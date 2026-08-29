@@ -243,13 +243,11 @@ def append_only_statements(table: str, *, schema: str = "wreath") -> tuple[str, 
     # has to split it -- and does *not* survive the four older call sites that
     # still split a `schema_sql()` blob on `";\n"`. Writing it flat costs
     # nothing and removes the trap rather than documenting it.
-    #
     # `UPDATE` is refused unconditionally: there is no legitimate reason to
     # change what a record says. `DELETE` is refused unless the transaction has
     # declared itself an erasure, because an audit trail holds personal data and
     # a subject may ask to be forgotten -- a trail that could not answer that
     # would force a deployment to choose between two compliance obligations.
-    #
     # The setting is transaction-scoped (`SET LOCAL`) and cannot be reached by
     # accident: an ordinary `DELETE` from a handler, a migration, or a curious
     # superuser at 2am does not have it, and gets the exception.

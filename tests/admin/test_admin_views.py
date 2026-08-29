@@ -1,5 +1,3 @@
-"""The four views, and the bounds they inherit from `wreath.pagination`."""
-
 from __future__ import annotations
 
 from typing import Any
@@ -50,7 +48,7 @@ async def test_the_list_view_shows_the_registered_columns(account_model: type) -
     body = (await handlers[("GET", "/admin/account/")](Request())).body.decode()
 
     assert "Person 1" in body and "p1@x.test" in body
-    assert ">Note<" not in body           # not a registered list column
+    assert ">Note<" not in body  # not a registered list column
 
 
 async def test_an_empty_list_says_so_rather_than_drawing_an_empty_table(
@@ -86,16 +84,12 @@ async def test_display_labels_are_compiled_when_the_admin_router_is_built(
     monkeypatch.setattr("wreath._admin.registry._label", unexpected_label)
 
     await handlers[("GET", "/admin/account/")](Request())
-    await handlers[("GET", "/admin/account/{pk}")](
-        Request(path_params={"pk": "1"})
-    )
+    await handlers[("GET", "/admin/account/{pk}")](Request(path_params={"pk": "1"}))
 
 
 async def test_a_missing_row_is_a_404_page(account_model: type) -> None:
     handlers = _handlers(account_model, FakeSession())
-    response = await handlers[("GET", "/admin/account/{pk}")](
-        Request(path_params={"pk": "9"})
-    )
+    response = await handlers[("GET", "/admin/account/{pk}")](Request(path_params={"pk": "9"}))
     assert response.status == 404
     assert "not found" in response.body.decode()
 
@@ -113,8 +107,6 @@ async def test_a_non_numeric_key_on_an_integer_column_is_a_404_not_a_500(
 async def test_the_page_size_is_bounded_by_pagination_s_ceiling(
     account_model: type,
 ) -> None:
-    """`?size=` is request-controlled, so the admin inherits `MAX_SIZE` rather
-    than deciding a second bound that could drift from it."""
     session = SortingSession(_rows(account_model, 3))
     handlers = _handlers(account_model, session)
 
@@ -126,8 +118,6 @@ async def test_the_page_size_is_bounded_by_pagination_s_ceiling(
 async def test_an_unsortable_column_in_the_query_string_is_ignored(
     account_model: type,
 ) -> None:
-    """The allow-list is what stops `?sort=` becoming a scan a caller can ask
-    for; an unknown token is dropped rather than reaching `apply_sort`."""
     session = SortingSession(_rows(account_model, 2))
     handlers = _handlers(account_model, session)
 
@@ -167,9 +157,9 @@ async def test_a_nullable_column_is_not_marked_required(account_model: type) -> 
     handlers = _handlers(account_model, FakeSession())
     body = (await handlers[("GET", "/admin/account/new")](Request())).body.decode()
 
-    note = body[body.index('id="account-note"'):]
+    note = body[body.index('id="account-note"') :]
     assert " required" not in note[: note.index(">")]
-    name = body[body.index('id="account-name"'):]
+    name = body[body.index('id="account-name"') :]
     assert " required" in name[: name.index(">")]
 
 
@@ -182,8 +172,6 @@ async def test_a_boolean_column_becomes_a_checkbox(account_model: type) -> None:
 async def test_an_unchecked_checkbox_is_false_rather_than_absent(
     account_model: type,
 ) -> None:
-    """A checkbox a browser omits means `false`, and storing nothing would leave
-    the previous `true` standing -- the one form control that fails silently."""
     row = account_model(id=1, name="A", email="e", note=None, active=True)
     session = FakeSession({1: row})
     handlers = _handlers(account_model, session)

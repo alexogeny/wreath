@@ -68,9 +68,7 @@ def resolve_once[T](request: Any, slot: str, resolve: Callable[[], T]) -> T:
     return resolved
 
 
-async def resolve_once_async[T](
-    request: Any, slot: str, resolve: Callable[[], Awaitable[T]]
-) -> T:
+async def resolve_once_async[T](request: Any, slot: str, resolve: Callable[[], Awaitable[T]]) -> T:
     """`resolve_once` for a resolver that must await.
 
     The cache read stays synchronous, so a hit does not yield to the event loop

@@ -1,6 +1,3 @@
-"""Auth, middleware, and ORM guards (report 23: R-35, R-45, R-46, R-49, R-51,
-R-53, R-56, R-62, R-63, R-64)."""
-
 from __future__ import annotations
 
 import pytest

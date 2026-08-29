@@ -1,23 +1,3 @@
-"""Drive wreath's gRPC server with the reference `grpcio` client.
-
-**This is the only file in the suite that proves interoperability.** Everything
-in `test_grpc.py` asserts that wreath agrees with itself: that its framer
-reverses its unframer, that its trailer encoder produces what its own reader
-expects. That kind of test passes just as happily against a wrong
-implementation, because both halves are wrong in the same direction. Here the
-peer is Google's own client, and it decides whether the bytes are gRPC.
-
-`grpcio` is a **test-only** dependency. `AGENTS.md` forbids mandatory runtime
-dependencies in `src/wreath`, not test ones -- `cryptography` and `sanic` are
-already here on the same footing. Nothing under `src/wreath` imports it.
-
-The client is driven at the generic-stub level (`channel.unary_unary` and
-friends) rather than through generated stubs, so no `protoc` runs in this
-suite and no `.proto` file is checked in. The serializers are
-`wreath.protobuf`'s own, which is the point: the client encodes with wreath's
-codec, wreath decodes with it, and grpcio carries the frames in between.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -31,9 +11,7 @@ from wreath.authorization import roles
 from wreath.grpc import GrpcError, GrpcService, Status
 from wreath.protobuf import decode, encode, field, message
 
-grpc = pytest.importorskip(
-    "grpc", reason="grpcio is the reference peer for gRPC interoperability"
-)
+grpc = pytest.importorskip("grpc", reason="grpcio is the reference peer for gRPC interoperability")
 
 pytestmark = [pytest.mark.network, pytest.mark.asyncio]
 
@@ -199,7 +177,6 @@ def _channel(endpoint):
 
 
 async def test_a_real_grpc_client_completes_a_unary_call(endpoint):
-    """The bytes wreath emits are gRPC, as judged by Google's client."""
     async with _channel(endpoint) as channel:
         call = channel.unary_unary(
             "/wreath.test.Echoer/Once",
@@ -212,8 +189,6 @@ async def test_a_real_grpc_client_completes_a_unary_call(endpoint):
 
 
 async def test_a_refusal_arrives_as_a_status_not_a_transport_error(endpoint):
-    """`grpc-status` in the trailers is what the client reports, and the
-    percent-encoded message survives the control characters in it."""
     async with _channel(endpoint) as channel:
         call = channel.unary_unary(
             "/wreath.test.Echoer/Refuse",
@@ -227,8 +202,6 @@ async def test_a_refusal_arrives_as_a_status_not_a_transport_error(endpoint):
 
 
 async def test_an_unknown_method_is_unimplemented(endpoint):
-    """A path with no route answers UNIMPLEMENTED, which is what a client
-    needs in order to distinguish a missing method from a broken server."""
     async with _channel(endpoint) as channel:
         call = channel.unary_unary(
             "/wreath.test.Echoer/NoSuchMethod",
@@ -285,11 +258,6 @@ async def test_bidirectional_streaming_interleaves(endpoint):
 
 
 async def test_an_auth_decorator_on_a_grpc_method_actually_refuses(endpoint):
-    """The claim that one authorization vocabulary spans REST and gRPC is only
-    worth anything if the decorator *enforces* here. `@roles` records its
-    requirement on the user's function, and the route registers a wrapper -- so
-    this is the test that the requirement survived that indirection, judged by a
-    real client rather than by reading an attribute back."""
     async with _channel(endpoint) as channel:
         call = channel.unary_unary(
             "/wreath.test.Echoer/Guarded",
@@ -302,9 +270,6 @@ async def test_an_auth_decorator_on_a_grpc_method_actually_refuses(endpoint):
 
 
 async def test_a_failure_after_the_first_message_still_reports_its_status(endpoint):
-    """Once bytes are on the wire the status can only travel in the trailer.
-    Re-raising instead would abort the stream with no status, which a client
-    reports as an unexplained transport error rather than the refusal it was."""
     async with _channel(endpoint) as channel:
         call = channel.unary_stream(
             "/wreath.test.Echoer/FailsMidStream",
@@ -321,8 +286,6 @@ async def test_a_failure_after_the_first_message_still_reports_its_status(endpoi
 
 
 async def test_a_client_deadline_is_honoured_by_the_server(endpoint):
-    """The client sends `grpc-timeout`; the server must stop rather than let
-    the call outlive the caller waiting on it."""
     async with _channel(endpoint) as channel:
         call = channel.unary_unary(
             "/wreath.test.Echoer/Slow",
@@ -335,24 +298,6 @@ async def test_a_client_deadline_is_honoured_by_the_server(endpoint):
 
 
 async def test_a_real_client_sends_gzip_and_wreath_reads_it(endpoint):
-    """A compressed request, framed by grpcio rather than by wreath.
-
-    `grpc.Compression.Gzip` makes the client set the per-message flag byte and
-    send `grpc-encoding: gzip`, so this is the only place wreath's request
-    decoder meets compressed bytes it did not produce. Neuter the decoder and
-    the call comes back INTERNAL rather than echoing.
-
-    **This test does not prove the reply direction, and deliberately does not
-    claim to.** grpcio strips `grpc-encoding` from `initial_metadata()` -- it
-    consumes the header itself -- and it decodes an identity reply perfectly
-    well, so an assertion here would pass against a server that never
-    compressed anything. What proves that half is
-    `test_grpc.py::TestCompression::test_a_client_that_accepts_gzip_gets_a_compressed_reply`,
-    which reads the flag byte and decompresses the body.
-
-    The payload is large and repetitive because `encode_frame` declines to
-    compress a message gzip would grow, so a short one exercises nothing.
-    """
     async with _channel(endpoint) as channel:
         call = channel.unary_unary(
             "/wreath.test.Echoer/Once",
@@ -368,11 +313,6 @@ async def test_a_real_client_sends_gzip_and_wreath_reads_it(endpoint):
 
 
 async def test_a_client_asking_for_an_unimplemented_coding_is_told_so(endpoint):
-    """`deflate` is a real gRPC coding wreath does not implement.
-
-    grpcio has no deflate of its own, so the header is set by hand on the call's
-    metadata -- which is exactly what a peer in another language would send.
-    """
     async with _channel(endpoint) as channel:
         call = channel.unary_unary(
             "/wreath.test.Echoer/Once",
@@ -380,8 +320,6 @@ async def test_a_client_asking_for_an_unimplemented_coding_is_told_so(endpoint):
             response_deserializer=_de,
         )
         with pytest.raises(grpc.aio.AioRpcError) as caught:
-            await call(
-                Echo(text="x", count=1), metadata=(("grpc-encoding", "deflate"),)
-            )
+            await call(Echo(text="x", count=1), metadata=(("grpc-encoding", "deflate"),))
     assert caught.value.code() == grpc.StatusCode.UNIMPLEMENTED
     assert "deflate" in caught.value.details()

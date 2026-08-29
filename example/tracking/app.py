@@ -74,8 +74,6 @@ def build(*, validate_schema: str = "error", cross_worker: bool = True) -> Wreat
     # way the message bus below gets its own.
     application.series(database="main")
 
-    # --- who you are ---------------------------------------------------------
-    #
     # Session state is a first-class activation policy, fixed before identity.
     application.configure_http_policy(
         HttpPolicy(session=SessionPolicy(secret=SETTINGS.session_secret()))
@@ -87,24 +85,16 @@ def build(*, validate_schema: str = "error", cross_worker: bool = True) -> Wreat
     # reader be told" is how a rule and its enforcement drift apart.
     application.configure_auth(SessionIdentityBackend(), CedarAuthorizer(engine=ENGINE))
 
-    # --- the live map --------------------------------------------------------
-    #
     # The bus is the whole of the cross-worker story: with it, a position
     # ingested by worker 3 reaches a browser connected to worker 1; without it
     # the fan-out is local and correct and smaller. `RoomRegistry` takes one or
     # takes None, and nothing else in this file changes between the two.
-    bus = (
-        application.messaging("live", database="main", schema=SCHEMA)
-        if cross_worker
-        else None
-    )
+    bus = application.messaging("live", database="main", schema=SCHEMA) if cross_worker else None
     live = LiveMap(RoomRegistry(bus))
 
     for router in routers(live):
         application.include_router(router)
 
-    # --- the same ingest, streamed -------------------------------------------
-    #
     # A station on a permanent link streams positions instead of POSTing a
     # batch. It is the same `accept()` underneath, which is the point: a second
     # transport must not become a second ingest. gRPC needs HTTP/2 and therefore

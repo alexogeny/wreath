@@ -1,18 +1,3 @@
-"""edwards25519 verification, group arithmetic, and torsion edge cases.
-
-**The hazard that shaped this file.** The obvious way to write that rewrite is
-`[S]B + [L - h]A`, because `-[h]A == [L - h]A` whenever `A` has order dividing
-`L`. RFC 8032 cofactorless verification *accepts a public key with a torsion
-component*, for which the two are different points, so the substitution would
-silently change which signatures verify. `ed_negate` is exact for every point,
-and the torsion corpus drives small-order and mixed-order keys where the
-substitution differs.
-
-RFC 8032 §7.1 vectors pin exact values, algebraic constructions cover the
-cofactor edge cases, and `cryptography` provides an independent implementation
-without entering Wreath runtime code.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -27,8 +12,6 @@ from wreath._dkim import _ed25519_sign, ed25519_public_key
 P = _curves.ED_P
 L = _curves.ED_L
 
-
-# --- 1. known answers from RFC 8032 §7.1 ------------------------------------
 
 _RFC8032 = [
     # (seed, public, message, signature) -- TEST 1, 2, 3 and SHA(abc).
@@ -65,25 +48,14 @@ _RFC8032 = [
 
 
 @pytest.mark.parametrize(("seed", "public", "message", "signature"), _RFC8032)
-def test_rfc8032_vectors_verify(
-    seed: str, public: str, message: str, signature: str
-) -> None:
-    assert verify_ed25519(
-        bytes.fromhex(public), bytes.fromhex(message), bytes.fromhex(signature)
-    )
+def test_rfc8032_vectors_verify(seed: str, public: str, message: str, signature: str) -> None:
+    assert verify_ed25519(bytes.fromhex(public), bytes.fromhex(message), bytes.fromhex(signature))
 
 
 @pytest.mark.parametrize(("seed", "public", "message", "signature"), _RFC8032)
 def test_rfc8032_vectors_are_reproduced_by_the_signer(
     seed: str, public: str, message: str, signature: str
 ) -> None:
-    """The signing known answers pin the complete native fixed-base operation.
-
-    A signing known-answer test is strictly stronger than a verifying one: it
-    fixes every intermediate, so a scalar multiplication that is wrong anywhere
-    produces different bytes rather than a result that still satisfies the
-    verification equation.
-    """
     assert ed25519_public_key(bytes.fromhex(seed)).hex() == public
     assert _ed25519_sign(bytes.fromhex(seed), bytes.fromhex(message)).hex() == signature
 
@@ -97,9 +69,6 @@ def test_rfc8032_vectors_reject_a_tampered_message(
         bytes.fromhex(message) + b"\x00",
         bytes.fromhex(signature),
     )
-
-
-# --- seeded valid and malformed corpora -------------------------------------
 
 
 def _corpus(seed: int, count: int) -> list[tuple[bytes, bytes, bytes]]:
@@ -171,19 +140,6 @@ def test_every_seeded_mutation_is_refused() -> None:
 
 
 def test_a_31_byte_public_key_is_refused_by_length_and_not_by_the_maths() -> None:
-    """The length check on the *key* is load-bearing, and needs a forged input.
-
-    A public key whose last byte is zero decodes identically with that byte
-    removed -- the encoding is little-endian, so the final byte carries the sign
-    bit and the top bits of `y`. Truncating a real key does not produce a valid
-    signature, because the key goes into the challenge hash and the hash changes.
-    But an attacker signs *for the short form*, and then the arithmetic accepts
-    it: only `len(public) != 32` refuses.
-
-    That matters because the key is the identity. Two encodings of one key mean
-    two spellings of one principal, and anything that pins, caches, or revokes by
-    the key bytes sees them as different.
-    """
     for index in range(3000):
         seed = hashlib.sha256(b"seed %d" % index).digest()
         public = ed25519_public_key(seed)
@@ -201,15 +157,9 @@ def test_a_31_byte_public_key_is_refused_by_length_and_not_by_the_maths() -> Non
     digest = hashlib.sha512(seed).digest()
     scalar = (int.from_bytes(digest[:32], "little") & ((1 << 254) - 8)) | (1 << 254)
     message = b"short key"
-    nonce = int.from_bytes(
-        hashlib.sha512(digest[32:] + message).digest(), "little"
-    ) % L
-    r_bytes = _curves.ed_encode_point(
-        _curves.ed_scalarmult_secret(nonce, _curves.ed_base())
-    )
-    challenge = int.from_bytes(
-        hashlib.sha512(r_bytes + short + message).digest(), "little"
-    ) % L
+    nonce = int.from_bytes(hashlib.sha512(digest[32:] + message).digest(), "little") % L
+    r_bytes = _curves.ed_encode_point(_curves.ed_scalarmult_secret(nonce, _curves.ed_base()))
+    challenge = int.from_bytes(hashlib.sha512(r_bytes + short + message).digest(), "little") % L
     forged = r_bytes + ((nonce + challenge * scalar) % L).to_bytes(32, "little")
 
     a_point = _curves.ed_decode_point(short)
@@ -284,17 +234,13 @@ def _forge_small_order_signature(public: bytes) -> tuple[bytes, bytes] | None:
     for attempt in range(5000):
         message = b"forged small-order %d" % attempt
         for multiple, r_bytes in candidates:
-            h = int.from_bytes(
-                hashlib.sha512(r_bytes + public + message).digest(), "little"
-            ) % L
+            h = int.from_bytes(hashlib.sha512(r_bytes + public + message).digest(), "little") % L
             if (multiple + h) % order == 0:
                 return message, r_bytes + bytes(32)
     raise AssertionError("no forgery found; the search above is broken")
 
 
-def _verify_with_the_unsafe_shortcut(
-    public: bytes, message: bytes, signature: bytes
-) -> bool:
+def _verify_with_the_unsafe_shortcut(public: bytes, message: bytes, signature: bytes) -> bool:
     """`[S]B + [L - h]A == R` -- the tempting rewrite, which is wrong.
 
     Present only so the algebraic torsion test can demonstrate the difference.
@@ -306,27 +252,12 @@ def _verify_with_the_unsafe_shortcut(
     s = int.from_bytes(signature[32:], "little")
     if s >= L:
         return False
-    h = int.from_bytes(
-        hashlib.sha512(signature[:32] + public + message).digest(), "little"
-    ) % L
-    left = _curves.ed_double_scalarmult_public(
-        s, _curves.ed_base(), (L - h) % L, a_point
-    )
+    h = int.from_bytes(hashlib.sha512(signature[:32] + public + message).digest(), "little") % L
+    left = _curves.ed_double_scalarmult_public(s, _curves.ed_base(), (L - h) % L, a_point)
     return _curves.ed_equal(left, r_point)
 
 
 def test_torsion_keys_use_exact_negation_not_the_order_shortcut() -> None:
-    """Construct accepted inputs on which the order shortcut differs.
-
-    A public key of small order has `[L]A != identity`, so `[L - h]A` and
-    `-[h]A` are different points. RFC 8032 cofactorless verification accepts such
-    a key -- a JWKS entry or a WebAuthn credential can carry any 32 bytes that
-    decode -- so a rewrite reaching for the first would change the verdict on
-    attacker-chosen input.
-
-    Cofactorless acceptance is RFC 8032's rule; the assertions pin Wreath to
-    that rule and prove the tempting substitution would change its result.
-    """
     distinguished = 0
     for public in _small_order_points():
         forged = _forge_small_order_signature(public)
@@ -343,7 +274,6 @@ def test_torsion_keys_use_exact_negation_not_the_order_shortcut() -> None:
 
 
 def test_torsion_keys_refuse_signatures_that_are_simply_wrong() -> None:
-    """The same keys with random signatures must refuse."""
     rng = random.Random(0x717D)
     checked = 0
     for public in _small_order_points():
@@ -356,13 +286,6 @@ def test_torsion_keys_refuse_signatures_that_are_simply_wrong() -> None:
 
 
 def test_a_genuine_signature_does_not_verify_under_a_torsion_shifted_key() -> None:
-    """Key substitution: `A + T` must not inherit `A`'s signatures.
-
-    This does not separate the two rewrite forms -- the hash binds the public key,
-    so shifting it changes `h` and the equation fails for both -- and it is here
-    because it is the property an attacker would actually want. Stated plainly so
-    nobody later reads it as the differential test; that one is above.
-    """
     seed = bytes(range(32))
     genuine = ed25519_public_key(seed)
     a_point = _curves.ed_decode_point(genuine)
@@ -380,8 +303,6 @@ def test_a_genuine_signature_does_not_verify_under_a_torsion_shifted_key() -> No
             checked += 1
     assert checked == 24
 
-
-# --- cross-check against `cryptography` -------------------------------------
 
 cryptography = pytest.importorskip(
     "cryptography",
@@ -410,7 +331,6 @@ def test_cryptography_signatures_verify_and_tampered_ones_do_not() -> None:
 
 
 def test_wreath_signatures_verify_under_cryptography() -> None:
-    """The other direction: what `_dkim`'s constant-shape ladder emits is real."""
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric import ed25519
 
@@ -424,31 +344,18 @@ def test_wreath_signatures_verify_under_cryptography() -> None:
             public.verify(signature, message + b"!")
 
 
-# --- the group law itself ---------------------------------------------------
-
-
 def test_curve_parameters_match_rfc_8032() -> None:
     assert P == 2**255 - 19
     assert L == 2**252 + 27742317777372353535851937790883648493
     assert _curves.ED_D == (-121665 * pow(121666, -1, P)) % P
     assert _curves._ED_I * _curves._ED_I % P == P - 1  # sqrt(-1)
     base = _curves.ed_base()
-    assert _curves.ed_encode_point(base) == (
-        (4 * pow(5, -1, P) % P) | 0
-    ).to_bytes(32, "little")
+    assert _curves.ed_encode_point(base) == ((4 * pow(5, -1, P) % P) | 0).to_bytes(32, "little")
     # B has order L, so [L]B is the neutral element.
-    assert _curves.ed_equal(
-        _curves.ed_scalarmult_public(L, base), _curves.ED_NEUTRAL
-    )
+    assert _curves.ed_equal(_curves.ed_scalarmult_public(L, base), _curves.ED_NEUTRAL)
 
 
 def test_the_secret_ladder_length_is_the_one_the_constants_imply() -> None:
-    """`k % L + 2L` has exactly 254 bits for every `k`, which is the whole trick.
-
-    If `2L < 2**253` or `3L >= 2**254` the reduction would not pin the length and
-    the iteration count would leak the scalar again, so the two inequalities are
-    asserted against the constant rather than trusted.
-    """
     assert 2 * L >= 2**253
     assert 3 * L < 2**254
     for k in (0, 1, L - 1, L, L + 1, 2**255 - 1):
@@ -466,13 +373,6 @@ def test_secret_and_public_scalarmult_agree() -> None:
 
 
 def test_negation_is_exact_for_torsion_points_where_the_shortcut_is_not() -> None:
-    """`-[h]A == [L - h]A` only when `[L]A` is the neutral element.
-
-    Asserted directly, so the reason `ed_negate` exists is written down as a
-    property rather than only as a comment. The first half proves the identity
-    holds for a genuine key; the second proves it fails for a torsion one, which
-    is what makes the shortcut unsafe.
-    """
     base = _curves.ed_base()
     h = 0x1234567890ABCDEF
     genuine = _curves.ed_scalarmult_public(12345, base)
@@ -508,26 +408,15 @@ def test_double_scalarmult_matches_two_separate_multiplications() -> None:
             _curves.ed_scalarmult_public(k1, base),
             _curves.ed_scalarmult_public(k2, other),
         )
-        assert _curves.ed_equal(
-            _curves.ed_double_scalarmult_public(k1, base, k2, other), expected
-        )
+        assert _curves.ed_equal(_curves.ed_double_scalarmult_public(k1, base, k2, other), expected)
 
 
 def test_the_addition_law_is_complete() -> None:
-    """One formula for doubling, the neutral element, and a point plus its negation.
-
-    The secret ladder calls `ed_add` unconditionally and would be wrong if any of
-    these needed a special case.
-    """
     base = _curves.ed_base()
-    assert _curves.ed_equal(
-        _curves.ed_add(base, base), _curves.ed_scalarmult_public(2, base)
-    )
+    assert _curves.ed_equal(_curves.ed_add(base, base), _curves.ed_scalarmult_public(2, base))
     assert _curves.ed_equal(_curves.ed_add(base, _curves.ED_NEUTRAL), base)
     assert _curves.ed_equal(_curves.ed_add(_curves.ED_NEUTRAL, base), base)
-    assert _curves.ed_equal(
-        _curves.ed_add(base, _curves.ed_negate(base)), _curves.ED_NEUTRAL
-    )
+    assert _curves.ed_equal(_curves.ed_add(base, _curves.ed_negate(base)), _curves.ED_NEUTRAL)
     assert _curves.ed_equal(
         _curves.ed_add(_curves.ED_NEUTRAL, _curves.ED_NEUTRAL), _curves.ED_NEUTRAL
     )

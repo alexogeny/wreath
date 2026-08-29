@@ -36,9 +36,7 @@ class Author(Model):
 
 class Book(Model):
     id = fields.BigIntField(pk=True)
-    author = fields.ForeignKeyField(
-        "models.Author", related_name="books", source_field="author_id"
-    )
+    author = fields.ForeignKeyField("models.Author", related_name="books", source_field="author_id")
     title = fields.TextField()
     year = fields.IntField()
 

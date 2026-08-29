@@ -1,10 +1,3 @@
-"""Golden emitted-output comparison (Phase 1 declarative emit).
-
-Auto-activates when the tool ships (``importorskip``). Each ``golden/<app>/<module>.py.expected``
-is the exact ``wreath port`` output for its ``corpus/<app>/<module>.py`` source, and
-pins the byte-for-byte result of the declarative emitter. Regenerate with the helper
-in golden/README.md when the emitter's output intentionally changes.
-"""
 from pathlib import Path
 
 import pytest
@@ -27,7 +20,6 @@ def test_emitted_matches_golden(expected_path, corpus_root):
 
 
 def test_port_tree_roundtrip_and_idempotent(corpus_root, tmp_path):
-    """Every emitted file is valid Python, and a second run is a no-op."""
     import ast
 
     app = corpus_root / "tumbleweed_api"

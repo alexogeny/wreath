@@ -57,8 +57,7 @@ def remember_basket():
 
 @moor.get("/teapot")
 def teapot():
-    # 418 has no wreath exception class; see docs/reference/port-gaps.md,
-    # `exc.http_unmapped`. This is a known wreath gap, not a porter bug.
+    # 418 has no wreath exception class. This is a known wreath gap, not a porter bug.
     return jsonify(error="short and stout"), 418
 
 

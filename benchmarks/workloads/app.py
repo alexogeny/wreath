@@ -79,9 +79,7 @@ def build_app(dsn: str | None = None) -> Wreath:
 
 
 def _register_database_shapes(app: Wreath, database: Any) -> None:
-    get_widget = database.statement(
-        "widget.get", 'SELECT id, value FROM "widget" WHERE id = $1'
-    )
+    get_widget = database.statement("widget.get", 'SELECT id, value FROM "widget" WHERE id = $1')
     update_widget = database.statement(
         "widget.update",
         'UPDATE "widget" SET value = $1 WHERE id = $2',
@@ -137,6 +135,6 @@ def _register_database_shapes(app: Wreath, database: Any) -> None:
         # application code, and render an escaped HTML table.
         rows = await list_quotations.fetch()
         collection = [{"id": row["id"], "message": row["message"]} for row in rows]
-        collection.append({"id": 0, "message": "Additional <fortune> & \"quote\""})
+        collection.append({"id": 0, "message": 'Additional <fortune> & "quote"'})
         collection.sort(key=lambda item: item["message"])
         return HTMLResponse(QUOTATION_TABLE.render(rows=collection))

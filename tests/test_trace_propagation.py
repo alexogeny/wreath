@@ -1,10 +1,3 @@
-"""Causality across wreath's own seams: outbound HTTP, and the durable queue.
-
-A trace that stops at the request boundary is a trace of one hop. These cover
-the two seams wreath owns both ends of -- the client it calls out with, and the
-queue it hands work to -- so "what caused this?" has an answer at 03:00.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -47,9 +40,6 @@ def _sent_headers(client: HTTPClient, headers=()) -> dict[bytes, bytes]:
     return {name.lower(): value for name, value in client._propagated(tuple(headers))}
 
 
-# --- stage 1: outbound HTTP --------------------------------------------------
-
-
 def test_a_traced_request_propagates_traceparent(unpropagated):
     telemetry.outbound_context.set((PARENT, ""))
     headers = _sent_headers(_client())
@@ -62,7 +52,6 @@ def test_an_untraced_request_sends_no_traceparent(unpropagated):
 
 
 def test_an_explicit_traceparent_wins(unpropagated):
-    """A header the caller wrote is a decision; the framework does not overrule it."""
     telemetry.outbound_context.set((PARENT, ""))
     mine = b"00-11111111111111111111111111111111-2222222222222222-01"
     headers = _sent_headers(_client(), ((b"traceparent", mine),))
@@ -70,19 +59,12 @@ def test_an_explicit_traceparent_wins(unpropagated):
 
 
 def test_a_client_can_refuse_to_propagate(unpropagated):
-    """An origin outside the trust boundary does not get our trace ids."""
     telemetry.outbound_context.set((PARENT, ""))
     headers = _sent_headers(_client(trace=TracePolicy(propagate=False)))
     assert b"traceparent" not in headers
 
 
 def test_an_unarmed_process_never_sends_a_stale_bound_context(unpropagated):
-    """The process latch is authoritative even if a context variable is bound.
-
-    A copied context can outlive the application that armed propagation.  The
-    cheap global guard prevents that stale value crossing an outbound trust
-    boundary before a new application declares an outbound client.
-    """
     telemetry.outbound_context.set((PARENT, ""))
     client = _client()
     telemetry.PROPAGATING = False
@@ -104,7 +86,6 @@ def test_an_empty_tracestate_is_not_sent(unpropagated):
 
 
 def test_constructing_a_client_arms_propagation(unpropagated):
-    """Nothing binds a context until something exists that could send one."""
     assert telemetry.PROPAGATING is False
     _client()
     assert telemetry.PROPAGATING is True
@@ -141,11 +122,6 @@ def test_binding_carries_tracestate_when_the_request_had_one(unpropagated):
 
 
 def test_an_unpropagated_request_binds_nothing(unpropagated):
-    """No incoming traceparent is the common case: nothing to send.
-
-    It binds *None* rather than skipping the bind, so a reused context cannot
-    carry the previous request's parent -- see the inheritance test below.
-    """
     telemetry.propagates()
     telemetry.bind_propagation(_Traced(parent=None))
     assert telemetry.outbound_context.get(None) is None
@@ -158,7 +134,6 @@ def test_a_malformed_traceparent_binds_nothing(unpropagated):
 
 
 def test_binding_is_inert_until_a_client_exists(unpropagated):
-    """The request path must not pay for a feature nobody enabled."""
 
     class _Request:
         def header(self, name):
@@ -169,13 +144,6 @@ def test_binding_is_inert_until_a_client_exists(unpropagated):
 
 
 def test_an_unpropagated_request_does_not_inherit_the_previous_one(unpropagated):
-    """A context reused across requests must not leak the last one's parent.
-
-    Keep-alive can hand two requests the same context. If the second binds
-    nothing because it carries no traceparent, it must still not send outbound
-    calls stamped with the *first* request's trace -- that is a misattribution,
-    which is worse than no trace at all.
-    """
     telemetry.propagates()
     telemetry.bind_propagation(_Traced())
     assert telemetry.outbound_context.get(None) is not None
@@ -183,16 +151,7 @@ def test_an_unpropagated_request_does_not_inherit_the_previous_one(unpropagated)
     assert telemetry.outbound_context.get(None) is None
 
 
-# --- stage 1: the pipeline binding, which makes all of the above live --------
-
-
 async def test_a_handler_inherits_the_requests_context_end_to_end(unpropagated):
-    """The pipeline binding. Without it every test above is inert in a real app.
-
-    Drives the whole chain in one assertion: an incoming `traceparent` reaches
-    the request pipeline, the pipeline binds it, and the client the handler
-    calls out with puts it on the wire.
-    """
     app = Wreath()
     outbound = _client()  # constructing it arms PROPAGATING
 
@@ -207,7 +166,6 @@ async def test_a_handler_inherits_the_requests_context_end_to_end(unpropagated):
 
 
 async def test_an_untraced_request_leaves_the_handler_nothing_to_send(unpropagated):
-    """The common case: no upstream tracer, so nothing is invented."""
     app = Wreath()
     outbound = _client()
 
@@ -222,12 +180,6 @@ async def test_an_untraced_request_leaves_the_handler_nothing_to_send(unpropagat
 
 
 async def test_an_app_with_no_outbound_client_never_binds(unpropagated, monkeypatch):
-    """The guide claims such an app pays nothing. This is that claim, asserted.
-
-    `PROPAGATING` is a *cost* guard -- `bind_propagation` would no-op anyway --
-    so nothing about the response can distinguish it. What is observable is the
-    call itself, and the claim is about the call.
-    """
     calls: list[object] = []
     monkeypatch.setattr(telemetry, "bind_propagation", lambda request: calls.append(request))
 
@@ -253,11 +205,6 @@ async def test_an_app_with_no_outbound_client_never_binds(unpropagated, monkeypa
 
 
 async def test_a_global_middleware_call_carries_the_context(unpropagated):
-    """Binding happens before the first `before` hook, not after it.
-
-    A global middleware that calls out -- an auth introspection, a flag fetch --
-    is doing so because of this request, so its call belongs in the same trace.
-    """
     seen: list[str] = []
     app = Wreath()
     outbound = _client()

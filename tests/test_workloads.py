@@ -1,10 +1,3 @@
-"""Completion-gate coverage for the neutral workload suite.
-
-Runs the workload verifier in-process (native and, via a separate env, pure)
-and confirms the workload app is an ordinary ASGI application that a
-third-party server can drive — the app never requires the native server.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -28,9 +21,7 @@ async def test_app_is_plain_asgi() -> None:
     app = build_app(dsn)
 
     # Lifespan protocol.
-    lifespan_events = iter(
-        [{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}]
-    )
+    lifespan_events = iter([{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}])
     sent: list[dict] = []
 
     async def receive_lifespan() -> dict:

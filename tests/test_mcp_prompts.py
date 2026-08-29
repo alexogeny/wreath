@@ -1,13 +1,3 @@
-"""Prompts: text a person chooses, with arguments a form can fill.
-
-The distinction that matters is who does the choosing. A tool is picked by the
-model and gets a JSON Schema; a prompt is picked by a person and gets a flat map
-of strings. The load-bearing assertion here is the registration refusal: a
-non-string parameter is a declaration a compliant client cannot satisfy, and
-catching it at declaration is the difference between the author seeing it and
-whoever clicked the menu entry seeing it.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -157,9 +147,7 @@ async def test_a_missing_argument_is_named_and_never_reaches_the_handler() -> No
             },
         )
         assert body["error"]["code"] == -32602
-        assert [e["loc"] for e in body["error"]["data"]["errors"]] == [
-            ["arguments", "species"]
-        ]
+        assert [e["loc"] for e in body["error"]["data"]["errors"]] == [["arguments", "species"]]
         assert mcp.schema_rejections == 1
         assert mcp.prompt_renders == 0
 
@@ -181,9 +169,7 @@ async def test_an_argument_the_prompt_never_declared_is_named() -> None:
                 },
             },
         )
-        assert [e["loc"] for e in body["error"]["data"]["errors"]] == [
-            ["arguments", "colour"]
-        ]
+        assert [e["loc"] for e in body["error"]["data"]["errors"]] == [["arguments", "colour"]]
 
 
 async def test_an_unknown_prompt_is_invalid_params() -> None:
@@ -294,7 +280,6 @@ async def test_the_capability_is_advertised_only_when_a_prompt_is_declared() -> 
 
 
 def test_a_non_string_argument_is_refused_at_registration() -> None:
-    """The whole reason prompts are checked separately from tools."""
     mcp = MCP(name="x", version="1.0.0")
     with pytest.raises(ToolSignatureError) as caught:
 

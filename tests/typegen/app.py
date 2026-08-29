@@ -1,11 +1,3 @@
-"""A representative Wreath application used as the typegen golden fixture.
-
-It exercises required/optional/nullable fields, literals and enums, lists,
-tuples, records, recursive and nested dataclasses, a same-named model from
-another module, path/query/header parameters, a JSON body, and both query and
-mutation operations.
-"""
-
 from __future__ import annotations
 
 import enum
@@ -50,26 +42,19 @@ def build_app() -> Wreath:
     app = Wreath()
 
     @app.get("/items", tags=("items",))
-    async def list_items(request, limit: int = 20, cursor: str | None = None) -> ItemPage:
-        ...
+    async def list_items(request, limit: int = 20, cursor: str | None = None) -> ItemPage: ...
 
     @app.get("/items/{item_id}", operation_id="getItem", tags=("items",))
-    async def get_item(
-        request, item_id: int, expand: bool = False, trace_id: str = ""
-    ) -> Item:
-        ...
+    async def get_item(request, item_id: int, expand: bool = False, trace_id: str = "") -> Item: ...
 
     @app.post("/items", operation_id="createItem", tags=("items",))
-    async def create_item(request, item: Item) -> Item:
-        ...
+    async def create_item(request, item: Item) -> Item: ...
 
     @app.delete("/items/{item_id}", tags=("items",))
-    async def delete_item(request, item_id: int) -> None:
-        ...
+    async def delete_item(request, item_id: int) -> None: ...
 
     @app.get("/inventory/{sku}", tags=("inventory",))
-    async def get_inventory(request, sku: str) -> OtherItem:
-        ...
+    async def get_inventory(request, sku: str) -> OtherItem: ...
 
     return app
 

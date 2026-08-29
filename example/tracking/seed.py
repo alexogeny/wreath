@@ -202,8 +202,7 @@ def build_rows() -> dict[str, list[tuple[Any, ...]]]:
     #: does not exercise -- inventing a refurbishment to demonstrate a foreign
     #: key would be the sort of padding this example is trying not to have.
     rows["collars"] = [
-        (animal_id, animal_id, f"CL-{animal_id:04d}", _at(-7, 0), None)
-        for animal_id, *_ in ANIMALS
+        (animal_id, animal_id, f"CL-{animal_id:04d}", _at(-7, 0), None) for animal_id, *_ in ANIMALS
     ]
 
     silence = {animal: (start, length) for animal, start, length in SILENCES}
@@ -222,25 +221,25 @@ def build_rows() -> dict[str, list[tuple[Any, ...]]]:
             if quiet_from is not None and quiet_from <= day < quiet_from + quiet_days:
                 received_at = _at(quiet_from + quiet_days, 30)
             else:
-                received_at = recorded_at + datetime.timedelta(
-                    minutes=rng.randrange(2, 25)
-                )
+                received_at = recorded_at + datetime.timedelta(minutes=rng.randrange(2, 25))
             here = Coordinate(lat=lat, lon=lon)
             leg = None if previous is None else distance(previous, here)
             previous = here
-            fixes.append((
-                animal_id,
-                recorded_at,
-                animal_id,
-                received_at,
-                lat,
-                lon,
-                round(rng.uniform(4.0, 28.0), 1),
-                max(3, 100 - (day * 100) // (DAYS * 3) - rng.randrange(0, 4)),
-                leg,
-                "relay-kimana",
-                rng.randrange(4, 12),
-            ))
+            fixes.append(
+                (
+                    animal_id,
+                    recorded_at,
+                    animal_id,
+                    received_at,
+                    lat,
+                    lon,
+                    round(rng.uniform(4.0, 28.0), 1),
+                    max(3, 100 - (day * 100) // (DAYS * 3) - rng.randrange(0, 4)),
+                    leg,
+                    "relay-kimana",
+                    rng.randrange(4, 12),
+                )
+            )
     rows["fixes"] = fixes
     return rows
 
@@ -251,8 +250,17 @@ COLUMNS: dict[str, tuple[str, ...]] = {
     "collars": ("id", "animal_id", "serial", "fitted_at", "removed_at"),
     "landmarks": ("id", "name", "kind", "latitude", "longitude"),
     "fixes": (
-        "collar_id", "recorded_at", "animal_id", "received_at", "latitude",
-        "longitude", "accuracy_m", "battery_pct", "leg_m", "relay", "satellites",
+        "collar_id",
+        "recorded_at",
+        "animal_id",
+        "received_at",
+        "latitude",
+        "longitude",
+        "accuracy_m",
+        "battery_pct",
+        "leg_m",
+        "relay",
+        "satellites",
     ),
 }
 

@@ -1,12 +1,3 @@
-"""Business rules layered onto the column types, in the same single pass.
-
-The seam under test is the promise that there is *one* validator per column --
-the type with its rules fused in -- and that every write path goes through it.
-Several of these tests exist to prove the paths cannot drift: a value refused by
-a request body must be refused by an assignment and by the constructor, for the
-same reason, whichever storage backend is in use.
-"""
-
 from __future__ import annotations
 
 from typing import Annotated, Any
@@ -80,9 +71,6 @@ def validator() -> Any:
     return compile_model_validator(Intern)
 
 
-# -- the three layers ----------------------------------------------------------
-
-
 def test_a_sound_body_passes_every_layer(validator: Any) -> None:
     intern = validator(body(), ("body",))
     assert isinstance(intern, Intern)
@@ -120,9 +108,7 @@ def test_narrowing_is_per_model_and_does_not_leak_to_a_sibling() -> None:
     # Both narrow the salary column they inherit, in opposite directions. The
     # base's column is a prototype; each model narrows its own clone.
     validate_senior = compile_model_validator(Senior)
-    senior = validate_senior(
-        body(salary=90_000, grade="senior", tenure_months=60), ("body",)
-    )
+    senior = validate_senior(body(salary=90_000, grade="senior", tenure_months=60), ("body",))
     assert senior.salary == 90_000
     # 90k is fine for a Senior and far too much for an Intern.
     with pytest.raises(ValidationError):
@@ -196,9 +182,6 @@ def test_a_rule_is_skipped_when_one_of_its_columns_is_absent() -> None:
     assert validate({"low": 5, "high": 9}, ("body",)).low == 5
 
 
-# -- one validator, every write path -------------------------------------------
-
-
 def test_assignment_enforces_the_same_rules_as_a_body(validator: Any) -> None:
     # The seam: what a body is refused for, an assignment is refused for. This
     # is the test that fails if the native descriptor ever goes back to calling
@@ -270,9 +253,6 @@ def test_an_overridden_coerce_is_not_skipped() -> None:
     assert coercer(loud)("x") == "X"
     plain = PgType("text", 25, "text", lambda v: v)
     assert coercer(plain) is plain._coerce
-
-
-# -- checks --------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -396,9 +376,6 @@ def test_null_skips_the_checks_entirely() -> None:
     assert instance.score is None
 
 
-# -- declaration errors --------------------------------------------------------
-
-
 def test_a_check_that_cannot_mean_anything_for_the_type_is_refused() -> None:
     with pytest.raises(DeclarationError, match="Length cannot apply to a int8 column"):
 
@@ -465,9 +442,6 @@ def test_junk_is_refused_at_declaration_time() -> None:
         rule("salary", at="bonus")
 
 
-# -- code generation -----------------------------------------------------------
-
-
 def test_the_generated_validator_inlines_its_bounds() -> None:
     # The reason a check costs a comparison rather than a call: the whole chain
     # is one function, and a literal bound is a LOAD_CONST inside it.
@@ -505,15 +479,12 @@ def test_a_non_finite_float_bound_still_compiles() -> None:
 def test_a_quote_in_a_bound_cannot_break_out_of_the_generated_source() -> None:
     class Quoted(Model, table="constraint_quoted"):
         id: Mapped[int] = column(Int64, primary_key=True)
-        value: Mapped[str] = column(Text, check=OneOf("it's \"fine\"", "also'fine"))
+        value: Mapped[str] = column(Text, check=OneOf('it\'s "fine"', "also'fine"))
 
     validate = Quoted.__wreath_column_map__["value"].validate
-    assert validate("it's \"fine\"") == "it's \"fine\""
+    assert validate('it\'s "fine"') == 'it\'s "fine"'
     with pytest.raises(CheckViolation):
         validate("nope")
-
-
-# -- through a route -----------------------------------------------------------
 
 
 @pytest.mark.asyncio

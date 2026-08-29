@@ -152,8 +152,6 @@ class Registry:
         self._prepared_shapes: dict[Any, bytes] = {}
         self.compile(tuple(models))
 
-    # -- compilation --------------------------------------------------------
-
     def compile(self, models: tuple[type[Model], ...]) -> None:
         """Resolve every model and relationship, then freeze the metadata."""
         for model in models:
@@ -510,8 +508,6 @@ class Registry:
                     f"{other.target.model_type.__name__} instead"
                 )
 
-    # -- lookup -------------------------------------------------------------
-
     def spec_for(self, model: type[Model]) -> ModelSpec:
         spec = self._specs.get(model)
         if spec is None:
@@ -533,8 +529,6 @@ class Registry:
 
     def __contains__(self, model: object) -> bool:
         return model in self._specs
-
-    # -- bounded plan cache -------------------------------------------------
 
     def cached_plan(self, shape_key: bytes) -> Any:
         with self._lock:

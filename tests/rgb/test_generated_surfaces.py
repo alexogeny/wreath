@@ -1,9 +1,3 @@
-"""Generated read surfaces over ORM models (report 23: R-66, R-73, R-74, R-75).
-
-`crud_router` and `GraphQL` derive from the same `ModelSpec`. The CRUD side is
-opt-in twice and hides sensitive columns; the GraphQL side was neither.
-"""
-
 from __future__ import annotations
 
 import pytest

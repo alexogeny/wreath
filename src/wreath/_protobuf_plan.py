@@ -46,7 +46,6 @@ __all__ = [
     "ProtobufDecodeError",
 ]
 
-# -- kinds ------------------------------------------------------------------
 # Stable integer codes: `_native/protobuf.c` switches on these, so the numbering
 # is part of the contract between the compiler and the codec.
 

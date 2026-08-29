@@ -5,8 +5,6 @@ from __future__ import annotations
 from ..ir import NEEDS_REVIEW, TRANSLATED
 
 SETTINGS: dict[str, tuple[str, str, str, str]] = {
-    # -- settings -------------------------------------------------------------
-    #
     # Split by *field shape*, the same way `.objects.filter()` is split by
     # argument shape. A `BaseSettings` class of plain scalars with literal
     # defaults is a mechanical rewrite: pydantic-settings' default source reads

@@ -1,30 +1,3 @@
-"""`aesgcm.c` must compile on machines this one cannot test.
-
-The AES-NI and PCLMULQDQ kernels sit behind `#if defined(WREATH_HAVE_AESGCM)`,
-which is true on exactly one family of targets. Everywhere else -- aarch64,
-MSVC, or a compiler without per-function `target` selection -- the scalar
-kernel remains, and an x86 runtime test cannot prove that translation unit.
-
-`AGENTS.md` records what that costs: `simd.h`'s NEON arms called their SWAR
-tails before those were declared, C assumed `int`, the declaration conflicted
-with the real definition, and `wreath._native._core` would not build on Apple
-Silicon at all. No x86 machine could have found it, and no test that runs code
-ever will. `tests/test_native_simd.py` reads that header as text for the same
-reason; this file does it for the AES kernels, and adds the checks specific to a
-file whose entire body is optional:
-
-* every intrinsic is inside the guard, so the scalar kernel has nothing to
-  compile that its target lacks;
-* every function that uses one carries `WREATH_TARGET_AESGCM`, because a
-  `target` attribute is what lets a non-AES build emit these instructions at
-  all, and a missing one is a SIGILL on an older CPU rather than a build error;
-* the public entry points sit outside the feature guard, so every target links;
-* and both build files list the source -- `setup.py` and the sanitizer's own
-  list, the second of which fails silently. `wreath-map-lint`'s MAP008 checks
-  that from the other direction; this is cheap and catches it at the same time
-  as everything else here.
-"""
-
 from __future__ import annotations
 
 import pathlib
@@ -89,12 +62,6 @@ FUNCTIONS = _functions()
 
 
 def test_every_intrinsic_is_inside_the_feature_guard() -> None:
-    """The scalar kernel must not name an instruction its target lacks.
-
-    An `__m128i` left outside the guard is invisible here and fatal on aarch64:
-    the type does not exist, and the translation unit fails before anything
-    reaches a linker.
-    """
     stray = [
         f"line {number}: {line.strip()}"
         for number, line in enumerate(TEXT.splitlines(), start=1)
@@ -108,13 +75,6 @@ def test_every_intrinsic_is_inside_the_feature_guard() -> None:
 
 
 def test_every_function_using_an_intrinsic_declares_its_target() -> None:
-    """Without `WREATH_TARGET_AESGCM` the compiler cannot emit these at all.
-
-    Or worse: with `-maes` globally it *can*, and then emits them in functions
-    the dispatcher calls unconditionally, so the extension SIGILLs on a CPU
-    without AES-NI instead of falling back. The attribute is what keeps the
-    instructions confined to code reached only after `aesgcm_arms()` is true.
-    """
     missing = [
         name
         for name, signature, body in FUNCTIONS
@@ -127,7 +87,6 @@ def test_every_function_using_an_intrinsic_declares_its_target() -> None:
 
 
 def test_the_entry_points_exist_outside_the_feature_guard() -> None:
-    """`_coremodule.c` names functions that every target must link."""
     exported = ("wreath_aesgcm_arms", "wreath_aes128gcm_encrypt", "wreath_aes128gcm_decrypt")
     for name in exported:
         lines = [
@@ -152,15 +111,7 @@ def test_the_entry_points_exist_outside_the_feature_guard() -> None:
 
 
 def test_no_function_calls_a_helper_defined_below_it() -> None:
-    """C assumes an undeclared function returns `int`, and the definition below
-    then conflicts with that -- a compile error, not a warning, and one that
-    only appears on whichever target compiles the calling arm.
-
-    Verified by moving a definition below its caller and watching this go red.
-    """
-    definitions = {
-        match.group("name"): match.start() for match in DEFINITION.finditer(TEXT)
-    }
+    definitions = {match.group("name"): match.start() for match in DEFINITION.finditer(TEXT)}
     for match in re.finditer(
         r"^static\s+[^;{]*?\b(wreath_\w+)\s*\([^;{]*\)\s*;", TEXT, re.M | re.S
     ):
@@ -181,15 +132,8 @@ def test_no_function_calls_a_helper_defined_below_it() -> None:
 
 
 def test_the_feature_probe_answers_on_every_architecture() -> None:
-    """`wreath_simd_has_aesgcm` is the one thing every target must be able to call.
-
-    On x86 it asks CPUID; everywhere else it has to return 0 rather than fail to
-    compile, because `aesgcm_arms()` calls it unconditionally.
-    """
     header = HEADER.read_text(encoding="utf-8")
-    probe = re.search(
-        r"wreath_simd_has_aesgcm\(void\)\n\{(?P<body>.*?)\n\}", header, re.S
-    )
+    probe = re.search(r"wreath_simd_has_aesgcm\(void\)\n\{(?P<body>.*?)\n\}", header, re.S)
     assert probe is not None, "simd.h no longer defines wreath_simd_has_aesgcm"
     body = probe.group("body")
     assert "#else" in body and "return 0;" in body, (
@@ -203,11 +147,6 @@ def test_the_feature_probe_answers_on_every_architecture() -> None:
 
 
 def test_the_source_is_registered_in_both_build_files() -> None:
-    """The second one fails silently: an undefined symbol in the sanitized
-    `_core.so` makes every test fail to *import*, and `wreath-sanitize` then
-    reports "0 passed ... clean" -- the false success its own docstring warns
-    about.
-    """
     for path in ("setup.py", "tools/sanitizers/setup_core.py"):
         text = (REPO / path).read_text(encoding="utf-8")
         assert "aesgcm.c" in text, f"{path} does not build src/wreath/_native/aesgcm.c"

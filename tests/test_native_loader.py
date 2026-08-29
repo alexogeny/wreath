@@ -1,12 +1,3 @@
-"""`wreath._native` resolves compiled extensions, and is the only thing that does.
-
-Five modules used to call `importlib` themselves because this knew four of the
-extension names. It knows all twelve now, and these pin that: every name `setup.py`
-builds resolves to the module when the build has it and to `None` when it has
-not, and a name that is not one of the twelve raises rather than reading as "this
-build has not got it".
-"""
-
 from __future__ import annotations
 
 import importlib
@@ -43,7 +34,6 @@ def _built(name: str) -> bool:
 
 @pytest.mark.parametrize("name", ALL_EXTENSIONS)
 def test_every_built_extension_is_reachable_as_an_attribute(name: str) -> None:
-    """`from wreath._native import _flight` must not be an AttributeError."""
     assert getattr(_native, name, "MISSING") != "MISSING", (
         f"{name} is built by setup.py but wreath._native does not declare it"
     )
@@ -59,6 +49,5 @@ def test_a_built_extension_resolves_and_an_unbuilt_one_is_none(name: str) -> Non
 
 
 def test_an_unknown_extension_is_an_error_not_a_none() -> None:
-    """A typo'd name must not read as "this build has not got it"."""
     with pytest.raises(AttributeError):
         _native.extension("_no_such_extension")

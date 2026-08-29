@@ -1,21 +1,3 @@
-"""The dynamic extension-OID mechanism, and the two invariants it must keep.
-
-pgvector's `vector` OID is assigned by `CREATE EXTENSION`, so it differs between
-databases. Two things must *not* move with it:
-
-* **the plan-cache shape token.** An OID in there gives one query two cache
-  entries against two databases, and changes when the extension is reinstalled.
-  The failure mode is a silently duplicated plan cache -- nothing breaks, and
-  nobody finds out until they profile it. So the token is name-derived, and this
-  suite pins it.
-* **the model fingerprint.** Same argument one layer up: a fingerprint that
-  moved with the database would report every model as drifted.
-
-The third invariant is a failure rather than a stability: a `Vector` column on a
-database without the extension must fail at *startup*, naming the extension,
-rather than at the first query with an unrecognised OID.
-"""
-
 from __future__ import annotations
 
 import os
@@ -80,12 +62,13 @@ def _vector_oid() -> int:
 
 def _fingerprint(spec: Any) -> bytes:
     return fingerprint_model(
-        spec.schema, spec.table, spec.columns, spec.relationships,
-        spec.table_uniques, spec.table_indexes,
+        spec.schema,
+        spec.table,
+        spec.columns,
+        spec.relationships,
+        spec.table_uniques,
+        spec.table_indexes,
     )
-
-
-# -- the shape token ----------------------------------------------------------
 
 
 def test_the_shape_token_is_name_derived_not_oid_derived() -> None:
@@ -137,28 +120,14 @@ def test_two_dimensions_fingerprint_differently() -> None:
     assert _fingerprint(wide) != _fingerprint(narrow)
 
 
-# -- binding ------------------------------------------------------------------
-
-
 def test_the_column_spec_reads_the_live_oid() -> None:
-    """`ColumnSpec.oid` reads through the type, it does not snapshot it.
-
-    A snapshot taken while the registry compiled would be 0 forever, because
-    resolution happens later -- at startup, against the live catalog.
-    """
-    oid = _vector_oid()   # bound first; see the note in the fingerprint test
+    oid = _vector_oid()  # bound first; see the note in the fingerprint test
     registry = Registry(Database(), [Document], validate_schema="off")
     spec = registry.spec_for(Document)
     assert spec.by_name["embedding"].oid == oid
 
 
 def test_rebinding_to_a_different_oid_is_refused(monkeypatch: Any) -> None:
-    """One process holds one codec table, so one type holds one OID.
-
-    Two databases whose `vector` OIDs disagree cannot both be served from one
-    interpreter, and the honest failure is here rather than in a decoder reading
-    one database's rows with the other's rules.
-    """
     from wreath.orm import types as orm_types
 
     monkeypatch.setitem(orm_types._EXTENSION_KINDS, "twinkind", EXT_KIND_VECTOR)
@@ -179,15 +148,12 @@ def test_binding_a_nonsense_oid_is_refused() -> None:
         bind_extension_oid("vector", 0)
 
 
-# -- a type declared after resolution -----------------------------------------
-#
 # `bind_extension_oid` walks the types declared *at the time it is called*, so
 # an `ExtensionType` constructed afterwards -- a model class defined after the
 # application started -- keeps OID 0 until something resolves again. That is not
 # reachable in the normal startup order, and it is the wrong failure mode for a
 # value that decides wire framing and migration descriptors: 0 is a legal-looking
 # OID meaning "unspecified" on the wire and "built-in" in a descriptor.
-#
 # Unbound stays legitimate at declaration, at fingerprint time, and while the
 # probe that is about to resolve it runs; the refusal lives at the points that
 # *consume* the OID.
@@ -195,12 +161,11 @@ def test_binding_a_nonsense_oid_is_refused() -> None:
 
 def _late_vector() -> Any:
     """A vector type constructed after `vector` was already resolved."""
-    _vector_oid()          # resolution has happened for this process
-    return Vector(4)       # ... and this instance was not there for it
+    _vector_oid()  # resolution has happened for this process
+    return Vector(4)  # ... and this instance was not there for it
 
 
 def test_declaring_after_resolution_is_still_allowed() -> None:
-    """The refusal must not fire where unbound is the legitimate state."""
     late = _late_vector()
     try:
         assert late.oid == 0
@@ -237,9 +202,6 @@ def test_binding_a_value_of_an_unbound_type_names_the_call() -> None:
 
 
 def test_a_migration_descriptor_refuses_an_unbound_type() -> None:
-    """The silent one. Without this the column is described as OID 0 with an
-    empty type spelling -- indistinguishable from a built-in, rediscovered as
-    drift on every run, with nothing saying why."""
     import wreath.migrations as migrations
 
     late = _late_vector()
@@ -265,9 +227,6 @@ def test_every_declared_extension_type_is_discoverable() -> None:
     declared = declared_extension_types()
     assert any(item.sql == "vector(4)" for item in declared)
     assert all(isinstance(item, ExtensionType) for item in declared)
-
-
-# -- startup ------------------------------------------------------------------
 
 
 class _NoExtensionConnection:
@@ -316,9 +275,6 @@ async def test_a_registry_without_extension_types_does_no_io() -> None:
     assert await resolve_extension_types(registry) == ()
 
 
-# -- against a real database --------------------------------------------------
-
-
 @pytest.mark.asyncio
 @pytest.mark.database
 async def test_the_real_oid_is_read_from_the_catalog() -> None:
@@ -348,9 +304,7 @@ async def test_a_missing_type_reports_not_installed_rather_than_raising() -> Non
         pytest.skip("set WREATH_TEST_POSTGRES_DSN for extension resolution tests")
     db = await connect(_DSN)
     try:
-        found = await probe_extension_types(
-            db, {f"not_a_type_{uuid.uuid4().hex[:8]}": "nothing"}
-        )
+        found = await probe_extension_types(db, {f"not_a_type_{uuid.uuid4().hex[:8]}": "nothing"})
         assert not found[0].installed
         assert found[0].current_schema
     finally:

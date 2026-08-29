@@ -118,9 +118,7 @@ async def _resolve(
                 verdicts[action] = verdict
             if verdict:
                 allowed.add(name)
-        permitted = frozenset(
-            name for name in columns if name not in gated or name in allowed
-        )
+        permitted = frozenset(name for name in columns if name not in gated or name in allowed)
     # Boxed, because the empty frozenset is a legitimate answer and `state.get`
     # cannot tell it from a miss.
     state.__setattr__(slot, (permitted,))
@@ -136,9 +134,7 @@ async def resolve_readable(
     admin_id: int,
 ) -> frozenset[str]:
     """Columns of `columns` this request may read, in declaration order."""
-    return await _resolve(
-        request, authorizer, field_access, columns, resource, "read", admin_id
-    )
+    return await _resolve(request, authorizer, field_access, columns, resource, "read", admin_id)
 
 
 async def resolve_writable(

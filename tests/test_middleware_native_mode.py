@@ -1,5 +1,3 @@
-"""First-class HTTP policy crosses the native server boundary exactly once."""
-
 from __future__ import annotations
 
 import asyncio
@@ -77,9 +75,7 @@ def build() -> tuple[Wreath, list[bool]]:
 
 
 async def serve(app: Wreath, raw: bytes) -> bytes:
-    protocol = _server.HttpProtocol(
-        app, ServerConfig(), asyncio.get_running_loop(), set()
-    )
+    protocol = _server.HttpProtocol(app, ServerConfig(), asyncio.get_running_loop(), set())
     transport = Recorder()
     protocol.connection_made(transport)
     protocol.data_received(raw)
@@ -145,8 +141,7 @@ async def test_native_ai_scraping_checks_every_recognized_product() -> None:
     app._compile_routes()
     response = await serve(
         app,
-        b"GET / HTTP/1.1\r\nhost: allowed.test\r\n"
-        b"user-agent: Googlebot/1.0 GPTBot/1.0\r\n\r\n",
+        b"GET / HTTP/1.1\r\nhost: allowed.test\r\nuser-agent: Googlebot/1.0 GPTBot/1.0\r\n\r\n",
     )
     assert response.startswith(b"HTTP/1.1 403 Forbidden\r\n")
 
@@ -162,8 +157,7 @@ async def test_native_ai_scraping_policy_allows_its_robots_declaration() -> None
     app._compile_routes()
     response = await serve(
         app,
-        b"GET /robots.txt HTTP/1.1\r\nhost: allowed.test\r\n"
-        b"user-agent: GPTBot/1.0\r\n\r\n",
+        b"GET /robots.txt HTTP/1.1\r\nhost: allowed.test\r\nuser-agent: GPTBot/1.0\r\n\r\n",
     )
     assert response.startswith(b"HTTP/1.1 200 OK\r\n")
     assert b"User-agent: gptbot" in response
@@ -315,9 +309,7 @@ async def test_accepted_response_receives_native_egress_policy() -> None:
     app, materialized = build()
     response = await serve(
         app,
-        b"GET /x HTTP/1.1\r\n"
-        b"host: allowed.test\r\n"
-        b"origin: https://app.test\r\n\r\n",
+        b"GET /x HTTP/1.1\r\nhost: allowed.test\r\norigin: https://app.test\r\n\r\n",
     )
     assert response.startswith(b"HTTP/1.1 200 OK\r\n")
     assert b"access-control-allow-origin: https://app.test\r\n" in response
@@ -329,9 +321,7 @@ async def test_accepted_response_receives_native_egress_policy() -> None:
 
 @pytest.mark.asyncio
 async def test_native_timing_replaces_only_its_metric_in_existing_fields() -> None:
-    app = Wreath(
-        http_policy=HttpPolicy(server_timing=ServerTimingPolicy(metric="total"))
-    )
+    app = Wreath(http_policy=HttpPolicy(server_timing=ServerTimingPolicy(metric="total")))
 
     @app.get("/timed")
     async def timed(request: Any) -> Response:
@@ -344,9 +334,7 @@ async def test_native_timing_replaces_only_its_metric_in_existing_fields() -> No
         )
 
     app._compile_routes()
-    response = await serve(
-        app, b"GET /timed HTTP/1.1\r\nhost: allowed.test\r\n\r\n"
-    )
+    response = await serve(app, b"GET /timed HTTP/1.1\r\nhost: allowed.test\r\n\r\n")
 
     assert response.count(b"server-timing:") == 1
     assert b"server-timing: db;dur=2, cache;dur=1, total;dur=" in response

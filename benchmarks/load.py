@@ -196,18 +196,14 @@ async def _ws_worker(
     ):
         started = time.perf_counter_ns()
         try:
-            if protocol is None or protocol.transport is None or (
-                protocol.transport.is_closing()
-            ):
+            if protocol is None or protocol.transport is None or (protocol.transport.is_closing()):
                 protocol = _WsClientProtocol(loop)
-                await loop.create_connection(
-                    lambda bound=protocol: bound, host, port
-                )
+                await loop.create_connection(lambda bound=protocol: bound, host, port)
                 await protocol.upgrade(_build_ws_upgrade(host, port, path))
             opcode = await protocol.send_and_wait(frame)
             if opcode != 0x1:
                 raise RuntimeError(f"unexpected reply opcode {opcode}")
-        except (OSError, RuntimeError, ValueError):
+        except OSError, RuntimeError, ValueError:
             errors += 1
             if progress_counts is not None:
                 progress_counts[1] += 1
@@ -255,7 +251,7 @@ async def _worker(
             await writer.drain()
             assert reader is not None
             await _read_response(reader)
-        except (OSError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, RuntimeError):
+        except OSError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, RuntimeError:
             errors += 1
             if progress_counts is not None:
                 progress_counts[1] += 1

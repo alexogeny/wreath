@@ -1,31 +1,3 @@
-"""Attacks on the MCP surface, each written to fail before it was fixed.
-
-Two holes, and both are the same shape: a control that is real on one path and
-absent on the path beside it, so the docstring above it reads as true and the
-deployment that took a different-but-supported route has none of it.
-
-* **A session was bound to its opener only when `MCPAuth` was the thing doing
-  the authenticating.** `Session.principal` says a leaked `Mcp-Session-Id` must
-  not be a credential in its own right, and `_owns` enforces exactly that -- but
-  the principal was recorded from the identity `MCPAuth` had published, and an
-  application that authenticates with `app.configure_auth(...)` instead
-  publishes nothing at `initialize`. Every session on such an endpoint was
-  therefore unbound, and a second verified caller who learned an id could drive
-  another caller's session: cancel its calls, end it, and open its
-  server-to-client stream, which is where a tool's `elicitation/create` form and
-  its progress reports travel.
-* **`expose_routes` carried a route's `AuthRequirement` and dropped everything
-  else in front of it.** A route's own `middleware=` and `dependencies=` are
-  controls a person put on that route; the adapter read `definition.requirement`
-  and nothing else, so a route guarded by `Depends(require_api_key)` became a
-  tool with no key check and a route behind a refusing middleware became a tool
-  that runs the handler.
-
-Both are checked here rather than in `tests/test_mcp_auth.py` and
-`tests/test_mcp_expose_routes.py` so a red-team round does not collide with the
-suites that describe the intended behaviour.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -88,17 +60,7 @@ async def initialize(client: TestClient, token: str) -> str:
     return header(opened, "mcp-session-id") or ""
 
 
-# -- a session is a credential for one subject --------------------------------
-
-
 async def test_another_caller_cannot_drive_the_session_ada_opened() -> None:
-    """The attack: Bob learns Ada's `Mcp-Session-Id` and uses it.
-
-    A session id travels in a header, is logged by intermediaries that log
-    headers, and is held by whatever client Ada is running -- so "it is secret"
-    is not the control. The control is that it names Ada, and a request from
-    anybody else is refused whatever it carries.
-    """
     app, mcp = application_authenticated()
     async with TestClient(app) as client:
         session = await initialize(client, "ada")
@@ -121,25 +83,15 @@ async def test_another_caller_cannot_drive_the_session_ada_opened() -> None:
 
 
 async def test_another_caller_cannot_end_the_session_ada_opened() -> None:
-    """`DELETE` is the cheapest cross-caller attack: one request, no body."""
     app, mcp = application_authenticated()
     async with TestClient(app) as client:
         session = await initialize(client, "ada")
-        ended = await client.delete(
-            "/mcp", headers=bearer("bob") | {"mcp-session-id": session}
-        )
+        ended = await client.delete("/mcp", headers=bearer("bob") | {"mcp-session-id": session})
         assert ended.status == 401
         assert mcp.sessions == 1
 
 
 async def test_another_caller_cannot_open_the_stream_of_ada_s_session() -> None:
-    """The stream is where a tool's questions to Ada travel.
-
-    `notifications/progress`, a subscribed resource changing, and above all the
-    `elicitation/create` form a tool puts in front of the person at the other
-    end -- all of it goes onto the session's `GET` stream. A second caller who
-    could open it would read Ada's prompts and be able to answer them.
-    """
     app, mcp = application_authenticated()
     async with TestClient(app) as client:
         session = await initialize(client, "ada")
@@ -163,13 +115,6 @@ async def test_another_caller_cannot_open_the_stream_of_ada_s_session() -> None:
 
 
 async def test_an_unprotected_endpoint_still_needs_no_identity() -> None:
-    """The guard must not invent a requirement where there is no subject.
-
-    An endpoint with neither `MCPAuth` nor an application backend has nobody to
-    bind a session to, and binding one to `None` would refuse every request on
-    it. This is the case that makes the fix's condition load-bearing rather
-    than a blanket refusal.
-    """
     app = Wreath()
     mcp = MCP(app, name="camera-trap", version="1.0.0")
 
@@ -196,17 +141,7 @@ async def test_an_unprotected_endpoint_still_needs_no_identity() -> None:
         assert answered.status == 200
 
 
-# -- a route's controls come with it, or the route is not exposed -------------
-
-
 async def test_a_route_s_dependencies_are_not_silently_dropped() -> None:
-    """The attack: put the API-key check in `dependencies=` and expose the route.
-
-    `Depends(...)` as a *parameter* is already refused by name. The same marker
-    passed to `app.get(dependencies=[...])` is not a parameter, it is the shape
-    a guard is usually written in -- resolved before the handler runs, free to
-    refuse -- and it was read by nothing in the adapter.
-    """
     ran: list[str] = []
 
     async def require_api_key(request) -> None:
@@ -232,11 +167,6 @@ async def test_a_route_s_dependencies_are_not_silently_dropped() -> None:
 
 
 async def test_a_route_s_middleware_is_not_silently_dropped() -> None:
-    """The same attack one layer out: the refusal lives in route middleware.
-
-    A `before` hook that returns a response is how Wreath spells "this request
-    stops here", and a route carrying one is a route somebody guarded.
-    """
     ran: list[str] = []
 
     class Blocker:
@@ -270,7 +200,6 @@ async def test_a_route_s_middleware_is_not_silently_dropped() -> None:
 
 
 async def test_an_unguarded_route_is_still_exposed() -> None:
-    """The refusals must not swallow the ordinary case they sit beside."""
     app = Wreath()
 
     @app.get("/sightings", tags=("ops",))

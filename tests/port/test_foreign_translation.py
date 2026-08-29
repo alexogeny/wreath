@@ -1,17 +1,3 @@
-"""Foreign-framework constructs that do carry across, and the ones that do not.
-
-Five frameworks say the same things five ways. `abort(404)`,
-`web.HTTPNotFound()`, `HTTPError(404)`, `HTTPNotFound()` and `Http404()` are all
-`raise NotFound()`, so the table that decides it lives in `_port/frameworks.py`
-once rather than five times -- the fifth spelling is always the one nobody
-remembers to add.
-
-Every test here comes in a pair. A construct is translated only where the target
-is exact, and the second half of each pair is the near-miss that has to keep
-failing loudly: a 418 with no wreath class, a `uuid` converter wreath's binder
-cannot convert, a regex converter that would widen the route, a monkeypatched
-tree where a rewrite that *looks* like it worked is worse than none.
-"""
 from __future__ import annotations
 
 import pytest
@@ -34,8 +20,6 @@ def _emit(tmp_path, source: str, name: str = "app.py") -> str:
 def _rules(findings) -> set[str]:
     return {f.rule_id for f in findings}
 
-
-# -- HTTP errors ---------------------------------------------------------------
 
 @pytest.mark.parametrize(
     ("imports", "call", "expected"),
@@ -73,11 +57,6 @@ def test_every_frameworks_http_error_is_the_same_wreath_class(
 
 
 def test_tornados_log_message_is_not_published_to_the_caller(tmp_path) -> None:
-    """`HTTPError(status, log_message)` -- the second positional goes to the log.
-
-    Carrying it across as the detail would put an internal message in the body
-    of every response. Only `reason=` is what the client was ever shown.
-    """
     emitted = _emit(
         tmp_path,
         "import tornado.web\n"
@@ -92,12 +71,6 @@ def test_tornados_log_message_is_not_published_to_the_caller(tmp_path) -> None:
 
 
 def test_a_status_with_no_wreath_class_stays_refused(tmp_path) -> None:
-    """418 is in `docs/reference/port-gaps.md` as `exc.http_unmapped`.
-
-    `wreath.exceptions` ships 400/401/403/404/405/409/413/422/429/431/500.
-    Rounding a 418 to the nearest class that exists would change the status the
-    caller sees, which is the whole content of the response.
-    """
     source = "from flask import Flask, abort\n\n\ndef read():\n    abort(418)\n"
     findings = _analyze(tmp_path, source)
 
@@ -107,12 +80,6 @@ def test_a_status_with_no_wreath_class_stays_refused(tmp_path) -> None:
 
 
 def test_a_bare_abort_gains_the_raise_it_always_had(tmp_path) -> None:
-    """Flask's `abort()` raises internally and reads like an ordinary call.
-
-    Rewriting only the call would leave a statement that builds an exception and
-    throws it away -- a route that answered 404 before the port and falls
-    through to its own return after it.
-    """
     emitted = _emit(
         tmp_path,
         "from flask import Flask, abort\n"
@@ -126,8 +93,6 @@ def test_a_bare_abort_gains_the_raise_it_always_had(tmp_path) -> None:
 
     assert "        raise NotFound()" in emitted
 
-
-# -- redirects -----------------------------------------------------------------
 
 @pytest.mark.parametrize(
     ("imports", "statement", "expected"),
@@ -162,19 +127,11 @@ def test_a_bare_abort_gains_the_raise_it_always_had(tmp_path) -> None:
 def test_a_redirect_never_loses_its_status(
     tmp_path, imports: str, statement: str, expected: str
 ) -> None:
-    """Wreath's `RedirectResponse` defaults to 307 and none of these are.
-
-    An omitted status is not "nothing to carry": 301 becoming 307 turns a
-    permanent redirect into a temporary one, and 302 becoming 307 preserves the
-    method, so a GET-after-POST becomes a re-POST.
-    """
     source = f"{imports}\n\n\ndef read():\n    {statement}\n"
 
     assert "port.http.redirect" in _rules(_analyze(tmp_path, source))
     assert expected in _emit(tmp_path, source)
 
-
-# -- routes --------------------------------------------------------------------
 
 @pytest.mark.parametrize(
     ("pattern", "signature", "expected_path", "expected_signature"),
@@ -209,12 +166,6 @@ def test_a_redirect_never_loses_its_status(
 def test_a_flask_path_converter_becomes_a_placeholder_and_an_annotation(
     tmp_path, pattern: str, signature: str, expected_path: str, expected_signature: str
 ) -> None:
-    """The placeholder is `{name}` and the typing lives in the annotation.
-
-    Both halves or neither: a path rewritten without its annotation binds the
-    capture as a string, and an annotation without the path rewrite is a
-    parameter nothing fills.
-    """
     emitted = _emit(
         tmp_path,
         "from flask import Flask\n"
@@ -232,11 +183,6 @@ def test_a_flask_path_converter_becomes_a_placeholder_and_an_annotation(
 
 
 def test_a_bottle_converter_reads_the_other_way_round(tmp_path) -> None:
-    """Flask writes `<int:id>` and Bottle writes `<id:int>`.
-
-    Same brackets, opposite order. Reading one as the other produces a route
-    parameter named after a type.
-    """
     emitted = _emit(
         tmp_path,
         "from bottle import Bottle\n"
@@ -268,11 +214,6 @@ def test_a_bottle_converter_reads_the_other_way_round(tmp_path) -> None:
 def test_the_methods_a_route_answers_pick_the_wreath_verb(
     tmp_path, decorator: str, expected: str
 ) -> None:
-    """Flask's default is GET+HEAD, and a wreath GET route answers HEAD too.
-
-    So the default is `@app.get`, not a loss -- and an explicit `["GET","HEAD"]`
-    is the same route rather than two.
-    """
     emitted = _emit(
         tmp_path,
         "from flask import Flask\n"
@@ -289,13 +230,6 @@ def test_the_methods_a_route_answers_pick_the_wreath_verb(
 
 
 def test_a_ported_handler_keeps_its_def(tmp_path) -> None:
-    """Wreath dispatches a synchronous handler natively.
-
-    This is a correctness point rather than a stylistic one: a WSGI handler's
-    body is full of calls that block, and they were fine on a worker thread.
-    Making it `async def` moves every one of them onto the event loop, which is
-    the same mistake the gevent refusal exists to prevent.
-    """
     emitted = _emit(
         tmp_path,
         "from flask import Flask\n"
@@ -322,11 +256,6 @@ def test_a_ported_handler_keeps_its_def(tmp_path) -> None:
 def test_a_converter_with_no_wreath_form_refuses_the_whole_route(
     tmp_path, pattern: str, why: str
 ) -> None:
-    """Half a path is a route that answers on a URL nobody wrote.
-
-    Downgrading `<code:re:[A-Z]{2}>` to `{code}` is the sharp one: it matches
-    any single segment, so the port turns a 404 into a 200.
-    """
     source = (
         "from flask import Flask\n"
         "\n"
@@ -344,12 +273,6 @@ def test_a_converter_with_no_wreath_form_refuses_the_whole_route(
 
 
 def test_a_capture_the_handler_does_not_declare_refuses_the_route(tmp_path) -> None:
-    """An annotation needs a parameter to sit on.
-
-    This is what keeps aiohttp's handlers out of the rule: they take only
-    `request` and read `match_info` in the body, so there is nothing in the
-    signature to annotate and the capture would arrive nowhere.
-    """
     findings = _analyze(
         tmp_path,
         "from aiohttp import web\n"
@@ -359,23 +282,14 @@ def test_a_capture_the_handler_does_not_declare_refuses_the_route(tmp_path) -> N
         "\n"
         '@routes.get("/c/{consignment_id}")\n'
         "async def read(request):\n"
-        '    return web.json_response({})\n',
+        "    return web.json_response({})\n",
     )
 
     assert "port.route.method" not in _rules(findings)
     assert "foreign.aiohttp.route" in _rules(findings)
 
 
-# -- the application and its routers -------------------------------------------
-
 def test_the_application_and_its_blueprints_become_wreath_objects(tmp_path) -> None:
-    """`Flask(__name__)` passes an import name so Flask can find templates.
-
-    Wreath finds neither templates nor static files that way -- `app.static` is
-    explicit -- so the argument has nowhere to go and needs none. The
-    blueprint's name becomes the router's `tags`, which is what the name was
-    grouping by.
-    """
     emitted = _emit(
         tmp_path,
         "from flask import Blueprint, Flask\n"
@@ -392,12 +306,6 @@ def test_the_application_and_its_blueprints_become_wreath_objects(tmp_path) -> N
 
 
 def test_a_blueprint_with_a_hook_of_its_own_is_not_a_router(tmp_path) -> None:
-    """Wreath's hooks belong to the application, not to a router.
-
-    A `before_request` registered on the blueprint runs for that blueprint's
-    routes only; re-declared on the application it runs for all of them. That is
-    a change to which requests it fires on, so the blueprint stays refused.
-    """
     findings = _analyze(
         tmp_path,
         "from flask import Blueprint, Flask\n"
@@ -414,8 +322,6 @@ def test_a_blueprint_with_a_hook_of_its_own_is_not_a_router(tmp_path) -> None:
     assert "port.router.new" not in _rules(findings)
     assert "foreign.flask.blueprint" in _rules(findings)
 
-
-# -- the monkeypatch refuses the whole tree ------------------------------------
 
 MONKEYPATCHED = """\
 from gevent import monkey
@@ -436,14 +342,6 @@ def read(sailing_id):
 
 
 def test_a_monkeypatched_tree_translates_nothing_at_all(tmp_path) -> None:
-    """Every construct here has an exact wreath spelling, and none of them fire.
-
-    The plan is explicit that the measured Bottle cluster is Bottle *under
-    gevent* and contributes nothing. A rewrite there produces code that passes
-    its tests at low concurrency and serialises in production, so a tree that
-    looks ported is worse than one that plainly is not -- and the gate is on the
-    patch rather than on the framework, because the patch is what broke it.
-    """
     (tmp_path / "app.py").write_text(MONKEYPATCHED)
     report = port.analyze(tmp_path)
 
@@ -454,12 +352,7 @@ def test_a_monkeypatched_tree_translates_nothing_at_all(tmp_path) -> None:
 
 
 def test_the_same_bottle_source_without_the_patch_does_translate(tmp_path) -> None:
-    """The control. Nothing about Bottle is the problem; the patch is."""
-    source = MONKEYPATCHED.replace(
-        "from gevent import monkey\n\nmonkey.patch_all()\n\n", ""
-    )
+    source = MONKEYPATCHED.replace("from gevent import monkey\n\nmonkey.patch_all()\n\n", "")
     findings = _analyze(tmp_path, source)
 
-    assert {"port.app.wreath", "port.route.method", "port.http.exception"} <= _rules(
-        findings
-    )
+    assert {"port.app.wreath", "port.route.method", "port.http.exception"} <= _rules(findings)

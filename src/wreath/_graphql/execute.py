@@ -67,13 +67,14 @@ def _resolve_value(value: Any, variables: dict[str, Any]) -> Any:
 
 def _arguments(field: Field, variables: dict[str, Any]) -> dict[str, Any]:
     return {
-        argument.name: _resolve_value(argument.value, variables)
-        for argument in field.arguments
+        argument.name: _resolve_value(argument.value, variables) for argument in field.arguments
     }
 
 
 def _flatten(
-    selections: tuple[Any, ...], document: Document, type_name: str,
+    selections: tuple[Any, ...],
+    document: Document,
+    type_name: str,
     seen: frozenset[str] = frozenset(),
 ) -> list[Field]:
     """Expand fragments into a flat field list for one object type.
@@ -101,7 +102,9 @@ def _flatten(
                 continue
             fields.extend(
                 _flatten(
-                    definition.selection_set.selections, document, type_name,
+                    definition.selection_set.selections,
+                    document,
+                    type_name,
                     seen | {selection.name},
                 )
             )
@@ -112,15 +115,31 @@ class _Run:
     """One execution. Carries the per-request caches so they cannot leak."""
 
     __slots__ = (
-        "_action", "_authorizer", "_document", "_max_page_size", "_on_denied",
-        "_policy_schema", "_policy_state", "_request", "_schema", "_session",
+        "_action",
+        "_authorizer",
+        "_document",
+        "_max_page_size",
+        "_on_denied",
+        "_policy_schema",
+        "_policy_state",
+        "_request",
+        "_schema",
+        "_session",
         "_variables",
     )
 
     def __init__(
-        self, schema: Schema, document: Document, session: Any, *,
-        variables: dict[str, Any], authorizer: Any, request: Any,
-        max_page_size: int, on_denied: str, action: str,
+        self,
+        schema: Schema,
+        document: Document,
+        session: Any,
+        *,
+        variables: dict[str, Any],
+        authorizer: Any,
+        request: Any,
+        max_page_size: int,
+        on_denied: str,
+        action: str,
         policy_schema: Any,
     ) -> None:
         self._action = action
@@ -133,12 +152,14 @@ class _Run:
         self._max_page_size = max_page_size
         self._on_denied = on_denied
         if authorizer is not None and policy_schema is None:
-            policies = tuple(
-                schema_field.policy
-                for object_type in schema.types.values()
-                for schema_field in object_type.fields.values()
-            ) + tuple(root.policy for root in schema.roots.values()) + tuple(
-                root.policy for root in schema.mutations.values()
+            policies = (
+                tuple(
+                    schema_field.policy
+                    for object_type in schema.types.values()
+                    for schema_field in object_type.fields.values()
+                )
+                + tuple(root.policy for root in schema.roots.values())
+                + tuple(root.policy for root in schema.mutations.values())
             )
             policy_schema = _core.graphql_policy_schema(policies, policy_resource)
         self._policy_schema = policy_schema
@@ -146,17 +167,13 @@ class _Run:
         # array is native-owned and belongs to this execution, so aliases and
         # repeated levels share decisions without a Python dict or global cache.
         self._policy_state = (
-            _core.graphql_policy_state(policy_schema)
-            if self._authorizer is not None
-            else None
+            _core.graphql_policy_state(policy_schema) if self._authorizer is not None else None
         )
 
     async def _allowed(self, resource: str, path: tuple[str, ...]) -> bool:
         if self._authorizer is None:
             return True
-        cached = _core.graphql_policy_cached(
-            self._policy_schema, self._policy_state, resource
-        )
+        cached = _core.graphql_policy_cached(self._policy_schema, self._policy_state, resource)
         if cached >= 0:
             return bool(cached)
         # An `AuthorizationProvider` is asked with a `PolicyRequirement`, never
@@ -169,15 +186,11 @@ class _Run:
             self._request,
             PolicyRequirement(
                 action=self._action,
-                resource=_core.graphql_policy_resource(
-                    self._policy_schema, resource
-                ),
+                resource=_core.graphql_policy_resource(self._policy_schema, resource),
             ),
         )
         allowed = bool(getattr(decision, "allowed", False))
-        _core.graphql_policy_store(
-            self._policy_schema, self._policy_state, resource, allowed
-        )
+        _core.graphql_policy_store(self._policy_schema, self._policy_state, resource, allowed)
         if not allowed and self._on_denied == "error":
             raise ExecutionError(
                 getattr(decision, "reason", None) or f"not authorized to read {resource}",
@@ -215,11 +228,13 @@ class _Run:
         authorize_resources = getattr(self._authorizer, "_authorize_resources", None)
         authorize_many = getattr(self._authorizer, "_authorize_many", None)
         if resources and callable(authorize_resources):
-            native = callable(getattr(
-                getattr(self._authorizer, "_engine", None),
-                "_is_authorized_many_native",
-                None,
-            ))
+            native = callable(
+                getattr(
+                    getattr(self._authorizer, "_engine", None),
+                    "_is_authorized_many_native",
+                    None,
+                )
+            )
             decisions = await authorize_resources(
                 self._request,
                 self._action,
@@ -237,17 +252,14 @@ class _Run:
                 stop_on_denied=self._on_denied == "error",
             )
         elif resources:
-            boundary = _core.graphql_policy_items(
-                plan, self._action, PolicyRequirement
-            )
+            boundary = _core.graphql_policy_items(plan, self._action, PolicyRequirement)
             scalar_decisions = []
             for requirement, _path in boundary:
                 scalar_decisions.append(
                     await self._authorizer.authorize(self._request, requirement)
                 )
-                if (
-                    self._on_denied == "error"
-                    and not bool(getattr(scalar_decisions[-1], "allowed", False))
+                if self._on_denied == "error" and not bool(
+                    getattr(scalar_decisions[-1], "allowed", False)
                 ):
                     break
             decisions = scalar_decisions
@@ -259,14 +271,16 @@ class _Run:
         )
         if denial is not None:
             reason, path, resource = denial
-            raise ExecutionError(
-                reason or f"not authorized to read {resource}", path=path
-            )
+            raise ExecutionError(reason or f"not authorized to read {resource}", path=path)
         result = _core.graphql_policy_result(plan, self._policy_state)
         return bool(result & 1), bool(result & 2)
 
     async def _call_resolver(
-        self, spec: Any, parents: list[Any], field: Field, path: tuple[str, ...],
+        self,
+        spec: Any,
+        parents: list[Any],
+        field: Field,
+        path: tuple[str, ...],
         parent_type: str,
     ) -> list[Any]:
         """Invoke a resolver over the level, returning one value per parent."""
@@ -298,15 +312,16 @@ class _Run:
         return values
 
     async def _project(
-        self, instances: list[Any], object_type: ObjectType, fields: list[Field],
+        self,
+        instances: list[Any],
+        object_type: ObjectType,
+        fields: list[Field],
         path: tuple[str, ...],
     ) -> list[dict[str, Any]]:
         """Project one level, batching every field and honouring `requires`."""
         marker = _phase_marker.get(None)
         if self._authorizer is None and marker is None:
-            projected = _core.graphql_project_plain(
-                instances, object_type.fields, fields
-            )
+            projected = _core.graphql_project_plain(instances, object_type.fields, fields)
             if projected is not None:
                 return projected
         results = _core.graphql_new_results(instances)
@@ -333,20 +348,19 @@ class _Run:
                 for dependency in schema_field.resolver.requires:
                     await ensure(dependency)
                 hidden[name] = await self._call_resolver(
-                    schema_field.resolver, instances,
-                    Field(name=name, key=name), (*path, name), object_type.name,
+                    schema_field.resolver,
+                    instances,
+                    Field(name=name, key=name),
+                    (*path, name),
+                    object_type.name,
                 )
             elif schema_field.relationship is not None and instances:
-                await self._session._load_relationship(
-                    schema_field.relationship, instances, ()
-                )
+                await self._session._load_relationship(schema_field.relationship, instances, ())
 
         for field in ordered:
             schema_field = object_type.fields.get(field.name)
             if schema_field is None:
-                raise ExecutionError(
-                    f"{object_type.name} has no field {field.name!r}", path=path
-                )
+                raise ExecutionError(f"{object_type.name} has no field {field.name!r}", path=path)
             field_path = (*path, field.name)
             if not await self._allowed(schema_field.policy, field_path):
                 _core.graphql_project_constant(results, field.key, None)
@@ -357,17 +371,20 @@ class _Run:
                 for dependency in schema_field.resolver.requires:
                     await ensure(dependency)
                 values = await self._call_resolver(
-                    schema_field.resolver, instances, field, field_path,
+                    schema_field.resolver,
+                    instances,
+                    field,
+                    field_path,
                     object_type.name,
                 )
                 if schema_field.resolver.type_name_out in self._schema.types:
-                    values = await self._project_children(
-                        values, schema_field, field, field_path
-                    )
+                    values = await self._project_children(values, schema_field, field, field_path)
                 _core.graphql_project_values(results, field.key, values)
                 if marker is not None:
                     marker(
-                        _PH_RESOLVER, len(instances), _COV_PYTHON,
+                        _PH_RESOLVER,
+                        len(instances),
+                        _COV_PYTHON,
                         _monotonic_ns() - started,
                     )
                 continue
@@ -378,9 +395,7 @@ class _Run:
             else:
                 attribute = schema_field.attribute
             if attribute is not None:
-                _core.graphql_project_attribute(
-                    results, instances, field.key, attribute
-                )
+                _core.graphql_project_attribute(results, instances, field.key, attribute)
                 if marker is not None:
                     marker(_PH_RESOLVER, 0, _COV_PYTHON, _monotonic_ns() - started)
                 continue
@@ -397,15 +412,15 @@ class _Run:
                 await self._session._load_relationship(relationship, instances, ())
             if marker is not None:
                 marker(
-                    _PH_RESOLVER, len(instances), _COV_PYTHON,
+                    _PH_RESOLVER,
+                    len(instances),
+                    _COV_PYTHON,
                     _monotonic_ns() - started,
                 )
 
             target_type = self._schema.type_of(schema_field.type_name)
             if target_type is None:
-                raise ExecutionError(
-                    f"unknown type {schema_field.type_name!r}", path=field_path
-                )
+                raise ExecutionError(f"unknown type {schema_field.type_name!r}", path=field_path)
             child_fields = _flatten(
                 field.selection_set.selections, self._document, target_type.name
             )
@@ -420,31 +435,31 @@ class _Run:
         return _core.graphql_finish_results(results)
 
     async def _project_children(
-        self, values: list[Any], schema_field: Any, field: Field,
+        self,
+        values: list[Any],
+        schema_field: Any,
+        field: Field,
         path: tuple[str, ...],
     ) -> list[Any]:
         """Project a resolver's object-typed return values."""
         target_type = self._schema.type_of(schema_field.resolver.type_name_out)
         if target_type is None or field.selection_set is None:
             return values
-        child_fields = _flatten(
-            field.selection_set.selections, self._document, target_type.name
-        )
-        flat, layout = _core.graphql_flatten_values(
-            values, schema_field.resolver.is_list
-        )
+        child_fields = _flatten(field.selection_set.selections, self._document, target_type.name)
+        flat, layout = _core.graphql_flatten_values(values, schema_field.resolver.is_list)
         projected = await self._project(flat, target_type, child_fields, path)
-        return _core.graphql_restore_values(
-            projected, layout, schema_field.resolver.is_list
-        )
+        return _core.graphql_restore_values(projected, layout, schema_field.resolver.is_list)
 
     async def _root_instances(self, root: Any, field: Field) -> list[Any]:
         """Fetch the objects one root field selects."""
         arguments = _arguments(field, self._variables)
         if root.resolver is not None:
             info = ResolverInfo(
-                request=self._request, session=self._session, arguments=arguments,
-                path=(field.name,), parent_type="Query",
+                request=self._request,
+                session=self._session,
+                arguments=arguments,
+                path=(field.name,),
+                parent_type="Query",
             )
             result = root.resolver.fn(info)
             if is_awaitable(result):
@@ -460,14 +475,14 @@ class _Run:
             limit = arguments.get("limit", self._max_page_size)
             try:
                 limit = min(int(limit), self._max_page_size)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 raise ExecutionError("limit must be an integer") from None
             query = query.limit(max(limit, 0))
             offset = arguments.get("offset")
             if offset is not None:
                 try:
                     query = query.offset(max(int(offset), 0))
-                except (TypeError, ValueError):
+                except TypeError, ValueError:
                     raise ExecutionError("offset must be an integer") from None
             return await self._session.fetch(query)
 
@@ -477,8 +492,7 @@ class _Run:
         primary = root.spec.primary_key
         if len(primary) != 1:
             raise ExecutionError(
-                f"{root.type_name} has a composite primary key and cannot be "
-                "fetched by a single id"
+                f"{root.type_name} has a composite primary key and cannot be fetched by a single id"
             )
         column = getattr(root.spec.model_type, primary[0].python_name)
         coerced = primary[0].pg_type.coerce(
@@ -492,7 +506,8 @@ class _Run:
         kind = "mutation" if is_mutation else "root"
         data: dict[str, Any] = {}
         selections = _flatten(
-            operation.selection_set.selections, self._document,
+            operation.selection_set.selections,
+            self._document,
             "Mutation" if is_mutation else "Query",
         )
         for field in selections:
@@ -526,9 +541,7 @@ class _Run:
             instances = await self._root_instances(root, field)
             if object_type is None or field.selection_set is None:
                 # A scalar-returning root (a count, an ack) needs no projection.
-                value: Any = instances if root.is_list else (
-                    instances[0] if instances else None
-                )
+                value: Any = instances if root.is_list else (instances[0] if instances else None)
                 data[field.key] = value
                 continue
             if child_fields is None:
@@ -554,12 +567,8 @@ class _Run:
                     if projection is not None:
                         data[field.key] = projection
                         continue
-            projected = await self._project(
-                instances, object_type, child_fields, (field.name,)
-            )
-            data[field.key] = projected if root.is_list else (
-                projected[0] if projected else None
-            )
+            projected = await self._project(instances, object_type, child_fields, (field.name,))
+            data[field.key] = projected if root.is_list else (projected[0] if projected else None)
         return data
 
 
@@ -591,9 +600,15 @@ async def execute(
                 raise ExecutionError(f"variable ${definition.name} is required")
 
     return await _Run(
-        schema, document, session,
-        variables=supplied, authorizer=authorizer, request=request,
-        max_page_size=max_page_size, on_denied=on_denied, action=action,
+        schema,
+        document,
+        session,
+        variables=supplied,
+        authorizer=authorizer,
+        request=request,
+        max_page_size=max_page_size,
+        on_denied=on_denied,
+        action=action,
         policy_schema=policy_schema,
     ).run(operation)
 
@@ -628,9 +643,15 @@ async def execute_json(
                 raise ExecutionError(f"variable ${definition.name} is required")
 
     data = await _Run(
-        schema, document, session,
-        variables=supplied, authorizer=authorizer, request=request,
-        max_page_size=max_page_size, on_denied=on_denied, action=action,
+        schema,
+        document,
+        session,
+        variables=supplied,
+        authorizer=authorizer,
+        request=request,
+        max_page_size=max_page_size,
+        on_denied=on_denied,
+        action=action,
         policy_schema=policy_schema,
     ).run(operation, json_output=True)
     return dumps({"data": data})

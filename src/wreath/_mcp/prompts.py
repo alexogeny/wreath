@@ -50,9 +50,7 @@ def _is_string_schema(schema: Mapping[str, Any]) -> bool:
     """
     values = schema.get("enum")
     if isinstance(values, list):
-        return bool(values) and all(
-            value is None or isinstance(value, str) for value in values
-        )
+        return bool(values) and all(value is None or isinstance(value, str) for value in values)
     kind = schema.get("type")
     if isinstance(kind, str):
         return kind in ("string", "null")
@@ -62,8 +60,7 @@ def _is_string_schema(schema: Mapping[str, Any]) -> bool:
         branches = schema.get(key)
         if isinstance(branches, list) and branches:
             return all(
-                isinstance(branch, Mapping) and _is_string_schema(branch)
-                for branch in branches
+                isinstance(branch, Mapping) and _is_string_schema(branch) for branch in branches
             )
     return False
 
@@ -214,9 +211,7 @@ def build_prompt(
         arguments=tuple(arguments),
         title=title,
         binding_spec=spec,
-        requirement=(
-            NO_REQUIREMENT if action is None else policy_requirement(action, prompt_name)
-        ),
+        requirement=(NO_REQUIREMENT if action is None else policy_requirement(action, prompt_name)),
         completions=MappingProxyType(completions),
     )
 

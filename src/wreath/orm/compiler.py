@@ -963,7 +963,6 @@ def _build_plan(registry: Any, select: Select, spec: ModelSpec) -> _CachedPlan:
             # shape it answers. Refusing here rather than returning a correct
             # answer slowly is the same call `.within()` makes by ANDing the box
             # on, and the same one hybrid search makes at declaration time.
-            #
             # A *token* test, never an operator test. Tier 2's KNN renders the
             # same `<->` pgvector does, and an unbounded `ORDER BY embedding
             # <-> $1` has always been allowed -- so the two have to stay
@@ -1701,9 +1700,6 @@ def _walk_values(node: Expression, values: list[Any], oids: list[int]) -> None:
     raise ORMError(f"cannot extract values from {type(node).__name__}")
 
 
-# -- shape keys ---------------------------------------------------------------
-
-
 #: Encoded model names, keyed by the model class. Bounded by the number of
 #: declared models, which is bounded by the application.
 _MODEL_SHAPES: dict[type, bytes] = {}
@@ -1849,14 +1845,10 @@ def shape_of(registry: Any, select: Select) -> bytes:
     either recovers a node the C does not know yet or re-raises exactly what the
     caller would have seen.
 
-    **No shipped node takes the walked path.** `InSubqueryExpr` used to, at the
-    cost of one raised-and-caught exception per compile of a subquery-bearing
-    query; `orm_shape.c` now keys it directly. The recovery stays because its
-    value is prospective -- it is what lets a node be added to Python without the
-    extension being rebuilt in the same change, and without a stale extension
-    silently keying two different queries the same way. A rebuild-order hazard
-    that degrades to "slower" is worth keeping; the alternative degrades to a
-    wrong plan.
+    Every expression class defined by this release takes the native path. The
+    recovery permits a Python expression class to precede an extension rebuild
+    without letting a stale extension key two different queries identically. A
+    version mismatch may therefore make compilation slower, never incorrect.
 
     An ordering that is not a bare column walks *before* the call rather than
     through the recovery: the C keyer reads `ordering.expression.column`, which a

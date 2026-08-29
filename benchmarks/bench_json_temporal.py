@@ -68,17 +68,11 @@ def main() -> int:
     for count in args.counts:
         iterations = max(20, 4000 // max(1, count))
         warmup = max(10, iterations // 4)
-        plain, floor_p = _measure(
-            dumps, _rows(count, False), args.rounds, iterations, warmup
-        )
-        timed, floor_t = _measure(
-            dumps, _rows(count, True), args.rounds, iterations, warmup
-        )
+        plain, floor_p = _measure(dumps, _rows(count, False), args.rounds, iterations, warmup)
+        timed, floor_t = _measure(dumps, _rows(count, True), args.rounds, iterations, warmup)
         # The old path, kept as the comparison point: rebuild then encode.
         payload = _rows(count, True)
-        rebuild, floor_r = _measure(
-            jsonable, payload, args.rounds, iterations, warmup
-        )
+        rebuild, floor_r = _measure(jsonable, payload, args.rounds, iterations, warmup)
         scenarios.append(
             {
                 "rows": count,
@@ -88,8 +82,7 @@ def main() -> int:
                 "ratio": round(timed / plain, 3),
                 "jsonable_rebuild_us": round(rebuild, 3),
                 "aa_floor_us": round(max(floor_p, floor_t, floor_r), 3),
-                "resolution_us": round(max(floor_p, floor_t, floor_r)
-                                       * RESOLUTION_FACTOR, 3),
+                "resolution_us": round(max(floor_p, floor_t, floor_r) * RESOLUTION_FACTOR, 3),
             }
         )
         print(

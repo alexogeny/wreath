@@ -163,9 +163,7 @@ class Param(RelatedColumnExpr):
 
     def __init__(self, name: str) -> None:
         if not isinstance(name, str) or not name.isidentifier():
-            raise DeclarationError(
-                f"a parameter name must be a Python identifier, got {name!r}"
-            )
+            raise DeclarationError(f"a parameter name must be a Python identifier, got {name!r}")
         # No column and no path: a Param is resolved by whatever it is compared
         # against, and every inherited method that reads those is unreachable
         # from a declaration.
@@ -265,8 +263,6 @@ class QueryDeclaration:
         #: Parameter names, in the order they bind.
         self.parameters = parameters
 
-    # -- declaration ------------------------------------------------------
-
     def _check_open(self) -> None:
         """A resolved declaration is a fixed shape, and stays one.
 
@@ -347,13 +343,10 @@ class QueryDeclaration:
         # because that is the order the renderer emits their placeholders in and
         # `parameters` has to name them in bind order.
         ordering_binders = tuple(
-            compile_rebind(item.expression, Placeholder, found)
-            for item in select.orderings
+            compile_rebind(item.expression, Placeholder, found) for item in select.orderings
         )
         execution_select = select
-        if self._single and (
-            execution_select.limit_ is None or execution_select.limit_ > 2
-        ):
+        if self._single and (execution_select.limit_ is None or execution_select.limit_ > 2):
             execution_select = execution_select.limit(2)
         return QueryDeclaration(
             self._steps,
@@ -368,8 +361,6 @@ class QueryDeclaration:
             # parameter list is de-duplicated while keeping bind order.
             parameters=tuple(dict.fromkeys(item.name for item in found)),
         )
-
-    # -- use --------------------------------------------------------------
 
     @property
     def single(self) -> bool:
@@ -429,9 +420,7 @@ class QueryDeclaration:
             bound = bound.rebound_orderings(
                 tuple(
                     item if binder is None else OrderExpr(binder(values), item.direction)
-                    for item, binder in zip(
-                        select.orderings, self._ordering_binders, strict=True
-                    )
+                    for item, binder in zip(select.orderings, self._ordering_binders, strict=True)
                 )
             )
         return bound
@@ -481,9 +470,7 @@ class BoundQuery:
 
     async def __call__(self, **values: Any) -> Any:
         declaration = self.declaration
-        compiled, execution_select = declaration._compile(
-            self.session.registry, values
-        )
+        compiled, execution_select = declaration._compile(self.session.registry, values)
         if declaration.single:
             return await self.session._fetch_one_compiled(execution_select, compiled)
         return await self.session._fetch_compiled(execution_select, compiled)
@@ -764,9 +751,7 @@ def _fused_order(rankings: tuple[tuple[Any, ...], ...], k: int) -> list[Any]:
     return _core.fused_order(rankings, k)
 
 
-def _check_named(
-    name: str, owner: str, attribute: str, declaration: QueryDeclaration
-) -> Select:
+def _check_named(name: str, owner: str, attribute: str, declaration: QueryDeclaration) -> Select:
     """The `Select` behind a fused search, refusing one that no class names.
 
     A fused search must be a query some class body binds to a name.
@@ -803,9 +788,7 @@ def _check_named(
     )
 
 
-def _check_half(
-    name: str, declaration: QueryDeclaration, select: Select, model: type
-) -> None:
+def _check_half(name: str, declaration: QueryDeclaration, select: Select, model: type) -> None:
     """What a query must be before a fusion can rank it.
 
     Takes the `Select` from `_check_named` rather than reading it back off the
@@ -871,11 +854,7 @@ class Queries[ModelT]:
             for name, value in vars(cls).items()
             if isinstance(value, QueryDeclaration)
         ]
-        fused = [
-            (name, value)
-            for name, value in vars(cls).items()
-            if isinstance(value, Fusion)
-        ]
+        fused = [(name, value) for name, value in vars(cls).items() if isinstance(value, Fusion)]
         if (declared or fused) and model is None:
             raise DeclarationError(
                 f"{cls.__name__} declares queries but names no model; write "

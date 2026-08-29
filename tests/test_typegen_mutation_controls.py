@@ -1,5 +1,3 @@
-"""Focused objections for the typegen inspection boundary."""
-
 from __future__ import annotations
 
 import inspect
@@ -78,9 +76,7 @@ def test_invalid_id_on_routed_method_reports_that_method() -> None:
 
 
 def test_explicit_id_is_suffixed_for_every_method_on_a_multi_method_route() -> None:
-    route = SimpleNamespace(
-        operation_id="items", methods=("GET", "POST"), path="/items"
-    )
+    route = SimpleNamespace(operation_id="items", methods=("GET", "POST"), path="/items")
 
     resolved, diagnostics = resolve_operation_ids([route])
 
@@ -142,25 +138,19 @@ def test_none_annotations_have_the_null_shape(annotation: object) -> None:
 
 @pytest.mark.parametrize("annotation", [list, tuple, set, frozenset])
 def test_bare_collections_have_an_unknown_element(annotation: object) -> None:
-    assert _Builder(False).type_ref(annotation) == TypeRef(
-        "array", arguments=(UNKNOWN,)
-    )
+    assert _Builder(False).type_ref(annotation) == TypeRef("array", arguments=(UNKNOWN,))
 
 
 @pytest.mark.parametrize("annotation", [list[int], set[int], frozenset[int]])
 def test_typed_collections_preserve_their_element(annotation: object) -> None:
-    assert _Builder(False).type_ref(annotation) == TypeRef(
-        "array", arguments=(INTEGER,)
-    )
+    assert _Builder(False).type_ref(annotation) == TypeRef("array", arguments=(INTEGER,))
 
 
 def test_bare_and_typed_records_have_distinct_value_shapes() -> None:
     builder = _Builder(False)
 
     assert builder.type_ref(dict) == TypeRef("record", arguments=(UNKNOWN,))
-    assert builder.type_ref(dict[str, int]) == TypeRef(
-        "record", arguments=(INTEGER,)
-    )
+    assert builder.type_ref(dict[str, int]) == TypeRef("record", arguments=(INTEGER,))
 
 
 def test_record_key_must_be_a_string() -> None:
@@ -259,12 +249,8 @@ def test_unresolved_wreath_hints_preserve_inheritance_without_copying(
     class Derived(Base):
         __annotations__ = {"overridden": Mapped[str]}
         __wreath_columns__ = (
-            SimpleNamespace(
-                python_name="inherited", nullable=False, default=MISSING
-            ),
-            SimpleNamespace(
-                python_name="overridden", nullable=False, default=MISSING
-            ),
+            SimpleNamespace(python_name="inherited", nullable=False, default=MISSING),
+            SimpleNamespace(python_name="overridden", nullable=False, default=MISSING),
         )
 
     def unresolved(*_args: Any, **_kwargs: Any) -> Any:
@@ -329,13 +315,9 @@ def test_unbound_operation_only_recognizes_complete_path_placeholders() -> None:
     builder = _Builder(False)
     definition = SimpleNamespace(path="/{id}/literal}/{unfinished", endpoint=None)
 
-    parameters, body, media, response = _operation_shape(
-        builder, None, definition, "GET", str
-    )
+    parameters, body, media, response = _operation_shape(builder, None, definition, "GET", str)
 
-    assert [(parameter.wire_name, parameter.type) for parameter in parameters] == [
-        ("id", STRING)
-    ]
+    assert [(parameter.wire_name, parameter.type) for parameter in parameters] == [("id", STRING)]
     assert body is None
     assert media is None
     assert response == STRING
@@ -388,9 +370,7 @@ def test_series_discovery_requires_code_even_with_a_namespace() -> None:
 
 
 def test_series_discovery_requires_a_dict_namespace_even_with_code() -> None:
-    endpoint = SimpleNamespace(
-        __globals__=None, __code__=SimpleNamespace(co_names=("used",))
-    )
+    endpoint = SimpleNamespace(__globals__=None, __code__=SimpleNamespace(co_names=("used",)))
 
     assert _series_shapes([SimpleNamespace(endpoint=endpoint)]) == ()
 

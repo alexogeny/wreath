@@ -75,6 +75,7 @@ def watch() -> None:
     global WATCHING
     WATCHING = True
 
+
 #: Phase names as the Inspector puts them on the wire (`PhaseKind` lowercased).
 _ORM_HYDRATE = "orm_hydrate"
 _DB_QUERY = "db_query"
@@ -138,9 +139,7 @@ class Finding:
     def explain(self) -> str:
         """One line that contains the diagnosis and implies the fix."""
         worst = self.worst
-        others = (
-            f" (and {len(self.repetitions) - 1} more)" if len(self.repetitions) > 1 else ""
-        )
+        others = f" (and {len(self.repetitions) - 1} more)" if len(self.repetitions) > 1 else ""
         where = self.origin.explain() or self.route
         return (
             f"{where} issued {self.queries} statements; "
@@ -359,9 +358,7 @@ def find_n_plus_one(
             elif name == _ORM_HYDRATE:
                 model_id = phase.get("dependency_id", 0)
                 counts[model_id] = counts.get(model_id, 0) + 1
-                durations[model_id] = durations.get(model_id, 0) + phase.get(
-                    "duration_us", 0
-                )
+                durations[model_id] = durations.get(model_id, 0) + phase.get("duration_us", 0)
         repetitions = tuple(
             sorted(
                 (

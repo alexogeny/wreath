@@ -1,10 +1,3 @@
-"""`wreath infra infer` end to end, through the same parser the shipped CLI uses.
-
-The exit code is the contract worth pinning: a plan with gaps exits 1, so a CI
-step that runs this fails on a settings key nothing supplies rather than
-printing one and moving on.
-"""
-
 from __future__ import annotations
 
 import importlib
@@ -87,9 +80,7 @@ def test_json_output_is_parseable_and_typed(
     assert {row["module"] for row in data["subsystems"]} >= {"wreath.jobs", "wreath.messaging"}
 
 
-def test_a_settings_gap_fails_the_command(
-    target: str, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_a_settings_gap_fails_the_command(target: str, capsys: pytest.CaptureFixture[str]) -> None:
     code = run("infer", target, "--settings", "trek_infra_app:Settings=TREK")
     out = capsys.readouterr().out
     assert code == 1
@@ -102,8 +93,7 @@ def test_a_dotenv_supplies_the_contract_and_the_command_passes(
 ) -> None:
     dotenv = tmp_path / "deploy.env"
     dotenv.write_text("TREK_DSN=postgresql://trek@db/trek\nTREK_TOKEN=t\n", encoding="utf-8")
-    code = run("infer", target, "--settings", "trek_infra_app:Settings=TREK",
-               "--env", str(dotenv))
+    code = run("infer", target, "--settings", "trek_infra_app:Settings=TREK", "--env", str(dotenv))
     out = capsys.readouterr().out
     assert code == 0
     assert "Gaps (0)" in out
@@ -117,8 +107,7 @@ def test_an_unread_dotenv_key_is_reported(
     dotenv.write_text(
         "TREK_DSN=postgresql://trek@db/trek\nTREK_TOKEN=t\nTREK_TOEKN=t\n", encoding="utf-8"
     )
-    code = run("infer", target, "--settings", "trek_infra_app:Settings=TREK",
-               "--env", str(dotenv))
+    code = run("infer", target, "--settings", "trek_infra_app:Settings=TREK", "--env", str(dotenv))
     out = capsys.readouterr().out
     assert code == 1
     assert "[unread-key] TREK_TOEKN" in out
@@ -159,9 +148,7 @@ def test_the_process_environment_can_be_the_supplier(
     assert "process" in out
 
 
-def test_a_factory_target_is_supported(
-    target: str, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_a_factory_target_is_supported(target: str, capsys: pytest.CaptureFixture[str]) -> None:
     assert run("infer", "trek_infra_app:build", "--factory") == 0
     assert "db.internal:5432/trek" in capsys.readouterr().out
 
@@ -171,14 +158,17 @@ def test_bundle_writes_a_checksummed_runtime_contract(
 ) -> None:
     output = tmp_path / "deploy"
     image = "registry.example/trek@sha256:" + "a" * 64
-    assert run(
-        "bundle",
-        target,
-        "--image",
-        image,
-        "--output",
-        str(output),
-    ) == 0
+    assert (
+        run(
+            "bundle",
+            target,
+            "--image",
+            image,
+            "--output",
+            str(output),
+        )
+        == 0
+    )
     assert (output / "compose.yaml").is_file()
     assert image in (output / "compose.yaml").read_text()
     assert (output / "SHA256SUMS").is_file()

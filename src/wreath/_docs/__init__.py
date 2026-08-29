@@ -16,5 +16,16 @@ from __future__ import annotations
 from .config import ICONS, THEMES, Link, Nav, Page, Palette, Repo, Section, Site
 from .site import BuildReport, build
 
-__all__ = ["ICONS", "THEMES", "BuildReport", "Link", "Nav", "Page", "Palette", "Repo",
-           "Section", "Site", "build"]
+__all__ = [
+    "ICONS",
+    "THEMES",
+    "BuildReport",
+    "Link",
+    "Nav",
+    "Page",
+    "Palette",
+    "Repo",
+    "Section",
+    "Site",
+    "build",
+]

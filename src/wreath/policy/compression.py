@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterable, AsyncIterator
+from typing import Any
 
 from .._compression import (
     _dcz_compress,
@@ -86,9 +87,8 @@ class CompressionPolicy:
     likely to come from an old client than a new one, and a missing zstd decoder
     surfaces as a corrupt body rather than as an error anyone can attribute. When
     a client accepts both, the higher `q` wins and a tie goes to zstd, which
-    decodes faster and smaller at every level offered here. The practical effect
-    is that no request that used to receive gzip receives a coding it did not ask
-    for by name. For an eligible HTTPS response whose exact registered
+    decodes faster and smaller at every level offered here. A bare wildcard
+    therefore selects gzip, never zstd. For an eligible HTTPS response whose exact registered
     dictionary appears in `Available-Dictionary`, DCZ is preferred when its
     client quality is at least as high as every ordinary coding. If that exact
     match is unavailable, an equal-quality client that advertised DCZ falls
@@ -175,16 +175,16 @@ class CompressionPolicy:
         self.gzip_level = gzip_level
         self._gzip_workspace = _gzip_encoder_new()
         self._dcz_dictionaries: list[tuple[bytes, bytes, object] | None] = [None] * _FORMAT_COUNT
-        self._gzip_fragments: tuple[
-            tuple[int, int, bytes, bytes, int] | None, ...
-        ] = (None,) * _FORMAT_COUNT
+        self._gzip_fragments: tuple[tuple[int, int, bytes, bytes, int] | None, ...] = (
+            None,
+        ) * _FORMAT_COUNT
         # The latest exact body and its already-owned dynamic edges per format.
         # Seven strong references are a bounded application-owned provenance
         # table; replacement can only turn a concurrent older body into the
         # checked fallback, never make a different body trusted.
-        self._gzip_fragment_bodies: tuple[
-            tuple[bytes, bytes, bytes, object] | None, ...
-        ] = (None,) * _FORMAT_COUNT
+        self._gzip_fragment_bodies: tuple[tuple[bytes, bytes, bytes, object] | None, ...] = (
+            None,
+        ) * _FORMAT_COUNT
         self.zstd_level = zstd_level
         self.compress_streaming = compress_streaming
         self.compress_authenticated = compress_authenticated
@@ -254,18 +254,41 @@ class CompressionPolicy:
         if prepared_level != self.gzip_level:
             raise RuntimeError("prepared gzip fragment no longer matches gzip_level")
         if type(prefix) is not bytes or len(prefix) != prefix_bytes:
-            raise ValueError(
-                f"gzip fragment prefix must be exactly {prefix_bytes} bytes"
-            )
+            raise ValueError(f"gzip fragment prefix must be exactly {prefix_bytes} bytes")
         if type(suffix) is not bytes or len(suffix) != suffix_bytes:
-            raise ValueError(
-                f"gzip fragment suffix must be exactly {suffix_bytes} bytes"
-            )
+            raise ValueError(f"gzip fragment suffix must be exactly {suffix_bytes} bytes")
         # join allocates the final wire body once. Chained `+` would allocate
         # and reread the stable middle again when a suffix is present.
         body = b"".join((prefix, stable, suffix))
         bodies = list(self._gzip_fragment_bodies)
         bodies[index] = (body, prefix, suffix, entry)
+        self._gzip_fragment_bodies = tuple(bodies)
+        return body
+
+    def _gzip_fragment_render(
+        self,
+        format: str | bytes,
+        template: Any,
+        context: dict[str, Any],
+    ) -> bytes:
+        index = _format_index(format)
+        entry = self._gzip_fragments[index]
+        if entry is None:
+            raise RuntimeError(
+                f"gzip fragment format {format!r} is not prepared; call "
+                "_configure_gzip_fragment() for that format first"
+            )
+        prefix_bytes, suffix_bytes, stable, _cached, prepared_level = entry
+        if prepared_level != self.gzip_level:
+            raise RuntimeError("prepared gzip fragment no longer matches gzip_level")
+        if suffix_bytes != 0:
+            raise ValueError("fused gzip fragment rendering requires a zero-byte suffix")
+        body = template._render_bytes_tail(context, stable)
+        if len(body) != prefix_bytes + len(stable):
+            raise ValueError(f"gzip fragment prefix must be exactly {prefix_bytes} bytes")
+        prefix = body[:prefix_bytes]
+        bodies = list(self._gzip_fragment_bodies)
+        bodies[index] = (body, prefix, b"", entry)
         self._gzip_fragment_bodies = tuple(bodies)
         return body
 

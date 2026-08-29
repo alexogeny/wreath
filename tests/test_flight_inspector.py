@@ -1,10 +1,3 @@
-"""Stage 3 slice 4: the read-only Inspector protocol, server, client, and CLI.
-
-Everything runs against a real Unix-domain socket in tmp_path. The recorder is
-the native one when built (it carries the seqlock active-table snapshot); the
-protocol itself is pure Python either way.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -42,9 +35,7 @@ def _app() -> Wreath:
 
 
 def _recorder():
-    return _flight.Recorder(
-        _flight.MODE_PULSE, ring_records=64, active_requests=8
-    )
+    return _flight.Recorder(_flight.MODE_PULSE, ring_records=64, active_requests=8)
 
 
 @pytest.mark.asyncio
@@ -87,9 +78,7 @@ async def test_workers_and_pressure_reflect_recorder_state(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_active_requests_lists_in_flight_and_pages(tmp_path) -> None:
     recorder = _recorder()
-    requests = [
-        recorder.begin(connection_id=i, protocol=1, start_ns=0) for i in range(5)
-    ]
+    requests = [recorder.begin(connection_id=i, protocol=1, start_ns=0) for i in range(5)]
     server = await serve_inspector(
         recorder, _app(), InspectorConfig(path=str(tmp_path / "wfi.sock"))
     )
@@ -100,9 +89,7 @@ async def test_active_requests_lists_in_flight_and_pages(tmp_path) -> None:
             assert {row.request_id for row in rows} == {1, 2, 3, 4, 5}
             assert all(row.protocol == "http1" for row in rows)
             # Paging: a short page carries the truncated flag.
-            page = await client.call(
-                Command.ACTIVE_REQUESTS, {"offset": 0, "limit": 2}
-            )
+            page = await client.call(Command.ACTIVE_REQUESTS, {"offset": 0, "limit": 2})
             assert len(page["requests"]) == 2
             assert page["total"] == 5
             assert page["truncated"] is True
@@ -120,9 +107,7 @@ async def test_explain_route_and_plan_join_metadata_names(tmp_path) -> None:
     )
     try:
         async with InspectorClient(server.path) as client:
-            route = await client.explain_route(
-                method="GET", path="/widgets/{widget_id}"
-            )
+            route = await client.explain_route(method="GET", path="/widgets/{widget_id}")
             assert route["route_id"] != 0
             assert route["method"] == "GET"
             same = await client.explain_route(route_id=route["route_id"])
@@ -230,7 +215,8 @@ async def test_disconnect_mid_frame_does_not_wedge_the_server(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_slow_client_is_disconnected_by_the_idle_timeout(tmp_path) -> None:
     server = await serve_inspector(
-        _recorder(), _app(),
+        _recorder(),
+        _app(),
         InspectorConfig(path=str(tmp_path / "wfi.sock"), idle_timeout=0.15),
     )
     try:
@@ -246,9 +232,7 @@ async def test_refuses_to_replace_a_non_socket_path(tmp_path) -> None:
     path = tmp_path / "wfi.sock"
     path.write_text("precious")
     with pytest.raises(InspectorError, match="not a socket"):
-        await serve_inspector(
-            _recorder(), _app(), InspectorConfig(path=str(path))
-        )
+        await serve_inspector(_recorder(), _app(), InspectorConfig(path=str(path)))
     assert path.read_text() == "precious"  # the file was not touched
 
 

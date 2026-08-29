@@ -1,23 +1,3 @@
-"""A downgrade may not revert a column whose values a re-encode has changed.
-
-The counterpart to ``test_pass_hazards.py``, running the other direction and
-keyed on the opposite sense. That refusal blocks *applying* a migration while a
-pass is unfinished, and relents the moment the pass publishes -- publication
-means every row converted, so the narrowing is then safe.
-
-This one cannot relent, and that is the whole point. A ``Recode`` overwrites
-values in place: once it finishes, no original value survives anywhere. So a
-*finished* re-encode is the dangerous state rather than the settled one, and the
-refusal reads the ledger with no ``verified_at`` filter at all.
-
-What made it worth a refusal rather than a paragraph in the guide is that every
-existing check passes. A re-encode touches no schema, so the reverse DDL applies
-cleanly and the catalog fingerprint returns to the artifact's source exactly as
-it should. ``revert_single_artifact`` verified everything it knows how to verify
-and reported success over a column full of values the restored schema was never
-written for.
-"""
-
 from __future__ import annotations
 
 import importlib
@@ -57,9 +37,7 @@ class After(Model, table="treks", schema="app"):
 
 
 def _descriptor(model: type) -> bytes:
-    return migrations._registry_descriptor(
-        Registry(Database(), [model], validate_schema="off")
-    )
+    return migrations._registry_descriptor(Registry(Database(), [model], validate_schema="off"))
 
 
 def altering_artifact() -> tuple[bytes, bytes, bytes]:
@@ -170,16 +148,7 @@ def rewritten_row(**overrides: Any) -> dict[str, Any]:
     return row
 
 
-# --- what the plan decoder sees ----------------------------------------------
-
-
 def test_an_altered_column_is_touched_even_though_it_is_not_narrowed() -> None:
-    """``_touched_columns`` is deliberately wider than ``_narrowed_columns``.
-
-    Adding a NOT NULL is not a narrowing in the sense the apply-side refusal
-    means -- it loses no rows behind a cursor -- but it absolutely contradicts
-    values written under the old definition, so the downgrade side has to see it.
-    """
     artifact_data, _, _ = altering_artifact()
     artifact = migrations._load_native_artifact(artifact_data)
     reverse = migrations._postgres._migration_reverse_plan(artifact.named_plan)
@@ -187,18 +156,8 @@ def test_an_altered_column_is_touched_even_though_it_is_not_narrowed() -> None:
     assert ("app", "treks", "status") in {(s, t, c) for s, t, c, _ in touched}
 
 
-# --- the ledger reader --------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_finished_recode_is_still_a_hazard() -> None:
-    """The inverse of the apply-side rule, and the reason this exists.
-
-    ``_pending_pass_hazards`` filters on ``verified_at IS NULL`` because a
-    published pass has converted everything and is therefore safe. Here
-    "converted everything" is exactly the state in which no original value
-    remains, so filtering it out would filter out the danger.
-    """
     artifact_data, before, after = altering_artifact()
     artifact = migrations._load_native_artifact(artifact_data)
     reverse = migrations._postgres._migration_reverse_plan(artifact.named_plan)
@@ -233,18 +192,6 @@ async def test_a_running_recode_is_a_hazard_too() -> None:
 
 @pytest.mark.asyncio
 async def test_a_recode_whose_ledger_row_was_purged_is_still_a_hazard() -> None:
-    """The belt failing does not stop the braces.
-
-    A ledger row is working state, and a "tidy up finished passes" job is a
-    reasonable thing for someone to write. If the refusal read only that row,
-    such a job would silently re-enable the downgrade this module exists to
-    prevent -- and it would look like nothing had happened, because a column
-    that was never re-encoded is *also* the absence of a row.
-
-    The append-only ``pass_rewrites`` record is what tells those two apart. It
-    survives the purge, so the hazard survives with it; the phase does not,
-    which is why the message says so rather than inventing one.
-    """
     artifact_data, before, after = altering_artifact()
     artifact = migrations._load_native_artifact(artifact_data)
     reverse = migrations._postgres._migration_reverse_plan(artifact.named_plan)
@@ -266,13 +213,10 @@ async def test_a_recode_whose_ledger_row_was_purged_is_still_a_hazard() -> None:
 
 @pytest.mark.asyncio
 async def test_a_column_no_recode_touched_is_not_a_hazard() -> None:
-    """The load-bearing negative: this must not block ordinary downgrades."""
     artifact_data, before, after = altering_artifact()
     artifact = migrations._load_native_artifact(artifact_data)
     reverse = migrations._postgres._migration_reverse_plan(artifact.named_plan)
-    connection = RevertConnection(
-        artifact=artifact, before=before, after=after, rewritten=[]
-    )
+    connection = RevertConnection(artifact=artifact, before=before, after=after, rewritten=[])
     assert await migrations._recoded_column_hazards(connection, reverse) == ()
 
 
@@ -287,18 +231,8 @@ async def test_a_database_that_never_ran_a_pass_has_no_ledger_and_no_hazard() ->
     assert await migrations._recoded_column_hazards(connection, reverse) == ()
 
 
-# --- the refusal, end to end --------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_reverting_a_recoded_column_is_refused_before_the_ddl_runs(catalog: None) -> None:
-    """The defect, pinned.
-
-    Before the fix this call returned a ``MigrationRevertResult`` -- the DDL ran,
-    the fingerprint verified, the history row was deleted, and nothing anywhere
-    reported a problem. The assertion on ``ddl_ran`` is the part that matters:
-    refusing *after* running the DDL would be no fix at all.
-    """
     artifact_data, before, after = altering_artifact()
     artifact = migrations._load_native_artifact(artifact_data)
     connection = RevertConnection(
@@ -324,11 +258,6 @@ async def test_reverting_a_recoded_column_is_refused_before_the_ddl_runs(catalog
 
 @pytest.mark.asyncio
 async def test_force_does_not_skip_this_refusal(catalog: None) -> None:
-    """``force=True`` exists to rewind a local stack past a *code* hazard.
-
-    It cannot mean "and also discard the data", so this refusal is deliberately
-    outside the ``if not force`` branch that guards ``DowngradeWouldStrandCode``.
-    """
     artifact_data, before, after = altering_artifact()
     artifact = migrations._load_native_artifact(artifact_data)
     connection = RevertConnection(
@@ -342,20 +271,15 @@ async def test_force_does_not_skip_this_refusal(catalog: None) -> None:
     registry = Registry(Database(), [After], validate_schema="off")
 
     with pytest.raises(DowngradeWouldStrandRecodedData):
-        await migrations.revert_single_artifact(
-            registry, connection, artifact_data, force=True
-        )
+        await migrations.revert_single_artifact(registry, connection, artifact_data, force=True)
     assert connection.ddl_ran is False
 
 
 @pytest.mark.asyncio
 async def test_an_untouched_schema_still_downgrades(catalog: None) -> None:
-    """Without a recode the downgrade proceeds, DDL and all."""
     artifact_data, before, after = altering_artifact()
     artifact = migrations._load_native_artifact(artifact_data)
-    connection = RevertConnection(
-        artifact=artifact, before=before, after=after, rewritten=[]
-    )
+    connection = RevertConnection(artifact=artifact, before=before, after=after, rewritten=[])
     registry = Registry(Database(), [After], validate_schema="off")
 
     result = await migrations.revert_single_artifact(

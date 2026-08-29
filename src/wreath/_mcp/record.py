@@ -101,6 +101,7 @@ def marker() -> _log.LogEvent:
         _MARKER = cached
     return cached[1]
 
+
 #: Outcomes, in the vocabulary the counters use. Every `tools/call` records
 #: exactly one, so "how many denials yesterday" is a filter rather than an
 #: inference from what is missing.

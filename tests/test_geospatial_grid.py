@@ -1,12 +1,3 @@
-"""The lattice a heatmap is drawn on.
-
-A grid is the spatial analogue of a bucket width, and it carries the same
-obligation: every cell in the extent exists whether or not anything happened in
-it. These tests are about the lattice itself -- its arithmetic, its refusals,
-and the distortion it is honest about. The composition with `Series`' fill
-rules is `tests/test_series_cells.py`.
-"""
-
 from __future__ import annotations
 
 import math
@@ -66,9 +57,7 @@ class TestGridArithmetic:
         for row in range(made.rows - 1):
             assert made.cell(row, 0).lat_max == pytest.approx(made.cell(row + 1, 0).lat_min)
         for column in range(made.columns - 1):
-            assert made.cell(0, column).lon_max == pytest.approx(
-                made.cell(0, column + 1).lon_min
-            )
+            assert made.cell(0, column).lon_max == pytest.approx(made.cell(0, column + 1).lon_min)
 
     def test_index_of_places_a_point_in_the_cell_that_contains_it(self):
         made = grid(box(-30.0, -29.0, 150.0, 151.0), metres=10_000)
@@ -148,13 +137,6 @@ class TestGridRefusals:
 
 class TestAnExtentStraddlingTheEquator:
     def test_the_widest_cell_is_found_inside_the_extent_not_at_an_edge(self):
-        """The `straddles` branch, which nothing else reaches.
-
-        Cell width scales with `cos(latitude)`, so it peaks at the equator. For
-        an extent containing the equator the maximum is *interior*, and taking
-        the nearer edge instead would under-report the distortion — which is
-        the number the refusal is based on.
-        """
         straddling = grid(box(-5.0, 5.0, 150.0, 151.0), metres=10_000)
         # Symmetric about the equator: both edges are equally far, and the
         # widest point is the equator between them.

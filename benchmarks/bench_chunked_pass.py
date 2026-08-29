@@ -28,9 +28,6 @@ SCHEMA = "wreath_bench_pass"
 TABLE = f'"{SCHEMA}".bench_rows'
 
 
-# --- fixture ------------------------------------------------------------------
-
-
 async def apply(database: Any, sql: str) -> None:
     connection = await database.acquire("write")
     try:
@@ -82,17 +79,13 @@ def walk_for(limit: int, *, name: str = "bench", work: Any = None) -> ChunkedPas
             within="60s",
         ),
         frontier=Ceiling.at_launch(),
-        work=work
-        or Rewrite(set_={"grade_text": "grade::text"}, where="grade_text IS NULL"),
+        work=work or Rewrite(set_={"grade_text": "grade::text"}, where="grade_text IS NULL"),
         pace=DutyCycle(1.0),  # unpaced: this measures throughput, not politeness
         schema=SCHEMA,
         # One shift for the whole walk: `run()` would otherwise re-enter every
         # 10s, and shift re-entry is not what H1 is varying.
         shift="900s",
     )
-
-
-# --- one walk -----------------------------------------------------------------
 
 
 async def timed_walk(database: Any, walk: ChunkedPass) -> tuple[float, int]:
@@ -108,9 +101,6 @@ async def repeat(database: Any, make: Any, runs: int) -> list[float]:
         elapsed, _rows = await timed_walk(database, make(index))
         samples.append(elapsed)
     return samples
-
-
-# --- the counterfactual for H4 ------------------------------------------------
 
 
 class RewritePerRow(Rewrite):
@@ -133,9 +123,6 @@ class RewritePerRow(Rewrite):
                 row[0],
             )
         return len(rows)
-
-
-# --- naive baselines ----------------------------------------------------------
 
 
 async def baseline_offset(database: Any, page: int) -> float:
@@ -171,9 +158,6 @@ async def baseline_one_update(database: Any) -> float:
     finally:
         await database.release("write", connection)
     return time.perf_counter() - started
-
-
-# --- reporting ----------------------------------------------------------------
 
 
 def summarise(label: str, samples: list[float], rows: int, floor: float) -> None:
@@ -250,8 +234,7 @@ async def main() -> None:
                 print("\n  baselines")
                 if rows <= 200_000:
                     b1 = [
-                        await baseline_offset(database, 1_000)
-                        for _ in range(max(1, args.runs - 1))
+                        await baseline_offset(database, 1_000) for _ in range(max(1, args.runs - 1))
                     ]
                     summarise("B1 OFFSET, one tx", b1, rows, floor)
                 else:

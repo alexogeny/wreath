@@ -12,8 +12,7 @@ here and no change to the server.
 in the project that implements HTTP/2, and the ASGI trailers extension is what
 carries `grpc-status`. Running a gRPC service behind a foreign ASGI server --
 uvicorn, hypercorn -- fails at startup with `GrpcUnsupported` naming the reason,
-rather than answering requests that no client can interpret. See
-`docs/guides/grpc.md`.
+rather than answering requests that no client can interpret.
 
 A method is a **route**. `GrpcService.router()` returns an ordinary `Router`
 whose routes are `POST /{service}/{method}`, so a method's controls are a
@@ -201,9 +200,6 @@ def status_for(exc: BaseException) -> tuple[Status, str]:
     return Status.UNKNOWN, ""
 
 
-# --- message framing --------------------------------------------------------
-
-
 def frame_message(payload: bytes, *, compressed: bool = False) -> bytes:
     """Prefix one encoded message with its gRPC five-byte header."""
     length = len(payload)
@@ -322,8 +318,6 @@ class Unframer:
         self._native.finish()
 
 
-# --- deadlines --------------------------------------------------------------
-
 #: `grpc-timeout` is a positive integer and a one-character unit.
 _TIMEOUT = re.compile(r"^(\d{1,8})([HMSmun])$")
 
@@ -349,8 +343,6 @@ def parse_timeout(value: str) -> float:
         raise GrpcError(Status.INVALID_ARGUMENT, f"malformed grpc-timeout: {value!r}")
     return int(match.group(1)) * _TIMEOUT_SCALE[match.group(2)]
 
-
-# --- trailer encoding -------------------------------------------------------
 
 #: `grpc-message` is percent-encoded: the spec restricts it to a byte range
 #: narrower than a header nominally allows, and an unescaped newline would let
@@ -390,14 +382,7 @@ def percent_encode(text: str) -> str:
     return "".join([_ENCODED[b] for b in raw])
 
 
-#: Asked of `wreath.protobuf` rather than read off the class, so there is one
-#: notion of what a message is. This used to read the private plan marker
-#: directly, which meant the answer lived in two modules and would have drifted
-#: the first time the marker moved.
 _is_message = _protobuf.is_message
-
-
-# --- the response ------------------------------------------------------------
 
 
 class _GrpcResponse(StreamingResponse):
@@ -459,9 +444,7 @@ class _GrpcResponse(StreamingResponse):
                 # without a DATA frame or an intervening scheduling point.
                 trailers = [(b"grpc-status", str(int(status)).encode("ascii"))]
                 if message:
-                    trailers.append(
-                        (b"grpc-message", percent_encode(message).encode("ascii"))
-                    )
+                    trailers.append((b"grpc-message", percent_encode(message).encode("ascii")))
                 await send(
                     {
                         "type": "http.response.start",
@@ -482,10 +465,8 @@ class _GrpcResponse(StreamingResponse):
             )
             try:
                 async for chunk in self.body:
-                    await send(
-                        {"type": "http.response.body", "body": chunk, "more_body": True}
-                    )
-            except (GeneratorExit, KeyboardInterrupt, SystemExit):
+                    await send({"type": "http.response.body", "body": chunk, "more_body": True})
+            except GeneratorExit, KeyboardInterrupt, SystemExit:
                 raise
             except Exception as exc:  # noqa: BLE001 - every failure becomes a status
                 # A handler that raises mid-stream has already sent bytes, so
@@ -497,9 +478,7 @@ class _GrpcResponse(StreamingResponse):
             await send({"type": "http.response.body", "body": b"", "more_body": False})
             trailers = [(b"grpc-status", str(int(status)).encode("ascii"))]
             if message:
-                trailers.append(
-                    (b"grpc-message", percent_encode(message).encode("ascii"))
-                )
+                trailers.append((b"grpc-message", percent_encode(message).encode("ascii")))
             await send({"type": "http.response.trailers", "headers": trailers})
         finally:
             cleanup = self._cleanup
@@ -517,8 +496,6 @@ async def _empty() -> AsyncIterator[bytes]:
     yield b""  # pragma: no cover - never reached; makes this a generator
 
 
-# --- the service -------------------------------------------------------------
-
 _UNARY, _SERVER_STREAM, _CLIENT_STREAM, _BIDI = range(4)
 
 
@@ -529,13 +506,10 @@ class GrpcService:
     it is also the path prefix, because a gRPC path *is* `/{service}/{method}`.
     """
 
-    def __init__(
-        self, name: str, *, max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES
-    ) -> None:
+    def __init__(self, name: str, *, max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES) -> None:
         if not name or name.startswith("/"):
             raise ValueError(
-                "service name must be a bare protobuf name like 'camera.Tracker', "
-                f"got {name!r}"
+                f"service name must be a bare protobuf name like 'camera.Tracker', got {name!r}"
             )
         self.name = name
         self.max_message_bytes = max_message_bytes
@@ -568,9 +542,7 @@ class GrpcService:
         def decorate(handler: Any) -> Any:
             if action is not None:
                 _authorize(action=action, resource=resource)(handler)
-            self._methods.append(
-                (handler.__name__, kind, request, response, handler, metadata)
-            )
+            self._methods.append((handler.__name__, kind, request, response, handler, metadata))
             return handler
 
         return decorate
@@ -619,9 +591,7 @@ class GrpcService:
             # without this the decorators a user wrote on their method would be
             # silently dropped -- a declared control that enforces nothing,
             # which is the exact failure `wreath mutant` exists to catch.
-            _requirements.set_requirement(
-                endpoint, _requirements.requirement_for(handler)
-            )
+            _requirements.set_requirement(endpoint, _requirements.requirement_for(handler))
             router.post(
                 f"/{self.name}/{name}",
                 response_only=True,
@@ -653,7 +623,7 @@ class GrpcService:
                         encoding=outgoing,
                     )
                 return _GrpcResponse(_frames(call, deadline, outgoing), encoding=outgoing)
-            except (GeneratorExit, KeyboardInterrupt, SystemExit):
+            except GeneratorExit, KeyboardInterrupt, SystemExit:
                 raise
             except Exception as exc:  # noqa: BLE001 - every failure becomes a status
                 # Nothing has been sent yet, so the whole call collapses to a
@@ -661,14 +631,9 @@ class GrpcService:
                 # on it: there is no message to have compressed, and a coding
                 # header over an empty body is a claim about nothing.
                 status, detail = status_for(exc)
-                return _GrpcResponse(
-                    _empty(), status=status, message=detail, trailers_only=True
-                )
+                return _GrpcResponse(_empty(), status=status, message=detail, trailers_only=True)
 
         return endpoint
-
-
-# --- transport checks and message plumbing -----------------------------------
 
 
 def _header(request: Any, name: str) -> str | None:
@@ -695,9 +660,7 @@ def _check_transport(request: Any) -> str:
         )
     content_type = (_header(request, "content-type") or "").split(";")[0].strip()
     if content_type not in _ACCEPTED_CONTENT_TYPES:
-        raise GrpcError(
-            Status.INTERNAL, f"unsupported content-type {content_type!r}"
-        )
+        raise GrpcError(Status.INTERNAL, f"unsupported content-type {content_type!r}")
     return negotiated_encoding(_header(request, "grpc-encoding"))
 
 
@@ -706,9 +669,7 @@ def _deadline_of(request: Any) -> float | None:
     return None if raw is None else parse_timeout(raw.strip())
 
 
-async def _messages(
-    request: Any, model: type, max_bytes: int, encoding: str
-) -> AsyncIterator[Any]:
+async def _messages(request: Any, model: type, max_bytes: int, encoding: str) -> AsyncIterator[Any]:
     """Decode the request body into messages as its bytes arrive."""
     unframer = Unframer(max_message_bytes=max_bytes, encoding=encoding)
     async for chunk in request.stream():
@@ -773,16 +734,12 @@ async def _with_deadline(awaitable: Any, deadline: float | None) -> Any:
         raise
 
 
-async def _frames(
-    results: Any, deadline: float | None, encoding: str
-) -> AsyncIterator[bytes]:
+async def _frames(results: Any, deadline: float | None, encoding: str) -> AsyncIterator[bytes]:
     """Frame each yielded response message, under the call's deadline."""
     import asyncio
     import contextlib
 
-    limit: Any = (
-        contextlib.nullcontext() if deadline is None else asyncio.timeout(deadline)
-    )
+    limit: Any = contextlib.nullcontext() if deadline is None else asyncio.timeout(deadline)
     try:
         async with limit:
             async for result in results:

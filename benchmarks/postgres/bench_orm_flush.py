@@ -54,9 +54,7 @@ def _make(registry: Registry, count: int) -> tuple[Session, list[Any]]:
         if index % 2:
             objects.append(Post(id=index, author_id=1, title=f"p{index}"))
         else:
-            objects.append(
-                User(id=index, email=f"{index}@b.c", name="u", created_at=None)
-            )
+            objects.append(User(id=index, email=f"{index}@b.c", name="u", created_at=None))
     return session, objects
 
 
@@ -68,8 +66,6 @@ def _order_pending(session: Session) -> list[Any]:
     )
 
 
-# -- legacy bookkeeping, for a before/after comparison -------------------------
-#
 # The pre-remediation implementation, reproduced exactly so the same harness can
 # measure both algorithms. This is a reconstruction of the replaced code, not a
 # checkout of it: it exists to show the shape of the change (quadratic vs

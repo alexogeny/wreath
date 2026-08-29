@@ -14,14 +14,9 @@ from .test_connection import POSTGRES_BACKENDS, FakePostgres
 
 @pytest.mark.asyncio
 async def test_native_operation_owns_its_flight_record() -> None:
-    native = next(
-        backend for backend in POSTGRES_BACKENDS
-        if backend._implementation == "native"
-    )
+    native = next(backend for backend in POSTGRES_BACKENDS if backend._implementation == "native")
     loop = asyncio.get_running_loop()
-    operation = native.Operation(
-        7, "select 1", (), "fetchval", loop.create_future(), None
-    )
+    operation = native.Operation(7, "select 1", (), "fetchval", loop.create_future(), None)
 
     assert native.Operation.__base__ is object
     assert operation.sequence == 7
@@ -251,8 +246,7 @@ async def test_emitted_limit_keeps_excess_operations_waiting(
     conn = await postgres.connect(dsn)
     try:
         tasks = [
-            asyncio.create_task(conn.fetchval(f"select {value}::int4"))
-            for value in range(100)
+            asyncio.create_task(conn.fetchval(f"select {value}::int4")) for value in range(100)
         ]
         await server.flight_received.wait()
         assert len(conn._emitted) == 64
@@ -333,9 +327,6 @@ async def test_cancel_active_operation_uses_cancel_request_and_connection_recove
         await conn.close()
 
 
-# --- fan-out map() and explicit transactions ------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_map_one_sync_per_input_including_duplicates(
     postgres: Any, database: tuple[FakePostgres, str]
@@ -361,6 +352,7 @@ async def test_map_preserves_input_order_and_length(
 ) -> None:
     conn = await postgres.connect(database[1])
     try:
+
         def generate():
             # A generator input keeps the pipeline bounded (no materialization).
             for value in range(20):
@@ -374,9 +366,7 @@ async def test_map_preserves_input_order_and_length(
 
 
 @pytest.mark.asyncio
-async def test_map_rejects_bad_arguments(
-    postgres: Any, database: tuple[FakePostgres, str]
-) -> None:
+async def test_map_rejects_bad_arguments(postgres: Any, database: tuple[FakePostgres, str]) -> None:
     conn = await postgres.connect(database[1])
     try:
         with pytest.raises(ValueError):
@@ -436,20 +426,6 @@ async def test_cancelling_the_newest_queued_operations_leaves_the_pipeline_corre
     database: tuple[FakePostgres, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancel newest-first, which is what nested `async with` scopes produce.
-
-    A cancelled waiting operation is tombstoned rather than removed from the
-    queue: `deque.remove` scans from the left, so cancelling the newest of k
-    queued operations walked all k, and a disconnect or timeout cascade paid
-    O(k^2). Measured at k=4000, newest-first: 72.9-80.0 ms before against a
-    1.85 ms oldest-first control at the same k; 0.86 ms after, with the two
-    orders now indistinguishable.
-
-    The tombstone is only safe if two things hold, and both are asserted here
-    rather than assumed: a cancelled operation is never emitted, and the live
-    count stays exact -- a queue of pure tombstones that still reads as "work
-    is waiting" reschedules the flush forever.
-    """
     server, dsn = database
     server.query_gate = asyncio.Event()
     conn = await postgres.connect(dsn)
@@ -457,10 +433,7 @@ async def test_cancelling_the_newest_queued_operations_leaves_the_pipeline_corre
     try:
         active = asyncio.create_task(conn.fetchval("select 1::int4"))
         await server.flight_received.wait()
-        queued = [
-            asyncio.create_task(conn.fetchval(f"select {n}::int4"))
-            for n in range(10, 20)
-        ]
+        queued = [asyncio.create_task(conn.fetchval(f"select {n}::int4")) for n in range(10, 20)]
         await asyncio.sleep(0)
 
         # Innermost scope first: the arrangement `deque.remove` was worst at.

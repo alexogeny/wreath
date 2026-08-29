@@ -1,12 +1,3 @@
-"""`PATCH` and `PUT` as pure functions over a SCIM representation.
-
-RFC 7644 section 3.5 leaves two things to the provider, and both are decided in
-`wreath._scim.patch`'s docstring rather than here: removing a member that is not
-there is a no-op, and replacing through a filter that matches nothing is a
-refusal. These tests pin both, because a later reader who "fixes" the asymmetry
-would silently make de-provisioning non-idempotent.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -48,13 +39,8 @@ def patch(*operations: dict[str, object]) -> dict[str, object]:
     return {"schemas": [PATCH_OP_URN], "Operations": list(operations)}
 
 
-# --- paths ------------------------------------------------------------------
-
-
 def test_a_path_lowercases_and_strips_the_schema_urn() -> None:
-    path = parse_path(
-        "urn:ietf:params:scim:schemas:core:2.0:User:UserName", shape=USER
-    )
+    path = parse_path("urn:ietf:params:scim:schemas:core:2.0:User:UserName", shape=USER)
     assert path.attribute == "username"
     assert path.predicate is None
     assert path.sub_attribute is None
@@ -73,7 +59,7 @@ def test_a_value_path_carries_its_filter_and_sub_attribute() -> None:
         ("", "empty path"),
         ("externalId", "has no attribute named 'externalid'"),
         ('members[value eq "7"', "no closing ']'"),
-        ('members[value eq]', "invalid filter"),
+        ("members[value eq]", "invalid filter"),
         ('members[value eq "7"]junk', "unexpected text after ']'"),
     ],
 )
@@ -82,9 +68,6 @@ def test_each_malformed_path_has_its_own_refusal(source: str, fragment: str) -> 
         parse_path(source, shape=GROUP)
     assert caught.value.scim_type == "invalidPath"
     assert fragment in caught.value.detail
-
-
-# --- the envelope -----------------------------------------------------------
 
 
 def test_a_body_naming_the_wrong_schema_is_refused() -> None:
@@ -109,7 +92,6 @@ def test_more_operations_than_the_ceiling_are_refused() -> None:
 
 
 def test_an_operation_name_is_case_insensitive() -> None:
-    """Directories send `Add` and `Replace`; the specification says otherwise."""
     result = apply(
         user_document(), patch({"op": "Replace", "path": "active", "value": False}), shape=USER
     )
@@ -122,11 +104,7 @@ def test_an_unknown_operation_names_the_three_that_exist() -> None:
     assert "expected add, remove or replace" in caught.value.detail
 
 
-# --- mutability -------------------------------------------------------------
-
-
 def test_a_read_only_attribute_is_refused_with_mutability() -> None:
-    """`groups` is read-only on a `User`: membership is changed through `/Groups`."""
     with pytest.raises(PatchError) as caught:
         apply(
             user_document(),
@@ -138,7 +116,6 @@ def test_a_read_only_attribute_is_refused_with_mutability() -> None:
 
 
 def test_a_group_display_name_cannot_be_renamed() -> None:
-    """Renaming it would rename a role every Cedar policy names by string."""
     with pytest.raises(PatchError) as caught:
         apply(
             group_document(),
@@ -165,9 +142,6 @@ def test_a_single_valued_attribute_refuses_a_filter_and_a_sub_attribute(path: st
         )
     assert caught.value.scim_type == "invalidPath"
     assert "single-valued" in caught.value.detail
-
-
-# --- the operations ---------------------------------------------------------
 
 
 def test_a_pathless_replace_applies_each_key_as_a_path() -> None:
@@ -213,7 +187,6 @@ def test_adding_a_member_that_is_already_there_does_not_duplicate_it() -> None:
 
 
 def test_a_member_whose_value_is_not_a_string_still_de_duplicates() -> None:
-    """The identity of a member is its `value`, whatever type a client sent."""
     document = group_document()
     document["members"] = [{"value": 7}]
     result = apply(
@@ -227,7 +200,6 @@ def test_a_member_whose_value_is_not_a_string_still_de_duplicates() -> None:
 
 
 def test_two_spellings_of_one_member_id_are_one_member() -> None:
-    """Member ids compare case-insensitively, as SCIM string comparison does."""
     document = group_document()
     document["members"] = [{"value": "AbC"}]
     result = apply(
@@ -257,7 +229,6 @@ def test_a_bare_string_member_means_the_same_as_an_object() -> None:
 
 
 def test_removing_a_member_that_is_not_there_is_a_no_op() -> None:
-    """The idempotency decision: a repeated de-provisioning must converge."""
     result = apply(
         group_document(),
         patch({"op": "remove", "path": 'members[value eq "404"]'}),
@@ -281,7 +252,6 @@ def test_removing_a_whole_multi_valued_attribute_clears_it() -> None:
 
 
 def test_replacing_through_a_filter_that_matches_nothing_is_refused() -> None:
-    """The asymmetry with remove, and the specification says SHALL here."""
     with pytest.raises(PatchError) as caught:
         apply(
             group_document(),
@@ -301,7 +271,6 @@ def test_replacing_a_whole_multi_valued_attribute_sets_it() -> None:
 
 
 def test_a_refusal_part_way_through_applies_nothing() -> None:
-    """"Apply all or none", without a transaction: the input is never mutated."""
     document = user_document()
     with pytest.raises(PatchError):
         apply(
@@ -315,11 +284,7 @@ def test_a_refusal_part_way_through_applies_nothing() -> None:
     assert document["active"] is True
 
 
-# --- PUT --------------------------------------------------------------------
-
-
 def test_a_replacement_ignores_read_only_and_unknown_attributes() -> None:
-    """A directory echoes back the whole resource, `meta` and `groups` included."""
     result = replace(
         user_document(),
         {
@@ -344,20 +309,17 @@ def test_a_replacement_leaves_an_omitted_attribute_alone() -> None:
 
 
 def test_a_replacement_writes_the_canonical_spelling() -> None:
-    """`username` and `userName` are one attribute; only one key may result."""
     result = replace(user_document(), {"username": "new@example.com"}, shape=USER)
     assert result["userName"] == "new@example.com"
     assert "username" not in result
 
 
 def test_a_replacement_normalises_a_multi_valued_attribute() -> None:
-    """Bare strings and objects both mean a member; one shape reaches the writer."""
     result = replace(group_document(), {"members": ["9"]}, shape=GROUP)
     assert result["members"] == [{"value": "9"}]
 
 
 def test_a_replacement_ignores_a_key_that_is_not_a_string() -> None:
-    """JSON cannot produce one; a caller holding a plain dict can."""
     result = replace(user_document(), {7: "surprise", "active": False}, shape=USER)
     assert result["active"] is False
     assert 7 not in result

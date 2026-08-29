@@ -172,9 +172,6 @@ def _check_name(name: str) -> None:
         )
 
 
-# --- Python ------------------------------------------------------------------
-
-
 def _pyproject(options: Options) -> str:
     return f'''[project]
 name = "{options.name}"
@@ -989,9 +986,6 @@ def test_suspending_a_tenant_stops_it_resolving():
 '''
 
 
-# --- README ------------------------------------------------------------------
-
-
 def _readme(options: Options) -> str:
     name = options.name
     sections = [
@@ -1100,9 +1094,6 @@ def _readme(options: Options) -> str:
             "so a route change that nobody regenerated fails the build.",
         ]
     return "\n".join(sections) + "\n"
-
-
-# --- the front end -----------------------------------------------------------
 
 
 def _web_package_json(options: Options) -> str:

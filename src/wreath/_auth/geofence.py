@@ -125,9 +125,7 @@ class Regions:
         """
         return frozenset(self._circles) | frozenset(self._boxes)
 
-    def containing(
-        self, point: Coordinate, names: Iterable[str] | None = None
-    ) -> frozenset[str]:
+    def containing(self, point: Coordinate, names: Iterable[str] | None = None) -> frozenset[str]:
         """The declared regions containing `point`.
 
         Args:
@@ -163,9 +161,7 @@ def _as_circle(name: str, region: Any) -> tuple[Coordinate, float]:
         )
     centre, radius = region
     if not isinstance(centre, Coordinate):
-        raise ValueError(
-            f"region {name!r} needs a Coordinate centre; got {type(centre).__name__}"
-        )
+        raise ValueError(f"region {name!r} needs a Coordinate centre; got {type(centre).__name__}")
     if not isinstance(radius, int | float) or isinstance(radius, bool):
         raise ValueError(f"region {name!r} needs a numeric radius; got {radius!r}")
     radius = float(radius)
@@ -387,14 +383,12 @@ def _as_rung(position: int, rung: Any) -> tuple[str, float | None]:
     """Read one `(action, metres)` rung, refusing anything else by name."""
     if not isinstance(rung, tuple | list) or len(rung) != 2:
         raise ValueError(
-            f"PrecisionLadder rung {position} must be an (action, metres) pair; "
-            f"got {rung!r}"
+            f"PrecisionLadder rung {position} must be an (action, metres) pair; got {rung!r}"
         )
     action, metres = rung
     if not isinstance(action, str) or not action:
         raise ValueError(
-            f"PrecisionLadder rung {position} needs a non-empty action name; "
-            f"got {action!r}"
+            f"PrecisionLadder rung {position} needs a non-empty action name; got {action!r}"
         )
     if metres is None:
         return action, None
@@ -406,7 +400,6 @@ def _as_rung(position: int, rung: Any) -> tuple[str, float | None]:
     metres = float(metres)
     if not math.isfinite(metres) or metres <= 0.0:
         raise ValueError(
-            f"PrecisionLadder rung {action!r} needs a positive finite resolution; "
-            f"got {metres!r}"
+            f"PrecisionLadder rung {action!r} needs a positive finite resolution; got {metres!r}"
         )
     return action, metres

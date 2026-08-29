@@ -31,7 +31,6 @@ from wreath.http_client import ClientResponse, HTTPClient
 
 
 def test_h2_response_decoder_reassembles_many_data_frames_linearly() -> None:
-    """Fragmentation must not repeatedly copy the body accumulated so far."""
     from wreath._h2_codec import DATA, FLAG_END_STREAM, decode_response
 
     payloads = tuple(bytes((index & 0xFF,)) * 257 for index in range(512))
@@ -82,7 +81,8 @@ def test_outbound_exchange_codec_is_an_exact_inverse() -> None:
 def test_native_outbound_exchange_codec_matches_the_independent_definition() -> None:
     recorded = replace(
         exchange(),
-        request_headers=exchange().request_headers + (
+        request_headers=exchange().request_headers
+        + (
             (b"Authorization", b"secret"),
             (b"x-long", b"v" * 257),
         ),
@@ -142,13 +142,20 @@ def test_http_replay_refuses_an_exchange_with_omitted_forbidden_headers() -> Non
         )
     )
     recording = SimpleNamespace(
-        slabs=(CaptureSlab(42, (CaptureField(
-            CaptureFieldClass.OUTBOUND_HTTP_EXCHANGE,
-            0,
-            CaptureDisposition.RAW,
-            len(payload),
-            payload,
-        ),)),),
+        slabs=(
+            CaptureSlab(
+                42,
+                (
+                    CaptureField(
+                        CaptureFieldClass.OUTBOUND_HTTP_EXCHANGE,
+                        0,
+                        CaptureDisposition.RAW,
+                        len(payload),
+                        payload,
+                    ),
+                ),
+            ),
+        ),
         image=SimpleNamespace(clients=(NamedMeta(3, "billing"),)),
     )
     with pytest.raises(HttpReplayError, match="omitted forbidden headers"):
@@ -189,13 +196,20 @@ async def test_wfr1_exchange_builds_a_validating_http_double() -> None:
 async def test_wfr1_http_replay_refuses_request_drift() -> None:
     payload = encode_exchange(exchange())
     recording = SimpleNamespace(
-        slabs=(CaptureSlab(42, (CaptureField(
-            CaptureFieldClass.OUTBOUND_HTTP_EXCHANGE,
-            0,
-            CaptureDisposition.RAW,
-            len(payload),
-            payload,
-        ),)),),
+        slabs=(
+            CaptureSlab(
+                42,
+                (
+                    CaptureField(
+                        CaptureFieldClass.OUTBOUND_HTTP_EXCHANGE,
+                        0,
+                        CaptureDisposition.RAW,
+                        len(payload),
+                        payload,
+                    ),
+                ),
+            ),
+        ),
         image=SimpleNamespace(clients=(NamedMeta(3, "billing"),)),
     )
     client = ReplayAdapters.from_recording(recording).clients["billing"]
@@ -214,20 +228,30 @@ def test_http_replay_selects_only_the_named_request_id() -> None:
     second = encode_exchange(replace(exchange(), target="/other", sequence=1))
     recording = SimpleNamespace(
         slabs=(
-            CaptureSlab(41, (CaptureField(
-                CaptureFieldClass.OUTBOUND_HTTP_EXCHANGE,
-                0,
-                CaptureDisposition.RAW,
-                len(first),
-                first,
-            ),)),
-            CaptureSlab(42, (CaptureField(
-                CaptureFieldClass.OUTBOUND_HTTP_EXCHANGE,
-                0,
-                CaptureDisposition.RAW,
-                len(second),
-                second,
-            ),)),
+            CaptureSlab(
+                41,
+                (
+                    CaptureField(
+                        CaptureFieldClass.OUTBOUND_HTTP_EXCHANGE,
+                        0,
+                        CaptureDisposition.RAW,
+                        len(first),
+                        first,
+                    ),
+                ),
+            ),
+            CaptureSlab(
+                42,
+                (
+                    CaptureField(
+                        CaptureFieldClass.OUTBOUND_HTTP_EXCHANGE,
+                        0,
+                        CaptureDisposition.RAW,
+                        len(second),
+                        second,
+                    ),
+                ),
+            ),
         ),
         image=SimpleNamespace(clients=(NamedMeta(3, "billing"),)),
     )
@@ -258,22 +282,27 @@ def test_http_replay_refuses_ambiguous_request_ids() -> None:
 def test_http_replay_ignores_other_capture_field_classes() -> None:
     payload = encode_exchange(exchange())
     recording = SimpleNamespace(
-        slabs=(CaptureSlab(42, (
-            CaptureField(
-                CaptureFieldClass.REQUEST_BODY,
-                0,
-                CaptureDisposition.RAW,
-                7,
-                b"not WHX",
+        slabs=(
+            CaptureSlab(
+                42,
+                (
+                    CaptureField(
+                        CaptureFieldClass.REQUEST_BODY,
+                        0,
+                        CaptureDisposition.RAW,
+                        7,
+                        b"not WHX",
+                    ),
+                    CaptureField(
+                        CaptureFieldClass.OUTBOUND_HTTP_EXCHANGE,
+                        0,
+                        CaptureDisposition.RAW,
+                        len(payload),
+                        payload,
+                    ),
+                ),
             ),
-            CaptureField(
-                CaptureFieldClass.OUTBOUND_HTTP_EXCHANGE,
-                0,
-                CaptureDisposition.RAW,
-                len(payload),
-                payload,
-            ),
-        )),),
+        ),
         image=SimpleNamespace(clients=(NamedMeta(3, "billing"),)),
     )
 
@@ -319,9 +348,7 @@ async def test_concurrent_http_exchanges_replay_in_invocation_order() -> None:
     release_first = asyncio.Event()
 
     class InvertedClient(HTTPClient):
-        async def _request_timed(
-            self, method, target, *, headers, body, idempotency_key
-        ):
+        async def _request_timed(self, method, target, *, headers, body, idempotency_key):
             if target == "/first":
                 await release_first.wait()
             else:

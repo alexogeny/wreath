@@ -62,9 +62,7 @@ FULL_SQL = (
     'SELECT "t0"."id", "t0"."number", "t0"."enabled", "t0"."label", "t0"."created_at" '
     'FROM "public"."orm_bench_items" AS "t0"'
 )
-PROJECTED_SQL = (
-    'SELECT "t0"."id", "t0"."number" FROM "public"."orm_bench_items" AS "t0"'
-)
+PROJECTED_SQL = 'SELECT "t0"."id", "t0"."number" FROM "public"."orm_bench_items" AS "t0"'
 
 
 class _Database:
@@ -157,6 +155,7 @@ async def _run_path(
         # identical between the two measurements.
         type(connection)._decode_dest = None
     try:
+
         async def operation() -> Any:
             session = _fresh_session(registry, connection)
             compiled = _compile(registry, sql)
@@ -201,7 +200,12 @@ async def run(args: argparse.Namespace) -> int:
         for name, sql in (("full_row", FULL_SQL), ("projected_row", PROJECTED_SQL)):
             for label, direct in (("direct_native", True), ("record_to_native_model", False)):
                 samples, allocations = await _run_path(
-                    registry, connection, sql, args.rows, args.warmup, args.trials,
+                    registry,
+                    connection,
+                    sql,
+                    args.rows,
+                    args.warmup,
+                    args.trials,
                     direct=direct,
                 )
                 results[f"{name}.{label}"] = {

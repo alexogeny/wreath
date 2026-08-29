@@ -1,5 +1,3 @@
-"""Validation-plan execution contracts."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -38,6 +36,12 @@ class ConstrainedPayload:
     lines: Annotated[list[ConstrainedLine], Field(min_length=1, max_length=3)]
 
 
+@dataclass(kw_only=True)
+class KeywordPayload:
+    value: int
+    label: str = "default"
+
+
 def test_any_mapping_validation_preserves_an_unchanged_value() -> None:
     payload = {"id": 7, "nested": [1, "two"]}
     plan = _compile_plan(dict[str, Any], frozenset())
@@ -59,9 +63,7 @@ def test_any_mapping_contract_encodes_in_the_validation_entry() -> None:
 
     body, errors = _core.run_validation_json(plan, ["not", "an", "object"], ("response",))
     assert body is None
-    assert errors == [
-        {"loc": ["response"], "msg": "value is not an object", "type": "dict"}
-    ]
+    assert errors == [{"loc": ["response"], "msg": "value is not an object", "type": "dict"}]
 
 
 def test_recursive_dataclass_is_evaluated_without_a_flat_plan() -> None:
@@ -72,6 +74,15 @@ def test_recursive_dataclass_is_evaluated_without_a_flat_plan() -> None:
     result = validator({"value": 1, "children": [{"value": 2}]}, ("body",))
 
     assert result == Node(value=1, children=[Node(value=2)])
+
+
+def test_keyword_only_dataclass_keeps_its_defaulted_constructor_path() -> None:
+    plan = _compile_plan(KeywordPayload, frozenset())
+
+    result, errors = _core.run_validation(plan, {"value": 7}, ("body",))
+
+    assert errors == []
+    assert result == KeywordPayload(value=7)
 
 
 @pytest.mark.parametrize(

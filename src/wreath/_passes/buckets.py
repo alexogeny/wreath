@@ -120,18 +120,14 @@ class Buckets:
 
     def __post_init__(self) -> None:
         if not isinstance(self.per_chunk, int) or isinstance(self.per_chunk, bool):
-            raise PassDeclarationError(
-                f"Buckets per_chunk must be an int; got {self.per_chunk!r}"
-            )
+            raise PassDeclarationError(f"Buckets per_chunk must be an int; got {self.per_chunk!r}")
         if self.per_chunk < 1:
             raise PassDeclarationError(
                 f"Buckets per_chunk must be at least 1; got {self.per_chunk}"
             )
         object.__setattr__(self, "keys", keyset.normalise(self.on))
         object.__setattr__(self, "bucket", resolve_bucket(self.step))
-        object.__setattr__(
-            self, "within", _seconds(self.within, what="Buckets within")
-        )
+        object.__setattr__(self, "within", _seconds(self.within, what="Buckets within"))
         # Resolve the zone here rather than at the first chunk: an unknown
         # zone is a typo in a declaration, and it should cost a failed start
         # rather than a walk that dies an hour in.
@@ -146,8 +142,6 @@ class Buckets:
                 "the bug this refuses: it would be read as the server's local "
                 "time on one machine and as UTC on another."
             )
-
-    # -- the range source protocol -------------------------------------------
 
     @property
     def limit(self) -> int:
@@ -262,7 +256,7 @@ class Buckets:
         if record is not None:
             try:
                 value = record["anchor"]
-            except (KeyError, TypeError):
+            except KeyError, TypeError:
                 value = record[0]
         return None if value is None else self.floor(value)
 

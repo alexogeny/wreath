@@ -1,5 +1,3 @@
-"""Migration CLI exposes only operations backed by verified metal behavior."""
-
 from __future__ import annotations
 
 import argparse

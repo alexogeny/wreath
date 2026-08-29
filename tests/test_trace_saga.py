@@ -1,21 +1,3 @@
-"""Plan 01 stage 3: a saga is one trace, across a resume.
-
-Lane V left the inheritance question unverified. It resolves in two halves, and
-they point opposite ways:
-
-* Within one execution, a workflow step already inherits the ambient
-  `outbound_context` through the ContextVar the job runner binds -- no mechanism
-  needed, but nothing asserted it, so a refactor could silently take it away.
-* Across a `resume`, it does not. The instance re-enters in a different worker
-  with whatever context that worker happens to hold, which is usually none. That
-  is precisely the case durable workflows exist for, so the trace breaks at the
-  one moment it is being relied on.
-
-The fix is the same shape stage 2 used for jobs: the context rides the durable
-row and is rebound on every execution, so the instance -- not the caller -- owns
-the trace.
-"""
-
 from __future__ import annotations
 
 import os
@@ -38,7 +20,6 @@ def _seen() -> list[tuple[str, object]]:
 class TestASagaIsOneTrace:
     @pytest.mark.asyncio
     async def test_a_step_inherits_the_context_of_the_run_that_started_it(self):
-        """The half that already worked. Pinned so a refactor cannot remove it."""
         flow = Workflow("checkout")
         seen = _seen()
 
@@ -58,12 +39,6 @@ class TestASagaIsOneTrace:
 
     @pytest.mark.asyncio
     async def test_a_resumed_step_sees_the_instances_trace_not_the_workers(self):
-        """The half that did not. This is the defect stage 3 exists to close.
-
-        The resume deliberately runs with a *different* context bound, not with
-        none: binding nothing would pass against an implementation that simply
-        leaked the ambient value, which is the bug being fixed.
-        """
         flow = Workflow("shipping")
         attempts = {"n": 0}
         seen = _seen()
@@ -104,7 +79,6 @@ class TestASagaIsOneTrace:
 
     @pytest.mark.asyncio
     async def test_a_compensation_runs_under_the_instances_trace(self):
-        """The plan's words: a compensation is *visibly part of* the saga."""
         flow = Workflow("booking")
         seen = _seen()
 
@@ -131,12 +105,6 @@ class TestASagaIsOneTrace:
 
     @pytest.mark.asyncio
     async def test_an_untraced_instance_binds_nothing_rather_than_leaking(self):
-        """An instance begun with no trace must not hand a later worker its own.
-
-        The mirror of the staleness stage 1 and 2 both had to fix: binding
-        `(None, "")` instead of `None` crashes `_propagated` on `.encode()`, and
-        binding nothing at all leaks whatever the worker already held.
-        """
         flow = Workflow("quiet")
         attempts = {"n": 0}
         seen = _seen()
@@ -180,13 +148,6 @@ async def _apply_schema(database, schema: str) -> None:
 @pytest.mark.database
 @pytest.mark.skipif(not _DSN, reason="needs WREATH_TEST_POSTGRES_DSN (a live PostgreSQL)")
 async def test_a_saga_resumed_by_another_worker_is_one_trace() -> None:
-    """The claim the in-memory store cannot make, against a real database.
-
-    The resume is driven by a *second* `Workflow` object built after the first is
-    gone and with a different context bound -- the closest a test gets to "the
-    worker died and another picked it up", which is the only situation the
-    instance-owns-the-trace rule exists for.
-    """
     from wreath.postgres import Database
 
     # Per-worker schema, assigned not defaulted: workers sharing one schema race
@@ -249,16 +210,6 @@ async def test_a_saga_resumed_by_another_worker_is_one_trace() -> None:
 @pytest.mark.database
 @pytest.mark.skipif(not _DSN, reason="needs WREATH_TEST_POSTGRES_DSN (a live PostgreSQL)")
 async def test_the_column_probe_happens_once_and_is_cached() -> None:
-    """The cost property, asserted rather than assumed.
-
-    Written first as "an untraced `begin` never probes", which **failed** and was
-    right to: `load` probes unconditionally -- it must, to know whether to select
-    the column -- and `begin` calls `load`, so the short-circuit that used to
-    guard the probe saved nothing. `wreath mutant` had already reported that
-    guard as survivable, which is what redundant code looks like from outside.
-    The guard is gone; this pins what actually holds, which is that the catalog
-    is asked once per store and never again.
-    """
     from wreath.postgres import Database
 
     worker = os.environ.get("PYTEST_XDIST_WORKER", "solo")
@@ -296,12 +247,6 @@ async def test_the_column_probe_happens_once_and_is_cached() -> None:
 @pytest.mark.database
 @pytest.mark.skipif(not _DSN, reason="needs WREATH_TEST_POSTGRES_DSN (a live PostgreSQL)")
 async def test_a_new_build_against_an_older_schema_runs_untraced() -> None:
-    """Degrade, never fail. The mirror of stage 2's rollout property.
-
-    A schema created before this change has no `trace_context` column. The saga
-    must still run and still resume; losing the trace is a degradation, losing
-    the workflow is not.
-    """
     from wreath.postgres import Database
 
     worker = os.environ.get("PYTEST_XDIST_WORKER", "solo")
@@ -315,8 +260,7 @@ async def test_a_new_build_against_an_older_schema_runs_untraced() -> None:
         connection = await database.acquire("write")
         try:
             await connection.execute(
-                f'ALTER TABLE "{schema}"."workflow_steps_instances" '
-                "DROP COLUMN trace_context"
+                f'ALTER TABLE "{schema}"."workflow_steps_instances" DROP COLUMN trace_context'
             )
         finally:
             await database.release("write", connection)

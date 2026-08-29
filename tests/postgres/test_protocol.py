@@ -87,17 +87,13 @@ def test_execute_packets_omit_unused_result_metadata(postgres: Any) -> None:
     assert _bind_result_format_count(cached) == 0
 
 
-# --------------------------------------------------------------------------
 # A parameterless cached query builds the same bytes every time.
-#
 # `Bind`/`Execute`/`Sync` for a cached plan is a function of the statement name,
 # the arguments and the result mode. With no arguments only two of those vary,
 # and both belong to the plan -- so the bytes cannot change, and rebuilding them
 # per query measured 2,153 instructions that produce a value already known.
-#
 # These state what the packet may not stop depending on, which is what a cache
 # keyed too coarsely would break.
-# --------------------------------------------------------------------------
 
 
 def test_a_parameterless_packet_is_the_same_bytes_every_time(postgres: Any) -> None:
@@ -109,12 +105,6 @@ def test_a_parameterless_packet_is_the_same_bytes_every_time(postgres: Any) -> N
 
 
 def test_each_result_mode_keeps_its_own_parameterless_packet(postgres: Any) -> None:
-    """`execute` asks for text results and everything else asks for binary.
-
-    One packet remembered for a plan regardless of mode would hand an `execute`
-    the binary-result Bind -- the rows would come back in the wrong format and
-    be decoded as though they were not.
-    """
     plan = postgres.Plan(b"wreath_1", (), (23,), ("value",))
     fetch = postgres._build_cached_query_packet(plan, (), "fetch")
     execute = postgres._build_cached_query_packet(plan, (), "execute")
@@ -127,7 +117,6 @@ def test_each_result_mode_keeps_its_own_parameterless_packet(postgres: Any) -> N
 
 
 def test_two_plans_do_not_share_a_parameterless_packet(postgres: Any) -> None:
-    """The statement name is inside the Bind, so it cannot be cached across plans."""
     first = postgres.Plan(b"wreath_1", (), (23,), ("value",))
     second = postgres.Plan(b"wreath_2", (), (23,), ("value",))
     assert postgres._build_cached_query_packet(first, (), "fetch") != (
@@ -136,7 +125,6 @@ def test_two_plans_do_not_share_a_parameterless_packet(postgres: Any) -> None:
 
 
 def test_a_packet_with_arguments_still_carries_them(postgres: Any) -> None:
-    """Only the parameterless packet is invariant; a bound value is not."""
     plan = postgres.Plan(b"wreath_1", (23,), (23,), ("value",))
     first = postgres._build_cached_query_packet(plan, (42,), "fetch")
     second = postgres._build_cached_query_packet(plan, (43,), "fetch")
@@ -146,13 +134,6 @@ def test_a_packet_with_arguments_still_carries_them(postgres: Any) -> None:
 def test_a_parameterless_plan_and_a_bound_one_do_not_share_a_packet(
     postgres: Any,
 ) -> None:
-    """A remembered packet belongs to the plan that built it and to no other.
-
-    Both plans name the same prepared statement, so a cache keyed on the
-    statement name -- rather than on the plan -- would hand the bound call a
-    Bind carrying no parameters, and PostgreSQL would answer a different query
-    rather than refuse it.
-    """
     parameterless = postgres.Plan(b"wreath_1", (), (23,), ("value",))
     bound = postgres.Plan(b"wreath_1", (23,), (23,), ("value",))
     empty = postgres._build_cached_query_packet(parameterless, (), "fetch")
@@ -163,12 +144,6 @@ def test_a_parameterless_plan_and_a_bound_one_do_not_share_a_packet(
 def test_both_engines_refuse_an_argument_count_the_plan_does_not_declare(
     postgres: Any,
 ) -> None:
-    """And refuse it as the same exception, which is what a caller catches.
-
-    The pure engine is the reference and raises `InterfaceError`; a native build
-    raising `ValueError` for the same mistake means `except InterfaceError`
-    around a query works on one build and not the other.
-    """
     from wreath._pgdriver import InterfaceError
 
     plan = postgres.Plan(b"wreath_1", (23,), (23,), ("value",))
@@ -242,9 +217,6 @@ def test_scram_rejects_nonce_downgrade_and_invalid_iterations(postgres: Any) -> 
         postgres._scram_continue(state, "password", "r=client-server,s=QSXCR+Q6sek8bf92,i=0")
 
 
-# --- asynchronous backend messages -------------------------------------------
-
-
 def _operation(mode: str = "execute") -> Any:
     loop = asyncio.new_event_loop()
     try:
@@ -273,14 +245,7 @@ def _operation(mode: str = "execute") -> Any:
         (b"A", b"\x00\x00\x00\x01chan\x00\x00"),  # NotificationResponse
     ],
 )
-def test_asynchronous_messages_are_ignored_during_an_operation(
-    kind: bytes, payload: bytes
-) -> None:
-    """These may arrive at any time and belong to no operation.
-
-    tests/postgres/ otherwise drives a FakeConnection that never emits them, so
-    this is the only place that pins the behaviour without a real server.
-    """
+def test_asynchronous_messages_are_ignored_during_an_operation(kind: bytes, payload: bytes) -> None:
     connection = pure_postgres.Connection.__new__(pure_postgres.Connection)
     # A NotificationResponse ('A') is now captured into the per-connection ring
     # rather than discarded, so give the bare connection the notify slots that

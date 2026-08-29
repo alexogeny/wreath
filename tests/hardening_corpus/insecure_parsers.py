@@ -1,10 +1,3 @@
-"""a10, a11 -- two parsers handed request text with their defences down.
-
-The XML half is the stdlib reader with external general entities switched back
-on, which turns a document parser into a file reader. The template half compiles
-attacker-supplied source at request time, which turns a renderer into an
-expression evaluator over whatever the context holds.
-"""
 from __future__ import annotations
 
 import xml.sax  # hardening-expect: unsafe-xml-parser

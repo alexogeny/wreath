@@ -1,5 +1,3 @@
-"""How file serving uses threads (report 23: G-43, G-84)."""
-
 from __future__ import annotations
 
 import asyncio
@@ -45,7 +43,7 @@ class TestFileStreamingStillWorks:
     """Whatever the threading shape, the bytes have to be right."""
 
     async def test_a_large_file_still_streams_correctly(self, tmp_path):
-        body = bytes(range(256)) * 4096          # 1 MiB, several chunks
+        body = bytes(range(256)) * 4096  # 1 MiB, several chunks
         (tmp_path / "big.bin").write_bytes(body)
 
         app = Wreath()
@@ -70,9 +68,7 @@ class TestFileStreamingStillWorks:
         app = Wreath()
         app.static("/files", str(tmp_path))
         async with TestClient(app) as client:
-            response = await client.get(
-                "/files/big.bin", headers={"range": "bytes=1000-1999"}
-            )
+            response = await client.get("/files/big.bin", headers={"range": "bytes=1000-1999"})
         assert response.status == 206
         assert response.body == body[1000:2000]
 
@@ -100,9 +96,7 @@ class TestStaticFilesHasItsOwnExecutor:
         assert isinstance(executor, concurrent.futures.ThreadPoolExecutor)
         assert executor._max_workers <= 16
 
-    async def test_lookup_submission_is_bounded_before_the_executor(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_lookup_submission_is_bounded_before_the_executor(self, tmp_path, monkeypatch):
         from wreath.staticfiles import StaticFiles
 
         files = StaticFiles(str(tmp_path), max_workers=1)
@@ -163,9 +157,7 @@ class TestStaticFilesHasItsOwnExecutor:
         app = Wreath()
         app.static("/files", str(tmp_path))
         async with TestClient(app) as client:
-            response = await client.head(
-                "/files/big.bin", headers={"range": "bytes=100-199"}
-            )
+            response = await client.head("/files/big.bin", headers={"range": "bytes=100-199"})
 
         assert response.status == 206
         assert response.body == b""

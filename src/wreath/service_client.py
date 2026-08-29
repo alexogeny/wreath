@@ -170,22 +170,33 @@ class ServiceClient:
         return await self.request("GET", path, headers=headers)
 
     async def post(
-        self, path: str, *, headers: _Headers = (),
-        body: bytes | bytearray | memoryview = b"", idempotency_key: str | None = None,
+        self,
+        path: str,
+        *,
+        headers: _Headers = (),
+        body: bytes | bytearray | memoryview = b"",
+        idempotency_key: str | None = None,
     ) -> Any:
         """`POST` through `request`. The only verb here taking an idempotency key."""
-        return await self.request("POST", path, headers=headers, body=body,
-                                  idempotency_key=idempotency_key)
+        return await self.request(
+            "POST", path, headers=headers, body=body, idempotency_key=idempotency_key
+        )
 
     async def put(
-        self, path: str, *, headers: _Headers = (),
+        self,
+        path: str,
+        *,
+        headers: _Headers = (),
         body: bytes | bytearray | memoryview = b"",
     ) -> Any:
         """`PUT` through `request`."""
         return await self.request("PUT", path, headers=headers, body=body)
 
     async def patch(
-        self, path: str, *, headers: _Headers = (),
+        self,
+        path: str,
+        *,
+        headers: _Headers = (),
         body: bytes | bytearray | memoryview = b"",
     ) -> Any:
         """`PATCH` through `request`."""

@@ -1,10 +1,3 @@
-"""The JSON-RPC surface of `wreath.mcp`: one method at a time, plus the refusals.
-
-Every assertion here is about what a client sees on the wire. An MCP client that
-meets a bare 400 has nothing to act on, so the error *shapes* are as much the
-contract as the happy paths are.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -82,9 +75,7 @@ async def call(client: TestClient, session_id: str, payload: dict) -> dict:
 
 
 def test_parse_message_classifies_a_valid_request_directly() -> None:
-    message = parse_message(
-        {"jsonrpc": "2.0", "id": 7, "method": "ping", "params": {}}
-    )
+    message = parse_message({"jsonrpc": "2.0", "id": 7, "method": "ping", "params": {}})
     assert message.method == "ping"
     assert message.id == 7
     assert message.is_request is True
@@ -391,14 +382,6 @@ async def test_an_unacceptable_accept_header_is_refused() -> None:
 
 
 async def test_an_oversized_message_is_refused_by_the_app_s_own_body_limit() -> None:
-    """`MCPLimits` has no payload ceiling, and this is why it needs none.
-
-    A `tools/call` body is a POST body, so `RequestLimits.max_body_bytes` refuses
-    an oversized one while it is still arriving -- before the endpoint is
-    entered, and therefore before a tool name has even been read. The claim that
-    a second ceiling in `MCPLimits` would be redundant is only true if this
-    holds, so it is asserted rather than asserted-about.
-    """
     app = Wreath(limits=RequestLimits(max_body_bytes=256))
     mcp = MCP(app, name="camera-trap", version="1.0.0")
 

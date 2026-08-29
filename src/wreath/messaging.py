@@ -132,11 +132,7 @@ class MessageEnvelope(_MessageEnvelopeCache):
     trace_context: str | None = None
 
     def __post_init__(self) -> None:
-        if (
-            not isinstance(self.kind, str)
-            or not self.kind
-            or len(self.kind.encode("utf-8")) > 255
-        ):
+        if not isinstance(self.kind, str) or not self.kind or len(self.kind.encode("utf-8")) > 255:
             raise ValueError("MessageEnvelope kind must be between 1 and 255 UTF-8 bytes")
         if isinstance(self.version, bool) or not isinstance(self.version, int) or self.version < 1:
             raise ValueError("MessageEnvelope version must be an integer >= 1")
@@ -177,7 +173,7 @@ class MessageEnvelope(_MessageEnvelopeCache):
         """Decode an envelope, returning `None` for a legacy plain payload."""
         try:
             data = _json.loads(value) if isinstance(value, (str, bytes, bytearray)) else value
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None
         if not isinstance(data, dict) or data.get("__wreath_message__") != 1:
             return None
@@ -299,7 +295,9 @@ class MessageBus:
         # Channels and the dispatch maps below are filled in by `start`, once
         # subscriptions are known.
         self._doorbell = Doorbell(
-            database=database, workload=workload, pump=self._pump,
+            database=database,
+            workload=workload,
+            pump=self._pump,
         )
         self._wire_to_channel: dict[str, str] = {}
         self._ephemeral_subs: dict[str, list[_Subscription]] = {}
@@ -367,7 +365,7 @@ class MessageBus:
         Non-zero means ephemeral fan-out was down for at least a moment and
         those messages are gone (at-most-once has nowhere to replay from);
         climbing means it still is, and durable consumers are running on the
-        poll interval. This used to be entirely invisible.
+        poll interval.
 
         Kept deliberately apart from `handler_errors`: a bug in a
         subscriber must never read as a flapping database.
@@ -460,9 +458,7 @@ class MessageBus:
         with no registry table, the result is exactly what it was before.
         """
         local = {
-            sub.group
-            for sub in self._subs
-            if sub.channel == channel and sub.durable and sub.group
+            sub.group for sub in self._subs if sub.channel == channel and sub.durable and sub.group
         }
         return sorted(local | self._remote_groups.get(channel, frozenset()))
 
@@ -474,8 +470,6 @@ class MessageBus:
         the wrong subscribers -- a delivery bug that looks like a handler bug.
         """
         return validate_identifier(f"wm_{self._schema}_{channel}", "wire channel")
-
-    # -- registration --------------------------------------------------------
 
     def subscribe(
         self,
@@ -499,14 +493,18 @@ class MessageBus:
 
         def register(handler: MessageHandler) -> MessageHandler:
             self._subs.append(
-                _Subscription(channel=channel, group=group, handler=handler,
-                              concurrency=concurrency, durable=durable, retries=retries)
+                _Subscription(
+                    channel=channel,
+                    group=group,
+                    handler=handler,
+                    concurrency=concurrency,
+                    durable=durable,
+                    retries=retries,
+                )
             )
             return handler
 
         return register
-
-    # -- publish -------------------------------------------------------------
 
     async def publish(
         self,
@@ -556,7 +554,11 @@ class MessageBus:
             encoded = body.encode("utf-8")
         if durable:
             await self._publish_durable(
-                channel, body, tx=tx, tenant=tenant, key=key,
+                channel,
+                body,
+                tx=tx,
+                tenant=tenant,
+                key=key,
                 require_group=require_group,
             )
             return
@@ -616,9 +618,7 @@ class MessageBus:
             connection = await self._db.acquire(self._workload)
             runner = connection
         try:
-            await self._insert_durable(
-                runner, channel, body, tenant, key, groups, parent
-            )
+            await self._insert_durable(runner, channel, body, tenant, key, groups, parent)
         finally:
             if connection is not None:
                 await self._db.release(self._workload, connection)
@@ -672,8 +672,6 @@ class MessageBus:
         # says nothing new, and with fleet-wide discovery a busy channel can
         # have many groups.
         await runner.execute("SELECT pg_notify($1, '')", self._channel_wire(channel))
-
-    # -- the shared group registry -------------------------------------------
 
     async def _register_groups(self) -> None:
         """Declare this process's durable groups so other publishers find them.
@@ -793,9 +791,7 @@ class MessageBus:
         discovered: dict[str, set[str]] = {}
         for row in rows:
             discovered.setdefault(row["channel"], set()).add(row["group"])
-        self._remote_groups = {
-            channel: frozenset(groups) for channel, groups in discovered.items()
-        }
+        self._remote_groups = {channel: frozenset(groups) for channel, groups in discovered.items()}
 
     async def _group_refresher(self) -> None:
         """Keep the snapshot current, so a new service's consumer is found.
@@ -811,8 +807,6 @@ class MessageBus:
             if stopping.is_set():
                 break
             await self._refresh_groups()
-
-    # -- schema --------------------------------------------------------------
 
     def component(self) -> Any:
         """This bus's claim on the wreath schema.
@@ -854,7 +848,7 @@ class MessageBus:
                         "  updated_at timestamptz NOT NULL DEFAULT now()\n"
                         ")",
                         f"CREATE INDEX IF NOT EXISTS messages_claim_idx ON {t} "
-                        '(channel, "group", run_at) WHERE state = \'ready\'',
+                        "(channel, \"group\", run_at) WHERE state = 'ready'",
                         f"CREATE INDEX IF NOT EXISTS messages_lease_idx ON {t} "
                         "(lease_expiry) WHERE state = 'leased'",
                         f"CREATE UNIQUE INDEX IF NOT EXISTS messages_dedup_idx ON {t} "
@@ -884,9 +878,7 @@ class MessageBus:
                 # keeps working against an upgraded database mid-rollout.
                 Step(
                     version=2,
-                    statements=(
-                        f"ALTER TABLE {t} ADD COLUMN IF NOT EXISTS trace_context text",
-                    ),
+                    statements=(f"ALTER TABLE {t} ADD COLUMN IF NOT EXISTS trace_context text",),
                 ),
             ),
         )
@@ -900,8 +892,6 @@ class MessageBus:
         supported spelling and `component()` is what wreath applies.
         """
         return self.component().sql()
-
-    # -- supervised service protocol ----------------------------------------
 
     async def start(self, supervisor: Any) -> None:
         self._supervisor = supervisor
@@ -932,16 +922,12 @@ class MessageBus:
         durable_subs = [s for s in self._subs if s.durable]
         # One held connection multiplexing every channel we care about for the
         # doorbell (ephemeral delivery + durable wakeups).
-        listen_channels = sorted(
-            {self._channel_wire(s.channel) for s in self._subs}
-        )
+        listen_channels = sorted({self._channel_wire(s.channel) for s in self._subs})
         if listen_channels:
             self._doorbell.channels = listen_channels
             # Map wire channel -> user channel for ephemeral dispatch, once,
             # rather than on every reconnect.
-            self._wire_to_channel = {
-                self._channel_wire(c): c for c in ephemeral_channels
-            }
+            self._wire_to_channel = {self._channel_wire(c): c for c in ephemeral_channels}
             self._ephemeral_subs = {}
             for sub in self._subs:
                 if not sub.durable:
@@ -977,8 +963,6 @@ class MessageBus:
             # an empty set -- cannot happen under the `while` above.
             await asyncio.wait(tuple(self._inflight), timeout=max(0.0, deadline - loop.time()))
         await self._doorbell.release()
-
-    # -- loops ---------------------------------------------------------------
 
     async def _pump(self, connection: Any) -> None:
         """Dispatch notifications until the connection's stream ends.
@@ -1019,8 +1003,7 @@ class MessageBus:
             with contextlib.suppress(ValueError, TypeError):
                 payload = _json.loads(note.payload)
         for sub in ephemeral_subs.get(channel, ()):  # at-most-once, fire-and-forget
-            message = Message(channel=channel, group=sub.group, tenant="",
-                              payload=payload)
+            message = Message(channel=channel, group=sub.group, tenant="", payload=payload)
             self._spawn_ephemeral(sub, message)
 
     def _spawn_ephemeral(self, sub: _Subscription, message: Message) -> None:
@@ -1031,6 +1014,7 @@ class MessageBus:
                 raise
             except Exception:  # noqa: BLE001 - at-most-once; nowhere to retry to
                 self.handler_errors += 1
+
         future = asyncio.ensure_future(_run())
         self._inflight.add(future)
         future.add_done_callback(self._inflight.discard)
@@ -1128,8 +1112,7 @@ class MessageBus:
                 self._table,
                 key="id",
                 alias="m",
-                predicate='channel=$1 AND "group"=$2 AND state=\'ready\' '
-                "AND run_at <= now()",
+                predicate="channel=$1 AND \"group\"=$2 AND state='ready' AND run_at <= now()",
                 order="run_at",
                 limit="1",
                 assignments=(
@@ -1149,22 +1132,31 @@ class MessageBus:
         payload = row["payload"]
         if isinstance(payload, (str, bytes)):
             payload = _json.loads(payload)
-        return Message(channel=sub.channel, group=sub.group, tenant=row["tenant"],
-                       payload=payload, id=row["id"], fence=row["fence"],
-                       attempts=row["attempts"],
-                       trace_context=row["trace_context"] if trace else None)
+        return Message(
+            channel=sub.channel,
+            group=sub.group,
+            tenant=row["tenant"],
+            payload=payload,
+            id=row["id"],
+            fence=row["fence"],
+            attempts=row["attempts"],
+            trace_context=row["trace_context"] if trace else None,
+        )
 
     async def _complete(self, message: Message) -> None:
         await self._exec(
             fenced_update_sql(self._table, "state='done', updated_at=now()"),
-            message.id, message.fence,
+            message.id,
+            message.fence,
         )
 
     async def _dead(self, message: Message, error: str) -> None:
         await self._exec(
             f"UPDATE {self._table} SET state='dead', last_error=$3, updated_at=now() "
             "WHERE id=$1 AND fence=$2",
-            message.id, message.fence, error[:2000],
+            message.id,
+            message.fence,
+            error[:2000],
         )
 
     async def _retry(self, sub: _Subscription, message: Message, error: str) -> None:
@@ -1186,14 +1178,14 @@ class MessageBus:
             "run_at = now() + ($3 || ' seconds')::interval, last_error=$4, "
             "owner=NULL, lease_expiry=NULL, updated_at=now() "
             "WHERE id=$1 AND fence=$2",
-            message.id, message.fence, f"{delay:.3f}", error[:2000], sub.retries + 1,
+            message.id,
+            message.fence,
+            f"{delay:.3f}",
+            error[:2000],
+            sub.retries + 1,
         )
 
     async def _sweeper(self, sub: _Subscription) -> None:
-        # Deliberately the same shape as `wreath.jobs.JobRunner._sweeper`: the
-        # two loops do the same job one subsystem apart, and this one used to
-        # swallow silently while that one counted. A reclaim that keeps failing
-        # leaves messages `leased` forever with nothing to read.
         stopping = self._supervisor.stopping
         while not stopping.is_set():
             try:
@@ -1219,9 +1211,10 @@ class MessageBus:
             "state = CASE WHEN attempts + 1 >= max_attempts THEN 'dead' ELSE 'ready' END, "
             "last_error = COALESCE(last_error, 'lease expired before completion'), "
             "owner=NULL, lease_expiry=NULL, fence=fence+1, updated_at=now() "
-            'WHERE channel=$1 AND "group"=$2 AND state=\'leased\' '
+            "WHERE channel=$1 AND \"group\"=$2 AND state='leased' "
             "AND lease_expiry < now()",
-            sub.channel, sub.group,
+            sub.channel,
+            sub.group,
         )
 
     async def _exec(self, sql: str, *args: Any) -> None:

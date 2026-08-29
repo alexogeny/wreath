@@ -109,8 +109,7 @@ async def list_stations(request: Request, slug: str, session: ReadSession) -> di
     # only on the flag and the identity, so asking it 48 times would be 48
     # evaluations of one decision.
     locate = {
-        sensitive: may_locate(request.identity, sensitive=sensitive)
-        for sensitive in (False, True)
+        sensitive: may_locate(request.identity, sensitive=sensitive) for sensitive in (False, True)
     }
     return {
         "items": [
@@ -122,9 +121,7 @@ async def list_stations(request: Request, slug: str, session: ReadSession) -> di
 
 @stations.get("/{station_id}", summary="One station and every camera it has held")
 @authenticated()
-async def read_station(
-    request: Request, slug: str, station_id: int, session: ReadSession
-) -> dict:
+async def read_station(request: Request, slug: str, station_id: int, session: ReadSession) -> dict:
     reserve = await _reserve(session, slug)
     station = await _station(session, reserve, station_id)
     # `Station.cameras` is `load="raise"`, so reading it now would raise rather
@@ -187,7 +184,6 @@ async def list_sightings(
     # it returns. Filtering after the fetch would make `total` a lie and hand a
     # volunteer a 20-row page with four rows in it — and, worse, would have
     # loaded the withheld rows onto this machine before discarding them.
-    #
     # One statement: the species this caller may see are named by a subquery, so
     # the vocabulary is never carried to the application and back. `total` and
     # the page are then filtered by construction, because `paginate` counts the

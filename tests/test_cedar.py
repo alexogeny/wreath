@@ -52,9 +52,7 @@ def _request(identity: Identity | None, *, method: str = "GET", path: str = "/x"
     async def receive() -> dict[str, Any]:
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    request = Request(
-        {"type": "http", "method": method, "path": path, "headers": []}, receive
-    )
+    request = Request({"type": "http", "method": method, "path": path, "headers": []}, receive)
     request._set_identity(identity)
     return request
 
@@ -64,9 +62,7 @@ def test_default_entities_are_empty_for_an_anonymous_request() -> None:
 
 
 def test_default_entities_preserve_identity_facts() -> None:
-    identity = Identity(
-        "alice", roles=frozenset({"writer", "reader"}), attributes={"active": True}
-    )
+    identity = Identity("alice", roles=frozenset({"writer", "reader"}), attributes={"active": True})
 
     assert _default_entities(_request(identity)) == (
         CedarEntity(
@@ -197,9 +193,7 @@ async def test_custom_entities_are_resolved_even_when_the_engine_needs_no_princi
 
     expected = (CedarEntity(EntityUid("Service", "api")),)
     request = _request(Identity("alice"))
-    authorizer = CedarAuthorizer(
-        engine=Engine(frozenset()), entities=lambda request: expected
-    )
+    authorizer = CedarAuthorizer(engine=Engine(frozenset()), entities=lambda request: expected)
 
     _, _, entities, _ = await authorizer._query_base(request, request.identity, "read")
 
@@ -237,15 +231,11 @@ async def test_selective_context_adds_second_factor_age_only_when_proved(
     import wreath._auth.cedar as module
 
     monkeypatch.setattr(module.time, "time", lambda: 1_700_000_100.0)
-    authorizer = CedarAuthorizer(
-        engine=_SelectiveEngine(frozenset({"second_factor_age"}))
-    )
+    authorizer = CedarAuthorizer(engine=_SelectiveEngine(frozenset({"second_factor_age"})))
     unproved = _request(Identity("alice"))
     proved = _request(Identity("alice", claims={"second_factor_at": 1_700_000_000.0}))
 
-    _, _, _, unproved_context = await authorizer._query_base(
-        unproved, unproved.identity, "read"
-    )
+    _, _, _, unproved_context = await authorizer._query_base(unproved, unproved.identity, "read")
     _, _, _, proved_context = await authorizer._query_base(proved, proved.identity, "read")
 
     assert "second_factor_age" not in unproved_context
@@ -321,7 +311,6 @@ async def test_cedar_adapter_is_final_authorization_after_coarse_route_pruning()
     # the forbid an agent was supposed to be caught by.
     # `tests/test_cedar_flags.py`, `tests/test_cedar_geofence.py` and
     # `tests/test_principal_narrow.py` pin that engine behaviour for each.
-    #
     # Asserting the whole dict rather than a subset is what makes this a
     # *register* of the authorizer's context surface: a new fact fails here
     # first, which is the moment to decide whether it fails closed.
@@ -343,8 +332,6 @@ async def test_cedar_adapter_is_final_authorization_after_coarse_route_pruning()
     }
 
 
-# --- policy identity, delegated from the engine -------------------------------
-#
 # A cached permission manifest is tagged by the policy set behind the authorizer.
 # That tag used to be found by reaching through `authorizer._engine` from
 # `_auth/permissions.py` -- a private name owned by `_auth/cedar.py` and read
@@ -379,23 +366,10 @@ def test_the_authorizer_offers_the_engines_policy_identity() -> None:
 
 
 def test_every_probed_name_is_delegated_not_just_source() -> None:
-    """Partial delegation would reintroduce the miss in a subtler form.
-
-    An engine that offers `fingerprint` but not `source` has to be found through
-    the authorizer too, or it silently degrades to a per-instance token while the
-    engine next to it works fine.
-    """
     assert CedarAuthorizer(engine=_Fingerprinted()).fingerprint == b"a-digest"
 
 
 def test_an_engine_offering_nothing_leaves_the_names_absent() -> None:
-    """Absence has to stay absence, not become a `None` that is present.
-
-    The fingerprint probes with `getattr(..., None)` and falls through to a
-    per-instance token. A property that always resolved and returned `None`
-    would promise "there is a source, and it is nothing" -- a different claim,
-    and one that would read as an engine having no policies at all.
-    """
     authorizer = CedarAuthorizer(engine=Engine())
 
     for name in ("fingerprint", "source", "policies"):
@@ -405,7 +379,6 @@ def test_an_engine_offering_nothing_leaves_the_names_absent() -> None:
 
 
 def test_the_delegation_adds_no_dict_to_the_authorizer() -> None:
-    """`CedarAuthorizer` is `__slots__`; properties must not have changed that."""
     authorizer = CedarAuthorizer(engine=_Identified("permit(principal, action, resource);"))
 
     assert not hasattr(authorizer, "__dict__")

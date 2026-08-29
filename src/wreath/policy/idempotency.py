@@ -75,6 +75,7 @@ def _replayable_headers(
         and b"\x00" not in value
     )
 
+
 #: A stored response: status, headers, body.
 type Replay = tuple[int, tuple[tuple[bytes, bytes], ...], bytes]
 
@@ -291,8 +292,7 @@ class PostgresIdempotencyStore:
         if status is None:
             return ("in_flight", None)
         headers = tuple(
-            (name.encode("latin-1"), value.encode("latin-1"))
-            for name, value in (row[1] or ())
+            (name.encode("latin-1"), value.encode("latin-1")) for name, value in (row[1] or ())
         )
         return ("done", (int(status), headers, bytes(row[2] or b"")))
 
@@ -304,9 +304,7 @@ class PostgresIdempotencyStore:
         from the claim rather than from whenever the handler finished.
         """
         status, headers, body = replay
-        encoded = [
-            [name.decode("latin-1"), value.decode("latin-1")] for name, value in headers
-        ]
+        encoded = [[name.decode("latin-1"), value.decode("latin-1")] for name, value in headers]
         await self._store.statement("store").execute(key, status, _json_list(encoded), body)
 
     async def release(self, key: str) -> None:
@@ -337,7 +335,9 @@ class PostgresIdempotencyStore:
 
         return keyed_purge_pass(
             self._store.declaration,
-            name=f"purge_{self._store.table}", chunk=chunk, **options,
+            name=f"purge_{self._store.table}",
+            chunk=chunk,
+            **options,
         )
 
     async def purge(self) -> str:
@@ -425,7 +425,12 @@ class IdempotencyPolicy:
     """
 
     __slots__ = (
-        "_header", "_max_body_bytes", "_methods", "_store", "conflicts", "ignored",
+        "_header",
+        "_max_body_bytes",
+        "_methods",
+        "_store",
+        "conflicts",
+        "ignored",
     )
 
     def __init__(
@@ -439,9 +444,7 @@ class IdempotencyPolicy:
         max_body_bytes: int = 256 * 1024,
     ) -> None:
         self._store: IdempotencyStore = (
-            store
-            if store is not None
-            else MemoryIdempotencyStore(ttl=ttl, max_entries=max_entries)
+            store if store is not None else MemoryIdempotencyStore(ttl=ttl, max_entries=max_entries)
         )
         self._methods = frozenset(m.upper() for m in methods)
         self._header = header.lower()
@@ -466,11 +469,9 @@ class IdempotencyPolicy:
         """The store this policy delegates its tables to.
 
         It owns no tables itself, so it answers with the store it was given
-        rather than forwarding a `component()`. Answering at all is the point:
-        `Wreath.schema_components` walks policy and asks each holder this
-        question, and this class used to expose neither it nor `component()`,
-        so a `PostgresIdempotencyStore`'s `wreath_idempotency` table was
-        emitted by `wreath schema sql` and created by nothing.
+        rather than forwarding a `component()`. `Wreath.schema_components`
+        walks policy and asks each holder this question, so a
+        `PostgresIdempotencyStore` contributes its `wreath_idempotency` table.
 
         The default in-process store is returned too and contributes nothing --
         it has no `component()`, and the walk asks rather than assumes.
@@ -521,9 +522,7 @@ class IdempotencyPolicy:
                 (
                     409,
                     ResponseSpec(
-                        description=(
-                            "A request with this Idempotency-Key is still running."
-                        ),
+                        description=("A request with this Idempotency-Key is still running."),
                         media_type="application/problem+json",
                     ),
                 ),

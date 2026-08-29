@@ -21,8 +21,7 @@ from .scenarios import (
 # One HTML row per record, with cells that need escaping so the template
 # scenario exercises real escaping rather than a passthrough.
 TEMPLATE_ROWS = [
-    {"id": index, "message": f"item <{index}> & 'quote'"}
-    for index in range(TEMPLATE_ROW_COUNT)
+    {"id": index, "message": f"item <{index}> & 'quote'"} for index in range(TEMPLATE_ROW_COUNT)
 ]
 # Competitors render the same markup through Jinja2 (autoescaping on).
 JINJA_TABLE_SOURCE = (
@@ -55,7 +54,6 @@ if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
     # short-circuit, so every previously recorded `auth-*` number is measuring
     # exactly the work it measured before; only a token that is neither falls
     # through to the JWT path.
-    #
     # That path is here because it is the one native accelerator the whole
     # scenario suite otherwise never reaches. `ws-echo` exercises the masking
     # arm, `template` the HTML-escape arm, `json`/`json-body` the JSON scanner
@@ -116,7 +114,6 @@ if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
     async def auth_admin(request):
         return TextResponse("admin")
 
-    # --- e2e: the whole stack orchestrated in one request ------------------
     # Authentication, a database round trip through wreath.postgres, and a
     # remote HTTP fetch through wreath.http_client, composed into one JSON
     # response. Both upstreams run in-process on the benchmarked loop (see
@@ -153,9 +150,7 @@ if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
                     max_connections=64,
                     max_keepalive_connections=64,
                 ),
-                destination=DestinationPolicy(
-                    allow_private=True, allow_loopback=True
-                ),
+                destination=DestinationPolicy(allow_private=True, allow_loopback=True),
             )
             await client.start()
             connection = await postgres.connect(dsn)
@@ -261,9 +256,7 @@ if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
         return response
 
     # A large age window keeps the fixed benchmark timestamp valid for the run.
-    _webhook_verifier = HMACWebhookVerifier(
-        {WEBHOOK_KEY_ID: WEBHOOK_SECRET}, max_age=10**9
-    )
+    _webhook_verifier = HMACWebhookVerifier({WEBHOOK_KEY_ID: WEBHOOK_SECRET}, max_age=10**9)
 
     @app.post("/webhook")
     async def webhook(request):
@@ -409,9 +402,7 @@ elif FRAMEWORK == "starlette":
         return StarletteHTMLResponse(_jinja_table.render(rows=TEMPLATE_ROWS))
 
     async def cached(request):
-        return PlainTextResponse(
-            "cacheable", headers={"cache-control": CACHE_CONTROL_VALUE}
-        )
+        return PlainTextResponse("cacheable", headers={"cache-control": CACHE_CONTROL_VALUE})
 
     app = Starlette(
         routes=[
@@ -505,9 +496,7 @@ elif FRAMEWORK == "fastapi":
 
     @app.get("/cached", response_class=PlainTextResponse)
     async def cached():
-        return PlainTextResponse(
-            "cacheable", headers={"cache-control": CACHE_CONTROL_VALUE}
-        )
+        return PlainTextResponse("cacheable", headers={"cache-control": CACHE_CONTROL_VALUE})
 
     async def routing_leaf():
         return PlainTextResponse("route-hit")
@@ -713,9 +702,7 @@ elif FRAMEWORK == "panther":
 
     @API()
     async def cached():
-        return PlainTextResponse(
-            "cacheable", headers={"Cache-Control": CACHE_CONTROL_VALUE}
-        )
+        return PlainTextResponse("cacheable", headers={"Cache-Control": CACHE_CONTROL_VALUE})
 
     async def _leaf():
         return PlainTextResponse("route-hit")
@@ -727,9 +714,7 @@ elif FRAMEWORK == "panther":
     # the shared table needs one handler object per method rather than one
     # handler and five registrations.
     _leaves = {method: API(methods=[method])(_leaf) for method in ROUTE_METHODS}
-    _param_leaves = {
-        method: API(methods=[method])(_param_leaf) for method in ROUTE_METHODS
-    }
+    _param_leaves = {method: API(methods=[method])(_param_leaf) for method in ROUTE_METHODS}
 
     _urls = {
         "": plaintext,

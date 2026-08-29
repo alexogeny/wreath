@@ -1,10 +1,3 @@
-"""Multi-worker reactors and GIL discipline.
-
-The production model is one reactor per worker thread behind SO_REUSEPORT. These
-pin two invariants: independent reactors serve correctly in parallel, and a
-single reactor stays correct under many concurrent clients (no lost wakeups, no
-torn state) with the GIL released only across the blocking poll.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -54,7 +47,6 @@ def test_single_reactor_handles_many_concurrent_clients(loop):
 
 
 def test_two_reactor_workers_serve_independently(make_native_loop):
-    """Two loops, two threads, two ports — each answers its own clients."""
     ready = threading.Event()
     stop = threading.Event()
     ports: dict[int, int] = {}

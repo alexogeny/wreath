@@ -1,5 +1,3 @@
-"""app.orm() registration and Annotated[Session, FromORM(...)] handler binding."""
-
 from __future__ import annotations
 
 from typing import Annotated, Any
@@ -32,9 +30,6 @@ def build_app(monkeypatch: pytest.MonkeyPatch) -> tuple[Wreath, FakeDatabase]:
     app = Wreath()
     app.postgres("main", dsn="postgresql://localhost/app")
     return app, database
-
-
-# -- registration --------------------------------------------------------------
 
 
 async def test_orm_registers_against_a_configured_database(
@@ -98,9 +93,6 @@ async def test_two_apps_can_map_one_model_set_to_different_databases(
     left = Session(first, "read")
     right = Session(second, "read")
     assert (await left.fetch(User.select()))[0] is not (await right.fetch(User.select()))[0]
-
-
-# -- binding -------------------------------------------------------------------
 
 
 async def test_a_handler_receives_a_request_scoped_session(
@@ -167,9 +159,7 @@ async def test_session_tenant_marker_resolves_for_the_request() -> None:
         captured.append(session._tenant)
         return None
 
-    tenant_session.__annotations__["session"] = Annotated[
-        Session, FromORM("main", tenant=marker)
-    ]
+    tenant_session.__annotations__["session"] = Annotated[Session, FromORM("main", tenant=marker)]
 
     class SchemaMode:
         kind = "isolated"
@@ -208,9 +198,7 @@ async def test_an_unused_session_leases_no_connection(
     app.orm(database="main", models=[User, Post], validate_schema="off")
 
     @app.get("/idle")
-    async def idle(
-        request: Any, session: Annotated[Session, FromORM("main")]
-    ) -> Any:
+    async def idle(request: Any, session: Annotated[Session, FromORM("main")]) -> Any:
         return {}
 
     async with TestClient(app) as client:
@@ -226,9 +214,7 @@ async def test_the_connection_returns_once_when_a_handler_raises(
     app.orm(database="main", models=[User, Post], validate_schema="off")
 
     @app.get("/boom")
-    async def boom(
-        request: Any, session: Annotated[Session, FromORM("main")]
-    ) -> Any:
+    async def boom(request: Any, session: Annotated[Session, FromORM("main")]) -> Any:
         database.connection.script("users", [user_row(1)])
         await session.fetch(User.select())
         raise RuntimeError("handler failed")
@@ -301,9 +287,7 @@ async def test_a_bare_session_annotation_is_rejected(
 
 
 async def test_an_unknown_registry_fails_while_compiling_the_handler() -> None:
-    async def handler(
-        request: Any, session: Annotated[Session, FromORM("nope")]
-    ) -> Any:
+    async def handler(request: Any, session: Annotated[Session, FromORM("nope")]) -> Any:
         return {}
 
     with pytest.raises(TypeError, match="unknown ORM registry"):

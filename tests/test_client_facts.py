@@ -38,7 +38,7 @@ class Geo:
 def _varint(value: int) -> bytes:
     encoded = bytearray()
     while value >= 0x80:
-        encoded.append((value & 0x7f) | 0x80)
+        encoded.append((value & 0x7F) | 0x80)
         value >>= 7
     encoded.append(value)
     return bytes(encoded)
@@ -124,9 +124,7 @@ def test_client_hints_override_disagreeing_database_facts() -> None:
         receive,
     )
 
-    database = SimpleNamespace(
-        _classify=lambda raw: ("Chrome", "120", "Linux", True, False, 1)
-    )
+    database = SimpleNamespace(_classify=lambda raw: ("Chrome", "120", "Linux", True, False, 1))
     facts = ClientFactsProvider(user_agents=database).resolve(request)
 
     assert (
@@ -173,9 +171,7 @@ def test_exact_builtin_geoip_reuses_the_provider_ip_parse(monkeypatch) -> None:
 def test_client_facts_skip_only_an_explicitly_unarmed_flight_context() -> None:
     facts = ClientFacts(
         ip=None,
-        user_agent=UserAgentFacts(
-            raw="curl/8", browser="curl", browser_version="8", rule_id=7
-        ),
+        user_agent=UserAgentFacts(raw="curl/8", browser="curl", browser_version="8", rule_id=7),
         agent=AgentFacts(claimed=False, verified=False),
     )
 
@@ -313,9 +309,7 @@ def test_client_fact_metrics_distinguish_ipv6_and_verified_humans() -> None:
         facts=lambda request: SimpleNamespace(verified=True, agent="human-agent")
     )
     provider = ClientFactsProvider(signatures=signatures)
-    request = Request(
-        {"type": "http", "client": ("2001:db8::1", None), "headers": []}, receive
-    )
+    request = Request({"type": "http", "client": ("2001:db8::1", None), "headers": []}, receive)
 
     provider.resolve(request)
 
@@ -482,9 +476,7 @@ def test_provider_caches_and_fuses_verified_agent_once_per_request() -> None:
 )
 def test_unverified_signature_facts_publish_no_identity(signature_facts) -> None:
     signatures = SimpleNamespace(facts=lambda request: signature_facts)
-    request = Request(
-        {"type": "http", "headers": [(b"user-agent", b"curl/8")]}, receive
-    )
+    request = Request({"type": "http", "headers": [(b"user-agent", b"curl/8")]}, receive)
 
     facts = ClientFactsProvider(signatures=signatures).resolve(request)
 
@@ -546,12 +538,20 @@ def test_native_user_agent_database_scans_products_without_regexes(tmp_path) -> 
         False,
     )
     path = tmp_path / "agents.json"
-    path.write_text(json.dumps({"entries": [{
-        "token": "wreathprobe",
-        "browser": "Wreath Probe",
-        "bot": True,
-        "priority": 100,
-    }]}))
+    path.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "token": "wreathprobe",
+                        "browser": "Wreath Probe",
+                        "bot": True,
+                        "priority": 100,
+                    }
+                ]
+            }
+        )
+    )
     custom = UserAgentDatabase.from_path(path)
     assert custom.lookup("wreathprobe/2.1") == (
         "Wreath Probe",
@@ -611,17 +611,20 @@ def test_bundled_user_agent_database_is_real_bounded_data() -> None:
     )
 
 
-@pytest.mark.parametrize(("user_agent", "client"), [
-    (
-        "Mozilla/5.0 Chrome/131.0; compatible; OAI-SearchBot/1.4",
-        "OpenAI SearchBot",
-    ),
-    ("Claude-SearchBot/1.0", "Claude SearchBot"),
-    ("Perplexity-User/1.0", "Perplexity User"),
-    ("Meta-ExternalAgent/1.1", "Meta External Agent"),
-    ("Bytespider/1.0", "Bytespider"),
-    ("Scrapy/2.13", "Scrapy"),
-])
+@pytest.mark.parametrize(
+    ("user_agent", "client"),
+    [
+        (
+            "Mozilla/5.0 Chrome/131.0; compatible; OAI-SearchBot/1.4",
+            "OpenAI SearchBot",
+        ),
+        ("Claude-SearchBot/1.0", "Claude SearchBot"),
+        ("Perplexity-User/1.0", "Perplexity User"),
+        ("Meta-ExternalAgent/1.1", "Meta External Agent"),
+        ("Bytespider/1.0", "Bytespider"),
+        ("Scrapy/2.13", "Scrapy"),
+    ],
+)
 def test_bundled_user_agent_database_covers_contemporary_automation(
     user_agent: str, client: str
 ) -> None:
@@ -629,11 +632,14 @@ def test_bundled_user_agent_database_covers_contemporary_automation(
     assert (browser, bot) == (client, True)
 
 
-@pytest.mark.parametrize(("user_agent", "client"), [
-    ("python-requests/2.32.4", "Python Requests"),
-    ("aws-sdk-go-v2/1.38.0", "AWS SDK for Go"),
-    ("Mozilla/5.0 HuaweiBrowser/15.0 Mobile", "Huawei Browser"),
-])
+@pytest.mark.parametrize(
+    ("user_agent", "client"),
+    [
+        ("python-requests/2.32.4", "Python Requests"),
+        ("aws-sdk-go-v2/1.38.0", "AWS SDK for Go"),
+        ("Mozilla/5.0 HuaweiBrowser/15.0 Mobile", "Huawei Browser"),
+    ],
+)
 def test_bundled_user_agent_database_covers_clients_without_calling_them_bots(
     user_agent: str, client: str
 ) -> None:
@@ -653,16 +659,12 @@ def test_bundled_geoip_database_is_exact_bounded_ipv4_and_ipv6_data() -> None:
 
 def test_wreath_geoip_uses_exact_ranges_across_lookup_directories(tmp_path) -> None:
     v4 = [
-        (int(ipaddress.IPv4Address("1.255.255.250")),
-         int(ipaddress.IPv4Address("2.0.0.5"))),
-        (int(ipaddress.IPv4Address("203.0.113.0")),
-         int(ipaddress.IPv4Address("203.0.113.255"))),
+        (int(ipaddress.IPv4Address("1.255.255.250")), int(ipaddress.IPv4Address("2.0.0.5"))),
+        (int(ipaddress.IPv4Address("203.0.113.0")), int(ipaddress.IPv4Address("203.0.113.255"))),
     ]
     first_v6 = int(ipaddress.IPv6Address("2001:db8::")) >> 64
     image = (
-        b"WGD2\x01\x02\x00\x01\x00AU"
-        + _range_records(v4)
-        + _range_records([(first_v6, first_v6)])
+        b"WGD2\x01\x02\x00\x01\x00AU" + _range_records(v4) + _range_records([(first_v6, first_v6)])
     )
     path = tmp_path / "exact.wgd"
     path.write_bytes(image)

@@ -1,12 +1,3 @@
-"""The shared bus-bridge discipline: one channel, one origin, no relay.
-
-Three subsystems broadcast across workers, and the parts they share are the
-parts that are subtle: dropping the echo `NOTIFY` hands back to the sender, and
-never re-publishing what arrived. These pin the primitive directly rather than
-only through its three callers, because "the bridge never relays" is a property
-of the bridge, and a caller test can only ever show that *this* caller does not.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -65,11 +56,7 @@ def _collecting(bus: Any = None, *, channel: str = "test_channel"):
     return BusBridge(bus, channel=channel, apply=apply), accepted
 
 
-# --- subscription -------------------------------------------------------------
-
-
 async def test_it_subscribes_once_at_construction() -> None:
-    """The bus collects subscriptions before it starts; later is never."""
     bus = FakeBus()
     _collecting(bus, channel="shard_a")
 
@@ -84,14 +71,10 @@ async def test_a_bridge_without_a_bus_subscribes_to_nothing() -> None:
 
 
 async def test_publishing_without_a_bus_is_a_no_op() -> None:
-    """Single-process is a supported configuration, not a broken one."""
     bridge, _accepted = _collecting()
-    await bridge.publish({"hello": "world"})     # must not raise
+    await bridge.publish({"hello": "world"})  # must not raise
     bridge.publish_soon({"hello": "world"})
     await asyncio.sleep(0)
-
-
-# --- the origin tag -------------------------------------------------------------
 
 
 async def test_every_publish_carries_the_origin() -> None:
@@ -103,18 +86,18 @@ async def test_every_publish_carries_the_origin() -> None:
     await asyncio.sleep(0)
 
     assert [payload["origin"] for _channel, payload in bus.published] == [
-        bridge.origin, bridge.origin
+        bridge.origin,
+        bridge.origin,
     ]
 
 
 async def test_a_caller_cannot_shadow_the_origin() -> None:
-    """The tag is the guard; a payload key must not be able to disable it."""
     bus = FakeBus()
     bridge, _accepted = _collecting(bus)
 
     await bridge.publish({"origin": "spoofed"})
 
-    (_channel, payload), = bus.published
+    ((_channel, payload),) = bus.published
     assert payload["origin"] == bridge.origin
 
 
@@ -125,43 +108,28 @@ async def test_two_bridges_have_different_origins() -> None:
 
 
 async def test_the_origin_is_not_the_object_address() -> None:
-    """The tag is published to every worker on the channel, so an address is
-    wrong twice over: two processes with similar heap layouts can allocate
-    their bridge at the same one, and it discloses this process's layout."""
     bridge, _accepted = _collecting(FakeBus())
 
     address = f"{id(bridge):x}"
     assert bridge.origin != address
     assert address not in bridge.origin
     assert len(bridge.origin) == 16
-    int(bridge.origin, 16)          # hex, so it survives any payload encoding
+    int(bridge.origin, 16)  # hex, so it survives any payload encoding
 
 
 async def test_origins_do_not_repeat_across_short_lived_bridges() -> None:
-    """The failure an address-derived tag actually produces.
-
-    Each of these is collected before the next is built, so CPython hands the
-    same address out again and again -- measured here, `id()` yielded exactly
-    one distinct tag for 500 bridges. On the wire that is one worker eating
-    another's messages as its own echo, and the symptom is invalidations that
-    mostly work.
-    """
     origins = {_collecting()[0].origin for _ in range(500)}
     assert len(origins) == 500
 
 
-# --- the echo guard ---------------------------------------------------------------
-
-
 async def test_a_worker_ignores_the_echo_of_its_own_publish() -> None:
-    """NOTIFY hands the sender its own message back; applying it twice is waste."""
     bus = FakeBus()
     bridge, accepted = _collecting(bus)
 
-    await bridge.publish({"n": 1})       # FakeBus delivers back to this listener
+    await bridge.publish({"n": 1})  # FakeBus delivers back to this listener
 
-    assert bus.published                  # it did go out
-    assert accepted == []                 # ... and did not come back in
+    assert bus.published  # it did go out
+    assert accepted == []  # ... and did not come back in
 
 
 async def test_another_workers_message_is_accepted() -> None:
@@ -175,8 +143,6 @@ async def test_another_workers_message_is_accepted() -> None:
 
 
 async def test_a_payload_with_no_origin_is_treated_as_foreign() -> None:
-    """Delivering an untagged message is the safe direction: an unrecognised
-    publisher is somebody else, and dropping it would lose a real update."""
     bus = FakeBus()
     _bridge, accepted = _collecting(bus)
 
@@ -200,7 +166,6 @@ async def test_an_invalid_origin_is_delivered_but_counted(origin: Any) -> None:
 
 @pytest.mark.parametrize("payload", ["not-a-dict", None, 7, ["models"], b"bytes"])
 async def test_a_payload_that_is_not_a_mapping_is_dropped(payload: Any) -> None:
-    """The channel is shared; anything else on it must not crash the worker."""
     bus = FakeBus()
     _bridge, accepted = _collecting(bus)
 
@@ -210,16 +175,7 @@ async def test_a_payload_that_is_not_a_mapping_is_dropped(payload: Any) -> None:
     assert accepted == []
 
 
-# --- never relay --------------------------------------------------------------------
-
-
 async def test_an_accepted_message_is_never_published_onward() -> None:
-    """The property the whole module exists for: one hop out from the writer.
-
-    A bridge that re-publishes what it received turns one write into a storm
-    that grows with the worker count. There is no path from receive to publish
-    here, so a caller would have to write the relay itself to get one.
-    """
     bus = FakeBus()
     _bridge, accepted = _collecting(bus)
 
@@ -232,31 +188,26 @@ async def test_an_accepted_message_is_never_published_onward() -> None:
     assert bus.published == []
 
 
-# --- the two publish shapes ------------------------------------------------------
-
-
 async def test_publish_soon_does_not_make_the_caller_wait() -> None:
     bus = FakeBus()
     bridge, _accepted = _collecting(bus)
 
     bridge.publish_soon({"n": 1})
-    assert bus.published == []            # not yet: it is a task, not inline
+    assert bus.published == []  # not yet: it is a task, not inline
 
     await asyncio.sleep(0)
     assert len(bus.published) == 1
 
 
 async def test_publish_soon_survives_a_bus_that_is_down() -> None:
-    """The caller's real work is already done; a NOTIFY cannot undo it."""
     bridge, _accepted = _collecting(FakeBus(fail=True))
 
-    bridge.publish_soon({"n": 1})         # must not raise
+    bridge.publish_soon({"n": 1})  # must not raise
     for _ in range(5):
         await asyncio.sleep(0)
 
 
 async def test_publish_soon_outside_the_event_loop_is_not_carried() -> None:
-    """Defensive: these callers only publish from async code, but never raise."""
     bus = FakeBus()
     bridge, _accepted = _collecting(bus)
 
@@ -265,8 +216,6 @@ async def test_publish_soon_outside_the_event_loop_is_not_carried() -> None:
 
 
 async def test_publish_lets_a_bus_failure_reach_the_caller() -> None:
-    """The awaited form is for a caller who asked for the fan-out and can act
-    on it failing -- unlike `publish_soon`, whose caller has already finished."""
     bridge, _accepted = _collecting(FakeBus(fail=True))
 
     with pytest.raises(ConnectionError):
@@ -274,23 +223,19 @@ async def test_publish_lets_a_bus_failure_reach_the_caller() -> None:
 
 
 async def test_an_inflight_publish_keeps_its_own_reference() -> None:
-    """A task nobody holds can be collected mid-flight, losing the message."""
     bus = FakeBus()
     bridge, _accepted = _collecting(bus)
 
     bridge.publish_soon({"n": 1})
-    assert bridge.inflight == 1           # held from the moment it is scheduled
+    assert bridge.inflight == 1  # held from the moment it is scheduled
 
     # Several yields, not one: the task finishes in its first step, but the
     # done-callback that releases the reference is itself a `call_soon`.
     for _ in range(5):
         await asyncio.sleep(0)
 
-    assert bridge.inflight == 0           # and released once it lands
+    assert bridge.inflight == 0  # and released once it lands
     assert len(bus.published) == 1
-
-
-# --- channels are separate -------------------------------------------------------
 
 
 async def test_bridges_on_separate_channels_do_not_cross_talk() -> None:

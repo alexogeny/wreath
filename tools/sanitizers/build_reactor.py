@@ -1,8 +1,4 @@
-"""Prepare an isolated Wreath package containing an ASan/UBSan reactor extension.
-
-Mirrors build_server.py. See docs/plans/native-server-sanitizers.md for how to
-drive the sanitized extension under LD_PRELOAD + ASAN/UBSAN/LSAN options.
-"""
+"""Prepare an isolated Wreath package containing an ASan/UBSan reactor extension."""
 
 from __future__ import annotations
 

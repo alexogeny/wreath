@@ -1,5 +1,3 @@
-"""Tenant request context: transaction-local search_path/role binding."""
-
 from __future__ import annotations
 
 import pytest
@@ -103,9 +101,6 @@ def _single_registry() -> Registry:
     )
 
 
-# -- context validation -------------------------------------------------------
-
-
 def test_context_validates_identifiers() -> None:
     from wreath.orm.errors import DeclarationError
 
@@ -118,9 +113,7 @@ def test_context_validates_identifiers() -> None:
 
 
 def test_namespace_context_binds_only_search_path() -> None:
-    assert TenantContext(schema="t1")._bind_statements() == (
-        'SET LOCAL search_path = "t1"',
-    )
+    assert TenantContext(schema="t1")._bind_statements() == ('SET LOCAL search_path = "t1"',)
 
 
 def test_role_context_binds_search_path_then_role() -> None:
@@ -128,9 +121,6 @@ def test_role_context_binds_search_path_then_role() -> None:
         'SET LOCAL search_path = "t1"',
         'SET LOCAL ROLE "t1_role"',
     )
-
-
-# -- session construction -----------------------------------------------------
 
 
 def test_isolated_registry_requires_a_tenant_context() -> None:
@@ -146,9 +136,6 @@ def test_tenant_context_is_rejected_for_a_single_registry() -> None:
 def test_isolated_registry_with_a_context_constructs() -> None:
     session = Session(_isolated_registry(), "write", tenant=TenantContext(schema="t1"))
     assert not session.closed
-
-
-# -- binding at transaction start --------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -206,9 +193,6 @@ async def test_a_savepoint_does_not_rebind_the_context() -> None:
             pass
     binds = [s for s in database.connection.statements if s.startswith("SET LOCAL")]
     assert binds == ['SET LOCAL search_path = "tenant_7"']
-
-
-# -- the no-unbound-tenant-SQL guarantee -------------------------------------
 
 
 @pytest.mark.asyncio

@@ -313,8 +313,6 @@ class TestClient:
         self._restore_backend: Any = _UNSET
         self._root: TestClient = self
 
-    # --- acting as someone ---------------------------------------------------
-
     def acting_as(
         self,
         principal: Any,
@@ -435,8 +433,6 @@ class TestClient:
             configure(self._restore_backend, getattr(self.app, "_authorizer", None))
         self._restore_backend = _UNSET
 
-    # --- lifespan ----------------------------------------------------------
-
     async def __aenter__(self) -> TestClient:
         to_app: asyncio.Queue[Message] = asyncio.Queue()
         from_app: asyncio.Queue[Message] = asyncio.Queue()
@@ -500,8 +496,6 @@ class TestClient:
             f"the app's lifespan ended without a {phase} reply; it must send "
             f"lifespan.{phase}.complete or lifespan.{phase}.failed"
         )
-
-    # --- HTTP ---------------------------------------------------------------
 
     async def request(
         self,
@@ -647,8 +641,6 @@ class TestClient:
     async def head(self, path: str, **kwargs: Any) -> TestResponse:
         """Send a HEAD request; keywords are those of `request()`."""
         return await self.request("HEAD", path, **kwargs)
-
-    # --- WebSocket ------------------------------------------------------------
 
     def websocket(
         self,

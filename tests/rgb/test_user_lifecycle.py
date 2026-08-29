@@ -1,6 +1,3 @@
-"""Password reset and login throttling in the shipped user router (report 23:
-G-75, B-14)."""
-
 from __future__ import annotations
 
 from wreath._userkit import (
@@ -29,7 +26,8 @@ class _RecordingSessionStore:
     async def delete_for(self, subject: str) -> int:
         self.deleted_for.append(subject)
         gone = [
-            sid for sid, data in self.rows.items()
+            sid
+            for sid, data in self.rows.items()
             if (data.get("principal") or {}).get("sub") == subject
         ]
         for sid in gone:
@@ -57,11 +55,17 @@ class TestResetEndsSessions:
         from wreath._userkit import fingerprint, sign_token
 
         token = sign_token(
-            "s" * 32, "reset", user.id, ttl=3600,
+            "s" * 32,
+            "reset",
+            user.id,
+            ttl=3600,
             bound=fingerprint(user.hashed_password),
         )
         done = await self._reset(
-            users, sessions, secret="s" * 32, token=token,
+            users,
+            sessions,
+            secret="s" * 32,
+            token=token,
             new_password="a-much-better-one",
         )
         assert done is True
@@ -76,7 +80,10 @@ class TestResetEndsSessions:
         sessions.rows["sid-ann"] = {"principal": {"sub": "1"}}
 
         done = await self._reset(
-            users, sessions, secret="s" * 32, token="not-a-token",
+            users,
+            sessions,
+            secret="s" * 32,
+            token="not-a-token",
             new_password="a-much-better-one",
         )
         assert done is False
@@ -84,8 +91,6 @@ class TestResetEndsSessions:
         assert "sid-ann" in sessions.rows
 
     async def test_a_store_that_cannot_enumerate_is_tolerated(self):
-        """A caller may pass a session store with no `delete_for`; the reset
-        must still succeed rather than failing on a missing capability."""
         users = InMemoryUserStore()
         user = await users.create("ann@example.com", hash_password("hunter2hunter2"))
 
@@ -102,13 +107,22 @@ class TestResetEndsSessions:
         from wreath._userkit import fingerprint, sign_token
 
         token = sign_token(
-            "s" * 32, "reset", user.id, ttl=3600,
+            "s" * 32,
+            "reset",
+            user.id,
+            ttl=3600,
             bound=fingerprint(user.hashed_password),
         )
-        assert await self._reset(
-            users, _Minimal(), secret="s" * 32, token=token,
-            new_password="a-much-better-one",
-        ) is True
+        assert (
+            await self._reset(
+                users,
+                _Minimal(),
+                secret="s" * 32,
+                token=token,
+                new_password="a-much-better-one",
+            )
+            is True
+        )
 
     async def test_no_session_store_still_resets(self):
         users = InMemoryUserStore()
@@ -116,13 +130,22 @@ class TestResetEndsSessions:
         from wreath._userkit import fingerprint, sign_token
 
         token = sign_token(
-            "s" * 32, "reset", user.id, ttl=3600,
+            "s" * 32,
+            "reset",
+            user.id,
+            ttl=3600,
             bound=fingerprint(user.hashed_password),
         )
-        assert await self._reset(
-            users, None, secret="s" * 32, token=token,
-            new_password="a-much-better-one",
-        ) is True
+        assert (
+            await self._reset(
+                users,
+                None,
+                secret="s" * 32,
+                token=token,
+                new_password="a-much-better-one",
+            )
+            is True
+        )
 
 
 class TestPostgresSessionStoreEnumeration:
@@ -207,8 +230,6 @@ class TestLoginThrottling:
         assert limiter.allow("ann@example.com") is True
 
     def test_the_primitive_is_still_unguarded(self):
-        """`_userkit.authenticate` stays stdlib-only and unthrottled; the
-        throttle lives in the router, and that has to be said out loud."""
         import inspect
 
         from wreath import _userkit

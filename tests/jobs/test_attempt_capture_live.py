@@ -1,16 +1,3 @@
-"""Attempt recording and replay against a real queue.
-
-Two things a fake cannot establish. **Lease expiry** is observed only by the
-sweeper's `UPDATE ... RETURNING`, and a fake hands back whatever row it was
-scripted with regardless of the projection, so the recording it produces would
-be identical whichever columns the statement actually selected. And **the
-property that makes this safe** -- that replaying an attempt does not enqueue,
-dedupe against, or otherwise mutate the queue -- is a claim about rows, which
-means it has to be checked against rows.
-
-Skipped unless ``WREATH_TEST_POSTGRES_DSN`` points at a throwaway database.
-"""
-
 from __future__ import annotations
 
 import os
@@ -61,9 +48,7 @@ async def queue(tmp_path):
         AttemptPolicy(triggers=(AttemptTrigger(AttemptTriggerKind.FAILURE),)),
         directory=str(tmp_path),
     )
-    runner = JobRunner(
-        db, name="work", schema=_SCHEMA, concurrency=1, lease=1.0, attempts=recorder
-    )
+    runner = JobRunner(db, name="work", schema=_SCHEMA, concurrency=1, lease=1.0, attempts=recorder)
     await _apply(db, f'CREATE SCHEMA IF NOT EXISTS "{_SCHEMA}"')
     await _apply(db, runner.schema_sql())
     await _apply(db, f'TRUNCATE "{_SCHEMA}".jobs')
@@ -78,8 +63,7 @@ async def _rows(runner):
     connection = await runner._db.acquire("write")
     try:
         return await connection.fetch(
-            f'SELECT id, state, attempts, fence, dedup_key FROM "{_SCHEMA}".jobs '
-            "ORDER BY id"
+            f'SELECT id, state, attempts, fence, dedup_key FROM "{_SCHEMA}".jobs ORDER BY id'
         )
     finally:
         await runner._db.release("write", connection)
@@ -97,8 +81,7 @@ async def test_a_reclaimed_lease_is_recorded_as_the_attempt_it_ended(queue):
     held_fence = claimed.fence
 
     await runner._exec(
-        f'UPDATE "{_SCHEMA}".jobs SET lease_expiry = now() - interval \'1 hour\' '
-        "WHERE id = $1",
+        f"UPDATE \"{_SCHEMA}\".jobs SET lease_expiry = now() - interval '1 hour' WHERE id = $1",
         job_id,
     )
     await runner._reclaim_expired()
@@ -122,8 +105,6 @@ async def test_a_reclaimed_lease_is_recorded_as_the_attempt_it_ended(queue):
 
 
 async def test_a_reclaimed_lease_with_no_dedup_key_records_an_empty_one(queue):
-    """`dedup_key` is nullable, and `str(None)` here would mint the four-character
-    key `"None"` -- which reads as a real one and matches nothing."""
     runner, directory = queue
 
     @runner.task("noop")
@@ -133,25 +114,18 @@ async def test_a_reclaimed_lease_with_no_dedup_key_records_an_empty_one(queue):
     job_id = await runner.enqueue("noop")
     await runner._claim(1)
     await runner._exec(
-        f'UPDATE "{_SCHEMA}".jobs SET lease_expiry = now() - interval \'1 hour\' '
-        "WHERE id = $1",
+        f"UPDATE \"{_SCHEMA}\".jobs SET lease_expiry = now() - interval '1 hour' WHERE id = $1",
         job_id,
     )
     await runner._reclaim_expired()
 
-    record = read_attempt_recording(
-        (directory / f"work-{job_id}-1.wfr1").read_bytes()
-    )
+    record = read_attempt_recording((directory / f"work-{job_id}-1.wfr1").read_bytes())
     assert record.dedup_key == ""
     assert record.argument_count == 0
     assert record.trace_context == ""
 
 
 async def test_an_unarmed_sweep_keeps_the_statement_it_always_issued(queue):
-    """The projection grows only when something is recording. Asserted on the
-    *statement*, because a fake hands back its row whatever the SELECT list is
-    -- and so does PostgreSQL, for the columns that are there.
-    """
     runner, _ = queue
     runner._attempts = None
     issued: list[str] = []
@@ -168,13 +142,6 @@ async def test_an_unarmed_sweep_keeps_the_statement_it_always_issued(queue):
 
 
 async def test_replaying_an_attempt_does_not_touch_the_queue(queue):
-    """The property that makes it safe to run a production recording locally.
-
-    Every way an attempt replay could reach the queue is checked against the
-    rows themselves: a handler that enqueues, a handler that reaches the
-    runner's own database directly, and the runner's own bookkeeping. None of
-    it may leave a mark.
-    """
     runner, directory = queue
 
     @runner.task("noisy")
@@ -192,9 +159,7 @@ async def test_replaying_an_attempt_does_not_touch_the_queue(queue):
 
     before = await _rows(runner)
     # The recorded attempt: one row, failed once, back to ready for a retry.
-    assert [(r["id"], r["state"], r["attempts"]) for r in before] == [
-        (job_id, "ready", 1)
-    ]
+    assert [(r["id"], r["state"], r["attempts"]) for r in before] == [(job_id, "ready", 1)]
     recording = directory / f"work-{job_id}-1.wfr1"
     record = read_attempt_recording(recording.read_bytes())
     assert record.outcome == AttemptOutcome.RAISED
@@ -203,9 +168,7 @@ async def test_replaying_an_attempt_does_not_touch_the_queue(queue):
     # destructive thing a handler could do to the queue. That is the situation
     # this property exists for: a production recording, replayed by somebody
     # who did not write the handler, on a machine with a real database.
-    replayer = JobRunner(
-        runner._db, name="work", schema=_SCHEMA, concurrency=1, lease=1.0
-    )
+    replayer = JobRunner(runner._db, name="work", schema=_SCHEMA, concurrency=1, lease=1.0)
 
     @replayer.task("noisy")
     async def destructive(ctx, *args):
@@ -234,8 +197,6 @@ async def test_replaying_an_attempt_does_not_touch_the_queue(queue):
 
 
 async def test_the_replay_reached_a_double_rather_than_doing_nothing(queue):
-    """The queue-safety test above would pass just as well against a replay
-    that never ran the handler at all. This one proves it ran."""
     runner, directory = queue
     seen: list[int] = []
 
@@ -249,9 +210,7 @@ async def test_the_replay_reached_a_double_rather_than_doing_nothing(queue):
 
     job_id = await runner.enqueue("counted")
     await runner._run((await runner._claim(1))[0])
-    record = read_attempt_recording(
-        (directory / f"work-{job_id}-1.wfr1").read_bytes()
-    )
+    record = read_attempt_recording((directory / f"work-{job_id}-1.wfr1").read_bytes())
     assert seen == [1]
     # The live attempt's boundary trace saw the handler's acquire/query/release
     # and then the runner's own `_fail` UPDATE on the same database.

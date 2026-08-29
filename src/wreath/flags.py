@@ -107,9 +107,7 @@ class _LegacyFlagAdapter:
     def __init__(self, provider: FlagProvider) -> None:
         self._provider = provider
 
-    def resolve[T: FlagScalar](
-        self, flag: Flag[T], context: Mapping[str, Any] | None = None
-    ) -> T:
+    def resolve[T: FlagScalar](self, flag: Flag[T], context: Mapping[str, Any] | None = None) -> T:
         if type(flag.default) is not bool:
             raise TypeError(
                 f"flag {flag.name!r} has a {type(flag.default).__name__} default; "
@@ -147,14 +145,14 @@ class OpenFeatureProvider:
 
     def __init__(self, client: Any) -> None:
         methods = (
-            "get_boolean_value", "get_string_value", "get_integer_value",
+            "get_boolean_value",
+            "get_string_value",
+            "get_integer_value",
             "get_float_value",
         )
         missing = tuple(name for name in methods if not callable(getattr(client, name, None)))
         if missing:
-            raise TypeError(
-                "OpenFeature client is missing " + ", ".join(missing)
-            )
+            raise TypeError("OpenFeature client is missing " + ", ".join(missing))
         self._client = client
 
     @classmethod
@@ -168,9 +166,7 @@ class OpenFeatureProvider:
             ) from exc
         return cls(api.get_client(name))
 
-    def resolve[T: FlagScalar](
-        self, flag: Flag[T], context: Mapping[str, Any] | None = None
-    ) -> T:
+    def resolve[T: FlagScalar](self, flag: Flag[T], context: Mapping[str, Any] | None = None) -> T:
         method = {
             bool: self._client.get_boolean_value,
             str: self._client.get_string_value,
@@ -213,14 +209,10 @@ class FlagSet:
         self._provider = resolved_provider
         self._by_name = by_name
 
-    def value[T: FlagScalar](
-        self, flag: Flag[T], context: Mapping[str, Any] | None = None
-    ) -> T:
+    def value[T: FlagScalar](self, flag: Flag[T], context: Mapping[str, Any] | None = None) -> T:
         declared = self._by_name.get(flag.name.lower())
         if declared is None:
-            raise KeyError(
-                f"flag {flag.name!r} is not declared; add that Flag to FlagSet"
-            )
+            raise KeyError(f"flag {flag.name!r} is not declared; add that Flag to FlagSet")
         if type(declared.default) is not type(flag.default):
             raise TypeError(
                 f"flag {flag.name!r} was declared as {type(declared.default).__name__}, "
@@ -295,9 +287,7 @@ class FeatureFlags:
         """Collect `WREATH_FLAG_<NAME>` entries from the environment."""
         env = environ if environ is not None else read_osenv()
         values = {
-            key[len(FLAG_PREFIX) :]: val
-            for key, val in env.items()
-            if key.startswith(FLAG_PREFIX)
+            key[len(FLAG_PREFIX) :]: val for key, val in env.items() if key.startswith(FLAG_PREFIX)
         }
         return cls(values)
 
@@ -316,9 +306,7 @@ class FeatureFlags:
         raw = self._values.get(key)
         return False if raw is None else evaluate_rule(raw, key, context)
 
-    def resolve[T: FlagScalar](
-        self, flag: Flag[T], context: Mapping[str, Any] | None = None
-    ) -> T:
+    def resolve[T: FlagScalar](self, flag: Flag[T], context: Mapping[str, Any] | None = None) -> T:
         """Resolve one typed declaration; malformed or absent values use its default."""
         raw = self._values.get(flag.name.lower())
         if raw is None:
@@ -345,14 +333,8 @@ class FeatureFlags:
         view of the configuration rather than of the application's flag vocabulary.
         """
         if type(self) is not FeatureFlags:
-            return {
-                name: self.resolve(Flag(name, False), context)
-                for name in self._values
-            }
-        return {
-            name: evaluate_rule(raw, name, context)
-            for name, raw in self._values.items()
-        }
+            return {name: self.resolve(Flag(name, False), context) for name in self._values}
+        return {name: evaluate_rule(raw, name, context) for name, raw in self._values.items()}
 
     def names(self) -> frozenset[str]:
         """Every flag name this provider holds, lower-cased.

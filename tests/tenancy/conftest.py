@@ -1,16 +1,3 @@
-"""Fixtures building the two-tenant deployment the isolation tests run against.
-
-Everything here exists so those tests can be *falsified*. They point a hostile
-query at another tenant and require the server to refuse, and that claim is only
-worth making against a database with two tenants, a central schema, and an
-application role that owns none of it.
-
-The setup connection is the DSN's own role, which in the test container is a
-superuser -- exactly the role `verify_isolation` refuses for the request path.
-That is the point: it *builds* the deployment, and every assertion runs on a
-second connection as an unprivileged `NOINHERIT` login role.
-"""
-
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
@@ -44,27 +31,36 @@ async def deployment() -> AsyncIterator[None]:
         # tenant role's privileges the moment it is granted membership, and
         # `RESET ROLE` becomes an escape hatch instead of a dead end.
         await connection.execute(
-            f"CREATE ROLE \"{APP_ROLE}\" LOGIN NOINHERIT PASSWORD '{APP_PASSWORD}'")
+            f"CREATE ROLE \"{APP_ROLE}\" LOGIN NOINHERIT PASSWORD '{APP_PASSWORD}'"
+        )
         await connection.execute(f'CREATE SCHEMA "{CENTRAL}"')
         await connection.execute(
-            f'CREATE TABLE "{CENTRAL}".plan (id bigint primary key, name text not null)')
+            f'CREATE TABLE "{CENTRAL}".plan (id bigint primary key, name text not null)'
+        )
         await connection.execute(
-            f"INSERT INTO \"{CENTRAL}\".plan (id, name) VALUES (1, 'free'), (2, 'pro')")
+            f"INSERT INTO \"{CENTRAL}\".plan (id, name) VALUES (1, 'free'), (2, 'pro')"
+        )
 
         for tenant in (ACME, GLOBEX):
             await provision_tenant(
-                connection, key=tenant.key, schema=tenant.schema, role=tenant.role,
-                central=CENTRAL, login_role=APP_ROLE,
+                connection,
+                key=tenant.key,
+                schema=tenant.schema,
+                role=tenant.role,
+                central=CENTRAL,
+                login_role=APP_ROLE,
             )
             # Created *after* provisioning, so the ALTER DEFAULT PRIVILEGES the
             # provisioner issued is what grants them. A fixture that granted by
             # hand here would hide the drift this is meant to prove is absent.
             await connection.execute(
                 f'CREATE TABLE "{tenant.schema}".item '
-                "(id bigint primary key, name text not null, plan_id bigint)")
+                "(id bigint primary key, name text not null, plan_id bigint)"
+            )
             await connection.execute(
-                f"INSERT INTO \"{tenant.schema}\".item (id, name, plan_id) "
-                f"VALUES (1, '{tenant.key}-thing', 1)")
+                f'INSERT INTO "{tenant.schema}".item (id, name, plan_id) '
+                f"VALUES (1, '{tenant.key}-thing', 1)"
+            )
         yield
     finally:
         await _teardown(connection)

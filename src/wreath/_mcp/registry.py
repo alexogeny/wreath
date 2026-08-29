@@ -31,9 +31,7 @@ from .schema import ToolSignatureError, derive_input_schema
 NO_REQUIREMENT = AuthRequirement()
 
 
-def policy_requirement(
-    action: str, resource: object | Callable[[Any], object]
-) -> AuthRequirement:
+def policy_requirement(action: str, resource: object | Callable[[Any], object]) -> AuthRequirement:
     """The requirement a declared `action=` produces.
 
     `authenticated=True` comes with it, exactly as `@authorize(...)` on a route
@@ -41,9 +39,7 @@ def policy_requirement(
     with no principal so the engine can deny it is a slower way of arriving at
     the same answer with a worse message.
     """
-    return AuthRequirement(
-        authenticated=True, policies=(PolicyRequirement(action, resource),)
-    )
+    return AuthRequirement(authenticated=True, policies=(PolicyRequirement(action, resource),))
 
 
 def bind_arguments(
@@ -75,9 +71,7 @@ def bind_arguments(
                     )
                 continue
             try:
-                kwargs[parameter] = validate(
-                    annotation, arguments[wire_name], (label, wire_name)
-                )
+                kwargs[parameter] = validate(annotation, arguments[wire_name], (label, wire_name))
             except ValidationError as error:
                 errors.extend(error.errors)
         if spec.body is not None:
@@ -221,7 +215,6 @@ class ToolRegistry(Catalog):
         self.insert(tool.name, tool)
 
 
-
 def actions_by_type(entries: Iterable[Any]) -> dict[str, tuple[str, ...]]:
     """Resource type -> the Cedar actions `entries` are gated on.
 
@@ -296,9 +289,7 @@ def build_tool(
         )
     text = description if description is not None else inspect.getdoc(handler)
     if not text:
-        subject = (
-            f"tool {tool_name!r}" if route is None else f"route {route} ({tool_name!r})"
-        )
+        subject = f"tool {tool_name!r}" if route is None else f"route {route} ({tool_name!r})"
         how = (
             "Pass `description=` or give the handler a docstring"
             if route is None

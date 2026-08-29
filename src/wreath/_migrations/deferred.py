@@ -76,9 +76,7 @@ def _model_of(column: Any) -> Any:
 
 
 def _primary_key(model: Any) -> tuple[Any, ...]:
-    columns = tuple(
-        item for item in getattr(model, "__wreath_columns__", ()) if item.primary_key
-    )
+    columns = tuple(item for item in getattr(model, "__wreath_columns__", ()) if item.primary_key)
     if not columns:
         raise DeferredDeclarationError(
             f"{model.__name__} has no primary key, so a chunked walk over it has "
@@ -94,9 +92,7 @@ def _walk_key(model: Any) -> Any:
     `Column` objects on the model are resolved back
     through the class to the descriptors' expressions.
     """
-    expressions = tuple(
-        getattr(model, item.python_name) for item in _primary_key(model)
-    )
+    expressions = tuple(getattr(model, item.python_name) for item in _primary_key(model))
     return expressions[0] if len(expressions) == 1 else expressions
 
 
@@ -151,8 +147,6 @@ class Recode:
             raise DeferredDeclarationError(f"chunk must be a positive int; got {self.chunk!r}")
         _model_of(self.column)
 
-    # -- identity ---------------------------------------------------------
-
     @property
     def converts(self) -> str:
         """`schema.table.column` for the column being converted."""
@@ -162,8 +156,6 @@ class Recode:
     def pass_name(self) -> str:
         return self.name or f"recode_{self.converts.replace('.', '_')}"
 
-    # -- what it derives --------------------------------------------------
-
     def build(self) -> ChunkedPass:
         """The walk that performs the conversion.
 
@@ -172,12 +164,9 @@ class Recode:
         is `scan`, and it runs before the walk starts rather than after it
         finishes.
 
-        It does declare `rewrites`, which is the *downgrade* half of the same
-        question. Having no gate means having no `guards`, so before this the
-        ledger recorded no association between this pass and the column at all
-        -- a downgrade could not have found it to refuse. `rewrites` is that
-        association, and unlike `guards` it is never cleared: the old values
-        are gone from the table and finishing does not bring them back.
+        `rewrites` records the column association needed to refuse an unsafe
+        downgrade. Unlike `guards`, it is never cleared: completing the pass
+        does not restore the previous encoding.
         """
         model = _model_of(self.column)
         inner = getattr(self.column, "column", self.column)

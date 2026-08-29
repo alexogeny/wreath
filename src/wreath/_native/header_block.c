@@ -10,15 +10,24 @@ typedef struct {
 } WreathHeaderSpan;
 
 typedef struct {
+    Py_ssize_t first_plus_one;
+    Py_ssize_t matches;
+} WreathHeaderIndexEntry;
+
+typedef struct {
     PyObject_HEAD
     PyObject *raw;
     PyObject *materialized;
     WreathHeaderSpan *spans;
     PyObject **names;
     PyObject **values;
+    WreathHeaderIndexEntry *index;
     Py_ssize_t count;
     Py_ssize_t capacity;
+    Py_ssize_t index_capacity;
+    Py_ssize_t unique_count;
     unsigned char object_mode;
+    unsigned char index_ready;
 } WreathHeaderBlock;
 
 static PyTypeObject WreathHeaderBlockType = {
@@ -48,6 +57,7 @@ header_block_free_storage(WreathHeaderBlock *self)
     PyMem_Free(self->spans);
     PyMem_Free(self->names);
     PyMem_Free(self->values);
+    PyMem_Free(self->index);
     PyObject_Free(self);
 }
 
@@ -65,6 +75,8 @@ header_block_dealloc(WreathHeaderBlock *self)
     self->raw = NULL;
     self->materialized = NULL;
     self->count = 0;
+    self->unique_count = 0;
+    self->index_ready = 0;
     if (header_block_freelist_enabled && self->names != NULL &&
         self->values != NULL && (self->object_mode || self->spans != NULL) &&
         header_block_freelist_len < HEADER_BLOCK_FREELIST_CAP) {
@@ -133,9 +145,13 @@ new_block(Py_ssize_t capacity, int object_mode)
     self->spans = NULL;
     self->names = NULL;
     self->values = NULL;
+    self->index = NULL;
     self->count = 0;
     self->capacity = capacity;
+    self->index_capacity = 0;
+    self->unique_count = 0;
     self->object_mode = (unsigned char)object_mode;
+    self->index_ready = 0;
     self->names = PyMem_Calloc((size_t)capacity, sizeof(PyObject *));
     self->values = PyMem_Calloc((size_t)capacity, sizeof(PyObject *));
     if (self->names == NULL || self->values == NULL) goto memory_error;
@@ -234,6 +250,7 @@ wreath_header_block_append_span(
     if (self->count == self->capacity && grow(self) < 0) return -1;
     self->spans[self->count++] = (WreathHeaderSpan){
         name_offset, name_size, value_offset, value_size};
+    self->index_ready = 0;
     return 0;
 }
 
@@ -250,6 +267,7 @@ wreath_header_block_append_objects(
     self->names[self->count] = Py_NewRef(name);
     self->values[self->count] = Py_NewRef(value);
     self->count++;
+    self->index_ready = 0;
     return 0;
 }
 
@@ -443,7 +461,277 @@ wreath_headers_materialize(PyObject *headers)
         PyList_SET_ITEM(list, i, pair);
     }
     self->materialized = Py_NewRef(list);
+    self->index_ready = 0;
     return list;
+}
+
+static uint64_t
+header_hash(const char *data, Py_ssize_t length)
+{
+    uint64_t hash = UINT64_C(1469598103934665603);
+    for (Py_ssize_t index = 0; index < length; index++) {
+        hash = (hash ^ (unsigned char)data[index]) * UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+static uint64_t
+header_name_hash(PyObject *name, Py_ssize_t length)
+{
+    uint64_t hash = UINT64_C(1469598103934665603);
+    for (Py_ssize_t index = 0; index < length; index++) {
+        unsigned char value = PyBytes_Check(name)
+            ? (unsigned char)PyBytes_AS_STRING(name)[index]
+            : (unsigned char)PyUnicode_READ_CHAR(name, index);
+        if (value >= 'A' && value <= 'Z') value += (unsigned char)('a' - 'A');
+        hash = (hash ^ value) * UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+static int
+header_name_length(PyObject *name, Py_ssize_t *length)
+{
+    if (PyBytes_Check(name)) {
+        *length = PyBytes_GET_SIZE(name);
+        return 0;
+    }
+    if (!PyUnicode_Check(name)) {
+        PyErr_SetString(PyExc_TypeError, "header name must be str or bytes");
+        return -1;
+    }
+    *length = PyUnicode_GET_LENGTH(name);
+    for (Py_ssize_t index = 0; index < *length; index++) {
+        if (PyUnicode_READ_CHAR(name, index) > 255) {
+            PyObject *encoded = PyUnicode_AsLatin1String(name);
+            Py_XDECREF(encoded);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int
+header_name_equal(const char *candidate, Py_ssize_t length, PyObject *name)
+{
+    for (Py_ssize_t index = 0; index < length; index++) {
+        unsigned char wanted = PyBytes_Check(name)
+            ? (unsigned char)PyBytes_AS_STRING(name)[index]
+            : (unsigned char)PyUnicode_READ_CHAR(name, index);
+        if (wanted >= 'A' && wanted <= 'Z') wanted += (unsigned char)('a' - 'A');
+        if ((unsigned char)candidate[index] != wanted) return 0;
+    }
+    return 1;
+}
+
+static int
+header_block_build_index(WreathHeaderBlock *self)
+{
+    if (self->index_ready) return 0;
+    Py_ssize_t capacity = 8;
+    if (self->count > PY_SSIZE_T_MAX / 2) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    Py_ssize_t wanted = self->count * 2;
+    while (capacity < wanted) {
+        if (capacity > PY_SSIZE_T_MAX / 2) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        capacity *= 2;
+    }
+    if (capacity > self->index_capacity) {
+        if ((size_t)capacity > SIZE_MAX / sizeof(WreathHeaderIndexEntry)) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        WreathHeaderIndexEntry *entries = PyMem_Realloc(
+            self->index, (size_t)capacity * sizeof(WreathHeaderIndexEntry));
+        if (entries == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        self->index = entries;
+        self->index_capacity = capacity;
+    }
+    memset(self->index, 0,
+           (size_t)self->index_capacity * sizeof(WreathHeaderIndexEntry));
+    self->unique_count = 0;
+    for (Py_ssize_t index = 0; index < self->count; index++) {
+        const char *name;
+        const char *value;
+        Py_ssize_t name_size;
+        Py_ssize_t value_size;
+        if (wreath_headers_view((PyObject *)self, index, &name, &name_size,
+                                &value, &value_size) < 0) return -1;
+        (void)value;
+        (void)value_size;
+        Py_ssize_t slot = (Py_ssize_t)(
+            header_hash(name, name_size) &
+            (uint64_t)(self->index_capacity - 1));
+        for (;;) {
+            WreathHeaderIndexEntry *entry = &self->index[slot];
+            if (entry->first_plus_one == 0) {
+                entry->first_plus_one = index + 1;
+                entry->matches = 1;
+                self->unique_count++;
+                break;
+            }
+            const char *candidate;
+            const char *ignored_value;
+            Py_ssize_t candidate_size;
+            Py_ssize_t ignored_value_size;
+            if (wreath_headers_view(
+                    (PyObject *)self, entry->first_plus_one - 1,
+                    &candidate, &candidate_size, &ignored_value,
+                    &ignored_value_size) < 0) return -1;
+            if (candidate_size == name_size &&
+                memcmp(candidate, name, (size_t)name_size) == 0) {
+                entry->matches++;
+                break;
+            }
+            slot = (slot + 1) & (self->index_capacity - 1);
+        }
+    }
+    self->index_ready = 1;
+    return 0;
+}
+
+static int
+header_block_find(
+    WreathHeaderBlock *self, uint64_t hash, Py_ssize_t name_size,
+    PyObject *name_object, const char *name_bytes,
+    Py_ssize_t *first, Py_ssize_t *matches)
+{
+    if (header_block_build_index(self) < 0) return -1;
+    Py_ssize_t slot = (Py_ssize_t)(
+        hash & (uint64_t)(self->index_capacity - 1));
+    for (;;) {
+        WreathHeaderIndexEntry *entry = &self->index[slot];
+        if (entry->first_plus_one == 0) {
+            *first = -1;
+            if (matches != NULL) *matches = 0;
+            return 0;
+        }
+        const char *candidate;
+        const char *ignored_value;
+        Py_ssize_t candidate_size;
+        Py_ssize_t ignored_value_size;
+        if (wreath_headers_view(
+                (PyObject *)self, entry->first_plus_one - 1,
+                &candidate, &candidate_size, &ignored_value,
+                &ignored_value_size) < 0) return -1;
+        int equal = candidate_size == name_size &&
+            (name_object != NULL
+                ? header_name_equal(candidate, name_size, name_object)
+                : memcmp(candidate, name_bytes, (size_t)name_size) == 0);
+        if (equal) {
+            *first = entry->first_plus_one - 1;
+            if (matches != NULL) *matches = entry->matches;
+            return 0;
+        }
+        slot = (slot + 1) & (self->index_capacity - 1);
+    }
+}
+
+int
+wreath_headers_find(
+    PyObject *headers, const char *name, Py_ssize_t name_size,
+    Py_ssize_t *first, Py_ssize_t *matches)
+{
+    if (wreath_headers_is_block(headers)) {
+        WreathHeaderBlock *self = (WreathHeaderBlock *)headers;
+        if (self->materialized == NULL) {
+            return header_block_find(
+                self, header_hash(name, name_size), name_size, NULL, name,
+                first, matches);
+        }
+    }
+    Py_ssize_t count = wreath_headers_count(headers);
+    if (count < 0) return -1;
+    *first = -1;
+    Py_ssize_t found = 0;
+    for (Py_ssize_t index = 0; index < count; index++) {
+        const char *candidate;
+        const char *value;
+        Py_ssize_t candidate_size;
+        Py_ssize_t value_size;
+        if (wreath_headers_view(headers, index, &candidate, &candidate_size,
+                                &value, &value_size) < 0) return -1;
+        if (candidate_size != name_size ||
+            memcmp(candidate, name, (size_t)name_size) != 0) continue;
+        if (*first < 0) *first = index;
+        found++;
+    }
+    if (matches != NULL) *matches = found;
+    return 0;
+}
+
+int
+wreath_headers_find_name(
+    PyObject *headers, PyObject *name, Py_ssize_t *first,
+    Py_ssize_t *matches)
+{
+    Py_ssize_t name_size;
+    if (header_name_length(name, &name_size) < 0) return -1;
+    if (wreath_headers_is_block(headers)) {
+        WreathHeaderBlock *self = (WreathHeaderBlock *)headers;
+        if (self->materialized == NULL) {
+            return header_block_find(
+                self, header_name_hash(name, name_size), name_size, name, NULL,
+                first, matches);
+        }
+    }
+    Py_ssize_t count = wreath_headers_count(headers);
+    if (count < 0) return -1;
+    *first = -1;
+    Py_ssize_t found = 0;
+    for (Py_ssize_t index = 0; index < count; index++) {
+        const char *candidate;
+        const char *value;
+        Py_ssize_t candidate_size;
+        Py_ssize_t value_size;
+        if (wreath_headers_view(headers, index, &candidate, &candidate_size,
+                                &value, &value_size) < 0) return -1;
+        if (candidate_size != name_size ||
+            !header_name_equal(candidate, name_size, name)) continue;
+        if (*first < 0) *first = index;
+        found++;
+    }
+    if (matches != NULL) *matches = found;
+    return 0;
+}
+
+Py_ssize_t
+wreath_headers_unique_count(PyObject *headers)
+{
+    if (wreath_headers_is_block(headers)) {
+        WreathHeaderBlock *self = (WreathHeaderBlock *)headers;
+        if (self->materialized == NULL) {
+            if (header_block_build_index(self) < 0) return -1;
+            return self->unique_count;
+        }
+    }
+    Py_ssize_t count = wreath_headers_count(headers);
+    if (count < 0) return -1;
+    Py_ssize_t unique = 0;
+    for (Py_ssize_t index = 0; index < count; index++) {
+        const char *name;
+        const char *value;
+        Py_ssize_t name_size;
+        Py_ssize_t value_size;
+        if (wreath_headers_view(headers, index, &name, &name_size,
+                                &value, &value_size) < 0) return -1;
+        (void)value;
+        (void)value_size;
+        Py_ssize_t first;
+        if (wreath_headers_find(headers, name, name_size, &first, NULL) < 0) {
+            return -1;
+        }
+        if (first == index) unique++;
+    }
+    return unique;
 }
 
 int
@@ -561,6 +849,7 @@ wreath_headers_remove_all(PyObject *headers, PyObject *name)
                 write++;
             }
             self->count = write;
+            self->index_ready = 0;
             return 0;
         }
         list = self->materialized;

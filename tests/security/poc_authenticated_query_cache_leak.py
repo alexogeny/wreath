@@ -1,15 +1,3 @@
-"""PoC: replay one authenticated caller's cached response to another.
-
-Run from the repository root::
-
-    uv run python tests/security/poc_authenticated_query_cache_leak.py
-
-The script binds only to loopback and drives Wreath through the metal event
-loop and native HTTP/1 server.  The route uses the documented ``query_params``
-cache-key helper to bound its public query keyspace.  A vulnerable build stores
-Alice's authenticated response under that shared key and serves it to Bob.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -65,9 +53,7 @@ async def _drive(server: Server, port: int) -> list[bytes]:
 def main() -> int:
     app = Wreath()
     app.configure_auth(
-        BearerTokenBackend(
-            lambda token: Identity(id=token) if token in {"alice", "bob"} else None
-        )
+        BearerTokenBackend(lambda token: Identity(id=token) if token in {"alice", "bob"} else None)
     )
 
     @app.get("/me")

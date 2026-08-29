@@ -1,10 +1,3 @@
-"""What ``wreath port`` does with a tree that is not a tidy corpus.
-
-These pin the three ways a run over a real 3000-file checkout used to go wrong:
-a coverage number that reads 100% precisely when nothing was understood, a single
-unreadable file ending the whole run, and a checked-out virtualenv being walked
-and counted as application code.
-"""
 from pathlib import Path
 
 import pytest
@@ -30,11 +23,7 @@ def _app_tree(tmp_path: Path) -> Path:
     return root
 
 
-# -- 1. an empty denominator is not 100% --------------------------------------
-
-
 def test_empty_tree_reports_no_coverage_rather_than_perfect_coverage(tmp_path):
-    """A tree the analyzer recognized nothing in must never render as 100%."""
     root = tmp_path / "empty"
     root.mkdir()
 
@@ -54,7 +43,6 @@ def test_empty_tree_reports_no_coverage_rather_than_perfect_coverage(tmp_path):
 
 
 def test_a_tree_of_unrecognized_python_is_not_100_percent(tmp_path):
-    """Files were read and understood to contain *nothing portable*: still n/a."""
     root = tmp_path / "plain"
     root.mkdir()
     (root / "maths.py").write_text("def herd_size(n):\n    return n * 2\n", encoding="utf-8")
@@ -68,7 +56,6 @@ def test_a_tree_of_unrecognized_python_is_not_100_percent(tmp_path):
 
 
 def test_a_category_with_no_findings_has_no_coverage(tmp_path):
-    """Per-category coverage has the same empty-denominator rule as the overall."""
     report = port.analyze(_app_tree(tmp_path))
 
     assert report.coverage("routing") is not None
@@ -76,7 +63,8 @@ def test_a_category_with_no_findings_has_no_coverage(tmp_path):
 
 
 def test_each_source_is_parsed_once_for_the_whole_analysis(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from wreath._port import analyzer
     from wreath._port.analyzer import django, orm
@@ -102,11 +90,7 @@ def test_each_source_is_parsed_once_for_the_whole_analysis(
     assert sorted(path.name for path in parsed) == ["main.py", "models.py"]
 
 
-# -- 2. a bad file is recorded and skipped, not fatal -------------------------
-
-
 def test_an_unreadable_file_is_recorded_and_skipped(tmp_path):
-    """A broken symlink is the reliable form of "cannot be read" (root included)."""
     root = _app_tree(tmp_path)
     (root / "dangling.py").symlink_to(root / "no_such_file.py")
 
@@ -132,12 +116,6 @@ def test_a_file_that_is_not_utf8_is_recorded_and_skipped(tmp_path):
 
 
 def test_a_file_with_nul_bytes_is_recorded_and_skipped(tmp_path):
-    """A binary blob named ``.py``. CPython 3.14 reports NULs as a SyntaxError.
-
-    Older CPythons raised ``ValueError`` here, which is why the analyzer catches
-    that too (``invalid-source``); what this pins is that the file is skipped and
-    named rather than ending the run, under whichever of the two it raises.
-    """
     root = _app_tree(tmp_path)
     (root / "binary.py").write_bytes(b"TREK = 1\x00\n")
 
@@ -156,7 +134,6 @@ def test_a_value_error_is_classified_as_invalid_source():
 
 
 def test_a_module_nested_past_the_recursion_limit_is_recorded_and_skipped(tmp_path):
-    """A generated module can exceed the parser's stack budget; that is one file."""
     root = _app_tree(tmp_path)
     (root / "generated.py").write_text(
         "PADDOCKS = " + "+".join(["1"] * 100_000) + "\n", encoding="utf-8"
@@ -180,7 +157,6 @@ def test_a_syntax_error_is_now_reported_rather_than_silently_dropped(tmp_path):
 
 
 def test_a_skipped_file_is_named_once_not_once_per_pass(tmp_path):
-    """The tree is read twice (index, then analysis); the skip is reported once."""
     root = _app_tree(tmp_path)
     (root / "python2.py").write_text("print 'llama'\n", encoding="utf-8")
 
@@ -202,12 +178,6 @@ def test_skips_are_visible_in_both_renderings(tmp_path):
 
 
 def test_skipped_files_are_outside_the_coverage_fraction(tmp_path):
-    """Documented semantics: coverage describes the files that *were* read.
-
-    A skipped file has no classified constructs, so it moves neither numerator
-    nor denominator — which is exactly why the skip list has to be printed next
-    to the number.
-    """
     root = _app_tree(tmp_path)
     clean = port.analyze(root)
 
@@ -251,16 +221,12 @@ def test_merge_carries_skips_and_file_counts(tmp_path):
     assert len(merged.skipped) == 1
 
 
-# -- 3. infrastructure directories are not application code -------------------
-
-
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
 
 
 def test_a_virtualenv_inside_the_tree_is_not_walked(tmp_path):
-    """Detected by its ``pyvenv.cfg`` marker, so an unconventional name is caught."""
     root = _app_tree(tmp_path)
     for venv_name in (".venv", "herd-env"):  # dotted convention, and neither
         venv = root / venv_name
@@ -295,10 +261,14 @@ def test_conventional_infrastructure_directories_are_pruned(tmp_path):
 
 
 def test_pruning_is_not_over_eager(tmp_path):
-    """Names that merely *look* like infrastructure are still application code."""
     root = _app_tree(tmp_path)
-    for rel in ("env/settings.py", "builders/api.py", "distribution/api.py",
-                "venvironment/api.py", "tests/test_api.py"):
+    for rel in (
+        "env/settings.py",
+        "builders/api.py",
+        "distribution/api.py",
+        "venvironment/api.py",
+        "tests/test_api.py",
+    ):
         _write(root / rel, _APP)
 
     report = port.analyze(root)
@@ -307,7 +277,6 @@ def test_pruning_is_not_over_eager(tmp_path):
 
 
 def test_a_root_that_is_itself_a_virtualenv_is_still_analyzed(tmp_path):
-    """The marker prunes *nested* environments; an explicitly named root is honored."""
     root = _app_tree(tmp_path)
     (root / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
 
@@ -317,7 +286,6 @@ def test_a_root_that_is_itself_a_virtualenv_is_still_analyzed(tmp_path):
 
 
 def test_a_symlinked_directory_is_not_followed_out_of_the_tree(tmp_path):
-    """A link out of the named tree must not widen the walk."""
     outside = tmp_path / "outside"
     _write(outside / "api.py", _APP)
     root = _app_tree(tmp_path)

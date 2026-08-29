@@ -1,5 +1,3 @@
-"""ORM-driven cache invalidation within and across workers."""
-
 from __future__ import annotations
 
 import asyncio
@@ -46,8 +44,7 @@ def _isolate_subscribers():
 
     subscribers = _orm_events._subscribers.copy()
     subscriber_keys = {
-        key: subscriptions.copy()
-        for key, subscriptions in _orm_events._subscriber_keys.items()
+        key: subscriptions.copy() for key, subscriptions in _orm_events._subscriber_keys.items()
     }
     bridges = _orm_events._bridges.copy()
     yield
@@ -362,6 +359,8 @@ class FakeBus:
             for subscribed, handler in bus.handlers:
                 if subscribed == channel:
                     await handler(_BusMessage(channel, payload))
+
+
 class _BusMessage:
     def __init__(self, channel: str, payload: Any) -> None:
         self.channel = channel
@@ -387,7 +386,7 @@ async def test_a_local_write_is_carried_to_the_bus() -> None:
     publish_write(frozenset({"User", "Post"}))
     await asyncio.sleep(0)
 
-    (channel, payload), = bus.published
+    ((channel, payload),) = bus.published
     assert channel == WRITE_CHANNEL
     assert payload["models"] == ["Post", "User"]
     assert payload["origin"]

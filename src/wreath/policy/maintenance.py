@@ -44,9 +44,7 @@ class MaintenancePolicy:
                     "MaintenancePolicy exempt paths must be absolute paths beginning with '/'"
                 )
         if retry_after is not None and (
-            isinstance(retry_after, bool)
-            or not isinstance(retry_after, int)
-            or retry_after < 0
+            isinstance(retry_after, bool) or not isinstance(retry_after, int) or retry_after < 0
         ):
             raise ValueError("MaintenancePolicy retry_after must be a non-negative integer")
         if not isinstance(detail, str) or not detail:
@@ -105,10 +103,15 @@ class MaintenancePolicy:
         from .base import PolicyContract
 
         return PolicyContract(
-            responses=((503, ResponseSpec(
-                description="The application is temporarily refusing ordinary traffic.",
-                media_type="application/problem+json",
-            )),),
+            responses=(
+                (
+                    503,
+                    ResponseSpec(
+                        description="The application is temporarily refusing ordinary traffic.",
+                        media_type="application/problem+json",
+                    ),
+                ),
+            ),
         )
 
 

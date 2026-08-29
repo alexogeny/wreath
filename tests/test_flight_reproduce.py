@@ -1,16 +1,3 @@
-"""Joining a crash file to a recording: does replaying it retrace the crash?
-
-A ring file names the request that was in flight when a process died and the
-log call sites it had reached. It does not hold the request's bytes -- a
-completion cell carries a route and a status, never a payload -- so reproducing
-the failure needs a transport recording of that request from somewhere else.
-
-What joins the two is the *sequence of call sites*. If replaying the recording
-emits the same sites in the same order, the replay went where the dead process
-went; where it stops matching is where the behaviour changed. These tests drive
-that both ways -- a recording that retraces the path, and one that does not.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -119,7 +106,6 @@ def test_a_replay_that_retraces_the_path_reproduces_it() -> None:
 
 
 def test_a_replay_that_takes_a_different_turn_is_reported_not_hidden() -> None:
-    """The useful negative: the fix changed the path, and it says where."""
     ring = _Ring(7, (CHARGE.site_id, SETTLE.site_id))
     outcome = _reproduce(_app((CHARGE, REFUND)), ring)
     assert not outcome.reproduced
@@ -137,8 +123,6 @@ def test_a_replay_that_stops_early_diverges_where_it_stopped() -> None:
 
 
 def test_a_replay_that_goes_further_still_reproduces() -> None:
-    """The crash file stops where the *process* stopped, not where the request
-    would have. A replay that survives past that point has still retraced it."""
     ring = _Ring(7, (CHARGE.site_id,))
     outcome = _reproduce(_app((CHARGE, SETTLE, REFUND)), ring)
     assert outcome.reproduced
@@ -168,13 +152,11 @@ def test_an_explicit_request_id_does_not_inspect_in_flight_requests() -> None:
 
 
 def test_a_ring_with_nothing_in_flight_refuses_rather_than_guessing() -> None:
-    """Every request that logged also completed: there is no crash here."""
     with pytest.raises(ReplayError, match="no request in flight"):
         _reproduce(_app((CHARGE,)), _Ring(0, ()))
 
 
 def test_a_request_with_no_records_refuses_rather_than_comparing_nothing() -> None:
-    """An empty expected sequence would 'reproduce' against literally anything."""
     with pytest.raises(ReplayError, match="no log records"):
         _reproduce(_app((CHARGE,)), _Ring(7, ()))
 
@@ -227,17 +209,6 @@ _CRASH_SCRIPT = (
 @pytest.mark.skipif(os.name != "posix", reason="needs POSIX signals")
 @pytest.mark.skipif("ASAN_OPTIONS" in os.environ, reason="ASan intercepts SIGSEGV")
 def test_a_real_crash_file_drives_a_real_reproduction(tmp_path) -> None:
-    """The whole story, with nothing stood in for.
-
-    A child maps a ring, opens a request, logs its way through two call sites,
-    and segfaults. The parent decodes the file it left behind, finds the request
-    that never completed, and replays a recording of that request against the
-    app -- reaching the same two sites in the same order.
-
-    This is the claim the feature is for: the crash file says *which* request,
-    the recording says *what* it was, and together they say whether it still
-    does that.
-    """
     ring_path = str(tmp_path / "flight.wfrr")
     child = subprocess.run(
         [sys.executable, "-c", _CRASH_SCRIPT, ring_path],
@@ -254,8 +225,7 @@ def test_a_real_crash_file_drives_a_real_reproduction(tmp_path) -> None:
     assert outcome.request_id == 2
     assert outcome.expected == (CHARGE.site_id, SETTLE.site_id)
     assert outcome.reproduced, (
-        f"the replay did not retrace the crash: {outcome.observed} against "
-        f"{outcome.expected}"
+        f"the replay did not retrace the crash: {outcome.observed} against {outcome.expected}"
     )
 
     # And the negative, against the same real file: a build that takes a
@@ -266,12 +236,6 @@ def test_a_real_crash_file_drives_a_real_reproduction(tmp_path) -> None:
 
 
 def test_the_replay_publishes_nothing_into_the_installed_runtime() -> None:
-    """A reproduction is an investigation, not traffic.
-
-    It runs under a captured runtime, so the records it produces must not reach
-    whatever this process has installed -- least of all a recorder whose ring is
-    the file being investigated.
-    """
     published: list[object] = []
     previous = log.install(log.LogRuntime(published.append, level=log.TRACE))
     try:

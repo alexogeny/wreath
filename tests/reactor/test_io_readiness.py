@@ -1,8 +1,3 @@
-"""fd readiness (add_reader/add_writer) and coroutine socket ops.
-
-These exercise the Poller directly (epoll today, io_uring later). Level-trigger
-semantics and the sock_* coroutines are the substrate every protocol rides on.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -15,7 +10,6 @@ from .support import run, socketpair, tcp_listener
 
 #: Every test here drives the metal loop, so the whole module goes.
 pytestmark = requires_metal
-
 
 
 def test_add_reader_fires_when_readable(loop):

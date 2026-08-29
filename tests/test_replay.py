@@ -1,11 +1,3 @@
-"""Stage 6/7: transport replay, fault injection, and endpoint-plan replay.
-
-Transport cases run over the HTTP/1 protocol driven by a fake transport; the
-replay module ships its own fake transport so these never depend on the server
-test harness. We only ever assert owned outcomes: normalized response bytes,
-terminal disposition, and owned status/headers/body.
-"""
-
 from __future__ import annotations
 
 import importlib
@@ -61,9 +53,6 @@ def _app() -> wreath.Wreath:
     return app
 
 
-# --- recording model + serialization ----------------------------------------
-
-
 def test_transport_recording_round_trips() -> None:
     rec = record_transport_segments([GET_PING[:20], GET_PING[20:]], close=int(SegmentKind.EOF))
     restored = TransportRecording.from_bytes(rec.to_bytes())
@@ -89,9 +78,6 @@ def test_open_recording_dispatches_on_magic(tmp_path) -> None:
     (tmp_path / "bad.bin").write_bytes(b"XXXX not a recording")
     with pytest.raises(ReplayError):
         open_recording(str(tmp_path / "bad.bin"))
-
-
-# --- transport replay --------------------------------------------------------
 
 
 @proto
@@ -132,9 +118,6 @@ async def test_body_request_replays(protocol_cls: type) -> None:
     rec = record_transport_segments([post])
     result = await replay_transport(_app(), rec, protocol_cls=protocol_cls)
     assert b"hello" in result.response
-
-
-# --- fault injection ---------------------------------------------------------
 
 
 def test_fault_schedule_round_trips() -> None:
@@ -180,9 +163,6 @@ async def test_half_close_midstream_is_deterministic(protocol_cls: type) -> None
     a = await replay_transport(_app(), rec, protocol_cls=protocol_cls, faults=sched)
     b = await replay_transport(_app(), rec, protocol_cls=protocol_cls, faults=sched)
     assert a.matches(b)
-
-
-# --- endpoint-plan replay ----------------------------------------------------
 
 
 @pytest.mark.asyncio

@@ -1,12 +1,3 @@
-"""The live-document primitive: one bounded registry, one hop, one honest tag.
-
-These pin the primitive directly rather than only through the permission
-manifest, because the properties that matter are properties of the primitive: a
-registry that cannot grow without limit, a slot that is released when the client
-disappears, and a coalesced notification that never claims a tag it cannot
-state. A caller test can only ever show that *this* caller gets them right.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -72,9 +63,6 @@ async def _soon(condition, *, limit: float = 1.0) -> None:
         await asyncio.sleep(0)
 
 
-# --- being told your copy is stale ---------------------------------------------
-
-
 async def test_a_subscriber_is_woken_with_the_reason_and_the_tag() -> None:
     document = _document()
     subscription = document.subscribe("User::ada")
@@ -109,13 +97,10 @@ async def test_notify_all_wakes_everyone_because_a_deploy_stales_everyone() -> N
 
     for subscription in subscriptions:
         assert subscription is not None
-        assert await asyncio.wait_for(subscription.wait(), 1) == Change(
-            "policies", 'W/"new"'
-        )
+        assert await asyncio.wait_for(subscription.wait(), 1) == Change("policies", 'W/"new"')
 
 
 async def test_two_notifications_coalesce_to_one_wake() -> None:
-    """The signal is idempotent, so a paused client must not build a backlog."""
     document = _document()
     subscription = document.subscribe("User::ada")
     assert subscription is not None
@@ -130,21 +115,15 @@ async def test_two_notifications_coalesce_to_one_wake() -> None:
 
 @pytest.mark.parametrize("order", [("known", "unknown"), ("unknown", "known")])
 async def test_an_unknown_tag_wins_the_merge(order: tuple[str, str]) -> None:
-    """Otherwise a client compares tags and skips the change we could not name."""
     document = _document()
     subscription = document.subscribe("User::ada")
     assert subscription is not None
 
     for which in order:
-        document.notify(
-            "User::ada", which, etag='W/"abc"' if which == "known" else None
-        )
+        document.notify("User::ada", which, etag='W/"abc"' if which == "known" else None)
 
     change = await asyncio.wait_for(subscription.wait(), 1)
     assert change is not None and change.etag is None
-
-
-# --- the registry is bounded ----------------------------------------------------
 
 
 async def test_one_principal_cannot_fill_the_registry() -> None:
@@ -152,8 +131,8 @@ async def test_one_principal_cannot_fill_the_registry() -> None:
 
     assert document.subscribe("User::ada") is not None
     assert document.subscribe("User::ada") is not None
-    assert document.subscribe("User::ada") is None      # a third tab, refused
-    assert document.subscribe("User::bo") is not None   # somebody else, unaffected
+    assert document.subscribe("User::ada") is None  # a third tab, refused
+    assert document.subscribe("User::bo") is not None  # somebody else, unaffected
 
 
 async def test_the_registry_has_an_overall_cap() -> None:
@@ -200,7 +179,6 @@ async def test_a_closed_subscription_releases_its_waiter() -> None:
 
 
 async def test_a_change_accepted_before_a_close_is_still_delivered() -> None:
-    """A shutdown must not be the one way a known change reaches nobody."""
     document = _document()
     subscription = document.subscribe("User::ada")
     assert subscription is not None
@@ -226,11 +204,7 @@ async def test_a_closed_subscription_ignores_later_notifications() -> None:
         await asyncio.wait_for(subscription.wait(), 0.02)
 
 
-# --- a write is the signal ------------------------------------------------------
-
-
 async def test_a_write_to_a_watched_model_stales_the_documents() -> None:
-    """The role change no bolt-on can see: the ORM already announced it."""
     document = _document(watch=("Role",), watch_reason="roles")
     subscription = document.subscribe("User::ada")
     assert subscription is not None
@@ -268,7 +242,6 @@ async def test_a_model_may_be_named_by_its_class() -> None:
 
 
 async def test_nothing_listens_for_writes_until_a_stream_exists() -> None:
-    """`_orm_events` keeps a process-global list; an idle document is not in it."""
     document = _document(watch=("Role",))
     assert not document.watching
 
@@ -279,11 +252,7 @@ async def test_nothing_listens_for_writes_until_a_stream_exists() -> None:
     assert not document.watching
 
 
-# --- across workers -------------------------------------------------------------
-
-
 async def test_a_notification_reaches_a_stream_on_another_worker() -> None:
-    """The write commits on whichever worker took it; the browser is elsewhere."""
     writer_bus, reader_bus = FakeBus(), FakeBus()
     writer_bus.peers.append(reader_bus)
     writer = _document(bus=writer_bus, watch=("Role",), watch_reason="roles")
@@ -313,10 +282,7 @@ async def test_a_worker_does_not_apply_its_own_echo_twice() -> None:
 async def test_a_detached_document_publishes_nothing() -> None:
     document = _document()
     assert not document.attached
-    document.notify_all("policies")            # no bus, no error
-
-
-# --- the stream -----------------------------------------------------------------
+    document.notify_all("policies")  # no bus, no error
 
 
 async def test_the_stream_frames_a_change_as_an_sse_event() -> None:
@@ -363,7 +329,6 @@ async def test_an_explicit_change_tag_does_not_call_the_fallback_resolver() -> N
 
 
 async def test_a_resolver_that_declines_leaves_the_tag_out() -> None:
-    """A stale identity cannot describe the new tag, so it says nothing."""
     document = _document()
     subscription = document.subscribe("User::ada")
     assert subscription is not None
@@ -393,7 +358,6 @@ async def test_an_idle_stream_sends_a_keepalive_comment() -> None:
 async def test_a_moved_fingerprint_wakes_the_stream_without_a_hook(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A policy set replaced in-process; nobody called `notify_all`."""
     monkeypatch.setattr(livedoc, "_FINGERPRINT_TTL", 0.0)
     fingerprints = iter(["one"])
     document = _document(fingerprint=lambda: next(fingerprints, "two"))
@@ -429,7 +393,6 @@ async def test_a_document_with_no_fingerprint_has_no_drift_check() -> None:
 
 
 async def test_a_vanished_client_frees_its_slot() -> None:
-    """The disconnect closes the generator; the `finally` is the cleanup."""
     document = _document()
     subscription = document.subscribe("User::ada")
     assert subscription is not None

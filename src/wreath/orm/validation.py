@@ -113,8 +113,7 @@ def _field(column: Any, ns: dict[str, Any], keep: bool) -> list[str]:
     lines.append(f"                _proven = _coerce{index}(_value)")
     lines.append("            except (TypeError, ValueError, OverflowError) as error:")
     lines.append(
-        f"                errors.append(_error({where}, _str(error), "
-        f"_kind(error, _column{index})))"
+        f"                errors.append(_error({where}, _str(error), _kind(error, _column{index})))"
     )
     lines.append("            else:")
     lines.extend(_checks(column, ns, where, keep, "                "))
@@ -122,9 +121,7 @@ def _field(column: Any, ns: dict[str, Any], keep: bool) -> list[str]:
     return lines
 
 
-def _checks(
-    column: Any, ns: dict[str, Any], where: str, keep: bool, indent: str
-) -> list[str]:
+def _checks(column: Any, ns: dict[str, Any], where: str, keep: bool, indent: str) -> list[str]:
     """The column's business rules, inlined here rather than called.
 
     `Column.validate` fuses the same checks into a callable that *raises*,
@@ -190,9 +187,7 @@ def _absent(column: Any, ns: dict[str, Any], keep: bool) -> list[str]:
     if column.nullable or column.server_default or column.primary_key:
         lines.append("        pass")
         return lines
-    lines.append(
-        f"        errors.append(_error((*loc, {name!r}), 'field is required', 'missing'))"
-    )
+    lines.append(f"        errors.append(_error((*loc, {name!r}), 'field is required', 'missing'))")
     return lines
 
 
@@ -223,9 +218,7 @@ def _rules(rules: tuple[Any, ...], ns: dict[str, Any]) -> list[str]:
         arguments = ", ".join(f"_f{index}" for index in indexes)
         where = f"(*loc, {at!r})" if at else "loc"
         lines.append(f"    if {guard} and not _rule{number}({arguments}):")
-        lines.append(
-            f"        errors.append(_error({where}, _message{number}, _rulekind{number}))"
-        )
+        lines.append(f"        errors.append(_error({where}, _message{number}, _rulekind{number}))")
     if lines:
         lines.append("    if errors:")
         lines.append("        raise _ValidationError(errors)")

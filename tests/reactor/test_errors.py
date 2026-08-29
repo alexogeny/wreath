@@ -1,4 +1,3 @@
-"""Exception handling: set/call_exception_handler and unhandled task errors."""
 from __future__ import annotations
 
 import asyncio

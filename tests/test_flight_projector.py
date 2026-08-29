@@ -1,11 +1,3 @@
-"""Stage 4a -- the asynchronous projector reassembles ring cells into traces.
-
-These drive :class:`wreath._projector.Projector` over a fake recorder whose
-``drain`` hands back pre-encoded cell buffers, so assembly, settling, metric
-aggregation, bounded retention, and export isolation are all exercised
-deterministically without a real ring. One test drives the background thread.
-"""
-
 from __future__ import annotations
 
 import threading
@@ -88,8 +80,7 @@ def correlation(request_id: int, trace_id: int = 0xABC, span_id: int = 0xDEF) ->
 
 def phases(request_id: int, *kinds: PhaseKind) -> bytes:
     records = tuple(
-        PhaseRecord(phase_id=k, duration_us=100 + i, sequence=i)
-        for i, k in enumerate(kinds)
+        PhaseRecord(phase_id=k, duration_us=100 + i, sequence=i) for i, k in enumerate(kinds)
     )
     return PhaseBatchCell(request_id=request_id, records=records).encode()
 
@@ -97,9 +88,6 @@ def phases(request_id: int, *kinds: PhaseKind) -> bytes:
 def drain_until_settled(proj: Projector, cycles: int = 3) -> None:
     for _ in range(cycles):
         proj.poll()
-
-
-# --- basic assembly --------------------------------------------------------
 
 
 def test_completion_only_settles_after_a_cycle() -> None:
@@ -177,8 +165,6 @@ def test_client_facts_cell_joins_completion() -> None:
 
 
 def test_reordered_tail_before_completion_still_joins() -> None:
-    """A batch boundary can put the correlation/phases ahead of their completion.
-    The projector still settles on the quiet cycle with the whole tail joined."""
     rec = FakeRecorder()
     rec.feed(correlation(4), phases(4, PhaseKind.DB_QUERY), completion(4))
     proj = Projector(rec)
@@ -218,9 +204,6 @@ def test_max_cells_split_does_not_lose_the_tail() -> None:
     assert snap.assembled == 1
     (trace,) = snap.recent
     assert trace.has_correlation and len(trace.phases) == 1
-
-
-# --- orphans and loss ------------------------------------------------------
 
 
 def test_orphan_correlation_without_completion_is_counted() -> None:
@@ -295,9 +278,6 @@ def test_unknown_kind_cells_are_ignored() -> None:
     assert snap.loss.decode_error == 0
 
 
-# --- failures and metrics --------------------------------------------------
-
-
 def test_failures_are_retained_separately() -> None:
     rec = FakeRecorder()
     rec.feed(
@@ -318,8 +298,7 @@ def test_route_metrics_aggregate_counts_errors_and_duration() -> None:
     rec = FakeRecorder()
     rec.feed(
         completion(1, route_id=100, duration_us=500, status=200),
-        completion(2, route_id=100, duration_us=1500, status=500,
-                   terminal=TerminalStatus.ERROR),
+        completion(2, route_id=100, duration_us=1500, status=500, terminal=TerminalStatus.ERROR),
         completion(3, route_id=200, duration_us=300, status=200),
     )
     proj = Projector(rec)
@@ -365,9 +344,6 @@ def test_recorder_loss_is_read_through() -> None:
     assert proj.recorder_loss()[LossReason.RING_FULL] == 42
 
 
-# --- export hook -----------------------------------------------------------
-
-
 def test_export_hook_receives_each_finished_trace() -> None:
     seen: list[ProjectedTrace] = []
     rec = FakeRecorder()
@@ -390,9 +366,6 @@ def test_export_hook_failure_is_isolated_and_counted() -> None:
     snap = proj.snapshot()
     assert snap.assembled == 2  # assembly and retention are unaffected
     assert snap.loss.export_error == 2
-
-
-# --- background thread -----------------------------------------------------
 
 
 def test_background_thread_drains_on_its_interval() -> None:
@@ -421,19 +394,6 @@ def test_background_thread_drains_on_its_interval() -> None:
 
 
 def test_stop_flushes_the_ring_with_no_thread_to_have_drained_it() -> None:
-    """`stop()`'s own drain is the only thing that can deliver these.
-
-    No thread is ever started, so nothing on the interval loop can have seen
-    these cells -- every trace that arrives came from the two `poll` calls on
-    the way out of `stop`. That is also a real path: `_abort_startup` stops a
-    projector that never ran.
-
-    Split out of `test_background_thread_drains_on_its_interval`, which waited
-    for the background thread to catch up *before* stopping and therefore passed
-    with the final drain deleted -- it proved the loop drained, and named the
-    flush. Two polls, because a completion needs a second settle to pick up its
-    tail, which is why `stop` calls `poll` twice rather than once.
-    """
     rec = FakeRecorder()
     seen: list[int] = []
 
@@ -467,15 +427,11 @@ def test_construction_validates_tuning() -> None:
         Projector(rec, max_cells=0)
 
 
-# --- integration over a real native recorder -------------------------------
-
 _flight = pytest.importorskip("wreath._native._flight")
 _TRACEPARENT = b"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 
 
 def test_projects_a_real_detailed_recorder_end_to_end() -> None:
-    """Drive an armed Detailed request through the real ring -- completion,
-    correlation, and phase cells -- and prove the projector reassembles it."""
     rec = _flight.Recorder(
         _flight.MODE_DETAILED,
         ring_records=1024,
@@ -511,8 +467,12 @@ def test_projects_many_real_completions() -> None:
     rec = _flight.Recorder(_flight.MODE_PULSE, ring_records=8192, active_requests=256)
     for i in range(200):
         rec.record(
-            start_ns=0, end_ns=(i + 1) * 1000, status=200,
-            connection_id=i, route_id=(i % 5), plan_id=0,
+            start_ns=0,
+            end_ns=(i + 1) * 1000,
+            status=200,
+            connection_id=i,
+            route_id=(i % 5),
+            plan_id=0,
         )
     proj = Projector(rec)
     drain_until_settled(proj)

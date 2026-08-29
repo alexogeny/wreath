@@ -1,38 +1,3 @@
-"""The pgvector `sparsevec` binary codec, its value type, and the twin contract.
-
-`test_vector_codec.py` and `test_halfvec_codec.py` one type over, with one
-difference that shapes the whole file: a `sparsevec` value is not a list. It is
-a dimension -- which may be a billion -- plus the positions that are not zero,
-so `wreath._sparsevec.SparseVector` carries both and the codec frames *it*.
-
-Two numberings meet in this file and must not be confused. `SparseVector` counts
-positions from **1**, because that is what pgvector's text form
-(`'{1:1.5,3:3.5}/5'`) and its documentation use. The **binary** wire counts from
-**0**. That is not a wreath convention; it is pgvector's, stated twice in its own
-source. `sparsevec_send` and `sparsevec_recv` in `src/sparsevec.c` each carry the
-comment "Binary representation uses zero-based numbering for indices", while
-`sparsevec_in` converts the other way ("Convert 1-based numbering (SQL) to
-0-based (C)") and `sparsevec_out` converts back. Every off-by-one this type can
-produce lives at that boundary, so the conversion is asserted against literal
-bytes rather than only through a round trip -- a round trip is exactly the thing
-that stays green when both directions are wrong.
-
-Both twins are driven and **neither is the other's oracle**. The anchor is
-`sparsevec_send`:
-
-    pq_sendint(&buf, svec->dim, sizeof(int32));
-    pq_sendint(&buf, svec->nnz, sizeof(int32));
-    pq_sendint(&buf, svec->unused, sizeof(int32));
-    for (int i = 0; i < svec->nnz; i++)
-        pq_sendint(&buf, svec->indices[i], sizeof(int32));
-    for (int i = 0; i < svec->nnz; i++)
-        pq_sendfloat4(&buf, values[i]);
-
--- three big-endian `int32`s, then all of the indices, then all of the values.
-The indices are not interleaved with the values, and the third header word is
-`unused` and must be zero, which `sparsevec_recv` enforces.
-"""
-
 from __future__ import annotations
 
 import contextlib
@@ -126,29 +91,18 @@ def _both_twins_text(value: SparseVector, expected: bytes) -> bytes:
     return expected
 
 
-# -- the value type -----------------------------------------------------------
-
-
 def test_elements_are_stored_sorted_by_index_whatever_order_they_arrive() -> None:
-    """The wire format requires ascending indices, so the value normalises once."""
     sparse = SparseVector(9, {7: 0.5, 2: 1.5, 4: -1.0})
     assert sparse.indices == (2, 4, 7)
     assert sparse.values == (1.5, -1.0, 0.5)
 
 
 def test_an_explicit_zero_is_dropped_rather_than_stored() -> None:
-    """Otherwise a value would not survive its own round trip through the server.
-
-    pgvector stores non-zeros; an explicit zero written into a `sparsevec` comes
-    back absent. Dropping it here makes the difference visible at the assignment
-    that caused it rather than after a write and a read.
-    """
     assert SparseVector(5, {1: 1.0, 2: 0.0}).to_dict() == {1: 1.0}
     assert len(SparseVector(5, {2: 0.0})) == 0
 
 
 def test_len_is_the_stored_count_not_the_dimension() -> None:
-    """pgvector's `nnz`. A million-dimension value with nine elements has len 9."""
     assert len(SparseVector(1_000_000, {5: 1.0, 900: 2.0})) == 2
 
 
@@ -189,22 +143,9 @@ def test_more_non_zeros_than_pgvector_allows_is_refused() -> None:
         SparseVector(MAX_SPARSEVEC_NNZ + 1, too_many)
 
 
-# -- wire format --------------------------------------------------------------
-
-
 def test_the_published_frame_for_a_two_element_sparsevec() -> None:
-    """The whole layout in hex, owing nothing to `struct` or to either twin.
-
-    Source: pgvector `src/sparsevec.c`, `sparsevec_send`. `{1:1.5,3:3.5}/5` is
-    dim 5, nnz 2, unused 0; then the two indices **zero-based**, so the 1-based
-    1 and 3 the value holds appear as 0x00000000 and 0x00000002; then the two
-    float4s, 1.5 = 0x3FC00000 and 3.5 = 0x40600000.
-
-    This single literal pins every decision the format makes at once: big-endian
-    int32s, the third header word, the index base, and values-after-indices.
-    """
     assert _both_twins_frame(SparseVector(5, {1: 1.5, 3: 3.5})) == bytes.fromhex(
-        "00000005" "00000002" "00000000" "00000000" "00000002" "3fc00000" "40600000"
+        "00000005000000020000000000000000000000023fc0000040600000"
     )
 
 
@@ -214,13 +155,6 @@ def test_header_is_dimension_then_count_then_two_reserved_words() -> None:
 
 
 def test_the_binary_indices_are_zero_based_and_the_value_is_one_based() -> None:
-    """The single conversion in the type, asserted against the bytes themselves.
-
-    pgvector settles the direction: `sparsevec_send` carries the comment "Binary
-    representation uses zero-based numbering for indices", and `sparsevec_out`
-    adds 1 on the way to the text form. So a value holding 1-based 1 and 3 must
-    put 0 and 2 on the wire -- not 1 and 3, and not 0 and 3.
-    """
     wire = _both_twins_frame(SparseVector(5, {1: 1.5, 3: 3.5}))
     assert struct.unpack_from("!ii", wire, 12) == (0, 2)
 
@@ -236,19 +170,9 @@ def test_an_empty_sparsevec_is_just_a_header() -> None:
 
 
 def test_a_huge_dimension_costs_nothing_which_is_the_point_of_the_type() -> None:
-    """A billion positions, two of them stored: 28 bytes.
-
-    The last index is the largest a `sparsevec` can carry, and it must appear on
-    the wire one lower than the value holds -- 999_999_998 = 0x3B9AC9FE -- which
-    is where an unsigned/signed or off-by-one slip would show first.
-    """
     wire = _both_twins_frame(SparseVector(MAX_SPARSEVEC_DIM, {1: 1.0, 999_999_999: 2.0}))
     assert len(wire) == 28
-    assert wire == bytes.fromhex(
-        "3b9aca00" "00000002" "00000000"
-        "00000000" "3b9ac9fe"
-        "3f800000" "40000000"
-    )
+    assert wire == bytes.fromhex("3b9aca000000000200000000000000003b9ac9fe3f80000040000000")
 
 
 def test_elements_round_trip_through_the_binary_form() -> None:
@@ -257,31 +181,20 @@ def test_elements_round_trip_through_the_binary_form() -> None:
     # Every element is a dyadic rational, so binary32 holds it exactly and the
     # decoded value must equal the original outright.
     assert wire == bytes.fromhex(
-        "000003e8" "00000003" "00000000"
-        "00000000" "00000010" "000003e6"
-        "3fc00000" "be800000" "41000000"
+        "000003e800000003000000000000000000000010000003e63fc00000be80000041000000"
     )
     assert pure._decode_value(SPARSEVEC_OID, 1, wire) == sparse
     assert native._decode_value(SPARSEVEC_OID, 1, wire) == sparse
 
 
 def test_float4_rounding_is_the_same_rounding_vector_gets() -> None:
-    """`sparsevec` stores float4s, so 0.1 becomes 0x3DCCCCCD as it does in `vector`."""
     wire = _both_twins_frame(SparseVector(3, {2: 0.1}))
-    assert wire == bytes.fromhex(
-        "00000003" "00000001" "00000000" "00000001" "3dcccccd"
-    )
+    assert wire == bytes.fromhex("000000030000000100000000000000013dcccccd")
     for codec in (pure, native):
-        assert codec._decode_value(SPARSEVEC_OID, 1, wire).to_dict() == {
-            2: 0.10000000149011612
-        }
-
-
-# -- the text form ------------------------------------------------------------
+        assert codec._decode_value(SPARSEVEC_OID, 1, wire).to_dict() == {2: 0.10000000149011612}
 
 
 def test_the_text_form_is_braced_elements_over_the_dimension() -> None:
-    """pgvector's documented spelling, quoted from its README: `'{1:1.5,3:3.5}/5'`."""
     _both_twins_text(SparseVector(5, {1: 1.5, 3: 3.5}), b"{1:1.5,3:3.5}/5")
 
 
@@ -295,21 +208,11 @@ def test_the_text_form_round_trips() -> None:
 
 
 def test_text_indices_are_the_one_based_ones_the_value_holds() -> None:
-    """What `psql` prints and what Python holds must be the same numbers.
-
-    The counterpart to the binary test above, and the reason the two must be
-    asserted separately: `sparsevec_in` converts 1-based to 0-based while
-    `sparsevec_recv` does not, so a codec that applied one rule to both forms
-    would still round-trip cleanly through itself.
-    """
     for codec in (pure, native):
         decoded = codec._decode_value(SPARSEVEC_OID, 0, b"{1:1.5,3:3.5}/5")
         assert decoded.indices == (1, 3)
         assert decoded.values == (1.5, 3.5)
         assert decoded.dim == 5
-
-
-# -- refusals -----------------------------------------------------------------
 
 
 def test_a_list_is_refused_because_it_is_the_dense_type() -> None:
@@ -347,7 +250,6 @@ def test_a_reserved_word_that_is_not_zero_is_refused() -> None:
 
 
 def test_a_wire_index_outside_the_dimension_is_refused() -> None:
-    """A decoder must not build a value the constructor would have rejected."""
     wire = struct.pack("!iii", 3, 1, 0) + struct.pack("!i", 7) + struct.pack("!f", 1.0)
     for codec in (pure, native):
         with pytest.raises((ProtocolError, ValueError), match=r"outside 0\.\.2"):
@@ -374,19 +276,11 @@ def test_a_text_element_missing_its_value_is_refused() -> None:
             codec._decode_value(SPARSEVEC_OID, 0, b"{1}/5")
 
 
-# -- the declaration ----------------------------------------------------------
-
-
 def test_the_declared_sql_names_the_dimension() -> None:
     assert Sparsevec(30000).sql == "sparsevec(30000)"
 
 
 def test_the_extension_is_vector_not_sparsevec() -> None:
-    """One `CREATE EXTENSION vector` provides all three types.
-
-    Naming `sparsevec` here would send a reader to install something that does
-    not exist, which is the same reasoning `Halfvec` records.
-    """
     assert Sparsevec(30000).extension == "vector"
     assert Sparsevec(30000).type_name == "sparsevec"
 
@@ -431,12 +325,10 @@ def _fake_oid(column):
 
 
 def test_the_shape_token_is_name_derived_like_every_extension_type() -> None:
-    """An OID in a plan-cache key would split the cache between databases."""
     assert Sparsevec(30).shape_value == b"xsparsevec(30)"
 
 
 def test_a_bound_value_carries_its_oid_without_mutating_the_callers() -> None:
-    """`SparseVector` solves for itself what `WireList` solves for `vector`."""
     column = Sparsevec(5)
     with _fake_oid(column):
         mine = SparseVector(5, {1: 1.5})

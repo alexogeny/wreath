@@ -42,18 +42,14 @@ def add_privacy_parser(commands: Any) -> None:
     )
     plan.add_argument("target", help="a Privacy object as module:attribute")
     plan.add_argument("--subject", required=True, help="the subject's identity value")
-    plan.add_argument(
-        "--format", dest="privacy_format", default="text", choices=("text", "json")
-    )
+    plan.add_argument("--format", dest="privacy_format", default="text", choices=("text", "json"))
 
     access = actions.add_parser(
         "access", help="the read-mode traversal behind a subject-access request"
     )
     access.add_argument("target", help="a Privacy object as module:attribute")
     access.add_argument("--subject", required=True)
-    access.add_argument(
-        "--format", dest="privacy_format", default="text", choices=("text", "json")
-    )
+    access.add_argument("--format", dest="privacy_format", default="text", choices=("text", "json"))
 
     retention = actions.add_parser(
         "retention", help="every declared window, and every table that lacks one"

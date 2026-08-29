@@ -21,7 +21,6 @@ from .targets import (
 
 
 class _ImportRewrite(_EmitterState):
-    # -- imports -----------------------------------------------------------------
     def rewrite_imports(self, tree: ast.Module) -> None:
         last_import_line = 0
         live_httpx = {
@@ -49,8 +48,7 @@ class _ImportRewrite(_EmitterState):
             node.id
             for node in ast.walk(tree)
             if isinstance(node, ast.Name)
-            and self.imports.origin(node).split(".")[0]
-            in {"pydantic_settings", "pydantic_partial"}
+            and self.imports.origin(node).split(".")[0] in {"pydantic_settings", "pydantic_partial"}
             and id(node) not in self._rewritten
             and not self._inside_replaced(node)
         }
@@ -70,7 +68,7 @@ class _ImportRewrite(_EmitterState):
                 isinstance(node, ast.ImportFrom)
                 and node.module in ("fastapi.exceptions", "starlette.exceptions")
                 and node.level == 0
-                and any(a.name == "HTTPException" for a in node.names)
+                and any(alias.name == "HTTPException" for alias in node.names)
             ):
                 # The same class, imported the long way round. Missing this
                 # spelling left the module importing fastapi's HTTPException
@@ -106,9 +104,12 @@ class _ImportRewrite(_EmitterState):
                 isinstance(node, ast.ImportFrom)
                 and (module := node.module) is not None
                 and module.startswith(("fastapi.middleware", "starlette.middleware"))
-                and any(a.name in {"CORSMiddleware", "TrustedHostMiddleware"} for a in node.names)
+                and any(
+                    alias.name in {"CORSMiddleware", "TrustedHostMiddleware"}
+                    for alias in node.names
+                )
             ):
-                imported = {a.name for a in node.names}
+                imported = {alias.name for alias in node.names}
                 drop = imported & {"CORSMiddleware", "TrustedHostMiddleware"}
                 self.buf.replace(
                     node,
@@ -119,11 +120,7 @@ class _ImportRewrite(_EmitterState):
             elif isinstance(node, ast.ImportFrom) and node.module in _TESTCLIENT_MODULES:
                 self._swap_import(node, {"TestClient": "TestClient"})
             elif isinstance(node, ast.ImportFrom) and node.module == "httpx":
-                keep = [
-                    alias
-                    for alias in node.names
-                    if (alias.asname or alias.name) in live_httpx
-                ]
+                keep = [alias for alias in node.names if (alias.asname or alias.name) in live_httpx]
                 self.buf.replace(
                     node,
                     "from httpx import " + ", ".join(self._alias_str(alias) for alias in keep)
@@ -140,9 +137,7 @@ class _ImportRewrite(_EmitterState):
                 ]
                 self.buf.replace(
                     node,
-                    "import " + ", ".join(self._alias_str(alias) for alias in keep)
-                    if keep
-                    else "",
+                    "import " + ", ".join(self._alias_str(alias) for alias in keep) if keep else "",
                 )
             elif isinstance(node, ast.ImportFrom) and node.module == "cachetools":
                 self._drop_replaced(node, set(_CACHE_RENAME))
@@ -154,19 +149,17 @@ class _ImportRewrite(_EmitterState):
                     and (alias.asname or alias.name) not in self._retain
                 }
                 if gone:
-                    self.buf.replace(
-                        node, self._keep_leftover(node, gone, node.module or "")
-                    )
+                    self.buf.replace(node, self._keep_leftover(node, gone, node.module or ""))
             elif (
                 isinstance(node, ast.Import)
-                and all((a.asname or a.name) not in self._retain for a in node.names)
-                and all(a.name in ("arrow",) for a in node.names)
+                and all((alias.asname or alias.name) not in self._retain for alias in node.names)
+                and all(alias.name in ("arrow",) for alias in node.names)
             ):
                 self.buf.replace(node, "")
             elif (
                 isinstance(node, ast.Import)
-                and all((a.asname or a.name) not in self._retain for a in node.names)
-                and all(a.name == "strawberry" for a in node.names)
+                and all((alias.asname or alias.name) not in self._retain for alias in node.names)
+                and all(alias.name == "strawberry" for alias in node.names)
             ):
                 self.buf.replace(node, "")
             elif (
@@ -175,9 +168,7 @@ class _ImportRewrite(_EmitterState):
                 and "jsonable_encoder" not in self._retain
             ):
                 self.buf.replace(node, self._keep_leftover(node, {"jsonable_encoder"}, node.module))
-            elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
-                "django."
-            ):
+            elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith("django."):
                 # A ported module that still imports django does not start
                 # without django installed, which is the one thing the port was
                 # for. Dropped per name and only where every mention of that name
@@ -190,17 +181,15 @@ class _ImportRewrite(_EmitterState):
                     if (alias.asname or alias.name) not in live_django
                 }
                 if gone:
-                    self.buf.replace(
-                        node, self._keep_leftover(node, gone, node.module or "")
-                    )
+                    self.buf.replace(node, self._keep_leftover(node, gone, node.module or ""))
         self._last_import_line = last_import_line
 
     def _drop_replaced(self, node: ast.ImportFrom, names: set[str]) -> None:
         """Drop the imported names whose every call site was rewritten."""
         gone = {
-            a.name
-            for a in node.names
-            if a.name in names and (a.asname or a.name) not in self._retain
+            alias.name
+            for alias in node.names
+            if alias.name in names and (alias.asname or alias.name) not in self._retain
         }
         if gone:
             self.buf.replace(node, self._keep_leftover(node, gone, node.module or ""))
@@ -213,13 +202,14 @@ class _ImportRewrite(_EmitterState):
         left the import pointing at fastapi — so a "ported" module still needed
         fastapi installed to start.
         """
-        moved = [a for a in node.names if a.name in rename and a.asname is None]
+        moved = [alias for alias in node.names if alias.name in rename and alias.asname is None]
         if not moved:
             return
         for alias in moved:
             self.needs.add(rename[alias.name])
         self.buf.replace(
-            node, self._keep_leftover(node, {a.name for a in moved}, node.module or "")
+            node,
+            self._keep_leftover(node, {alias.name for alias in moved}, node.module or ""),
         )
 
     def _rewrite_from_fastapi(self, node: ast.ImportFrom) -> None:
@@ -248,7 +238,7 @@ class _ImportRewrite(_EmitterState):
             parts.extend(_grouped_imports(wreath_names))
         if keep:
             parts.append(
-                f"from {node.module} import " + ", ".join(self._alias_str(a) for a in keep)
+                f"from {node.module} import " + ", ".join(self._alias_str(alias) for alias in keep)
             )
         self.buf.replace(node, "\n".join(parts) if parts else "")
 
@@ -258,25 +248,26 @@ class _ImportRewrite(_EmitterState):
         # human, is still written in the file — deleting its import turns a
         # reviewable port into a module that will not import at all.
         dropped = ({"BaseModel", "Field"} - self._retain) | self._removed_pydantic_imports
-        keep = [a for a in node.names if a.name not in dropped]
-        if any(a.name in dropped for a in node.names):
+        keep = [alias for alias in node.names if alias.name not in dropped]
+        if any(alias.name in dropped for alias in node.names):
             self.needs_dataclass = True
         if keep:
             self.buf.replace(
-                node, "from pydantic import " + ", ".join(self._alias_str(a) for a in keep)
+                node,
+                "from pydantic import " + ", ".join(self._alias_str(alias) for alias in keep),
             )
         else:
             self.buf.replace(node, "")
 
     def _keep_leftover(self, node: ast.ImportFrom, drop: set[str], module: str) -> str:
-        keep = [a for a in node.names if a.name not in drop]
+        keep = [alias for alias in node.names if alias.name not in drop]
         if not keep:
             return ""
-        return f"from {module} import " + ", ".join(self._alias_str(a) for a in keep)
+        return f"from {module} import " + ", ".join(self._alias_str(alias) for alias in keep)
 
     @staticmethod
-    def _alias_str(a: ast.alias) -> str:
-        return f"{a.name} as {a.asname}" if a.asname else a.name
+    def _alias_str(alias: ast.alias) -> str:
+        return f"{alias.name} as {alias.asname}" if alias.asname else alias.name
 
     def inject_imports(self) -> None:
         lines: list[str] = []

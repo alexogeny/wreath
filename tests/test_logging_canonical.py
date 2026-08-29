@@ -1,20 +1,3 @@
-"""Stage 5 of first-class logging: the canonical log line.
-
-One structured record per request, carrying everything the recorder already
-knows -- route, plan, protocol, status, error class, timings, trace and span
-ids -- plus whatever the application attached. Stripe's canonical log line, and
-the core of the wide-event framing.
-
-The completion cell is already this record in binary; what this stage adds is
-application fields on it and a rendering of the pair. For most services one wide
-record replaces the majority of hand-written log lines, which is why it ships in
-the first release rather than after it.
-
-Application fields follow the same deny-by-default rule as log arguments: a
-scalar is written, a string is fingerprinted unless declared. A wide event is
-exactly where a tenant name and an access token sit side by side.
-"""
-
 from __future__ import annotations
 
 import json
@@ -45,9 +28,6 @@ def _trace(**kw: object) -> ProjectedTrace:
     return ProjectedTrace(**fields)  # type: ignore[arg-type]
 
 
-# --- attaching fields -------------------------------------------------------
-
-
 def _merged(records: list[fs.LogCell]) -> dict[str, object]:
     """Fold every event-field record into one attribute mapping.
 
@@ -72,8 +52,6 @@ def test_scalar_fields_reach_the_record() -> None:
 
 
 def test_string_fields_are_fingerprinted_unless_declared_raw() -> None:
-    """Deny-by-default reaches the wide event too: it is exactly where a tenant
-    name and an access token sit next to each other."""
     with log.testing_runtime() as records:
         with log.request_scope(request_id=7) as scope:
             scope.set("token", "hunter2")
@@ -85,8 +63,6 @@ def test_string_fields_are_fingerprinted_unless_declared_raw() -> None:
 
 
 def test_fields_are_published_even_when_the_request_succeeds() -> None:
-    """The canonical line is not failure-triggered: it is the record of every
-    request, which is what makes it the authoritative one."""
     with log.testing_runtime() as records:
         with log.request_scope(request_id=7) as scope:
             scope.set("tenant_id", 1)
@@ -141,23 +117,17 @@ def test_a_scope_with_no_fields_publishes_nothing_extra() -> None:
 
 
 def test_setting_a_field_outside_a_request_is_a_no_op() -> None:
-    """Application code must not have to know whether it is in a request."""
     with log.testing_runtime() as records:
         log.set_field("tenant", 1)
     assert records == []
 
 
 def test_set_field_reaches_the_current_scope() -> None:
-    """The module-level helper is the form deep helper code can use without
-    threading a request object down to it."""
     with log.testing_runtime() as records:
         with log.request_scope(request_id=7) as scope:
             log.set_field("gateway", 3)
             scope.finish(promoted=False)
         assert _merged(records) == {"gateway": 3}
-
-
-# --- rendering the wide record ----------------------------------------------
 
 
 def test_canonical_json_carries_the_whole_request() -> None:
@@ -208,25 +178,17 @@ def test_the_canonical_line_omits_correlation_when_there_is_none() -> None:
 
 
 def test_promoted_records_are_not_folded_into_the_attributes() -> None:
-    """A promoted DEBUG record is its own line; only event-field cells are the
-    canonical record's attributes."""
     with log.testing_runtime(level=log.TRACE) as records:
         with log.request_scope(request_id=7) as scope:
             log.debug("led up to it {v}", v=1)
             scope.set("tenant_id", 42)
             scope.finish(promoted=True)
-        payload = json.loads(
-            canonical_json(log.installed().registry, _trace(logs=tuple(records)))
-        )
+        payload = json.loads(canonical_json(log.installed().registry, _trace(logs=tuple(records))))
         assert payload["attributes"] == {"tenant_id": 42}
         assert payload["records"] == 1
 
 
-# --- the request.event accessor ---------------------------------------------
-
-
 def test_request_event_is_always_safe_to_call() -> None:
-    """Application code must not have to know whether telemetry is configured."""
     from wreath.logging import current_scope
 
     scope = current_scope()

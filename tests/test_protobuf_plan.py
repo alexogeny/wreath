@@ -1,17 +1,3 @@
-"""What `@message` compiles a declaration *into*.
-
-The wire tests assert bytes, which exercises the compiled plan only indirectly —
-and every message they use is declared at module level, so a mutation test
-cannot attribute those declarations to any test at all. A mutation pass over
-`_resolve` and `_unwrap_optional` reported exactly that: the branches that
-decide repeated-ness, packing, presence and nesting were either unreached or
-survived, because nothing here looked at the plan.
-
-So this file declares messages *inside* the tests and asserts the plan directly.
-The plan is the contract with every peer; asserting the bytes for one value does
-not pin the flags that decide the bytes for every other one.
-"""
-
 from __future__ import annotations
 
 import enum
@@ -42,9 +28,6 @@ def _holders(cls: type) -> tuple:
 
 def _row(cls: type, index: int = 0) -> tuple:
     return _plan(cls)[index]
-
-
-# -- presence ---------------------------------------------------------------
 
 
 def test_a_plain_scalar_has_implicit_presence() -> None:
@@ -96,7 +79,6 @@ def test_a_two_arg_generic_carrying_nonetype_is_not_mistaken_for_optional() -> N
     # arguments, one of them NoneType. Only the origin test separates them, and
     # without it this unwraps to an optional `str` — a malformed map silently
     # becoming a scalar field of an entirely different wire type.
-    #
     # `dict[str, None]` above does *not* reach that path: a subscripted generic
     # keeps the literal `None`, while a union normalises to `NoneType`. The two
     # spellings take different routes to the same refusal, so both are pinned.
@@ -114,9 +96,6 @@ def test_an_instance_used_as_an_annotation_is_refused() -> None:
         message(type("M", (), namespace))
 
 
-# -- default kind selection -------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "annotation,expected",
     [
@@ -127,9 +106,7 @@ def test_an_instance_used_as_an_annotation_is_refused() -> None:
         (bytes, wire.KIND_BYTES),
     ],
 )
-def test_each_python_type_has_a_default_wire_kind(
-    annotation: type, expected: int
-) -> None:
+def test_each_python_type_has_a_default_wire_kind(annotation: type, expected: int) -> None:
     namespace = {"__annotations__": {"a": annotation}, "a": field(1)}
     M = message(type("M", (), namespace))
     assert _row(M)[1] == expected
@@ -149,9 +126,6 @@ def test_an_explicit_kind_narrows_the_default(kind: str, expected: int) -> None:
     namespace = {"__annotations__": {"a": int}, "a": field(1, kind=kind)}
     M = message(type("M", (), namespace))
     assert _row(M)[1] == expected
-
-
-# -- repeated and packing ---------------------------------------------------
 
 
 def test_a_repeated_scalar_packs_by_default() -> None:
@@ -206,9 +180,6 @@ def test_a_repeated_message_is_repeated_and_not_packed() -> None:
     assert subplan == _plan(Leaf)
 
 
-# -- nesting ----------------------------------------------------------------
-
-
 def test_a_nested_message_carries_the_inner_plan_and_explicit_presence() -> None:
     @message
     class M:
@@ -242,9 +213,6 @@ def test_the_subplan_is_a_plan_and_never_the_class() -> None:
     assert all(isinstance(row, tuple) for row in subplan)
 
 
-# -- enums ------------------------------------------------------------------
-
-
 def test_an_enum_compiles_to_the_enum_kind_and_keeps_its_class() -> None:
     @message
     class M:
@@ -262,9 +230,6 @@ def test_an_enum_field_defaults_to_its_zero_member() -> None:
         a: Colour = field(1)
 
     assert M().a is Colour.NONE
-
-
-# -- maps -------------------------------------------------------------------
 
 
 def test_a_map_compiles_to_a_key_value_entry_plan() -> None:
@@ -305,9 +270,6 @@ def test_an_integer_map_key_is_allowed() -> None:
         a: dict[int, str] = field(1)
 
     assert _row(M)[3][0][1] == wire.KIND_INT64
-
-
-# -- field numbers ----------------------------------------------------------
 
 
 def test_the_plan_preserves_declared_numbers_not_positions() -> None:

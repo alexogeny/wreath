@@ -1,20 +1,3 @@
-"""A declared message is readable *and* writable, and the document says both.
-
-Wreath has decoded `application/x-protobuf` request bodies since
-`binding._decode_protobuf_body` landed. It could not encode one: a handler
-returning a declared message served JSON whatever the client asked for, and the
-generated OpenAPI advertised JSON on both halves. That asymmetry was not a
-decision -- it was the half that had not been done.
-
-The fix is deliberately *per route*, not a change to `DEFAULT_SERIALIZERS`. The
-reason `negotiation` keeps `PROTOBUF` out of the global offers still stands:
-JSON and MessagePack encode whatever a handler returns, protobuf can only encode
-a declared message, and a handler returning a dict is the common case. What was
-missing is the **return annotation** -- a route saying at startup that its body
-is encodable. These tests pin that distinction, because the tempting fix (add
-PROTOBUF to the defaults) breaks every dict-returning route in the tree.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -50,9 +33,6 @@ def _app() -> Wreath:
 
 def _content_type(response) -> str | None:
     return response.header("content-type")
-
-
-# --- the wire ------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -133,9 +113,6 @@ async def test_an_explicit_json_preference_still_wins() -> None:
             headers={"accept": "application/json;q=1.0, application/x-protobuf;q=0.5"},
         )
     assert _content_type(response) == "application/json"
-
-
-# --- the document --------------------------------------------------------------------
 
 
 def test_the_document_advertises_both_media_types() -> None:

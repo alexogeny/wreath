@@ -40,9 +40,7 @@ def test_an_errored_row_tied_with_the_best_result_is_not_marked_as_a_win() -> No
 
 
 def test_a_scenario_table_does_not_rank_across_protocols() -> None:
-    html = _scenario_table(
-        [_row("http1", 1.0), _row("http2", 2.0, protocol="h2")]
-    )
+    html = _scenario_table([_row("http1", 1.0), _row("http2", 2.0, protocol="h2")])
 
     assert 'class="win"' not in html
 
@@ -77,9 +75,7 @@ def test_migration_results_ignore_entries_without_a_median() -> None:
 
 
 def test_cedar_report_keeps_the_compiled_evaluation_table_on_its_own() -> None:
-    html = _cedar_section(
-        [{"evaluate": {"wreath": {"median_ns": 125.0}}}]
-    )
+    html = _cedar_section([{"evaluate": {"wreath": {"median_ns": 125.0}}}])
 
     assert "Cedar authorization" in html
     assert "Evaluate (policies compiled once)" in html
@@ -87,9 +83,7 @@ def test_cedar_report_keeps_the_compiled_evaluation_table_on_its_own() -> None:
 
 
 def test_cedar_report_keeps_the_stateless_evaluation_table_on_its_own() -> None:
-    html = _cedar_section(
-        [{"parse_and_evaluate": {"wreath": {"median_ns": 250.0}}}]
-    )
+    html = _cedar_section([{"parse_and_evaluate": {"wreath": {"median_ns": 250.0}}}])
 
     assert "Cedar authorization" in html
     assert "Evaluate (policies compiled once)" not in html

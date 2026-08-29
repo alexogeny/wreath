@@ -10,13 +10,10 @@ the losing side of that at least once.
 So each task ensures its own group with `uv sync --inexact`, which adds without
 removing, and then runs the tool:
 
-    uv run wreath-docs                 # build the docs, strictly (no group needed)
-    uv run wreath-docs --serve         # ... and preview, rebuilding on change
     uv run wreath-bench --framework wreath starlette
     uv run wreath-check                # ruff, ty, pytest, native lints, baseline
 
 `--inexact` is the whole point: `wreath-bench` must not cost you `wreath-check`.
-`wreath-docs` needs no group at all -- wreath's own generator builds the site.
 
 Nothing here pins or resolves anything itself -- `uv.lock` remains the only
 source of versions. These just make sure the group is present before use.
@@ -53,35 +50,11 @@ def ensure_groups(*groups: str) -> None:
     command = [_uv(), "sync", "--inexact", *(f"--group={group}" for group in groups)]
     result = subprocess.run(command, cwd=repo_root())
     if result.returncode != 0:
-        raise SystemExit(
-            f"wreath tasks: `{' '.join(command)}` failed; the group is not installed."
-        )
+        raise SystemExit(f"wreath tasks: `{' '.join(command)}` failed; the group is not installed.")
 
 
 def _run(command: list[str], *, cwd: Path | None = None) -> int:
     return subprocess.run(command, cwd=cwd or repo_root()).returncode
-
-
-def docs(argv: list[str] | None = None) -> int:
-    """Build the documentation, strictly. `--serve` previews and watches instead.
-
-    There is no docs dependency group to install any more: wreath's own
-    generator builds the site, so the toolchain is the framework.
-    """
-    parser = argparse.ArgumentParser(
-        prog="wreath-docs", description="Build (or serve) the documentation."
-    )
-    parser.add_argument(
-        "--serve", action="store_true", help="preview and rebuild on change"
-    )
-    parser.add_argument("rest", nargs=argparse.REMAINDER, help="passed to `wreath docs`")
-    args = parser.parse_args(argv)
-
-    if args.serve:
-        return _run([sys.executable, "-m", "wreath", "docs", "serve", *args.rest])
-    # `check` is the strict build: a warning that is not an error is a warning
-    # nobody reads, so an orphan page or a dead link fails here.
-    return _run([sys.executable, "-m", "wreath", "docs", "check", *args.rest])
 
 
 #: PostgreSQL image and container used by the DB battery. Matches the durability
@@ -103,7 +76,7 @@ def _top_freq_cpus() -> set[int]:
         try:
             cpu = int(os.path.basename(path)[3:])
             freq = int(Path(f"{path}/cpufreq/cpuinfo_max_freq").read_text())
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
         rows.append((cpu, freq))
     if not rows:
@@ -249,13 +222,31 @@ def _db_battery() -> list[Path]:
     port = _free_port()
     dsn = f"postgresql://wreath:secret@127.0.0.1:{port}/wreath"
     subprocess.run(["podman", "rm", "-f", _BENCH_PG_NAME], capture_output=True)
-    started = _run([
-        "podman", "run", "--rm", "--detach", "--name", _BENCH_PG_NAME,
-        "--publish", f"127.0.0.1:{port}:5432",
-        "--env", "POSTGRES_USER=wreath", "--env", "POSTGRES_PASSWORD=secret",
-        "--env", "POSTGRES_DB=wreath", _BENCH_PG_IMAGE,
-        "-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off",
-    ])
+    started = _run(
+        [
+            "podman",
+            "run",
+            "--rm",
+            "--detach",
+            "--name",
+            _BENCH_PG_NAME,
+            "--publish",
+            f"127.0.0.1:{port}:5432",
+            "--env",
+            "POSTGRES_USER=wreath",
+            "--env",
+            "POSTGRES_PASSWORD=secret",
+            "--env",
+            "POSTGRES_DB=wreath",
+            _BENCH_PG_IMAGE,
+            "-c",
+            "fsync=off",
+            "-c",
+            "synchronous_commit=off",
+            "-c",
+            "full_page_writes=off",
+        ]
+    )
     if started != 0:
         print("[skip] could not start the benchmark PostgreSQL container")
         return produced
@@ -266,11 +257,37 @@ def _db_battery() -> list[Path]:
         if not _wait_pg_ready(_BENCH_PG_NAME, 45):
             print("[skip] benchmark PostgreSQL did not become ready in time")
             return produced
-        if _run([sys.executable, "-m", "benchmarks.postgres.bench_orm_competitors",
-                 "--dsn", dsn, "--output", str(orm)]) == 0 and orm.exists():
+        if (
+            _run(
+                [
+                    sys.executable,
+                    "-m",
+                    "benchmarks.postgres.bench_orm_competitors",
+                    "--dsn",
+                    dsn,
+                    "--output",
+                    str(orm),
+                ]
+            )
+            == 0
+            and orm.exists()
+        ):
             produced.append(orm)
-        if _run([sys.executable, "-m", "benchmarks.postgres.bench_webhooks",
-                 "--dsn", dsn, "--output", str(webhooks)]) == 0 and webhooks.exists():
+        if (
+            _run(
+                [
+                    sys.executable,
+                    "-m",
+                    "benchmarks.postgres.bench_webhooks",
+                    "--dsn",
+                    dsn,
+                    "--output",
+                    str(webhooks),
+                ]
+            )
+            == 0
+            and webhooks.exists()
+        ):
             produced.append(webhooks)
     finally:
         subprocess.run(["podman", "rm", "-f", _BENCH_PG_NAME], capture_output=True)
@@ -304,29 +321,58 @@ def bench(argv: list[str] | None = None) -> int:
         prog="wreath-bench",
         description="Run the full Wreath benchmark battery, pinned and repeated.",
     )
-    parser.add_argument("--passes", type=int, default=3,
-                        help="framework-matrix passes to run and combine (default 3)")
-    parser.add_argument("--pin", default="pcores",
-                        help="CPUs to pin to: 'pcores' (default), 'none', or a list like '0-11'")
-    parser.add_argument("--multi", nargs="?", const="auto", default=None, metavar="N",
-                        help="run every arm multi-worker on N server cores "
-                             "(default: half the physical cores, so the load "
-                             "generator keeps the other half). Without it every "
-                             "arm is held to one worker on one core.")
-    parser.add_argument("--matrix-only", action="store_true",
-                        help="run only the framework matrix (skip webhook and database benches)")
-    parser.add_argument("--no-db", action="store_true",
-                        help="skip the benchmarks that need podman/PostgreSQL")
-    parser.add_argument("--quiet", type=int, default=0, choices=(0, 1, 2), metavar="TIER",
-                        help="quiet the machine first: 0 pinning only (default), "
-                             "1 governor and named services (needs root), "
-                             "2 also freeze desktop applications. Tiers 1 and 2 "
-                             "print a plan and refuse unless --quiet-apply is given.")
-    parser.add_argument("--quiet-apply", action="store_true",
-                        help="actually apply --quiet (without this, tiers 1 and 2 dry-run)")
-    parser.add_argument("--allow-competing", action="store_true",
-                        help="benchmark even though other tests, agents or load "
-                             "generators are running (the result measures them too)")
+    parser.add_argument(
+        "--passes",
+        type=int,
+        default=3,
+        help="framework-matrix passes to run and combine (default 3)",
+    )
+    parser.add_argument(
+        "--pin",
+        default="pcores",
+        help="CPUs to pin to: 'pcores' (default), 'none', or a list like '0-11'",
+    )
+    parser.add_argument(
+        "--multi",
+        nargs="?",
+        const="auto",
+        default=None,
+        metavar="N",
+        help="run every arm multi-worker on N server cores "
+        "(default: half the physical cores, so the load "
+        "generator keeps the other half). Without it every "
+        "arm is held to one worker on one core.",
+    )
+    parser.add_argument(
+        "--matrix-only",
+        action="store_true",
+        help="run only the framework matrix (skip webhook and database benches)",
+    )
+    parser.add_argument(
+        "--no-db", action="store_true", help="skip the benchmarks that need podman/PostgreSQL"
+    )
+    parser.add_argument(
+        "--quiet",
+        type=int,
+        default=0,
+        choices=(0, 1, 2),
+        metavar="TIER",
+        help="quiet the machine first: 0 pinning only (default), "
+        "1 governor and named services (needs root), "
+        "2 also freeze desktop applications. Tiers 1 and 2 "
+        "print a plan and refuse unless --quiet-apply is given.",
+    )
+    parser.add_argument(
+        "--quiet-apply",
+        action="store_true",
+        help="actually apply --quiet (without this, tiers 1 and 2 dry-run)",
+    )
+    parser.add_argument(
+        "--allow-competing",
+        action="store_true",
+        help="benchmark even though other tests, agents or load "
+        "generators are running (the result measures them too)",
+    )
     args, forwarded = parser.parse_known_args(sys.argv[1:] if argv is None else argv)
 
     # The competing-workload check runs at every tier, including 0, because it
@@ -337,8 +383,10 @@ def bench(argv: list[str] | None = None) -> int:
     if not args.allow_competing:
         competing = _quiet.competing_workloads()
         if competing:
-            print(f"wreath-bench: REFUSED -- {len(competing)} competing workload(s) "
-                  "would be measured alongside the benchmark:")
+            print(
+                f"wreath-bench: REFUSED -- {len(competing)} competing workload(s) "
+                "would be measured alongside the benchmark:"
+            )
             for workload in competing[:12]:
                 print(f"    pid {workload.pid:>7}  {workload.why}")
                 print(f"              {workload.command}")
@@ -351,18 +399,20 @@ def bench(argv: list[str] | None = None) -> int:
     if args.quiet >= 1:
         if not args.quiet_apply:
             _quiet._print_plan(_quiet.plan(args.quiet), args.quiet)
-            print("\nwreath-bench: dry run -- nothing was changed and no benchmark ran. "
-                  "Add --quiet-apply to proceed.")
+            print(
+                "\nwreath-bench: dry run -- nothing was changed and no benchmark ran. "
+                "Add --quiet-apply to proceed."
+            )
             return 0
         try:
-            quiet_journal = _quiet.apply(
-                args.quiet, allow_competing=args.allow_competing
-            )
+            quiet_journal = _quiet.apply(args.quiet, allow_competing=args.allow_competing)
         except _quiet.QuietRefused as error:
             print(f"wreath-bench: REFUSED to quiet the machine -- {error}")
             return 2
-        print(f"[quiet] tier {args.quiet}: {len(quiet_journal.changes)} change(s) "
-              f"applied; watchdog {quiet_journal.watchdog} restores unconditionally.")
+        print(
+            f"[quiet] tier {args.quiet}: {len(quiet_journal.changes)} change(s) "
+            f"applied; watchdog {quiet_journal.watchdog} restores unconditionally."
+        )
         noise = _quiet.measure_noise()
         print(f"[quiet] A/A spread after quieting: {noise['spread_pct']:.2f}%")
 
@@ -395,8 +445,10 @@ def _bench_after_quiet(args: argparse.Namespace, forwarded: list[str]) -> int:
         os.environ["WREATH_BENCH_SERVER_CPUS"] = ",".join(str(c) for c in split.server)
         pinned = _apply_pin(set(split.client))
         if pinned:
-            print(f"[pin] server -> CPUs {list(split.server)}; generator -> "
-                  f"{list(split.client)} ({split.reason})")
+            print(
+                f"[pin] server -> CPUs {list(split.server)}; generator -> "
+                f"{list(split.client)} ({split.reason})"
+            )
     elif len(pcores) >= 2 * server_cores + 2 and "WREATH_BENCH_SERVER_CPUS" not in os.environ:
         take = 2 * server_cores
         server_cpus, client_cpus = pcores[:take], set(pcores[take:])
@@ -412,12 +464,16 @@ def _bench_after_quiet(args: argparse.Namespace, forwarded: list[str]) -> int:
         print("[pin] no CPU pinning applied (sysfs unavailable or empty selection)")
 
     forwarded = _ensure_workers(_ensure_native_arm(forwarded), server_cores)
-    print(f"[workers] every arm runs {server_cores} worker(s) on {server_cores} "
-          f"server core(s)" + ("" if server_cores > 1 else
-                               "; pass --multi for the multi-worker column"))
-    print("[wreath] `wreath-native` is wreath's own HTTP+JSON stack (the headline "
-          "wreath number); the `wreath` arm is wreath on uvicorn/httptools, kept as "
-          "the common-server framework-overhead comparison and labeled by server.")
+    print(
+        f"[workers] every arm runs {server_cores} worker(s) on {server_cores} "
+        f"server core(s)"
+        + ("" if server_cores > 1 else "; pass --multi for the multi-worker column")
+    )
+    print(
+        "[wreath] `wreath-native` is wreath's own HTTP+JSON stack (the headline "
+        "wreath number); the `wreath` arm is wreath on uvicorn/httptools, kept as "
+        "the common-server framework-overhead comparison and labeled by server."
+    )
 
     ensure_groups("benchmark")
 
@@ -430,36 +486,75 @@ def _bench_after_quiet(args: argparse.Namespace, forwarded: list[str]) -> int:
         if _run([sys.executable, "-m", "benchmarks.run", *forwarded]) != 0:
             print("wreath-bench: a matrix pass failed; aborting.")
             return 1
-        fresh = sorted(
-            set(results_dir.glob("*Z.json")) - before, key=lambda p: p.stat().st_mtime
-        )
+        fresh = sorted(set(results_dir.glob("*Z.json")) - before, key=lambda p: p.stat().st_mtime)
         if fresh:
             matrix_jsons.append(fresh[-1])
 
     report_inputs = list(matrix_jsons)
     if not args.matrix_only:
         print("\n=== webhook microbenchmarks " + "=" * 30)
-        _run([sys.executable, "-m", "benchmarks.bench_webhooks",
-              "--output", "benchmark-results-webhooks/latest.json"])
-        _run([sys.executable, "-m", "benchmarks.bench_webhook_inbound",
-              "--output", "benchmark-results-webhooks/inbound-latest.json"])
-        _run([sys.executable, "-m", "benchmarks.bench_webhook_dispatcher",
-              "--output", "benchmark-results-webhooks/dispatcher-latest.json"])
+        _run(
+            [
+                sys.executable,
+                "-m",
+                "benchmarks.bench_webhooks",
+                "--output",
+                "benchmark-results-webhooks/latest.json",
+            ]
+        )
+        _run(
+            [
+                sys.executable,
+                "-m",
+                "benchmarks.bench_webhook_inbound",
+                "--output",
+                "benchmark-results-webhooks/inbound-latest.json",
+            ]
+        )
+        _run(
+            [
+                sys.executable,
+                "-m",
+                "benchmarks.bench_webhook_dispatcher",
+                "--output",
+                "benchmark-results-webhooks/dispatcher-latest.json",
+            ]
+        )
 
         print("\n=== wreath-metal timer " + "=" * 35)
-        _run([sys.executable, "-m", "benchmarks.bench_timing_wheel",
-              "--output", "benchmark-results-timing-wheel/latest.json"])
+        _run(
+            [
+                sys.executable,
+                "-m",
+                "benchmarks.bench_timing_wheel",
+                "--output",
+                "benchmark-results-timing-wheel/latest.json",
+            ]
+        )
 
         print("\n=== migration resolution " + "=" * 32)
         migrations = repo_root() / "benchmark-results-migrations" / "latest.json"
-        if _run([sys.executable, "-m", "benchmarks.bench_migration_resolution",
-                 "--output", str(migrations)]) == 0 and migrations.exists():
+        if (
+            _run(
+                [
+                    sys.executable,
+                    "-m",
+                    "benchmarks.bench_migration_resolution",
+                    "--output",
+                    str(migrations),
+                ]
+            )
+            == 0
+            and migrations.exists()
+        ):
             report_inputs.append(migrations)
 
         print("\n=== cedar authorization " + "=" * 33)
         cedar = repo_root() / "benchmark-results-cedar" / "latest.json"
-        if _run([sys.executable, "-m", "benchmarks.bench_cedar",
-                 "--output", str(cedar)]) == 0 and cedar.exists():
+        if (
+            _run([sys.executable, "-m", "benchmarks.bench_cedar", "--output", str(cedar)]) == 0
+            and cedar.exists()
+        ):
             report_inputs.append(cedar)
         if not args.no_db:
             print("\n=== database battery (ORM, PostgreSQL webhooks, lifecycle) " + "=" * 8)
@@ -517,18 +612,26 @@ def _pytest_command() -> list[str]:
     you go for evidence. A bare `uv run pytest` stays serial, because that is
     the one you attach a debugger to.
     """
-    return [sys.executable, "-m", "wreath.cli", "test",
-            "--grid", "never", "--mutant", "off", "--slowest", "0"]
+    return [
+        sys.executable,
+        "-m",
+        "wreath.cli",
+        "test",
+        "--grid",
+        "never",
+        "--mutant",
+        "off",
+        "--slowest",
+        "0",
+    ]
 
 
 #: The gates a change has to pass, in the order that fails cheapest first.
 _CHECKS: tuple[tuple[str, list[str]], ...] = (
-    ("map-lint", [sys.executable, "-m", "wreath._devtools.map_lint"]),
     # Locally as well as in CI: finding a co-authorship trailer at the
     # ruleset, after the push is refused, is finding it too late to fix
     # without a rebase.
     ("hygiene", [sys.executable, "-m", "wreath._devtools.hygiene", "--paths"]),
-    ("roadmap-lint", [sys.executable, "-m", "wreath._devtools.roadmap_lint"]),
     # `wreath-build-lint` is deliberately absent: it reports the stale
     # `_http3` artifact today, and a gate that fails on arrival is a gate
     # somebody appends `|| true` to. It joins this list when it reaches zero,
@@ -541,8 +644,17 @@ _CHECKS: tuple[tuple[str, list[str]], ...] = (
     ("native-error-lint", [sys.executable, "-m", "wreath._devtools.native_error_lint"]),
     ("native-memory-lint", [sys.executable, "-m", "wreath._devtools.native_memory_lint"]),
     ("native-gil-lint", [sys.executable, "-m", "wreath._devtools.native_gil_lint"]),
-    ("complexity", [sys.executable, "-m", "wreath._devtools.complexity_probe",
-                    "--group", "metal-http1", "--check"]),
+    (
+        "complexity",
+        [
+            sys.executable,
+            "-m",
+            "wreath._devtools.complexity_probe",
+            "--group",
+            "metal-http1",
+            "--check",
+        ],
+    ),
     ("request-trace", [sys.executable, "-m", "wreath._devtools.request_trace", "--check"]),
 )
 
@@ -556,15 +668,10 @@ def check(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="wreath-check", description="Run lint, types, tests, native lints, baseline."
     )
-    parser.add_argument(
-        "--docs", action="store_true", help="also build the docs, strictly"
-    )
-    args = parser.parse_args(argv)
+    parser.parse_args(argv)
 
     ensure_groups("dev")
     checks = list(_CHECKS)
-    if args.docs:
-        checks.append(("docs", [sys.executable, "-m", "wreath", "docs", "check"]))
 
     failed: list[str] = []
     for name, command in checks:
@@ -595,13 +702,8 @@ def _warn_unverified() -> None:
     """
     if os.environ.get("WREATH_TEST_POSTGRES_DSN"):
         return
-    runtime = next(
-        (name for name in ("docker", "podman", "nerdctl") if shutil.which(name)), None
-    )
-    print(
-        "\nNOTE: the database-backed tests did not run -- "
-        "WREATH_TEST_POSTGRES_DSN is unset."
-    )
+    runtime = next((name for name in ("docker", "podman", "nerdctl") if shutil.which(name)), None)
+    print("\nNOTE: the database-backed tests did not run -- WREATH_TEST_POSTGRES_DSN is unset.")
     if runtime is None:
         print("      No container runtime found, so they cannot run on this machine.")
     print("      See the pytest section above for the count and the command.")

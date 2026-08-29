@@ -65,10 +65,18 @@ _ARROW_RENAMES = frozenset({"utcnow", "now", "get", "fromtimestamp", "fromdateti
 _CACHE_STORES = frozenset({"TTLCache", "LRUCache", "LFUCache", "Cache", "FIFOCache"})
 
 # Declarative fastapi.security schemes, all of which become an auth backend.
-_SECURITY_SCHEMES = frozenset({
-    "HTTPBearer", "HTTPBasic", "HTTPDigest", "APIKeyHeader", "APIKeyQuery",
-    "APIKeyCookie", "OAuth2PasswordBearer", "OAuth2AuthorizationCodeBearer",
-})
+_SECURITY_SCHEMES = frozenset(
+    {
+        "HTTPBearer",
+        "HTTPBasic",
+        "HTTPDigest",
+        "APIKeyHeader",
+        "APIKeyQuery",
+        "APIKeyCookie",
+        "OAuth2PasswordBearer",
+        "OAuth2AuthorizationCodeBearer",
+    }
+)
 
 
 def _boto3_service(node: ast.Call) -> str | None:
@@ -102,14 +110,20 @@ def _middleware_writes_state(node: ast.ClassDef) -> bool:
 
 
 class _Analyzer(ast.NodeVisitor):
-    def __init__(self, path: Path, root: Path, imports: _Imports, index: dict[str, set[str]],
-                 pk_types: dict[str, str] | None = None,
-                 orm_columns: dict[str, set[str]] | None = None,
-                 orm_relations: dict[str, dict[str, str]] | None = None,
-                 orm_tables: dict[str, str] | None = None,
-                 orm_unique_constraints: dict[str, tuple[frozenset[str], ...]] | None = None,
-                 positional_model_calls: set[str] | frozenset[str] = frozenset(),
-                 django: DjangoImage | None = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        root: Path,
+        imports: _Imports,
+        index: dict[str, set[str]],
+        pk_types: dict[str, str] | None = None,
+        orm_columns: dict[str, set[str]] | None = None,
+        orm_relations: dict[str, dict[str, str]] | None = None,
+        orm_tables: dict[str, str] | None = None,
+        orm_unique_constraints: dict[str, tuple[frozenset[str], ...]] | None = None,
+        positional_model_calls: set[str] | frozenset[str] = frozenset(),
+        django: DjangoImage | None = None,
+    ) -> None:
         self.rel = _relative_to(path, root)
         self.django = django or DjangoImage()
         self.imports = imports
@@ -153,7 +167,6 @@ class _Analyzer(ast.NodeVisitor):
                 self.positional_model_calls.add(call.func.attr)
         self.generic_visit(node)
 
-    # -- emit -----------------------------------------------------------------
     def _emit(self, rule_id: str, line: int, extra: str = "") -> None:
         construct, category, tag, message = RULES[rule_id]
         if extra:
@@ -165,7 +178,6 @@ class _Analyzer(ast.NodeVisitor):
             self._once.add(key)
             self._emit(rule_id, line)
 
-    # -- loops (dynamic include_router) ---------------------------------------
     def _visit_loop(self, node: ast.For | ast.AsyncFor) -> None:
         self._loop_depth += 1
         self.generic_visit(node)
@@ -177,14 +189,16 @@ class _Analyzer(ast.NodeVisitor):
     def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
         self._visit_loop(node)
 
-    # -- classes (models / settings) ------------------------------------------
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         for dec in node.decorator_list:
             origin = self.imports.origin(dec.func if isinstance(dec, ast.Call) else dec)
             if origin.split(".")[-1] == "as_form":
                 self._emit("form.as_form", node.lineno)
             elif origin.startswith("strawberry.") and origin.split(".")[-1] in (
-                "type", "input", "interface", "federation",
+                "type",
+                "input",
+                "interface",
+                "federation",
             ):
                 # One finding per GraphQL type, not per field: wreath derives
                 # fields from the ORM model, so `strawberry.auto` (the single
@@ -222,7 +236,8 @@ class _Analyzer(ast.NodeVisitor):
             self._scan_settings_body(node)
             rule_id = settings_class_rule(self.imports, node, self.index["settings"])
             self._emit(
-                rule_id, node.lineno,
+                rule_id,
+                node.lineno,
                 settings_required(node) if rule_id == "settings.class_env" else "",
             )
         elif kind in ("ormar", "sqlmodel"):
@@ -272,7 +287,8 @@ class _Analyzer(ast.NodeVisitor):
         hidden = sorted(columns - set(fields))
         if hidden:
             return "graphql.type", (
-                "the derived type would also expose " + ", ".join(hidden)
+                "the derived type would also expose "
+                + ", ".join(hidden)
                 + " — wreath's exposure is per model, not per field, so deleting this class "
                 "widens the public schema"
             )
@@ -280,7 +296,8 @@ class _Analyzer(ast.NodeVisitor):
         if renamed:
             return "graphql.type", (
                 "strawberry camel-cases field names and wreath does not, so "
-                + ", ".join(renamed) + " would change on the wire"
+                + ", ".join(renamed)
+                + " would change on the wire"
             )
         return "graphql.type_mirror", ""
 
@@ -332,16 +349,20 @@ class _Analyzer(ast.NodeVisitor):
             origin = self.imports.origin(value.func)
             if origin == "ormar.ForeignKey" or self._has_kw(value, "foreign_key"):
                 target = value.args[0] if value.args else None
-                target_name = target.id if isinstance(target, ast.Name) else (
-                    target.attr if isinstance(target, ast.Attribute) else None)
+                target_name = (
+                    target.id
+                    if isinstance(target, ast.Name)
+                    else (target.attr if isinstance(target, ast.Attribute) else None)
+                )
                 typed = target_name in self.pk_types
                 self._emit("orm.fk_typed" if typed else "orm.fk", stmt.lineno)
-            elif origin.startswith("ormar.") or origin.endswith(".ARRAY") or (
-                kind == "sqlmodel" and origin.split(".")[-1] == "Field"
+            elif (
+                origin.startswith("ormar.")
+                or origin.endswith(".ARRAY")
+                or (kind == "sqlmodel" and origin.split(".")[-1] == "Field")
             ):
                 self._emit("orm.column", stmt.lineno)
 
-    # -- functions (routes / deps / validators / lifespan) --------------------
     def visit_FunctionDef(self, node) -> None:
         self._handle_function(node)
         self.generic_visit(node)
@@ -388,9 +409,7 @@ class _Analyzer(ast.NodeVisitor):
                 # Call form missed every undecorated-argument task -- and the
                 # emitter (`emit.py`) has always matched on `tail`, so the report
                 # under-counted exactly the sites whose ported source carried a TODO.
-                self._emit(
-                    celery_task_rule(dec, node), getattr(dec, "lineno", node.lineno)
-                )
+                self._emit(celery_task_rule(dec, node), getattr(dec, "lineno", node.lineno))
             elif tail == "field" and origin.startswith("strawberry."):
                 self._emit("graphql.resolver", getattr(dec, "lineno", node.lineno))
             elif tail == "cached" and origin.startswith("cachetools"):
@@ -427,7 +446,7 @@ class _Analyzer(ast.NodeVisitor):
     def _scan_params(self, node) -> None:
         args = node.args
         # The tail of `args.args` is exactly as long as `args.defaults`.
-        defaulted = args.args[len(args.args) - len(args.defaults):]
+        defaulted = args.args[len(args.args) - len(args.defaults) :]
         defaults = dict(zip([a.arg for a in defaulted], args.defaults, strict=True))
         for arg in list(args.args) + list(args.kwonlyargs):
             default = defaults.get(arg.arg)
@@ -441,15 +460,15 @@ class _Analyzer(ast.NodeVisitor):
                     # has no switch for that — the DTO has to gain the wrapper.
                     self._emit(
                         "param.body_embed"
-                        if any(k.arg == "embed" and _is_true(k.value)
-                               for k in default.keywords)
+                        if any(k.arg == "embed" and _is_true(k.value) for k in default.keywords)
                         else "param.body",
                         arg.lineno,
                     )
                     continue
                 rule_id = _MARKER_RULE.get(marker)
-                if rule_id == "param.query" and any(k.arg in _STR_CONSTRAINTS
-                                                    for k in default.keywords):
+                if rule_id == "param.query" and any(
+                    k.arg in _STR_CONSTRAINTS for k in default.keywords
+                ):
                     self._emit("param.query_strconstraint", arg.lineno)
                     continue
                 if rule_id:
@@ -460,7 +479,6 @@ class _Analyzer(ast.NodeVisitor):
             elif arg.annotation is not None and self._annotation_is_model(arg.annotation):
                 self._emit("param.body", arg.lineno)
 
-    # -- calls / attributes (queries, deps, middleware, infra) ----------------
     def visit_Call(self, node: ast.Call) -> None:
         func = node.func
         origin = self.imports.origin(func)
@@ -468,15 +486,15 @@ class _Analyzer(ast.NodeVisitor):
         if isinstance(func, ast.Attribute):
             attr = func.attr
             if attr == "include_router":
-                self._emit("route.include_dynamic" if self._loop_depth else "route.include_static",
-                           node.lineno)
+                self._emit(
+                    "route.include_dynamic" if self._loop_depth else "route.include_static",
+                    node.lineno,
+                )
             elif attr == "add_middleware":
                 self._scan_add_middleware(node)
             elif attr in ("delay", "apply_async"):
                 self._emit(
-                    celery_enqueue_rule(
-                        node, inside_async=self._enclosing_is_async(node)
-                    ),
+                    celery_enqueue_rule(node, inside_async=self._enclosing_is_async(node)),
                     node.lineno,
                 )
             elif attr in ("send_json", "receive_json"):
@@ -553,17 +571,11 @@ class _Analyzer(ast.NodeVisitor):
             if service == "s3":
                 self._once_emit("boto3-s3", "ext.boto3_s3", node.lineno)
             elif service in {"scheduler", "events"}:
-                self._once_emit(
-                    "boto3-scheduler", "ext.boto3_scheduler", node.lineno
-                )
+                self._once_emit("boto3-scheduler", "ext.boto3_scheduler", node.lineno)
             elif service in {"cloudwatch", "logs"}:
-                self._once_emit(
-                    "boto3-observability", "ext.boto3_observability", node.lineno
-                )
+                self._once_emit("boto3-observability", "ext.boto3_observability", node.lineno)
             elif service in {"cognito-idp", "cognito-identity"}:
-                self._once_emit(
-                    "boto3-identity", "ext.boto3_identity", node.lineno
-                )
+                self._once_emit("boto3-identity", "ext.boto3_identity", node.lineno)
             else:
                 self._once_emit("boto3", "ext.boto3", node.lineno)
         elif origin in ("hmac.new", "hmac.compare_digest"):
@@ -576,9 +588,7 @@ class _Analyzer(ast.NodeVisitor):
         elif tail in ("decode", "get_unverified_header") and "jwt" in origin.lower():
             claims = {keyword.arg for keyword in node.keywords}
             self._emit(
-                "auth.oidc_manual"
-                if {"issuer", "audience"} <= claims
-                else "auth.jwt",
+                "auth.oidc_manual" if {"issuer", "audience"} <= claims else "auth.jwt",
                 node.lineno,
             )
         elif tail == "OAuth2Session" or "authlib" in origin:
@@ -666,20 +676,14 @@ class _Analyzer(ast.NodeVisitor):
                 return True
             if isinstance(candidate.value, ast.Call):
                 awaited = candidate.value
-                if (
-                    self.imports.origin(awaited.func) in ("asyncio.gather", "asyncio.wait")
-                    and any(
-                        (
-                            isinstance(argument, ast.Name)
-                            and argument.id in tracked
-                        )
-                        or (
-                            isinstance(argument, ast.Starred)
-                            and isinstance(argument.value, ast.Name)
-                            and argument.value.id in tracked
-                        )
-                        for argument in awaited.args
+                if self.imports.origin(awaited.func) in ("asyncio.gather", "asyncio.wait") and any(
+                    (isinstance(argument, ast.Name) and argument.id in tracked)
+                    or (
+                        isinstance(argument, ast.Starred)
+                        and isinstance(argument.value, ast.Name)
+                        and argument.value.id in tracked
                     )
+                    for argument in awaited.args
                 ):
                     return True
         return False
@@ -700,9 +704,7 @@ class _Analyzer(ast.NodeVisitor):
             self._claimed_objects.add(id(value))
             call = self._parents.get(id(node))
             model = ast.unparse(value.value)
-            if not self.django.objects_is_every_row(
-                model, reads_django=self.imports.reads_django
-            ):
+            if not self.django.objects_is_every_row(model, reads_django=self.imports.reads_django):
                 # Same spelling, different manager -- and whose manager it is
                 # is a property of the model, resolved tree-wide in
                 # `analyzer/django.py`, not of this module's import list.
@@ -748,9 +750,7 @@ class _Analyzer(ast.NodeVisitor):
                 if isinstance(key, ast.Attribute)
                 else ""
             ).lower()
-            is_auth = any(
-                word in key_name for word in ("auth", "user", "principal", "ranger")
-            )
+            is_auth = any(word in key_name for word in ("auth", "user", "principal", "ranger"))
             # No subscript is no override: `app.dependency_overrides = {}` and
             # `.clear()` reset the whole map, which is neither an identity nor an
             # adapter. Reading the key alone put adapter advice on those lines
@@ -767,7 +767,8 @@ class _Analyzer(ast.NodeVisitor):
             # has two, and a single per-module slot reported only the first.
             self._once_emit(rule_id, rule_id, node.lineno)
         elif node.attr.startswith("HTTP_") and self.imports.origin(value) in (
-            "fastapi.status", "starlette.status",
+            "fastapi.status",
+            "starlette.status",
         ):
             self._emit("resp.status_const", node.lineno)
         self.generic_visit(node)
@@ -838,9 +839,9 @@ class _Analyzer(ast.NodeVisitor):
         verdict = "mig.derived"
         for argument in node.args:
             if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
-                continue                      # the table name
+                continue  # the table name
             if not isinstance(argument, ast.Call):
-                return "mig.schema_op"        # a splat or a name: nothing to read
+                return "mig.schema_op"  # a splat or a name: nothing to read
             kind = self.imports.origin(argument.func).split(".")[-1]
             if kind not in _SA_TABLE_CONSTRAINTS:
                 return "mig.schema_op"
@@ -859,7 +860,7 @@ class _Analyzer(ast.NodeVisitor):
         """One `sa.Column(...)`: modelled type, no referential action of its own."""
         for argument in call.args:
             if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
-                continue                      # the column name
+                continue  # the column name
             if isinstance(argument, ast.Call):
                 kind = self.imports.origin(argument.func).split(".")[-1]
                 if kind == "ForeignKey":
@@ -911,7 +912,6 @@ class _Analyzer(ast.NodeVisitor):
     def _scan_http_exception(self, node: ast.Call) -> None:
         self._emit(http_exception_rule(self.imports, node), node.lineno)
 
-    # -- small predicates -----------------------------------------------------
     def _annotation_is_model(self, ann: ast.AST) -> bool:
         name = ""
         if isinstance(ann, ast.Name):

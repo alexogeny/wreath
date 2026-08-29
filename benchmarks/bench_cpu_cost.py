@@ -45,9 +45,7 @@ _BODY = Response(b'{"ok":1}', media_type=b"application/json")
 
 
 def _app(components: list[Any]) -> Wreath:
-    app = Wreath(
-        http_policy=policy_from_components(components) if components else None
-    )
+    app = Wreath(http_policy=policy_from_components(components) if components else None)
 
     @app.get("/i/{x}")
     async def hot(request: Any) -> Response:

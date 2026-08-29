@@ -1,16 +1,3 @@
-"""P-256 group arithmetic, checked against standards and an independent library.
-
-RFC 6979 §A.2.5 known answers pin exact key and signature values. Seeded valid
-and malformed corpora exercise the wider surface, and `cryptography` supplies
-an independent group/signature implementation without entering Wreath runtime
-code.
-
-**The rejections are tested harder than the acceptances.** A curve rewrite that
-starts accepting an off-curve point, the identity, or an out-of-range `s` has
-failed in the direction that matters, and a corpus of valid signatures cannot
-see it.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -43,8 +30,6 @@ def _sign(private: int, message: bytes, nonce: int) -> bytes:
     return r.to_bytes(32, "big") + s.to_bytes(32, "big")
 
 
-# --- known answers from RFC 6979 --------------------------------------------
-
 #: RFC 6979 §A.2.5: P-256 with SHA-256, the key `x = C9AF...6721`.
 _RFC6979_UX = 0x60FED4BA255A9D31C961EB74C6356D68C049B8923B61FA6CE669622E60F29FB6
 _RFC6979_UY = 0x7903FE1008B8BC99A41AE9E95628BC64F2F1B20C2D7E9F5177A3C294D4462299
@@ -72,7 +57,6 @@ def test_rfc6979_known_answers(message: bytes, r: int, s: int) -> None:
 
 
 def test_rfc6979_public_key_is_the_stated_private_scalar_times_g() -> None:
-    """The vector's own consistency, which also exercises the secret ladder."""
     assert _curves.p256_scalarmult_secret(_RFC6979_X, G) == (
         _RFC6979_UX,
         _RFC6979_UY,
@@ -104,28 +88,17 @@ def test_rfc6979_public_key_is_the_stated_private_scalar_times_g() -> None:
         ),
     ],
 )
-def test_rfc6979_known_answers_reject_when_tampered(
-    message: bytes, r: int, s: int
-) -> None:
+def test_rfc6979_known_answers_reject_when_tampered(message: bytes, r: int, s: int) -> None:
     signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
     assert not verify_es256(_RFC6979_UX, _RFC6979_UY, message, signature)
 
 
 def test_low_s_and_high_s_are_both_accepted() -> None:
-    """`s` and `n - s` are both valid ECDSA and ES256 does not normalise.
-
-    JOSE has no low-S rule; `_webpush` chooses to emit the low form, and a
-    verifier that refused the high one would reject signatures other
-    implementations make.
-    """
     signature = _sign(_RFC6979_X, b"sample", 0x1234567890ABCDEF)
     r, s = signature[:32], int.from_bytes(signature[32:], "big")
     flipped = r + (N - s).to_bytes(32, "big")
     assert verify_es256(_RFC6979_UX, _RFC6979_UY, b"sample", signature)
     assert verify_es256(_RFC6979_UX, _RFC6979_UY, b"sample", flipped)
-
-
-# --- seeded valid and malformed corpora -------------------------------------
 
 
 def _independent_public(scalar: int) -> tuple[int, int] | None:
@@ -148,9 +121,7 @@ def _corpus(seed: int, count: int) -> list[tuple[int, int, bytes, bytes]]:
         public = _independent_public(private)
         assert public is not None
         message = f"corpus entry {index}".encode() + rng.randbytes(rng.randrange(0, 40))
-        out.append(
-            (public[0], public[1], message, _sign(private, message, rng.randrange(1, N)))
-        )
+        out.append((public[0], public[1], message, _sign(private, message, rng.randrange(1, N))))
     return out
 
 
@@ -221,19 +192,6 @@ def test_every_seeded_mutation_is_refused() -> None:
 
 
 def test_a_63_byte_signature_is_refused_by_length_and_not_by_the_maths() -> None:
-    """The length check is load-bearing, and only a constructed input shows it.
-
-    Slicing a 63-byte value gives a 32-byte `r` and a 31-byte `s`, and when the
-    real `s` is under `2**248` its big-endian encoding has a leading zero byte --
-    so dropping that byte yields *the same integer*. The arithmetic then accepts
-    it, and only `len(signature) != 64` refuses. JOSE fixes the width precisely so
-    one signature has one encoding; without this guard a caller could re-present
-    the same signature in a second form, which defeats any replay ledger keyed on
-    the bytes.
-
-    A random corpus never finds this -- it needs an `s` whose top byte is zero,
-    which is one signature in 256 -- so it is searched for rather than sampled.
-    """
     for nonce in range(2, 4000):
         signature = _sign(_RFC6979_X, b"sample", nonce)
         s = int.from_bytes(signature[32:], "big")
@@ -249,15 +207,6 @@ def test_a_63_byte_signature_is_refused_by_length_and_not_by_the_maths() -> None
 
 
 def test_a_signature_driving_the_sum_to_infinity_is_refused() -> None:
-    """`[u1]G + [u2]Q` really can be the identity, on input anyone can build.
-
-    Choose `r = -z/d mod n` for a key whose private scalar `d` you know and any
-    `s`: then `u1 + u2*d == 0 mod n`, so the two multiples cancel exactly and the
-    verification equation has no affine `x` to compare. No random signature ever
-    lands here, so without this input the `point is None` branch is dead code
-    that a mutant deletes for free -- and deleting it turns a refusal into a
-    `TypeError` on `None`, which is a 500 rather than a 401.
-    """
     private = _RFC6979_X
     z = int.from_bytes(hashlib.sha256(b"infinity").digest(), "big")
     r = -z * pow(private, -1, N) % N
@@ -265,20 +214,13 @@ def test_a_signature_driving_the_sum_to_infinity_is_refused() -> None:
     signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
     w = pow(s, -1, N)
     assert (
-        _curves.p256_double_scalarmult_public(
-            z * w % N, G, r * w % N, (_RFC6979_UX, _RFC6979_UY)
-        )
+        _curves.p256_double_scalarmult_public(z * w % N, G, r * w % N, (_RFC6979_UX, _RFC6979_UY))
         is None
     ), "the construction no longer reaches the identity"
     assert not verify_es256(_RFC6979_UX, _RFC6979_UY, b"infinity", signature)
 
 
 def test_on_curve_accepts_independent_points_and_refuses_nearby_values() -> None:
-    """Independent points satisfy the equation; adjacent values do not.
-
-    `(0, 0)` satisfies neither `y^2 = x^3 + ax + b` nor anything else -- it is
-    the conventional affine spelling of the identity -- so it is refused.
-    """
     rng = random.Random(0x5EED)
     for _ in range(30):
         private = rng.randrange(1, N)
@@ -288,8 +230,6 @@ def test_on_curve_accepts_independent_points_and_refuses_nearby_values() -> None
         assert not on_p256_curve(point[0], (point[1] + 1) % P)
     assert not on_p256_curve(0, 0)
 
-
-# --- cross-check against `cryptography` -------------------------------------
 
 cryptography = pytest.importorskip(
     "cryptography",
@@ -317,7 +257,6 @@ def test_cryptography_signatures_verify_and_tampered_ones_do_not() -> None:
 
 
 def test_wreath_signatures_verify_under_cryptography() -> None:
-    """The other direction: what `_webpush` emits must satisfy a real verifier."""
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import ec, utils
@@ -334,23 +273,13 @@ def test_wreath_signatures_verify_under_cryptography() -> None:
         der = utils.encode_dss_signature(
             int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:], "big")
         )
-        public = ec.EllipticCurvePublicNumbers(
-            point[0], point[1], ec.SECP256R1()
-        ).public_key()
+        public = ec.EllipticCurvePublicNumbers(point[0], point[1], ec.SECP256R1()).public_key()
         public.verify(der, message, ec.ECDSA(hashes.SHA256()))
         with pytest.raises(InvalidSignature):
             public.verify(der, message + b"!", ec.ECDSA(hashes.SHA256()))
 
 
-# --- the group law itself ---------------------------------------------------
-
-
 def test_curve_parameters_match_the_standard_and_the_doubling_shortcut() -> None:
-    """Doubling expands `3X^2 + aZ^4` as `3(X - Z^2)(X + Z^2)`.
-
-    That identity holds only for `a == -3`, which is a property of P-256 rather
-    than of the code, so it is checked once here instead of in the hot function.
-    """
     assert A == P - 3
     assert (A - (-3)) % P == 0
     assert _curves.p256_on_curve(*G)
@@ -360,19 +289,6 @@ def test_curve_parameters_match_the_standard_and_the_doubling_shortcut() -> None
 
 
 def test_zero_is_refused_by_the_curve_equation_itself() -> None:
-    """Why `p256_on_curve` has no `(0, 0)` clause, recorded so none comes back.
-
-    An explicit clause sat here and three mutants survived on it: removing it,
-    and dropping either half of it, changed no answer any test could see. The
-    reason is algebraic rather than accidental -- `(0, 0)` on the curve would need
-    `0 == b`, and P-256's `b` is not zero -- so the clause was two spellings of
-    one condition, which is how they drift apart later.
-
-    The second half of the test is the trap that makes the first half worth
-    stating: `x == 0` is *not* an invalid coordinate. `b` is a quadratic residue
-    mod `p`, so there are two real curve points with `x == 0`, and a guard written
-    as `x == 0` rather than `x == 0 and y == 0` would reject them.
-    """
     assert not on_p256_curve(0, 0)
     assert (0 - (0 + 0 + B)) % P != 0
     root = pow(B, (P + 1) // 4, P)
@@ -400,11 +316,6 @@ def test_double_scalarmult_matches_two_separate_multiplications() -> None:
 
 
 def test_double_scalarmult_survives_the_two_points_cancelling() -> None:
-    """`p1 + p2` is the identity when `p2 == -p1`, and the digit-3 table entry
-    is then unrepresentable in affine form. ECDSA verification never reaches it
-    -- `p1` is the base point and `p2` an independent key -- but the function is
-    general, and the alternative to handling it is a wrong answer rather than an
-    error."""
     minus_g = (G[0], P - G[1])
     for k1, k2 in [(3, 3), (0xFFFF, 0xFFFF), (0b1011, 0b1011)]:
         assert k1 == k2
@@ -419,12 +330,6 @@ def test_secret_scalarmult_matches_cryptography() -> None:
 
 
 def test_secret_scalarmult_refuses_a_scalar_outside_the_group_order() -> None:
-    """A real `raise`, not an `assert`: `python -O` would strip an assert.
-
-    The bound is public -- it is the curve order -- so refusing loudly leaks
-    nothing, and the alternative is a ladder whose length depends on how far out
-    of range the caller went.
-    """
     for k in (0, -1, N, N + 1, 2**300):
         with pytest.raises(ValueError, match=r"P-256 scalar is in \[1, n\)"):
             _curves.p256_scalarmult_secret(k, G)

@@ -1,4 +1,3 @@
-"""CloudWatch EMF bridge — envelope shape, dimensions, units, deltas."""
 from __future__ import annotations
 
 import importlib
@@ -38,8 +37,14 @@ emf = _mod("_cloudwatch_emf")
 
 
 class _Loss:
-    _FIELDS = ("orphan_phase", "orphan_correlation", "pending_evicted",
-               "decode_error", "export_error", "recent_evicted")
+    _FIELDS = (
+        "orphan_phase",
+        "orphan_correlation",
+        "pending_evicted",
+        "decode_error",
+        "export_error",
+        "recent_evicted",
+    )
 
     def __init__(self, **kw):
         for f in self._FIELDS:
@@ -77,9 +82,12 @@ def _metric_names(blob):
 
 
 def test_route_and_global_blobs_shape():
-    snap = _Snap(assembled=10, pending=2,
-                 routes=[_Route(7, count=5, errors=1, dsum=4000.0, dmax=900.0)],
-                 loss=_Loss(decode_error=3))
+    snap = _Snap(
+        assembled=10,
+        pending=2,
+        routes=[_Route(7, count=5, errors=1, dsum=4000.0, dmax=900.0)],
+        loss=_Loss(decode_error=3),
+    )
     b = emf.EmfBridge(_Src(snap), namespace="Trailhead", dimensions={"Service": "api"})
     blobs = b.blobs(snap, timestamp_ms=1710000000000)
     assert len(blobs) == 2  # one route + one global
@@ -112,7 +120,7 @@ def test_counters_are_deltas_by_default():
     b.blobs(snap1, timestamp_ms=1)
     second = b.blobs(snap2, timestamp_ms=2)
     route = second[0]
-    assert route["Requests"] == 4          # 9 - 5
+    assert route["Requests"] == 4  # 9 - 5
     assert second[1]["TracesAssembled"] == 4  # 14 - 10
 
 
@@ -176,13 +184,9 @@ def test_subsystem_counters_use_the_same_collection_and_failure_isolation():
         def counters(self):
             raise RuntimeError("unavailable")
 
-    source = types.SimpleNamespace(
-        counters=lambda: Counters("jobs", "mail", {"run_errors": 3})
-    )
+    source = types.SimpleNamespace(counters=lambda: Counters("jobs", "mail", {"run_errors": 3}))
     snap = _Snap(0, 0, [], _Loss())
-    bridge = emf.EmfBridge(
-        _Src(snap), counter_sources=(Broken(), source), namespace="Trailhead"
-    )
+    bridge = emf.EmfBridge(_Src(snap), counter_sources=(Broken(), source), namespace="Trailhead")
     blob = bridge.blobs(snap, timestamp_ms=99)[-1]
     assert blob["Instance"] == "mail"
     assert blob["jobs_run_errors"] == 3
@@ -192,9 +196,7 @@ def test_subsystem_counters_use_the_same_collection_and_failure_isolation():
 def test_subsystem_counters_obey_delta_mode_and_leave_gauges_absolute():
     values = {"run_errors": 3, "ready": 1}
     source = types.SimpleNamespace(
-        counters=lambda: Counters(
-            "jobs", "mail", values, gauges=frozenset({"ready"})
-        )
+        counters=lambda: Counters("jobs", "mail", values, gauges=frozenset({"ready"}))
     )
     snap = _Snap(0, 0, [], _Loss())
     bridge = emf.EmfBridge(_Src(snap), counter_sources=(source,))
@@ -215,13 +217,9 @@ def test_subsystem_counters_obey_delta_mode_and_leave_gauges_absolute():
 
 
 def test_subsystem_counters_obey_cumulative_mode():
-    source = types.SimpleNamespace(
-        counters=lambda: Counters("jobs", "mail", {"run_errors": 3})
-    )
+    source = types.SimpleNamespace(counters=lambda: Counters("jobs", "mail", {"run_errors": 3}))
     snap = _Snap(0, 0, [], _Loss())
-    bridge = emf.EmfBridge(
-        _Src(snap), counter_sources=(source,), cumulative=True
-    )
+    bridge = emf.EmfBridge(_Src(snap), counter_sources=(source,), cumulative=True)
     bridge.blobs(snap, timestamp_ms=1)
     second = bridge.blobs(snap, timestamp_ms=2)[-1]
     assert second["jobs_run_errors"] == 3
@@ -230,9 +228,7 @@ def test_subsystem_counters_obey_cumulative_mode():
 def test_subsystem_counter_kernel_preserves_signed_gauges_and_large_integers():
     values = {"temperature": -7, "huge": 1 << 100}
     source = types.SimpleNamespace(
-        counters=lambda: Counters(
-            "workers", "alpha", values, gauges=frozenset({"temperature"})
-        )
+        counters=lambda: Counters("workers", "alpha", values, gauges=frozenset({"temperature"}))
     )
     snap = _Snap(0, 0, [], _Loss())
     bridge = emf.EmfBridge(_Src(snap), counter_sources=(source,))
@@ -249,9 +245,7 @@ def test_subsystem_counter_kernel_preserves_signed_gauges_and_large_integers():
 
 
 def test_render_appends_subsystem_counter_blobs() -> None:
-    source = types.SimpleNamespace(
-        counters=lambda: Counters("jobs", "mail", {"run_errors": 3})
-    )
+    source = types.SimpleNamespace(counters=lambda: Counters("jobs", "mail", {"run_errors": 3}))
     snap = _Snap(0, 0, [], _Loss())
     text = emf.EmfBridge(_Src(snap), counter_sources=(source,)).render(timestamp_ms=1)
     blobs = [json.loads(line) for line in text.splitlines()]
@@ -263,9 +257,7 @@ def test_native_counter_documents_match_the_independent_python_definition() -> N
         Counters(
             "jobs",
             "mail",
-            types.MappingProxyType(
-                {f"metric_{index}": index for index in range(101)}
-            ),
+            types.MappingProxyType({f"metric_{index}": index for index in range(101)}),
             gauges=frozenset({"metric_0"}),
         ),
     )

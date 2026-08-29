@@ -1,6 +1,3 @@
-"""Protocol and helper details (report 23: R-01, R-29, R-41, R-77, G-01, G-20,
-G-48, G-50, G-81)."""
-
 from __future__ import annotations
 
 import asyncio
@@ -171,8 +168,6 @@ class TestProgressStreamTermination:
 
 class TestMissAndHead:
     async def test_a_registered_404_handler_sees_a_routing_miss(self):
-        """G-50: a miss builds its own ProblemResponse, so `add_status_handler`
-        never fires for the case people register it for."""
         app = Wreath()
 
         async def not_found(request, error):
@@ -192,7 +187,6 @@ class TestMissAndHead:
         assert response.json() == {"custom": True}
 
     async def test_head_is_served_by_a_get_route(self):
-        """G-48: RFC 9110 §9.3.2 -- HEAD is GET without a body."""
         app = Wreath()
 
         @app.get("/thing")
@@ -221,9 +215,7 @@ class TestBodyTruncation:
         async def receive():
             return messages.pop(0)
 
-        request = Request(
-            {"type": "http", "method": "POST", "path": "/", "headers": []}, receive
-        )
+        request = Request({"type": "http", "method": "POST", "path": "/", "headers": []}, receive)
         with pytest.raises(ClientDisconnect):
             await request.body()
 
@@ -238,7 +230,5 @@ class TestBodyTruncation:
         async def receive():
             return messages.pop(0)
 
-        request = Request(
-            {"type": "http", "method": "POST", "path": "/", "headers": []}, receive
-        )
+        request = Request({"type": "http", "method": "POST", "path": "/", "headers": []}, receive)
         assert await request.body() == b'{"a": 1}'

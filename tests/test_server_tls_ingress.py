@@ -1,20 +1,3 @@
-"""HTTP/1.1 over TLS, keep-alive, under concurrent load.
-
-There was no coverage of this at all: every other TLS test makes one request per
-connection, so the native `BufferedProtocol` ingress had never been driven with
-many requests over several concurrent TLS connections.
-
-What these do **not** cover, so nobody reads more into them than is there: the
-server logs one `Fatal error on SSL protocol` per TLS connection at teardown
-(`get_buffer() called while a previous read offer is live`), and these tests
-pass anyway, because it costs no requests. asyncio's TLS path calls
-`buffer_updated()` only when the SSL layer decrypted at least one byte
-(`sslproto._do_read__buffered`: `if offset > 0`), so a zero-byte decrypt leaves
-the offer unanswered; `http_protocol_releasebuffer` already clears an abandoned
-offer when the last view drops, which is why requests still succeed. Reproducing
-the log noise needs the re-entrant close path, not load, and these do not
-reproduce it.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -43,20 +26,29 @@ def _cert() -> tuple[str, str]:
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
     now = datetime.datetime.now(datetime.UTC)
-    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
-            .public_key(key.public_key()).serial_number(x509.random_serial_number())
-            .not_valid_before(now - datetime.timedelta(days=1))
-            .not_valid_after(now + datetime.timedelta(days=1))
-            .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), False)
-            .sign(key, hashes.SHA256()))
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=1))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), False)
+        .sign(key, hashes.SHA256())
+    )
     directory = tempfile.mkdtemp()
     cert_path, key_path = f"{directory}/cert.pem", f"{directory}/key.pem"
     with open(cert_path, "wb") as handle:
         handle.write(cert.public_bytes(serialization.Encoding.PEM))
     with open(key_path, "wb") as handle:
-        handle.write(key.private_bytes(serialization.Encoding.PEM,
-                                       serialization.PrivateFormat.TraditionalOpenSSL,
-                                       serialization.NoEncryption()))
+        handle.write(
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption(),
+            )
+        )
     return cert_path, key_path
 
 
@@ -67,8 +59,13 @@ async def _app(scope, receive, send) -> None:
             return
         if not message.get("more_body", False):
             break
-    await send({"type": "http.response.start", "status": 200,
-                "headers": [(b"content-type", b"text/plain")]})
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"content-type", b"text/plain")],
+        }
+    )
     await send({"type": "http.response.body", "body": b"ok"})
 
 
@@ -82,9 +79,7 @@ def _client_context() -> ssl.SSLContext:
 
 async def _keepalive_requests(port: int, count: int) -> int:
     """`count` sequential requests over one TLS connection. Returns the successes."""
-    reader, writer = await asyncio.open_connection(
-        "127.0.0.1", port, ssl=_client_context()
-    )
+    reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=_client_context())
     served = 0
     try:
         for _ in range(count):
@@ -101,7 +96,7 @@ async def _keepalive_requests(port: int, count: int) -> int:
         writer.close()
         try:
             await writer.wait_closed()
-        except (ssl.SSLError, OSError):
+        except ssl.SSLError, OSError:
             pass
     return served
 
@@ -110,18 +105,17 @@ async def _keepalive_requests(port: int, count: int) -> int:
 async def test_http11_over_tls_survives_concurrent_keepalive_load() -> None:
     cert, key = _cert()
     server = await serve(
-        _app, ServerConfig(host="127.0.0.1", port=0, lifespan="off"),
+        _app,
+        ServerConfig(host="127.0.0.1", port=0, lifespan="off"),
         tls=TLSConfig(cert, key),
     )
     port = server.sockets[0].getsockname()[1]
     try:
-        served = await asyncio.gather(*[
-            _keepalive_requests(port, PER_CONNECTION) for _ in range(CONNECTIONS)
-        ])
-        expected = [PER_CONNECTION] * CONNECTIONS
-        assert list(served) == expected, (
-            f"TLS keep-alive served {served}, expected {expected}"
+        served = await asyncio.gather(
+            *[_keepalive_requests(port, PER_CONNECTION) for _ in range(CONNECTIONS)]
         )
+        expected = [PER_CONNECTION] * CONNECTIONS
+        assert list(served) == expected, f"TLS keep-alive served {served}, expected {expected}"
     finally:
         await server.close()
 
@@ -130,7 +124,8 @@ async def test_http11_over_tls_survives_concurrent_keepalive_load() -> None:
 async def test_a_single_tls_connection_serves_many_requests() -> None:
     cert, key = _cert()
     server = await serve(
-        _app, ServerConfig(host="127.0.0.1", port=0, lifespan="off"),
+        _app,
+        ServerConfig(host="127.0.0.1", port=0, lifespan="off"),
         tls=TLSConfig(cert, key),
     )
     port = server.sockets[0].getsockname()[1]

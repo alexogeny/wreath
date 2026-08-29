@@ -146,9 +146,7 @@ def _render(finding: Finding) -> str:
     return f"{where}: {finding.rule_id} {finding.message}{suggestion}"
 
 
-# ---------------------------------------------------------------------------
 # policy
-# ---------------------------------------------------------------------------
 
 
 def resolve_policy(requested: str = "warn") -> Policy:
@@ -206,9 +204,7 @@ def apply_policy(findings: Iterable[Finding], policy: Policy) -> tuple[Finding, 
     return reported
 
 
-# ---------------------------------------------------------------------------
 # what to scan
-# ---------------------------------------------------------------------------
 
 
 def application_sources(app: Any) -> list[Path]:

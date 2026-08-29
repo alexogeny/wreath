@@ -1,10 +1,3 @@
-"""a10 and a11 written correctly. Nothing here may produce a finding.
-
-`wreath.xml.parse` has no setting that turns entity expansion back on, so the
-XXE is not a thing this handler has to remember to switch off. The template is
-compiled once at import from source this application wrote, and the request
-supplies only the values it renders with.
-"""
 from __future__ import annotations
 
 from wreath import Request, Router

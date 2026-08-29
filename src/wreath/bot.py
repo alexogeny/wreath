@@ -59,11 +59,7 @@ class Turnstile:
     ) -> None:
         if not isinstance(secret, str) or not secret:
             raise ValueError("Turnstile secret must be a non-empty string")
-        if (
-            not isinstance(target, str)
-            or not target.startswith("/")
-            or target.startswith("//")
-        ):
+        if not isinstance(target, str) or not target.startswith("/") or target.startswith("//"):
             raise ValueError(
                 "Turnstile target must be an origin-relative path string such as "
                 "'/turnstile/v0/siteverify'"
@@ -90,9 +86,7 @@ class Turnstile:
             body=urlencode(form).encode("ascii"),
         )
         if response.status != 200:
-            raise ChallengeRefused(
-                f"Turnstile verification endpoint answered {response.status}"
-            )
+            raise ChallengeRefused(f"Turnstile verification endpoint answered {response.status}")
         try:
             payload = loads(response.body)
         except ValueError as exc:
@@ -110,9 +104,7 @@ class Turnstile:
                 f"Turnstile token hostname {hostname!r} is not {self._hostname!r}"
             )
         if self._action is not None and action != self._action:
-            raise ChallengeRefused(
-                f"Turnstile token action {action!r} is not {self._action!r}"
-            )
+            raise ChallengeRefused(f"Turnstile token action {action!r} is not {self._action!r}")
         challenge_at = None
         raw_time = payload.get("challenge_ts")
         if isinstance(raw_time, str):
@@ -129,9 +121,7 @@ class Turnstile:
         )
 
 
-def challenge_dependency(
-    challenge: BotChallenge, *, header: str = "cf-turnstile-response"
-):
+def challenge_dependency(challenge: BotChallenge, *, header: str = "cf-turnstile-response"):
     """Build a dependency over the canonical bot-challenge protocol."""
     if not callable(getattr(challenge, "verify", None)):
         raise TypeError("bot challenge must expose async verify(token, request)")
@@ -141,9 +131,7 @@ def challenge_dependency(
     async def verify(request: Request) -> ChallengeResult:
         token = request.header(header)
         if token is None:
-            raise ChallengeRefused(
-                f"bot-challenge token header {header!r} is required"
-            )
+            raise ChallengeRefused(f"bot-challenge token header {header!r} is required")
         return await challenge.verify(token, request)
 
     return verify

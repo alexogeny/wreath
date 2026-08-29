@@ -1,12 +1,3 @@
-"""LISTEN/NOTIFY seam on the shared pure Connection.
-
-These exercise the notification ring, parsing, channel validation, and the
-notifications() iterator in isolation (no live PostgreSQL): a stub Connection is
-built with __new__ and only the ring-related slots populated. Real-DB delivery
-(idle wakeups, interleaved-during-operation capture, native-backend parity) is
-left to an integration test gated on WREATH_TEST_POSTGRES_DSN.
-"""
-
 from __future__ import annotations
 
 import asyncio

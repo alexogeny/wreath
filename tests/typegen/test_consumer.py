@@ -1,16 +1,3 @@
-"""Compile and exercise the generated client with a pinned Node toolchain.
-
-Skipped unless Node and the consumer's ``node_modules`` are present (run
-``npm ci`` in ``tests/typegen/consumer`` first). This proves the generated
-TypeScript compiles under strict mode against real React + TanStack Query types,
-matches the committed golden, and honours Wreath's fetch wire conventions at
-runtime.
-
-It is a single test on purpose: it generates into one shared directory, so
-splitting it across xdist workers (default ``--dist load`` ignores group marks)
-would race a teardown against another worker's write.
-"""
-
 from __future__ import annotations
 
 import shutil
@@ -36,7 +23,7 @@ def _node_version(command: tuple[str, ...]) -> tuple[int, int] | None:
         )
         major, minor, *_rest = completed.stdout.strip().lstrip("v").split(".")
         return int(major), int(minor)
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except OSError, ValueError, subprocess.SubprocessError:
         return None
 
 

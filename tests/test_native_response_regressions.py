@@ -1,4 +1,3 @@
-"""Cross-implementation response-boundary regressions."""
 from __future__ import annotations
 
 from typing import Any

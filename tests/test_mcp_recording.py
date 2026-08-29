@@ -1,19 +1,3 @@
-"""What a `tools/call` leaves behind, and what it must not.
-
-An MCP server's audit trail is the thing an operator needs six months later:
-which model asked for what, on whose behalf, and what happened. That is a
-structured record on the Flight Recorder's ring, and the interesting assertions
-are about the *absence* of things -- a tool called with a `password` argument
-records the call and not the password.
-
-Nothing here is MCP-specific redaction. Argument values follow
-`wreath.logging`'s deny-by-default rule (a scalar is written, a string is
-fingerprinted) and argument names follow `wreath.crud.SENSITIVE_FIELD`, the same
-regular expression that hides a password column from a generated CRUD endpoint.
-A name it matches is recorded as present and never as a value -- not even as a
-fingerprint, because a fingerprint of a password is an offline guessing oracle.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -48,9 +32,7 @@ def build() -> tuple[Wreath, MCP]:
         return {"signed_in": account.username}
 
     @mcp.tool(description="Takes a whole argument whose *name* looks like a secret.")
-    async def sign_in_wholesale(
-        request, credentials: Annotated[Credentials, Body()]
-    ) -> dict:
+    async def sign_in_wholesale(request, credentials: Annotated[Credentials, Body()]) -> dict:
         return {"signed_in": credentials.username}
 
     @mcp.tool(description="Fails on purpose.")
@@ -65,11 +47,7 @@ def build() -> tuple[Wreath, MCP]:
 
 
 def markers(records: list) -> list[dict]:
-    return [
-        log.attributes(cell)
-        for cell in records
-        if not cell.flags & fs.LOG_FLAG_EVENT_FIELDS
-    ]
+    return [log.attributes(cell) for cell in records if not cell.flags & fs.LOG_FLAG_EVENT_FIELDS]
 
 
 def fields(records: list) -> dict:
@@ -146,7 +124,6 @@ async def test_a_password_nested_in_a_structured_argument_is_redacted_too() -> N
 
 
 async def test_a_whole_argument_whose_name_looks_like_a_secret_is_withheld() -> None:
-    """The name rule applies to the container, not only to its leaves."""
     _, attached = await drive(
         "sign_in_wholesale",
         {"credentials": {"username": "ada", "password": PASSWORD}},
@@ -155,7 +132,6 @@ async def test_a_whole_argument_whose_name_looks_like_a_secret_is_withheld() -> 
 
 
 async def test_the_arguments_of_a_refused_call_are_recorded_too() -> None:
-    """A schema rejection is exactly the call an audit wants the arguments of."""
     seen, attached = await drive(
         "sign_in", {"username": "ada", "password": PASSWORD, "invented": "nonsense"}
     )
@@ -219,7 +195,6 @@ async def test_the_verified_caller_is_on_the_marker() -> None:
 
 
 async def test_stats_reports_every_counter_by_name() -> None:
-    """The mapping and canonical metrics reading cannot drift apart."""
     app, mcp = build()
     assert mcp.stats() == {
         "tool_calls": 0,
@@ -272,7 +247,6 @@ async def test_stats_reports_every_counter_by_name() -> None:
 
 
 async def test_a_tool_called_with_no_recorder_running_still_works() -> None:
-    """The marker is best-effort observability, never a precondition."""
     app, mcp = build()
     async with TestClient(app) as client:
         opened = await client.post(

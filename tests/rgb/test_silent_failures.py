@@ -1,6 +1,3 @@
-"""Failures that used to be invisible (report 23: B-04, B-05, B-06, B-07, B-10,
-B-11, G-11, G-12, G-51, G-53)."""
-
 from __future__ import annotations
 
 import asyncio
@@ -148,8 +145,14 @@ class TestJobLoopFailuresAreCounted:
         from wreath.jobs import _Claimed
 
         job = _Claimed(
-            id=1, task="t", args=[], tenant="", attempts=0, max_attempts=1,
-            fence=1, key=None,
+            id=1,
+            task="t",
+            args=[],
+            tenant="",
+            attempts=0,
+            max_attempts=1,
+            fence=1,
+            key=None,
         )
         await runner._fail(job, "boom", runner._tasks["t"])
         assert runner.dead_lettered == 1
@@ -161,10 +164,6 @@ class TestBackgroundTaskFailures:
     task with nothing to catch it."""
 
     async def test_a_failing_background_task_is_counted(self):
-        """It still *propagates* -- that is the shipped contract, and the server
-        is the only thing left that can log a failure after the response has
-        gone (see tests/test_background.py). What was missing is that the
-        application could not tell it had happened."""
         from wreath.background import BackgroundTask
         from wreath.testing import TestClient
 
@@ -248,7 +247,15 @@ class TestSpecCacheKey:
 
         # Swap one route for another: the count is identical.
         app._routes[0] = app._routes[0].__class__(
-            "/second", ("GET",), first, (), (), None, (), app._routes[0].requirement, None,
+            "/second",
+            ("GET",),
+            first,
+            (),
+            (),
+            None,
+            (),
+            app._routes[0].requirement,
+            None,
         )
         app._dirty = True
 
@@ -268,5 +275,5 @@ class TestNotFoundAllocation:
 
         source = inspect.getsource(app_module)
         if "_NOT_FOUND" not in source:
-            return                      # removed outright, which is also fine
+            return  # removed outright, which is also fine
         assert source.count("_NOT_FOUND") > 1, "defined and never used"

@@ -1,6 +1,3 @@
-"""Session cookie hygiene, cache stampede, and small correctness items
-(report 23: R-07, R-08, R-34, R-47, G-07, G-57, G-58)."""
-
 from __future__ import annotations
 
 import asyncio
@@ -186,7 +183,7 @@ class TestIdempotencyKeyEdges:
         middleware = IdempotencyPolicy()
 
         class _Identity:
-            id = 7          # an integer primary key is an ordinary choice
+            id = 7  # an integer primary key is an ordinary choice
 
         class _Request:
             method = "POST"

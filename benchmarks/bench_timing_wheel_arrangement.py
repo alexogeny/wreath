@@ -76,8 +76,7 @@ def cancel(count: int, *, colliding: bool) -> tuple[float, dict[str, Any]]:
     in the order their deadlines were set.
     """
     wheel = _wheel()
-    handles = [wheel.schedule(delay, _noop)
-               for delay in _delays(count, colliding=colliding)]
+    handles = [wheel.schedule(delay, _noop) for delay in _delays(count, colliding=colliding)]
     before = wheel.slot_rescans
     start = time.perf_counter()
     for handle in handles:
@@ -104,8 +103,9 @@ OPERATIONS = {"insert": insert, "cancel": cancel, "fire": fire}
 
 
 def report() -> None:
-    header = (f"{'op':<8}{'arrangement':<12}{'k':>6}{'ns/op':>11}"
-              f"{'spread%':>9}{'ratio':>8}{'rescans':>9}")
+    header = (
+        f"{'op':<8}{'arrangement':<12}{'k':>6}{'ns/op':>11}{'spread%':>9}{'ratio':>8}{'rescans':>9}"
+    )
     print(header)
     print("-" * len(header))
     for name, operation in OPERATIONS.items():
@@ -120,10 +120,12 @@ def report() -> None:
                     best = min(best, elapsed)
                     worst = max(worst, elapsed)
                 ratio = "" if previous is None else f"{best / previous:.2f}"
-                print(f"{name:<8}{'colliding' if colliding else 'spread':<12}"
-                      f"{size:>6}{best / size * 1e9:>11.1f}"
-                      f"{(worst - best) / best * 100:>8.1f}%{ratio:>8}"
-                      f"{detail.get('rescans', 0):>9}")
+                print(
+                    f"{name:<8}{'colliding' if colliding else 'spread':<12}"
+                    f"{size:>6}{best / size * 1e9:>11.1f}"
+                    f"{(worst - best) / best * 100:>8.1f}%{ratio:>8}"
+                    f"{detail.get('rescans', 0):>9}"
+                )
                 previous = best
             print()
 
@@ -131,17 +133,18 @@ def report() -> None:
 def control() -> None:
     """A/A: the same arm twice. A delta below this is noise, not a result."""
     for name, operation in OPERATIONS.items():
-        runs = [min(operation(SIZES[-1], colliding=False)[0]
-                    for _ in range(ROUNDS))
-                for _ in range(2)]
+        runs = [
+            min(operation(SIZES[-1], colliding=False)[0] for _ in range(ROUNDS)) for _ in range(2)
+        ]
         drift = abs(runs[0] - runs[1]) / min(runs) * 100.0
         print(f"A/A {name:<8} {drift:.2f}%")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--control", action="store_true",
-                        help="report the A/A noise floor instead of the table")
+    parser.add_argument(
+        "--control", action="store_true", help="report the A/A noise floor instead of the table"
+    )
     if parser.parse_args().control:
         control()
     else:

@@ -59,7 +59,7 @@ while a sibling is running tests produces failures nobody can attribute.
   is what keeps the free-threaded build honest.
 - **Hot-path complexity is an asserted contract, not a docstring.**
   `wreath-complexity-probe` measures doubling-size scaling ratios against
-  `docs/agents/complexity-baseline.json` -- ~1 constant, ~2 linear, ~4
+  `tools/baselines/complexity-baseline.json` -- ~1 constant, ~2 linear, ~4
   quadratic. **Every probe needs a same-size control**: without one it proves
   only that something is slow at size. A known-defective contract is *marked*,
   not silently tolerated -- a marked probe still runs, records its observed and
@@ -73,7 +73,7 @@ while a sibling is running tests produces failures nobody can attribute.
   candidate can be turned into a probe or restructured before anyone measures
   it. The scanner reports only container kinds and reuse it can prove. Bounded
   or output-sized work carries an exact-code `complexity: allow` waiver with a
-  checkable reason; `docs/agents/complexity-discovery.json` retains only
+  checkable reason; `tools/baselines/complexity-discovery.json` retains only
   exceptional confirmed hotspots. The baseline carries exact source
   fingerprints: byte-identical files reuse their findings, while new or edited
   files are scanned and any scanner change invalidates the whole cache. Record
@@ -182,9 +182,7 @@ while a sibling is running tests produces failures nobody can attribute.
   one moment somebody was already looking.
 
   So: if a surface is worth a test, implement the surface. If it is not ready to
-  implement, write the contract down as **prose** -- a row in
-  `docs/reference/roadmap.md`, which is the single place that answer lives -- and
-  leave `tests/` alone. Red-green TDD is welcome and is not this: writing a
+  implement, leave `tests/` alone. Red-green TDD is welcome and is not this: writing a
   failing test and *then making it pass in the same change* is the good version.
   Committing the red half on its own is not a checklist, it is a broken gate with
   a note attached.
@@ -244,7 +242,7 @@ while a sibling is running tests produces failures nobody can attribute.
   realistic app and attributes each to a lifecycle phase. The intended shape is
   that ingress, routing, authentication, and authorization stay native and
   Python is entered when a route is *activated*; `pre_activation` measures the
-  distance from that. `docs/agents/request-boundary-baseline.json` records where
+  distance from that. `tools/baselines/request-boundary-baseline.json` records where
   it stands. Growth there is a trade-off, not automatically a defect -- a
   feature can be worth crossings -- but it should be a decision someone made and
   wrote down, not drift. Re-record with `--update-baseline` and say why.
@@ -268,9 +266,7 @@ while a sibling is running tests produces failures nobody can attribute.
   per byte pays most, an out-of-line C call per element pays next, a single
   instruction per byte pays least. Every loss has been the opposite: a body
   already minimal, or a length that some earlier partition had already reduced
-  to one. Measured examples of both live in `docs/plans/bitset-routing.md`,
-  where four ideas died because the `(method, nseg)` split had already made the
-  loop run once.
+  to one.
 
   Two consequences worth stating outright:
 
@@ -336,15 +332,10 @@ while a sibling is running tests produces failures nobody can attribute.
 everything else**, so anything a workflow needs must be declared in a group.
 That default also means `uv sync --group benchmark` uninstalls the dev
 toolchain and the next `uv sync --group dev` uninstalls sanic, each tool working
-only until the next one runs. **Prefer the task entry points** -- `wreath-check`,
-`wreath-docs`, `wreath-bench` -- which install their own group with
+only until the next one runs. **Prefer the task entry points** -- `wreath-check`
+and `wreath-bench` -- which install their own group with
 `uv sync --inexact`, adding without evicting. Reach for a bare `uv sync --group X`
 only to reconcile deliberately, and name *every* group you still need when you do.
-
-**The docs need no group at all.** Wreath builds its own site: `wreath docs`
-renders `wreath_docs.py` with the generator in `src/wreath/_docs/`. There is no
-mkdocs, no mkdocs-material, and no mkdocstrings -- the `:::` directive is the
-reference generator, and `wreath docs check` is the gate.
 
 `[tool.uv] default-groups = ["dev"]` keeps the dev toolchain installed for every
 sync. Two entries in `dev` exist only for that reason and look redundant
@@ -358,8 +349,6 @@ themselves rather than failing. `tests/test_dev_environment.py` now asserts both
 
 ```bash
 uv run wreath-check              # ruff, ty, pytest, native lints, trace baseline
-uv run wreath-check --docs       # ... and a strict docs build
-uv run wreath-docs               # build the docs strictly (--serve to watch)
 uv run wreath-bench --framework wreath starlette fastapi   # installs competitors first
 
 # The individual gates, when you want one of them.
@@ -377,15 +366,13 @@ uv run ty check
 uv run wreath-native-lint        # C complexity patterns (see below); 0 = clean
 uv run wreath-sanitize --all     # build each ASan/UBSan extension and drive tests at it
 uv run wreath-sanitize core --leaks   # ... and attribute what is still live at exit
-uv run wreath-map-lint           # the agent-facing maps still describe this repo
-uv run wreath-map-lint --fix     # ... and attach each source's conventional tests
 uv run wreath-port-golden        # tests/port/golden/ still matches the emitter
 uv run wreath-port-golden --update    # ... rewrite what drifted, on purpose
 uv run wreath-dup-scan           # function bodies sharing a structure (a report, not a gate)
 uv run wreath-request-trace      # Python/native crossings for one request lifecycle
-uv run wreath-request-trace --check   # ... vs docs/agents/request-boundary-baseline.json
+uv run wreath-request-trace --check   # ... vs tools/baselines/request-boundary-baseline.json
 uv run wreath-complexity-probe --discover        # superlinear shapes no probe covers yet
-uv run wreath-complexity-probe --discover-check  # ... vs docs/agents/complexity-discovery.json
+uv run wreath-complexity-probe --discover-check  # ... vs tools/baselines/complexity-discovery.json
 uv run wreath-policy-decomp      # what first-class HTTP policy costs a request
 uv run wreath-decomp             # request stages, ORM internals, ns/frame calibration
 ```
@@ -517,7 +504,6 @@ See [`repo-map.md`](repo-map.md) for a subsystem-oriented source, test, benchmar
   rather than like a mistake in the fix. `tests/_camera_trap.py` and
   `tests/test_replay_live_faults.py` are the patterns to copy.
 - `benchmarks/`: equivalent competitor applications and benchmark tooling
-- `docs/`: user documentation, API reference, cookbooks, agent guidance, design notes, and conformance reports
 
 ## Traps that have already cost someone a day
 
@@ -578,8 +564,7 @@ None is discoverable by reading the code you are changing.
   its own source list. Miss the second and the sanitized `_core.so` has an
   undefined symbol, *every* test fails to import, and `wreath-sanitize` reports
   "0 passed … clean" — the exact false success its own docstring warns about.
-  Two sessions hit this; `wreath-map-lint`'s MAP008 catches the omission from the
-  other direction.
+  The build and sanitizer tests must cover both source lists.
 - **`wreath-sanitize --leaks` used to report every leak in Wreath's own C as
   libpython's.** ASan's default unwinder walks frame pointers; CPython is built
   with `-fomit-frame-pointer`; and essentially all of Wreath's C allocates
@@ -696,38 +681,13 @@ say how a written test still manages to assert nothing.
   progress, not a record of what survived. Re-check the tree rather than trusting
   the log.
 
-## Documentation rules
+## Source rules
 
-- The machine-oriented docs live under `docs/cookbook/agents/`; start at its
-  `index.md`. `docs/agents/manifest.json` and `request-boundary-baseline.json`
-  are operational data files (referenced by tooling), not prose.
-- **A new module or a moved file updates `docs/agents/manifest.json` in the same
-  change.** The manifest is how an agent finds a subsystem's sources, tests, and
-  invariants without reading the tree, and it is only worth reading if it is
-  true. `uv run wreath-map-lint` enforces that: no dangling paths, no public
-  module without a subsystem, no guide missing from `docs/llms.txt`, and no
-  repository path cited in `AGENTS.md`/`repo-map.md`/`README.md` that isn't
-  there. It exists because all four of those had drifted at once — including
-  three subsystems whose test lists a bad patch had made unreachable.
-- When you add or change a public module, follow
-  `docs/cookbook/agents/documenting-a-module.md`: it lists the reference page,
-  guide, and recipes a change must ship with, and the voice they must be in.
-- **Before adding a verb that already exists elsewhere, read
-  `docs/cookbook/agents/naming.md`.** It is the index of the names wreath reuses
-  across subsystems -- `component()` versus `schema_claim()`, `as_dict()` versus
-  `to_json()` versus `stats()` versus `snapshot()`, the twenty storage ports, the
-  two native-dispatch idioms, and the backoff parameter translation. Every entry
-  in it is a name that had grown a second incompatible spelling, and the reason
-  the page exists is that a call site could not tell you which one you were
-  looking at. One of those spellings would have raised `TypeError` the first time
-  the collection walk reached it.
-- **The brand may be poetic; the API must stay literal.** Warm, explanatory
-  prose in the framing; plain, conventional names in the code. Never theme a
-  technical term (no threads/roots/kindling/leaves). Match `docs/index.md`.
+- Keep public modules, tests, and examples self-explanatory and current.
+- **The brand may be poetic; the API must stay literal.** Use plain,
+  conventional technical names. Never theme a technical term.
 - Keep examples runnable on Python 3.14 and distinguish Wreath-native behavior
   from portable ASGI behavior.
-- Run `uv run wreath-docs` (strict build) before completing documentation
-  changes; a missing nav entry or broken autodoc target fails it.
 
 ## Benchmark policy
 
@@ -752,10 +712,3 @@ pipeline and its built-ins; the PostgreSQL driver, ORM, and migration stack;
 durable jobs and messaging; authentication and a built-in Cedar authorizer;
 first-class structured logging on the Flight Recorder's ring; and a native
 documentation site generator. Treat those as current features.
-
-**What is genuinely not shipped is listed in `docs/reference/roadmap.md`**, which
-is the single place that answer lives — the recording capture engine, isolated
-tenant session execution, and the rest. This section previously named HTTP/2,
-OpenAPI, dependencies, and advanced middleware as roadmap items long after all
-four had shipped, which is why the list now lives in one file that the docs gate
-reads rather than in prose here.

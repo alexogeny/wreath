@@ -1,10 +1,3 @@
-"""Fake-transport protocol tests for the Wreath HTTP server.
-
-Every behavioral test runs against the HTTP protocol implementation, skipped
-when the extension is not built. We only ever compare bytes on the wire, ASGI
-scopes/messages, and closure behavior -- never internal object layout.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -185,9 +178,6 @@ async def test_native_maintenance_policy_refuses_before_python_activation(
     assert maintenance.refused == 1
 
 
-# --- simple apps ------------------------------------------------------------
-
-
 async def echo_ok(scope: dict, receive: Any, send: Any) -> None:
     body = b""
     while True:
@@ -235,7 +225,6 @@ GET = b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"
 @pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
 @pytest.mark.asyncio
 async def test_native_request_shells_reuse_bounded_storage() -> None:
-    """A second same-shaped request reuses both native ingress shells."""
     await drive(_NativeHttpProtocol, echo_ok, [GET])
     gc.collect()
     after_first = _native_server._request_storage_counts()
@@ -323,10 +312,7 @@ async def test_native_dcz_uses_the_registered_dictionary_and_standard_frame() ->
         return Response(document, media_type=b"application/json")
 
     request = (
-        GET[:-2]
-        + b"Accept-Encoding: dcz, gzip\r\nAvailable-Dictionary: "
-        + token
-        + b"\r\n\r\n"
+        GET[:-2] + b"Accept-Encoding: dcz, gzip\r\nAvailable-Dictionary: " + token + b"\r\n\r\n"
     )
     transport = await drive(
         _NativeHttpProtocol,
@@ -349,9 +335,7 @@ async def test_native_dcz_uses_the_registered_dictionary_and_standard_frame() ->
 @pytest.mark.asyncio
 async def test_native_cache_policy_transforms_a_prepared_response_one_shot() -> None:
     app = Wreath(
-        http_policy=HttpPolicy(
-            cache_control=CachePolicy(CacheControl(public=True, max_age=60))
-        )
+        http_policy=HttpPolicy(cache_control=CachePolicy(CacheControl(public=True, max_age=60)))
     )
     response = PreparedResponse.text("ready")
 
@@ -514,9 +498,6 @@ async def test_native_bearer_auth_reads_one_header_without_materializing_the_blo
     assert duplicate.buffer.startswith(b"HTTP/1.1 401")
 
 
-# --- head fragmentation -----------------------------------------------------
-
-
 @impl
 @pytest.mark.asyncio
 async def test_head_split_every_boundary(protocol_cls: type) -> None:
@@ -608,9 +589,13 @@ async def test_wreath_native_request_headers_stay_native_until_public_read() -> 
         assert len(index) == 3
         assert index[b"x-value"] == b"first"
         assert index.get(b"missing") is None
+        with pytest.raises(ValueError, match="more than once"):
+            request._single_header(b"x-value")
         assert request.cookies == {"a": "1", "b": "2"}
         request._set_header(b"host", b"updated.example")
         assert request.header("host") == "updated.example"
+        request._remove_headers(b"x-value")
+        assert request._index_headers().get(b"x-value") is None
         assert request._scope is None
         assert request.headers[0] == (b"host", b"updated.example")
         return Response(b"ok")
@@ -629,8 +614,6 @@ async def test_wreath_native_request_headers_stay_native_until_public_read() -> 
     assert b"200 OK" in transport.buffer
 
 
-# --- fixed body -------------------------------------------------------------
-
 FIXED = b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello"
 
 
@@ -641,8 +624,6 @@ async def test_fixed_body_split_every_boundary(protocol_cls: type) -> None:
         transport = await drive(protocol_cls, echo_ok, [FIXED[:split], FIXED[split:]])
         assert transport.buffer.endswith(b"hello"), split
 
-
-# --- chunked body -----------------------------------------------------------
 
 CHUNKED = (
     b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
@@ -658,8 +639,6 @@ async def test_chunked_body_split_every_boundary(protocol_cls: type) -> None:
         assert transport.buffer.endswith(b"hello world"), split
 
 
-# --- resumable delimiter scanning -------------------------------------------
-#
 # Head, chunk-size, and trailer delimiters are found with a per-state cursor
 # that resumes where the previous scan stopped, so a slow peer cannot make each
 # arrival rescan the whole buffered prefix. A cursor that advanced too far would
@@ -689,7 +668,6 @@ async def test_chunked_request_delivered_one_byte_at_a_time(protocol_cls: type) 
 @impl
 @pytest.mark.asyncio
 async def test_head_terminator_split_at_every_interior_byte(protocol_cls: type) -> None:
-    """Split inside the final CRLFCRLF itself, at all three interior points."""
     end = GET.index(b"\r\n\r\n")
     for offset in range(1, 4):
         split = end + offset
@@ -700,7 +678,6 @@ async def test_head_terminator_split_at_every_interior_byte(protocol_cls: type) 
 @impl
 @pytest.mark.asyncio
 async def test_head_terminator_split_three_ways(protocol_cls: type) -> None:
-    """Two receive boundaries inside the terminator: scan, stall, resume, stall."""
     end = GET.index(b"\r\n\r\n")
     for first in range(1, 4):
         for second in range(first + 1, 4):
@@ -743,7 +720,6 @@ async def test_empty_trailer_section_split_every_boundary(protocol_cls: type) ->
 @impl
 @pytest.mark.asyncio
 async def test_pipelined_requests_rescan_from_the_new_request(protocol_cls: type) -> None:
-    """Consuming a request must reset the scan cursors for the next one."""
     transport = await drive(protocol_cls, echo_ok, [GET + GET + GET])
     assert transport.buffer.count(b"HTTP/1.1 200") == 3
 
@@ -771,12 +747,6 @@ MALFORMED = [
 @pytest.mark.parametrize("payload", MALFORMED)
 @pytest.mark.asyncio
 async def test_malformed_input_status_is_the_same_at_every_split(payload: bytes) -> None:
-    """Resumable scanning must not change what malformed input produces.
-
-    The oracle is the payload delivered whole: a parser that resumes correctly
-    cannot care where the TCP boundary landed, so all `len(payload) - 1` split
-    points must produce the response the single `data_received` produced.
-    """
     whole = await drive(_NativeHttpProtocol, echo_ok, [payload])
     expected = parse_responses(whole.buffer)
     for split in range(1, len(payload)):
@@ -794,9 +764,6 @@ async def test_chunk_extensions_ignored(protocol_cls: type) -> None:
     )
     transport = await drive(protocol_cls, echo_ok, [body])
     assert transport.buffer.endswith(b"hello")
-
-
-# --- framing errors ---------------------------------------------------------
 
 
 @impl
@@ -957,9 +924,6 @@ async def test_oversized_body(protocol_cls: type) -> None:
     assert not called
 
 
-# --- read backpressure ------------------------------------------------------
-
-
 @impl
 @pytest.mark.asyncio
 async def test_read_pause_resume_watermarks(protocol_cls: type) -> None:
@@ -989,9 +953,6 @@ async def test_read_pause_resume_watermarks(protocol_cls: type) -> None:
     assert not transport.reading_paused
 
 
-# --- write backpressure -----------------------------------------------------
-
-
 @impl
 @pytest.mark.asyncio
 async def test_write_pause_resume_awaitable(protocol_cls: type) -> None:
@@ -1015,9 +976,6 @@ async def test_write_pause_resume_awaitable(protocol_cls: type) -> None:
     protocol.resume_writing()
     await _settle()
     assert done.is_set()
-
-
-# --- timeouts ---------------------------------------------------------------
 
 
 @impl
@@ -1047,9 +1005,6 @@ async def test_request_timeout(protocol_cls: type) -> None:
     assert transport.buffer.startswith(b"HTTP/1.1 408")
 
 
-# --- disconnects ------------------------------------------------------------
-
-
 @impl
 @pytest.mark.asyncio
 async def test_disconnect_before_body_complete(protocol_cls: type) -> None:
@@ -1075,9 +1030,6 @@ async def test_disconnect_before_body_complete(protocol_cls: type) -> None:
     assert saw_disconnect
 
 
-# --- application errors ------------------------------------------------------
-
-
 @impl
 @pytest.mark.asyncio
 async def test_app_exception_before_start(protocol_cls: type) -> None:
@@ -1101,9 +1053,6 @@ async def test_app_exception_after_start(protocol_cls: type) -> None:
     # Only one response head; no second response injected.
     assert parse_responses(transport.buffer) == [b"HTTP/1.1 200 OK"]
     assert transport.closed
-
-
-# --- body suppression -------------------------------------------------------
 
 
 @impl
@@ -1200,9 +1149,6 @@ async def test_existing_protocol_observes_refreshed_default_header_wire(
     assert b"server: before\r\n" not in head
 
 
-# --- HTTP/1.0 ---------------------------------------------------------------
-
-
 @impl
 @pytest.mark.asyncio
 async def test_http10_defaults_close(protocol_cls: type) -> None:
@@ -1241,9 +1187,6 @@ async def test_http11_close_requires_an_exact_connection_token(
     transport = await drive(protocol_cls, echo_ok, [req])
     assert b"connection: keep-alive" in transport.buffer.lower()
     assert not transport.closed
-
-
-# --- native hot path --------------------------------------------------------
 
 
 @pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
@@ -1364,9 +1307,6 @@ async def test_native_does_not_retain_large_response_serialization_buffer() -> N
     assert retained - baseline < 8 * 1024
 
 
-# --- collectability ---------------------------------------------------------
-
-
 @impl
 @pytest.mark.asyncio
 async def test_protocol_collectable_after_loss(protocol_cls: type) -> None:
@@ -1391,9 +1331,6 @@ async def test_protocol_collectable_after_loss(protocol_cls: type) -> None:
     gc.collect()
     if ref is not None:
         assert ref() is None
-
-
-# --- wreath.response one-shot extension -----------------------------------------
 
 
 async def one_shot_ok(scope: dict, receive: Any, send: Any) -> None:
@@ -1512,8 +1449,6 @@ async def test_one_shot_head_suppresses_body(protocol_cls: type) -> None:
     assert one_shot_wire == paired_wire
     assert one_shot_wire.endswith(b"\r\n\r\n")  # head only, no body bytes
 
-
-# --- native buffered ingress (asyncio.BufferedProtocol) -----------------------
 
 native_only = pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
 
@@ -1704,8 +1639,6 @@ async def test_native_data_received_compat_path_still_parses() -> None:
     await _settle()
 
 
-# --- integer rendering in the response head ---------------------------------
-#
 # The status code, the content-length, and every chunk size line are written by
 # hand in the native protocol rather than through `PyOS_snprintf`, because
 # glibc's printf machinery measured at ~2% of a saturated metal worker's cycles
@@ -1713,7 +1646,6 @@ async def test_native_data_received_compat_path_still_parses() -> None:
 # having if it is right at the edges, so these drive the values a `%zd`/`%zx`
 # format string would have covered for free: zero, one digit, every digit-count
 # boundary, and both sides of each hex nibble boundary.
-
 
 
 @impl
@@ -1754,7 +1686,6 @@ async def test_response_status_line_renders_every_three_digit_code(
 async def test_streaming_chunk_size_lines_render_across_nibble_boundaries(
     protocol_cls: type, size: int
 ) -> None:
-    """A chunk size is hex, so its boundaries are the nibble ones, not the decimal."""
 
     async def app(scope: dict, receive: Any, send: Any) -> None:
         # No content-length: HTTP/1.1 framing falls to chunked, which is the

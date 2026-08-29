@@ -150,9 +150,7 @@ def register(runner: Any, registry: Registry, store: Any) -> None:
             ctx.report(5, f"reading {archive}")
 
             if not await store.exists(archive):
-                raise IngestRefused(
-                    f"deployment {deployment_id} has no uploaded card at {archive}"
-                )
+                raise IngestRefused(f"deployment {deployment_id} has no uploaded card at {archive}")
 
             prefix = image_prefix(slug, deployment_id)
             ctx.report(20, "unpacking")

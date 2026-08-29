@@ -13,8 +13,12 @@ from .sources import _SKIPPABLE, _parse_file
 
 # ormar PK column type -> wreath PgType name, for FK type inference from the referenced model.
 _PK_PGTYPE = {
-    "UUID": "Uuid", "Integer": "Int64", "BigInteger": "Int64",
-    "SmallInteger": "Int16", "String": "Varchar", "Text": "Text",
+    "UUID": "Uuid",
+    "Integer": "Int64",
+    "BigInteger": "Int64",
+    "SmallInteger": "Int16",
+    "String": "Varchar",
+    "Text": "Text",
 }
 
 
@@ -223,17 +227,13 @@ def _index_tree(
                             relations[statement.target.id] = target.id
                         elif isinstance(target, ast.Attribute):
                             relations[statement.target.id] = target.attr
-                        elif isinstance(target, ast.Constant) and isinstance(
-                            target.value, str
-                        ):
+                        elif isinstance(target, ast.Constant) and isinstance(target.value, str):
                             relations[statement.target.id] = target.value
                     orm_relations[node.name] = relations
                     table = _declared_table(node)
                     if table is not None:
                         orm_tables[node.name] = table
-                    orm_unique_constraints[node.name] = _declared_unique_constraints(
-                        node, imports
-                    )
+                    orm_unique_constraints[node.name] = _declared_unique_constraints(node, imports)
                 elif any(
                     isinstance(statement, (ast.AnnAssign, ast.Assign))
                     and isinstance(statement.value, ast.Call)
@@ -333,17 +333,10 @@ def _declared_unique_constraints(
             )
         ):
             constraints.append(frozenset((statement.target.id,)))
-        if not (
-            isinstance(statement, ast.Assign)
-            and isinstance(statement.value, ast.Call)
-        ):
+        if not (isinstance(statement, ast.Assign) and isinstance(statement.value, ast.Call)):
             continue
         values = next(
-            (
-                keyword.value
-                for keyword in statement.value.keywords
-                if keyword.arg == "constraints"
-            ),
+            (keyword.value for keyword in statement.value.keywords if keyword.arg == "constraints"),
             None,
         )
         if not isinstance(values, (ast.List, ast.Tuple)):
@@ -354,8 +347,7 @@ def _declared_unique_constraints(
                 and imports.origin(value.func).split(".")[-1] == "UniqueColumns"
                 and value.args
                 and all(
-                    isinstance(argument, ast.Constant)
-                    and isinstance(argument.value, str)
+                    isinstance(argument, ast.Constant) and isinstance(argument.value, str)
                     for argument in value.args
                 )
             ):
@@ -364,8 +356,7 @@ def _declared_unique_constraints(
                 frozenset(
                     argument.value
                     for argument in value.args
-                    if isinstance(argument, ast.Constant)
-                    and isinstance(argument.value, str)
+                    if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
                 )
             )
     return tuple(constraints)
@@ -377,8 +368,11 @@ def _declared_columns(cls: ast.ClassDef) -> set[str]:
     for stmt in cls.body:
         if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
             target = stmt.target.id
-        elif isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 \
-                and isinstance(stmt.targets[0], ast.Name):
+        elif (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+        ):
             target = stmt.targets[0].id
         else:
             continue
@@ -396,8 +390,10 @@ def _index_is_over_columns(node: ast.Call) -> bool:
     `[sa.text("lower(name)")]` and a runtime column list are both outside what
     detection reads, and both look the same from the verb alone.
     """
-    columns = node.args[2] if len(node.args) > 2 else next(
-        (kw.value for kw in node.keywords if kw.arg == "columns"), None
+    columns = (
+        node.args[2]
+        if len(node.args) > 2
+        else next((kw.value for kw in node.keywords if kw.arg == "columns"), None)
     )
     if not isinstance(columns, (ast.List, ast.Tuple)):
         return False

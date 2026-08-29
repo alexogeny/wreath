@@ -11,8 +11,6 @@ from .state import _EmitterState
 
 
 class _BackgroundWork(_EmitterState):
-    # -- Celery -> wreath jobs -------------------------------------------------
-
     def _rewrite_celery_app(self, stmt: ast.Assign, call: ast.Call) -> None:
         """`x = Celery(...)` -> `x = app.jobs("x", database="...")`.
 
@@ -30,7 +28,7 @@ class _BackgroundWork(_EmitterState):
         self._note(
             stmt.lineno,
             "bg.celery",
-            'name the database this queue runs on -- wreath\'s queue is a table on '
+            "name the database this queue runs on -- wreath's queue is a table on "
             "an app.postgres() database, so there is no broker URL and nothing in "
             "the Celery call says which database it should be",
         )
@@ -72,13 +70,15 @@ class _BackgroundWork(_EmitterState):
                 self.buf._edits.append((begin, begin, b"ctx, "))
             else:
                 self._note(
-                    node.lineno, "bg.celery",
+                    node.lineno,
+                    "bg.celery",
                     "add the `ctx` first parameter: a wreath handler is "
                     "`async def handler(ctx, *args)`",
                 )
         if not isinstance(node, ast.AsyncFunctionDef):
             self._note(
-                node.lineno, "bg.celery",
+                node.lineno,
+                "bg.celery",
                 "wreath job handlers are async; make this `async def` and await "
                 "the database calls inside it",
             )
@@ -171,9 +171,7 @@ class _BackgroundWork(_EmitterState):
         )
         first = node.body[body_index]
         indent = self.buf.line_indent(first.lineno)
-        self.buf.insert_before_line(
-            first.lineno, f"{indent}{parameter.arg} = BackgroundTasks()"
-        )
+        self.buf.insert_before_line(first.lineno, f"{indent}{parameter.arg} = BackgroundTasks()")
         for statement in returns:
             value = statement.value
             if value is None:  # filtered when `returns` was built; re-narrowed here
@@ -230,8 +228,7 @@ class _BackgroundWork(_EmitterState):
         for task, coroutine in calls:
             arguments = [self._seg(argument) for argument in coroutine.args]
             arguments.extend(
-                f"{keyword.arg}={self._seg(keyword.value)}"
-                for keyword in coroutine.keywords
+                f"{keyword.arg}={self._seg(keyword.value)}" for keyword in coroutine.keywords
             )
             suffix = "" if not arguments else ", " + ", ".join(arguments)
             self._replace_all_of(
@@ -255,25 +252,21 @@ class _BackgroundWork(_EmitterState):
         for statement in returns:
             value = statement.value
             if value is None:
-                self._replace_all_of(
-                    statement, f"return Response(status=204, background={name})"
-                )
+                self._replace_all_of(statement, f"return Response(status=204, background={name})")
                 self.needs.add("Response")
                 continue
             response_name = (
                 value.func.attr
                 if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
-                else getattr(value.func, "id", "") if isinstance(value, ast.Call) else ""
+                else getattr(value.func, "id", "")
+                if isinstance(value, ast.Call)
+                else ""
             )
             if response_name.endswith("Response"):
                 close = self.buf.end_of(value) - 1
                 separator = "" if _ends_argument_list(self.buf.b, close) else ", "
-                self.buf._edits.append(
-                    (close, close, f"{separator}background={name}".encode())
-                )
+                self.buf._edits.append((close, close, f"{separator}background={name}".encode()))
             else:
-                self._replace_all_of(
-                    value, f"JSONResponse({self._seg(value)}, background={name})"
-                )
+                self._replace_all_of(value, f"JSONResponse({self._seg(value)}, background={name})")
                 self.needs.add("JSONResponse")
         self.needs.add("BackgroundTasks")

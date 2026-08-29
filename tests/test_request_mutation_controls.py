@@ -1,4 +1,3 @@
-"""Focused request-boundary objections from the cloud mutation corpus."""
 from __future__ import annotations
 
 import hashlib
@@ -35,7 +34,7 @@ class _App:
 
     def url_path_for(self, name: str, **parameters: Any) -> str:
         assert name == "item"
-        return f'/items/{parameters["item_id"]}'
+        return f"/items/{parameters['item_id']}"
 
 
 class _NativeContext:
@@ -105,9 +104,7 @@ def test_boundary_fragment_without_equals_does_not_hide_a_later_boundary() -> No
 
 @pytest.mark.asyncio
 async def test_multipart_refuses_a_part_without_a_form_field_name() -> None:
-    request = _multipart_request(
-        b"--B\r\nContent-Disposition: form-data\r\n\r\nvalue\r\n--B--\r\n"
-    )
+    request = _multipart_request(b"--B\r\nContent-Disposition: form-data\r\n\r\nvalue\r\n--B--\r\n")
 
     with pytest.raises(ValueError, match="needs a non-empty form-data name"):
         await request.form()
@@ -117,9 +114,7 @@ async def test_multipart_refuses_a_part_without_a_form_field_name() -> None:
 async def test_large_plain_field_is_not_misclassified_as_a_spooled_upload() -> None:
     value = b"x" * 65
     request = _multipart_request(
-        b'--B\r\nContent-Disposition: form-data; name="plain"\r\n\r\n'
-        + value
-        + b"\r\n--B--\r\n",
+        b'--B\r\nContent-Disposition: form-data; name="plain"\r\n\r\n' + value + b"\r\n--B--\r\n",
         limits=RequestLimits(spool_max_bytes=64, max_form_memory_bytes=128),
     )
 

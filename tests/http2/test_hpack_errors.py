@@ -1,8 +1,3 @@
-"""HPACK error handling (RFC 7541): malformed blocks are COMPRESSION_ERROR.
-
-A COMPRESSION_ERROR is a connection error (RFC 9113 s4.3): the server must send
-GOAWAY with COMPRESSION_ERROR and must not deliver the request to the app.
-"""
 from __future__ import annotations
 
 import pytest
@@ -18,9 +13,10 @@ async def _expect_connection_error(make_driver, block: bytes, code: int):
     d = make_driver(app)
     await d.preface()
     await d.feed_and_settle(
-        support.encode_frame(support.HEADERS,
-                             support.FLAG_END_HEADERS | support.FLAG_END_STREAM,
-                             1, block))
+        support.encode_frame(
+            support.HEADERS, support.FLAG_END_HEADERS | support.FLAG_END_STREAM, 1, block
+        )
+    )
     goaways = [f for f in d.frames() if f.type == support.GOAWAY]
     assert goaways, "malformed HPACK must be a connection error (GOAWAY)"
     _, got, _ = support.parse_goaway(goaways[-1].payload)

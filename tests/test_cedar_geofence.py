@@ -1,11 +1,3 @@
-"""Slice 1: geofenced authorization -- Cedar deciding on where the caller is.
-
-The composition is the point. A test that a Cedar policy evaluates, and
-separately that a coordinate falls in a region, proves neither of the two
-things this slice claims: that a *policy* can read the caller's position, and
-that the resolution is lazy, cached and fail-closed.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -80,24 +72,18 @@ async def _status(app: Wreath) -> int:
     return next(m["status"] for m in sent if m["type"] == "http.response.start")
 
 
-# --- the composition ---------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_caller_inside_the_region_is_permitted():
-    """The whole slice in one assertion: position -> region set -> Cedar -> 200."""
     assert await _status(_app(GEOFENCED, at=TOWN)) == 200
 
 
 @pytest.mark.asyncio
 async def test_the_same_caller_outside_the_region_is_denied():
-    """Same identity, same roles, same policy -- only the position differs."""
     assert await _status(_app(GEOFENCED, at=FAR)) == 403
 
 
 @pytest.mark.asyncio
 async def test_a_caller_with_no_location_is_denied():
-    """No position is not a permit. `location` defaults to None for a reason."""
     assert await _status(_app(GEOFENCED, at=None)) == 403
 
 
@@ -111,19 +97,8 @@ async def test_a_policy_can_test_a_region_the_caller_is_only_in_by_box():
     assert await _status(_app(source, at=FAR)) == 403
 
 
-# --- fail-closed: absent is not empty ----------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_an_unless_geofence_still_forbids_when_no_provider_is_configured():
-    """The property that makes `regions` unconditional rather than optional.
-
-    Measured on the engine before the design was chosen: against a context with
-    no `regions` key at all, `forbid ... unless { context.regions.contains(x) }`
-    evaluates to **allowed** -- the forbid is skipped rather than standing. An
-    application that never configured regions would therefore silently stop
-    geofencing, which is the failure this asserts cannot happen.
-    """
     source = """
     permit (principal, action == Action::"read", resource);
     forbid (principal, action == Action::"read", resource)
@@ -144,15 +119,9 @@ async def test_an_unless_geofence_permits_a_caller_actually_inside():
 
 
 def test_the_engine_skips_an_unless_forbid_when_the_key_is_absent():
-    """The engine behaviour the above rests on, pinned directly.
-
-    Without this, a future change making an absent key deny would make the
-    unconditional supply look like belt-and-braces rather than the load-bearing
-    decision it is, and someone would remove it.
-    """
     engine = CedarPolicies(
-        'permit (principal, action, resource);\n'
-        'forbid (principal, action, resource)\n'
+        "permit (principal, action, resource);\n"
+        "forbid (principal, action, resource)\n"
         'unless { context.regions.contains("depot") };'
     )
     from wreath.authorization import EntityUid
@@ -168,9 +137,6 @@ def test_the_engine_skips_an_unless_forbid_when_the_key_is_absent():
 
     assert ask({}) is True  # absent: the forbid is skipped
     assert ask({"regions": frozenset()}) is False  # empty: the forbid stands
-
-
-# --- resolution is once per request ------------------------------------------
 
 
 class CountingRegions:
@@ -259,19 +225,6 @@ def _manifest_app(regions, engine, at):
 
 @pytest.mark.asyncio
 async def test_regions_are_resolved_once_however_many_policies_evaluate():
-    """A caller cannot be in two places inside one decision.
-
-    Resolving the position per evaluation would let a moving caller satisfy a
-    `permit` and escape a `forbid` in the same request, which is not a decision
-    anybody wrote.
-
-    **The `evaluations > 1` assertion is what gives this teeth.** The first
-    version of this test used a single route with two policies and passed with
-    the cache removed -- one `@authorize` is one `is_authorized` call, because
-    the engine evaluates the whole policy set at once, so there was never a
-    second resolution to suppress. The manifest endpoint is the shape that
-    genuinely drives many evaluations through one request.
-    """
     from wreath.testing import TestClient
 
     regions = CountingRegions()
@@ -279,9 +232,7 @@ async def test_regions_are_resolved_once_however_many_policies_evaluate():
     app = _manifest_app(regions, engine, TOWN)
 
     async with TestClient(app) as client:
-        response = await client.acting_as("alice", roles=["driver"]).get(
-            "/permissions/manifest"
-        )
+        response = await client.acting_as("alice", roles=["driver"]).get("/permissions/manifest")
 
     assert response.status == 200
     assert engine.evaluations > 1, (
@@ -292,45 +243,33 @@ async def test_regions_are_resolved_once_however_many_policies_evaluate():
     )
 
 
-# --- the lazy vocabulary -----------------------------------------------------
-
-
 def test_a_literal_geofence_names_only_the_regions_it_tests():
     engine = CedarPolicies(GEOFENCED)
     assert engine.referenced_regions() == frozenset({"depot"})
 
 
 def test_a_policy_naming_no_region_costs_nothing():
-    engine = CedarPolicies('permit (principal, action, resource);')
+    engine = CedarPolicies("permit (principal, action, resource);")
     assert engine.referenced_regions() == frozenset()
 
 
 def test_a_computed_region_argument_withholds_the_list():
-    """`contains(resource.site)` is the natural geofence and is not enumerable.
-
-    `None` rather than a short list: resolving only the names this walk could
-    see would answer a *different* authorization question, and an optimisation
-    that changes an answer is a defect.
-    """
     engine = CedarPolicies(
-        'permit (principal, action, resource)\n'
-        'when { context.regions.contains(resource.site) };'
+        "permit (principal, action, resource)\nwhen { context.regions.contains(resource.site) };"
     )
     assert engine.referenced_regions() is None
 
 
 def test_isempty_withholds_the_list_too():
     engine = CedarPolicies(
-        'permit (principal, action, resource)\n'
-        'when { context.regions.isEmpty() };'
+        "permit (principal, action, resource)\nwhen { context.regions.isEmpty() };"
     )
     assert engine.referenced_regions() is None
 
 
 def test_flags_and_regions_do_not_read_each_other():
-    """One walk, two attributes -- so it is worth proving they stay separate."""
     engine = CedarPolicies(
-        'permit (principal, action, resource)\n'
+        "permit (principal, action, resource)\n"
         'when { context.flags.contains("beta") && '
         'context.regions.contains("depot") };'
     )
@@ -340,7 +279,6 @@ def test_flags_and_regions_do_not_read_each_other():
 
 @pytest.mark.asyncio
 async def test_only_the_named_regions_are_measured():
-    """The lazy path, observed: three regions declared, one named, one measured."""
     asked = []
 
     class RecordingRegions:
@@ -370,29 +308,20 @@ async def test_a_computed_argument_measures_every_declared_region():
     source = (
         'permit (principal, action == Action::"read", resource)\n'
         'when { context.regions.contains("depot") || '
-        'context.regions.contains(context.path) };'
+        "context.regions.contains(context.path) };"
     )
     await _status(_app(source, regions=RecordingRegions(), at=TOWN))
     assert asked == [None], "an unknowable argument must resolve every region"
 
 
-# --- startup validation ------------------------------------------------------
-
-
 def test_a_policy_naming_an_undeclared_region_fails_at_startup():
-    source = (
-        'permit (principal, action, resource)\n'
-        'when { context.regions.contains("warehouse") };'
-    )
+    source = 'permit (principal, action, resource)\nwhen { context.regions.contains("warehouse") };'
     with pytest.raises(ValueError, match="warehouse"):
         CedarAuthorizer(engine=CedarPolicies(source), regions=REGIONS)
 
 
 def test_the_startup_refusal_says_why_it_would_have_denied_forever():
-    source = (
-        'permit (principal, action, resource)\n'
-        'when { context.regions.contains("waerhouse") };'
-    )
+    source = 'permit (principal, action, resource)\nwhen { context.regions.contains("waerhouse") };'
     with pytest.raises(ValueError, match="deny forever"):
         CedarAuthorizer(engine=CedarPolicies(source), regions=REGIONS)
 
@@ -402,7 +331,6 @@ def test_a_correct_region_name_boots():
 
 
 def test_no_regions_configured_is_not_refused():
-    """Declining to geofence is a decision, not a mistake. Every test denies."""
     CedarAuthorizer(engine=CedarPolicies(GEOFENCED), regions=None)
 
 
@@ -413,9 +341,6 @@ def test_a_non_enumerable_region_provider_warns_where_it_is_written():
 
     with pytest.warns(RuntimeWarning, match="misspelled region"):
         CedarAuthorizer(engine=CedarPolicies(GEOFENCED), regions=OpaqueRegions())
-
-
-# --- the Regions declaration -------------------------------------------------
 
 
 def test_a_circle_contains_a_point_inside_its_radius():
@@ -455,11 +380,7 @@ def test_names_enumerates_every_declared_region():
     assert REGIONS.names() == frozenset({"depot", "reserve", "outback"})
 
 
-# --- declaration clauses the mutation pass showed were unexercised ------------
-
-
 def test_a_boolean_radius_is_refused_rather_than_read_as_one_metre():
-    """`True` is an `int` in Python, so a bool must be refused by name."""
     with pytest.raises(ValueError, match="numeric radius"):
         Regions(depot=(DEPOT, True))
 
@@ -480,7 +401,6 @@ def test_a_non_string_region_name_is_refused():
 
 
 def test_a_box_region_is_kept_apart_from_a_circle_one():
-    """Both kinds resolve, and neither shadows the other."""
     mixed = Regions(
         circle=(DEPOT, 5_000.0),
         box=BoundingBox(-24.0, -23.0, 133.0, 134.0),

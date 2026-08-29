@@ -56,8 +56,15 @@ from . import cpu_probe
 #: Where the driver's own methods came from before the port. Restoring these
 #: onto the native type is the A/B; see the module docstring.
 GRAFTED = (
-    "_submit", "_flush", "_closes_prefix", "_finish_operation",
-    "_publish_completed", "execute", "fetch", "fetchrow", "fetchval",
+    "_submit",
+    "_flush",
+    "_closes_prefix",
+    "_finish_operation",
+    "_publish_completed",
+    "execute",
+    "fetch",
+    "fetchrow",
+    "fetchval",
     "_fetch_into",
 )
 
@@ -69,24 +76,24 @@ ARMS: dict[str, str] = {
     "execute": "no result set -- submission and completion with no decode",
     "map20": "twenty round trips in one pipeline -- amortises submission",
     "noop": "no query at all -- one await that actually suspends. The floor "
-            "every arm doing I/O is measured against",
+    "every arm doing I/O is measured against",
     "resumed": "await a future that is already resolved -- the await machinery "
-               "with no suspension. `noop` minus this is what one suspension "
-               "and reschedule costs",
+    "with no suspension. `noop` minus this is what one suspension "
+    "and reschedule costs",
     "build": "build one cached-plan query packet and nothing else -- no "
-             "Operation, no future, no I/O",
+    "Operation, no future, no I/O",
     "nothing": "the harness's own per-iteration cost and nothing else -- "
-               "subtract it from every arm below before reading them",
+    "subtract it from every arm below before reading them",
     "operation": "allocate one Operation and nothing else",
     "future": "create one future on this loop and nothing else",
     "awaitable": "allocate the submission awaitable and drop it -- `_submit` is "
-                 "lazy, so this is the awaitable's allocation and nothing else",
+    "lazy, so this is the awaitable's allocation and nothing else",
     "is_txn": "the transaction-control test `_submit` runs on every SQL string",
     "plan_get": "one plan-cache lookup and nothing else",
     "flush_idle": "one `_flush` with an empty queue -- the bookkeeping, no write",
     "submit": "submit and flush an operation cancelled before it reaches the "
-              "wire -- Operation, packet, future, queue and flush bookkeeping, "
-              "with no I/O and no completion",
+    "wire -- Operation, packet, future, queue and flush bookkeeping, "
+    "with no I/O and no completion",
 }
 
 
@@ -100,20 +107,22 @@ def dsn() -> str | None:
             return value
     # The TechEmpower database, when this box has one up.
     if os.environ.get("WREATH_QUERY_PROBE_TFB"):
-        return (
-            "postgresql://benchmarkdbuser:benchmarkdbpass"
-            "@tfb-database:5432/hello_world"
-        )
+        return "postgresql://benchmarkdbuser:benchmarkdbpass@tfb-database:5432/hello_world"
     return None
 
 
-def _child_command(
-    arm: str, queries: int, *, ungraft: bool, calls: bool, target: str
-) -> list[str]:
+def _child_command(arm: str, queries: int, *, ungraft: bool, calls: bool, target: str) -> list[str]:
     """The command that runs `queries` of `arm` and exits."""
     argv = [
-        sys.executable, "-m", "wreath._devtools.query_probe",
-        "--run-child", arm, "--queries", str(queries), "--dsn", target,
+        sys.executable,
+        "-m",
+        "wreath._devtools.query_probe",
+        "--run-child",
+        arm,
+        "--queries",
+        str(queries),
+        "--dsn",
+        target,
     ]
     if ungraft:
         argv.append("--ungraft")
@@ -125,6 +134,7 @@ def _child_command(
 # ------------------------------------------------------------------ #
 # The child: performs the queries and exits.
 # ------------------------------------------------------------------ #
+
 
 def _reference_state_machine() -> Any:
     """The module the native Connection inherits its Python state machine from.
@@ -206,8 +216,8 @@ async def _run_arm(
     connections = [await connect(target) for _ in range(concurrency)]
     try:
         await _prepare(connections[0])
-        one = 'SELECT id, payload FROM wreath_query_probe.rows WHERE id = $1'
-        twelve = 'SELECT id, payload FROM wreath_query_probe.rows LIMIT 12'
+        one = "SELECT id, payload FROM wreath_query_probe.rows WHERE id = $1"
+        twelve = "SELECT id, payload FROM wreath_query_probe.rows LIMIT 12"
 
         # Priced by `build` and `submit`: the two stages of a query that
         # happen before anything is written, isolated so the round trip can be
@@ -296,15 +306,26 @@ async def _run_arm(
                 await connection.execute("SELECT 1")
             else:
                 await connection.map(
-                    "fetchrow", one, [(i % 12 + 1,) for i in range(20)],
+                    "fetchrow",
+                    one,
+                    [(i % 12 + 1,) for i in range(20)],
                     max_in_flight=20,
                 )
 
         for connection in connections:  # warm plans, codec, statement cache
             for _ in range(3):
                 await connection.fetchrow(one, 1)
-        if arm in ("build", "submit", "operation", "future", "nothing",
-                   "is_txn", "plan_get", "flush_idle", "awaitable"):
+        if arm in (
+            "build",
+            "submit",
+            "operation",
+            "future",
+            "nothing",
+            "is_txn",
+            "plan_get",
+            "flush_idle",
+            "awaitable",
+        ):
             plan = connections[0]._plans.get(one)
             if plan is None:
                 raise SystemExit("no cached plan; the warmup did not run")
@@ -352,8 +373,8 @@ async def _run_arm(
                 # as a leak check. `allocations` below is the one that counts.
                 "net_blocks_per_query": allocated / (performed * scale),
                 "by_file": {
-                    name.split("/wreath/")[-1] if "/wreath/" in name else name:
-                        count / (performed * scale)
+                    name.split("/wreath/")[-1] if "/wreath/" in name else name: count
+                    / (performed * scale)
                     for name, count in counts.most_common(8)
                 },
             }
@@ -397,14 +418,13 @@ async def _prepare(connection: Any) -> None:
         "CREATE TABLE IF NOT EXISTS wreath_query_probe.rows ("
         "id int PRIMARY KEY, payload text NOT NULL)"
     )
-    existing = await connection.fetchval(
-        "SELECT count(*) FROM wreath_query_probe.rows"
-    )
+    existing = await connection.fetchval("SELECT count(*) FROM wreath_query_probe.rows")
     if not existing:
         for index in range(1, 13):
             await connection.execute(
                 "INSERT INTO wreath_query_probe.rows (id, payload) VALUES ($1, $2)",
-                index, f"row {index} payload",
+                index,
+                f"row {index} payload",
             )
 
 
@@ -424,7 +444,10 @@ def _child_main(args: argparse.Namespace) -> int:
 
     asyncio.run(
         _run_arm(
-            args.run_child, args.queries, args.dsn, args.calls,
+            args.run_child,
+            args.queries,
+            args.dsn,
+            args.calls,
             ungrafted=args.ungraft,
         ),
         loop_factory=_loop,
@@ -436,22 +459,17 @@ def _child_main(args: argparse.Namespace) -> int:
 # The parent: drives the child and reports.
 # ------------------------------------------------------------------ #
 
-def measure(
-    arm: str, queries: int, target: str, *, ungraft: bool
-) -> dict[str, float] | None:
+
+def measure(arm: str, queries: int, target: str, *, ungraft: bool) -> dict[str, float] | None:
     scale = 20 if arm == "map20" else 1
     return cpu_probe.per_operation(
-        lambda n: _child_command(
-            arm, n, ungraft=ungraft, calls=False, target=target
-        ),
+        lambda n: _child_command(arm, n, ungraft=ungraft, calls=False, target=target),
         queries,
         scale=scale,
     )
 
 
-def syscalls(
-    arm: str, queries: int, target: str, *, ungraft: bool
-) -> dict[str, float] | None:
+def syscalls(arm: str, queries: int, target: str, *, ungraft: bool) -> dict[str, float] | None:
     """Syscalls per query, by the same slope, counted with `strace -c`.
 
     Not `perf stat -e raw_syscalls:sys_enter`: that is a tracepoint, and
@@ -472,9 +490,17 @@ def syscalls(
 
     def total_for(count: int) -> dict[str, float] | None:
         done = subprocess.run(
-            ["strace", "-c", "-f", "-U", "name,calls",
-             *_child_command(arm, count, ungraft=ungraft, calls=False, target=target)],
-            capture_output=True, text=True, check=False,
+            [
+                "strace",
+                "-c",
+                "-f",
+                "-U",
+                "name,calls",
+                *_child_command(arm, count, ungraft=ungraft, calls=False, target=target),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
         )
         if done.returncode != 0:
             return None
@@ -494,9 +520,7 @@ def syscalls(
     if spread <= 0:
         return None
     per_query = {
-        name: (high[name] - low.get(name, 0.0)) / spread
-        for name in high
-        if name != "total"
+        name: (high[name] - low.get(name, 0.0)) / spread for name in high if name != "total"
     }
     # Slope noise puts tiny counters slightly negative; those are syscalls that
     # do not scale with the query count at all (setup, imports), which is
@@ -511,7 +535,9 @@ def python_calls(arm: str, queries: int, target: str, *, ungraft: bool) -> Any:
 
     done = subprocess.run(
         _child_command(arm, queries, ungraft=ungraft, calls=True, target=target),
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if done.returncode != 0:
         return None
@@ -530,10 +556,7 @@ def _render(results: dict[str, dict[str, Any]]) -> None:
     rather than work, but it is only meaningful with the governor pinned --
     `cpu_probe`'s docstring has the measurement that established that.
     """
-    header = (
-        f"{'arm':<22} {'instr/query':>13} {'cycles/query':>13} {'IPC':>6} "
-        f"{'cache-miss':>11}"
-    )
+    header = f"{'arm':<22} {'instr/query':>13} {'cycles/query':>13} {'IPC':>6} {'cache-miss':>11}"
     print(header)
     print("-" * len(header))
     for label, row in results.items():
@@ -549,10 +572,7 @@ def _render(results: dict[str, dict[str, Any]]) -> None:
             cycles_text, ipc_text = f"{'unresolved':>13}", f"{'-':>6}"
         misses = row.get("cache-misses", 0.0)
         miss_text = f"{misses:>11,.1f}" if misses > 0 else f"{'-':>11}"
-        print(
-            f"{label:<22} {row['instructions']:>13,.0f} {cycles_text} "
-            f"{ipc_text} {miss_text}"
-        )
+        print(f"{label:<22} {row['instructions']:>13,.0f} {cycles_text} {ipc_text} {miss_text}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -563,17 +583,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-child", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--dsn", default=None)
     parser.add_argument("--queries", type=int, default=8000)
-    parser.add_argument("--arm", action="append", default=None,
-                        help=f"limit to these arms: {', '.join(ARMS)}")
-    parser.add_argument("--ungraft", action="store_true",
-                        help="restore the Python state machine onto the native "
-                             "Connection -- the driver as it was before pipeline.c")
-    parser.add_argument("--compare", action="store_true",
-                        help="measure both ways and print the delta")
-    parser.add_argument("--calls", action="store_true",
-                        help="also count Python calls per query (exact, not sampled)")
-    parser.add_argument("--syscalls", action="store_true",
-                        help="also count syscalls per query, via strace")
+    parser.add_argument(
+        "--arm", action="append", default=None, help=f"limit to these arms: {', '.join(ARMS)}"
+    )
+    parser.add_argument(
+        "--ungraft",
+        action="store_true",
+        help="restore the Python state machine onto the native "
+        "Connection -- the driver as it was before pipeline.c",
+    )
+    parser.add_argument(
+        "--compare", action="store_true", help="measure both ways and print the delta"
+    )
+    parser.add_argument(
+        "--calls",
+        action="store_true",
+        help="also count Python calls per query (exact, not sampled)",
+    )
+    parser.add_argument(
+        "--syscalls", action="store_true", help="also count syscalls per query, via strace"
+    )
     parser.add_argument("--json", type=Path, default=None)
     args = parser.parse_args(argv)
 
@@ -593,8 +622,10 @@ def main(argv: list[str] | None = None) -> int:
         return _child_main(args)
 
     if not cpu_probe.available():
-        print("perf cannot count hardware events here; "
-              "instructions/query is unavailable", file=sys.stderr)
+        print(
+            "perf cannot count hardware events here; instructions/query is unavailable",
+            file=sys.stderr,
+        )
         return 2
 
     arms = args.arm or list(ARMS)
@@ -637,8 +668,7 @@ def main(argv: list[str] | None = None) -> int:
         for name, row in results.items():
             if "syscalls" in row:
                 print(f"    {name:<20} {row['syscalls']:>8.2f}")
-                top = sorted(row.get("by_syscall", {}).items(),
-                             key=lambda item: -item[1])[:4]
+                top = sorted(row.get("by_syscall", {}).items(), key=lambda item: -item[1])[:4]
                 for call, count in top:
                     print(f"        {count:>6.2f}  {call}")
     if args.compare:
@@ -647,8 +677,10 @@ def main(argv: list[str] | None = None) -> int:
             native = results.get(arm, {}).get("instructions")
             python = results.get(f"{arm} [python]", {}).get("instructions")
             if native and python:
-                print(f"    {arm:<12} {python - native:>10,.0f} fewer instructions"
-                      f"  ({100 * (python - native) / python:.1f}%)")
+                print(
+                    f"    {arm:<12} {python - native:>10,.0f} fewer instructions"
+                    f"  ({100 * (python - native) / python:.1f}%)"
+                )
     if args.json:
         args.json.write_text(json.dumps(results, indent=2))
     return 0

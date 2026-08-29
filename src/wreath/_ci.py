@@ -147,9 +147,7 @@ def render(ci: CiPlan, forge: str) -> dict[str, str]:
     try:
         renderer = _RENDERERS[forge]
     except KeyError:
-        raise ValueError(
-            f"unknown forge {forge!r}; supported: {', '.join(FORGES)}"
-        ) from None
+        raise ValueError(f"unknown forge {forge!r}; supported: {', '.join(FORGES)}") from None
     return renderer(ci)
 
 
@@ -160,9 +158,6 @@ def existing(directory: Path, forge: str) -> list[str]:
     which is the same promise `wreath new` makes about a non-empty directory.
     """
     return sorted(name for name in render(plan("_"), forge) if (directory / name).exists())
-
-
-# --- YAML --------------------------------------------------------------------
 
 
 def _scalar(text: str) -> str:
@@ -176,9 +171,6 @@ def _scalar(text: str) -> str:
     """
     escaped = text.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
-
-
-# --- GitHub Actions ----------------------------------------------------------
 
 
 def _github(ci: CiPlan) -> dict[str, str]:
@@ -224,9 +216,6 @@ def _github(ci: CiPlan) -> dict[str, str]:
     return {".github/workflows/ci.yml": "\n".join(lines).rstrip("\n") + "\n"}
 
 
-# --- GitLab CI ---------------------------------------------------------------
-
-
 def _gitlab(ci: CiPlan) -> dict[str, str]:
     """`.gitlab-ci.yml`.
 
@@ -261,9 +250,6 @@ def _gitlab(ci: CiPlan) -> dict[str, str]:
         lines += [f"    - {_scalar(command)}" for command in check.commands]
         lines += [""]
     return {".gitlab-ci.yml": "\n".join(lines).rstrip("\n") + "\n"}
-
-
-# --- Forgejo (Codeberg) and Gitea --------------------------------------------
 
 
 def _actions_in_container(ci: CiPlan, *, checkout: str, comment: str) -> str:

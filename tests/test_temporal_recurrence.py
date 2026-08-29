@@ -1,27 +1,3 @@
-"""A length has a type, and a schedule knows its zone.
-
-`wreath.temporal` already refused a naive `datetime`, because a moment without
-an offset has no single meaning. A *length* had no type at all: a job lease, a
-quota period, a notification digest, a store window and a rate-limit span were
-five bare floats, so "how long" was documented five times and spelled five ways.
-A *recurrence* was worse than untyped -- it was a five-field cron string read in
-UTC, so "03:00 depot-local" was an hour wrong for half the year, in whichever
-half the reader did not test in.
-
-These tests pin the three properties that make the pair worth having:
-
-* `Duration.of` takes a length however it was written, and `total_seconds()` is
-  what every call site it replaces already wanted.
-* A `Recurrence` fires on its own zone's wall clock, not on UTC's.
-* The two DST days answer the way a person expects rather than the way the
-  arithmetic falls out -- a local time that does not exist does not fire, and a
-  local time that happens twice fires once.
-
-The DST cases are the reason this file exists. They are also the cases a test
-suite normally discovers in production, so they are written against real zones
-and real 2026 transition dates rather than against a fabricated fixed offset.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -48,9 +24,6 @@ from wreath.temporal import (
 FALL_BACK = datetime.date(2026, 4, 5)
 SPRING_FORWARD = datetime.date(2026, 10, 4)
 SYDNEY = "Australia/Sydney"
-
-
-# --- Duration ------------------------------------------------------------------------
 
 
 def test_unit_helpers_build_the_span_they_name() -> None:
@@ -121,9 +94,6 @@ def test_a_duration_still_moves_an_instant() -> None:
     assert (start + hours(3)).hour == 3
 
 
-# --- Recurrence: the zone is the point -----------------------------------------------
-
-
 def test_cron_defaults_to_utc_so_an_existing_expression_is_unchanged() -> None:
     recurrence = Recurrence.cron("0 3 * * *")
     assert recurrence.matches_at(Instant.parse("2026-08-03T03:00:00+00:00"))
@@ -162,9 +132,6 @@ def test_next_after_keeps_only_the_identical_latest_moment() -> None:
     second = recurrence.next_after(equal_moment)
     assert second == first
     assert second is not first
-
-
-# --- Recurrence: the two DST days ----------------------------------------------------
 
 
 def test_a_local_time_that_does_not_exist_does_not_fire() -> None:
@@ -212,9 +179,6 @@ def test_bucket_key_is_local_and_distinguishes_ordinary_minutes() -> None:
     assert recurrence.bucket_key(one) != recurrence.bucket_key(one + minutes(1))
 
 
-# --- Recurrence: cron parsing --------------------------------------------------------
-
-
 def test_cron_accepts_seven_as_sunday() -> None:
     # A form people copy straight out of a crontab; refusing it was a startup error.
     assert Recurrence.cron("0 0 * * 7").weekday == Recurrence.cron("0 0 * * 0").weekday
@@ -249,9 +213,6 @@ def test_an_unsatisfiable_recurrence_refuses_instead_of_looping() -> None:
     recurrence = Recurrence.cron("0 0 31 2 *")  # February 31st
     with pytest.raises(RecurrenceError, match="never happens"):
         recurrence.next_after(Instant.parse("2026-01-01T00:00:00+00:00"))
-
-
-# --- Recurrence: the calendar spelling -----------------------------------------------
 
 
 def test_weekdays_at_three_is_the_shape_a_calendar_ui_emits() -> None:
@@ -335,8 +296,6 @@ def test_recurrence_error_is_a_temporal_error() -> None:
     assert issubclass(RecurrenceError, TemporalError)
 
 
-# --- the refusals `wreath mutant` found nothing watching ------------------------------
-#
 # Every test below was written because `wreath mutant` removed the control it
 # covers and no test objected. They are the difference between "the parser
 # accepts what it should" (which the tests above prove) and "the parser refuses
@@ -404,8 +363,6 @@ def test_a_by_field_outside_its_range_is_refused(part: str, message: str) -> Non
         Recurrence.calendar(f"FREQ=DAILY;{part}")
 
 
-# --- the field defaults each FREQ implies --------------------------------------------
-#
 # These pin what a FREQ means when a BY field is *absent*, which is where the
 # whole vocabulary either lines up with cron or quietly does not.
 
@@ -426,9 +383,7 @@ def test_minutely_means_every_minute_of_every_hour() -> None:
 
 
 def test_minutely_with_an_interval_steps_the_minute_field() -> None:
-    assert Recurrence.calendar("FREQ=MINUTELY;INTERVAL=15").minute == frozenset(
-        {0, 15, 30, 45}
-    )
+    assert Recurrence.calendar("FREQ=MINUTELY;INTERVAL=15").minute == frozenset({0, 15, 30, 45})
 
 
 def test_hourly_pins_the_minute_to_zero_rather_than_every_minute() -> None:

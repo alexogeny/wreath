@@ -1,21 +1,3 @@
-"""Every subsystem's counters, collected once and exported.
-
-Two dozen objects in this tree keep counters, each added with a written reason
-an operator would want it, and none of them reached a dashboard: the shipped
-Prometheus/StatsD/CloudWatch bridges read the *flight projector's* snapshot --
-route aggregates -- and nothing read a subsystem.
-
-These tests pin the seam. The properties that matter are the ones that make a
-scrape trustworthy rather than merely present:
-
-* collection is by *asking*, so a new subsystem is not a new place to forget;
-* two instances of one subsystem stay two series, or a deployment running four
-  queues gets one number that means nothing;
-* one subsystem raising must not blank every other subsystem's numbers;
-* the exposition stays parseable -- a scraper rejects a family whose samples
-  are not contiguous, which is the one way this can be silently broken.
-"""
-
 from __future__ import annotations
 
 from types import MappingProxyType, SimpleNamespace
@@ -34,9 +16,7 @@ class FakeProjector:
     """The route-aggregate half, which these tests are not about."""
 
     def snapshot(self) -> Any:
-        return type(
-            "S", (), {"assembled": 0, "pending": 0, "loss": None, "routes": ()}
-        )()
+        return type("S", (), {"assembled": 0, "pending": 0, "loss": None, "routes": ()})()
 
 
 def _app() -> Wreath:
@@ -47,9 +27,6 @@ def _app() -> Wreath:
     app.jobs("mail", database="main")
     app.entities(database="main", bus="events")
     return app
-
-
-# --- collection -----------------------------------------------------------------------
 
 
 def test_every_registered_subsystem_reports() -> None:
@@ -123,9 +100,6 @@ def test_a_holder_with_no_counters_is_simply_absent() -> None:
     assert metrics.collect(app) == (app.counters(),)
 
 
-# --- the flat form --------------------------------------------------------------------
-
-
 def test_prefixed_names_carry_the_namespace_and_subsystem() -> None:
     reading = Counters(subsystem="jobs", instance="work", values={"run_errors": 2})
     assert reading.prefixed() == {"wreath_jobs_run_errors": 2}
@@ -167,20 +141,15 @@ def test_flatten_normalizes_int_subclasses_to_plain_ints() -> None:
     assert all(type(value) is int for value in flattened.values())
 
 
-# --- the Prometheus exposition --------------------------------------------------------
-
-
 def test_counters_reach_the_exposition() -> None:
     text = PrometheusBridge(FakeProjector(), app=_app()).render()
-    assert "wreath_jobs_run_errors{instance=\"work\"} 0" in text
-    assert "wreath_entity_lost{instance=\"wreath_entity\"} 0" in text
+    assert 'wreath_jobs_run_errors{instance="work"} 0' in text
+    assert 'wreath_entity_lost{instance="wreath_entity"} 0' in text
 
 
 def test_prometheus_counter_values_retain_the_mapping_protocol() -> None:
     source = SimpleNamespace(
-        counters=lambda: Counters(
-            "readonly", "one", MappingProxyType({"completed": 7})
-        )
+        counters=lambda: Counters("readonly", "one", MappingProxyType({"completed": 7}))
     )
     text = PrometheusBridge(FakeProjector(), counter_sources=(source,)).render()
     assert 'wreath_readonly_completed{instance="one"} 7' in text
@@ -188,25 +157,19 @@ def test_prometheus_counter_values_retain_the_mapping_protocol() -> None:
 
 def test_explicit_counter_sources_reach_prometheus_and_dogstatsd() -> None:
     source = SimpleNamespace(
-        counters=lambda: Counters(
-            "client_facts", "public", {"geo_known": 7, "bot": 3}
-        )
+        counters=lambda: Counters("client_facts", "public", {"geo_known": 7, "bot": 3})
     )
     text = PrometheusBridge(FakeProjector(), counter_sources=(source,)).render()
     assert 'wreath_client_facts_geo_known{instance="public"} 7' in text
 
-    bridge = StatsDBridge(
-        FakeProjector(), dogstatsd=True, counter_sources=(source,)
-    )
+    bridge = StatsDBridge(FakeProjector(), dogstatsd=True, counter_sources=(source,))
     lines: list[str] = []
     bridge._counter_lines(lines)
     assert "wreath.client_facts.bot:3|g|#instance:public" in lines
 
 
 def test_explicit_source_failure_is_isolated_identically_by_every_bridge() -> None:
-    good = SimpleNamespace(
-        counters=lambda: Counters("health", "public", {"ready": 1})
-    )
+    good = SimpleNamespace(counters=lambda: Counters("health", "public", {"ready": 1}))
 
     class Broken:
         def counters(self) -> Counters:
@@ -216,9 +179,7 @@ def test_explicit_source_failure_is_isolated_identically_by_every_bridge() -> No
     text = PrometheusBridge(FakeProjector(), counter_sources=sources).render()
     assert 'wreath_health_ready{instance="public"} 1' in text
 
-    bridge = StatsDBridge(
-        FakeProjector(), dogstatsd=True, counter_sources=sources
-    )
+    bridge = StatsDBridge(FakeProjector(), dogstatsd=True, counter_sources=sources)
     lines: list[str] = []
     bridge._counter_lines(lines)
     assert "wreath.health.ready:1|g|#instance:public" in lines
@@ -232,11 +193,6 @@ def test_a_bridge_without_an_app_renders_the_projector_half_alone() -> None:
 
 
 def test_each_family_is_contiguous() -> None:
-    """A scraper rejects an exposition whose samples are not grouped.
-
-    Two queues interleaving would produce two `# HELP` blocks for one name,
-    which is the one way this can break while still looking fine by eye.
-    """
     text = PrometheusBridge(FakeProjector(), app=_app()).render()
     seen: list[str] = []
     for line in text.splitlines():
@@ -249,20 +205,14 @@ def test_each_family_is_contiguous() -> None:
 def test_every_counter_sample_is_labelled_by_instance() -> None:
     text = PrometheusBridge(FakeProjector(), app=_app()).render()
     rows = [
-        line for line in text.splitlines()
+        line
+        for line in text.splitlines()
         if line.startswith("wreath_jobs_") and not line.startswith("#")
     ]
     assert rows and all('instance="' in row for row in rows)
 
 
 def test_counters_render_as_gauges() -> None:
-    """Not counters, and the difference is not cosmetic.
-
-    A reading may be monotonic (`jobs.run_errors`) or may move both ways
-    (`pool.borrowed`), and this layer cannot tell them apart. Declaring a
-    falling series a counter makes a scraper read every decrease as a process
-    restart and invent a rate spike out of it.
-    """
     text = PrometheusBridge(FakeProjector(), app=_app()).render()
     types = [line for line in text.splitlines() if line.startswith("# TYPE wreath_pool_")]
     assert types and all(line.endswith(" gauge") for line in types)
@@ -271,7 +221,7 @@ def test_counters_render_as_gauges() -> None:
 def test_a_name_that_is_not_a_valid_metric_name_is_sanitised() -> None:
     readings = (Counters(subsystem="odd-one", instance="x", values={"a.b": 1}),)
     text = render_exposition(FakeProjector().snapshot(), counters=readings)
-    assert "wreath_odd_one_a_b{instance=\"x\"} 1" in text
+    assert 'wreath_odd_one_a_b{instance="x"} 1' in text
 
 
 def test_native_counter_exposition_preserves_unicode_and_label_semantics() -> None:
@@ -289,9 +239,6 @@ def test_native_counter_exposition_preserves_unicode_and_label_semantics() -> No
 def test_rendering_no_counters_changes_nothing() -> None:
     plain = render_exposition(FakeProjector().snapshot())
     assert render_exposition(FakeProjector().snapshot(), counters=()) == plain
-
-
-# --- the StatsD bridge ----------------------------------------------------------------
 
 
 def test_statsd_emits_a_line_per_counter() -> None:
@@ -319,8 +266,6 @@ def test_statsd_carries_the_instance_either_way(dogstatsd: bool) -> None:
     assert any("work" in line for line in lines)
 
 
-# --- exposition correctness `wreath mutant` found nothing watching --------------------
-#
 # These cover the renderer's own sanitisation and format rules rather than the
 # counter seam above. Each was reported as a surviving control: the behaviour
 # was reachable, correct, and unwatched.
@@ -380,12 +325,6 @@ def test_a_snapshot_with_no_routes_attribute_renders() -> None:
 
 
 def test_an_empty_histogram_bucket_emits_no_sample() -> None:
-    """Only non-empty buckets are written, and the cumulative still carries them.
-
-    A histogram with 64 buckets and two populated ones would otherwise put 64
-    rows per route on the wire, which is the difference between a scrape that
-    is free and one that is not.
-    """
     buckets = [0] * 64
     buckets[3] = 5
 
@@ -412,12 +351,6 @@ def test_an_empty_histogram_bucket_emits_no_sample() -> None:
 
 
 def test_a_snapshot_reporting_routes_as_none_renders() -> None:
-    """`getattr(..., "routes", ()) or ()` — the `or` arm, not the default arm.
-
-    A source that *has* the attribute and reports `None` is a different case
-    from one that lacks it, and only the second was covered. Both bridges take
-    the same shape, so both are checked here.
-    """
     class NullRoutes:
         assembled = 0
         pending = 0
@@ -431,16 +364,7 @@ def test_a_snapshot_reporting_routes_as_none_renders() -> None:
     assert bridge._lines(NullRoutes(), None) is not None
 
 
-# --- the egress subsystems that were counting into a void -----------------------------
-
-
 def test_a_cdn_purger_reports_its_counters() -> None:
-    """`dropped` is the reason `CDNPurge` counts at all.
-
-    Its failure mode is silence: the edge keeps serving stale content and
-    nothing in the application looks wrong. A counter nobody scrapes cannot do
-    the one job it was added for.
-    """
     from wreath.response_cache import CDNPurge, Tags
 
     purge = CDNPurge(object(), tags=Tags(secret=b"k" * 32), task="purge_tags")

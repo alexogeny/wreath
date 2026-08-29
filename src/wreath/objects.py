@@ -41,6 +41,7 @@ store = app.state.objects_assets
 
 The guide is [Object storage](../guides/objects.md).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -252,8 +253,7 @@ class ObjectStat:
     `MemoryObjectStore` uses an MD5 of the content, `LocalObjectStore` an
     `mtime-size` pair -- cheap, and not a content hash -- and `S3ObjectStore`
     whatever S3 returned. Comparing two stats from the same backend is
-    meaningful; comparing across backends is not, and used to fail for the
-    additional and uninteresting reason that only one of them was quoted.
+    meaningful; comparing across backends is not.
 
     `last_modified` is `None` wherever the backend does not supply one:
     `MemoryObjectStore` never does, and `S3ObjectStore.list` does not either,
@@ -339,9 +339,7 @@ class ObjectStore(Protocol):
         """Whether `key` is present, without transferring the object."""
         ...
 
-    def list(
-        self, prefix: str = "", *, delimiter: str | None = None
-    ) -> AsyncIterator[ObjectStat]:
+    def list(self, prefix: str = "", *, delimiter: str | None = None) -> AsyncIterator[ObjectStat]:
         """Yield the objects whose key starts with `prefix`, in key order.
 
         `delimiter` is honoured only by `S3ObjectStore`, which passes it
@@ -622,9 +620,7 @@ def _sign_local(secret: bytes, method: str, key: str, deadline: int) -> str:
     return hmac.new(secret, msg, hashlib.sha256).hexdigest()
 
 
-def _verify_local(
-    secret: bytes, key: str, *, method: str, expires: int, signature: str
-) -> bool:
+def _verify_local(secret: bytes, key: str, *, method: str, expires: int, signature: str) -> bool:
     """Whether `signature` is authentic for `key` and the deadline has not passed."""
     # `isascii()` before the compare, and it is load-bearing rather than belt
     # and braces: `hmac.compare_digest` **raises** `TypeError` on a `str`
@@ -809,9 +805,7 @@ class MemoryObjectStore:
         Raises:
             ObjectError: when `key` is not a valid key.
         """
-        return _verify_local(
-            self._secret, key, method=method, expires=expires, signature=signature
-        )
+        return _verify_local(self._secret, key, method=method, expires=expires, signature=signature)
 
     def path(self, key: str) -> ObjectPath:
         """An `ObjectPath` bound to this store and `key`."""
@@ -901,7 +895,6 @@ class LocalObjectStore:
         if fd >= 0:
             os.close(fd)
 
-    # -- read ---------------------------------------------------------------
     async def read(self, key: str) -> bytes:
         """The whole object as bytes, assembled from `read_stream`.
 
@@ -955,11 +948,11 @@ class LocalObjectStore:
         finally:
             await asyncio.to_thread(os.close, fd)
 
-    # -- write --------------------------------------------------------------
     async def write(
         self, key: str, data: bytes | bytearray | memoryview, *, content_type: str | None = None
     ) -> ObjectStat:
         """Store `data` at `key` atomically, without copying it. See `write_stream`."""
+
         async def _one() -> AsyncIterator[bytes | bytearray | memoryview]:
             yield data
 
@@ -1073,7 +1066,6 @@ class LocalObjectStore:
             raise
         return current, opened, parts[-1]
 
-    # -- metadata / listing -------------------------------------------------
     async def stat(self, key: str) -> ObjectStat:
         """Metadata for one object.
 
@@ -1250,9 +1242,7 @@ class LocalObjectStore:
         Raises:
             ObjectError: when `key` is not a valid key.
         """
-        return _verify_local(
-            self._secret, key, method=method, expires=expires, signature=signature
-        )
+        return _verify_local(self._secret, key, method=method, expires=expires, signature=signature)
 
     def path(self, key: str) -> ObjectPath:
         """An `ObjectPath` bound to this store and `key`."""
@@ -1385,9 +1375,7 @@ async def unzip_stream(
     raw_buffer = bytearray()
     async for chunk in storage.read_stream(key):
         if len(chunk) > limits.max_archive_bytes - len(raw_buffer):
-            raise ObjectError(
-                f"zip archive exceeds {limits.max_archive_bytes} bytes"
-            )
+            raise ObjectError(f"zip archive exceeds {limits.max_archive_bytes} bytes")
         raw_buffer += chunk
     raw = bytes(raw_buffer)
 
@@ -1419,8 +1407,7 @@ async def unzip_stream(
                 )
             if info.file_size > limits.max_total_bytes - total:
                 raise ObjectError(
-                    f"zip output exceeds {limits.max_total_bytes} bytes at "
-                    f"entry {info.filename!r}"
+                    f"zip output exceeds {limits.max_total_bytes} bytes at entry {info.filename!r}"
                 )
             total += info.file_size
             planned.append((info, normalized))
@@ -1459,7 +1446,7 @@ async def file_chunks(data: bytes, *, chunk_size: int = 1 << 20) -> AsyncIterato
     """
     view = memoryview(data)
     for start in range(0, len(view), chunk_size):
-        yield bytes(view[start:start + chunk_size])
+        yield bytes(view[start : start + chunk_size])
 
 
 _MIN_PART = 5 * 1024 * 1024
@@ -1483,7 +1470,7 @@ def _http_date(value: bytes | None) -> float | None:
 
     try:
         return parsedate_to_datetime(value.decode("ascii")).timestamp()
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -1599,7 +1586,6 @@ class S3ObjectStore:
     def __repr__(self) -> str:  # never leak credentials
         return f"S3ObjectStore(bucket={self._bucket!r}, region={self._region!r})"
 
-    # -- request plumbing ----------------------------------------------------
     def _obj_path(self, key: str) -> str:
         return f"/{self._bucket}/{key}" if self._path_style else f"/{key}"
 
@@ -1617,13 +1603,12 @@ class S3ObjectStore:
         extra_headers: dict[str, str] | None = None,
     ) -> Any:
         params = params or []
-        extra = {k.lower(): v for k, v in (extra_headers or {}).items()}
+        extra = {name.lower(): value for name, value in (extra_headers or {}).items()}
         if payload_hash is None:
             # `bytes()` on a `bytes` is the same object, so a caller that
             # already had one pays nothing; only a signed `bytearray` body is
             # frozen, and only for the hash. A part upload sends
             # `UNSIGNED_PAYLOAD` and never reaches here.
-            #
             # `wreath mutant` reports the `if body` here and the `or None`
             # below as survivors, and both are **equivalent mutants rather
             # than untested lines**: `EMPTY_SHA256` *is* `sha256_hex(b"")`,
@@ -1633,20 +1618,29 @@ class S3ObjectStore:
             payload_hash = _sigv4.sha256_hex(bytes(body)) if body else _sigv4.EMPTY_SHA256
         amz_date = _amz_date()
         signed = _sigv4.sign(
-            method=method, host=self._host, path=path, region=self._region,
-            service=self._service, access_key=self._ak, secret_key=self._sk,
-            amz_date=amz_date, params=params, payload_hash=payload_hash,
-            headers=extra or None, session_token=self._token,
+            method=method,
+            host=self._host,
+            path=path,
+            region=self._region,
+            service=self._service,
+            access_key=self._ak,
+            secret_key=self._sk,
+            amz_date=amz_date,
+            params=params,
+            payload_hash=payload_hash,
+            headers=extra or None,
+            session_token=self._token,
         )
         # `extra` goes on the wire as well as into the signature: a header S3
         # sees but the signature does not cover (or the reverse) is a 403 whose
         # message names only the mismatch.
         headers = {"host": self._host, **extra, **signed}
         wire_headers = tuple(
-            (k.encode("ascii"), str(v).encode("latin-1")) for k, v in headers.items()
+            (name.encode("ascii"), str(value).encode("latin-1")) for name, value in headers.items()
         )
         query = "&".join(
-            f"{_sigv4.uri_encode(k)}={_sigv4.uri_encode(v)}" for k, v in sorted(params)
+            f"{_sigv4.uri_encode(name)}={_sigv4.uri_encode(value)}"
+            for name, value in sorted(params)
         )
         target = _sigv4.uri_encode(path, encode_slash=False)
         if query:
@@ -1661,7 +1655,6 @@ class S3ObjectStore:
             )
         return resp
 
-    # -- ObjectStore protocol ----------------------------------------------------
     async def read(self, key: str) -> bytes:
         """The whole object, in one unranged `GET`.
 
@@ -1723,15 +1716,28 @@ class S3ObjectStore:
         amz_date = _amz_date()
         rng = f"bytes={start}-{hi}"
         signed = _sigv4.sign(
-            method=method, host=self._host, path=path, region=self._region,
-            service=self._service, access_key=self._ak, secret_key=self._sk,
-            amz_date=amz_date, params=[], payload_hash=_sigv4.EMPTY_SHA256,
-            headers={"range": rng}, session_token=self._token,
+            method=method,
+            host=self._host,
+            path=path,
+            region=self._region,
+            service=self._service,
+            access_key=self._ak,
+            secret_key=self._sk,
+            amz_date=amz_date,
+            params=[],
+            payload_hash=_sigv4.EMPTY_SHA256,
+            headers={"range": rng},
+            session_token=self._token,
         )
         headers = {"host": self._host, "range": rng, **signed}
-        wire = tuple((k.encode("ascii"), str(v).encode("latin-1")) for k, v in headers.items())
+        wire = tuple(
+            (name.encode("ascii"), str(value).encode("latin-1")) for name, value in headers.items()
+        )
         return await self._client.request(
-            method, _sigv4.uri_encode(path, encode_slash=False), headers=wire, body=b"",
+            method,
+            _sigv4.uri_encode(path, encode_slash=False),
+            headers=wire,
+            body=b"",
         )
 
     async def write(
@@ -1766,9 +1772,12 @@ class S3ObjectStore:
         key = normalize_key(key)
         resp = self._ok(
             await self._send(
-                "PUT", self._obj_path(key), body=data,
+                "PUT",
+                self._obj_path(key),
+                body=data,
                 extra_headers={"content-type": content_type} if content_type else None,
-            ), 200,
+            ),
+            200,
         )
         etag = (resp.header(b"etag") or b"").decode("ascii").strip('"')
         return ObjectStat(key=key, size=len(data), etag=etag, content_type=content_type)
@@ -1857,9 +1866,12 @@ class S3ObjectStore:
     async def _initiate(self, path: str, content_type: str | None) -> str:
         resp = self._ok(
             await self._send(
-                "POST", path, params=[("uploads", "")],
+                "POST",
+                path,
+                params=[("uploads", "")],
                 extra_headers={"content-type": content_type} if content_type else None,
-            ), 200,
+            ),
+            200,
         )
         root = _parse_s3_xml(resp.body)
         pending = [root]
@@ -1875,16 +1887,20 @@ class S3ObjectStore:
     ) -> str:
         resp = self._ok(
             await self._send(
-                "PUT", path,
+                "PUT",
+                path,
                 params=[("partNumber", str(num)), ("uploadId", upload_id)],
-                body=data, payload_hash=_sigv4.UNSIGNED_PAYLOAD,
-            ), 200,
+                body=data,
+                payload_hash=_sigv4.UNSIGNED_PAYLOAD,
+            ),
+            200,
         )
         return (resp.header(b"etag") or b"").decode("ascii")
 
     async def _complete(self, path: str, upload_id: str, parts: _List[tuple[int, str]]) -> Any:
         body = "".join(
-            f"<Part><PartNumber>{n}</PartNumber><ETag>{e}</ETag></Part>" for n, e in parts
+            f"<Part><PartNumber>{number}</PartNumber><ETag>{etag}</ETag></Part>"
+            for number, etag in parts
         )
         xml = (
             f'<CompleteMultipartUpload xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
@@ -1913,7 +1929,7 @@ class S3ObjectStore:
 
         try:
             resp = await self._send("DELETE", path, params=[("uploadId", upload_id)])
-        except (ClientError, OSError):
+        except ClientError, OSError:
             self.orphaned_uploads += 1
             return
         if resp.status not in (200, 204, 404):
@@ -1935,7 +1951,9 @@ class S3ObjectStore:
         etag = (resp.header(b"etag") or b"").decode("ascii").strip('"')
         ctype = resp.header(b"content-type")
         return ObjectStat(
-            key=key, size=size, etag=etag,
+            key=key,
+            size=size,
+            etag=etag,
             last_modified=_http_date(resp.header(b"last-modified")),
             # latin-1, not ascii: a header value is bytes on the wire and a
             # parameter S3 hands back verbatim (a filename, say) need not be
@@ -2013,7 +2031,7 @@ class S3ObjectStore:
             for el in root:
                 name = el.local
                 if name == "Contents":
-                    fields = {c.local: (c.text or "") for c in el}
+                    fields = {child.local: (child.text or "") for child in el}
                     yield ObjectStat(
                         key=normalize_key(fields.get("Key", "")),
                         size=int(fields.get("Size", "0") or 0),
@@ -2063,9 +2081,16 @@ class S3ObjectStore:
         """
         key = normalize_key(key)
         return _sigv4.presign(
-            method=method, host=self._host, path=self._obj_path(key), region=self._region,
-            service=self._service, access_key=self._ak, secret_key=self._sk,
-            amz_date=_amz_date(), expires=expires, session_token=self._token,
+            method=method,
+            host=self._host,
+            path=self._obj_path(key),
+            region=self._region,
+            service=self._service,
+            access_key=self._ak,
+            secret_key=self._sk,
+            amz_date=_amz_date(),
+            expires=expires,
+            session_token=self._token,
             scheme=self._scheme,
         )
 
@@ -2074,10 +2099,7 @@ class S3ObjectStore:
         return ObjectPath(self, key)
 
 
-# ---------------------------------------------------------------------------
 # Resumable uploads
-# ---------------------------------------------------------------------------
-#
 # The shipped surface is **Resumable Uploads for HTTP**,
 # `draft-ietf-httpbis-resumable-upload-12` (July 2026). tus 1.0.x is
 # deliberately *not* served: the two vocabularies overlap enough
@@ -2381,7 +2403,7 @@ class MemoryUploadStore:
         self._states.pop(upload_id, None)
 
     async def expired(self, before: float) -> _List[UploadState]:
-        return [s for s in list(self._states.values()) if s.updated < before]
+        return [state for state in list(self._states.values()) if state.updated < before]
 
 
 class ObjectUploadStore:
@@ -2447,9 +2469,7 @@ class ObjectUploadStore:
     async def expired(self, before: float) -> _List[UploadState]:
         stale: _List[UploadState] = []
         async for stat in self._store.list(prefix=self._prefix):
-            state = await self.read(
-                stat.key.removeprefix(self._prefix).removesuffix(".json")
-            )
+            state = await self.read(stat.key.removeprefix(self._prefix).removesuffix(".json"))
             if state is not None and state.updated < before:
                 stale.append(state)
         return stale
@@ -2461,9 +2481,7 @@ class _UploadBackend:
     #: Smallest non-final append this assembly strategy can accept, in bytes.
     min_append: int = 0
 
-    async def append(
-        self, state: UploadState, data: bytes | bytearray | memoryview
-    ) -> None:
+    async def append(self, state: UploadState, data: bytes | bytearray | memoryview) -> None:
         raise NotImplementedError
 
     async def finish(self, state: UploadState) -> ObjectStat:
@@ -2496,9 +2514,7 @@ class _PartsUploadBackend(_UploadBackend):
     def _part_key(self, upload_id: str, number: int) -> str:
         return f"{self._prefix}{upload_id}/{number:08d}.part"
 
-    async def append(
-        self, state: UploadState, data: bytes | bytearray | memoryview
-    ) -> None:
+    async def append(self, state: UploadState, data: bytes | bytearray | memoryview) -> None:
         number = int(state.backend.get("parts", 0)) + 1
         await self._store.write(self._part_key(state.id, number), data)
         state.backend["parts"] = number
@@ -2506,16 +2522,14 @@ class _PartsUploadBackend(_UploadBackend):
     async def finish(self, state: UploadState) -> ObjectStat:
         count = int(state.backend.get("parts", 0))
         store = self._store
-        part_keys = [self._part_key(state.id, n) for n in range(1, count + 1)]
+        part_keys = [self._part_key(state.id, number) for number in range(1, count + 1)]
 
         async def _chunks() -> AsyncIterator[bytes]:
             for part_key in part_keys:
                 async for chunk in store.read_stream(part_key):
                     yield chunk
 
-        stat = await store.write_stream(
-            state.key, _chunks(), content_type=state.content_type
-        )
+        stat = await store.write_stream(state.key, _chunks(), content_type=state.content_type)
         for part_key in part_keys:
             await store.delete(part_key)
         return stat
@@ -2557,17 +2571,14 @@ class _S3UploadBackend(_UploadBackend):
             state.backend["parts"] = []
         return str(upload_id)
 
-    async def append(
-        self, state: UploadState, data: bytes | bytearray | memoryview
-    ) -> None:
+    async def append(self, state: UploadState, data: bytes | bytearray | memoryview) -> None:
         upload_id = await self._ensure(state)
         path = self._store._obj_path(normalize_key(state.key))
         parts = state.backend["parts"]
         number = len(parts) + 1
         if number > _S3_MAX_PARTS:
             raise ObjectError(
-                f"S3 multipart upload is limited to {_S3_MAX_PARTS} parts; "
-                "raise the append size"
+                f"S3 multipart upload is limited to {_S3_MAX_PARTS} parts; raise the append size"
             )
         etag = await self._store._put_part(path, upload_id, number, data)
         parts.append([number, etag])
@@ -2579,16 +2590,16 @@ class _S3UploadBackend(_UploadBackend):
             # Nothing was ever appended: an upload completed at zero bytes is a
             # legitimate empty object, and a multipart upload cannot express
             # one (S3 refuses a completion with no parts).
-            return await self._store.write(
-                state.key, b"", content_type=state.content_type
-            )
-        parts = [(int(n), str(e)) for n, e in state.backend.get("parts", [])]
+            return await self._store.write(state.key, b"", content_type=state.content_type)
+        parts = [(int(number), str(etag)) for number, etag in state.backend.get("parts", [])]
         self._store._ok(await self._store._complete(path, str(upload_id), parts), 200)
         try:
             return await self._store.stat(state.key)
         except ObjectError:
             return ObjectStat(
-                key=normalize_key(state.key), size=state.offset, etag="",
+                key=normalize_key(state.key),
+                size=state.offset,
+                etag="",
                 content_type=state.content_type,
             )
 
@@ -2733,9 +2744,21 @@ class ResumableUploads:
     """
 
     __slots__ = (
-        "_backend_prefix", "_inflight", "_jobs", "_key_for", "_limits", "_on_complete",
-        "_prefix", "_quota", "_sniff", "_store", "_uploads", "expire",
-        "aborted_uploads", "refused_appends", "swept_uploads",
+        "_backend_prefix",
+        "_inflight",
+        "_jobs",
+        "_key_for",
+        "_limits",
+        "_on_complete",
+        "_prefix",
+        "_quota",
+        "_sniff",
+        "_store",
+        "_uploads",
+        "expire",
+        "aborted_uploads",
+        "refused_appends",
+        "swept_uploads",
     )
 
     def __init__(
@@ -2809,8 +2832,6 @@ class ResumableUploads:
         if isinstance(self._store, S3ObjectStore):
             return _S3UploadBackend(self._store)
         return _PartsUploadBackend(self._store, self._backend_prefix)
-
-    # -- protocol handlers --------------------------------------------------
 
     def _headers(self, state: UploadState, *, store: bool = False) -> _List[tuple[bytes, bytes]]:
         headers = [
@@ -2927,8 +2948,6 @@ class ResumableUploads:
         await self._discard(state)
         return Response(b"", status=204)
 
-    # -- machinery ----------------------------------------------------------
-
     async def _require(self, request: Request) -> UploadState:
         # No `if upload_id else None` guard: every store answers None for an
         # empty id anyway, so the shortcut was a second spelling of the same
@@ -3001,18 +3020,6 @@ class ResumableUploads:
             if state.length is not None and written > state.length:
                 raise _Refused(413, f"upload exceeds declared length {state.length}")
 
-        # **The `bytes(buffered)` freeze that used to stand here is gone**, and
-        # the decision it was waiting for has been made: `ObjectStore.write`
-        # now accepts `bytes | bytearray | memoryview` and promises no backend
-        # retains the buffer. Ablated on an 8 MiB append, the freeze was 1155us
-        # against 584us without it (35us floor) when it was written, and
-        # 592.46us against 201.77us (5.22us floor) when the survey re-took it --
-        # both agreeing it was roughly half of an append, and both agreeing it
-        # was pure `memcpy` at memory bandwidth rather than slow code. Nothing
-        # downstream ever needed the immutability: `MemoryObjectStore.write`
-        # copies what it stores regardless, `LocalObjectStore` hands each chunk
-        # to `_write_all`, which takes a `memoryview`, and the S3 part goes to
-        # the HTTP client, which copies the body once on its way to the socket.
         floor = self._limits.min_append_size
         if not complete and floor is not None and 0 < len(buffered) < floor:
             raise _Refused(400, f"a non-final append must be at least {floor} bytes")
@@ -3105,7 +3112,7 @@ class ResumableUploads:
         for state in stale:
             try:
                 await backend.abort(state)
-            except (ObjectError, OSError):
+            except ObjectError, OSError:
                 # Named rather than blanket: these are the storage layer saying
                 # no. A TypeError out of here is a bug in this file and must
                 # not be filed under "the bucket was unavailable".
@@ -3115,8 +3122,6 @@ class ResumableUploads:
             reclaimed += 1
         self.swept_uploads += reclaimed
         return reclaimed
-
-    # -- mounting -----------------------------------------------------------
 
     def router(self, path: str = "/uploads", *, permissions: Iterable[str] = ()) -> Any:
         """Ordinary wreath routes for the four protocol operations.

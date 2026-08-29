@@ -1,15 +1,3 @@
-"""Template rendering: what the engine produces, and the two ways it runs a tape.
-
-`template_render` walks the tape directly; `template_render_compiled` lowers it
-to a native program first and then runs that. They are separate code paths over
-one input, so every case below drives both and holds them to the same written-
-down bytes -- not to each other, which would pass on any shared mistake.
-
-The tape they execute, the escaping, and the error types come from
-`wreath._template_tape`, so `Markup` here and the `Markup` `wreath.templates`
-exports are one class rather than two that agree.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -33,9 +21,7 @@ _LIMIT = 16 * 1024 * 1024
 def render(tape: tuple, context: dict, max_output: int = _LIMIT) -> bytes:
     """Render `tape` both ways, assert the two agree, and return the bytes."""
     walked = _core.template_render(tape, context, max_output)
-    compiled = _core.template_render_compiled(
-        _core.template_compile(tape), context, max_output
-    )
+    compiled = _core.template_render_compiled(_core.template_compile(tape), context, max_output)
     assert compiled == walked, "the compiled program disagreed with the walked tape"
     return walked
 
@@ -44,9 +30,7 @@ def render_error(tape: tuple, context: dict, max_output: int = _LIMIT) -> BaseEx
     """The error both paths raise, asserted identical, and returned."""
     walked = _capture(lambda: _core.template_render(tape, context, max_output))
     program = _core.template_compile(tape)
-    compiled = _capture(
-        lambda: _core.template_render_compiled(program, context, max_output)
-    )
+    compiled = _capture(lambda: _core.template_render_compiled(program, context, max_output))
     assert type(compiled) is type(walked)
     assert str(compiled) == str(walked)
     return walked
@@ -112,12 +96,12 @@ NUMERIC_CASES = [
     {"v": 7},
     {"v": -7},
     {"v": 2**62},
-    {"v": 2**63},                 # one past a signed C long
+    {"v": 2**63},  # one past a signed C long
     {"v": -(2**63) - 1},
-    {"v": 2**200 + 12345},        # far past any machine word
-    {"v": True},                  # `str(True)` is "True", not "1"
+    {"v": 2**200 + 12345},  # far past any machine word
+    {"v": True},  # `str(True)` is "True", not "1"
     {"v": False},
-    {"v": Weird(5)},              # `str` is overridden; digits would be wrong
+    {"v": Weird(5)},  # `str` is overridden; digits would be wrong
     {"v": 1.5},
     {"v": float("inf")},
 ]
@@ -131,12 +115,6 @@ def test_non_string_values_render_as_str(context: dict) -> None:
 
 
 def test_a_number_inside_a_loop_renders_once_per_row() -> None:
-    """The loop body is where a decoded tape would be reused across rows.
-
-    Rendering the same instruction thirteen times must produce thirteen
-    distinct values, not the first one repeated -- which is the way a
-    pre-decoded instruction stream fails when an operand is cached too eagerly.
-    """
     tape = compile_tape("{% for r in rows %}<i>{{ r.id }}</i>{% endfor %}")
     rows = [{"id": index} for index in range(13)]
     expected = b"".join(f"<i>{index}</i>".encode() for index in range(13))
@@ -158,6 +136,16 @@ def test_a_bad_lookup_is_a_render_error_on_both_paths(source: str, context: dict
 def test_output_past_the_size_bound_is_refused_on_both_paths() -> None:
     tape = compile_tape("{{ x }}")
     assert isinstance(render_error(tape, {"x": "a" * 100}, 10), TemplateRenderError)
+
+
+def test_compiled_render_appends_a_tail_in_the_output_allocation() -> None:
+    template = Template.from_string("<p>{{ value }}</p>")
+
+    assert template._render_bytes_tail({"value": "a&b"}, b"<footer>x</footer>") == (
+        b"<p>a&amp;b</p><footer>x</footer>"
+    )
+    with pytest.raises(TemplateRenderError, match="output too large"):
+        template._render_bytes_tail({"value": "a&b"}, b"tail", max_output=8)
 
 
 def test_escaping_covers_all_five() -> None:
@@ -207,14 +195,6 @@ def test_plain_strings_are_untrusted() -> None:
     ],
 )
 def test_syntax_errors(source: str, message: str) -> None:
-    """The message, not just the type.
-
-    Every refusal in the compiler raises `TemplateSyntaxError`, so asserting
-    the type alone passes on whichever branch fired -- including the one this
-    case was written to reach. Five of these refusals could be deleted outright
-    with the suite still green, because a later guard caught the same source
-    and said something else about it.
-    """
     with pytest.raises(TemplateSyntaxError) as caught:
         Template.from_string(source)
     assert message in str(caught.value)
@@ -231,10 +211,6 @@ def test_syntax_errors(source: str, message: str) -> None:
     ],
 )
 def test_a_brace_that_opens_no_tag_is_literal_text(source: str, expected: str) -> None:
-    """A `{` is only special followed by `{` or `%`, and only if there is a
-    next character at all -- a template ending in a brace has neither a tag nor
-    an index to read past the end with.
-    """
     assert render(compile_tape(source), {}) == expected.encode()
 
 
@@ -243,26 +219,11 @@ def test_text_on_both_sides_of_a_tag_survives() -> None:
 
 
 def test_a_lone_brace_does_not_swallow_a_later_tag() -> None:
-    """Scanning resumes past a `{` that opened nothing.
-
-    The two arms of that guard are "there are no more tags" and "this brace is
-    not one", and only the first may stop the scan. Treating a lone brace as
-    the end of the template makes every tag after it literal -- so a page with
-    a CSS block or a `{` in prose renders its variables as source, which looks
-    like a data problem rather than a tokenizer one.
-    """
     tape = compile_tape("style { color: red } and {{ name }}")
     assert render(tape, {"name": "Andie"}) == b"style { color: red } and Andie"
 
 
 def test_a_false_condition_with_an_else_renders_the_else_body() -> None:
-    """The backpatch that only an unmatched `if` gets.
-
-    An `if` without an `else` sends its false path to the `endif`; one *with*
-    an else has already been pointed at the else body, and doing it again jumps
-    past both bodies -- so the false branch renders nothing at all and only a
-    test that takes the else branch can see it.
-    """
     tape = compile_tape("{% if flag %}yes{% else %}no{% endif %}")
     assert render(tape, {"flag": False}) == b"no"
     assert render(tape, {"flag": True}) == b"yes"
@@ -271,7 +232,7 @@ def test_a_false_condition_with_an_else_renders_the_else_body() -> None:
 def test_directory_include_resolved_at_compile(tmp_path) -> None:
     (tmp_path / "row.html").write_text("<td>{{ r.msg }}</td>")
     (tmp_path / "table.html").write_text(
-        "<table>{% for r in rows %}<tr>{% include \"row.html\" %}</tr>{% endfor %}</table>"
+        '<table>{% for r in rows %}<tr>{% include "row.html" %}</tr>{% endfor %}</table>'
     )
     directory = TemplateDirectory(tmp_path)
     template = directory.compile("table.html")
@@ -298,8 +259,6 @@ def _capture(fn):
         return error
     return None
 
-
-# --- adversarial: template loading must not follow symlinks out of root (#8) --
 
 def test_directory_rejects_symlink_escape(tmp_path):
     import os as _os
@@ -349,17 +308,13 @@ def test_include_rejects_symlink_escape(tmp_path):
     [
         "{{ u.__class__ }}",
         "{{ u.__init__.__globals__.API_KEY }}",
-        "{{ __class__ }}",                      # first segment: getattr on the context dict
+        "{{ __class__ }}",  # first segment: getattr on the context dict
         "{{ u._private }}",
         "{% if u.__dict__ %}x{% endif %}",
         "{% for x in u._items %}{{ x }}{% endfor %}",
     ],
 )
 def test_a_template_cannot_walk_into_private_attributes(source: str) -> None:
-    """A lookup falls back from subscript to `getattr`, so a dotted path could
-    walk an object's internals -- `u.__init__.__globals__.API_KEY` read a module
-    global straight into the output. Refused at compile time, which is also why
-    the native engine needs no rule of its own: it only executes the tape."""
     with pytest.raises(TemplateSyntaxError) as caught:
         Template.from_string(source)
     assert "private name" in str(caught.value)
@@ -376,5 +331,4 @@ def test_ordinary_dotted_lookups_still_resolve() -> None:
             self.name = "alex"
             self.tags = {"role": "owner"}
 
-    assert Template.from_string("{{ u.name }}/{{ u.tags.role }}").render(u=User()) == (
-        "alex/owner")
+    assert Template.from_string("{{ u.name }}/{{ u.tags.role }}").render(u=User()) == ("alex/owner")

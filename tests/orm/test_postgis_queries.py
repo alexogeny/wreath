@@ -1,23 +1,3 @@
-"""Tier 2's query half: KNN by `<->`, and containment by `ST_Covers`.
-
-`within()` and `nearest()` gain a **second rendering, not a second name**. A
-model that moves from `Point` to `Geography` keeps its queries; only the SQL
-underneath changes, from a bounding box plus a hand-written haversine to
-`ST_DWithin` and PostGIS's KNN operator. That promise is only worth making if
-the tier-1 rendering is proved *unchanged*, so the goldens below are the exact
-strings the compiler emitted before this file existed.
-
-`covered_by()` is the operation tier 1 structurally cannot do: a region with a
-shape. It renders `ST_Covers(ST_GeogFromText($1), col)` -- in that order, and
-with that function, because **`ST_Contains(geography, geography)` does not
-exist**; a design reaching for it fails at the database rather than at
-declaration.
-
-The live half asserts the *plan*. A correct answer read off the whole table is
-exactly the failure this design exists to prevent, and it is invisible in the
-results.
-"""
-
 from __future__ import annotations
 
 import os
@@ -137,11 +117,7 @@ def _bind_oids() -> None:
     may have already read the server's own OID; that one wins, because a process
     resolves an extension type exactly once.
     """
-    held = {
-        item.type_name: item.oid
-        for item in declared_extension_types()
-        if item.oid
-    }
+    held = {item.type_name: item.oid for item in declared_extension_types() if item.oid}
     bind_extension_oid("geography", held.get("geography", GEOGRAPHY_OID))
     bind_extension_oid("vector", held.get("vector", VECTOR_OID))
 
@@ -168,8 +144,6 @@ def _sql(registry: Registry, select: Any) -> str:
     return compile_select(registry, select).sql
 
 
-# --- the tier-1 rendering, unchanged ------------------------------------------
-#
 # Recorded from the compiler before the tier-2 branch was written, and pasted
 # here verbatim. A dual rendering is good for the reader and dangerous for the
 # implementer: one name with two SQL forms means the *old* form has to be proved
@@ -221,9 +195,7 @@ class TestThePointRenderingIsUnchanged:
         sql = _sql(registry, Station.select().where(Station.at.within(TAVEUNI, 50_000)))
         assert sql.count("<@ box(point(") == 2
 
-    def test_the_tier_one_path_never_renders_a_postgis_call(
-        self, registry: Registry
-    ) -> None:
+    def test_the_tier_one_path_never_renders_a_postgis_call(self, registry: Registry) -> None:
         # The dispatch is on the column's type, not on which method was called.
         # A branch that tested the wrong thing would send a `point` column into
         # PostGIS, where it would fail at the database rather than here.
@@ -231,14 +203,9 @@ class TestThePointRenderingIsUnchanged:
         assert "ST_" not in sql
 
 
-# --- KNN ordering --------------------------------------------------------------
-
-
 class TestNearestOnAGeography:
     def test_it_renders_the_knn_operator(self, registry: Registry) -> None:
-        sql = _sql(
-            registry, Beacon.select().order_by(Beacon.at.nearest(SYDNEY)).limit(5)
-        )
+        sql = _sql(registry, Beacon.select().order_by(Beacon.at.nearest(SYDNEY)).limit(5))
         assert '("t0"."at" <-> $1)' in sql
         # Not the tier-1 haversine: the index answers this one directly.
         assert "asin" not in sql.lower()
@@ -257,9 +224,7 @@ class TestNearestOnAGeography:
         with pytest.raises(DeclarationError, match="limit"):
             compile_select(registry, Beacon.select().order_by(Beacon.at.nearest(SYDNEY)))
 
-    def test_an_unbounded_vector_ordering_is_still_allowed(
-        self, registry: Registry
-    ) -> None:
+    def test_an_unbounded_vector_ordering_is_still_allowed(self, registry: Registry) -> None:
         # The refusal is a *token* test, never an operator test. pgvector's
         # `<->` is spelled the same way and an unbounded `ORDER BY embedding
         # <-> $1` has always been allowed; reusing its token for geography KNN
@@ -278,9 +243,7 @@ class TestNearestOnAGeography:
     def test_a_knn_threshold_is_a_predicate_and_renders(self, registry: Registry) -> None:
         # The one shape a distance *may* take in a WHERE, exactly as the
         # pgvector distances may: compared against a ceiling.
-        sql = _sql(
-            registry, Beacon.select().where(Beacon.at.nearest(SYDNEY) < 20_000.0)
-        )
+        sql = _sql(registry, Beacon.select().where(Beacon.at.nearest(SYDNEY) < 20_000.0))
         assert '("t0"."at" <-> $1) < $2' in sql
 
     def test_a_non_coordinate_centre_is_refused(self, registry: Registry) -> None:
@@ -288,17 +251,12 @@ class TestNearestOnAGeography:
             Beacon.at.nearest((151.2, -33.8))
 
 
-# --- ST_DWithin ----------------------------------------------------------------
-
-
 class TestWithinOnAGeography:
     def test_it_renders_st_dwithin(self, registry: Registry) -> None:
         sql = _sql(registry, Beacon.select().where(Beacon.at.within(SYDNEY, 20_000)))
         assert 'ST_DWithin("t0"."at", $1, $2)' in sql
 
-    def test_it_renders_no_bounding_box_and_no_haversine(
-        self, registry: Registry
-    ) -> None:
+    def test_it_renders_no_bounding_box_and_no_haversine(self, registry: Registry) -> None:
         # PostGIS adds the `&&` index condition itself -- that is what the live
         # plan below shows. Hand-building one here would be a second, redundant
         # spelling of the same coarse filter.
@@ -307,24 +265,18 @@ class TestWithinOnAGeography:
         assert "asin" not in sql.lower()
 
     def test_the_centre_and_the_radius_are_binds(self, registry: Registry) -> None:
-        compiled = compile_select(
-            registry, Beacon.select().where(Beacon.at.within(SYDNEY, 20_000))
-        )
+        compiled = compile_select(registry, Beacon.select().where(Beacon.at.within(SYDNEY, 20_000)))
         assert compiled.bind_values == (_wire(SYDNEY), 20000.0)
         assert compiled.bind_oids[1] == 701
 
-    def test_the_binds_stay_in_step_with_the_placeholders(
-        self, registry: Registry
-    ) -> None:
+    def test_the_binds_stay_in_step_with_the_placeholders(self, registry: Registry) -> None:
         # The renderer numbers placeholders as it emits them and the bind
         # program walks the tree; a call rendering its operands in an order the
         # walk does not share would prepare the statement with the values
         # transposed and no offline test would see it.
         compiled = compile_select(
             registry,
-            Beacon.select()
-            .where(Beacon.name == "north")
-            .where(Beacon.at.within(SYDNEY, 20_000)),
+            Beacon.select().where(Beacon.name == "north").where(Beacon.at.within(SYDNEY, 20_000)),
         )
         assert compiled.bind_values == (
             "north",
@@ -340,39 +292,17 @@ class TestWithinOnAGeography:
         with pytest.raises(TypeError):
             Beacon.at.within((151.2, -33.8), 20_000)
 
-    def test_within_is_still_refused_on_a_column_that_is_neither(
-        self, registry: Registry
-    ) -> None:
+    def test_within_is_still_refused_on_a_column_that_is_neither(self, registry: Registry) -> None:
         with pytest.raises(DeclarationError, match="Point"):
             Beacon.name.within(SYDNEY, 5_000)
 
 
-# --- containment ---------------------------------------------------------------
-
-
 class TestCoveredBy:
-    def test_it_renders_st_covers_over_st_geogfromtext(
-        self, registry: Registry
-    ) -> None:
+    def test_it_renders_st_covers_over_st_geogfromtext(self, registry: Registry) -> None:
         sql = _sql(registry, Beacon.select().where(Beacon.at.covered_by(L_REGION)))
         assert 'ST_Covers(ST_GeogFromText($1), "t0"."at")' in sql
 
-    def test_st_contains_reaches_no_sql_the_compiler_can_emit(
-        self, registry: Registry
-    ) -> None:
-        """`ST_Contains(geography, geography)` does not exist.
-
-        Checked against a live PostGIS 3.5.2, which answers `function
-        st_contains(geography, geography) does not exist` -- so a rendering that
-        reached for it would fail at the database rather than at declaration,
-        and only against a server.
-
-        The source scan looks for the *quoted literal*, not for the name: the
-        renderer's own docstring says why `ST_Contains` is not an option, and a
-        scan that objected to explaining itself would be pushing the reason out
-        of the file that needs it. What must not exist is a string the builder
-        could emit.
-        """
+    def test_st_contains_reaches_no_sql_the_compiler_can_emit(self, registry: Registry) -> None:
         sql = _sql(registry, Beacon.select().where(Beacon.at.covered_by(L_REGION)))
         assert "ST_Contains" not in sql
         root = Path(compiler_module.__file__).parent
@@ -385,9 +315,7 @@ class TestCoveredBy:
         # No bind-only `ExtensionType`, no OID to resolve, and
         # `wreath_pg_decode_extension` is never reached: the region goes out as
         # WKT and PostGIS lifts it.
-        compiled = compile_select(
-            registry, Beacon.select().where(Beacon.at.covered_by(L_REGION))
-        )
+        compiled = compile_select(registry, Beacon.select().where(Beacon.at.covered_by(L_REGION)))
         assert compiled.bind_oids == (25,)
         assert compiled.bind_values == (L_REGION.wkt,)
 
@@ -411,9 +339,7 @@ class TestCoveredBy:
         with pytest.raises(DeclarationError, match="everywhere else"):
             ~Beacon.at.covered_by(L_REGION)
 
-    def test_not_of_a_containment_is_refused_by_the_same_rule(
-        self, registry: Registry
-    ) -> None:
+    def test_not_of_a_containment_is_refused_by_the_same_rule(self, registry: Registry) -> None:
         # `not_()` builds the node directly rather than through `__invert__`, so
         # a refusal written only on the operator would leave this spelling open.
         with pytest.raises(DeclarationError, match="everywhere else"):
@@ -425,17 +351,13 @@ class TestCoveredBy:
         with pytest.raises(DeclarationError, match="everywhere else"):
             ~(Beacon.at.covered_by(L_REGION) & (Beacon.name == "north"))
 
-    def test_an_ordinary_predicate_may_still_be_negated(
-        self, registry: Registry
-    ) -> None:
+    def test_an_ordinary_predicate_may_still_be_negated(self, registry: Registry) -> None:
         # The refusal must key on containment, not on NOT. Without this, moving
         # it up to every `UnaryExpr` would outlaw every negation in the ORM.
         sql = _sql(registry, Beacon.select().where(~(Beacon.name == "north")))
         assert "NOT (" in sql
 
 
-# --- the renderer's own shape guards -------------------------------------------
-#
 # These are unreachable through the query builder, which is the point: the node
 # constructors decide the shape and the renderer re-checks it, so a hand-built
 # node -- or a future builder that got the tree wrong -- fails with a sentence
@@ -463,8 +385,7 @@ class TestTheRenderersRefuseAMalformedNode:
         # on the left there is exactly one bind however the tree is walked.
         with pytest.raises(ORMError, match="Geography column"):
             self._render(
-                BinaryExpr(GEO_COVERS, BinaryExpr(GEO_COVERS, Beacon.at, Beacon.at),
-                           Beacon.at)
+                BinaryExpr(GEO_COVERS, BinaryExpr(GEO_COVERS, Beacon.at, Beacon.at), Beacon.at)
             )
 
     def test_a_knn_distance_is_refused_as_a_predicate(self) -> None:
@@ -478,9 +399,6 @@ class TestTheRenderersRefuseAMalformedNode:
         builder = SqlBuilder()
         with pytest.raises(ORMError, match="yields a boolean"):
             _render_operand(Beacon.at.covered_by(L_REGION), builder, "t0", {})
-
-
-# --- the region value ----------------------------------------------------------
 
 
 class TestPolygonIsBuiltFromCoordinates:
@@ -541,8 +459,6 @@ class TestPolygonIsBuiltFromCoordinates:
             region.vertices = ()
 
 
-# --- against a real PostGIS ----------------------------------------------------
-#
 # The image is `postgis/postgis:17-3.5`, not the pgvector one the rest of the
 # repository uses. A server without PostGIS reports a skip rather than passing by
 # accident; a DSN pointing at nothing fails at `connect`, which is the property
@@ -591,9 +507,7 @@ async def _live_schema(connection: Any) -> None:
         "151.2093 + g * 0.001, -33.8688 + g * 0.001), 4326)::geography "
         "FROM generate_series(0, 19) AS g"
     )
-    await connection.execute(
-        f'CREATE INDEX beacons_at_gist ON "{_SCHEMA}".beacons USING gist (at)'
-    )
+    await connection.execute(f'CREATE INDEX beacons_at_gist ON "{_SCHEMA}".beacons USING gist (at)')
     await connection.execute(f'ANALYZE "{_SCHEMA}".beacons')
 
 
@@ -613,7 +527,6 @@ async def _bind_server_geography_oid(connection: Any) -> None:
 async def test_the_seed_is_large_enough_for_the_planner_to_have_a_choice(
     registry: Registry,
 ) -> None:
-    """The precondition every plan assertion below rests on, asserted once."""
     connection = await _live_connection()
     try:
         await _live_schema(connection)
@@ -628,7 +541,6 @@ async def test_the_seed_is_large_enough_for_the_planner_to_have_a_choice(
 async def test_knn_is_answered_by_an_index_scan_with_an_order_by(
     registry: Registry,
 ) -> None:
-    """`Index Scan ... Order By:` -- the plan a KNN index exists to produce."""
     connection = await _live_connection()
     try:
         await _live_schema(connection)
@@ -650,13 +562,6 @@ async def test_knn_is_answered_by_an_index_scan_with_an_order_by(
 async def test_knn_orders_by_metres_agreeing_with_the_tier_one_haversine(
     registry: Registry,
 ) -> None:
-    """`<->` on `geography` answers metres, so the two tiers are comparable.
-
-    Not the same number: PostGIS measures on the WGS84 spheroid and
-    `wreath.geospatial` on a sphere, which the guide states as ~0.5%. Being
-    within that is the claim; being equal would mean one of them was not doing
-    what it says.
-    """
     connection = await _live_connection()
     try:
         await _live_schema(connection)
@@ -666,9 +571,7 @@ async def test_knn_orders_by_metres_agreeing_with_the_tier_one_haversine(
         )
         rows = await connection.fetch(compiled.sql, *compiled.bind_values)
         assert len(rows) == 5
-        got = [
-            distance(SYDNEY, Geography().from_wire(row["at"])) for row in rows
-        ]
+        got = [distance(SYDNEY, Geography().from_wire(row["at"])) for row in rows]
         assert got == sorted(got), got
         # The furthest of the five is ~578 m out, so a transposed x/y would be
         # thousands of kilometres away rather than half a per cent.
@@ -682,18 +585,11 @@ async def test_knn_orders_by_metres_agreeing_with_the_tier_one_haversine(
 async def test_within_on_a_geography_is_answered_by_the_index(
     registry: Registry,
 ) -> None:
-    """`ST_DWithin` plans as `&&` against the index with the exact test filtered.
-
-    Literally the shape tier 1 hand-builds, which is the strongest argument that
-    the two tiers belong behind one name.
-    """
     connection = await _live_connection()
     try:
         await _live_schema(connection)
         await _bind_server_geography_oid(connection)
-        compiled = compile_select(
-            registry, Beacon.select().where(Beacon.at.within(SYDNEY, 20_000))
-        )
+        compiled = compile_select(registry, Beacon.select().where(Beacon.at.within(SYDNEY, 20_000)))
         rows = await connection.fetch(f"EXPLAIN {compiled.sql}", *compiled.bind_values)
         plan = "\n".join(str(row[0]) for row in rows)
         assert "beacons_at_gist" in plan, plan
@@ -711,9 +607,7 @@ async def test_within_returns_only_rows_inside_the_radius(registry: Registry) ->
         await _live_schema(connection)
         await _bind_server_geography_oid(connection)
         radius = 2_000.0
-        compiled = compile_select(
-            registry, Beacon.select().where(Beacon.at.within(SYDNEY, radius))
-        )
+        compiled = compile_select(registry, Beacon.select().where(Beacon.at.within(SYDNEY, radius)))
         rows = await connection.fetch(compiled.sql, *compiled.bind_values)
         assert rows, "expected the seeded cluster to be found"
         for row in rows:
@@ -727,21 +621,6 @@ async def test_within_returns_only_rows_inside_the_radius(registry: Registry) ->
 async def test_covered_by_returns_the_region_not_its_bounding_box(
     registry: Registry,
 ) -> None:
-    """The test that has to be proved non-vacuous, and how.
-
-    The first attempt at this proved nothing: an L-shaped region over a
-    1-degree grid returned the same 10 rows either way, because the concavity
-    was empty -- so `ST_Covers` and the `&&` bounding box the index applies
-    before it were indistinguishable, and deleting the exact test would still
-    have passed. Seeding rows *into the notch* is what makes the two answers
-    differ, and this asserts on both counts rather than on one.
-
-    `id >= 20000` narrows both queries to the rows this test placed, so the
-    counts are exactly the 10 and the 70 the design was measured against rather
-    than those plus whatever the worldwide background seed happens to drop into
-    a two-degree square. The containment is still the only thing separating the
-    two answers; the filter removes rows neither query is about.
-    """
     connection = await _live_connection()
     try:
         await _live_schema(connection)
@@ -764,32 +643,21 @@ async def test_covered_by_returns_the_region_not_its_bounding_box(
 
         region = compile_select(
             registry,
-            Beacon.select()
-            .where(Beacon.id >= 20000)
-            .where(Beacon.at.covered_by(L_REGION)),
+            Beacon.select().where(Beacon.id >= 20000).where(Beacon.at.covered_by(L_REGION)),
         )
         envelope = compile_select(
             registry,
-            Beacon.select()
-            .where(Beacon.id >= 20000)
-            .where(Beacon.at.covered_by(L_ENVELOPE)),
+            Beacon.select().where(Beacon.id >= 20000).where(Beacon.at.covered_by(L_ENVELOPE)),
         )
-        covered = {
-            row["name"] for row in await connection.fetch(region.sql, *region.bind_values)
-        }
-        boxed = {
-            row["name"]
-            for row in await connection.fetch(envelope.sql, *envelope.bind_values)
-        }
+        covered = {row["name"] for row in await connection.fetch(region.sql, *region.bind_values)}
+        boxed = {row["name"] for row in await connection.fetch(envelope.sql, *envelope.bind_values)}
         assert len(covered) == 10, sorted(covered)
         assert len(boxed) == 70, len(boxed)
         # Stated as well as counted: every row the box adds is one the region
         # rejects, and it is exactly the sixty planted in the concavity. Without
         # them the two answers are equal and this test asserts nothing.
         assert covered < boxed
-        assert {name for name in boxed - covered if name.startswith("notch")} == (
-            boxed - covered
-        )
+        assert {name for name in boxed - covered if name.startswith("notch")} == (boxed - covered)
         assert len(boxed - covered) == 60
     finally:
         await connection.close()
@@ -802,9 +670,7 @@ async def test_covered_by_is_answered_by_the_index(registry: Registry) -> None:
     try:
         await _live_schema(connection)
         await _bind_server_geography_oid(connection)
-        compiled = compile_select(
-            registry, Beacon.select().where(Beacon.at.covered_by(L_REGION))
-        )
+        compiled = compile_select(registry, Beacon.select().where(Beacon.at.covered_by(L_REGION)))
         rows = await connection.fetch(f"EXPLAIN {compiled.sql}", *compiled.bind_values)
         plan = "\n".join(str(row[0]) for row in rows)
         assert "beacons_at_gist" in plan, plan
@@ -818,7 +684,6 @@ async def test_covered_by_is_answered_by_the_index(registry: Registry) -> None:
 async def test_a_coordinate_round_trips_through_a_tier_two_query(
     registry: Registry,
 ) -> None:
-    """The whole path: a `Coordinate` in, a `Coordinate` out, through the ORM."""
     connection = await _live_connection()
     schema = f"wreath_geo2_rt_{uuid.uuid4().hex[:12]}"
     try:

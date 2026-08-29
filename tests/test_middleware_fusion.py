@@ -1,18 +1,3 @@
-"""Synchronous before-hook fusion in the middleware tape.
-
-Built-in middleware whose work is synchronous (host checks, security headers,
-local rate-limit, CSRF token minting) can expose a ``before_sync`` hook -- a
-plain function, not a coroutine. The tape compiler fuses a contiguous run of
-such hooks into ONE instruction executed in a single synchronous pass: no
-per-hook coroutine, no per-hook await, one boundary instead of many.
-
-A genuinely async middleware (remote rate-limit, or any user middleware) breaks
-the run, so the tape partitions into fused native segments with Python segments
-between them -- exactly the "partition the ordered chain, fuse the native runs,
-leave the Python runs alone" model. These tests pin that behaviour, prove the
-fused hooks are never awaited, and prove a custom async user middleware still
-interleaves correctly across the partition.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -53,9 +38,9 @@ async def invoke(app: Wreath, path: str = "/") -> list[dict[str, Any]]:
         sent.append(message)
 
     await app(
-        {"type": "http", "method": "GET", "path": path,
-         "headers": [], "query_string": b""},
-        receive, send,
+        {"type": "http", "method": "GET", "path": path, "headers": [], "query_string": b""},
+        receive,
+        send,
     )
     return sent
 
@@ -63,9 +48,11 @@ async def invoke(app: Wreath, path: str = "/") -> list[dict[str, Any]]:
 def sync_marker(events: list[str], name: str, *, respond: Any = None) -> MiddlewareHooks:
     """A synchronous (fusable) middleware that records it ran, optionally
     short-circuiting with `respond`."""
+
     def before_sync(request: Any) -> Any:
         events.append(name)
         return respond
+
     return MiddlewareHooks(before_sync=before_sync)
 
 
@@ -96,14 +83,10 @@ def sync_marker_with_after_sync(
         events.append(f"{name}-async-out")
         return response
 
-    return MiddlewareHooks(
-        before_sync=before_sync, after=after, after_sync=after_sync
-    )
+    return MiddlewareHooks(before_sync=before_sync, after=after, after_sync=after_sync)
 
 
-def sync_marker_with_after_inplace(
-    events: list[str], name: str, *, respond: Any = None
-) -> Any:
+def sync_marker_with_after_inplace(events: list[str], name: str, *, respond: Any = None) -> Any:
     class InPlaceMarker:
         def before_sync(self, request: Any) -> Any:
             events.append(f"{name}-in")
@@ -122,8 +105,6 @@ def sync_marker_with_after_inplace(
 
     return InPlaceMarker()
 
-
-# --- the fun one: a seeded Magic 8-Ball async user middleware ----------------
 
 class Magic8Ball:
     """A gloriously unnecessary *async* user middleware. On the way in it awaits
@@ -160,19 +141,19 @@ def _seed_for(verdict: str) -> int:
     raise AssertionError(f"no seed produced {verdict!r}")
 
 
-# --- fusion mechanics --------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_contiguous_before_sync_hooks_fuse_into_one_instruction() -> None:
     app = Wreath()
     events: list[str] = []
 
-    @app.get("/", middleware=(
-        sync_marker(events, "a"),
-        sync_marker(events, "b"),
-        sync_marker(events, "c"),
-    ))
+    @app.get(
+        "/",
+        middleware=(
+            sync_marker(events, "a"),
+            sync_marker(events, "b"),
+            sync_marker(events, "c"),
+        ),
+    )
     async def endpoint(request: Any) -> str:
         events.append("endpoint")
         return "ok"
@@ -211,11 +192,14 @@ async def test_before_sync_short_circuit_runs_entered_afters_only() -> None:
     app = Wreath()
     events: list[str] = []
 
-    @app.get("/", middleware=(
-        sync_marker_with_after(events, "a"),
-        sync_marker_with_after(events, "b", respond=TextResponse("stop", status=403)),
-        sync_marker_with_after(events, "c"),
-    ))
+    @app.get(
+        "/",
+        middleware=(
+            sync_marker_with_after(events, "a"),
+            sync_marker_with_after(events, "b", respond=TextResponse("stop", status=403)),
+            sync_marker_with_after(events, "c"),
+        ),
+    )
     async def endpoint(request: Any) -> str:
         events.append("endpoint")
         return "never"
@@ -234,11 +218,14 @@ async def test_after_sync_hooks_compile_without_await_in_reverse_order() -> None
     app = Wreath()
     events: list[str] = []
 
-    @app.get("/", middleware=(
-        sync_marker_with_after_sync(events, "a"),
-        sync_marker_with_after_sync(events, "b"),
-        sync_marker_with_after_sync(events, "c"),
-    ))
+    @app.get(
+        "/",
+        middleware=(
+            sync_marker_with_after_sync(events, "a"),
+            sync_marker_with_after_sync(events, "b"),
+            sync_marker_with_after_sync(events, "c"),
+        ),
+    )
     async def endpoint(request: Any) -> str:
         events.append("endpoint")
         return "ok"
@@ -248,11 +235,21 @@ async def test_after_sync_hooks_compile_without_await_in_reverse_order() -> None
 
     assert isinstance(matched[0], MiddlewareTape)
     assert matched[0].operations == (
-        "fused_before", "endpoint", "after_sync", "after_sync", "after_sync",
+        "fused_before",
+        "endpoint",
+        "after_sync",
+        "after_sync",
+        "after_sync",
     )
     assert sent[1]["body"] == b"ok"
     assert events == [
-        "a-in", "b-in", "c-in", "endpoint", "c-out", "b-out", "a-out",
+        "a-in",
+        "b-in",
+        "c-in",
+        "endpoint",
+        "c-out",
+        "b-out",
+        "a-out",
     ]
 
 
@@ -261,13 +258,14 @@ async def test_after_sync_short_circuit_runs_entered_afters_only() -> None:
     app = Wreath()
     events: list[str] = []
 
-    @app.get("/", middleware=(
-        sync_marker_with_after_sync(events, "a"),
-        sync_marker_with_after_sync(
-            events, "b", respond=TextResponse("stop", status=403)
+    @app.get(
+        "/",
+        middleware=(
+            sync_marker_with_after_sync(events, "a"),
+            sync_marker_with_after_sync(events, "b", respond=TextResponse("stop", status=403)),
+            sync_marker_with_after_sync(events, "c"),
         ),
-        sync_marker_with_after_sync(events, "c"),
-    ))
+    )
     async def endpoint(request: Any) -> str:
         events.append("endpoint")
         return "never"
@@ -284,10 +282,13 @@ async def test_after_inplace_preserves_response_without_using_return_value() -> 
     app = Wreath()
     events: list[str] = []
 
-    @app.get("/", middleware=(
-        sync_marker_with_after_inplace(events, "a"),
-        sync_marker_with_after_inplace(events, "b"),
-    ))
+    @app.get(
+        "/",
+        middleware=(
+            sync_marker_with_after_inplace(events, "a"),
+            sync_marker_with_after_inplace(events, "b"),
+        ),
+    )
     async def endpoint(request: Any) -> str:
         events.append("endpoint")
         return "ok"
@@ -297,7 +298,10 @@ async def test_after_inplace_preserves_response_without_using_return_value() -> 
 
     assert isinstance(matched[0], MiddlewareTape)
     assert matched[0].operations == (
-        "fused_before", "endpoint", "after_inplace", "after_inplace",
+        "fused_before",
+        "endpoint",
+        "after_inplace",
+        "after_inplace",
     )
     assert sent[1]["body"] == b"ok"
     assert events == ["a-in", "b-in", "endpoint", "b-out", "a-out"]
@@ -308,13 +312,14 @@ async def test_after_inplace_short_circuit_unwinds_only_entered_hooks() -> None:
     app = Wreath()
     events: list[str] = []
 
-    @app.get("/", middleware=(
-        sync_marker_with_after_inplace(events, "a"),
-        sync_marker_with_after_inplace(
-            events, "b", respond=TextResponse("stop", status=403)
+    @app.get(
+        "/",
+        middleware=(
+            sync_marker_with_after_inplace(events, "a"),
+            sync_marker_with_after_inplace(events, "b", respond=TextResponse("stop", status=403)),
+            sync_marker_with_after_inplace(events, "c"),
         ),
-        sync_marker_with_after_inplace(events, "c"),
-    ))
+    )
     async def endpoint(request: Any) -> str:
         events.append("endpoint")
         return "never"
@@ -325,21 +330,21 @@ async def test_after_inplace_short_circuit_unwinds_only_entered_hooks() -> None:
     assert events == ["a-in", "b-in", "b-out", "a-out"]
 
 
-# --- interleaving with the fun async user middleware -------------------------
-
-
 @pytest.mark.asyncio
 async def test_async_user_middleware_partitions_the_fused_runs() -> None:
     app = Wreath()
     events: list[str] = []
     good_seed = _seed_for("It is certain")
 
-    @app.get("/", middleware=(
-        sync_marker(events, "native-a"),
-        sync_marker(events, "native-b"),
-        Magic8Ball(events, good_seed),   # async: breaks the fused run
-        sync_marker(events, "native-c"),
-    ))
+    @app.get(
+        "/",
+        middleware=(
+            sync_marker(events, "native-a"),
+            sync_marker(events, "native-b"),
+            Magic8Ball(events, good_seed),  # async: breaks the fused run
+            sync_marker(events, "native-c"),
+        ),
+    )
     async def endpoint(request: Any) -> str:
         events.append("endpoint")
         return "ok"
@@ -351,7 +356,11 @@ async def test_async_user_middleware_partitions_the_fused_runs() -> None:
     assert matched[0].operations == ("fused_before", "before", "fused_before", "endpoint")
     assert sent[1]["body"] == b"ok"
     assert events == [
-        "native-a", "native-b", "8ball:It is certain", "native-c", "endpoint",
+        "native-a",
+        "native-b",
+        "8ball:It is certain",
+        "native-c",
+        "endpoint",
     ]
 
 
@@ -361,12 +370,15 @@ async def test_magic_8ball_short_circuits_between_fused_runs() -> None:
     events: list[str] = []
     bad_seed = _seed_for(Magic8Ball.BAD_VIBES)
 
-    @app.get("/", middleware=(
-        sync_marker(events, "native-a"),
-        sync_marker(events, "native-b"),
-        Magic8Ball(events, bad_seed),
-        sync_marker(events, "native-c"),
-    ))
+    @app.get(
+        "/",
+        middleware=(
+            sync_marker(events, "native-a"),
+            sync_marker(events, "native-b"),
+            Magic8Ball(events, bad_seed),
+            sync_marker(events, "native-c"),
+        ),
+    )
     async def endpoint(request: Any) -> str:
         events.append("endpoint")
         return "never"
@@ -377,9 +389,6 @@ async def test_magic_8ball_short_circuits_between_fused_runs() -> None:
     assert sent[1]["body"] == b"the vibes are off, come back later"
     # The second fused run (native-c) and the endpoint never execute.
     assert events == ["native-a", "native-b", f"8ball:{Magic8Ball.BAD_VIBES}"]
-
-
-# --- equivalence: fusion must not change behaviour ---------------------------
 
 
 @pytest.mark.asyncio
@@ -394,6 +403,7 @@ async def test_fused_sync_matches_unfused_async_behaviour() -> None:
             async def before(request: Any) -> Any:
                 events.append(name)
                 return None
+
             return MiddlewareHooks(before=before)
 
         @app.get("/", middleware=(make("a"), make("b"), make("c")))
@@ -416,11 +426,13 @@ async def test_fused_sync_matches_unfused_async_behaviour() -> None:
     # And the fused one really did fuse, while the plain one did not.
     assert fused_app.router.match("GET", "/")[0].operations == ("fused_before", "endpoint")
     assert plain_app.router.match("GET", "/")[0].operations == (
-        "before", "before", "before", "endpoint")
+        "before",
+        "before",
+        "before",
+        "endpoint",
+    )
 
 
-# --- global pipeline: the same partition-and-fuse in _handle_http ------------
-#
 # Built-in middleware (host checks, rate-limit, CSRF) are global_scope, so they
 # run through the app's global-hook loop, not the per-route tape. That loop must
 # dispatch a synchronous before_sync hook WITHOUT awaiting it (no coroutine),
@@ -432,8 +444,9 @@ class GlobalSync:
 
     global_scope = True
 
-    def __init__(self, events: list[str], name: str, *, respond: Any = None,
-                 with_after: bool = False) -> None:
+    def __init__(
+        self, events: list[str], name: str, *, respond: Any = None, with_after: bool = False
+    ) -> None:
         self._events, self._name, self._respond = events, name, respond
         if with_after:
             self.after = self._after
@@ -529,7 +542,8 @@ async def test_global_sync_short_circuit_runs_entered_afters() -> None:
     events: list[str] = []
     app.add_middleware(GlobalSync(events, "a", with_after=True))
     app.add_middleware(
-        GlobalSync(events, "b", respond=TextResponse("stop", status=403), with_after=True))
+        GlobalSync(events, "b", respond=TextResponse("stop", status=403), with_after=True)
+    )
     app.add_middleware(GlobalSync(events, "c", with_after=True))
 
     @app.get("/")
@@ -587,9 +601,7 @@ async def test_global_after_sync_preserves_short_circuit_unwind() -> None:
     app = Wreath()
     events: list[str] = []
     app.add_middleware(GlobalSyncAfter(events, "a"))
-    app.add_middleware(
-        GlobalSyncAfter(events, "b", respond=TextResponse("stop", status=403))
-    )
+    app.add_middleware(GlobalSyncAfter(events, "b", respond=TextResponse("stop", status=403)))
     app.add_middleware(GlobalSyncAfter(events, "c"))
 
     @app.get("/")
@@ -718,9 +730,7 @@ async def test_reused_response_does_not_accumulate_observability_headers() -> No
 
 @pytest.mark.asyncio
 async def test_reused_response_replaces_its_csrf_cookie() -> None:
-    app = Wreath(
-        http_policy=HttpPolicy(csrf=CsrfPolicy("x" * 32, secure=False))
-    )
+    app = Wreath(http_policy=HttpPolicy(csrf=CsrfPolicy("x" * 32, secure=False)))
     response = TextResponse("ok")
 
     @app.get("/", response_only=True)
@@ -733,9 +743,6 @@ async def test_reused_response_replaces_its_csrf_cookie() -> None:
     cookies = [value for name, value in response.headers if name == b"set-cookie"]
     assert len(cookies) == 1
     assert cookies[0].startswith(b"wreath_csrf=")
-
-
-# --- built-ins are not middleware hooks --------------------------------------
 
 
 def test_trusted_host_exposes_no_public_hook_protocol() -> None:
@@ -785,9 +792,7 @@ def test_rate_limit_exposes_no_public_hook_protocol() -> None:
         ),
     ),
 )
-def test_policy_builtins_expose_no_public_hooks(
-    middleware: Any, hooks: tuple[str, ...]
-) -> None:
+def test_policy_builtins_expose_no_public_hooks(middleware: Any, hooks: tuple[str, ...]) -> None:
     instance = middleware()
     for name in hooks:
         assert not hasattr(instance, name)
@@ -817,10 +822,16 @@ async def test_trusted_host_and_rate_limit_still_enforce_through_the_pipeline() 
             sent.append(message)
 
         await app(
-            {"type": "http", "method": "GET", "path": "/",
-             "headers": [(b"host", host.encode())], "query_string": b"",
-             "client": ("1.2.3.4", 5678)},
-            receive, send,
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/",
+                "headers": [(b"host", host.encode())],
+                "query_string": b"",
+                "client": ("1.2.3.4", 5678),
+            },
+            receive,
+            send,
         )
         return sent
 

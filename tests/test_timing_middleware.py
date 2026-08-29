@@ -1,5 +1,3 @@
-"""ServerTimingPolicy: header formatting and the recorded measurement."""
-
 from __future__ import annotations
 
 import asyncio
@@ -28,12 +26,6 @@ def test_formatter_renders_milliseconds() -> None:
 
 
 def test_formatter_renders_dur_in_milliseconds_to_three_places() -> None:
-    """`dur` is milliseconds, per the W3C Server Timing spec's `dur` description.
-
-    The expectation is derived from that unit rather than read off the
-    implementation: seconds times 1000, rendered to three decimal places, which
-    makes the seconds-to-milliseconds conversion the thing under test.
-    """
     for seconds in (0.0, 1e-9, 0.5, 1.23456789, 1000.0):
         assert formatter(b"total", seconds) == f"total;dur={seconds * 1000:.3f}".encode()
 
@@ -57,7 +49,6 @@ async def test_header_reports_a_plausible_duration() -> None:
 
 
 async def test_elapsed_is_recorded_for_later_readers() -> None:
-    """The measurement an access log or tracing exporter will read."""
     policy = HttpPolicy(server_timing=ServerTimingPolicy(emit_header=False))
     request = Request(
         {
@@ -78,9 +69,7 @@ async def test_elapsed_is_recorded_for_later_readers() -> None:
 
 
 async def test_custom_metric_name() -> None:
-    app = Wreath(
-        http_policy=HttpPolicy(server_timing=ServerTimingPolicy(metric="app"))
-    )
+    app = Wreath(http_policy=HttpPolicy(server_timing=ServerTimingPolicy(metric="app")))
 
     @app.get("/")
     async def index(request: Any) -> str:

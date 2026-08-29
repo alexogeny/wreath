@@ -123,9 +123,7 @@ class ErasureRecord:
 
     __slots__ = ("_declaration", "_exists", "_log")
 
-    def __init__(
-        self, *, schema: str = "wreath", retain: float | None = KEEP_FOREVER
-    ) -> None:
+    def __init__(self, *, schema: str = "wreath", retain: float | None = KEEP_FOREVER) -> None:
         self._declaration = erasure_log(schema=schema, retain=retain)
         self._log = PostgresLog(None, self._declaration)
         self._exists = (

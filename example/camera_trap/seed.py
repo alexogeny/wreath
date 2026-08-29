@@ -58,8 +58,14 @@ RESERVES = (
 )
 
 HABITATS = (
-    "riverine forest", "open grassland", "acacia scrub", "rocky escarpment",
-    "waterhole", "fence line", "dry riverbed", "canopy edge",
+    "riverine forest",
+    "open grassland",
+    "acacia scrub",
+    "rocky escarpment",
+    "waterhole",
+    "fence line",
+    "dry riverbed",
+    "canopy edge",
 )
 
 CAMERA_MODELS = ("Reconyx HP2X", "Bushnell Core DS", "Browning Spec Ops", "Cuddeback J3")
@@ -113,9 +119,15 @@ SPECIES: tuple[tuple[str, str, str, str, bool], ...] = (
 #: console posting whatever it liked. Weighted so "confirmed" dominates and the
 #: stragglers are rare enough to be a real discovery in psql.
 REVIEW_STATES = (
-    ("confirmed", 46), ("Confirmed", 9), ("ok", 6),
-    ("needs-review", 17), ("needs review", 5), ("", 6),
-    ("rejected", 7), ("no", 2), ("?", 2),
+    ("confirmed", 46),
+    ("Confirmed", 9),
+    ("ok", 6),
+    ("needs-review", 17),
+    ("needs review", 5),
+    ("", 6),
+    ("rejected", 7),
+    ("no", 2),
+    ("?", 2),
 )
 
 _ROLES = (("volunteer", 14), ("researcher", 7), ("ranger", 3))
@@ -171,8 +183,7 @@ def build_rows(*, sightings: int = 140_000) -> dict[str, list[tuple[Any, ...]]]:
     rows: dict[str, list[tuple[Any, ...]]] = {}
 
     rows["reserves"] = [
-        (rid, name, slug, tz, hectares, _at(0, 9, 0))
-        for rid, name, slug, tz, hectares in RESERVES
+        (rid, name, slug, tz, hectares, _at(0, 9, 0)) for rid, name, slug, tz, hectares in RESERVES
     ]
 
     #: 12 stations per reserve; the first two of each are sensitive, which puts
@@ -183,15 +194,17 @@ def build_rows(*, sightings: int = 140_000) -> dict[str, list[tuple[Any, ...]]]:
     for reserve_id, *_ in RESERVES:
         for offset in range(12):
             station_id = (reserve_id - 1) * 12 + offset + 1
-            stations.append((
-                station_id,
-                reserve_id,
-                f"{RESERVES[reserve_id - 1][2].split('-')[0].title()} {offset + 1:02d}",
-                Decimal(f"{-1.5 + reserve_id * 0.7 + offset * 0.011:.6f}"),
-                Decimal(f"{36.2 + reserve_id * 1.3 + offset * 0.013:.6f}"),
-                HABITATS[offset % len(HABITATS)],
-                offset < 2,
-            ))
+            stations.append(
+                (
+                    station_id,
+                    reserve_id,
+                    f"{RESERVES[reserve_id - 1][2].split('-')[0].title()} {offset + 1:02d}",
+                    Decimal(f"{-1.5 + reserve_id * 0.7 + offset * 0.011:.6f}"),
+                    Decimal(f"{36.2 + reserve_id * 1.3 + offset * 0.013:.6f}"),
+                    HABITATS[offset % len(HABITATS)],
+                    offset < 2,
+                )
+            )
     rows["stations"] = stations
 
     #: station id -> its reserve's zone, so a capture is generated on the wall
@@ -206,25 +219,42 @@ def build_rows(*, sightings: int = 140_000) -> dict[str, list[tuple[Any, ...]]]:
     camera_id = 0
     for station_id, *_ in stations:
         camera_id += 1
-        cameras.append((
-            camera_id, station_id, f"CT-{camera_id:05d}",
-            CAMERA_MODELS[camera_id % len(CAMERA_MODELS)],
-            #: Three days before the first capture. Captures are generated on
-            #: local wall clocks, so a +03 reserve's day-zero midnight is
-            #: 21:00 UTC the day before -- deploying at day zero would leave
-            #: sightings that predate their own camera.
-            _at(-3, 10, 0), None, rng.randrange(28, 100), "3.2.1",
-        ))
+        cameras.append(
+            (
+                camera_id,
+                station_id,
+                f"CT-{camera_id:05d}",
+                CAMERA_MODELS[camera_id % len(CAMERA_MODELS)],
+                #: Three days before the first capture. Captures are generated on
+                #: local wall clocks, so a +03 reserve's day-zero midnight is
+                #: 21:00 UTC the day before -- deploying at day zero would leave
+                #: sightings that predate their own camera.
+                _at(-3, 10, 0),
+                None,
+                rng.randrange(28, 100),
+                "3.2.1",
+            )
+        )
     for station_id in range(1, 14):
         camera_id += 1
         replaced_on = 200 + station_id * 7
-        cameras[station_id - 1] = (*cameras[station_id - 1][:5], _at(replaced_on, 11, 0),
-                                   *cameras[station_id - 1][6:])
-        cameras.append((
-            camera_id, station_id, f"CT-{camera_id:05d}",
-            CAMERA_MODELS[camera_id % len(CAMERA_MODELS)],
-            _at(replaced_on, 12, 0), None, rng.randrange(40, 100), "4.0.0",
-        ))
+        cameras[station_id - 1] = (
+            *cameras[station_id - 1][:5],
+            _at(replaced_on, 11, 0),
+            *cameras[station_id - 1][6:],
+        )
+        cameras.append(
+            (
+                camera_id,
+                station_id,
+                f"CT-{camera_id:05d}",
+                CAMERA_MODELS[camera_id % len(CAMERA_MODELS)],
+                _at(replaced_on, 12, 0),
+                None,
+                rng.randrange(40, 100),
+                "4.0.0",
+            )
+        )
     rows["cameras"] = cameras
 
     #: station id -> [(deployed_at, retired_at, camera_id)], so a sighting is
@@ -249,10 +279,15 @@ def build_rows(*, sightings: int = 140_000) -> dict[str, list[tuple[Any, ...]]]:
         for n in range(count):
             observer_id += 1
             reserve = None if role == "researcher" else (observer_id % 4) + 1
-            observers.append((
-                observer_id, f"{role}{n + 1}@example.org",
-                f"{role.title()} {n + 1}", role, reserve,
-            ))
+            observers.append(
+                (
+                    observer_id,
+                    f"{role}{n + 1}@example.org",
+                    f"{role.title()} {n + 1}",
+                    role,
+                    reserve,
+                )
+            )
     rows["observers"] = observers
 
     #: Volunteers and rangers see one reserve; researchers see all four.
@@ -285,11 +320,16 @@ def build_rows(*, sightings: int = 140_000) -> dict[str, list[tuple[Any, ...]]]:
             if deployment_id in late_ids:
                 collected_day += rng.randrange(8, 27)
             collected = _at(collected_day, 14, 30)
-            deployments.append((
-                deployment_id, station_id, collected, f"SD-{deployment_id:04d}",
-                rng.randrange(120, 4200),
-                _at(collected_day, 18, 0) if deployment_id % 9 else None,
-            ))
+            deployments.append(
+                (
+                    deployment_id,
+                    station_id,
+                    collected,
+                    f"SD-{deployment_id:04d}",
+                    rng.randrange(120, 4200),
+                    _at(collected_day, 18, 0) if deployment_id % 9 else None,
+                )
+            )
             collections.setdefault(station_id, []).append((collected, deployment_id))
     rows["deployments"] = deployments
 
@@ -301,12 +341,14 @@ def build_rows(*, sightings: int = 140_000) -> dict[str, list[tuple[Any, ...]]]:
         species = species_rows[rng.randrange(0, len(species_rows))]
         day = rng.randrange(0, DAYS)
         hour = _activity_hour(rng, species[5])
-        captured = _local(zones[station_id], day, hour,
-                          rng.randrange(0, 60), rng.randrange(0, 60))
+        captured = _local(zones[station_id], day, hour, rng.randrange(0, 60), rng.randrange(0, 60))
         #: The device hanging there at the time, which is not always the first.
         camera_at = next(
-            (cid for deployed, retired, cid in fleet[station_id]
-             if deployed <= captured and (retired is None or captured < retired)),
+            (
+                cid
+                for deployed, retired, cid in fleet[station_id]
+                if deployed <= captured and (retired is None or captured < retired)
+            ),
             fleet[station_id][0][2],
         )
         #: The first card collected at or after this capture. ``None`` means the
@@ -322,16 +364,24 @@ def build_rows(*, sightings: int = 140_000) -> dict[str, list[tuple[Any, ...]]]:
             if card is not None
             else captured + datetime.timedelta(days=60)
         )
-        sighting_rows.append((
-            n, station_id, camera_at, species[0], card, captured, uploaded,
-            rng.randrange(41, 100),
-            f"images/{station_id:02d}/{n:07d}.jpg",
-            f"thumbs/{station_id:02d}/{n:07d}.jpg" if n % 3 else None,
-            rng.randrange(1, 25) if n % 4 else None,
-            _weighted(rng, REVIEW_STATES),
-            {"batch": (n // 5000) + 1},
-            None,
-        ))
+        sighting_rows.append(
+            (
+                n,
+                station_id,
+                camera_at,
+                species[0],
+                card,
+                captured,
+                uploaded,
+                rng.randrange(41, 100),
+                f"images/{station_id:02d}/{n:07d}.jpg",
+                f"thumbs/{station_id:02d}/{n:07d}.jpg" if n % 3 else None,
+                rng.randrange(1, 25) if n % 4 else None,
+                _weighted(rng, REVIEW_STATES),
+                {"batch": (n // 5000) + 1},
+                None,
+            )
+        )
     rows["sightings"] = sighting_rows
 
     #: A by-product of seeded restricted-location reads: rangers looking at
@@ -341,10 +391,15 @@ def build_rows(*, sightings: int = 140_000) -> dict[str, list[tuple[Any, ...]]]:
     audit: list[tuple[Any, ...]] = []
     for row in sighting_rows:
         if row[3] in restricted and len(audit) < 600:
-            audit.append((
-                len(audit) + 1, rangers[len(audit) % len(rangers)], row[0],
-                "viewed_location", row[5] + datetime.timedelta(days=3),
-            ))
+            audit.append(
+                (
+                    len(audit) + 1,
+                    rangers[len(audit) % len(rangers)],
+                    row[0],
+                    "viewed_location",
+                    row[5] + datetime.timedelta(days=3),
+                )
+            )
     rows["audit_entries"] = audit
     return rows
 
@@ -353,23 +408,57 @@ def build_rows(*, sightings: int = 140_000) -> dict[str, list[tuple[Any, ...]]]:
 COLUMNS: dict[str, tuple[str, ...]] = {
     "reserves": ("id", "name", "slug", "timezone", "area_hectares", "created_at"),
     "stations": ("id", "reserve_id", "name", "latitude", "longitude", "habitat", "sensitive"),
-    "cameras": ("id", "station_id", "serial", "model", "deployed_at", "retired_at",
-                "battery_pct", "firmware"),
+    "cameras": (
+        "id",
+        "station_id",
+        "serial",
+        "model",
+        "deployed_at",
+        "retired_at",
+        "battery_pct",
+        "firmware",
+    ),
     "species": ("id", "code", "common_name", "scientific_name", "protection", "nocturnal"),
     "observers": ("id", "email", "display_name", "role", "reserve_id"),
     "assignments": ("observer_id", "reserve_id", "level"),
-    "deployments": ("id", "station_id", "collected_at", "card_serial", "image_count",
-                    "ingested_at"),
-    "sightings": ("id", "station_id", "camera_id", "species_id", "deployment_id",
-                  "captured_at", "uploaded_at", "confidence", "image_key",
-                  "thumbnail_key", "identified_by", "review_state", "tags", "notes"),
+    "deployments": (
+        "id",
+        "station_id",
+        "collected_at",
+        "card_serial",
+        "image_count",
+        "ingested_at",
+    ),
+    "sightings": (
+        "id",
+        "station_id",
+        "camera_id",
+        "species_id",
+        "deployment_id",
+        "captured_at",
+        "uploaded_at",
+        "confidence",
+        "image_key",
+        "thumbnail_key",
+        "identified_by",
+        "review_state",
+        "tags",
+        "notes",
+    ),
     "audit_entries": ("id", "observer_id", "sighting_id", "action", "at"),
 }
 
 #: Insert order: a table's referenced tables must already hold their rows.
 ORDER = (
-    "reserves", "stations", "cameras", "species", "observers",
-    "assignments", "deployments", "sightings", "audit_entries",
+    "reserves",
+    "stations",
+    "cameras",
+    "species",
+    "observers",
+    "assignments",
+    "deployments",
+    "sightings",
+    "audit_entries",
 )
 
 
@@ -393,14 +482,14 @@ async def seed(connection: Any, *, sightings: int = 140_000) -> dict[str, int]:
 
     rows = build_rows(sightings=sightings)
     await connection.execute(
-        'TRUNCATE ' + ", ".join(f'"{SCHEMA}"."{t}"' for t in ORDER) + " RESTART IDENTITY CASCADE"
+        "TRUNCATE " + ", ".join(f'"{SCHEMA}"."{t}"' for t in ORDER) + " RESTART IDENTITY CASCADE"
     )
     written: dict[str, int] = {}
     for table in ORDER:
         columns = COLUMNS[table]
         data = rows[table]
         for start in range(0, len(data), BATCH):
-            chunk = data[start:start + BATCH]
+            chunk = data[start : start + BATCH]
             flat: list[Any] = []
             for row in chunk:
                 for column, value in zip(columns, row, strict=True):

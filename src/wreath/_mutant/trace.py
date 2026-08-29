@@ -13,9 +13,7 @@ from `sys.settrace`:
   one bytecode location permanently. Every file that is not a mutation target
   therefore costs exactly one callback for the whole run, and then nothing.
 * **Nothing is paid for what is not watched.** The callback is only armed for
-  lines that some operator actually proposed a mutation for. Instrumenting the
-  then-4,400-test suite this way was not measurably slower than not instrumenting
-  it (see `docs/guides/mutant.md` for the numbers and how they were taken).
+  lines that some operator actually proposed a mutation for.
 
 The consequence to be honest about: a line reached only through a C extension
 frame, a subprocess, or a thread that outlives the test is attributed wrongly or
@@ -42,8 +40,6 @@ class LineTracer:
         self._current: set[tuple[str, int]] | None = None
         self._armed = False
 
-    # -- pytest hooks ------------------------------------------------------
-
     def begin(self, node_id: str) -> None:
         """Begin one engine-independent test attribution window."""
         self._current = self.hits.setdefault(node_id, set())
@@ -57,8 +53,6 @@ class LineTracer:
 
     def pytest_runtest_teardown(self, item: Any, nextitem: Any) -> None:
         self.end()
-
-    # -- monitoring --------------------------------------------------------
 
     def _line(self, code: Any, line: int) -> Any:
         lines = self.watched.get(code.co_filename)
@@ -86,8 +80,6 @@ class LineTracer:
         monitoring.register_callback(_TOOL_ID, monitoring.events.LINE, None)
         monitoring.free_tool_id(_TOOL_ID)
         self._armed = False
-
-    # -- results -----------------------------------------------------------
 
     def index(self) -> dict[tuple[str, int], tuple[str, ...]]:
         """Invert the recording: (file, line) -> the tests that ran it."""

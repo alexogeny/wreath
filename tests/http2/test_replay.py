@@ -1,12 +1,3 @@
-"""HTTP/2 transport replay (Stage 6) over the real native Http2Protocol.
-
-Replay feeds recorded HTTP/2 wire bytes (preface, SETTINGS, HEADERS/DATA frames)
-into the owned driver over a fake transport and decodes the frames it writes back
-into per-stream owned responses. Byte-level faults (short-read/truncate/reset)
-apply exactly as for HTTP/1. The reference frame/HPACK codec in ``support`` builds
-the requests and is independent of the production decoder in ``wreath._h2_codec``.
-"""
-
 from __future__ import annotations
 
 import pytest

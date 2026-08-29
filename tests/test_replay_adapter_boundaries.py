@@ -84,9 +84,7 @@ def test_database_faults_have_distinct_owned_errors(
 
 
 def test_object_store_url_surfaces_an_unreachable_boundary() -> None:
-    store = ObjectStoreDouble(
-        "files", op_faults={0: AdapterFault.OBJECT_UNREACHABLE}
-    )
+    store = ObjectStoreDouble("files", op_faults={0: AdapterFault.OBJECT_UNREACHABLE})
 
     with pytest.raises(ObjectError, match="unreachable.*'avatar.png'"):
         store.url("avatar.png")

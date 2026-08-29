@@ -1,21 +1,3 @@
-"""Live-PostgreSQL checks for the spatial axis.
-
-The fake-driver suite in ``tests/series/test_cells.py`` proves the statement's
-shape and the fill rules. These prove the two things only a real server can:
-
-* **The lattice PostgreSQL computes is the lattice Python computes.**
-  ``compile_cells`` renders ``FLOOR((lat - origin) / step)`` clamped into range,
-  and ``Grid.index_of`` does the same arithmetic in Python. Two spellings of one
-  rule is how they drift apart, and a drift here puts observations in the wrong
-  cell -- which nothing downstream can detect, because a heatmap with everything
-  shifted one cell east still looks like a heatmap.
-* **The spine really is dense.** A ``generate_series`` cross join returning one
-  row per cell is a claim about PostgreSQL's behaviour, not about the builder's
-  string.
-
-Skipped unless ``WREATH_TEST_POSTGRES_DSN`` points at a throwaway database.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -151,9 +133,7 @@ class TestTheSpineIsDenseOnARealServer:
         result = await view().run(session)
         assert len(result.cells) == lattice.count
         assert {(cell.row, cell.column) for cell in result.cells} == {
-            (row, column)
-            for row in range(lattice.rows)
-            for column in range(lattice.columns)
+            (row, column) for row in range(lattice.rows) for column in range(lattice.columns)
         }
 
     async def test_an_empty_cell_counts_zero_and_averages_null(self, session, database):
@@ -176,18 +156,11 @@ class TestTheSpineIsDenseOnARealServer:
 
 class TestSqlAndPythonAgreeOnWhichCell:
     async def test_sql_cell_assignment_matches_index_of(self, session, database):
-        """The load-bearing test of the whole slice.
-
-        Every observation is placed by PostgreSQL, and the cell it landed in is
-        compared against the one `Grid.index_of` computes in Python. A
-        drift between them is invisible downstream: a map with everything one
-        cell east still renders.
-        """
         lattice = grid(EXTENT, metres=CELL_METRES)
         points = [
-            (-29.5, 150.5),   # middle
-            (-30.0, 150.0),   # the extent's south-west corner exactly
-            (-29.0, 151.0),   # the north-east corner exactly, the clamping case
+            (-29.5, 150.5),  # middle
+            (-30.0, 150.0),  # the extent's south-west corner exactly
+            (-29.0, 151.0),  # the north-east corner exactly, the clamping case
             (-29.999, 150.001),
             (-29.001, 150.999),
             (-29.25, 150.75),
@@ -210,13 +183,6 @@ class TestSqlAndPythonAgreeOnWhichCell:
         assert actual == expected
 
     async def test_a_point_on_the_far_edge_lands_in_the_edge_cell(self, session, database):
-        """The clamp, which is where a half-open rule would drop the row.
-
-        `BoundingBox.contains` is inclusive at both edges, so a point exactly on
-        the northern boundary is inside the region the reader asked for. The
-        statement's `LEAST(...)` and `index_of`'s `min(...)` both put it in the
-        last cell rather than one past the end.
-        """
         lattice = grid(EXTENT, metres=CELL_METRES)
         await insert(database, [(EXTENT.lat_max, EXTENT.lon_max, 1.0)])
         result = await view().run(session)

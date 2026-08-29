@@ -1,21 +1,3 @@
-"""The reader's rules, driven against a log double rather than a database.
-
-`wreath.streams` has exactly three rules that decide whether a client sees the
-right bytes, and none of them needs PostgreSQL to be wrong:
-
-* a row below the highest fence this stream has reached is **skipped**, because
-  a worker whose lease expired is still alive and still flushing;
-* a row above it is a retry, so `superseded` goes out **before** the new content
-  rather than after a client has already concatenated it;
-* a reader that is given nothing **blocks and then times out**, rather than
-  returning an empty success that reads as "the model said nothing".
-
-The double is deliberately not a fake `wreath.log`: it holds the real `_Buffer`
-and the real `Batch`/`Record`/`Cursor`, and only the two statements
-`wreath.streams` owns are answered by hand. `tests/test_streams_live.py` is
-where those statements meet a real server.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -39,8 +21,6 @@ from wreath.streams import (
     check_stream_attachment,
     declaration,
 )
-
-# -- the doubles -------------------------------------------------------------
 
 
 class _Connection:
@@ -80,9 +60,7 @@ class _Connection:
         key, fence = str(args[0]), int(args[1])  # type: ignore[arg-type]
         before = len(self._log.rows)
         self._log.rows = [
-            row
-            for row in self._log.rows
-            if not (row.stream == key and row.values["fence"] < fence)
+            row for row in self._log.rows if not (row.stream == key and row.values["fence"] < fence)
         ]
         return f"DELETE {before - len(self._log.rows)}"
 
@@ -146,10 +124,7 @@ class _Log:
                 Record(
                     cursor=Cursor(self._xid, self._seq),
                     stream=stream,
-                    values={
-                        name.name: values.get(name.name)
-                        for name in self.declaration.columns
-                    },
+                    values={name.name: values.get(name.name) for name in self.declaration.columns},
                 )
             )
         return len(rows)
@@ -193,9 +168,7 @@ class _Runner:
         """Run one attempt of `task` with an explicit fence, as a worker would."""
         from wreath.jobs import JobContext
 
-        context = JobContext(
-            job_id=1, task=task, attempt=attempt, fence=fence, tenant="", key=None
-        )
+        context = JobContext(job_id=1, task=task, attempt=attempt, fence=fence, tenant="", key=None)
         await self.tasks[task](context, *args)
 
 
@@ -230,17 +203,7 @@ async def _collect(streams: Streams, key: str, **options) -> list[StreamEvent]:
     return events
 
 
-# -- the declaration ---------------------------------------------------------
-
-
 def test_a_chunk_log_may_not_be_kept_forever() -> None:
-    """The retention refusal, asserted on its own words rather than on a name.
-
-    Every refusal in this module mentions the field, so matching `retain` would
-    pass for any of them. What this one *says* is the design: a delivery buffer
-    that never expires becomes a transcript of prompts and completions in a
-    place with no erasure path.
-    """
     with pytest.raises(ValueError) as raised:
         declaration(retain=None)
     assert "delivery, not transcript" in str(raised.value)
@@ -248,7 +211,6 @@ def test_a_chunk_log_may_not_be_kept_forever() -> None:
 
 
 def test_a_streams_over_a_keep_forever_log_is_refused_too() -> None:
-    """The same refusal one layer up, for a log built by hand."""
     from wreath.log import KEEP_FOREVER, Log
 
     log = _Log(Log(table="t", retain=KEEP_FOREVER, schema=""))
@@ -259,14 +221,6 @@ def test_a_streams_over_a_keep_forever_log_is_refused_too() -> None:
 
 
 def test_the_default_flush_policy_is_the_one_the_reference_page_states() -> None:
-    """The defaults are a documented latency trade, so they are pinned.
-
-    50 ms is chosen against a *reader*, not against the database: a token
-    appearing 50 ms late is invisible and half a second late is not, so a token
-    stream flushes on the timer and the byte threshold is what stops a fast
-    producer paying a round trip per chunk. A mutation run widened all three and
-    nothing objected, because every flush test passes its own policy.
-    """
     assert declaration().flush == Flush(bytes=4096, every=0.05, capacity=1024)
     # And a caller's own policy displaces it rather than merging with it.
     mine = Flush(bytes=1, every=1.0, capacity=2)
@@ -298,9 +252,6 @@ def test_a_non_positive_interval_is_refused(option: str) -> None:
     assert f"{option} must be a positive number of seconds" in str(raised.value)
 
 
-# -- the cursor --------------------------------------------------------------
-
-
 def test_a_cursor_round_trips_through_its_encoding() -> None:
     cursor = StreamCursor(StreamCursor.start("k").token, 3, Cursor(9182, 44))
     decoded = StreamCursor.decode(cursor.encode(), key="k")
@@ -315,13 +266,6 @@ def test_an_absent_last_event_id_is_the_beginning() -> None:
 
 
 def test_a_cursor_for_another_stream_is_refused_by_that_name() -> None:
-    """The distinct message, not the field name.
-
-    A cursor from stream A replayed against stream B cannot *read* A's rows --
-    the log's `WHERE stream_key = $1` sees to that -- but `(xid, seq)` is a
-    whole-log order, so it would silently skip every one of B's rows below it.
-    That is a different fault from a mangled header and says so.
-    """
     borrowed = StreamCursor.start("other").encode()
     with pytest.raises(ValueError) as raised:
         StreamCursor.decode(borrowed, key="mine")
@@ -361,7 +305,6 @@ def test_a_cursor_that_is_not_one_is_refused_as_malformed(malformed: str) -> Non
 
 @pytest.mark.parametrize("digit", ["７", "١"])
 def test_a_unicode_digit_is_not_a_digit_here(digit: str) -> None:
-    """`int("７")` really is 7, and that is a cursor this never emitted."""
     token = StreamCursor.start("k").token
     value = f"{token}.1.2.{digit}"
     with pytest.raises(ValueError) as raised:
@@ -370,14 +313,8 @@ def test_a_unicode_digit_is_not_a_digit_here(digit: str) -> None:
 
 
 def test_a_well_formed_cursor_for_this_stream_is_accepted() -> None:
-    """The other side of the refusals above: all three digit checks must pass."""
     token = StreamCursor.start("k").token
-    assert StreamCursor.decode(f"{token}.4.5.6", key="k") == StreamCursor(
-        token, 4, Cursor(5, 6)
-    )
-
-
-# -- framing -----------------------------------------------------------------
+    assert StreamCursor.decode(f"{token}.4.5.6", key="k") == StreamCursor(token, 4, Cursor(5, 6))
 
 
 def test_a_text_chunk_frames_as_sse_data_with_its_id() -> None:
@@ -389,7 +326,6 @@ def test_a_text_chunk_frames_as_sse_data_with_its_id() -> None:
 
 
 def test_a_chunk_that_is_not_utf8_frames_as_base64_under_its_own_event_name() -> None:
-    """Silently replacing an undecodable byte would corrupt a payload."""
     event = StreamEvent(KIND_CHUNK, StreamCursor("tok", 1, Cursor(5, 6)), 1, 0, b"\xff\xfe")
     framed = event.as_sse()
     assert framed.event == "chunk64"
@@ -413,7 +349,6 @@ def test_a_timeout_is_terminal_for_the_reader_and_says_which_kind_it_is() -> Non
 
 
 def test_a_handle_is_a_response_the_app_will_accept() -> None:
-    """`app.py` ends in a closed isinstance check, so this is the contract."""
     from wreath.response import StreamingResponse
 
     handle = StreamHandle(key="k", task_id="7")
@@ -423,12 +358,6 @@ def test_a_handle_is_a_response_the_app_will_accept() -> None:
 
 
 async def test_a_handle_emits_its_json_body_once_and_declares_its_length() -> None:
-    """A streaming response is the *shape* this needs, not the framing.
-
-    The length is known, so it is sent; a client that reads `content-length`
-    and then waits for a chunked terminator would otherwise hang on a body it
-    already has.
-    """
     import json
 
     handle = StreamHandle(key="k", task_id="7")
@@ -437,9 +366,6 @@ async def test_a_handle_emits_its_json_body_once_and_declares_its_length() -> No
     assert len(chunks) == 1
     assert json.loads(body) == {"key": "k", "task_id": "7", "state": "queued"}
     assert dict(handle.headers)[b"content-length"] == str(len(body)).encode()
-
-
-# -- registration and start --------------------------------------------------
 
 
 async def test_a_kind_with_no_producer_cannot_be_started() -> None:
@@ -507,12 +433,6 @@ async def test_an_unusable_key_is_refused(key: str) -> None:
 
 @pytest.mark.parametrize("key", ["a\r\nx-admin: yes", "a\nb", "a\x7fb"])
 async def test_a_key_carrying_a_control_character_cannot_append_a_header(key: str) -> None:
-    """`attach` echoes the key into `x-stream-key`, so this is response splitting.
-
-    Asserted through the response rather than only through the refusal, because
-    the thing being prevented is a header appearing on the wire and only the
-    response can say whether one did.
-    """
     streams, _log, _runner = _streams()
     response = streams.attach(key)
     assert response.status == 400
@@ -524,11 +444,7 @@ async def test_a_key_carrying_a_control_character_cannot_append_a_header(key: st
     )
 
 
-# -- the reader --------------------------------------------------------------
-
-
 async def test_a_stream_whose_producer_never_ran_blocks_then_times_out() -> None:
-    """The falsifier. An empty success reads as "the model said nothing"."""
     streams, _log, _runner = _streams()
     started = asyncio.get_running_loop().time()
     events = await _collect(streams, "never", idle=0.08, poll=0.01)
@@ -555,12 +471,6 @@ async def test_a_completed_stream_replays_in_order_and_ends() -> None:
 
 
 async def test_a_retried_attempt_supersedes_the_first_and_the_reader_says_so() -> None:
-    """One logical stream out of two attempts, and the client is told.
-
-    A fresh attacher never sees the replaced range at all, because the fence is
-    seeded from the table. That is the difference between this and a reader that
-    discovers the retry only after handing over a duplicate.
-    """
     streams, log, runner = _streams()
 
     @streams.producer("chat")
@@ -601,12 +511,6 @@ async def test_a_client_resuming_under_a_replaced_fence_is_told_before_the_new_b
 
 
 async def test_a_late_row_from_a_fenced_worker_is_skipped_not_delivered() -> None:
-    """The zombie. Its lease expired, it is still alive, and it is still flushing.
-
-    Its rows land *after* the newer attempt's in commit order, which is exactly
-    the case a "highest fence wins" rule written as "the last fence seen" gets
-    wrong.
-    """
     streams, log, runner = _streams()
 
     @streams.producer("chat")
@@ -700,7 +604,6 @@ async def test_a_failing_producer_writes_a_terminal_error_only_on_its_last_attem
 
 
 async def test_a_cancelled_attempt_writes_no_terminal_row_and_re_raises() -> None:
-    """A supervisor stopping is not the stream ending."""
     streams, log, runner = _streams()
 
     @streams.producer("chat")
@@ -715,7 +618,6 @@ async def test_a_cancelled_attempt_writes_no_terminal_row_and_re_raises() -> Non
 
 
 async def test_cancel_writes_the_terminal_row_before_it_fences_the_job() -> None:
-    """Attaching to a cancelled stream returns the terminal record, not a hang."""
     streams, log, runner = _streams()
 
     @streams.producer("chat")
@@ -758,11 +660,6 @@ async def test_truncate_deletes_the_replaced_rows_and_the_reader_still_says_so()
 
 
 async def test_a_row_still_in_flight_is_not_read_and_does_not_move_the_fence() -> None:
-    """The horizon, and why the max-fence seed has to respect it.
-
-    A seed taken past the horizon would skip settled fence-1 rows on the
-    strength of a fence-2 row nobody can yet see.
-    """
     streams, log, runner = _streams()
 
     @streams.producer("chat")
@@ -777,9 +674,6 @@ async def test_a_row_still_in_flight_is_not_read_and_does_not_move_the_fence() -
     assert b"".join(event.data for event in events) == b"a"
 
 
-# -- counters ----------------------------------------------------------------
-
-
 async def test_started_is_counted_against_attached_and_a_gap_is_a_finding() -> None:
     streams, _log, runner = _streams()
 
@@ -790,8 +684,12 @@ async def test_started_is_counted_against_attached_and_a_gap_is_a_finding() -> N
     for index in range(4):
         await streams.start("chat", key=f"k{index}")
     assert streams.stats() == {
-        "started": 4, "attached": 0, "resumed": 0, "superseded_rows": 0,
-        "cursor_refusals": 0, "dropped": 0,
+        "started": 4,
+        "attached": 0,
+        "resumed": 0,
+        "superseded_rows": 0,
+        "cursor_refusals": 0,
+        "dropped": 0,
     }
     findings = check_stream_attachment(streams)
     assert findings and "0 of 4 streams started on this worker" in findings[0]
@@ -816,7 +714,6 @@ async def test_a_refused_cursor_answers_400_and_is_counted() -> None:
 
 
 async def test_an_unauthorized_attach_is_a_404_identical_to_an_unknown_stream() -> None:
-    """A distinct 403 would confirm which keys exist."""
     streams, _log, _runner = _streams()
     refused = streams.attach("k", authorize=lambda key: False)
     assert refused.status == 404
@@ -872,11 +769,7 @@ async def test_push_stream_sends_one_json_frame_per_event() -> None:
     assert all(frame["id"].startswith(StreamCursor.start("k").token) for frame in decoded)
 
 
-# -- the writer --------------------------------------------------------------
-
-
 async def test_a_writer_batches_rather_than_writing_a_row_per_token() -> None:
-    """Chunks per flush is the number this design is challenged on."""
     from wreath.log import Flush as _Flush
 
     declared = declaration(schema="", flush=Flush(bytes=1 << 20, every=1e6, capacity=64))
@@ -899,7 +792,6 @@ async def test_a_writer_batches_rather_than_writing_a_row_per_token() -> None:
 
 
 async def test_a_full_buffer_is_drained_rather_than_dropping_a_chunk() -> None:
-    """A dropped chunk is a hole in a stream that promises none."""
     declared = declaration(schema="", flush=Flush(bytes=1 << 20, every=1e6, capacity=2))
     log = _Log(declared)
     streams = Streams(jobs=_Runner(), log=log, idle=0.05, poll=0.005)  # type: ignore[arg-type]
@@ -915,15 +807,12 @@ async def test_a_full_buffer_is_drained_rather_than_dropping_a_chunk() -> None:
     assert b"".join(event.data for event in events) == b"012345678"
 
 
-# -- what a mutation run found nobody was watching ---------------------------
-#
 # Each test below exists because `wreath mutant` changed a line in
 # `wreath.streams` and every test still passed. They are grouped rather than
 # scattered so the next reader can see which parts of the module had no witness.
 
 
 async def test_a_producer_may_write_bytes_as_well_as_text() -> None:
-    """`write` takes both, and a stream carrying binary is not a misuse."""
     streams, _log, runner = _streams()
 
     @streams.producer("chat")
@@ -938,11 +827,6 @@ async def test_a_producer_may_write_bytes_as_well_as_text() -> None:
 
 
 async def test_the_byte_threshold_flushes_mid_stream_without_the_buffer_filling() -> None:
-    """`Flush(bytes=...)` is a second trigger, not decoration.
-
-    A capacity large enough that it never fires, so the only thing that can
-    issue a statement here is the byte threshold.
-    """
     declared = declaration(schema="", flush=Flush(bytes=120, every=1e6, capacity=4096))
     log = _Log(declared)
     streams = Streams(jobs=_Runner(), log=log, idle=0.05, poll=0.005)  # type: ignore[arg-type]
@@ -967,12 +851,6 @@ async def test_the_byte_threshold_flushes_mid_stream_without_the_buffer_filling(
 
 
 async def test_a_full_buffer_is_drained_before_it_can_refuse_a_row() -> None:
-    """The drain is asserted as a *flush count*, not as an outcome.
-
-    Flushing before every offer would produce identical rows and identical
-    order -- the only thing it changes is how many statements were issued, which
-    is exactly the write amplification this design is challenged on.
-    """
     declared = declaration(schema="", flush=Flush(bytes=1 << 20, every=1e6, capacity=4))
     log = _Log(declared)
     streams = Streams(jobs=_Runner(), log=log, idle=0.05, poll=0.005)  # type: ignore[arg-type]
@@ -992,12 +870,6 @@ async def test_a_full_buffer_is_drained_before_it_can_refuse_a_row() -> None:
 
 
 async def test_a_buffer_that_refuses_after_a_drain_raises_rather_than_dropping() -> None:
-    """The backstop under the drain above, which nothing else can reach.
-
-    A dropped chunk is a hole in a stream that promises none, so the refusal is
-    a real `raise` -- `python -O` strips every assert, and this is a framing
-    rule rather than a debugging aid.
-    """
     from wreath.streams import StreamWriter
 
     log = _Log(declaration(schema=""))
@@ -1025,7 +897,6 @@ async def test_follow_refuses_a_key_it_would_not_accept_at_start() -> None:
 
 @pytest.mark.parametrize("option", ["idle", "poll"])
 async def test_follow_refuses_a_non_positive_interval(option: str) -> None:
-    """A zero poll is a busy loop and a zero idle never waits at all."""
     streams, _log, _runner = _streams()
     with pytest.raises(ValueError) as raised:
         await _collect(streams, "k", **{option: 0.0})
@@ -1033,7 +904,6 @@ async def test_follow_refuses_a_non_positive_interval(option: str) -> None:
 
 
 async def test_the_poll_interval_decides_how_often_the_log_is_read() -> None:
-    """Asserted as a read count, because a timing assertion is a flaky one."""
     streams, log, _runner = _streams()
     reads = 0
     inner = log.read
@@ -1070,11 +940,6 @@ async def test_resuming_is_counted_apart_from_attaching() -> None:
 
 
 async def test_attaching_to_a_stream_this_worker_never_started_is_not_counted() -> None:
-    """`attached` is counted against `started`, so a key nobody started is neither.
-
-    Otherwise a fleet where every worker reads every stream would report more
-    attaches than starts and the doctor finding would never fire.
-    """
     streams, _log, _runner = _streams()
 
     @streams.producer("chat")
@@ -1089,13 +954,6 @@ async def test_attaching_to_a_stream_this_worker_never_started_is_not_counted() 
 
 
 async def test_a_retry_that_starts_while_a_client_is_tailing_is_announced_live() -> None:
-    """The supersede rule reached through the *tail*, not through the seed.
-
-    A reader that attached before the retry has already delivered content under
-    the old fence, so it learns from the fence rising in the rows it is reading
-    rather than from the lookahead. This is the path a live client actually
-    takes, and it was the one with no witness.
-    """
     streams, _log, runner = _streams()
 
     @streams.producer("chat")
@@ -1132,7 +990,6 @@ async def test_a_retry_that_starts_while_a_client_is_tailing_is_announced_live()
 
 
 async def test_a_row_whose_detail_is_null_reads_as_an_empty_reason() -> None:
-    """The column is nullable, so a NULL is a shape this must survive."""
     streams, log, _runner = _streams()
     await log.append_many(
         [("k", {"fence": 1, "idx": 0, "kind": KIND_END, "body": None, "detail": None})]
@@ -1143,7 +1000,6 @@ async def test_a_row_whose_detail_is_null_reads_as_an_empty_reason() -> None:
 
 
 async def test_an_authorized_attach_opens_the_stream() -> None:
-    """The other side of the refusal: a predicate that says yes must not 404."""
     from wreath.response import SSEResponse
 
     streams, _log, runner = _streams()
@@ -1161,7 +1017,6 @@ async def test_an_authorized_attach_opens_the_stream() -> None:
 
 
 async def test_attach_accepts_a_cursor_object_as_well_as_a_header() -> None:
-    """`since=` takes both, and the object form must not be re-decoded."""
     streams, _log, runner = _streams()
 
     @streams.producer("chat")
@@ -1178,7 +1033,6 @@ async def test_attach_accepts_a_cursor_object_as_well_as_a_header() -> None:
 
 
 async def test_start_names_the_kinds_this_process_does_have() -> None:
-    """A refusal that cannot say what *is* registered sends the reader nowhere."""
     streams, _log, _runner = _streams()
     with pytest.raises(ValueError) as raised:
         await streams.start("chat", key="k")
@@ -1206,20 +1060,12 @@ async def test_a_lost_chunk_is_a_finding_because_it_is_a_hole_in_a_stream() -> N
 
 
 def test_a_worker_that_started_nothing_has_nothing_to_report() -> None:
-    """`started == 0` is not a finding, and needs no clause of its own to say so."""
     streams, _log, _runner = _streams()
     assert streams.stats()["started"] == 0
     assert check_stream_attachment(streams) == []
 
 
 async def test_a_stream_that_keeps_producing_outlives_the_idle_window() -> None:
-    """The idle timeout measures *silence*, not the length of the generation.
-
-    A five-minute answer must not be cut off at thirty seconds. The deadline is
-    pushed out by every batch that arrives, and a mutation run found that reset
-    had no witness -- so a reader could have started closing long generations
-    and every test would still have passed.
-    """
     streams, _log, runner = _streams()
 
     @streams.producer("chat")
@@ -1230,9 +1076,7 @@ async def test_a_stream_that_keeps_producing_outlives_the_idle_window() -> None:
             await asyncio.sleep(0.02)
 
     idle = 0.06
-    producing = asyncio.create_task(
-        runner.attempt("stream_chat", "k", [8], fence=1, attempt=1)
-    )
+    producing = asyncio.create_task(runner.attempt("stream_chat", "k", [8], fence=1, attempt=1))
     started = asyncio.get_running_loop().time()
     events = await _collect(streams, "k", idle=idle, poll=0.005)
     elapsed = asyncio.get_running_loop().time() - started
@@ -1246,7 +1090,6 @@ async def test_a_stream_that_keeps_producing_outlives_the_idle_window() -> None:
 
 
 async def test_a_stream_that_goes_quiet_mid_generation_still_times_out() -> None:
-    """The other side of the reset: silence ends the reader even mid-stream."""
     streams, log, _runner = _streams()
     await log.append_many(
         [("k", {"fence": 1, "idx": 0, "kind": KIND_CHUNK, "body": b"half", "detail": ""})]
@@ -1260,11 +1103,6 @@ async def test_a_stream_that_goes_quiet_mid_generation_still_times_out() -> None
 
 @pytest.mark.parametrize("kind", ["", "chat stream", "chat-stream", "café", "x" * 64])
 async def test_a_kind_that_is_not_a_task_name_is_refused_at_registration(kind: str) -> None:
-    """The kind names the durable task, so it is a bounded SQL-safe identifier.
-
-    Refused where the traceback points at the declaration, rather than at an
-    enqueue weeks later against a channel name PostgreSQL silently truncated.
-    """
     streams, _log, _runner = _streams()
     with pytest.raises(ValueError) as raised:
         streams.producer(kind)
@@ -1273,11 +1111,6 @@ async def test_a_kind_that_is_not_a_task_name_is_refused_at_registration(kind: s
 
 @pytest.mark.parametrize("key", [None, 7, b"bytes"])
 async def test_a_key_that_is_not_a_string_is_refused_as_one(key) -> None:
-    """The refusal has to come from here, or it comes from `str.encode` instead.
-
-    A `AttributeError: 'int' object has no attribute 'encode'` two frames down
-    names neither the argument nor what was wrong with it.
-    """
     streams, _log, _runner = _streams()
 
     @streams.producer("chat")
@@ -1290,13 +1123,6 @@ async def test_a_key_that_is_not_a_string_is_refused_as_one(key) -> None:
 
 
 async def test_a_slow_producers_chunk_waits_for_its_next_write_unless_it_flushes() -> None:
-    """The buffer is driven by its owner, and that is a documented sharp edge.
-
-    There is no timer task behind `write`, so a producer with long gaps has to
-    flush for itself. Asserted rather than described, because the alternative
-    reading -- "the 50 ms threshold means a chunk is never more than 50 ms
-    late" -- is the one somebody will believe.
-    """
     declared = declaration(schema="", flush=Flush(bytes=1 << 20, every=0.001, capacity=64))
     log = _Log(declared)
     streams = Streams(jobs=_Runner(), log=log, idle=0.05, poll=0.005)  # type: ignore[arg-type]
@@ -1317,7 +1143,6 @@ async def test_a_slow_producers_chunk_waits_for_its_next_write_unless_it_flushes
 
 
 async def test_a_producer_that_flushes_itself_does_not_wait() -> None:
-    """The escape hatch the docstring names, exercised."""
     declared = declaration(schema="", flush=Flush(bytes=1 << 20, every=1e6, capacity=64))
     log = _Log(declared)
     streams = Streams(jobs=_Runner(), log=log, idle=0.05, poll=0.005)  # type: ignore[arg-type]

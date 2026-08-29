@@ -2136,6 +2136,19 @@ typedef struct {
 } SeriesData;
 
 #define SERIES_DATA_CAPSULE_NAME "wreath.series_data"
+#define SERIES_CHART_PLAN_CAPSULE_NAME "wreath.series_chart_plan"
+
+typedef struct {
+    PyObject *data_capsule;
+    SeriesData *data;
+    Py_ssize_t downsample_count;
+    Py_ssize_t full_count;
+    Py_ssize_t tick_target;
+    Py_ssize_t *rows;
+    size_t *selected_offsets;
+    Py_ssize_t *selected;
+    double *bounds;
+} SeriesChartPlan;
 
 static void
 series_data_free(SeriesData *data)
@@ -2170,6 +2183,36 @@ static SeriesData *
 series_data_get(PyObject *capsule)
 {
     return PyCapsule_GetPointer(capsule, SERIES_DATA_CAPSULE_NAME);
+}
+
+static void
+series_chart_plan_free(SeriesChartPlan *plan)
+{
+    if (plan == NULL) return;
+    Py_XDECREF(plan->data_capsule);
+    PyMem_Free(plan->rows);
+    PyMem_Free(plan->selected_offsets);
+    PyMem_Free(plan->selected);
+    PyMem_Free(plan->bounds);
+    PyMem_Free(plan);
+}
+
+static void
+series_chart_plan_destroy(PyObject *capsule)
+{
+    SeriesChartPlan *plan = PyCapsule_GetPointer(
+        capsule, SERIES_CHART_PLAN_CAPSULE_NAME);
+    if (plan == NULL) {
+        PyErr_WriteUnraisable(capsule);
+        return;
+    }
+    series_chart_plan_free(plan);
+}
+
+static SeriesChartPlan *
+series_chart_plan_get(PyObject *capsule)
+{
+    return PyCapsule_GetPointer(capsule, SERIES_CHART_PLAN_CAPSULE_NAME);
 }
 
 PyObject *
@@ -2461,6 +2504,258 @@ error:
     Py_DECREF(buckets);
     series_data_free(data);
     return NULL;
+}
+
+static SeriesChartPlan *
+series_chart_plan_compile(
+    PyObject *data_capsule, PyObject *downsample_source, PyObject *full_source,
+    Py_ssize_t threshold, Py_ssize_t tick_target)
+{
+    if (threshold < 3 || tick_target < 2 || tick_target > 10000) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "series chart threshold must be >= 3 and tick target in 2..10000");
+        return NULL;
+    }
+    SeriesData *data = series_data_get(data_capsule);
+    if (data == NULL) return NULL;
+    PyObject *downsample = PySequence_Fast(
+        downsample_source,
+        "series chart downsample rows must be an iterable of indices");
+    PyObject *full = PySequence_Fast(
+        full_source, "series chart full rows must be an iterable of indices");
+    if (downsample == NULL || full == NULL) {
+        Py_XDECREF(downsample);
+        Py_XDECREF(full);
+        return NULL;
+    }
+    Py_ssize_t downsample_count = PySequence_Fast_GET_SIZE(downsample);
+    Py_ssize_t full_count = PySequence_Fast_GET_SIZE(full);
+    if (downsample_count > PY_SSIZE_T_MAX - full_count) {
+        Py_DECREF(downsample);
+        Py_DECREF(full);
+        PyErr_NoMemory();
+        return NULL;
+    }
+    Py_ssize_t output_count = downsample_count + full_count;
+    Py_ssize_t workspace_count = threshold < data->bucket_count
+        ? threshold : data->bucket_count;
+    if (downsample_count == PY_SSIZE_T_MAX ||
+        (size_t)output_count > SIZE_MAX / sizeof(Py_ssize_t) ||
+        (size_t)(downsample_count + 1) > SIZE_MAX / sizeof(size_t) ||
+        (size_t)downsample_count > SIZE_MAX / (2 * sizeof(double)) ||
+        (size_t)workspace_count > SIZE_MAX / sizeof(Py_ssize_t) ||
+        (workspace_count != 0 && (size_t)downsample_count >
+            SIZE_MAX / sizeof(Py_ssize_t) / (size_t)workspace_count)) {
+        Py_DECREF(downsample);
+        Py_DECREF(full);
+        PyErr_NoMemory();
+        return NULL;
+    }
+    SeriesChartPlan *plan = PyMem_Calloc(1, sizeof(*plan));
+    if (plan == NULL) {
+        Py_DECREF(downsample);
+        Py_DECREF(full);
+        PyErr_NoMemory();
+        return NULL;
+    }
+    plan->rows = output_count != 0
+        ? PyMem_Malloc((size_t)output_count * sizeof(*plan->rows)) : NULL;
+    plan->selected_offsets = PyMem_Malloc(
+        (size_t)(downsample_count + 1) * sizeof(*plan->selected_offsets));
+    size_t selected_capacity =
+        (size_t)downsample_count * (size_t)workspace_count;
+    plan->selected = selected_capacity != 0
+        ? PyMem_Malloc(selected_capacity * sizeof(*plan->selected)) : NULL;
+    plan->bounds = downsample_count != 0
+        ? PyMem_Malloc((size_t)downsample_count * 2 * sizeof(*plan->bounds))
+        : NULL;
+    if ((output_count != 0 && plan->rows == NULL) ||
+        plan->selected_offsets == NULL ||
+        (selected_capacity != 0 && plan->selected == NULL) ||
+        (downsample_count != 0 && plan->bounds == NULL)) {
+        PyErr_NoMemory();
+        goto plan_error;
+    }
+    plan->data_capsule = Py_NewRef(data_capsule);
+    plan->data = data;
+    plan->downsample_count = downsample_count;
+    plan->full_count = full_count;
+    plan->tick_target = tick_target;
+    PyObject **downsample_items = PySequence_Fast_ITEMS(downsample);
+    PyObject **full_items = PySequence_Fast_ITEMS(full);
+    Py_ssize_t row_count = data->series_count * data->measure_count;
+    size_t selected_used = 0;
+    for (Py_ssize_t output = 0; output < downsample_count; output++) {
+        Py_ssize_t row = PyLong_AsSsize_t(downsample_items[output]);
+        if (row == -1 && PyErr_Occurred()) goto plan_error;
+        if (row < 0 || row >= row_count) {
+            PyErr_Format(PyExc_IndexError,
+                         "series chart row %zd is outside 0..%zd",
+                         row, row_count - 1);
+            goto plan_error;
+        }
+        plan->rows[output] = row;
+        plan->selected_offsets[output] = selected_used;
+        size_t offset = (size_t)row * (size_t)data->bucket_count;
+        Py_ssize_t selected_count = 0;
+        double minimum;
+        double maximum;
+        Py_ssize_t *selected = series_chart_lttb(
+            data->bucket_count != 0 ? data->values + offset : NULL,
+            data->prefix +
+                (size_t)row * ((size_t)data->bucket_count + 1),
+            data->bounds + (size_t)row * 2,
+            data->bucket_count, threshold,
+            selected_capacity != 0 ? plan->selected + selected_used : NULL,
+            &selected_count, &minimum, &maximum);
+        if (selected == NULL && data->bucket_count != 0) goto plan_error;
+        selected_used += (size_t)selected_count;
+        plan->bounds[(size_t)output * 2] = minimum;
+        plan->bounds[(size_t)output * 2 + 1] = maximum;
+    }
+    plan->selected_offsets[downsample_count] = selected_used;
+    for (Py_ssize_t output = 0; output < full_count; output++) {
+        Py_ssize_t row = PyLong_AsSsize_t(full_items[output]);
+        if (row == -1 && PyErr_Occurred()) goto plan_error;
+        if (row < 0 || row >= row_count) {
+            PyErr_Format(PyExc_IndexError,
+                         "series chart row %zd is outside 0..%zd",
+                         row, row_count - 1);
+            goto plan_error;
+        }
+        plan->rows[downsample_count + output] = row;
+    }
+    Py_DECREF(downsample);
+    Py_DECREF(full);
+    return plan;
+
+plan_error:
+    Py_DECREF(downsample);
+    Py_DECREF(full);
+    series_chart_plan_free(plan);
+    return NULL;
+}
+
+static PyObject *
+series_chart_plan_render(SeriesChartPlan *plan, int tick_text)
+{
+    SeriesData *data = plan->data;
+    Py_ssize_t output_count = plan->downsample_count + plan->full_count;
+    PyObject *paths = PyTuple_New(output_count);
+    PyObject *ticks = tick_text ? NULL : PyTuple_New(plan->downsample_count);
+    WreathBytesWriter tick_writer = {0};
+    Py_ssize_t tick_count = 0;
+    if (paths == NULL || (!tick_text && ticks == NULL) ||
+        (tick_text && wreath_writer_init(&tick_writer, 256) < 0)) {
+        Py_XDECREF(paths);
+        Py_XDECREF(ticks);
+        Py_XDECREF(tick_writer.bytes);
+        return NULL;
+    }
+    for (Py_ssize_t output = 0; output < plan->downsample_count; output++) {
+        Py_ssize_t row = plan->rows[output];
+        size_t offset = (size_t)row * (size_t)data->bucket_count;
+        size_t selected_start = plan->selected_offsets[output];
+        size_t selected_end = plan->selected_offsets[output + 1];
+        PyObject *path = series_chart_path(
+            data->bucket_count != 0 ? data->values + offset : NULL,
+            data->bucket_count != 0 ? data->present + offset : NULL,
+            data->bucket_count,
+            selected_end != selected_start
+                ? plan->selected + selected_start : NULL,
+            (Py_ssize_t)(selected_end - selected_start), data->index_plan,
+            data->value_text,
+            data->bucket_count != 0 ? data->value_offsets + offset : NULL,
+            data->bucket_count != 0 ? data->value_lengths + offset : NULL);
+        double minimum = plan->bounds[(size_t)output * 2];
+        double maximum = plan->bounds[(size_t)output * 2 + 1];
+        PyObject *axis = tick_text ? NULL : series_chart_ticks(
+            minimum, maximum, plan->tick_target);
+        int tick_error = tick_text ? series_chart_write_ticks(
+            &tick_writer, minimum, maximum, plan->tick_target, output != 0,
+            &tick_count) : 0;
+        if (path == NULL || (!tick_text && axis == NULL) || tick_error < 0) {
+            Py_XDECREF(path);
+            Py_XDECREF(axis);
+            goto render_error;
+        }
+        PyTuple_SET_ITEM(paths, output, path);
+        if (!tick_text) PyTuple_SET_ITEM(ticks, output, axis);
+    }
+    for (Py_ssize_t output = 0; output < plan->full_count; output++) {
+        Py_ssize_t row = plan->rows[plan->downsample_count + output];
+        size_t path_start = data->path_offsets[row];
+        size_t path_size = data->path_offsets[row + 1] - path_start;
+        if (path_size > (size_t)PY_SSIZE_T_MAX) {
+            PyErr_NoMemory();
+            goto render_error;
+        }
+        PyObject *path = PyUnicode_DecodeASCII(
+            data->path_text == NULL ? "" : data->path_text + path_start,
+            (Py_ssize_t)path_size, NULL);
+        if (path == NULL) goto render_error;
+        PyTuple_SET_ITEM(paths, plan->downsample_count + output, path);
+    }
+    PyObject *tick_output = ticks;
+    if (tick_text) {
+        PyObject *bytes = wreath_writer_finish(&tick_writer);
+        tick_writer.bytes = NULL;
+        tick_output = bytes == NULL ? NULL : PyUnicode_DecodeASCII(
+            PyBytes_AS_STRING(bytes), PyBytes_GET_SIZE(bytes), NULL);
+        Py_XDECREF(bytes);
+        if (tick_output == NULL) goto render_error;
+    }
+    PyObject *result = tick_text
+        ? Py_BuildValue(
+            "nOOOn", data->series_count * data->measure_count, data->keys,
+            paths, tick_output, tick_count)
+        : Py_BuildValue(
+            "nOOO", data->series_count * data->measure_count, data->keys,
+            paths, tick_output);
+    Py_DECREF(paths);
+    Py_DECREF(tick_output);
+    return result;
+
+render_error:
+    Py_XDECREF(paths);
+    Py_XDECREF(ticks);
+    Py_XDECREF(tick_writer.bytes);
+    return NULL;
+}
+
+PyObject *
+wreath_series_data_chart_plan(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *data;
+    PyObject *downsample;
+    PyObject *full;
+    Py_ssize_t threshold;
+    Py_ssize_t tick_target;
+    if (!PyArg_ParseTuple(
+            args, "OOOnn:series_data_chart_plan", &data, &downsample, &full,
+            &threshold, &tick_target)) return NULL;
+    SeriesChartPlan *plan = series_chart_plan_compile(
+        data, downsample, full, threshold, tick_target);
+    if (plan == NULL) return NULL;
+    PyObject *capsule = PyCapsule_New(
+        plan, SERIES_CHART_PLAN_CAPSULE_NAME, series_chart_plan_destroy);
+    if (capsule == NULL) series_chart_plan_free(plan);
+    return capsule;
+}
+
+PyObject *
+wreath_series_chart_plan(PyObject *Py_UNUSED(self), PyObject *plan_capsule)
+{
+    SeriesChartPlan *plan = series_chart_plan_get(plan_capsule);
+    return plan == NULL ? NULL : series_chart_plan_render(plan, 0);
+}
+
+PyObject *
+wreath_series_chart_plan_text(PyObject *Py_UNUSED(self), PyObject *plan_capsule)
+{
+    SeriesChartPlan *plan = series_chart_plan_get(plan_capsule);
+    return plan == NULL ? NULL : series_chart_plan_render(plan, 1);
 }
 
 static PyObject *

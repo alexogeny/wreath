@@ -1,5 +1,3 @@
-"""Immutable migration artifacts are built and verified by Wreath-metal."""
-
 from __future__ import annotations
 
 import hashlib
@@ -33,9 +31,10 @@ def test_native_artifact_round_trips_verified_metadata_and_tape() -> None:
     )
 
     assert artifact.data[:4] == b"WMA1"
-    assert artifact.checksum == hashlib.sha256(
-        artifact.data[:136] + bytes(32) + artifact.data[168:]
-    ).digest()
+    assert (
+        artifact.checksum
+        == hashlib.sha256(artifact.data[:136] + bytes(32) + artifact.data[168:]).digest()
+    )
     loaded = _load_native_artifact(artifact.data)
     assert loaded == artifact
     assert loaded.migration_id == MIGRATION_ID

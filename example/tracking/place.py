@@ -26,8 +26,7 @@ did this animal travel", because those are rectangles and arithmetic.
 It cannot answer "which animals crossed the northern boundary", "how much time
 did this animal spend inside the conservancy", or "infer the migration corridor
 from these tracks". Those are polygon containment and a spatial join, and they
-need PostGIS. See ``docs/tracking/place.md`` for what that would change and what
-it would not.
+need PostGIS.
 """
 
 from __future__ import annotations
@@ -398,9 +397,7 @@ async def track(
     )
 
 
-def nearest_landmark(
-    point: Coordinate, landmarks: list[Landmark]
-) -> tuple[Landmark, float] | None:
+def nearest_landmark(point: Coordinate, landmarks: list[Landmark]) -> tuple[Landmark, float] | None:
     """The landmark closest to `point`, and how far away it is.
 
     In Python over the whole table, because the table is twelve rows. A

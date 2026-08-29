@@ -53,6 +53,7 @@ def _as_model(model: type) -> type[Model]:
     """Narrow to a wreath model so the ORM-injected class attributes resolve."""
     return cast("type[Model]", model)
 
+
 __all__ = [
     "SENSITIVE_FIELD",
     "Access",
@@ -232,7 +233,7 @@ def _checked_resource(resource: Any) -> Any:
         raise ValueError(
             f"Access.cedar(resource={resource!r}) is not a Cedar entity reference; "
             'expected Type::"id" or a Type::"{param}" template, e.g. '
-            f'\'{resource}::"{{id}}"\'. Pass a callable or an EntityUid if a custom '
+            f"'{resource}::\"{{id}}\"'. Pass a callable or an EntityUid if a custom "
             "CedarAuthorizer(resource=...) mapper builds the reference instead."
         ) from error
     return resource
@@ -246,8 +247,11 @@ def _mode(mode: str) -> str:
 
 #: Which group each operation belongs to, for `authorize={"read": ...}` keys.
 _OP_GROUP = {
-    "list": "read", "retrieve": "read",
-    "create": "write", "update": "write", "delete": "write",
+    "list": "read",
+    "retrieve": "read",
+    "create": "write",
+    "update": "write",
+    "delete": "write",
 }
 
 #: A column whose name matches this is treated as a secret: hidden from output
@@ -444,7 +448,8 @@ def crud_router(
         tuple(name for name in allow_list if name not in exclude_set)
         if allow_list is not None
         else tuple(
-            name for name in columns
+            name
+            for name in columns
             if name not in exclude_set
             and (name not in sensitive or name in exposed)
             and (name not in retrieval or name in exposed)
@@ -459,7 +464,8 @@ def crud_router(
     # `fields=` deliberately does not widen this. It names what may *leave*, and
     # a sensitive column named there is likewise readable and not writable.
     writable_fields = frozenset(
-        name for name in (allow_list if allow_list is not None else columns)
+        name
+        for name in (allow_list if allow_list is not None else columns)
         if name != pk_name
         and name not in readonly_set
         and name not in sensitive
@@ -497,9 +503,7 @@ def crud_router(
                 # which is a different and false statement about the world.
                 row.pop(name, None)
             elif value is not None:
-                row[name] = _jsonable(
-                    value if metres is None else _coarsen(value, metres)
-                )
+                row[name] = _jsonable(value if metres is None else _coarsen(value, metres))
         return row
 
     #: The Cedar resource a ladder's rungs are asked about. Resource-type level,
@@ -525,9 +529,7 @@ def crud_router(
             # a decision nobody can make, and publishing would answer it "yes".
             return dict.fromkeys(precision_ladders, _WITHHELD)
         return {
-            name: await _resolve_precision(
-                request, authorizer, ladder, precision_resource
-            )
+            name: await _resolve_precision(request, authorizer, ladder, precision_resource)
             for name, ladder in precision_ladders.items()
         }
 
@@ -542,7 +544,8 @@ def crud_router(
 
     async def object_denied(request: Any, op: str, instance: Any) -> bool:
         return object_authorizer is not None and not await _object_ok(
-            object_authorizer, request, op, instance)
+            object_authorizer, request, op, instance
+        )
 
     if "list" in ops:
         list_rule = rules["list"]
@@ -563,17 +566,18 @@ def crud_router(
                     # every row at once. A page may therefore come back shorter
                     # than `size`; that is the honest answer, and paging over a
                     # filtered set is the caller's to reconcile.
-                    rows = [
-                        row for row in rows
-                        if not await object_denied(request, "list", row)
-                    ]
+                    rows = [row for row in rows if not await object_denied(request, "list", row)]
                 grades = await resolutions_for(request)
-                return JSONResponse({
-                    "items": [serialize(row, grades) for row in rows],
-                    "page": page, "size": size,
-                })
+                return JSONResponse(
+                    {
+                        "items": [serialize(row, grades) for row in rows],
+                        "page": page,
+                        "size": size,
+                    }
+                )
             finally:
                 await session.close()
+
         _apply_requirement(list_, list_rule)
 
     if "retrieve" in ops:
@@ -593,6 +597,7 @@ def crud_router(
                 return JSONResponse(serialize(instance, await resolutions_for(request)))
             finally:
                 await session.close()
+
         _apply_requirement(retrieve, retrieve_rule)
 
     if "create" in ops:
@@ -619,6 +624,7 @@ def crud_router(
                 return _unprocessable(error)
             finally:
                 await session.close()
+
         _apply_requirement(create, create_rule)
 
     if "update" in ops:
@@ -648,6 +654,7 @@ def crud_router(
                 return _unprocessable(error)
             finally:
                 await session.close()
+
         _apply_requirement(update, update_rule)
 
     if "delete" in ops:
@@ -670,6 +677,7 @@ def crud_router(
                 return Response(b"", status=204)
             finally:
                 await session.close()
+
         _apply_requirement(delete, delete_rule)
 
     return router
@@ -740,9 +748,9 @@ def _apply_requirement(handler: Any, rule: Access) -> Any:
     elif rule.kind == "permissions":
         handler = permissions(*rule.values, mode=mode)(handler)
     elif rule.kind == "cedar":
-        handler = authorize(
-            action=cast("str", rule.action), resource=_resource_fn(rule.resource)
-        )(handler)
+        handler = authorize(action=cast("str", rule.action), resource=_resource_fn(rule.resource))(
+            handler
+        )
     if rule.second_factor is not None:
         handler = second_factor(max_age=rule.second_factor)(handler)
     return handler
@@ -757,14 +765,15 @@ def _resource_fn(resource: Any) -> Any:
 
 def _page_params(request: Any, default_size: int) -> tuple[int, int]:
     """CRUD's compatibility view over the canonical bounded page parser."""
-    params = _parse_page_params(
-        request, default_size=default_size, max_size=_MAX_PAGE_SIZE
-    )
+    params = _parse_page_params(request, default_size=default_size, max_size=_MAX_PAGE_SIZE)
     return params.page, params.size
 
 
 async def _object_ok(
-    authorizer: Callable[..., Any], request: Any, op: str, instance: Any,
+    authorizer: Callable[..., Any],
+    request: Any,
+    op: str,
+    instance: Any,
 ) -> bool:
     """Run a row-level authorizer; accept a bool or an AuthorizationDecision."""
     result = authorizer(request, op, instance)
@@ -795,7 +804,9 @@ def _unprocessable(error: Exception) -> Response:
     identifiers. Catching only the first two also meant a driver error was not
     caught at all, and answered 500.
     """
-    detail = str(error) if isinstance(error, (TypeError, ValueError)) else (
-        "the request body was not accepted"
+    detail = (
+        str(error)
+        if isinstance(error, (TypeError, ValueError))
+        else ("the request body was not accepted")
     )
     return JSONResponse({"error": detail}, status=422)

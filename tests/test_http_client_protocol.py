@@ -34,7 +34,7 @@ def test_serialize_fixed_request() -> None:
         b"/events?source=wreath",
         b"partner.example",
         headers=((b"content-type", b"application/json"), (b"x-event-id", b"evt-1")),
-        body=b'{}',
+        body=b"{}",
     )
 
     assert request == (
@@ -116,12 +116,7 @@ def test_parse_response_head_accepts_every_fragment_boundary() -> None:
 
 
 def test_public_head_parser_does_not_apply_request_specific_framing() -> None:
-    """Framing refusal belongs to a request transaction, not syntax parsing."""
-    data = (
-        b"HTTP/1.1 200 OK\r\n"
-        b"content-length: 2\r\n"
-        b"transfer-encoding: chunked\r\n\r\n"
-    )
+    data = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\ntransfer-encoding: chunked\r\n\r\n"
     assert parse_response_head(data) == (
         1,
         200,
@@ -138,12 +133,8 @@ def test_public_head_parser_does_not_apply_request_specific_framing() -> None:
         pytest.param(b"HTTP/1.1 two OK\r\n\r\n", "status line", id="non-numeric-status"),
         pytest.param(b"HTTP/1.1 99 Nope\r\n\r\n", "status line", id="status-below-100"),
         pytest.param(b"HTTP/1.1 200 O\x01K\r\n\r\n", "reason", id="control-byte-in-reason"),
-        pytest.param(
-            b"HTTP/1.1 200 OK\r\n folded: no\r\n\r\n", "folding", id="obs-fold"
-        ),
-        pytest.param(
-            b"HTTP/1.1 200 OK\r\nbad name: no\r\n\r\n", "header name", id="space-in-name"
-        ),
+        pytest.param(b"HTTP/1.1 200 OK\r\n folded: no\r\n\r\n", "folding", id="obs-fold"),
+        pytest.param(b"HTTP/1.1 200 OK\r\nbad name: no\r\n\r\n", "header name", id="space-in-name"),
         pytest.param(
             b"HTTP/1.1 200 OK\r\nx-test: a\x01b\r\n\r\n",
             "header value",
@@ -185,13 +176,16 @@ def test_the_two_request_serializers_agree() -> None:
             headers=headers,
             body=body,
         )
-        assert selected_serialize_request(
-            method,
-            target,
-            host,
-            headers=headers,
-            body=body,
-        ) == expected
+        assert (
+            selected_serialize_request(
+                method,
+                target,
+                host,
+                headers=headers,
+                body=body,
+            )
+            == expected
+        )
 
 
 def test_client_module_exports_the_bound_codecs() -> None:
@@ -249,13 +243,16 @@ def test_native_client_codec_randomized_parity() -> None:
             headers=headers,
             body=body,
         )
-        assert _client.serialize_request(
-            method,
-            b"/random",
-            b"example.com",
-            headers,
-            body,
-        ) == expected
+        assert (
+            _client.serialize_request(
+                method,
+                b"/random",
+                b"example.com",
+                headers,
+                body,
+            )
+            == expected
+        )
         framing_headers = rng.choice(
             (
                 [],

@@ -1,11 +1,3 @@
-"""The bucket vocabulary: truncation, stepping, and the two days a year it matters.
-
-Every interesting case here is a zone whose offset changes. Bucketing is only
-hard because "a day" is a calendar day on somebody's wall clock rather than
-86400 seconds, and the whole point of putting this in ``temporal`` is that the
-Python side and the SQL side cannot then disagree about which.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -111,12 +103,6 @@ class TestEndOf:
         ) == datetime.timedelta(days=1)
 
     def test_a_dst_day_still_advances_the_calendar_by_exactly_one_day(self):
-        """The wall clock moves one day even though the elapsed time does not.
-
-        This is the property `generate_series` over naive local timestamps has
-        and `generate_series` over `timestamptz` does not, which is why the
-        spine is generated in local time and converted back afterwards.
-        """
         moment = at(2026, 4, 5, 6)
         start = Day.floor(moment, AUCKLAND)
         end = Day.end_of(moment, AUCKLAND)
@@ -142,10 +128,7 @@ class TestSpine:
 
     def test_it_walks_the_local_clock_across_both_dst_directions(self):
         buckets = spine(at(2026, 4, 3), at(2026, 4, 8), bucket=Day, in_zone=AUCKLAND)
-        gaps = [
-            elapsed(left, right)
-            for left, right in zip(buckets, buckets[1:], strict=False)
-        ]
+        gaps = [elapsed(left, right) for left, right in zip(buckets, buckets[1:], strict=False)]
         assert datetime.timedelta(hours=25) in gaps
 
     def test_an_empty_range_is_an_empty_spine(self):
@@ -176,15 +159,11 @@ class TestSpine:
         start = at(2025, 9, 20, 7, 17)
         end = at(2027, 4, 20, 18, 41)
         units = (Hour, Day, Week, Month, Quarter, Year)
-        assert spine_lengths(
-            start, end, buckets=units, in_zone=AUCKLAND
-        ) == tuple(
-            spine_length(start, end, bucket=unit, in_zone=AUCKLAND)
-            for unit in units
+        assert spine_lengths(start, end, buckets=units, in_zone=AUCKLAND) == tuple(
+            spine_length(start, end, bucket=unit, in_zone=AUCKLAND) for unit in units
         )
 
     def test_the_end_of_one_bucket_is_the_start_of_the_next(self):
-        """Half-open, so these have to be the same instant and not merely close."""
         for unit in (Minute, Hour, Day, Week, Month, Quarter, Year):
             moment = at(2026, 4, 5, 6)
             assert unit.end_of(moment, AUCKLAND) == unit.floor(
@@ -194,13 +173,6 @@ class TestSpine:
 
 class TestAmbiguousAndMissingLocalTimes:
     def test_an_ambiguous_local_hour_resolves_to_the_later_of_its_two_instants(self):
-        """London repeats 01:00-02:00 on 2026-10-25; floor takes the later.
-
-        Not a preference -- it is what `timestamp AT TIME ZONE zone` does, so
-        `floor` and `date_trunc` name the same instant. Measured against a live
-        server in `tests/postgres/test_series_integration.py`; the Python check
-        here is the fast mirror of it.
-        """
         # 00:30 UTC on that date is 01:30 BST, the *first* pass through 01:30 --
         # but its bucket start is the *second* 01:00, an hour later.
         floored = Hour.floor(at(2026, 10, 25, 0, 30), LONDON)
@@ -208,14 +180,6 @@ class TestAmbiguousAndMissingLocalTimes:
         assert floored.astimezone(UTC) == Instant.of(at(2026, 10, 25, 1))
 
     def test_an_ambiguous_result_must_be_converted_before_it_is_compared(self):
-        """PEP 495: a datetime inside a fold compares unequal across zones.
-
-        Not a defect in :meth:`Bucket.floor` -- it is how CPython keeps
-        comparison transitive when a local time names two instants. It is worth
-        pinning because the failure is silent and asymmetric: the same
-        expression is true in June and false on one day in October, so a test
-        written the naive way passes all year and then does not.
-        """
         ambiguous = Hour.floor(at(2026, 10, 25, 0, 30), LONDON)
         same_instant = Instant.of(at(2026, 10, 25, 1))
         assert ambiguous != same_instant
@@ -225,13 +189,6 @@ class TestAmbiguousAndMissingLocalTimes:
         assert unambiguous == Instant.of(at(2026, 6, 25, 0)), "ordinary days compare fine"
 
     def test_a_local_midnight_that_a_spring_forward_skipped_still_answers(self):
-        """Some zones jump *at* midnight, so local midnight does not exist.
-
-        Cuba moves 00:00 to 01:00 on 2026-03-08. There is no correct instant for
-        that local midnight, and the useful behaviour is a defined one rather
-        than a raise -- a chart should not fail to draw one day a year. The
-        answer is the pre-transition offset, which is what zoneinfo gives.
-        """
         havana = zone("America/Havana")
         floored = Day.floor(at(2026, 3, 8, 12), havana)
         assert floored.tzinfo is havana

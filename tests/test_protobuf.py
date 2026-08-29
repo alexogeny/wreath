@@ -1,17 +1,3 @@
-"""The protobuf codec: declarations, the wire format, and what it refuses.
-
-`wreath.protobuf` compiles a message declaration to a wire plan once, at class
-creation, and encodes against the plan. The tests here are organised the way the
-risk is: declaration-time refusals first (a bad declaration must never reach the
-wire), then the wire format against known-answer vectors, then the parsing
-refusals that matter because this codec exists to read bytes from someone you do
-not control.
-
-Byte vectors are hand-computed from the protobuf encoding specification rather
-than produced by this implementation, so a bug here fails as a spec mismatch
-instead of agreeing with itself.
-"""
-
 from __future__ import annotations
 
 import enum
@@ -26,8 +12,6 @@ from wreath.protobuf import (
     field,
     message,
 )
-
-# -- declaration-time refusals ----------------------------------------------
 
 
 def test_a_duplicate_field_number_is_refused_naming_the_field() -> None:
@@ -73,13 +57,6 @@ def test_a_type_with_no_wire_mapping_is_refused_naming_the_field() -> None:
 
 
 def test_a_kind_that_does_not_exist_is_refused_as_unknown_not_as_incompatible() -> None:
-    """Both refusals are `ProtobufDeclarationError`, so the type proves nothing.
-
-    A misspelled kind falls through to the compatibility check as `None`, which
-    is not in any compatible set, so it refuses either way -- and the message
-    the author reads would name a compatibility problem their annotation does
-    not have, with no list of the kinds they could have meant.
-    """
     with pytest.raises(ProtobufDeclarationError) as caught:
 
         @message
@@ -102,12 +79,6 @@ def test_a_kind_incompatible_with_the_annotation_says_so() -> None:
 
 
 def test_a_kind_on_a_type_with_no_compatible_kinds_at_all_is_refused() -> None:
-    """`_COMPATIBLE` has no entry for the annotation, rather than an entry
-    without this kind in it. The distinction is invisible in the outcome and
-    total in the mechanism: without the `is None` arm, membership is tested
-    against `None` and the author gets `TypeError: argument of type 'NoneType'
-    is not iterable` instead of a refusal naming their field.
-    """
     with pytest.raises(ProtobufDeclarationError) as caught:
 
         @message
@@ -147,9 +118,6 @@ def test_a_field_without_a_number_is_refused() -> None:
             n: int = 0
 
     assert "n" in str(caught.value)
-
-
-# -- scalars on the wire ----------------------------------------------------
 
 
 @message
@@ -226,9 +194,6 @@ def test_an_out_of_range_value_for_the_declared_kind_is_refused() -> None:
         encode(Scalars(u32=-1))
     with pytest.raises(ValueError):
         encode(Scalars(i32=2**31))
-
-
-# -- the parsing refusals ---------------------------------------------------
 
 
 def test_a_truncated_buffer_raises_rather_than_over_reading() -> None:

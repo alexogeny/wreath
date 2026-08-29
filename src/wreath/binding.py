@@ -33,8 +33,7 @@ async def create(request, item_id: int, item: NewItem, dry_run: bool = False):
 `Path`, `Query`, `Header`, `Cookie`, `Body`, `Form` and `File` override that
 inference. **A marker rides in `Annotated`; the default stays a plain Python
 default** — write `limit: Annotated[int, Query()] = 20`, never
-`limit: int = Query(20)`. That second form is the most common mistake when
-porting from FastAPI, and it used to fail quietly. Markers are read only from
+`limit: int = Query(20)`. Markers are read only from
 `Annotated` metadata, so a marker written as a default is not recognised as a
 marker at all: `Query(20)` would become the literal default value, every alias
 and bound on it ignored, and a request that omits the parameter would hand the
@@ -251,7 +250,11 @@ def _compile_plan(annotation: Any, seen: frozenset[type]) -> tuple[Any, ...]:
                     )
                 )
             fields = tuple(fields_list)
-            return (_OP_DATACLASS, annotation, fields)
+            known = frozenset(field[1] for field in fields)
+            positional = all(
+                field.init and not field.kw_only for field in dataclasses.fields(annotation)
+            )
+            return (_OP_DATACLASS, annotation, fields, known, positional)
         if (
             annotation
             in (
@@ -328,9 +331,6 @@ class ResponseValidationError(Exception):
 
 def _error(loc: tuple[Any, ...], message: str, kind: str) -> dict[str, Any]:
     return {"loc": list(loc), "msg": message, "type": kind}
-
-
-# --- JSON value validation ------------------------------------------------------
 
 
 # Total node visits allowed per validation. A union tries every option against
@@ -754,14 +754,12 @@ def _jsonable_any(value: Any) -> Any:
     if kind in _JSON_SCALARS:
         return value
     # A plain `dict` or `list` before the scalar ladder, by *exact* type.
-    #
     # The ladder below is ordered by how specific each case is, which put the
     # commonest shape a handler returns -- a dict -- behind seven guards that
     # cannot match it, ending in `isinstance(value, Mapping)`. That last one is
     # an ABC check and the most expensive of the eight: measured on this
     # machine, the eight guards cost 578ns of a 790ns walk over `{"id": 42,
     # "ok": True}`, and `type(value) is dict` answers the same question in 28ns.
-    #
     # `is dict` rather than `isinstance`, so this cannot change what any
     # *subclass* does: anything that is not exactly a dict or a list falls
     # through to the original ladder in its original order. A dict subclass
@@ -1346,8 +1344,6 @@ def _validate_dataclass(
     return cls(**kwargs)
 
 
-# --- scalar (path/query) conversion ----------------------------------------------
-
 _TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
 _FALSE_WORDS = frozenset({"0", "false", "no", "off"})
 
@@ -1419,9 +1415,6 @@ def _apply_constraint(value: Any, constraint: ScalarConstraint, loc: tuple[Any, 
             return maximum
         raise ValidationError([_error(loc, f"value must be <= {maximum}", "maximum")])
     return value
-
-
-# --- explicit request sources and dependency injection ----------------------------
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -1984,9 +1977,6 @@ def _compile_dep(
 
     memo[(fn, scope)] = resolve
     return resolve
-
-
-# --- binder compilation -----------------------------------------------------------
 
 
 def _is_model(annotation: Any) -> bool:
@@ -2567,9 +2557,7 @@ def inspect_handler(
     )
 
 
-def _inspect_handler_facts(
-    handler: Handler, path: str, host: str | None = None
-) -> _HandlerFacts:
+def _inspect_handler_facts(handler: Handler, path: str, host: str | None = None) -> _HandlerFacts:
     try:
         signature = inspect.signature(handler)
     except TypeError, ValueError:
@@ -2659,10 +2647,6 @@ def compile_binder(
     )
     query_specs = () if spec is None else spec.query_params
     query_constraints = {} if spec is None else dict(spec.query_constraints)
-    # Each query parameter carries its own constraint, resolved here. The bind
-    # loop used to ask `query_constraints.get(name)` per parameter per request
-    # for a mapping that has not changed since compilation. `spec.query_params`
-    # keeps its published shape, because OpenAPI and typegen read it.
     query_plan = tuple(
         (name, alias, annotation, default, query_constraints.get(name))
         for name, alias, annotation, default in query_specs
@@ -2672,9 +2656,7 @@ def compile_binder(
         query_entries = []
         alias_positions: dict[str, list[int]] = {}
         for index, (name, alias, annotation, default, constraint) in enumerate(query_plan):
-            minimum, maximum, overflow = (
-                (None, None, "error") if constraint is None else constraint
-            )
+            minimum, maximum, overflow = (None, None, "error") if constraint is None else constraint
             query_entries.append(
                 (
                     name,
@@ -2711,10 +2693,6 @@ def compile_binder(
             _body_validator(form_model_spec[1]),
         )
     )
-    # Each entry carries its own cache key and cache flag, both fixed here. The
-    # request loop below used to rebuild `(marker.fn, marker.scope)` and re-read
-    # `marker.use_cache` per dependency per request for an answer that cannot
-    # change after compilation.
     resolvers: tuple[tuple[str, tuple[Any, str], bool, Resolver], ...] = tuple(
         (
             name,
@@ -2795,9 +2773,7 @@ def compile_binder(
         """
         errors: list[dict[str, Any]] | None = None
         if compiled_path_entries:
-            errors = _core.bind_path_into(
-                request.path_params, compiled_path_entries, kwargs
-            )
+            errors = _core.bind_path_into(request.path_params, compiled_path_entries, kwargs)
         else:
             for name, alias, annotation in path_specs:
                 try:
@@ -2845,9 +2821,7 @@ def compile_binder(
                                 )
                         except ValidationError as invalid:
                             errors = (
-                                invalid.errors
-                                if errors is None
-                                else [*errors, *invalid.errors]
+                                invalid.errors if errors is None else [*errors, *invalid.errors]
                             )
                             continue
                         kwargs[name] = converted
@@ -2919,7 +2893,6 @@ def compile_binder(
         _extract_scalars(request, kwargs)
         if needs_body:
             await _decode_body(request, kwargs)
-        # A `def` handler is called, not awaited; see `docs/guides/routing.md`.
         # The binder itself has to stay `async` here because binding a body is
         # asynchronous, so the convention is decided per call rather than
         # compiled away as it is in `compile_response_validator`.

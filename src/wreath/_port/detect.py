@@ -83,8 +83,10 @@ def scan_module(tree: ast.AST) -> ModuleSignals:
                 roots.add(node.module.split(".")[0])
         elif isinstance(node, ast.Call) and patch_line is None:
             func = node.func
-            name = func.attr if isinstance(func, ast.Attribute) else (
-                func.id if isinstance(func, ast.Name) else None
+            name = (
+                func.attr
+                if isinstance(func, ast.Attribute)
+                else (func.id if isinstance(func, ast.Name) else None)
             )
             if name in _PATCH_CALLS:
                 patch_line = node.lineno
@@ -146,7 +148,6 @@ class Detection:
             patch_sites=tuple(sorted(set(sites))),
         )
 
-    # -- questions the report and the CLI ask ---------------------------------
     @property
     def target_modules(self) -> int:
         return sum(n for root, n in self.frameworks.items() if root in TARGETS)

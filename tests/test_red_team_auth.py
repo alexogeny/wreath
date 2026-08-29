@@ -1,41 +1,3 @@
-"""Adversarial tests for the authentication and second-factor surface.
-
-Every test here was written as an *attack* and watched fail before the thing it
-attacks was fixed (a check that has nothing to check). Each attack sits beside a control that
-passes in both trees, so a suite that has simply broken everywhere cannot be
-mistaken for one that caught something.
-
-Five holes, in five different places:
-
-* **A half-wired second factor that fails open.** `user_router` refuses a login
-  it cannot complete when it was given no `second_factors=` at all. Given the
-  *wrong* store -- a second `SecondFactorStore` that is not the one
-  `second_factor_router` writes to -- it saw an account with no credentials and
-  signed the caller straight in. The same mistake, the opposite direction.
-* **A recovery code that is single-use unless you send it twice at once.** The
-  TOTP branch of `verify_second_factor` closes that race with the store's
-  conditional counter advance; the recovery branch removed the row without ever
-  asking whether it was the one that removed it.
-* **A compact JWS with padding glued on the end.** `base64.urlsafe_b64decode`
-  re-pads before decoding, so anything built on it verifies `<token>=` as
-  `<token>` -- an unbounded family of strings authenticating as one. The same
-  laxity raises `TypeError` out of `verify_jwt`, which is documented to return
-  None and never raise, when `aud` holds an unhashable member.
-* **An authentication backend that raises leaves through the front door.** On a
-  classifying routing table -- `bitset`, the default, and `decision` -- the
-  backend runs before the route is resolved and outside every error boundary,
-  so the exception escaped `__call__` with no response started and every global
-  `after` hook skipped. `trie` answered 500 for the same backend. On a
-  WebSocket the authorization step caught only `HTTPException`, so anything
-  else left the handshake neither accepted nor closed and the peer hanging.
-* **A shipped example that raises.** `identify()`'s runnable snippet, rendered
-  on `docs/reference/auth.md`, read `identity.subject`; the field is `id`.
-
-Run under `python -O` as well: `-O` deletes a test's own `assert`, so the
-JWT half of this file drives its subject in a subprocess that `raise`s, and
-`test_the_probes_still_have_something_to_check` is the guard on the guard.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -84,8 +46,6 @@ def _cookie(response: Any) -> str:
     return value.split(";", 1)[0] if value else ""
 
 
-# --- 1. the half-wired second factor -----------------------------------------
-#
 # AGENTS.md settles the direction: a door that refuses and names its
 # own misconfiguration beats one that opens quietly. `user_router` already does
 # that for `second_factors=None`. These drive the other half-wiring.
@@ -105,15 +65,11 @@ def _two_router_app(
     """
     app = Wreath()
     app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
-    app.include_router(
-        user_router(users, secret="u" * 32, second_factors=login_store, clock=clock)
-    )
+    app.include_router(user_router(users, secret="u" * 32, second_factors=login_store, clock=clock))
     with warnings.catch_warnings():
         # The router warns about `enrolments=None`; that is a different subject.
         warnings.simplefilter("ignore", UserWarning)
-        app.include_router(
-            second_factor_router(users, enrol_store, issuer="Wreath", clock=clock)
-        )
+        app.include_router(second_factor_router(users, enrol_store, issuer="Wreath", clock=clock))
 
     @app.get("/session")
     async def show(request: Any) -> dict[str, Any]:
@@ -146,14 +102,6 @@ async def _enrol_totp(client: Any, clock: _Clock, cookie: str) -> str:
 
 
 async def test_a_login_wired_to_the_wrong_factor_store_refuses_rather_than_admits() -> None:
-    """The attack: enrol a factor, then sign in with the password alone.
-
-    Two `SecondFactorStore`s, which is what a deployment gets by building one
-    inline for each router. The account demonstrably has a TOTP factor and this
-    login path cannot see it, which is the same knowable moment `second_factors=None`
-    is refused at -- so it must refuse here too, rather than issuing a session
-    that says the second factor was satisfied when nothing asked for one.
-    """
     users, clock = InMemoryUserStore(), _Clock()
     login_store, enrol_store = InMemorySecondFactorStore(), InMemorySecondFactorStore()
     app = _two_router_app(users, login_store, enrol_store, clock)
@@ -167,9 +115,7 @@ async def test_a_login_wired_to_the_wrong_factor_store_refuses_rather_than_admit
 
         assert signed_in.status == 500, signed_in.json()
         assert signed_in.json()["error"] == "second_factor_not_wired"
-        session = (
-            await client.get("/session", headers={"cookie": _cookie(signed_in)})
-        ).json()
+        session = (await client.get("/session", headers={"cookie": _cookie(signed_in)})).json()
         # And no session was written -- neither a principal nor a pending marker.
         assert "principal" not in session
         assert "pending_second_factor" not in session
@@ -193,18 +139,7 @@ class _SharedUserStore(InMemoryUserStore):
         self.store_id = store_id
 
 
-async def test_two_user_store_objects_over_one_table_do_not_defeat_the_wiring_check(
-) -> None:
-    """The identity keying, attacked where it is weakest.
-
-    `_mounted_second_factors(users)` filtered on `wiring.users is users`, so a
-    deployment that constructed its `UserStore` separately for each router
-    matched nothing at all: the login found no wiring to consult, decided the
-    account had no factor it could not check, and signed the caller in on a
-    password alone with 2FA enrolled. Every signal saying protected, nothing
-    being so -- the exact failure `second_factor_not_wired` exists to refuse,
-    reached by going around the test that finds it.
-    """
+async def test_two_user_store_objects_over_one_table_do_not_defeat_the_wiring_check() -> None:
     shared: dict[str, Any] = {"by_id": {}, "by_email": {}}
     login_users = _SharedUserStore(shared, store_id="users-table")
     enrol_users = _SharedUserStore(shared, store_id="users-table")
@@ -239,14 +174,6 @@ async def test_two_user_store_objects_over_one_table_do_not_defeat_the_wiring_ch
 
 
 async def test_two_unrelated_stores_are_still_not_consulted_for_each_other() -> None:
-    """The control the widened match must not cost.
-
-    Two applications in one process have different users, and
-    `InMemoryUserStore` numbers both from `"1"`. Matching on a user id -- or on
-    nothing at all -- would make one application's login refuse because the
-    *other* application's user 1 has a factor. Declared identities differ here,
-    so neither consults the other.
-    """
     clock = _Clock()
     first_users = _SharedUserStore({"by_id": {}, "by_email": {}}, store_id="tenant-a")
     second_users = _SharedUserStore({"by_id": {}, "by_email": {}}, store_id="tenant-b")
@@ -260,8 +187,7 @@ async def test_two_unrelated_stores_are_still_not_consulted_for_each_other() -> 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         app.include_router(
-            second_factor_router(second_users, second_factors, issuer="Wreath",
-                                 clock=clock)
+            second_factor_router(second_users, second_factors, issuer="Wreath", clock=clock)
         )
 
     async with TestClient(app) as client:
@@ -269,9 +195,12 @@ async def test_two_unrelated_stores_are_still_not_consulted_for_each_other() -> 
         user = await second_users.create("bob@example.test", hash_password(PASSWORD))
         secret = generate_totp_secret()
         await confirm_totp_enrolment(
-            second_factors, user.id, secret=secret,
+            second_factors,
+            user.id,
+            secret=secret,
             code=totp_code(secret, totp_counter(clock.now)),
-            label="phone", at=clock.now,
+            label="phone",
+            at=clock.now,
         )
         signed_in = await _login(client)
 
@@ -279,11 +208,6 @@ async def test_two_unrelated_stores_are_still_not_consulted_for_each_other() -> 
 
 
 async def test_the_same_store_in_both_routers_still_prompts_for_the_factor() -> None:
-    """Control: the correct wiring is unchanged, and must not start refusing.
-
-    Passes in both trees. A refusal that fires on a correctly wired application
-    is a lockout, not a fix.
-    """
     users, clock = InMemoryUserStore(), _Clock()
     factors = InMemorySecondFactorStore()
     app = _two_router_app(users, factors, factors, clock)
@@ -300,11 +224,6 @@ async def test_the_same_store_in_both_routers_still_prompts_for_the_factor() -> 
 
 
 async def test_a_user_with_no_factor_signs_in_normally_under_either_wiring() -> None:
-    """Control: the refusal is about *this account's* credentials, not the wiring.
-
-    Passes in both trees. Somebody who has enrolled nothing is unaffected by a
-    misconfiguration they are not using.
-    """
     users, clock = InMemoryUserStore(), _Clock()
     login_store, enrol_store = InMemorySecondFactorStore(), InMemorySecondFactorStore()
     app = _two_router_app(users, login_store, enrol_store, clock)
@@ -315,9 +234,6 @@ async def test_a_user_with_no_factor_signs_in_normally_under_either_wiring() -> 
 
         assert signed_in.status == 200
         assert signed_in.json()["email"] == "ann@example.test"
-
-
-# --- 2. a recovery code redeemed twice at once -------------------------------
 
 
 class _SuspendingStore(InMemorySecondFactorStore):
@@ -357,13 +273,6 @@ async def _enrolled_store() -> tuple[_SuspendingStore, bytes, list[str], float]:
 
 
 async def test_one_recovery_code_cannot_be_redeemed_by_two_requests_at_once() -> None:
-    """The attack: race the legitimate user with a code read over their shoulder.
-
-    Exactly what the TOTP counter exists to stop, against the credential that
-    has no counter. A phishing proxy that relays a recovery code and uses it at
-    the same moment gets a working second factor *and* leaves the victim's own
-    attempt succeeding, so nothing looks wrong to them.
-    """
     store, _secret, codes, at = await _enrolled_store()
 
     first, second = await asyncio.gather(
@@ -378,11 +287,6 @@ async def test_one_recovery_code_cannot_be_redeemed_by_two_requests_at_once() ->
 
 
 async def test_a_recovery_code_still_works_once_on_its_own() -> None:
-    """Control: single use means once, not never.
-
-    Passes in both trees -- so a refusal that simply broke every recovery code
-    would not be mistaken for the fix.
-    """
     store, _secret, codes, at = await _enrolled_store()
 
     assert await verify_second_factor(store, "user-1", codes[0], at=at + 30) is not None
@@ -391,12 +295,6 @@ async def test_a_recovery_code_still_works_once_on_its_own() -> None:
 
 
 async def test_the_race_harness_sees_the_totp_replay_being_refused() -> None:
-    """Control, and the guard on the guard: the harness can observe a race at all.
-
-    The TOTP branch already closes this with `SecondFactorStore.touch`. If this
-    test ever showed both halves succeeding, `_SuspendingStore` would have
-    stopped interleaving and the recovery attack above would be proving nothing.
-    """
     store, secret, _codes, at = await _enrolled_store()
     live = totp_code(secret, totp_counter(at + 30))
 
@@ -408,8 +306,6 @@ async def test_the_race_harness_sees_the_totp_replay_being_refused() -> None:
     assert [first is not None, second is not None].count(True) == 1
 
 
-# --- 3. a hostile token must not authenticate ---------------------------------
-#
 # Driven in a subprocess because these are import-time properties of a whole
 # application, not of an object a test can construct. The probe `raise`s rather
 # than asserting, so `python -O` cannot empty it.
@@ -518,14 +414,6 @@ def probes() -> dict[str, Any]:
 
 
 def test_the_probe_still_has_something_to_check(probes: dict[str, Any]) -> None:
-    """Guard on the guard, and the control the attacks below are measured against.
-
-    Every assertion after this one is that some hostile token is *refused*. A
-    probe that refused everything -- a broken key, an app that never started --
-    would satisfy all of them while examining nothing
-    (a check that has nothing to check). So: the parser resolved, and a well-formed token
-    authenticates, with and without an audience configured.
-    """
     if probes["native"] is not True:
         raise AssertionError("the probe did not resolve the jose parser")
     if probes["plain"] != 200:
@@ -537,14 +425,6 @@ def test_the_probe_still_has_something_to_check(probes: dict[str, Any]) -> None:
 def test_base64_padding_glued_to_a_token_does_not_authenticate(
     probes: dict[str, Any],
 ) -> None:
-    """The attack: `<token>=` is a second string that verifies as the token.
-
-    RFC 7515 writes compact-serialization segments as base64url *without*
-    padding, so the `=` must be refused. An implementation that re-padded before
-    decoding -- which `base64.urlsafe_b64decode` does -- would let an unbounded
-    family of strings authenticate as one token, quietly defeating any
-    deployment that blocklists a leaked token by its value.
-    """
     if probes["padded"] != 401:
         raise AssertionError(f"a padded token authenticated: {probes}")
 
@@ -552,26 +432,15 @@ def test_base64_padding_glued_to_a_token_does_not_authenticate(
 def test_a_nested_audience_is_a_refusal_not_a_server_error(
     probes: dict[str, Any],
 ) -> None:
-    """The attack: `aud: [["api"]]` takes the authentication path to a 500.
-
-    `verify_jwt` documents that it "Returns None (never raises) for every
-    authentication failure". A claim validator that builds `set(aud)` raises
-    `TypeError` on an unhashable member, and the raise leaves `verify_jwt`
-    altogether -- so a token that should have been refused becomes a server
-    error instead.
-    """
     if probes["nested_aud"] != 401:
         raise AssertionError(f"a nested aud answered {probes['nested_aud']}")
 
 
-# --- 4. an authentication backend that raises --------------------------------
-#
 # The third "the control holds on one supported wiring and not another" of the
 # day. On a classifying table (`bitset`, the default, and `decision`)
 # authentication runs early, before the route is resolved, and used to run
 # outside every error boundary the rest of the request has. On `trie`, and on
 # the lazy `identify()` path in every mode, the same backend answered 500.
-#
 # A backend is documented to refuse with None rather than raise, so a raising
 # one is misuse -- but escaping the application is not an acceptable response to
 # misuse, and it is reachable without any application mistake at all:
@@ -638,16 +507,9 @@ def _raising_backend_app(routing: str) -> tuple[Wreath, _Egress]:
 
 @pytest.mark.parametrize("routing", _ROUTING_MODES)
 async def test_a_backend_that_raises_on_a_protected_route_is_a_500(routing: str) -> None:
-    """The attack: make the backend raise and watch the app answer nothing.
-
-    Driven through the canonical policy router so its protected-route boundary
-    cannot turn a backend failure into a missing response.
-    """
     app, egress = _raising_backend_app(routing)
     async with TestClient(app) as client:
-        refused = await client.get(
-            "/vault", headers={"authorization": "Bearer boom"}
-        )
+        refused = await client.get("/vault", headers={"authorization": "Bearer boom"})
 
         assert refused.status == 500
         # And the egress the request was owed still ran.
@@ -658,11 +520,6 @@ async def test_a_backend_that_raises_on_a_protected_route_is_a_500(routing: str)
 async def test_a_backend_that_raises_on_a_public_identify_route_is_a_500(
     routing: str,
 ) -> None:
-    """Control: the lazy path was already correct and must stay so.
-
-    This control makes a general failure distinguishable from the protected-route
-    hole above.
-    """
     app, egress = _raising_backend_app(routing)
     async with TestClient(app) as client:
         refused = await client.get("/who", headers={"authorization": "Bearer boom"})
@@ -673,7 +530,6 @@ async def test_a_backend_that_raises_on_a_public_identify_route_is_a_500(
 
 @pytest.mark.parametrize("routing", _ROUTING_MODES)
 async def test_a_backend_that_refuses_still_answers_401(routing: str) -> None:
-    """Control: an ordinary refusal remains 401 rather than becoming a 500."""
     app, egress = _raising_backend_app(routing)
     async with TestClient(app) as client:
         refused = await client.get("/vault", headers={"authorization": "Bearer nope"})
@@ -683,13 +539,6 @@ async def test_a_backend_that_refuses_still_answers_401(routing: str) -> None:
 
 
 async def test_a_websocket_backend_that_raises_closes_rather_than_escaping() -> None:
-    """The same class on the third wiring: the handshake's authorization step.
-
-    Three lines above it, the WebSocket ingress hooks catch `Exception` and
-    close with 1008 because security ingress fails closed. The authorization
-    call beside them caught only `HTTPException`, so anything else escaped the
-    application with the handshake neither accepted nor closed.
-    """
     from wreath.auth import BearerTokenBackend
     from wreath.auth import authenticated as authenticated_decorator
 
@@ -708,9 +557,7 @@ async def test_a_websocket_backend_that_raises_closes_rather_than_escaping() -> 
         # unbounded `async with` here would take the suite with it.
         with pytest.raises(ConnectionError) as caught:
             async with asyncio.timeout(5):
-                async with client.websocket(
-                    "/feed", headers={"authorization": "Bearer boom"}
-                ):
+                async with client.websocket("/feed", headers={"authorization": "Bearer boom"}):
                     pass
 
     # 1008 is what the ingress hooks three lines above already close with.
@@ -718,11 +565,6 @@ async def test_a_websocket_backend_that_raises_closes_rather_than_escaping() -> 
 
 
 async def test_a_websocket_backend_that_refuses_still_closes_the_handshake() -> None:
-    """Control: an ordinary anonymous WebSocket is still refused, and promptly.
-
-    Passes in both trees. It is also the guard on the test above: if the client
-    stopped distinguishing a close from a hang, this would stop passing too.
-    """
     from wreath.auth import BearerTokenBackend
     from wreath.auth import authenticated as authenticated_decorator
 
@@ -737,15 +579,10 @@ async def test_a_websocket_backend_that_refuses_still_closes_the_handshake() -> 
     async with TestClient(app) as client:
         with pytest.raises(ConnectionError) as caught:
             async with asyncio.timeout(5):
-                async with client.websocket(
-                    "/feed", headers={"authorization": "Bearer nope"}
-                ):
+                async with client.websocket("/feed", headers={"authorization": "Bearer nope"}):
                     pass
 
     assert "1008" in str(caught.value)
-
-
-# --- 5. the shipped `identify()` example ------------------------------------
 
 
 def _fenced_python(docstring: str | None) -> str:
@@ -769,19 +606,6 @@ def _fenced_python(docstring: str | None) -> str:
 
 
 async def test_the_identify_docstring_example_runs_as_written() -> None:
-    """The example in `identify()`'s own docstring is compiled and driven.
-
-    It is rendered on `docs/reference/auth.md` as runnable, and it read
-    `identity.subject`. `Identity` carries `id`, `type`, `roles`, `permissions`
-    and `claims`, and nothing called `subject` -- so a reader who copied it got
-    an `AttributeError`, a 500 on the one route whose whole job is to answer
-    "who is this, if anyone?".
-
-    The example is **read out of `identify.__doc__` and executed**, not
-    transcribed into this file. A transcription would go green the moment it was
-    written and stay green however the docstring drifted, which is the shape
-    AGENTS.md's has-nothing-to-check rule is about: it would be testing this test.
-    """
     from wreath.auth import BearerTokenBackend, Identity, identify
     from wreath.request import Request
 

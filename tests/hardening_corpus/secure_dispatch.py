@@ -1,10 +1,3 @@
-"""a03, a16 and a17 written correctly. Nothing here may produce a finding.
-
-The dispatch table is a mapping this module owns, so an unknown action is a
-`KeyError` rather than an import. The update reads named fields off a bound
-model instead of walking whatever arrived. The allow-list is compared on
-`casefold`, and stored casefolded, so the two sides agree by construction.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass

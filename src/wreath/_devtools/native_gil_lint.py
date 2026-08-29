@@ -61,9 +61,7 @@ RULES: dict[str, Rule] = {
 # domain is the one Python allocator family permitted without an attached
 # thread.  A narrow API allowlist previously missed PyMem_Malloc and macros such
 # as PyBytes_AS_STRING, allowing unsafe released-region code to pass silently.
-PYTHON_API = re.compile(
-    r"\b_?Py(?!GILState_)(?!Mem_Raw)[A-Za-z_]\w*\s*\("
-)
+PYTHON_API = re.compile(r"\b_?Py(?!GILState_)(?!Mem_Raw)[A-Za-z_]\w*\s*\(")
 # The leading lookbehind excludes `x->write(...)` and `x.read(...)`. Those are
 # calls through a struct member -- the metal transport's `capi->write`, a
 # protocol's `.read` -- and a POSIX syscall is never spelled that way, so `\b`

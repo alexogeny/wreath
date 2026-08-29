@@ -84,9 +84,7 @@ def retention_passes(
     from .execute import primary_key
 
     built: list[tuple[Retention, Any]] = []
-    for model in sorted(
-        registry.retentions, key=lambda item: getattr(item, "__name__", "")
-    ):
+    for model in sorted(registry.retentions, key=lambda item: getattr(item, "__name__", "")):
         policy = registry.retentions[model]
         # No "has this a primary key?" guard: `wreath.orm.Model` refuses a
         # mapped model without one at class creation, so a second check here
@@ -131,9 +129,7 @@ def describe_retention(
     ):
         name = getattr(model, "__name__", str(model))
         reason = f" -- {policy.reason}" if policy.reason else ""
-        lines.append(
-            f"{name}: rows deleted {_days(policy.after)} after {policy.on}{reason}"
-        )
+        lines.append(f"{name}: rows deleted {_days(policy.after)} after {policy.on}{reason}")
     for model, item in sorted(
         registry.classifications.items(), key=lambda pair: getattr(pair[0], "__name__", "")
     ):
@@ -151,9 +147,7 @@ def describe_retention(
             "restore can replay the erasure"
         )
     else:
-        lines.append(
-            f"erasure records: deleted {_days(erasure_record_retain)} after the erasure"
-        )
+        lines.append(f"erasure records: deleted {_days(erasure_record_retain)} after the erasure")
     return tuple(lines)
 
 

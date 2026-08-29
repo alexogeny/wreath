@@ -1,15 +1,3 @@
-"""Query budgets outside the request: job attempts, workflow steps, pass shifts.
-
-The N+1 guard was request-shaped. Everything here is about the scopes that do
-the heaviest ORM work and had no ledger at all -- a durable job, a workflow
-step, and a chunked pass shift.
-
-The ORM seam is `orm.session.Session._count_read`, which reads the
-`query_ledger` ContextVar and calls `ledger.record("module.QualName")`. These
-tests stand in for it by making that same call, which is the whole of what the
-seam does; the live-ORM path is covered by the existing doctor suite.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -42,9 +30,6 @@ def _record(times: int, model: str = MODEL) -> None:
         return
     for _ in range(times):
         ledger.record(model)
-
-
-# --- stage 1: the general scope ----------------------------------------------
 
 
 def test_watching_binds_a_ledger_and_resets_it(unarmed):
@@ -93,13 +78,6 @@ def test_nested_scopes_restore_the_outer_ledger(unarmed):
 
 
 def test_guard_binding_survives_an_unreferenced_request(unarmed):
-    """The guard must bind with a token, not a suspended context manager.
-
-    A `@contextmanager` held on `request.state` is finalized when the request
-    object becomes unreachable, which runs its `finally` and unbinds the ledger
-    mid-request -- so the guard would silently stop counting for any caller
-    that did not keep the request in a local. A `Token` has no finalizer.
-    """
     import gc
 
     from wreath.doctor import NPlusOneGuard
@@ -146,9 +124,6 @@ class _State:
         return self._values.get(name, default)
 
 
-# --- stage 1: the finding carries an origin ----------------------------------
-
-
 def test_finding_carries_origin_and_keeps_request_id():
     origin = Origin(kind="job", label="ingest_card", identifier="41")
     ledger = QueryLedger(limit=2, origin=origin)
@@ -170,8 +145,6 @@ def test_request_findings_still_describe_a_route():
 
 
 def test_a_trace_scan_threshold_below_one_is_refused():
-    """Pre-existing refusal that no test reached: a threshold of zero would
-    report every trace as a finding."""
     from wreath._nplusone import find_n_plus_one
 
     with pytest.raises(ValueError, match="threshold must be >= 1"):
@@ -179,8 +152,6 @@ def test_a_trace_scan_threshold_below_one_is_refused():
 
 
 def test_a_scope_with_no_identifier_describes_without_a_hash():
-    """A pass shift has a name and no id -- `shift recode_species#` would be
-    a dangling reference to nothing."""
     assert Origin(kind="shift", label="recode_species").explain() == "shift recode_species"
     assert Origin(kind="job", label="ingest", identifier="41").explain() == "job ingest#41"
 
@@ -197,8 +168,6 @@ def test_a_finding_says_how_many_other_models_it_found():
 
 
 def test_a_finding_built_without_an_origin_still_names_its_route():
-    """The older two-argument shape. Anything already constructing a `Finding`
-    keeps working, and keeps reading the same way."""
     from wreath._nplusone import Finding, Repetition
 
     finding = Finding(route="GET /llamas", repetitions=(Repetition("Trek", 12),), queries=13)
@@ -206,7 +175,6 @@ def test_a_finding_built_without_an_origin_still_names_its_route():
 
 
 def test_trace_scan_output_is_unchanged_and_gains_an_origin():
-    """`find_n_plus_one` is the older producer; its shape must not move."""
     from wreath._nplusone import find_n_plus_one
 
     traces = [
@@ -241,11 +209,6 @@ def test_job_finding_describes_the_task_not_a_route():
     assert "job" in described
 
 
-# --- stage 2/3: the job attempt scope ----------------------------------------
-
-
-
-
 class _FakeDatabase:
     def __init__(self):
         self.connection = SilentConnection()
@@ -259,13 +222,18 @@ class _FakeDatabase:
 
 def _claimed(runner, task, attempts=0):
     return _Claimed(
-        id=41, task=task, args=[], tenant="", attempts=attempts,
-        max_attempts=5, fence=1, key=None,
+        id=41,
+        task=task,
+        args=[],
+        tenant="",
+        attempts=attempts,
+        max_attempts=5,
+        fence=1,
+        key=None,
     )
 
 
 def test_job_without_budget_and_without_a_guard_binds_nothing(unarmed):
-    """The cost of this plan must be zero for an app that never asked."""
     runner = JobRunner(_FakeDatabase(), name="work")
     seen: list[object] = []
 
@@ -296,12 +264,6 @@ def test_job_with_budget_binds_a_ledger_naming_the_attempt(unarmed):
 
 
 def test_job_over_budget_raises_inside_the_query(unarmed):
-    """The traceback must name the loop, not the bookkeeping.
-
-    Asserting the *frame* rather than the exception type is the whole point of
-    raising from the seam: an error reported after the attempt would say a
-    budget was crossed without saying by which line.
-    """
     import traceback
 
     frames: list[str] = []
@@ -311,11 +273,9 @@ def test_job_over_budget_raises_inside_the_query(unarmed):
     async def greedy(ctx):
         try:
             for _ in range(50):
-                _record(1)          # <- the loop the traceback must name
+                _record(1)  # <- the loop the traceback must name
         except NPlusOneDetected as error:
-            frames.extend(
-                frame.name for frame in traceback.extract_tb(error.__traceback__)
-            )
+            frames.extend(frame.name for frame in traceback.extract_tb(error.__traceback__))
             raise
 
     asyncio.run(runner._run(_claimed(runner, "greedy")))
@@ -327,7 +287,6 @@ def test_job_over_budget_raises_inside_the_query(unarmed):
 
 
 def test_job_without_budget_observes_when_a_guard_exists(unarmed):
-    """A guard in the process means somebody asked to be told; still never raises."""
     _nplusone.watch()
     runner = JobRunner(_FakeDatabase(), name="work")
     seen: list[object] = []
@@ -357,7 +316,6 @@ def test_a_job_observer_does_not_count_an_empty_ledger():
 
 
 def test_each_attempt_gets_a_fresh_ledger(unarmed):
-    """Counts must not accumulate across retries -- an attempt is one execution."""
     runner = JobRunner(_FakeDatabase(), name="work")
     counts: list[int] = []
 
@@ -380,9 +338,6 @@ def test_ledger_is_reset_when_the_handler_raises(unarmed):
 
     asyncio.run(runner._run(_claimed(runner, "boom")))
     assert _nplusone.query_ledger.get(None) is None
-
-
-# --- stage 4: the report groups by origin ------------------------------------
 
 
 def _finding(kind, label, identifier="", count=12, request_id=0):
@@ -435,12 +390,7 @@ def test_report_does_not_drop_a_scope_it_does_not_know(capsys):
     assert "saga(s) queried" in out
 
 
-# --- stage 2/3: pass shifts --------------------------------------------------
-
-
 def test_pass_shift_binds_a_ledger_naming_the_pass(unarmed):
-    """A backfill with an N+1 per chunk is the disaster this plan exists for:
-    it passes every test on a table that fits in one chunk."""
     from wreath._passes import driver
 
     seen: list[object] = []
@@ -506,8 +456,6 @@ def test_pass_shift_without_budget_binds_nothing(unarmed):
 
 
 def test_pass_query_budget_must_be_positive():
-    """Refused at declaration, before the source is even looked at -- the
-    traceback should name the line that wrote the budget."""
     from wreath.passes import ChunkedPass
 
     with pytest.raises(ValueError, match="query_budget"):
@@ -519,9 +467,6 @@ def test_pass_query_budget_must_be_positive():
             work=None,
             query_budget=0,
         )
-
-
-# --- stage 2/3: workflow steps, including compensations ----------------------
 
 
 def _workflow(name="checkout"):
@@ -564,8 +509,6 @@ def test_workflow_step_over_budget_fails_the_step(unarmed):
 
 
 def test_compensation_is_its_own_scope(unarmed):
-    """Undo paths run only when something already went wrong -- the least
-    exercised code in a saga, and so the most worth watching."""
     flow = _workflow()
     seen: list[object] = []
 

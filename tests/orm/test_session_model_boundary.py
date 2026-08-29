@@ -1,5 +1,3 @@
-"""Session write scheduling accepts ORM model instances only."""
-
 from __future__ import annotations
 
 import pytest

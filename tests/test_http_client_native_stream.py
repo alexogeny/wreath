@@ -1,11 +1,3 @@
-"""The outbound HTTP client as a stream-fusion implementer.
-
-On a metal loop the client's plaintext connections must fuse: wire bytes land
-in the native stream protocol's C buffer with no Python calling convention per
-read, and query dispatch leaves through the transport C API. Framing semantics
-(content-length, chunked with trailers, close-delimited) must be identical to
-the asyncio-streams path they replace.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -80,9 +72,11 @@ def test_client_ingress_fuses_on_metal_loop() -> None:
     transports: list = []
 
     async def exercise():
-        server, port = await _serve([
-            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
-        ])
+        server, port = await _serve(
+            [
+                b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+            ]
+        )
         try:
             async with _client(port) as client:
                 response = await client.get("/")
@@ -95,18 +89,13 @@ def test_client_ingress_fuses_on_metal_loop() -> None:
     assert response.status == 200
     assert response.body == b"hello"
 
-    fused = [
-        t for t in transports
-        if getattr(t, "_fused_stream", None) == "wreath._native._client"
-    ]
+    fused = [t for t in transports if getattr(t, "_fused_stream", None) == "wreath._native._client"]
     assert fused, [getattr(t, "_fused_stream", None) for t in transports]
     assert all(t._fused_http1 is False for t in fused)
 
 
 @requires_metal
 def test_client_framing_parity_on_metal_loop() -> None:
-    """Chunked with trailers, content-length, and close-delimited bodies all
-    decode identically through the fused reader."""
     loop = _metal_loop_or_skip()
     transports: list = []
 
@@ -132,15 +121,11 @@ def test_client_framing_parity_on_metal_loop() -> None:
 
     bodies = _run(loop, exercise(), transports)
     assert bodies == [b"hello world", b"hello world", b"hello world"]
-    assert any(
-        getattr(t, "_fused_stream", None) == "wreath._native._client"
-        for t in transports
-    )
+    assert any(getattr(t, "_fused_stream", None) == "wreath._native._client" for t in transports)
 
 
 @requires_metal
 def test_client_large_body_spans_many_reads_on_metal_loop() -> None:
-    """A body far larger than one 16 KiB provided buffer arrives intact."""
     loop = _metal_loop_or_skip()
     transports: list = []
     body = bytes(range(256)) * 1024  # 256 KiB, byte-position sensitive
@@ -163,10 +148,7 @@ def test_client_large_body_spans_many_reads_on_metal_loop() -> None:
 
     received = _run(loop, exercise(), transports)
     assert received == body
-    assert any(
-        getattr(t, "_fused_stream", None) == "wreath._native._client"
-        for t in transports
-    )
+    assert any(getattr(t, "_fused_stream", None) == "wreath._native._client" for t in transports)
 
 
 @requires_metal
@@ -202,9 +184,7 @@ def test_reused_request_is_one_native_transaction_with_a_compiled_plan() -> None
             server.close()
             await server.wait_closed()
 
-    first, second, snapshot, plan_count, requests = _run(
-        loop, exercise(), transports
-    )
+    first, second, snapshot, plan_count, requests = _run(loop, exercise(), transports)
     assert (first.body, second.body) == (b"first", b"second")
     assert snapshot.requests == 2
     assert snapshot.reused == 1
@@ -243,9 +223,7 @@ def test_native_transaction_enforces_the_total_deadline() -> None:
         await client.start()
         try:
             assert (await client.get("/slow")).body == b"ok"
-            with pytest.raises(
-                RequestTimeout, match="outbound request exceeded total timeout"
-            ):
+            with pytest.raises(RequestTimeout, match="outbound request exceeded total timeout"):
                 await client.get("/slow")
             await second_arrived.wait()
             return client.snapshot()

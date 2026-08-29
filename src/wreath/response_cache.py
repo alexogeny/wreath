@@ -105,10 +105,7 @@ def cache_key_for(names: Iterable[str]) -> Callable[[Any], str]:
     declared = tuple(names)
     for index, name in enumerate(declared):
         if not isinstance(name, str):
-            raise TypeError(
-                f"cache_key_for names[{index}] must be str, "
-                f"got {type(name).__name__}"
-            )
+            raise TypeError(f"cache_key_for names[{index}] must be str, got {type(name).__name__}")
 
     def key(request: Any) -> str:
         base = f"{request.method} {request.path}"
@@ -406,7 +403,6 @@ def _apply_tags(result: Any, value: bytes) -> None:
         # Appended rather than replaced: a handler that set its own
         # `Cache-Tag` has said something this decorator has no basis to
         # overrule, and both keys purging the response is the correct union.
-        #
         # Skipped when this exact pair is already present, which makes this
         # idempotent -- and it has to be. `Response.__call__` recomputes
         # nothing, so returning one module-level response object from a handler
@@ -471,10 +467,16 @@ def cached(
     `.invalidate(request=None)` — drop one key, or clear all when omitted.
     """
     if fn is not None:
-        return cached(ttl=ttl, max_entries=max_entries, key=key,
-                      methods=methods, store=store,
-                      invalidate_on=invalidate_on, query_params=query_params,
-                      tags=tags)(fn)
+        return cached(
+            ttl=ttl,
+            max_entries=max_entries,
+            key=key,
+            methods=methods,
+            store=store,
+            invalidate_on=invalidate_on,
+            query_params=query_params,
+            tags=tags,
+        )(fn)
 
     if query_params is not None:
         if key is not default_cache_key:
@@ -493,8 +495,9 @@ def cached(
     public_key = key is default_cache_key or getattr(key, "_wreath_public", False)
 
     window = None if ttl is None else Duration.of(ttl).total_seconds()
-    the_store: BoundedCache = store if store is not None else BoundedCache(
-        max_entries=max_entries, ttl=window)
+    the_store: BoundedCache = (
+        store if store is not None else BoundedCache(max_entries=max_entries, ttl=window)
+    )
 
     def decorate(handler: Callable[..., Any]) -> Callable[..., Any]:
         # One in-flight computation per key. Without it, every request that
@@ -562,13 +565,13 @@ def cached(
                 the_store.delete(key(request))
 
         if watched:
+
             def _on_write(written: frozenset[str]) -> None:
                 # Model-grained, not row-grained: dropping a model's responses
                 # when that model is written costs one set intersection per
                 # write and nothing per read. Row-grained would need a read set
                 # recorded per request -- real work on the hot path to save a
                 # few misses on the cold one.
-                #
                 # Clears the *whole* store, including entries other handlers
                 # sharing it put there. That coupling is the documented price of
                 # sharing a store -- one budget and one invalidation surface --
@@ -587,8 +590,8 @@ def cached(
             subscribe_writes(_on_write, owner=wrapper)
             wrapper.invalidated_by = watched  # ty: ignore[unresolved-attribute]
 
-        wrapper.cache_store = the_store       # ty: ignore[unresolved-attribute]
-        wrapper.invalidate = invalidate       # ty: ignore[unresolved-attribute]
+        wrapper.cache_store = the_store  # ty: ignore[unresolved-attribute]
+        wrapper.invalidate = invalidate  # ty: ignore[unresolved-attribute]
         return wrapper
 
     return decorate

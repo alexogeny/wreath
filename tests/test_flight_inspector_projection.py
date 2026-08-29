@@ -1,10 +1,3 @@
-"""Stage 4c -- the Inspector's projection-backed commands.
-
-TIMELINE, RECENT_FAILURES, and ROUTE_DISTRIBUTIONS read a projector snapshot, so
-these serve an Inspector with a projector attached (fed from a real recorder) and
-check the wire payloads, capability feature-testing, and the not-enabled path.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -51,12 +44,21 @@ def _fed_projector() -> Projector:
     rec = _flight.Recorder(_flight.MODE_PULSE, ring_records=256, active_requests=32)
     for i in range(3):
         rec.record(
-            start_ns=0, end_ns=(i + 1) * 1000, protocol=int(Protocol.HTTP1),
-            route_id=7, status=200, connection_id=i,
+            start_ns=0,
+            end_ns=(i + 1) * 1000,
+            protocol=int(Protocol.HTTP1),
+            route_id=7,
+            status=200,
+            connection_id=i,
         )
     rec.record(
-        start_ns=0, end_ns=9000, protocol=int(Protocol.HTTP1), route_id=9,
-        status=500, terminal=int(TerminalStatus.ERROR), error_class=3,
+        start_ns=0,
+        end_ns=9000,
+        protocol=int(Protocol.HTTP1),
+        route_id=9,
+        status=500,
+        terminal=int(TerminalStatus.ERROR),
+        error_class=3,
     )
     proj = Projector(rec)
     for _ in range(3):
@@ -67,9 +69,7 @@ def _fed_projector() -> Projector:
 @pytest.mark.asyncio
 async def test_capabilities_include_projection_only_with_projector(tmp_path) -> None:
     rec = _flight.Recorder(_flight.MODE_PULSE)
-    without = await serve_inspector(
-        rec, _app(), InspectorConfig(path=str(tmp_path / "a.sock"))
-    )
+    without = await serve_inspector(rec, _app(), InspectorConfig(path=str(tmp_path / "a.sock")))
     try:
         async with InspectorClient(without.path) as client:
             caps = (await client.hello())["capabilities"]
@@ -79,7 +79,9 @@ async def test_capabilities_include_projection_only_with_projector(tmp_path) -> 
         await without.close()
 
     with_proj = await serve_inspector(
-        rec, _app(), InspectorConfig(path=str(tmp_path / "b.sock")),
+        rec,
+        _app(),
+        InspectorConfig(path=str(tmp_path / "b.sock")),
         projector=_fed_projector(),
     )
     try:
@@ -94,7 +96,9 @@ async def test_capabilities_include_projection_only_with_projector(tmp_path) -> 
 async def test_timeline_lists_recent_traces_newest_first(tmp_path) -> None:
     proj = _fed_projector()
     server = await serve_inspector(
-        proj._recorder, _app(), InspectorConfig(path=str(tmp_path / "wfi.sock")),
+        proj._recorder,
+        _app(),
+        InspectorConfig(path=str(tmp_path / "wfi.sock")),
         projector=proj,
     )
     try:
@@ -135,7 +139,9 @@ def test_trace_payload_names_ai_scraping_refusals() -> None:
 async def test_recent_failures_only_returns_failures(tmp_path) -> None:
     proj = _fed_projector()
     server = await serve_inspector(
-        proj._recorder, _app(), InspectorConfig(path=str(tmp_path / "wfi.sock")),
+        proj._recorder,
+        _app(),
+        InspectorConfig(path=str(tmp_path / "wfi.sock")),
         projector=proj,
     )
     try:
@@ -155,7 +161,9 @@ async def test_recent_failures_only_returns_failures(tmp_path) -> None:
 async def test_route_distributions_aggregate_per_route(tmp_path) -> None:
     proj = _fed_projector()
     server = await serve_inspector(
-        proj._recorder, _app(), InspectorConfig(path=str(tmp_path / "wfi.sock")),
+        proj._recorder,
+        _app(),
+        InspectorConfig(path=str(tmp_path / "wfi.sock")),
         projector=proj,
     )
     try:
@@ -175,7 +183,8 @@ async def test_route_distributions_aggregate_per_route(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_projection_commands_error_without_projector(tmp_path) -> None:
     server = await serve_inspector(
-        _flight.Recorder(_flight.MODE_PULSE), _app(),
+        _flight.Recorder(_flight.MODE_PULSE),
+        _app(),
         InspectorConfig(path=str(tmp_path / "wfi.sock")),
     )
     try:
@@ -193,9 +202,7 @@ def test_cli_renders_projection_topics(tmp_path, capsys) -> None:
     thread = threading.Thread(target=loop.run_forever, daemon=True)
     thread.start()
     server = asyncio.run_coroutine_threadsafe(
-        serve_inspector(
-            proj._recorder, _app(), InspectorConfig(path=path), projector=proj
-        ),
+        serve_inspector(proj._recorder, _app(), InspectorConfig(path=path), projector=proj),
         loop,
     ).result(5)
     try:
@@ -212,9 +219,19 @@ def test_cli_renders_projection_topics(tmp_path, capsys) -> None:
         assert cli_main(["inspect", path, "distributions"]) == 0
         assert "route distributions" in capsys.readouterr().out
 
-        assert cli_main([
-            "inspect", path, "metadata", "--table", "components", "--json",
-        ]) == 0
+        assert (
+            cli_main(
+                [
+                    "inspect",
+                    path,
+                    "metadata",
+                    "--table",
+                    "components",
+                    "--json",
+                ]
+            )
+            == 0
+        )
         metadata = json.loads(capsys.readouterr().out)
         assert metadata["data"]["table"] == "components"
     finally:

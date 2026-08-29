@@ -1,4 +1,3 @@
-"""Task progress: registry, reporter, status endpoint, and streaming."""
 from __future__ import annotations
 
 import asyncio
@@ -51,7 +50,7 @@ async def test_stream_yields_updates_until_terminal() -> None:
     states = [p.state async for p in reg.stream("job", interval=0.005)]
     await task
     assert states[0] == "running"
-    assert states[-1] == "done"        # stream ended on the terminal state
+    assert states[-1] == "done"  # stream ended on the terminal state
 
 
 async def test_status_response_200_and_404() -> None:
@@ -86,20 +85,11 @@ async def test_push_progress_sends_json_frames() -> None:
     assert json.loads(ws.frames[-1])["state"] == "done"
 
 
-# --- why a stream ended (design 22 item 11) ---------------------------------
-
-
 async def _events(registry, task_id, **kw):
     return [p async for p in registry.stream(task_id, interval=0.01, **kw)]
 
 
 async def test_an_expired_entry_closes_the_stream_with_a_reason():
-    """A long import must not end by appearing to still be running.
-
-    `stream` used to just return when the entry aged out, so the last thing a
-    client saw was `state: running` at whatever percent it had reached -- and a
-    silent close is indistinguishable from the connection dropping.
-    """
     registry = ProgressRegistry(ttl=0.05)
     registry.report("t", 40, "importing")
 
@@ -132,7 +122,6 @@ async def test_a_spent_watch_budget_says_reconnect_rather_than_finished():
 
 
 async def test_a_finished_task_still_ends_with_its_own_terminal_event():
-    """The control: the ending states must not displace done/failed."""
     registry = ProgressRegistry()
     registry.report("t", 100, "finished", state="done")
 

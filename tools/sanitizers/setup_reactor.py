@@ -24,8 +24,7 @@ setup(
             "wreath._native._reactor",
             sources=[
                 str(ROOT / "src/wreath/_native" / name)
-                for name in ("_reactormodule.c", "reactor_wheel.c",
-                             "reactor_tls.c")
+                for name in ("_reactormodule.c", "reactor_wheel.c", "reactor_tls.c")
             ],
             # OpenSSL, for the native TLS transport. The session is C-owned and
             # freed on transport teardown, which is exactly the lifetime ASan

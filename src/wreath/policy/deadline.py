@@ -54,10 +54,15 @@ class DeadlinePolicy:
         from .base import PolicyContract
 
         return PolicyContract(
-            responses=((504, ResponseSpec(
-                description="The request handler exceeded its configured deadline.",
-                media_type="application/problem+json",
-            )),),
+            responses=(
+                (
+                    504,
+                    ResponseSpec(
+                        description="The request handler exceeded its configured deadline.",
+                        media_type="application/problem+json",
+                    ),
+                ),
+            ),
         )
 
 

@@ -31,7 +31,6 @@ from wreath.policy import CompressionPolicy
 
 
 def test_wreath_imports_without_the_optional_cpython_zstd_module() -> None:
-    """Regression for the Linux 0.3.0 wheel smoke-test environment."""
     script = """
 import sys
 sys.modules['_zstd'] = None
@@ -119,9 +118,7 @@ def test_prepared_gzip_fragment_is_standard_and_falls_back_on_mismatch() -> None
     prepared_document = b"item=41\n" + stable
     current_document = b"item=42\n" + stable
     policy = CompressionPolicy(gzip_level=5)
-    policy._configure_gzip_fragment(
-        "html", prepared_document, prefix_bytes=8, suffix_bytes=0
-    )
+    policy._configure_gzip_fragment("html", prepared_document, prefix_bytes=8, suffix_bytes=0)
 
     fragmented = _gzip_fragment_compress_with(
         policy._gzip_workspace,
@@ -157,9 +154,7 @@ def test_dcz_framing_hash_and_dictionary_round_trip() -> None:
 
     assert encoded[:8] == b"\x5e\x2a\x4d\x18\x20\x00\x00\x00"
     assert encoded[8:40] == prepared[1]
-    assert _dcz_decompress(
-        encoded, dictionary, max_output_bytes=len(payload)
-    ) == payload
+    assert _dcz_decompress(encoded, dictionary, max_output_bytes=len(payload)) == payload
     with pytest.raises(ValueError, match="this dictionary"):
         _dcz_decompress(encoded, dictionary + b"!", max_output_bytes=len(payload))
 
@@ -233,14 +228,6 @@ def test_zstd_refuses_level_outside_libzstd_range(level: int) -> None:
 
 
 def test_zstd_second_finish_refuses_rather_than_emitting_an_empty_frame() -> None:
-    """The whole reason `ZstdCompressor` exists rather than the stdlib object.
-
-    `zstd.ZstdCompressor.flush(FLUSH_FRAME)` does not raise on a finished
-    encoder -- it emits a second, empty, *valid* frame. Nothing downstream
-    complains, so the bug surfaces as a `Content-Length` too long by exactly
-    those bytes. Assert the stdlib behaviour too, so this test explains itself if
-    CPython ever changes it.
-    """
     raw = zstd.ZstdCompressor(level=3)
     raw.compress(b"payload")
     raw.flush(zstd.ZstdCompressor.FLUSH_FRAME)
@@ -278,8 +265,6 @@ def test_zstd_streaming_matches_whole_buffer_output() -> None:
     assert zstd.decompress(zstd_compress(payload, ZSTD_DEFAULT_LEVEL)) == payload
 
 
-# --- the bounded decoder -----------------------------------------------------
-#
 # The only entry point in this module that *decodes*, and so the only one with
 # an adversary on the other end: a gzip member's input length says nothing about
 # its output length.
@@ -295,12 +280,6 @@ def test_an_empty_member_round_trips() -> None:
 
 
 def test_a_member_of_exactly_the_limit_is_accepted() -> None:
-    """The off-by-one that would refuse what the caller said was allowed.
-
-    Asking zlib for exactly `max_output_bytes` can leave the member's trailer in
-    `unconsumed_tail`, which reads as "there is more" for a payload that is
-    exactly the size permitted.
-    """
     payload = b"a" * 1024
     assert gzip_decompress(gzip_compress(payload), max_output_bytes=1024) == payload
 
@@ -312,7 +291,6 @@ def test_a_member_one_byte_past_the_limit_is_refused() -> None:
 
 
 def test_a_bomb_is_refused_on_its_decoded_size_not_its_wire_size() -> None:
-    """Two kilobytes in, two megabytes out. Only the output bound catches it."""
     bomb = gzip_compress(b"\x00" * 2_000_000)
     assert len(bomb) < 8192
     with pytest.raises(ValueError, match="expands past"):
@@ -320,12 +298,6 @@ def test_a_bomb_is_refused_on_its_decoded_size_not_its_wire_size() -> None:
 
 
 def test_a_limit_of_zero_is_refused_because_zlib_reads_it_as_unbounded() -> None:
-    """The trap this keyword exists to close, asserted rather than commented.
-
-    `zlib`'s `max_length=0` means *no limit*, so a caller that computed a
-    ceiling of zero would get the exact opposite of the guarantee. Refusing is
-    the only answer that cannot be silently wrong.
-    """
     with pytest.raises(ValueError, match="must be positive"):
         gzip_decompress(gzip_compress(b"anything"), max_output_bytes=0)
 
@@ -337,13 +309,10 @@ def test_a_truncated_member_is_refused_rather_than_returning_a_prefix() -> None:
 
 
 def test_bytes_after_the_member_are_refused() -> None:
-    """A second member, or a smuggled tail, is not silently dropped."""
     with pytest.raises(ValueError, match="trailing bytes"):
         gzip_decompress(gzip_compress(b"abc") + b"junk", max_output_bytes=1 << 20)
 
 
 def test_something_that_is_not_gzip_at_all_raises_value_error() -> None:
-    """`zlib.error` is not a `ValueError`, and a caller of this facade should
-    not have to import zlib to catch what it raises."""
     with pytest.raises(ValueError, match="not a readable gzip member"):
         gzip_decompress(b"nowhere near a gzip member", max_output_bytes=1 << 20)

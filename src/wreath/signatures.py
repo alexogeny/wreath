@@ -204,10 +204,7 @@ class SignatureError(Exception):
     """
 
 
-# --------------------------------------------------------------------------
 # Structured fields -- the bounded subset RFC 9421 needs (RFC 8941)
-# --------------------------------------------------------------------------
-#
 # Not a general RFC 8941 implementation, and deliberately not: a general one is
 # a library, and the two headers here need a dictionary whose values are an
 # inner list of strings with parameters, and a dictionary whose values are byte
@@ -262,9 +259,8 @@ def _serialize_component(name: str, params: Mapping[str, Any]) -> str:
     return _serialize_string(name) + _serialize_params(params)
 
 
-# --------------------------------------------------------------------------
 # The signature base -- written once, called by both directions
-# --------------------------------------------------------------------------
+
 
 @dataclass(frozen=True, slots=True)
 class RequestMessage:
@@ -315,17 +311,14 @@ def _derived(name: str, params: Mapping[str, Any], message: RequestMessage) -> s
         return message.path + ("?" + query if query else "")
     if name == "@target-uri":
         query = message.query.decode("latin-1")
-        return (
-            f"{message.scheme.lower()}://{message.authority}{message.path}"
-            + ("?" + query if query else "")
+        return f"{message.scheme.lower()}://{message.authority}{message.path}" + (
+            "?" + query if query else ""
         )
     if name == "@query-param":
         wanted = params.get("name")
         if not isinstance(wanted, str):
             raise SignatureError("@query-param requires a name parameter")
-        pairs = parse_qsl(
-            message.query.decode("latin-1"), keep_blank_values=True
-        )
+        pairs = parse_qsl(message.query.decode("latin-1"), keep_blank_values=True)
         found = [value for key, value in pairs if key == wanted]
         if len(found) != 1:
             # Zero is a component that cannot be built; more than one is
@@ -366,9 +359,7 @@ def signature_base(
     )
 
 
-# --------------------------------------------------------------------------
 # The body -- covered by reference, checked when it arrives
-# --------------------------------------------------------------------------
 
 
 def _carries_body(headers: Mapping[bytes, bytes]) -> bool:
@@ -411,9 +402,7 @@ def _digest(algorithm: str, body: bytes) -> bytes:
     return hashlib.new(algorithm.replace("-", ""), body).digest()
 
 
-# --------------------------------------------------------------------------
 # Replay
-# --------------------------------------------------------------------------
 
 
 class NonceLedger:
@@ -454,9 +443,7 @@ class NonceLedger:
             raise ValueError("nonce ledger max_entries must be positive")
         if ttl <= 0:
             raise ValueError("nonce ledger ttl must be positive")
-        self._table = CapabilityMap(
-            max_entries=max_entries, ttl=ttl, overflow="refuse"
-        )
+        self._table = CapabilityMap(max_entries=max_entries, ttl=ttl, overflow="refuse")
         #: Requests refused because the ledger was full. A rising number is a
         #: flood or an undersized ledger, and both want a human.
         self.refusals = 0
@@ -502,9 +489,7 @@ class NonceLedger:
         return True
 
 
-# --------------------------------------------------------------------------
 # Keys
-# --------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -578,7 +563,7 @@ class _Directory:
                 continue
             try:
                 parsed = key_from_jwk(jwk)
-            except (JwtError, KeyError, ValueError, TypeError):
+            except JwtError, KeyError, ValueError, TypeError:
                 # A directory is a third party's document. One unreadable entry
                 # is their problem to fix and not a reason to refuse the rest.
                 continue
@@ -588,9 +573,7 @@ class _Directory:
         return len(keys)
 
 
-# --------------------------------------------------------------------------
 # The facts
-# --------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -623,9 +606,7 @@ class SignatureFacts:
 _UNSIGNED: Final = SignatureFacts(reason="absent")
 
 
-# --------------------------------------------------------------------------
 # Verification
-# --------------------------------------------------------------------------
 
 
 class Signatures:
@@ -802,9 +783,7 @@ class Signatures:
         if agent is not None and agent.startswith('"') and agent.endswith('"'):
             agent = agent[1:-1]
         try:
-            facts = self._verify_headers(
-                request, raw_input, raw_signature, agent, headers
-            )
+            facts = self._verify_headers(request, raw_input, raw_signature, agent, headers)
         except SignatureError as error:
             self.unverified += 1
             return SignatureFacts(agent=agent, reason=str(error))
@@ -904,16 +883,13 @@ class Signatures:
             # nonce a real agent is about to present. `saml.py:1213-1219` states
             # the same rule for the same problem; this module used to take the
             # opposite position.
-            #
             # The *lookup* stays here because it is cheap and refuses a genuine
             # replay without paying for the verify -- see the cost note below.
             if nonces.seen(ledger_key):
                 raise SignatureError("signature nonce was already used")
 
-        # ------------------------------------------------------------------
         # Everything above this line is cheap; everything below is not, and the
         # ordering is load-bearing rather than stylistic.
-        #
         # Curve verification is the expensive operation an unauthenticated
         # caller can trigger for the price of one header. Every check that can
         # refuse *without* it -- covered components, the created
@@ -921,10 +897,8 @@ class Signatures:
         # is therefore placed above. Moving `verify_ed25519` earlier would not
         # fail a test about correctness, so
         # `test_a_bad_keyid_never_reaches_the_verify` exists to fail about this.
-        #
         # Rate limiting is still the deployment's job: the ordering shrinks the
         # cost of a *rejected* request, not of an accepted one.
-        # ------------------------------------------------------------------
         base = signature_base(_message(request, headers), components, params)
         from ._auth._ecverify import verify_ed25519
 
@@ -942,15 +916,12 @@ class Signatures:
             # streaming for every request in the application to check a header
             # almost none of them carry. So the expectation is parked and
             # `Request.body()`/`stream()` spend it -- the only places that can.
-            #
             # A mismatch raises there rather than downgrading the facts here,
             # because by the time a handler reads the body the authorization
             # decision has already been made on a signature that turns out not
             # to cover these bytes. There is no honest way to continue.
             request.state.__setattr__(_DIGEST_SLOT, expected_digest)
-        return SignatureFacts(
-            verified=True, agent=agent, key_id=key_id, covered=covered_order
-        )
+        return SignatureFacts(verified=True, agent=agent, key_id=key_id, covered=covered_order)
 
     def _key(self, agent: str | None, key_id: str) -> OkpPublicKey | None:
         """The named key from the agent's directory, or from any configured one.
@@ -1035,9 +1006,7 @@ def _message(request: Any, headers: Mapping[bytes, bytes]) -> RequestMessage:
     )
 
 
-# --------------------------------------------------------------------------
 # Signing -- the same base, the other way round
-# --------------------------------------------------------------------------
 
 
 def sign_request(
@@ -1130,9 +1099,7 @@ def sign_request(
     return out
 
 
-# --------------------------------------------------------------------------
 # Crawler policy, derived from the route table
-# --------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -1163,9 +1130,7 @@ def crawler_policy(app: Any) -> CrawlerPolicy:
     """
     allow: set[str] = set()
     disallow: set[str] = set()
-    for route, requirement in zip(
-        _routes(app), app._application_image.requirements(), strict=True
-    ):
+    for route, requirement in zip(_routes(app), app._application_image.requirements(), strict=True):
         if not getattr(route, "include_in_schema", True):
             continue
         target = _crawlable_path(route.path)
@@ -1199,9 +1164,7 @@ def _crawlable_path(path: str) -> str:
     return head.rstrip("/") or "/"
 
 
-def robots_txt(
-    app: Any, *, sitemap: str | None = None, crawl_delay: int | None = None
-) -> str:
+def robots_txt(app: Any, *, sitemap: str | None = None, crawl_delay: int | None = None) -> str:
     """A `robots.txt` body derived from `app`'s routes.
 
     An honour-system control, and worth saying so where somebody will read it:
@@ -1253,9 +1216,7 @@ def llms_txt(app: Any, *, title: str, summary: str | None = None) -> str:
             continue
         if not getattr(route, "include_in_schema", True):
             continue
-        description = route.summary or (route.endpoint.__doc__ or "").strip().split(
-            "\n"
-        )[0]
+        description = route.summary or (route.endpoint.__doc__ or "").strip().split("\n")[0]
         if not description:
             continue
         methods = "/".join(sorted(route.methods))
@@ -1263,9 +1224,7 @@ def llms_txt(app: Any, *, title: str, summary: str | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
-# --------------------------------------------------------------------------
 # 402
-# --------------------------------------------------------------------------
 
 
 class PaymentRequired(HTTPException):

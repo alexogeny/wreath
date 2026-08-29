@@ -7,22 +7,6 @@ complete generation and never a half-applied update. Old generations stay alive
 as long as a reader still references the value it read. Reads never perform I/O:
 a miss is an explicit miss, not a lazy load.
 
-**A native port was priced and declined.** `docs/plans/native-shared-primitives.md`
-named this a real candidate with "`kv.c` is the model to copy", so `kv.c` is what
-it was measured against -- 21 interleaved rounds, 40,000 iterations, performance
-governor, an A/A floor of 0.003us:
-
-| arm | median | vs a raw `dict.get` |
-| --- | --- | --- |
-| `dict.get` (the floor a port cannot beat) | 0.075us | -- |
-| `SnapshotCache.get` (this module) | 0.121us | +0.046us |
-| `KV.get` (the C table `kv.c` provides) | 0.128us | +0.053us |
-
-The C model is **0.007us slower** than the Python it was supposed to replace,
-because a read here is one attribute load and a native `dict` lookup, while
-`kv.c` must hash, check a TTL and keep its own bookkeeping. The refresh half is
-an `asyncio.Lock` and does not move to C at all. Reopen this only with a
-different measurement, not a different intuition.
 """
 
 from __future__ import annotations
@@ -75,8 +59,6 @@ class SnapshotCache[K, V]:
         self._current: _Generation[K, V] = _Generation({}, 0, time())
         self._refresh_lock = asyncio.Lock()
 
-    # --- read path (no I/O) ------------------------------------------------
-
     def get(self, key: K, default: V | None = None) -> V | None:
         return self._current.data.get(key, default)
 
@@ -115,8 +97,6 @@ class SnapshotCache[K, V]:
     def refreshed_at(self) -> float:
         return self._current.refreshed_at
 
-    # --- publication -------------------------------------------------------
-
     def replace(self, entries: Mapping[K, V] | Iterable[tuple[K, V]]) -> int:
         """Publish `entries` as a new generation and return its number.
 
@@ -126,8 +106,7 @@ class SnapshotCache[K, V]:
         data: dict[K, V] = dict(entries)
         if self._max_entries is not None and len(data) > self._max_entries:
             raise ValueError(
-                f"snapshot has {len(data)} entries, exceeding max_entries "
-                f"{self._max_entries}"
+                f"snapshot has {len(data)} entries, exceeding max_entries {self._max_entries}"
             )
         if self._max_bytes is not None:
             retained = getsizeof(data)

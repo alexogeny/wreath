@@ -1,5 +1,3 @@
-"""The shipped email machinery has one public first-party namespace."""
-
 from __future__ import annotations
 
 from wreath import email

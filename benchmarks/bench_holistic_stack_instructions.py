@@ -10,7 +10,7 @@ Run after installing the benchmark group::
 
     uv sync --inexact --group benchmark
     uv run python -m benchmarks.bench_holistic_stack_instructions \
-      --output docs/perf/data/e2e-holistic-stack-instructions.json
+      --output benchmarks/baselines/e2e-holistic-stack-instructions.json
 """
 
 from __future__ import annotations
@@ -161,9 +161,7 @@ def _environment(framework: str) -> dict[str, str]:
     return env
 
 
-def _server_command(
-    framework: str, port: int, cpu: int, certificate: Path, key: Path
-) -> list[str]:
+def _server_command(framework: str, port: int, cpu: int, certificate: Path, key: Path) -> list[str]:
     prefix = ["taskset", "-c", str(cpu), str(PYTHON)]
     if framework in {"wreath", "wreath-optimal"}:
         return [
@@ -345,9 +343,7 @@ def _verify(port: int, framework: str) -> None:
         # The same configured path remains useful to every ordinary gzip client.
         connection = HTTPSConnection("127.0.0.1", port, timeout=10, context=context)
         gzip_headers = dict(REQUEST_HEADERS)
-        connection.request(
-            REQUEST_METHOD, REQUEST_PATH, body=REQUEST_BODY, headers=gzip_headers
-        )
+        connection.request(REQUEST_METHOD, REQUEST_PATH, body=REQUEST_BODY, headers=gzip_headers)
         fallback = connection.getresponse()
         fallback_body = fallback.read()
         connection.close()
@@ -403,9 +399,7 @@ def _parse_counters(stderr: str, events: dict[str, str]) -> dict[str, int]:
 
 
 def _derive_metrics(counters: dict[str, float]) -> dict[str, float]:
-    prefetch_misses = (
-        counters["l2_prefetch_hits_l3"] + counters["l2_prefetch_misses_l3"]
-    )
+    prefetch_misses = counters["l2_prefetch_hits_l3"] + counters["l2_prefetch_misses_l3"]
     return {
         "instructions": counters["instructions"],
         "l1d_hits": counters["l1d_accesses"] - counters["l1d_misses"],
@@ -672,9 +666,7 @@ def main(argv: list[str] | None = None) -> int:
             "server_cpu": args.server_cpu,
             "generator_cpu": args.generator_cpu,
             "pythonhashseed": 0,
-            "counter_groups": {
-                name: list(events.values()) for name, events in COUNTER_GROUPS
-            },
+            "counter_groups": {name: list(events.values()) for name, events in COUNTER_GROUPS},
             "multiplexed": False,
         },
         "packages": _versions(),
@@ -684,8 +676,7 @@ def main(argv: list[str] | None = None) -> int:
         previous = json.loads(args.output.read_text(encoding="utf-8"))
         if previous.get("schema") != document["schema"]:
             parser.error(
-                f"cannot merge schema {previous.get('schema')!r}; expected "
-                f"{document['schema']!r}"
+                f"cannot merge schema {previous.get('schema')!r}; expected {document['schema']!r}"
             )
         if previous.get("measurement") != document["measurement"]:
             parser.error("cannot merge an artifact recorded with different measurement options")
@@ -705,11 +696,7 @@ def main(argv: list[str] | None = None) -> int:
                     for _group_name, events in counter_groups:
                         totals: dict[str, dict[str, int]] = {}
                         for size_name in order:
-                            count = (
-                                args.requests
-                                if size_name == "high"
-                                else args.requests // 2
-                            )
+                            count = args.requests if size_name == "high" else args.requests // 2
                             totals[size_name] = _one_count(
                                 framework,
                                 count,
@@ -724,8 +711,7 @@ def main(argv: list[str] | None = None) -> int:
                         denominator = args.requests - args.requests // 2
                         slopes.update(
                             {
-                                name: (totals["high"][name] - totals["low"][name])
-                                / denominator
+                                name: (totals["high"][name] - totals["low"][name]) / denominator
                                 for name in events
                             }
                         )

@@ -48,12 +48,8 @@ def _buffered_reader(wire: bytes) -> asyncio.StreamReader:
 
 def test_ipv6_socket_scope_is_preserved_exactly_once() -> None:
     assert HTTPClient._address(socket.AF_INET6, ("fe80::1", 443, 0, 7)) == "fe80::1%7"
-    assert HTTPClient._address(socket.AF_INET6, ("fe80::1%eth0", 443, 0, 7)) == (
-        "fe80::1%eth0"
-    )
-    assert HTTPClient._address(socket.AF_INET6, ("2001:db8::1", 443, 0, 0)) == (
-        "2001:db8::1"
-    )
+    assert HTTPClient._address(socket.AF_INET6, ("fe80::1%eth0", 443, 0, 7)) == ("fe80::1%eth0")
+    assert HTTPClient._address(socket.AF_INET6, ("2001:db8::1", 443, 0, 0)) == ("2001:db8::1")
 
 
 @pytest.mark.asyncio
@@ -124,7 +120,6 @@ async def test_client_stream_eof_only_keeps_plaintext_transport_open(
 
 @pytest.mark.asyncio
 async def test_reused_connection_skips_condition_when_no_waiter_exists() -> None:
-    """The idle pool transition is atomic until an operation actually awaits."""
 
     class OpenReader:
         @staticmethod
@@ -366,11 +361,8 @@ async def test_client_sends_request_and_reads_fixed_response() -> None:
 async def test_client_hands_taskless_entry_to_a_task_before_total_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Model the native server's eager first step in every execution mode."""
 
-    async def handler(
-        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await reader.readuntil(b"\r\n\r\n")
         writer.write(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
         await writer.drain()
@@ -419,11 +411,8 @@ async def test_client_hands_taskless_entry_to_a_task_before_total_timeout(
 async def test_client_does_not_yield_when_the_request_already_owns_a_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The native handoff is exceptional; ordinary asyncio calls stay direct."""
 
-    async def handler(
-        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await reader.readuntil(b"\r\n\r\n")
         writer.write(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
         await writer.drain()
@@ -631,11 +620,9 @@ async def test_client_rejects_redirect_loop_at_configured_bound() -> None:
         try:
             while True:
                 await reader.readuntil(b"\r\n\r\n")
-                writer.write(
-                    b"HTTP/1.1 302 Found\r\nlocation: /loop\r\ncontent-length: 0\r\n\r\n"
-                )
+                writer.write(b"HTTP/1.1 302 Found\r\nlocation: /loop\r\ncontent-length: 0\r\n\r\n")
                 await writer.drain()
-        except (asyncio.IncompleteReadError, ConnectionError):
+        except asyncio.IncompleteReadError, ConnectionError:
             pass
         finally:
             writer.close()
@@ -664,11 +651,9 @@ async def test_total_timeout_bounds_all_retry_attempts_and_backoff() -> None:
         try:
             while True:
                 await reader.readuntil(b"\r\n\r\n")
-                writer.write(
-                    b"HTTP/1.1 503 Unavailable\r\ncontent-length: 0\r\n\r\n"
-                )
+                writer.write(b"HTTP/1.1 503 Unavailable\r\ncontent-length: 0\r\n\r\n")
                 await writer.drain()
-        except (asyncio.IncompleteReadError, ConnectionError):
+        except asyncio.IncompleteReadError, ConnectionError:
             pass
         finally:
             writer.close()
@@ -742,8 +727,7 @@ async def test_client_shutdown_drains_owned_request_before_closing() -> None:
         ),
         (
             "GET",
-            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n"
-            b"2\r\nok\r\n0\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n",
             200,
             b"ok",
         ),
@@ -752,8 +736,7 @@ async def test_client_shutdown_drains_owned_request_before_closing() -> None:
         ("GET", b"HTTP/1.1 304 Not Modified\r\n\r\n", 304, b""),
         (
             "GET",
-            b"HTTP/1.1 100 Continue\r\n\r\n"
-            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok",
+            b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok",
             200,
             b"ok",
         ),
@@ -795,10 +778,7 @@ async def test_client_accepts_core_response_shapes_fragmented_at_every_byte(
 async def test_client_skips_informational_response_before_final_response() -> None:
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await reader.readuntil(b"\r\n\r\n")
-        writer.write(
-            b"HTTP/1.1 100 Continue\r\n\r\n"
-            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok"
-        )
+        writer.write(b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
         await writer.drain()
         writer.close()
         await writer.wait_closed()
@@ -849,10 +829,7 @@ async def test_head_response_does_not_consume_declared_body_length() -> None:
 @pytest.mark.parametrize(
     "wire",
     [
-        (
-            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n"
-            b"transfer-encoding: chunked\r\n\r\n"
-        ),
+        (b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\ntransfer-encoding: chunked\r\n\r\n"),
         b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\ncontent-length: 3\r\n\r\n",
         b"HTTP/1.1 200 OK\r\ntransfer-encoding: gzip\r\n\r\n",
         b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\nzz\r\n",
@@ -890,9 +867,7 @@ async def test_client_rejects_ambiguous_malformed_or_truncated_framing(
 async def test_bodyless_status_does_not_wait_for_declared_length(status: int) -> None:
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await reader.readuntil(b"\r\n\r\n")
-        writer.write(
-            f"HTTP/1.1 {status} Bodyless\r\ncontent-length: 99\r\n\r\n".encode()
-        )
+        writer.write(f"HTTP/1.1 {status} Bodyless\r\ncontent-length: 99\r\n\r\n".encode())
         await writer.drain()
         writer.close()
         await writer.wait_closed()
@@ -1015,12 +990,10 @@ async def test_cancellation_during_retry_backoff_stops_attempts() -> None:
             while True:
                 await reader.readuntil(b"\r\n\r\n")
                 requests += 1
-                writer.write(
-                    b"HTTP/1.1 503 Unavailable\r\ncontent-length: 0\r\n\r\n"
-                )
+                writer.write(b"HTTP/1.1 503 Unavailable\r\ncontent-length: 0\r\n\r\n")
                 await writer.drain()
                 responded.set()
-        except (asyncio.IncompleteReadError, ConnectionError):
+        except asyncio.IncompleteReadError, ConnectionError:
             pass
         finally:
             writer.close()
@@ -1093,16 +1066,14 @@ async def test_connection_close_token_prevents_pool_reuse() -> None:
         try:
             await reader.readuntil(b"\r\n\r\n")
             writer.write(
-                b"HTTP/1.1 200 OK\r\n"
-                b"connection: keep-alive, close\r\n"
-                b"content-length: 1\r\n\r\nx"
+                b"HTTP/1.1 200 OK\r\nconnection: keep-alive, close\r\ncontent-length: 1\r\n\r\nx"
             )
             await writer.drain()
             try:
                 await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 0.2)
                 writer.write(b"HTTP/1.1 200 OK\r\ncontent-length: 1\r\n\r\nx")
                 await writer.drain()
-            except (TimeoutError, asyncio.IncompleteReadError, ConnectionError):
+            except TimeoutError, asyncio.IncompleteReadError, ConnectionError:
                 pass
         finally:
             writer.close()
@@ -1164,9 +1135,7 @@ async def test_client_rejects_non_rfc_chunk_sizes(size: bytes) -> None:
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await reader.readuntil(b"\r\n\r\n")
         writer.write(
-            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n"
-            + size
-            + b"\r\nx\r\n0\r\n\r\n"
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n" + size + b"\r\nx\r\n0\r\n\r\n"
         )
         await writer.drain()
         writer.close()
@@ -1198,9 +1167,7 @@ async def test_client_rejects_malformed_response_trailers(trailer: bytes) -> Non
         await reader.readuntil(b"\r\n\r\n")
         writer.write(
             b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n"
-            b"1\r\nx\r\n0\r\n"
-            + trailer
-            + b"\r\n\r\n"
+            b"1\r\nx\r\n0\r\n" + trailer + b"\r\n\r\n"
         )
         await writer.drain()
         writer.close()
@@ -1235,9 +1202,7 @@ async def test_client_rejects_malformed_response_trailers(trailer: bytes) -> Non
         ("64:ff9b::a9fe:a9fe", "link-local"),
     ),
 )
-def test_destination_policy_rejects_non_global_addresses(
-    address: str, reason: str
-) -> None:
+def test_destination_policy_rejects_non_global_addresses(address: str, reason: str) -> None:
     with pytest.raises(DestinationRejected, match=reason):
         DestinationPolicy().validate_address(address)
 
@@ -1253,12 +1218,6 @@ def test_destination_policy_rejects_non_global_addresses(
 def test_ipv4_compatible_ipv6_cannot_hide_a_restricted_destination(
     address: str, reason: str
 ) -> None:
-    """Deprecated IPv4-compatible literals still encode an IPv4 destination.
-
-    `ipaddress` classifies these IPv6 spellings as global and does not expose
-    them through `ipv4_mapped`. A stack or translator that honours the embedded
-    address must not turn that classification mismatch into SSRF.
-    """
     with pytest.raises(DestinationRejected, match=reason):
         DestinationPolicy().validate_address(address)
 
@@ -1294,12 +1253,6 @@ def test_destination_policy_exceptions_do_not_widen_each_other() -> None:
 async def test_nat64_cannot_translate_a_public_dns_answer_to_loopback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Model the network translation that made the default policy bypassable.
-
-    The listener is real.  Only the NAT64 hop is replaced: before the guard,
-    the client sent its request to this loopback service after accepting the
-    attacker's globally classified AAAA answer.
-    """
     reached = asyncio.Event()
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -1314,9 +1267,7 @@ async def test_nat64_cannot_translate_a_public_dns_answer_to_loopback(
     loop = asyncio.get_running_loop()
     create_connection = loop.create_connection
 
-    async def malicious_dns(
-        *_args: object, **_kwargs: object
-    ) -> list[tuple[object, ...]]:
+    async def malicious_dns(*_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
         return [
             (
                 socket.AF_INET6,
@@ -1352,13 +1303,10 @@ async def test_nat64_cannot_translate_a_public_dns_answer_to_loopback(
 async def test_one_unsafe_dns_answer_refuses_the_whole_resolution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Happy Eyeballs must not race a public answer beside an internal one."""
     connected = False
     loop = asyncio.get_running_loop()
 
-    async def mixed_dns(
-        *_args: object, **_kwargs: object
-    ) -> list[tuple[object, ...]]:
+    async def mixed_dns(*_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
         return [
             (
                 socket.AF_INET,
@@ -1455,9 +1403,7 @@ async def test_dns_cache_ttl_starts_after_resolution(
     clock = 10.0
     resolutions = 0
 
-    async def getaddrinfo(
-        *_args: object, **_kwargs: object
-    ) -> list[tuple[object, ...]]:
+    async def getaddrinfo(*_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
         nonlocal clock, resolutions
         resolutions += 1
         clock += 2.0
@@ -1576,11 +1522,6 @@ async def test_pool_bounds_waiters_and_cancellation_removes_waiter() -> None:
 
 
 def test_the_public_surface_exports_nothing_unraisable() -> None:
-    """`ProxyError` was exported by a client with no proxy support.
-
-    An exception nothing can raise is a `except` clause that never fires, and
-    a reader cannot tell it apart from one that guards a real failure mode.
-    """
     import wreath.http_client as http_client
 
     assert "ProxyError" not in http_client.__all__
@@ -1588,7 +1529,6 @@ def test_the_public_surface_exports_nothing_unraisable() -> None:
 
 
 def test_redirect_policy_offers_no_flag_it_does_not_honour() -> None:
-    """`allow_cross_origin` changed the message and nothing else."""
     with pytest.raises(TypeError):
         RedirectPolicy(enabled=True, max_hops=2, allow_cross_origin=True)  # type: ignore[call-arg]
 
@@ -1606,7 +1546,7 @@ async def test_cross_origin_redirect_is_refused_with_one_reason() -> None:
                     b"content-length: 0\r\n\r\n"
                 )
                 await writer.drain()
-        except (asyncio.IncompleteReadError, ConnectionError):
+        except asyncio.IncompleteReadError, ConnectionError:
             pass
         finally:
             writer.close()

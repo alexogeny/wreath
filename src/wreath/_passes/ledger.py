@@ -209,8 +209,7 @@ def schema_claim(schema: str) -> Any:
             Step(
                 version=2,
                 statements=(
-                    f"ALTER TABLE {table_name(schema)} "
-                    "ADD COLUMN IF NOT EXISTS trace_context text",
+                    f"ALTER TABLE {table_name(schema)} ADD COLUMN IF NOT EXISTS trace_context text",
                 ),
             ),
         ),
@@ -228,9 +227,7 @@ async def has_trace_column(executor: Any, *, schema: str) -> bool:
     to survive, and the seed runs inside the shift, where poisoning the
     connection would take the walk with it.
     """
-    return await column_exists(
-        executor, schema=schema, table="passes", column="trace_context"
-    )
+    return await column_exists(executor, schema=schema, table="passes", column="trace_context")
 
 
 def schema_sql(schema: str) -> str:
@@ -352,10 +349,10 @@ def _reader(record: Any) -> Any:
     def field(name: str, index: int, default: Any = None) -> Any:
         try:
             return record[name]
-        except (KeyError, TypeError, IndexError):
+        except KeyError, TypeError, IndexError:
             try:
                 return record[index]
-            except (KeyError, TypeError, IndexError):
+            except KeyError, TypeError, IndexError:
                 return default
 
     return field
@@ -417,7 +414,13 @@ class Ledger:
     """The statements one pass issues against its own ledger row."""
 
     __slots__ = (
-        "_holes", "_name", "_rewrites", "_schema", "_table", "_tenant", "_trace_column",
+        "_holes",
+        "_name",
+        "_rewrites",
+        "_schema",
+        "_table",
+        "_tenant",
+        "_trace_column",
     )
 
     def __init__(self, *, schema: str, name: str, tenant: str = "") -> None:
@@ -577,9 +580,7 @@ class Ledger:
         reported, never structural -- the moment a count is load-bearing inside
         the primitive, a range source that counts no rows stops fitting.
         """
-        return await self._move_cursor(
-            executor, expected=expected, cursor=cursor, count=True
-        )
+        return await self._move_cursor(executor, expected=expected, cursor=cursor, count=True)
 
     async def skip_to(self, executor: Any, *, expected: Any, cursor: Any) -> bool:
         """Move the cursor past a hole without counting the chunk as done.
@@ -588,13 +589,9 @@ class Ledger:
         of work completed, and letting it count would make the percentage claim
         progress the pass did not make.
         """
-        return await self._move_cursor(
-            executor, expected=expected, cursor=cursor, count=False
-        )
+        return await self._move_cursor(executor, expected=expected, cursor=cursor, count=False)
 
-    async def _move_cursor(
-        self, executor: Any, *, expected: Any, cursor: Any, count: bool
-    ) -> bool:
+    async def _move_cursor(self, executor: Any, *, expected: Any, cursor: Any, count: bool) -> bool:
         update = (
             "cursor = $3::jsonb, units_done = units_done + 1, "
             "last_advance = clock_timestamp(), last_error = NULL"
@@ -626,8 +623,7 @@ class Ledger:
         between the `CASE` arms.
         """
         roll = (
-            "window_started IS NULL "
-            "OR now() - window_started > make_interval(secs => $4::float8)"
+            "window_started IS NULL OR now() - window_started > make_interval(secs => $4::float8)"
         )
         await executor.execute(
             f"UPDATE {self._table} SET rows_done = rows_done + $3, "
@@ -670,8 +666,7 @@ class Ledger:
     async def set_keyspace_floor(self, executor: Any, *, floor: Any) -> None:
         """Record the smallest key in range, for a keyspace percentage."""
         await executor.execute(
-            f"UPDATE {self._table} SET keyspace_from = $3::jsonb "
-            "WHERE name = $1 AND tenant = $2",
+            f"UPDATE {self._table} SET keyspace_from = $3::jsonb WHERE name = $1 AND tenant = $2",
             self._name,
             self._tenant,
             _encode(floor),
@@ -715,8 +710,7 @@ class Ledger:
         three shifts arrive together.
         """
         tag = await executor.execute(
-            f"UPDATE {self._table} SET phase = $4 "
-            "WHERE name = $1 AND tenant = $2 AND phase = $3",
+            f"UPDATE {self._table} SET phase = $4 WHERE name = $1 AND tenant = $2 AND phase = $3",
             self._name,
             self._tenant,
             expected,
@@ -733,8 +727,7 @@ class Ledger:
         retryable at all.
         """
         await executor.execute(
-            f"UPDATE {self._table} SET phase = $3, last_error = $4 "
-            "WHERE name = $1 AND tenant = $2",
+            f"UPDATE {self._table} SET phase = $3, last_error = $4 WHERE name = $1 AND tenant = $2",
             self._name,
             self._tenant,
             phase,
@@ -826,8 +819,6 @@ class Ledger:
             error[:2000],
         )
 
-    # -- pending units --------------------------------------------------------
-
     async def requeue(self, executor: Any, *, cursor_from: Any, cursor_to: Any) -> bool:
         """Append one unit to be walked out of order. The cursor never rewinds.
 
@@ -884,8 +875,6 @@ class Ledger:
             unit,
         )
 
-    # -- holes ----------------------------------------------------------------
-
     async def record_hole(
         self,
         executor: Any,
@@ -921,8 +910,7 @@ class Ledger:
         to do it.
         """
         await executor.execute(
-            f"DELETE FROM {self._holes} WHERE name = $1 AND tenant = $2 "
-            "AND cursor_to = $3::jsonb",
+            f"DELETE FROM {self._holes} WHERE name = $1 AND tenant = $2 AND cursor_to = $3::jsonb",
             self._name,
             self._tenant,
             _encode(cursor_to),
@@ -1170,9 +1158,7 @@ async def read_all(executor: Any, *, schema: str, name: str | None = None) -> li
     return [row_from_record(record) for record in records or ()]
 
 
-async def read_holes(
-    executor: Any, *, schema: str, name: str | None = None
-) -> list[Hole]:
+async def read_holes(executor: Any, *, schema: str, name: str | None = None) -> list[Hole]:
     """Every dead-lettered chunk in one schema's ledger, or one pass's."""
     table = holes_table_name(schema)
     if name is None:

@@ -213,9 +213,7 @@ def metadata_path_for(path: str) -> str:
     """
     if path in ("", "/"):
         return "/.well-known/oauth-protected-resource"
-    return "/.well-known/oauth-protected-resource" + (
-        path if path.startswith("/") else "/" + path
-    )
+    return "/.well-known/oauth-protected-resource" + (path if path.startswith("/") else "/" + path)
 
 
 __all__ = ["MCPAuth", "Unauthenticated", "metadata_path_for"]

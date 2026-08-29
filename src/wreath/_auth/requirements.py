@@ -193,13 +193,11 @@ def merge_requirements(*requirements: AuthRequirement) -> AuthRequirement:
     """Combine inherited requirements without allowing a child to weaken a parent."""
     public = any(requirement.public for requirement in requirements)
     protected = any(
-        requirement.identify or requirement.access_level > 0
-        for requirement in requirements
+        requirement.identify or requirement.access_level > 0 for requirement in requirements
     )
     if public and protected:
         raise ValueError(
-            "public() cannot be combined with authentication or authorization "
-            "requirements"
+            "public() cannot be combined with authentication or authorization requirements"
         )
     # The strictest window wins, which is the same rule the rest of this
     # function follows in a different shape: a router that demands a factor
@@ -221,9 +219,7 @@ def merge_requirements(*requirements: AuthRequirement) -> AuthRequirement:
         permission_checks=tuple(
             check for requirement in requirements for check in requirement.permission_checks
         ),
-        policies=tuple(
-            policy for requirement in requirements for policy in requirement.policies
-        ),
+        policies=tuple(policy for requirement in requirements for policy in requirement.policies),
     )
 
 
@@ -236,8 +232,7 @@ def _protected_requirement(endpoint: Any) -> AuthRequirement:
     current = requirement_for(endpoint)
     if current.public:
         raise ValueError(
-            "public() cannot be combined with authentication or authorization "
-            "requirements"
+            "public() cannot be combined with authentication or authorization requirements"
         )
     return current
 
@@ -246,8 +241,7 @@ def add_public(endpoint: Any) -> Any:
     current = requirement_for(endpoint)
     if current.identify or current.access_level > 0:
         raise ValueError(
-            "public() cannot be combined with authentication or authorization "
-            "requirements"
+            "public() cannot be combined with authentication or authorization requirements"
         )
     return set_requirement(endpoint, replace(current, public=True))
 
@@ -267,30 +261,20 @@ def add_second_factor(endpoint: Any, max_age: float) -> Any:
     `merge_requirements` does: stacking requirements adds, never subtracts.
     """
     current = _protected_requirement(endpoint)
-    window = (
-        max_age if current.second_factor is None else min(current.second_factor, max_age)
-    )
-    return set_requirement(
-        endpoint, replace(current, authenticated=True, second_factor=window)
-    )
+    window = max_age if current.second_factor is None else min(current.second_factor, max_age)
+    return set_requirement(endpoint, replace(current, authenticated=True, second_factor=window))
 
 
 def add_roles(endpoint: Any, values: frozenset[str], mode: Mode) -> Any:
-    return _append_check(
-        endpoint, "role_checks", SetRequirement(values, mode)
-    )
+    return _append_check(endpoint, "role_checks", SetRequirement(values, mode))
 
 
-def add_policy(
-    endpoint: Any, action: str, resource: object | Callable[[Any], object]
-) -> Any:
+def add_policy(endpoint: Any, action: str, resource: object | Callable[[Any], object]) -> Any:
     return _append_check(endpoint, "policies", PolicyRequirement(action, resource))
 
 
 def add_permissions(endpoint: Any, values: frozenset[str], mode: Mode) -> Any:
-    return _append_check(
-        endpoint, "permission_checks", SetRequirement(values, mode)
-    )
+    return _append_check(endpoint, "permission_checks", SetRequirement(values, mode))
 
 
 def _append_check(endpoint: Any, field: str, check: Any) -> Any:

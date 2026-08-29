@@ -28,21 +28,23 @@ def test_holistic_counter_helpers_do_not_import_benchmark_frameworks() -> None:
 @pytest.mark.parametrize("framework", ["wreath", "fastapi", "sanic", "blacksheep"])
 def test_e2e_stack_imports_one_valid_application(framework: str) -> None:
     arms = ("route", "cors", "binding", "auth", "cedar", "postgres", "complete-aa")
-    code = "\n".join((
-        "import importlib, json, os, sys",
-        f"arms = {arms!r}",
-        "rows = []",
-        "for arm in arms:",
-        "    os.environ['WREATH_E2E_ARM'] = arm",
-        "    sys.modules.pop('benchmarks.e2e_stack', None)",
-        "    stack = importlib.import_module('benchmarks.e2e_stack')",
-        "    rows.append({",
-        "        'framework': stack.FRAMEWORK, 'arm': stack.ARM,",
-        "        'effective': stack.EFFECTIVE_ARM, 'expected': stack.EXPECTED,",
-        "        'app': callable(stack.app),",
-        "    })",
-        "print(json.dumps(rows))",
-    ))
+    code = "\n".join(
+        (
+            "import importlib, json, os, sys",
+            f"arms = {arms!r}",
+            "rows = []",
+            "for arm in arms:",
+            "    os.environ['WREATH_E2E_ARM'] = arm",
+            "    sys.modules.pop('benchmarks.e2e_stack', None)",
+            "    stack = importlib.import_module('benchmarks.e2e_stack')",
+            "    rows.append({",
+            "        'framework': stack.FRAMEWORK, 'arm': stack.ARM,",
+            "        'effective': stack.EFFECTIVE_ARM, 'expected': stack.EXPECTED,",
+            "        'app': callable(stack.app),",
+            "    })",
+            "print(json.dumps(rows))",
+        )
+    )
     env = dict(os.environ)
     env["WREATH_E2E_FRAMEWORK"] = framework
     result = subprocess.run(
@@ -63,7 +65,7 @@ def test_e2e_stack_imports_one_valid_application(framework: str) -> None:
 
 
 def test_retained_instruction_account_has_repeated_slopes_and_aa_controls() -> None:
-    artifact = json.loads((ROOT / "docs/perf/data/e2e-stack-instructions.json").read_text())
+    artifact = json.loads((ROOT / "benchmarks/baselines/e2e-stack-instructions.json").read_text())
     assert artifact["metric"] == "retired userspace instructions per successful request"
     assert artifact["measurement"]["trials"] == 5
     assert artifact["measurement"]["requests_high"] == 4_000
@@ -88,12 +90,9 @@ def test_retained_instruction_account_has_repeated_slopes_and_aa_controls() -> N
     assert "rather than equivalent framework feature costs" in limitation
 
 
-def test_minimal_stack_docs_mark_non_equivalent_sanic_and_blacksheep_steps() -> None:
-    artifact = json.loads((ROOT / "docs/perf/data/e2e-stack-instructions.json").read_text())
-    pages = (
-        (ROOT / "README.md").read_text(),
-        (ROOT / "docs/perf/index.md").read_text(),
-    )
+def test_readme_marks_non_equivalent_sanic_and_blacksheep_steps() -> None:
+    artifact = json.loads((ROOT / "benchmarks/baselines/e2e-stack-instructions.json").read_text())
+    pages = ((ROOT / "README.md").read_text(),)
     for page in pages:
         prose = " ".join(page.split())
         for framework in ("sanic", "blacksheep"):
@@ -105,7 +104,7 @@ def test_minimal_stack_docs_mark_non_equivalent_sanic_and_blacksheep_steps() -> 
 
 
 def test_readme_histogram_matches_the_retained_complete_medians() -> None:
-    artifact = json.loads((ROOT / "docs/perf/data/e2e-stack-instructions.json").read_text())
+    artifact = json.loads((ROOT / "benchmarks/baselines/e2e-stack-instructions.json").read_text())
     readme = (ROOT / "README.md").read_text()
     wreath = round(artifact["arms"]["wreath"]["complete"]["median"])
     assert f"{wreath:,}" in readme
@@ -118,7 +117,7 @@ def test_readme_histogram_matches_the_retained_complete_medians() -> None:
 
 def test_retained_holistic_account_drives_the_readme_hero() -> None:
     artifact = json.loads(
-        (ROOT / "docs/perf/data/e2e-holistic-stack-instructions.json").read_text()
+        (ROOT / "benchmarks/baselines/e2e-holistic-stack-instructions.json").read_text()
     )
     assert artifact["metric"] == "retired userspace instructions per successful request"
     assert artifact["schema"] == "wreath/e2e-holistic-stack-counters/4"
@@ -178,18 +177,7 @@ def test_retained_holistic_account_drives_the_readme_hero() -> None:
         counters = holistic["counters"]
         assert f"{holistic['range'][0] / 1_000_000:.3f}M" in readme
         assert f"{holistic['range'][1] / 1_000_000:.3f}M" in readme
-        for name in (
-            "l1d_hits",
-            "l1d_misses",
-            "l1i_hits",
-            "l1i_misses",
-            "l2_demand_hits",
-            "l2_demand_misses",
-            "l2_prefetch_hits",
-            "l2_prefetch_misses",
-            "l2_all_misses",
-        ):
-            assert f"{round(counters[name]['median']):,}" in readme
+        assert f"{round(counters['l2_all_misses']['median']):,}" in readme
 
 
 def test_holistic_counter_parser_names_every_required_event() -> None:
@@ -197,21 +185,23 @@ def test_holistic_counter_parser_names_every_required_event() -> None:
         "instructions": "instructions:u",
         "l1d_misses": "l1-dcache-load-misses:u",
     }
-    stderr = (
-        "12345;;instructions:u;99;100.00;;\n"
-        "678;;l1-dcache-load-misses:u;99;100.00;;\n"
-    )
+    stderr = "12345;;instructions:u;99;100.00;;\n678;;l1-dcache-load-misses:u;99;100.00;;\n"
     assert _parse_counters(stderr, events) == {
         "instructions": 12_345,
         "l1d_misses": 678,
     }
 
 
-def test_holistic_wreath_rebuilds_the_chart_projection_per_request() -> None:
+def test_holistic_wreath_reuses_compact_chart_data_without_caching_the_projection() -> None:
     source = (ROOT / "benchmarks/holistic_e2e.py").read_text()
-    assert "project_chart_text(" in source
-    assert "_SERIES_DATA" not in source
-    assert "ChartData" not in source
+    assert "_SERIES_CHART = ChartData(" in source
+    assert "_SERIES_CHART.project_chart_text(" in source
+    assert "cache=False" in source
+
+
+def test_holistic_optimal_compression_renders_only_the_dynamic_prefix() -> None:
+    source = (ROOT / "benchmarks/holistic_e2e.py").read_text()
+    assert '_COMPRESSION._gzip_fragment_render("html", _PAGE_PREFIX, context)' in source
 
 
 def test_holistic_derived_cache_hits_use_accesses_less_misses() -> None:

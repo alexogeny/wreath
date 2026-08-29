@@ -1,5 +1,3 @@
-"""ProxyPolicy: trusted forwarding headers, and the bugs it fixes."""
-
 from __future__ import annotations
 
 import ipaddress
@@ -99,9 +97,6 @@ async def test_native_context_proxy_updates_do_not_materialize_scope() -> None:
     assert request.header("host") == "public.example"
 
 
-# --- matcher parity ---------------------------------------------------------
-
-
 @pytest.mark.parametrize("implementation", _IMPLEMENTATIONS)
 def test_networks_match_ipaddress_semantics(implementation: Any) -> None:
     networks = implementation(("10.0.0.0/8", "2001:db8::/32", "192.168.1.1/32"))
@@ -116,9 +111,10 @@ def test_networks_match_ipaddress_semantics(implementation: Any) -> None:
         ("not-an-ip", False),
         ("fe80::1%eth0", False),  # zone identifiers are refused, unlike stdlib
     ):
-        assert implementation(("10.0.0.0/8", "2001:db8::/32", "192.168.1.1/32")).contains(
-            address
-        ) is expected, address
+        assert (
+            implementation(("10.0.0.0/8", "2001:db8::/32", "192.168.1.1/32")).contains(address)
+            is expected
+        ), address
     assert networks.count == 3
 
 
@@ -164,14 +160,6 @@ def test_forwarded_client_renders_canonically(implementation: Any) -> None:
 
 @pytest.mark.parametrize("implementation", _IMPLEMENTATIONS)
 def test_the_client_is_the_rightmost_hop_no_trusted_proxy_claims(implementation: Any) -> None:
-    """`X-Forwarded-For` is walked right to left, and the answers are written down.
-
-    Only the rightmost entry is attested by the connection itself; everything to
-    its left was written by whoever was upstream and can be forged. So the
-    client is the first hop from the right that no trusted network contains --
-    an implementation that took the leftmost entry would let a caller name any
-    address it liked, which is the bug this exists to make impossible.
-    """
     networks = implementation(("10.0.0.0/8", "2001:db8::/32"))
     for header, expected in (
         # One trusted proxy in front: skip it, the client is what it forwarded.
@@ -192,18 +180,13 @@ def test_the_client_is_the_rightmost_hop_no_trusted_proxy_claims(implementation:
         assert networks.forwarded_client(header) == expected, header
 
 
-# --- middleware behavior ----------------------------------------------------
-
-
 def test_trusted_is_required() -> None:
     with pytest.raises(ValueError, match="must not be empty"):
         ProxyPolicy(trusted=())
 
 
 async def test_untrusted_peer_cannot_override_anything() -> None:
-    app = Wreath(
-        http_policy=HttpPolicy(proxy=ProxyPolicy(trusted=["10.0.0.0/8"]))
-    )
+    app = Wreath(http_policy=HttpPolicy(proxy=ProxyPolicy(trusted=["10.0.0.0/8"])))
     seen: dict[str, Any] = {}
 
     @app.get("/")
@@ -232,9 +215,7 @@ async def test_untrusted_peer_cannot_override_anything() -> None:
 
 
 async def test_trusted_peer_applies_forwarded_values() -> None:
-    app = Wreath(
-        http_policy=HttpPolicy(proxy=ProxyPolicy(trusted=["10.0.0.0/8"]))
-    )
+    app = Wreath(http_policy=HttpPolicy(proxy=ProxyPolicy(trusted=["10.0.0.0/8"])))
     seen: dict[str, Any] = {}
 
     @app.get("/")
@@ -265,9 +246,7 @@ async def test_trusted_peer_applies_forwarded_values() -> None:
 async def test_individual_overrides_can_be_disabled() -> None:
     app = Wreath(
         http_policy=HttpPolicy(
-            proxy=ProxyPolicy(
-                trusted=["10.0.0.0/8"], trust_proto=False, trust_host=False
-            )
+            proxy=ProxyPolicy(trusted=["10.0.0.0/8"], trust_proto=False, trust_host=False)
         )
     )
     seen: dict[str, Any] = {}
@@ -294,9 +273,7 @@ async def test_individual_overrides_can_be_disabled() -> None:
 
 
 async def test_garbage_forwarded_proto_is_ignored() -> None:
-    app = Wreath(
-        http_policy=HttpPolicy(proxy=ProxyPolicy(trusted=["10.0.0.0/8"]))
-    )
+    app = Wreath(http_policy=HttpPolicy(proxy=ProxyPolicy(trusted=["10.0.0.0/8"])))
     seen: dict[str, Any] = {}
 
     @app.get("/")
@@ -312,11 +289,7 @@ async def test_garbage_forwarded_proto_is_ignored() -> None:
     assert seen["scheme"] == "http"
 
 
-# --- the failures this middleware exists to fix -----------------------------
-
-
 async def test_hsts_is_silently_dropped_behind_a_proxy_until_proxy_headers_run() -> None:
-    """SecurityHeadersPolicy gates HSTS on an HTTPS scheme."""
 
     def build(with_proxy: bool) -> Wreath:
         app = Wreath(
@@ -343,11 +316,6 @@ async def test_hsts_is_silently_dropped_behind_a_proxy_until_proxy_headers_run()
 
 
 async def test_csrf_rejects_every_unsafe_request_behind_a_proxy_until_proxy_headers_run() -> None:
-    """CSRF compares the browser's Origin against scheme://host from the scope.
-
-    Behind a TLS-terminating proxy the scope says http, the browser says https,
-    and a legitimate same-origin form post is rejected.
-    """
 
     def build(with_proxy: bool) -> Wreath:
         app = Wreath(
@@ -395,7 +363,6 @@ async def test_csrf_rejects_every_unsafe_request_behind_a_proxy_until_proxy_head
 
 
 async def test_trusted_host_validates_the_forwarded_host() -> None:
-    """ProxyHeaders overrides Host; TrustedHost still gets to reject it."""
     app = Wreath(
         http_policy=HttpPolicy(
             proxy=ProxyPolicy(trusted=["10.0.0.0/8"]),
@@ -421,8 +388,6 @@ async def test_trusted_host_validates_the_forwarded_host() -> None:
     assert rejected == 400
 
 
-# --- the three branches nothing was standing on ------------------------------
-#
 # `wreath mutant` survived all three. Each is a "leave it alone" branch, and a
 # leave-it-alone branch that stops working is the dangerous kind: nothing
 # errors, the request simply arrives carrying a value a client chose.
@@ -430,17 +395,7 @@ async def test_trusted_host_validates_the_forwarded_host() -> None:
 
 @pytest.mark.asyncio
 async def test_a_request_with_no_peer_address_is_never_trusted() -> None:
-    """No `client` in the scope means no way to know who the peer is.
-
-    `_peer_trusted` has to answer False there -- it is the case the docstring
-    calls "the peer address is unavailable" -- and it was the one case no test
-    produced. A Unix-socket listener and some test harnesses both hand over a
-    scope with no client tuple, and treating that as trusted would honour
-    `X-Forwarded-For` from an entirely unknown source.
-    """
-    app = Wreath(
-        http_policy=HttpPolicy(proxy=ProxyPolicy(trusted=["127.0.0.0/8"]))
-    )
+    app = Wreath(http_policy=HttpPolicy(proxy=ProxyPolicy(trusted=["127.0.0.0/8"])))
 
     seen: dict[str, Any] = {}
 
@@ -453,26 +408,18 @@ async def test_a_request_with_no_peer_address_is_never_trusted() -> None:
     for missing in ({"client": None}, {"client": ()}):
         seen.clear()
         status, _ = await _call(
-            app, missing,
+            app,
+            missing,
             headers={"x-forwarded-for": "203.0.113.9", "x-forwarded-proto": "https"},
         )
-        assert status == 200                    # no crash ...
-        assert seen["client"] in (None, ())     # ... and nothing was rewritten
+        assert status == 200  # no crash ...
+        assert seen["client"] in (None, ())  # ... and nothing was rewritten
         assert seen["scheme"] == "http"
 
 
 @pytest.mark.asyncio
 async def test_an_unresolvable_forwarded_for_leaves_the_client_alone() -> None:
-    """`forwarded_client` answers None when the trusted boundary is unknowable.
-
-    `test_forwarded_client_walks_from_the_right` pins that it returns None; this
-    pins what the *middleware* does with that None. Overriding anyway would
-    replace a real peer address with nothing, and every downstream
-    address-keyed control -- rate limits, audit -- reads it afterwards.
-    """
-    app = Wreath(
-        http_policy=HttpPolicy(proxy=ProxyPolicy(trusted=["127.0.0.0/8"]))
-    )
+    app = Wreath(http_policy=HttpPolicy(proxy=ProxyPolicy(trusted=["127.0.0.0/8"])))
 
     seen: dict[str, Any] = {}
 
@@ -482,25 +429,18 @@ async def test_an_unresolvable_forwarded_for_leaves_the_client_alone() -> None:
         return {"ok": True}
 
     status, _ = await _call(
-        app, {"client": ("127.0.0.1", 5000)},
+        app,
+        {"client": ("127.0.0.1", 5000)},
         headers={"x-forwarded-for": "unknown, 127.0.0.1"},
     )
     assert status == 200
-    assert seen["client"] == ("127.0.0.1", 5000)     # the real peer, untouched
+    assert seen["client"] == ("127.0.0.1", 5000)  # the real peer, untouched
 
 
 @pytest.mark.asyncio
 async def test_an_empty_forwarded_host_does_not_blank_the_host_header() -> None:
-    """`X-Forwarded-Host: ` must not overwrite `Host` with nothing.
-
-    `TrustedHostPolicy` and `CsrfPolicy` both read `Host`, and both
-    treat an empty one as a refusal -- so writing the empty value through turns
-    a stray proxy header into a 400 on every request behind that proxy.
-    """
     app = Wreath(
-        http_policy=HttpPolicy(
-            proxy=ProxyPolicy(trusted=["127.0.0.0/8"], trust_host=True)
-        )
+        http_policy=HttpPolicy(proxy=ProxyPolicy(trusted=["127.0.0.0/8"], trust_host=True))
     )
 
     seen: dict[str, Any] = {}
@@ -511,7 +451,8 @@ async def test_an_empty_forwarded_host_does_not_blank_the_host_header() -> None:
         return {"ok": True}
 
     status, _ = await _call(
-        app, {"client": ("127.0.0.1", 5000)},
+        app,
+        {"client": ("127.0.0.1", 5000)},
         headers={"host": "real.example", "x-forwarded-host": ""},
     )
     assert status == 200
@@ -519,7 +460,8 @@ async def test_an_empty_forwarded_host_does_not_blank_the_host_header() -> None:
 
     # And a non-empty one still wins, so this is not "the override stopped".
     status, _ = await _call(
-        app, {"client": ("127.0.0.1", 5000)},
+        app,
+        {"client": ("127.0.0.1", 5000)},
         headers={"host": "real.example", "x-forwarded-host": "front.example"},
     )
     assert seen["host"] == "front.example"

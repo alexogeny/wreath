@@ -1,16 +1,3 @@
-"""PoC: bypass HTTP/2's frame-flood budget with unknown extension frames.
-
-Run from the repository root::
-
-    uv run python tests/security/poc_http2_extension_frame_flood.py
-
-The script binds only to loopback and uses TLS+ALPN, Wreath's metal event loop,
-native HTTP/2 parser, and an independent test frame/HPACK encoder.  Unknown
-frame types must be ignored individually, but a vulnerable build omits them
-from its no-progress budget and processes all 50,000 nine-byte frames before
-answering the request that follows.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -98,10 +85,7 @@ def _exchange(
             )
             try:
                 client.sendall(
-                    h2.PREFACE
-                    + h2.encode_settings({})
-                    + unknown * FLOOD_FRAMES
-                    + headers
+                    h2.PREFACE + h2.encode_settings({}) + unknown * FLOOD_FRAMES + headers
                 )
             except OSError:
                 # A fixed server closes while the already-buffered flood is
@@ -119,7 +103,7 @@ def _exchange(
                         for frame in parser.frames()
                     ):
                         break
-            except (OSError, TimeoutError):
+            except OSError, TimeoutError:
                 pass
     finally:
         output.append((bytes(response), perf_counter() - started))
@@ -172,9 +156,7 @@ def main() -> int:
             lifespan="off",
         )
         server = Server(app, config, loop)
-        loop.run_until_complete(
-            server._start(ssl=tls.build_ssl_context(("h2",)), tls=None)
-        )
+        loop.run_until_complete(server._start(ssl=tls.build_ssl_context(("h2",)), tls=None))
         port = server.sockets[0].getsockname()[1]
         response, elapsed = loop.run_until_complete(_drive(server, port))
     finally:

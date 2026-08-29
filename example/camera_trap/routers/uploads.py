@@ -62,6 +62,7 @@ ReadSession = Annotated[Session, FromORM("main", workload="read")]
 #: list also admit them to every card.
 CARD_REGISTRY = 'Registry::"cards"'
 
+
 def mount(application: Any, store: Any, runner: Any) -> None:
     """Attach the upload, ingest and progress routes to `application`.
 
@@ -160,9 +161,7 @@ def mount(application: Any, store: Any, runner: Any) -> None:
                 this store will accept.
         """
         try:
-            ok = store.verify_local_url(
-                key, method="PUT", expires=expires, signature=signature
-            )
+            ok = store.verify_local_url(key, method="PUT", expires=expires, signature=signature)
         except ObjectError as error:
             raise BadRequest(f"not a usable object key: {error}") from error
         if not ok:
@@ -170,17 +169,13 @@ def mount(application: Any, store: Any, runner: Any) -> None:
 
         body = await request.body()
         if len(body) > MAX_CARD_BYTES:
-            raise BadRequest(
-                f"card archive is {len(body)} bytes; the limit is {MAX_CARD_BYTES}"
-            )
+            raise BadRequest(f"card archive is {len(body)} bytes; the limit is {MAX_CARD_BYTES}")
         stat = await store.write(key, body, content_type=ARCHIVE_CONTENT_TYPE)
         return JSONResponse({"key": key, "size": stat.size}, status=201)
 
     @uploads.post("/cards/{deployment_id}/ingest", summary="Unpack an uploaded card")
     @authorize(action=ADMINISTER, resource=CARD_REGISTRY)
-    async def start_ingest(
-        request: Request, deployment_id: int, session: ReadSession
-    ) -> dict:
+    async def start_ingest(request: Request, deployment_id: int, session: ReadSession) -> dict:
         """Enqueue the unpack and hand back an id to watch.
 
         The response is a handle, not a result. Unpacking a card is minutes of
@@ -198,9 +193,7 @@ def mount(application: Any, store: Any, runner: Any) -> None:
             identifier.
         """
         await _owning_slug(session, deployment_id)
-        handle = await runner.launch(
-            INGEST_CARD, deployment_id, key=f"ingest-card:{deployment_id}"
-        )
+        handle = await runner.launch(INGEST_CARD, deployment_id, key=f"ingest-card:{deployment_id}")
         return handle.as_dict()
 
     @uploads.get("/tasks/{task_id}", summary="One task's latest progress")

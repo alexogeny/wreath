@@ -1,26 +1,3 @@
-"""A worker dies mid-generation, and the client that comes back sees one stream.
-
-This is the suite the design exists for, and everything in it needs a real
-server: the horizon that decides which rows a reader may see, the fence the
-queue bumps when a lease expires, and the two statements `wreath.streams` writes
-itself. `tests/test_streams_reader.py` covers the reader's rules against a
-double; nothing there can be wrong about PostgreSQL, and nothing here is a
-restatement of it.
-
-`test_a_killed_worker_leaves_one_logical_stream_with_no_gap_and_no_duplicate` is
-the test that matters. It kills a worker halfway through a generation, waits out
-the lease, lets the sweeper bump the fence, runs the retry, and then renders the
-stream two ways -- from zero, and by resuming from the id the killed connection
-last delivered. Both must render the same text, and it must be the whole of the
-second attempt with nothing missing and nothing said twice.
-
-**Marked `network`, not `database`.** Every read here stops at
-`pg_snapshot_xmin`, which is cluster-wide, so any other xdist worker holding a
-transaction open hides rows this suite has appended. `tests/test_log_cursor_live.py`
-carries the measurement -- six of fifteen failing and then a hang under
-`pytest -n 6` -- and a suite that reads the chunk log inherits it exactly.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -101,9 +78,7 @@ def parts(database):
     """A runner and a `Streams` over one live schema."""
     declared = declaration(schema=_SCHEMA, retain=60.0, flush=_FLUSH)
     runner = JobRunner(database, name="streams", schema=_SCHEMA, concurrency=1, lease=_LEASE)
-    streams = Streams(
-        jobs=runner, log=PostgresLog(database, declared), idle=0.4, poll=0.01
-    )
+    streams = Streams(jobs=runner, log=PostgresLog(database, declared), idle=0.4, poll=0.01)
     return runner, streams
 
 
@@ -144,14 +119,6 @@ async def _collect(streams, key, **options):
 async def test_a_killed_worker_leaves_one_logical_stream_with_no_gap_and_no_duplicate(
     parts,
 ):
-    """The test that matters.
-
-    A worker claims the job, writes half a generation, and dies. The lease
-    expires, the sweeper bumps the fence, and a second worker claims the same
-    job and produces the whole thing. Two clients then read it -- one from the
-    beginning and one resuming from the last id the dead connection delivered --
-    and both must end with exactly the second attempt's text.
-    """
     runner, streams = parts
     attempts: list[int] = []
 
@@ -223,15 +190,7 @@ def _render_from(already: str, events) -> str:
     return rendered
 
 
-async def test_a_retry_after_a_fenced_attempt_produces_exactly_one_logical_stream(
-    parts, database
-):
-    """Two attempts, one stream, and the second one is the whole of it.
-
-    The failing attempt leaves its chunks in the log -- that is `supersede`, and
-    deleting them would be the other policy -- so "exactly one logical stream"
-    is a claim about what a reader is handed, not about what the table holds.
-    """
+async def test_a_retry_after_a_fenced_attempt_produces_exactly_one_logical_stream(parts, database):
     runner, streams = parts
     seen: list[int] = []
 
@@ -293,7 +252,6 @@ async def test_two_attachers_one_from_zero_and_one_mid_stream_both_complete(part
 
 
 async def test_a_stream_whose_producer_never_ran_blocks_then_times_out(parts):
-    """The falsifier, against the real read. An empty success is not an answer."""
     _runner, streams = parts
     started = asyncio.get_running_loop().time()
     events = await _collect(streams, "nobody-started-this", idle=0.3, poll=0.02)
@@ -303,7 +261,6 @@ async def test_a_stream_whose_producer_never_ran_blocks_then_times_out(parts):
 
 
 async def test_a_cursor_from_another_stream_cannot_select_this_ones_chunks(parts):
-    """`Last-Event-ID` is client-supplied and is an index into one log."""
     runner, streams = parts
 
     @streams.producer("chat", timeout=_LEASE * 0.8)
@@ -365,12 +322,6 @@ async def test_cancel_by_key_and_by_id_are_the_same_door(parts):
 
 
 async def test_the_replay_is_a_range_scan_over_the_stream_index(parts):
-    """An index assertion needs enough rows, so this seeds a realistic stream.
-
-    On a handful the planner picks a sequential scan however indexable the
-    predicate is; the whole point of leading the composite index with the
-    partition column is that one stream's replay does not read the whole log.
-    """
     _runner, streams = parts
     log = streams.log
     for batch in range(8):
@@ -392,9 +343,7 @@ async def test_the_replay_is_a_range_scan_over_the_stream_index(parts):
     connection = await log.database.acquire("write")
     try:
         await connection.execute(f"ANALYZE {log.table}")
-        rows = await connection.fetch(
-            f"EXPLAIN {log.sql('read')}", "stream-7", "0", 0, 512
-        )
+        rows = await connection.fetch(f"EXPLAIN {log.sql('read')}", "stream-7", "0", 0, 512)
     finally:
         await log.database.release("write", connection)
     plan = "\n".join(row[0] for row in rows)
@@ -402,11 +351,6 @@ async def test_the_replay_is_a_range_scan_over_the_stream_index(parts):
 
 
 async def test_a_flush_costs_one_statement_per_rung_not_one_per_chunk(parts):
-    """Chunks per flush, asserted rather than described.
-
-    The buffer exists to remove write amplification, and the thing that could
-    quietly stop being true is the statement count.
-    """
     _runner, streams = parts
     writer_log = streams.log
 
@@ -424,8 +368,10 @@ async def test_a_flush_costs_one_statement_per_rung_not_one_per_chunk(parts):
     try:
         written = await writer_log.append_many(
             [
-                ("k", {"fence": 1, "idx": index, "kind": KIND_CHUNK,
-                       "body": b"token", "detail": ""})
+                (
+                    "k",
+                    {"fence": 1, "idx": index, "kind": KIND_CHUNK, "body": b"token", "detail": ""},
+                )
                 for index in range(1000)
             ],
             connection=counting,
@@ -438,12 +384,9 @@ async def test_a_flush_costs_one_statement_per_rung_not_one_per_chunk(parts):
 
 
 async def test_the_max_fence_seed_stops_at_the_horizon(parts):
-    """A seed read past the horizon would skip settled rows for unseen ones."""
     _runner, streams = parts
     log = streams.log
-    await log.append(
-        "k", fence=1, idx=0, kind=KIND_CHUNK, body=b"settled", detail=""
-    )
+    await log.append("k", fence=1, idx=0, kind=KIND_CHUNK, body=b"settled", detail="")
     database = log.database
     holding = await database.acquire("write")
     try:
@@ -451,7 +394,12 @@ async def test_the_max_fence_seed_stops_at_the_horizon(parts):
             await holding.execute(
                 f"INSERT INTO {log.table} (stream_key, fence, idx, kind, body, detail) "
                 "VALUES ($1, $2, $3, $4, $5, $6)",
-                "k", 2, 0, KIND_CHUNK, b"in-flight", "",
+                "k",
+                2,
+                0,
+                KIND_CHUNK,
+                b"in-flight",
+                "",
             )
             # The fence-2 row exists but has not settled, so neither the seed
             # nor the read may see it -- and the fence-1 row must still arrive.
@@ -481,7 +429,6 @@ async def test_a_stream_key_is_one_producer_however_many_times_start_is_called(p
 
 
 async def test_retention_is_a_counted_walk_and_the_declaration_carries_it(parts):
-    """"We have a retention policy" is a number in the pass ledger, or it is a claim."""
     _runner, streams = parts
     walk = streams.retention_pass(name=f"stream_chunks_{_WORKER}", schema=_SCHEMA)
     assert walk.recurring

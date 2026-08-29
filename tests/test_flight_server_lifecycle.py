@@ -1,11 +1,3 @@
-"""Stage 4c -- end-to-end: a running server drains its ring through the projector.
-
-Before slice 4c nothing consumed the recorder's ring in a live server, so Pulse
-completions accumulated and dropped. These serve a real Wreath app over loopback
-with telemetry + an Inspector, drive requests, and confirm the projector (started
-by the server) reassembled them and the Inspector's TIMELINE reports them.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -38,15 +30,13 @@ def _app() -> wreath.Wreath:
 
 async def _raw_get(port: int, path: str) -> bytes:
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
-    writer.write(
-        f"GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".encode()
-    )
+    writer.write(f"GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".encode())
     await writer.drain()
     body = await asyncio.wait_for(reader.read(), timeout=2.0)
     writer.close()
     try:
         await writer.wait_closed()
-    except (ConnectionResetError, BrokenPipeError):
+    except ConnectionResetError, BrokenPipeError:
         pass
     return body
 
@@ -70,7 +60,9 @@ async def _wait_for(predicate, within: float = 3.0) -> None:
 async def test_running_server_projects_completions(tmp_path) -> None:
     sock = str(tmp_path / "wfi.sock")
     config = ServerConfig(
-        host="127.0.0.1", port=0, lifespan="off",
+        host="127.0.0.1",
+        port=0,
+        lifespan="off",
         telemetry=TelemetryConfig(mode=Mode.PULSE, ring_records=256, active_requests=32),
         inspector=InspectorConfig(path=sock),
     )
@@ -121,7 +113,9 @@ def _projector_threads() -> list[threading.Thread]:
 async def test_sustained_load_is_fully_projected(tmp_path) -> None:
     sock = str(tmp_path / "wfi.sock")
     config = ServerConfig(
-        host="127.0.0.1", port=0, lifespan="off",
+        host="127.0.0.1",
+        port=0,
+        lifespan="off",
         telemetry=TelemetryConfig(mode=Mode.PULSE, ring_records=128, active_requests=64),
         inspector=InspectorConfig(path=sock),
     )
@@ -152,7 +146,9 @@ async def test_startup_abort_leaves_no_projector_thread(tmp_path) -> None:
     bad_path.write_text("x")
     before = len(_projector_threads())
     config = ServerConfig(
-        host="127.0.0.1", port=0, lifespan="off",
+        host="127.0.0.1",
+        port=0,
+        lifespan="off",
         telemetry=TelemetryConfig(mode=Mode.PULSE, ring_records=64, active_requests=8),
         inspector=InspectorConfig(path=str(bad_path)),
     )
@@ -170,7 +166,9 @@ async def test_startup_abort_leaves_no_projector_thread(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_projector_stops_cleanly_on_shutdown(tmp_path) -> None:
     config = ServerConfig(
-        host="127.0.0.1", port=0, lifespan="off",
+        host="127.0.0.1",
+        port=0,
+        lifespan="off",
         telemetry=TelemetryConfig(mode=Mode.PULSE, ring_records=64, active_requests=8),
     )
     server = await serve(_app(), config)
@@ -200,15 +198,21 @@ async def test_forensic_server_runs_sink_and_capture_control(tmp_path) -> None:
     wfr1 = str(tmp_path / "flight.wfr1")
     token = "capture-token-abcdef123456"
     config = ServerConfig(
-        host="127.0.0.1", port=0, lifespan="off",
+        host="127.0.0.1",
+        port=0,
+        lifespan="off",
         telemetry=TelemetryConfig(
-            mode=Mode.FORENSIC, ring_records=256, active_requests=32,
+            mode=Mode.FORENSIC,
+            ring_records=256,
+            active_requests=32,
             detailed=SamplingPolicy(rate=1.0),
-            capture_slabs=16, slab_bytes=4096,
+            capture_slabs=16,
+            slab_bytes=4096,
         ),
         inspector=InspectorConfig(path=sock, capture_token=token),
         recording=RecordingPolicy(
-            capture_slabs=16, max_capture_bytes=1 << 20,
+            capture_slabs=16,
+            max_capture_bytes=1 << 20,
             redaction=RedactionPolicy(
                 header_allowlist=frozenset({"x-trace"}), body=BodyCapture.HASHED
             ),
@@ -226,7 +230,8 @@ async def test_forensic_server_runs_sink_and_capture_control(tmp_path) -> None:
             caps = (await client.hello())["capabilities"]
             assert "ARM_CAPTURE" in caps
             armed = await client.arm_capture(
-                token=token, redaction={"header_allowlist": ["x-trace"]},
+                token=token,
+                redaction={"header_allowlist": ["x-trace"]},
                 expiry_seconds=60,
             )
             status = await client.capture_status(token=token)
@@ -236,8 +241,9 @@ async def test_forensic_server_runs_sink_and_capture_control(tmp_path) -> None:
         # the sink has real slabs to persist.
         for i in range(4):
             req = server.recorder.begin(protocol=1, start_ns=i)
-            req.capture(int(CaptureFieldClass.REQUEST_HEADER), 1,
-                        native_flight.CAP_RAW, b"trace-%d" % i)
+            req.capture(
+                int(CaptureFieldClass.REQUEST_HEADER), 1, native_flight.CAP_RAW, b"trace-%d" % i
+            )
             req.finish(now_ns=i + 1, status=200)
     finally:
         await server.close()

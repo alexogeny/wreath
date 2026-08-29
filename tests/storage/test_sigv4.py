@@ -1,15 +1,3 @@
-"""SigV4 correctness against AWS's published example vectors.
-
-Standalone-runnable: falls back to loading ``_sigv4.py`` by path (it imports only
-stdlib), so it runs under ``/usr/bin/python3`` without the built wreath extension —
-and as a normal pytest.
-
-The real ``wreath._sigv4`` is preferred whenever it imports, and the by-path load is
-only the no-build fallback, because a by-path load defeats `wreath mutant`: it execs
-pristine source into a *second* module object, so a mutation applied to
-``wreath._sigv4`` in the forked child's memory never reaches the code under test and
-every mutant here reported `survived` while these vectors passed.
-"""
 import hashlib
 import hmac
 import importlib
@@ -100,8 +88,6 @@ def test_sign_header_auth_includes_content_sha256():
     assert out["x-amz-content-sha256"] == sigv4.EMPTY_SHA256
 
 
-# --- what `sign`/`presign` put *into* the signature -------------------------
-#
 # The vectors above pin `canonical_request`, `string_to_sign` and `signing_key`
 # against AWS's published examples, but they call those directly. What they cannot
 # see is which headers and parameters `sign` assembles before handing them over --
@@ -114,8 +100,17 @@ def test_sign_header_auth_includes_content_sha256():
 
 
 def _authorization(
-    *, method, path, params, headers, payload_hash,
-    amz_date, region, service, access_key, secret_key,
+    *,
+    method,
+    path,
+    params,
+    headers,
+    payload_hash,
+    amz_date,
+    region,
+    service,
+    access_key,
+    secret_key,
 ):
     cr, signed = sigv4.canonical_request(method, path, params, headers, payload_hash)
     scope = f"{amz_date[:8]}/{region}/{service}/aws4_request"
@@ -129,24 +124,26 @@ def _authorization(
 
 
 def test_sign_covers_exactly_the_headers_and_params_it_is_given():
-    """Session-token credentials: `x-amz-security-token` is signed *and* returned.
-
-    STS/instance-role credentials are the case that needs it, and nothing signed
-    with a session token before this. It has to be both signed and sent: signed
-    but withheld and S3 rejects the request as unauthenticated, sent but unsigned
-    and S3 rejects the signature.
-    """
     payload_hash = sigv4.sha256_hex(b"body")
     params = [("partNumber", "2"), ("uploadId", "UP")]
     out = sigv4.sign(
-        method="PUT", host="b.s3.us-east-1.amazonaws.com", path="/dir/k.txt",
-        region="us-east-1", service="s3", access_key="AK", secret_key=_S3_SECRET,
-        amz_date="20240101T000000Z", params=params,
-        headers={"Content-Type": "text/csv"}, payload_hash=payload_hash,
+        method="PUT",
+        host="b.s3.us-east-1.amazonaws.com",
+        path="/dir/k.txt",
+        region="us-east-1",
+        service="s3",
+        access_key="AK",
+        secret_key=_S3_SECRET,
+        amz_date="20240101T000000Z",
+        params=params,
+        headers={"Content-Type": "text/csv"},
+        payload_hash=payload_hash,
         session_token="TOK/EN==",
     )
     expected = _authorization(
-        method="PUT", path="/dir/k.txt", params=params,
+        method="PUT",
+        path="/dir/k.txt",
+        params=params,
         headers={
             "host": "b.s3.us-east-1.amazonaws.com",
             "content-type": "text/csv",
@@ -154,8 +151,12 @@ def test_sign_covers_exactly_the_headers_and_params_it_is_given():
             "x-amz-content-sha256": payload_hash,
             "x-amz-security-token": "TOK/EN==",
         },
-        payload_hash=payload_hash, amz_date="20240101T000000Z",
-        region="us-east-1", service="s3", access_key="AK", secret_key=_S3_SECRET,
+        payload_hash=payload_hash,
+        amz_date="20240101T000000Z",
+        region="us-east-1",
+        service="s3",
+        access_key="AK",
+        secret_key=_S3_SECRET,
     )
     assert out["Authorization"] == expected
     assert "x-amz-security-token" in out["Authorization"], out["Authorization"]
@@ -166,8 +167,13 @@ def test_sign_covers_exactly_the_headers_and_params_it_is_given():
 
 def test_sign_without_a_session_token_neither_signs_nor_sends_one():
     out = sigv4.sign(
-        method="GET", host="b.s3.us-east-1.amazonaws.com", path="/k",
-        region="us-east-1", service="s3", access_key="AK", secret_key=_S3_SECRET,
+        method="GET",
+        host="b.s3.us-east-1.amazonaws.com",
+        path="/k",
+        region="us-east-1",
+        service="s3",
+        access_key="AK",
+        secret_key=_S3_SECRET,
         amz_date="20240101T000000Z",
     )
     assert "x-amz-security-token" not in out
@@ -178,15 +184,13 @@ def test_sign_without_a_session_token_neither_signs_nor_sends_one():
 
 
 def test_an_empty_path_signs_as_the_root():
-    """`uri_encode(path) or "/"`: a bucket-root request whose path is "" signs as "/".
-
-    The canonical request's second line is never empty in SigV4 -- AWS specifies
-    "/" for a request with no path -- and a signature over an empty line is a 403
-    that names the mismatch rather than the missing slash.
-    """
     kw = dict(
-        method="GET", host="b.s3.us-east-1.amazonaws.com", region="us-east-1",
-        service="s3", access_key="AK", secret_key=_S3_SECRET,
+        method="GET",
+        host="b.s3.us-east-1.amazonaws.com",
+        region="us-east-1",
+        service="s3",
+        access_key="AK",
+        secret_key=_S3_SECRET,
         amz_date="20240101T000000Z",
     )
     assert sigv4.sign(path="", **kw) == sigv4.sign(path="/", **kw)
@@ -196,9 +200,15 @@ def test_an_empty_path_signs_as_the_root():
 
 def test_presign_carries_the_token_the_extra_params_and_the_signed_headers():
     url = sigv4.presign(
-        method="GET", host="examplebucket.s3.amazonaws.com", path="/test.txt",
-        region="us-east-1", service="s3", access_key="AKIAIOSFODNN7EXAMPLE",
-        secret_key=_S3_SECRET, amz_date="20130524T000000Z", expires=86400,
+        method="GET",
+        host="examplebucket.s3.amazonaws.com",
+        path="/test.txt",
+        region="us-east-1",
+        service="s3",
+        access_key="AKIAIOSFODNN7EXAMPLE",
+        secret_key=_S3_SECRET,
+        amz_date="20130524T000000Z",
+        expires=86400,
         signed_headers={"X-Amz-Acl": "private"},
         extra_params=[("response-content-disposition", "attachment")],
         session_token="TOK/EN==",

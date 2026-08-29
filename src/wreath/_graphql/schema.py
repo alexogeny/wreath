@@ -329,10 +329,7 @@ def build_schema(
     declared_dataclasses = tuple(dataclasses)
     for model in declared_dataclasses:
         if not isinstance(model, type) or not is_dataclass(model):
-            raise TypeError(
-                "GraphQL dataclasses must contain dataclass types; "
-                f"got {model!r}"
-            )
+            raise TypeError(f"GraphQL dataclasses must contain dataclass types; got {model!r}")
         if model.__name__ in types:
             raise ValueError(f"GraphQL type {model.__name__!r} is already registered")
         hints = get_type_hints(model)
@@ -389,13 +386,20 @@ def build_schema(
             continue
         singular = object_type.name[0].lower() + object_type.name[1:]
         roots[singular] = RootField(
-            singular, object_type.name, False, object_type.spec,
+            singular,
+            object_type.name,
+            False,
+            object_type.spec,
             policy=f"Query.{singular}",
         )
         plural = _plural(object_type.name)
         roots[plural] = RootField(
-            plural, object_type.name, True, object_type.spec,
-            policy=f"Query.{plural}", cost=10,
+            plural,
+            object_type.name,
+            True,
+            object_type.spec,
+            policy=f"Query.{plural}",
+            cost=10,
         )
 
     return Schema(registry=registry, types=types, roots=roots)

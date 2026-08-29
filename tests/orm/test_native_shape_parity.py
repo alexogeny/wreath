@@ -1,10 +1,3 @@
-"""Pure/native parity for the ORM query cache key (`shape_of`).
-
-The key is a dict key for the compiled-SQL cache, so the native builder must
-produce bytes identical to the Python reference for every query shape -- a
-mismatch would silently split the cache. `_shape_of_walk` stays the reference.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -76,14 +69,6 @@ def test_native_keys_are_distinct_across_shapes(registry: Any) -> None:
 
 
 def test_facade_selects_native_when_available(registry: Any) -> None:
-    """The native builder is what actually runs, not merely what is installed.
-
-    This used to assert `shape_of is _core.orm_shape`. Identity stopped being
-    available once `shape_of` gained a fallback for nodes the extension cannot
-    key, but the property the test existed for -- that an ordinary query is not
-    quietly keyed in Python -- is unchanged, so it is asserted by observing the
-    call instead of by comparing objects.
-    """
     from wreath.orm import compiler
 
     if _core is None or not hasattr(_core, "orm_shape"):
@@ -105,14 +90,6 @@ def test_facade_selects_native_when_available(registry: Any) -> None:
 
 @native_only
 def test_the_native_builder_keys_a_subquery_identically_to_pure(registry: Any) -> None:
-    """`orm_shape.c` keys `InSubqueryExpr` rather than refusing it.
-
-    This test used to pin the *refusal*: the node postdated the extension, so C
-    raised `cannot key` and `shape_of` fell back to Python at the cost of one
-    raised-and-caught exception per compile of a subquery-bearing query.
-    Teaching C the node is what removes that cost, so the assertion moves from
-    "C refuses" to "C agrees" -- which was always the property that mattered.
-    """
     query = Post.select(Post.id).where(
         Post.author_id.in_(User.select(User.id).where(User.email == "a@b.c"))
     )
@@ -136,13 +113,6 @@ def test_the_native_builder_keys_a_subquery_identically_to_pure(registry: Any) -
 def test_two_subqueries_of_different_shape_do_not_share_a_key(
     registry: Any, label: str, build_other: Any
 ) -> None:
-    """The collision the old refusal existed to prevent, asserted directly.
-
-    A builder that dispatched by a *base* class -- or that keyed the operator and
-    forgot the subquery -- would key these identically and serve one query's
-    compiled SQL for the other. The bound value is deliberately the same in both,
-    so only the subquery's shape can tell them apart.
-    """
     base = Post.select(Post.id).where(
         Post.author_id.in_(User.select(User.id).where(User.email == "a@b.c"))
     )
@@ -153,8 +123,6 @@ def test_two_subqueries_of_different_shape_do_not_share_a_key(
 
 @native_only
 def test_two_subqueries_differing_only_in_bound_values_share_a_key(registry: Any) -> None:
-    """The other half, without which the collision tests above are satisfiable
-    by a key that simply hashed everything and defeated the cache entirely."""
     one = Post.select(Post.id).where(
         Post.author_id.in_(User.select(User.id).where(User.email == "a@b.c"))
     )
@@ -166,13 +134,6 @@ def test_two_subqueries_differing_only_in_bound_values_share_a_key(registry: Any
 
 @native_only
 def test_a_subquery_no_longer_falls_back_to_pure(registry: Any) -> None:
-    """The point of teaching C the node: no raised-and-caught exception per compile.
-
-    Parity alone cannot show this -- the fallback produced a correct key too, just
-    by way of an exception. Observing that `_shape_of_walk` is never reached is
-    the only assertion that distinguishes "C keys it" from "C refuses and Python
-    rescues it", which is the whole difference this change makes.
-    """
     from wreath.orm import compiler
 
     query = Post.select(Post.id).where(

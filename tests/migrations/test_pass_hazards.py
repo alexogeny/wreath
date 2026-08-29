@@ -1,17 +1,3 @@
-"""A migration may not narrow a column a chunked pass is still converting.
-
-The fifth refusal in ``apply_single_artifact``, and the one design 24 (deferred
-data migrations) cannot ship without: dropping ``grade`` while a pass is still
-filling ``grade_next`` loses every row behind the cursor, and the failure is
-silent because the DDL succeeds.
-
-The interesting half is what these tests prove the scan does *not* do. A scan
-that refused whenever a column was narrowed would be trivially safe and useless
--- it would block every ordinary migration forever -- so "an unguarded column is
-allowed" and "a published pass stops guarding" are as load-bearing as the
-refusal itself.
-"""
-
 from __future__ import annotations
 
 import importlib
@@ -50,9 +36,7 @@ class Narrow(Model, table="treks", schema="app"):
 
 
 def _descriptor(model: type) -> bytes:
-    return migrations._registry_descriptor(
-        Registry(Database(), [model], validate_schema="off")
-    )
+    return migrations._registry_descriptor(Registry(Database(), [model], validate_schema="off"))
 
 
 def narrowing_artifact() -> tuple[bytes, NativeCatalogSnapshot, NativeCatalogSnapshot]:
@@ -123,9 +107,6 @@ def pending_row(**overrides: Any) -> dict[str, Any]:
     return row
 
 
-# --- what the plan decoder sees ----------------------------------------------
-
-
 def test_a_dropped_column_is_a_narrowing() -> None:
     artifact_data, _, _ = narrowing_artifact()
     artifact = migrations._load_native_artifact(artifact_data)
@@ -134,13 +115,9 @@ def test_a_dropped_column_is_a_narrowing() -> None:
 
 
 def test_an_added_column_is_not_a_narrowing() -> None:
-    """The inverse artifact adds ``grade``; nothing is being taken away."""
     wide, narrow = _descriptor(Wide), _descriptor(Narrow)
     plan = native._migration_plan_descriptors(wide, narrow)
     assert migrations._narrowed_columns(plan) == ()
-
-
-# --- the scan ----------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -160,7 +137,6 @@ async def test_a_pass_still_converting_the_column_is_a_hazard() -> None:
 
 @pytest.mark.asyncio
 async def test_an_unguarded_column_is_not_a_hazard() -> None:
-    """No pass claims it, so nothing is refused. The scan is not a blanket no."""
     artifact_data, _, _ = narrowing_artifact()
     artifact = migrations._load_native_artifact(artifact_data)
     connection = LedgerConnection(rows=[])
@@ -169,12 +145,6 @@ async def test_an_unguarded_column_is_not_a_hazard() -> None:
 
 @pytest.mark.asyncio
 async def test_a_published_pass_stops_guarding_its_column() -> None:
-    """The gate's whole purpose: publication is what unblocks the narrowing.
-
-    ``pending_facts`` filters on ``verified_at IS NULL`` in SQL, so a published
-    pass simply does not come back -- which is why this asserts on an empty
-    result rather than on a flag in the row.
-    """
     artifact_data, _, _ = narrowing_artifact()
     artifact = migrations._load_native_artifact(artifact_data)
     connection = LedgerConnection(rows=[])
@@ -186,7 +156,6 @@ async def test_a_published_pass_stops_guarding_its_column() -> None:
 
 @pytest.mark.asyncio
 async def test_a_database_that_never_ran_a_pass_is_not_an_error() -> None:
-    """No ledger table is the answer "nothing is converting", not a failure."""
     artifact_data, _, _ = narrowing_artifact()
     artifact = migrations._load_native_artifact(artifact_data)
     connection = LedgerConnection(table_exists=False)
@@ -194,13 +163,16 @@ async def test_a_database_that_never_ran_a_pass_is_not_an_error() -> None:
     assert connection.asked_for == []
 
 
-# --- what the operator is told -----------------------------------------------
-
-
 def test_the_refusal_names_the_pass_the_column_and_the_way_out() -> None:
     hazard = migrations.PendingPassHazard(
-        schema="app", table="treks", column="grade", action="drop",
-        pass_name="normalize_trek_grades", tenant="", phase="walking", holes_open=0,
+        schema="app",
+        table="treks",
+        column="grade",
+        action="drop",
+        pass_name="normalize_trek_grades",
+        tenant="",
+        phase="walking",
+        holes_open=0,
     )
     error = MigrationBlockedByPass("app", (hazard,))
     message = str(error)
@@ -210,10 +182,15 @@ def test_the_refusal_names_the_pass_the_column_and_the_way_out() -> None:
 
 
 def test_a_barred_gate_is_called_out_because_waiting_will_not_clear_it() -> None:
-    """A hole means the pass *cannot* publish, so "wait for it" is wrong advice."""
     hazard = migrations.PendingPassHazard(
-        schema="app", table="treks", column="grade", action="drop",
-        pass_name="normalize_trek_grades", tenant="", phase="blocked", holes_open=2,
+        schema="app",
+        table="treks",
+        column="grade",
+        action="drop",
+        pass_name="normalize_trek_grades",
+        tenant="",
+        phase="blocked",
+        holes_open=2,
     )
     message = str(MigrationBlockedByPass("app", (hazard,)))
     assert "wreath passes retry" in message
@@ -222,18 +199,20 @@ def test_a_barred_gate_is_called_out_because_waiting_will_not_clear_it() -> None
 
 def test_a_retype_is_described_as_a_retype_not_a_drop() -> None:
     hazard = migrations.PendingPassHazard(
-        schema="app", table="treks", column="grade", action="alter",
-        pass_name="p", tenant="", phase="walking", holes_open=0,
+        schema="app",
+        table="treks",
+        column="grade",
+        action="alter",
+        pass_name="p",
+        tenant="",
+        phase="walking",
+        holes_open=0,
     )
     assert "changes the type of" in hazard.explain()
 
 
-# --- through apply_single_artifact -------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_apply_refuses_and_rolls_back_before_running_any_ddl(monkeypatch) -> None:
-    """The refusal sits inside the same transaction as the other four checks."""
     artifact_data, source, _ = narrowing_artifact()
     registry = Registry(Database(), [Narrow], validate_schema="off")
     connection = LedgerConnection(rows=[pending_row()])
@@ -242,9 +221,7 @@ async def test_apply_refuses_and_rolls_back_before_running_any_ddl(monkeypatch) 
         return source
 
     monkeypatch.setattr(migrations, "_decode_catalog_snapshot", fake_snapshot)
-    monkeypatch.setattr(
-        migrations, "_bootstrap_migration_history", _noop
-    )
+    monkeypatch.setattr(migrations, "_bootstrap_migration_history", _noop)
 
     # Destructive approval is a *separate* gate, checked before the transaction
     # opens: a drop without it never gets this far. Granting it here is what

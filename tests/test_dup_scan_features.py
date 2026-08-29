@@ -21,7 +21,7 @@ def _write(tree: Path, name: str, source: str) -> None:
     target.write_text(source)
 
 
-PARTIAL_PYTHON_COPY = '''
+PARTIAL_PYTHON_COPY = """
 def first(source):
     if source:
         initialize_alpha(source)
@@ -52,10 +52,10 @@ def second(source):
     if audited:
         return audited
     raise RuntimeError("missing audit")
-'''
+"""
 
 
-PARTIAL_NATIVE_COPY = r'''
+PARTIAL_NATIVE_COPY = r"""
 static int
 first(Buffer *buffer, Item *item)
 {
@@ -83,10 +83,10 @@ second(Buffer *buffer, Item *item)
     record_success(buffer);
     return item->pending ? -1 : 0;
 }
-'''
+"""
 
 
-RENAMED_RELATIONSHIPS = '''
+RENAMED_RELATIONSHIPS = """
 def first(left, right):
     chosen = prepare(left)
     joined = combine(chosen, chosen)
@@ -118,10 +118,10 @@ def third(source, unused):
     notify(written)
     audit(written)
     return written
-'''
+"""
 
 
-EXACT_TWINS = '''
+EXACT_TWINS = """
 def first(source):
     loaded = load(source)
     parsed = parse(loaded)
@@ -142,11 +142,10 @@ def second(item):
     written = save(payload)
     audit(written)
     return written
-'''
+"""
 
 
 def test_native_fragment_scan_finds_a_python_interior_copy(tree: Path) -> None:
-    """A copied block is a finding even when its containing bodies diverge."""
     _write(tree, "partial.py", PARTIAL_PYTHON_COPY)
 
     assert dup_scan.scan(tree, ("src/wreath",), 8, ("python",))[0] == []
@@ -180,13 +179,16 @@ def test_native_fragment_scan_handles_c_and_uses_a_dual_floor(tree: Path) -> Non
 
     assert len(fragments) == 1
     assert (fragments[0].left.name, fragments[0].right.name) == ("first", "second")
-    assert dup_scan.fragment_clones(
-        tree,
-        ("src/wreath",),
-        min_lines=5,
-        min_tokens=10_000,
-        langs=("native",),
-    ) == []
+    assert (
+        dup_scan.fragment_clones(
+            tree,
+            ("src/wreath",),
+            min_lines=5,
+            min_tokens=10_000,
+            langs=("native",),
+        )
+        == []
+    )
 
 
 def test_fragment_matcher_is_a_native_builtin() -> None:
@@ -194,7 +196,6 @@ def test_fragment_matcher_is_a_native_builtin() -> None:
 
 
 def test_repetitive_fragment_work_is_near_linear_beside_a_same_size_control() -> None:
-    """Low-entropy windows must not repeatedly extend the same long suffix."""
     def work(size: int, *, repetitive: bool) -> int:
         if repetitive:
             source = (
@@ -205,10 +206,7 @@ def test_repetitive_fragment_work_is_near_linear_beside_a_same_size_control() ->
         else:
             source = (
                 "def subject(value):\n"
-                + "".join(
-                    f"    value = operation_{index}(value)\n"
-                    for index in range(size)
-                )
+                + "".join(f"    value = operation_{index}(value)\n" for index in range(size))
                 + "    return value\n"
             )
         _matches, measured = dup_scan._fragment_scan(
@@ -232,7 +230,6 @@ def test_fragment_only_scan_does_not_build_the_whole_body_shape(
     tree: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The native token pass must not pay for an unused AST fingerprint."""
     _write(tree, "partial.py", PARTIAL_PYTHON_COPY)
 
     def unexpected(*_args: object, **_kwargs: object) -> None:
@@ -251,7 +248,6 @@ def test_fragment_only_scan_does_not_build_the_whole_body_shape(
 
 
 def test_alpha_normalization_preserves_identifier_relationships(tree: Path) -> None:
-    """Alpha renaming keeps use relationships instead of erasing every name."""
     _write(tree, "relationships.py", RENAMED_RELATIONSHIPS)
 
     shape, _ = dup_scan.scan(tree, ("src/wreath",), 8, ("python",))
@@ -276,11 +272,19 @@ def test_context_json_contains_exact_source_ranges_and_snippets(
     _write(tree, "twins.py", EXACT_TWINS)
     monkeypatch.setattr(dup_scan, "repo_root", lambda: tree)
 
-    assert dup_scan.main([
-        "--path", "src/wreath/twins.py",
-        "--format", "json",
-        "--context", "1",
-    ]) == 0
+    assert (
+        dup_scan.main(
+            [
+                "--path",
+                "src/wreath/twins.py",
+                "--format",
+                "json",
+                "--context",
+                "1",
+            ]
+        )
+        == 0
+    )
     report = json.loads(capsys.readouterr().out)
 
     sites = report["groups"][0]["sites"]
@@ -359,9 +363,9 @@ def test_summary_aggregates_duplicate_lines_by_file_and_directory(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _write(tree, "left/twins.py", EXACT_TWINS)
-    _write(tree, "right/twins.py", EXACT_TWINS.replace("first", "third").replace(
-        "second", "fourth"
-    ))
+    _write(
+        tree, "right/twins.py", EXACT_TWINS.replace("first", "third").replace("second", "fourth")
+    )
     monkeypatch.setattr(dup_scan, "repo_root", lambda: tree)
 
     assert dup_scan.main(["--format", "json", "--summary"]) == 0

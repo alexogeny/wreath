@@ -156,9 +156,7 @@ def declared_actions(app: Any) -> dict[str, tuple[str, ...]]:
         )
         for policy in requirement.policies:
             resource_type, separator, _verb = policy.action.partition(_SEPARATOR)
-            found.setdefault(resource_type if separator else "", set()).add(
-                policy.action
-            )
+            found.setdefault(resource_type if separator else "", set()).add(policy.action)
         # `__self__` because an MCP endpoint is a bound method: the declarations
         # belong to the server object, and an attribute set on a bound method
         # would be discarded the moment that temporary object is.
@@ -171,9 +169,7 @@ def declared_actions(app: Any) -> dict[str, tuple[str, ...]]:
         requirement = requirement_for(endpoint)
         for policy in requirement.policies:
             resource_type, separator, _verb = policy.action.partition(_SEPARATOR)
-            found.setdefault(resource_type if separator else "", set()).add(
-                policy.action
-            )
+            found.setdefault(resource_type if separator else "", set()).add(policy.action)
     return {name: tuple(sorted(actions)) for name, actions in sorted(found.items())}
 
 
@@ -244,7 +240,8 @@ def _private(response: Response) -> Response:
     `private` still keys on the caller.
     """
     response.headers[:] = [
-        header for header in response.headers
+        header
+        for header in response.headers
         if header[0].lower() not in (b"cache-control", b"vary")
     ]
     response.headers.append((b"cache-control", b"private, no-store"))
@@ -258,9 +255,7 @@ def _private_stream(response: SSEResponse) -> SSEResponse:
     Appending a second `cache-control` line would leave the first one --
     `no-cache`, which permits a *shared* store -- as the one a proxy reads.
     """
-    response.headers = [
-        header for header in response.headers if header[0] != b"cache-control"
-    ]
+    response.headers = [header for header in response.headers if header[0] != b"cache-control"]
     response.headers.append((b"cache-control", b"private, no-cache, no-store"))
     return response
 
@@ -321,9 +316,7 @@ async def _decide(
     if limit <= 1 or len(asks) == 1:
         verdicts = []
         for resource, action in asks:
-            decision = await authorizer.authorize(
-                request, _Requirement(action, resource)
-            )
+            decision = await authorizer.authorize(request, _Requirement(action, resource))
             verdicts.append(bool(getattr(decision, "allowed", False)))
         return verdicts
 
@@ -331,9 +324,7 @@ async def _decide(
 
     async def one(resource: Any, action: str) -> bool:
         async with gate:
-            decision = await authorizer.authorize(
-                request, _Requirement(action, resource)
-            )
+            decision = await authorizer.authorize(request, _Requirement(action, resource))
             return bool(getattr(decision, "allowed", False))
 
     return list(await asyncio.gather(*(one(r, a) for r, a in asks)))
@@ -454,10 +445,7 @@ def permissions_router(
             return _unauthenticated()
         return _private(
             JSONResponse(
-                {"resources": {
-                    name: list(actions)
-                    for name, actions in vocabulary_now().items()
-                }}
+                {"resources": {name: list(actions) for name, actions in vocabulary_now().items()}}
             )
         )
 
@@ -476,9 +464,7 @@ def permissions_router(
         # change the answer -- who is asking, what roles they hold, and the
         # policy set itself -- so a promotion or a deploy invalidates it and
         # nothing else does.
-        tag = _manifest_etag(
-            identity, authorizer, vocabulary, _request_flags(authorizer, request)
-        )
+        tag = _manifest_etag(identity, authorizer, vocabulary, _request_flags(authorizer, request))
         if _etag_matches(request.header("if-none-match"), tag):
             response = Response(b"", status=304)
             response.headers.append((b"etag", tag.encode("ascii")))
@@ -487,7 +473,6 @@ def permissions_router(
         # The resource is the *type*, not a row: this answers "could this
         # principal ever" so a nav item can be drawn. Row-level questions go to
         # the batch endpoint, which is why both exist.
-        #
         # Flattened across resource types before evaluating, so `max_concurrency`
         # bounds the whole manifest rather than each type in turn -- a type with
         # one action would otherwise pace the type with ten.
@@ -500,19 +485,17 @@ def permissions_router(
         allowed: dict[str, list[str]] = {}
         at = 0
         for resource_type, actions in vocabulary.items():
-            granted = [
-                action
-                for offset, action in enumerate(actions)
-                if verdicts[at + offset]
-            ]
+            granted = [action for offset, action in enumerate(actions) if verdicts[at + offset]]
             at += len(actions)
             if granted:
                 allowed[resource_type] = granted
-        body = JSONResponse({
-            "principal": identity.id,
-            "roles": sorted(identity.roles),
-            "allowed": allowed,
-        })
+        body = JSONResponse(
+            {
+                "principal": identity.id,
+                "roles": sorted(identity.roles),
+                "allowed": allowed,
+            }
+        )
         body.headers.append((b"etag", tag.encode("ascii")))
         return _private(body)
 
@@ -589,9 +572,7 @@ def permissions_router(
         # remaining rows are silently unauthorized, which is worse than a page
         # that says it asked for too much.
         if len(identifiers) > max_ids:
-            return _bad(
-                f"at most {max_ids} ids per request; {len(identifiers)} were sent"
-            )
+            return _bad(f"at most {max_ids} ids per request; {len(identifiers)} were sent")
 
         vocabulary = vocabulary_now()
         known = vocabulary.get(resource_type)
@@ -600,18 +581,14 @@ def permissions_router(
         actions = payload.get("actions")
         if actions is None:
             actions = known
-        elif not isinstance(actions, list) or not all(
-            isinstance(item, str) for item in actions
-        ):
+        elif not isinstance(actions, list) or not all(isinstance(item, str) for item in actions):
             return _bad("`actions` must be a list of strings")
         else:
             # Refused rather than evaluated: an endpoint that answers for any
             # action a caller invents is an oracle for probing the policy set.
             unknown = [action for action in actions if action not in known]
             if unknown:
-                return _bad(
-                    f"undeclared action(s) for {resource_type}: {', '.join(unknown)}"
-                )
+                return _bad(f"undeclared action(s) for {resource_type}: {', '.join(unknown)}")
             # Deduplicated, order preserved. `max_ids` bounds one side of the
             # ids x actions product and nothing bounded the other, so a repeated
             # action was a way to multiply the work past the ceiling this
@@ -627,23 +604,15 @@ def permissions_router(
         # `len(ids)` sequential rounds however small the concurrency limit.
         chosen = tuple(actions)
         # complexity: allow SL-COMP-LOOP -- response is the identifier-action matrix
-        asks = [
-            (_entity(resource_type, text), action)
-            for text in texts
-            for action in chosen
-        ]
+        asks = [(_entity(resource_type, text), action) for text in texts for action in chosen]
         verdicts = await _decide(request, authorizer, asks, limit=max_concurrency)
         permissions = {}
         for index, text in enumerate(texts):
             base = index * len(chosen)
             permissions[text] = [
-                action
-                for offset, action in enumerate(chosen)
-                if verdicts[base + offset]
+                action for offset, action in enumerate(chosen) if verdicts[base + offset]
             ]
-        return _private(
-            JSONResponse({"type": resource_type, "permissions": permissions})
-        )
+        return _private(JSONResponse({"type": resource_type, "permissions": permissions}))
 
     return router
 
@@ -653,9 +622,7 @@ def _authorizer(app: Any) -> Any:
 
 
 def _unauthenticated() -> Response:
-    return ProblemResponse(
-        status=401, detail="permissions are per-principal; authenticate first"
-    )
+    return ProblemResponse(status=401, detail="permissions are per-principal; authenticate first")
 
 
 def _unconfigured() -> Response:

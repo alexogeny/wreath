@@ -1,11 +1,3 @@
-"""The `wreath.geospatial` value type, its refusals, and the maths.
-
-The contract this file exists to pin is the *ordering* one: GeoJSON writes
-`[lon, lat]`, humans say "lat, lon", and a library that accepts a bare pair
-picks a side silently. `wreath.temporal` already refuses a naive datetime
-rather than assuming UTC; this is the same refusal for place.
-"""
-
 from __future__ import annotations
 
 import math
@@ -22,14 +14,12 @@ class TestCoordinateRefusesAmbiguity:
         assert here.lon == pytest.approx(153.0251)
 
     def test_a_bare_pair_is_refused_by_name(self) -> None:
-        """The whole point. A positional pair has no self-evident order."""
         with pytest.raises(TypeError) as caught:
             Coordinate(-27.4698, 153.0251)  # ty: ignore[missing-argument]
         message = str(caught.value)
         assert "lat=" in message and "lon=" in message
 
     def test_the_refusal_explains_the_geojson_trap(self) -> None:
-        """A reader who hit this needs to know *why*, or they will work around it."""
         with pytest.raises(TypeError) as caught:
             Coordinate(1.0, 2.0)  # ty: ignore[missing-argument]
         message = str(caught.value).lower()
@@ -53,7 +43,6 @@ class TestCoordinateRefusesAmbiguity:
         assert "lon" in str(caught.value)
 
     def test_the_poles_and_the_antimeridian_are_valid_coordinates(self) -> None:
-        """The bounds are inclusive; it is beyond them that is nonsense."""
         for coordinate in (
             Coordinate(lat=90.0, lon=0.0),
             Coordinate(lat=-90.0, lon=0.0),
@@ -80,7 +69,6 @@ class TestCoordinateRefusesAmbiguity:
         assert isinstance(here.lon, float)
 
     def test_a_bool_is_not_a_latitude(self) -> None:
-        """`True` is an int in Python, and that is never a deliberate latitude."""
         with pytest.raises(GeospatialError):
             Coordinate(lat=True, lon=0.0)  # ty: ignore[invalid-argument-type]
 
@@ -107,17 +95,6 @@ class TestCoordinateRefusesAmbiguity:
             Coordinate()  # ty: ignore[missing-argument]
 
     def test_positional_arguments_are_refused_even_alongside_keywords(self) -> None:
-        """The `if args` guard's real job, and the only case that distinguishes
-        it from the missing-keyword refusal below it.
-
-        A mutation pass caught this: with the guard removed, every other test
-        still passed, because a bare positional pair falls through to the
-        missing-keyword check and raises the same error. Only a call carrying
-        *both* tells the two apart -- and without the guard this one silently
-        ignores the positional values and builds a coordinate from the
-        keywords, which is precisely the silent wrong answer the whole type
-        exists to prevent.
-        """
         with pytest.raises(TypeError):
             Coordinate(1.0, 2.0, lat=-27.4698, lon=153.0251)  # ty: ignore[too-many-positional-arguments]
 
@@ -138,8 +115,6 @@ class TestPolygonRing:
     )
 
     def test_wkt_text_is_refused_rather_than_parsed(self) -> None:
-        """A pasted `POLYGON(...)` is longitude-first and would describe
-        somewhere else entirely, with nothing to raise about it."""
         with pytest.raises(TypeError) as caught:
             Polygon("POLYGON((153.0 -27.0, 154.0 -27.0, 153.5 -28.0, 153.0 -27.0))")  # ty: ignore[invalid-argument-type]
         message = str(caught.value)
@@ -147,8 +122,6 @@ class TestPolygonRing:
         assert "longitude" in message
 
     def test_a_bare_pair_among_the_vertices_is_refused_by_index(self) -> None:
-        """The same ambiguity as one bare pair, repeated -- and the index is
-        what makes it findable in a ring of forty."""
         with pytest.raises(TypeError) as caught:
             Polygon([*self.CORNERS, (153.0, -27.0)])  # ty: ignore[invalid-argument-type]
         assert "vertex 3" in str(caught.value)
@@ -159,18 +132,10 @@ class TestPolygonRing:
         assert len(ring.vertices) == 4
 
     def test_a_hand_closed_ring_does_not_count_its_last_vertex_twice(self) -> None:
-        """A triangle written as four points is still a triangle.
-
-        Without the closed-ring check the repeated vertex counts towards the
-        three-distinct minimum, so the *correctly* closed ring -- the one a
-        caller who read the WKT specification writes -- is the one refused.
-        """
         by_hand = Polygon([*self.CORNERS, self.CORNERS[0]])
         assert by_hand.vertices == Polygon(self.CORNERS).vertices
 
     def test_three_distinct_vertices_are_enough(self) -> None:
-        """The boundary the minimum is written against, from the accepting side:
-        truncating an *unclosed* ring would leave two and refuse this."""
         assert len(Polygon(self.CORNERS).vertices) == 4
 
     @pytest.mark.parametrize(
@@ -186,13 +151,6 @@ class TestPolygonRing:
     def test_fewer_than_three_distinct_vertices_encloses_nothing(
         self, ring: tuple[Coordinate, ...], distinct: int
     ) -> None:
-        """Including the empty ring, which has no first vertex to compare.
-
-        A single vertex counts as **zero**, not one: it is trivially its own
-        last vertex, so the closing rule drops it before the minimum is
-        measured. The count in the message is of what was left to enclose
-        something with, which is the number the refusal is about.
-        """
         with pytest.raises(ValueError) as caught:
             Polygon(ring)
         assert f"got {distinct}" in str(caught.value)
@@ -213,7 +171,6 @@ class TestDistance:
         assert distance(a, b) == pytest.approx(distance(b, a), rel=1e-12)
 
     def test_one_degree_of_latitude_at_the_equator(self) -> None:
-        """A degree of latitude is a fixed arc: R * pi / 180."""
         a = Coordinate(lat=0.0, lon=0.0)
         b = Coordinate(lat=1.0, lon=0.0)
         expected = 6_371_008.8 * math.pi / 180.0
@@ -232,24 +189,17 @@ class TestDistance:
         assert distance(a, b) == pytest.approx(expected, rel=1e-9)
 
     def test_a_very_short_distance_does_not_lose_precision(self) -> None:
-        """The haversine exists because the law of cosines collapses here."""
         a = Coordinate(lat=-27.4698, lon=153.0251)
         b = Coordinate(lat=-27.4698, lon=153.02511)
         metres = distance(a, b)
         assert 0.0 < metres < 2.0
 
     def test_longitude_convergence_toward_the_pole(self) -> None:
-        """A degree of longitude shrinks with the cosine of the latitude."""
-        at_equator = distance(
-            Coordinate(lat=0.0, lon=0.0), Coordinate(lat=0.0, lon=1.0)
-        )
-        at_sixty = distance(
-            Coordinate(lat=60.0, lon=0.0), Coordinate(lat=60.0, lon=1.0)
-        )
+        at_equator = distance(Coordinate(lat=0.0, lon=0.0), Coordinate(lat=0.0, lon=1.0))
+        at_sixty = distance(Coordinate(lat=60.0, lon=0.0), Coordinate(lat=60.0, lon=1.0))
         assert at_sixty == pytest.approx(at_equator * 0.5, rel=1e-3)
 
     def test_crossing_the_antimeridian_is_the_short_way(self) -> None:
-        """179E to 179W is two degrees apart, not 358."""
         a = Coordinate(lat=0.0, lon=179.0)
         b = Coordinate(lat=0.0, lon=-179.0)
         two_degrees = 2.0 * 6_371_008.8 * math.pi / 180.0

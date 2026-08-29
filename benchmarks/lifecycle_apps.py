@@ -157,9 +157,7 @@ if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
         return Identity(
             str(row[0]),
             roles=frozenset({row[1]}),
-            permissions=frozenset(
-                {"organizations:access", f"domain:{TARGET_BRANCH}:write"}
-            ),
+            permissions=frozenset({"organizations:access", f"domain:{TARGET_BRANCH}:write"}),
         )
 
     app.configure_auth(BearerTokenBackend(verify_lifecycle_token))
@@ -167,9 +165,7 @@ if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
     async def decoy_endpoint(request):
         return {"resource": request.path_params["item_id"]}
 
-    organization = Router(
-        prefix=API_PREFIX, permissions=("organizations:access",)
-    )
+    organization = Router(prefix=API_PREFIX, permissions=("organizations:access",))
     for branch_number in range(ROUTE_BRANCHES):
         branch = Router(
             prefix=f"/{BRANCH_WORDS[branch_number]}",
@@ -189,9 +185,7 @@ if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
         if "admin" not in request.identity.roles:
             return JSONResponse({"error": "forbidden"}, status=403)
         payload = await request.json()
-        row = await _mutate_statement.fetchrow(
-            payload["name"], int(request.path_params["user_id"])
-        )
+        row = await _mutate_statement.fetchrow(payload["name"], int(request.path_params["user_id"]))
         return _mutation_payload(row)
 
     organization.include_router(target)
@@ -268,8 +262,7 @@ elif FRAMEWORK == "blacksheep":
             app.router.get(path)(decoy_endpoint)
 
     @app.router.post(
-        f"/api/v2/organizations/{{organization_id}}/{TARGET_BRANCH_WORD}"
-        "/admin/users/{user_id}"
+        f"/api/v2/organizations/{{organization_id}}/{TARGET_BRANCH_WORD}/admin/users/{{user_id}}"
     )
     async def mutate_user(request: Request, organization_id: int, user_id: int):
         header = request.get_first_header(b"authorization")

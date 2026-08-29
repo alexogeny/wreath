@@ -1,16 +1,3 @@
-"""Prometheus exposition bridge — renderer format + bridge behavior.
-
-The renderer is duck-typed over a projector snapshot, so these fall back to loading
-``src/wreath/_prometheus.py`` by path and run under a bare ``/usr/bin/python3``
-(no native build). The handler test needs the built package (``Response``) and is
-skipped when it is absent.
-
-The real ``wreath._prometheus`` is preferred whenever it imports, following
-``test_statsd.py``. A by-path load defeats `wreath mutant`: it execs pristine source
-into a *second* module object, so a mutation applied to ``wreath._prometheus`` in the
-forked child's memory never reaches the code under test and every mutant here reports
-`survived` while these tests pass.
-"""
 from __future__ import annotations
 
 import importlib
@@ -27,12 +14,14 @@ except ImportError:
     _spec.loader.exec_module(prom)  # top-level imports are stdlib only
 
 
-# --- duck-typed snapshot fixtures ------------------------------------------
-
 class _Loss:
     _FIELDS = (
-        "orphan_phase", "orphan_correlation", "pending_evicted",
-        "decode_error", "export_error", "recent_evicted",
+        "orphan_phase",
+        "orphan_correlation",
+        "pending_evicted",
+        "decode_error",
+        "export_error",
+        "recent_evicted",
     )
 
     def __init__(self, **kw: int) -> None:
@@ -97,17 +86,16 @@ def _parse(text: str):
                 family = family[: -len(suf)]
                 break
         assert family in types, f"sample {name} has no declared TYPE (family {family})"
-        labels = line[len(name):].rsplit(" ", 1)[0].strip() if "{" in line else ""
+        labels = line[len(name) :].rsplit(" ", 1)[0].strip() if "{" in line else ""
         value = line.rsplit(" ", 1)[1]
         samples.setdefault(name, []).append((labels, value))
     return types, samples
 
 
-# --- tests ------------------------------------------------------------------
-
 def test_counter_gauge_and_globals():
     snap = _Snap(
-        assembled=42, pending=3,
+        assembled=42,
+        pending=3,
         routes=[_Route(7, count=10, errors=2, dsum=5000, dmax=900, buckets=_bkts())],
         loss=_Loss(decode_error=1, export_error=4),
     )
@@ -130,9 +118,11 @@ def test_counter_gauge_and_globals():
 def test_histogram_cumulative_and_inf():
     # buckets: 3 obs in [2,4)us (bucket 1), 2 obs in [32,64)us (bucket 5).
     snap = _Snap(
-        assembled=5, pending=0,
-        routes=[_Route(1, count=5, errors=0, dsum=1234, dmax=63,
-                       buckets=_bkts(**{"1": 3, "5": 2}))],
+        assembled=5,
+        pending=0,
+        routes=[
+            _Route(1, count=5, errors=0, dsum=1234, dmax=63, buckets=_bkts(**{"1": 3, "5": 2}))
+        ],
         loss=_Loss(),
     )
     text = prom.render_exposition(snap)
@@ -230,7 +220,8 @@ def test_recorder_loss_reason_labels():
 
 def test_openmetrics_variant():
     snap = _Snap(
-        assembled=9, pending=1,
+        assembled=9,
+        pending=1,
         routes=[_Route(1, count=5, errors=1, dsum=1234, dmax=63, buckets=_bkts(**{"1": 5}))],
         loss=_Loss(),
     )
@@ -254,8 +245,10 @@ def test_bridge_render_reads_source():
     class _Source:
         def __init__(self):
             self._snap = _Snap(2, 1, [_Route(3, 4, 0, 0, 0, _bkts())], _Loss())
+
         def snapshot(self):
             return self._snap
+
         def recorder_loss(self):
             return {_Reason("RING_FULL"): 1}
 
@@ -295,7 +288,8 @@ def test_handler_content_type():
 if __name__ == "__main__":  # standalone: run the renderer/bridge tests without pytest
     for _name, _fn in sorted(globals().items()):
         if _name.startswith("test_") and _name not in (
-            "test_bridge_rejects_bad_source", "test_handler_content_type",
+            "test_bridge_rejects_bad_source",
+            "test_handler_content_type",
         ):
             _fn()
             print(f"ok  {_name}")

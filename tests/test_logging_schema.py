@@ -1,16 +1,3 @@
-"""Stage 1 of first-class logging: the LOG cell wire schema and its C mirror.
-
-These tests pin the 64-byte log cell, its typed inline argument packing, the
-severity mapping, the new loss reasons, and byte-for-byte parity with
-`flight_schema.h`. Nothing here emits telemetry; the runtime path arrives in a
-later stage.
-
-The framing rules under test are the ones that make a later mmap-backed forensic
-ring possible without a format break: every cell carries the schema version in
-byte 0, and every decode *validates* rather than trusts -- a torn or stale
-record is rejected by name, never guessed at.
-"""
-
 from __future__ import annotations
 
 import re
@@ -23,9 +10,6 @@ import pytest
 from wreath import _flight_schema as fs
 
 _NATIVE = Path(__file__).parents[1] / "src" / "wreath" / "_native"
-
-
-# --- the log cell -----------------------------------------------------------
 
 
 def test_log_cell_round_trips() -> None:
@@ -56,7 +40,6 @@ def test_log_cell_is_a_ring_cell() -> None:
 
 
 def test_log_cell_without_a_request_is_valid() -> None:
-    """Startup, shutdown and background records join to no trace."""
     cell = fs.LogCell(request_id=0, site_id=1, severity=fs.Severity.INFO)
     assert fs.LogCell.decode(cell.encode()).request_id == 0
 
@@ -81,7 +64,6 @@ def test_log_cell_decode_rejects_a_foreign_schema_version() -> None:
 
 
 def test_log_cell_decode_rejects_arg_bytes_past_the_inline_area() -> None:
-    """Validate-don't-trust: a corrupt length must not read beyond the cell."""
     raw = bytearray(fs.LogCell(request_id=1, site_id=1, severity=fs.Severity.INFO).encode())
     raw[27] = fs.LOG_INLINE_ARG_BYTES + 1  # arg_bytes
     with pytest.raises(fs.SchemaError, match="argument bytes"):
@@ -106,9 +88,6 @@ def test_log_cell_decode_rejects_an_unknown_argument_tag() -> None:
     raw[32] = 250  # the first argument's type tag
     with pytest.raises(fs.SchemaError, match="argument type"):
         fs.LogCell.decode(bytes(raw))
-
-
-# --- typed argument packing -------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -148,8 +127,6 @@ def test_log_text_argument_is_utf8() -> None:
 
 
 def test_log_arguments_that_overflow_the_inline_area_truncate_and_flag() -> None:
-    """The cell is fixed; a record that does not fit is clipped, never spilled,
-    and says so in its flags -- the same drop-and-count posture as the ring."""
     cell = fs.LogCell(
         request_id=1,
         site_id=1,
@@ -195,9 +172,6 @@ def test_log_text_clipping_never_splits_a_utf8_sequence() -> None:
         assert clipped == "é" * (len(clipped))
 
 
-# --- severity ---------------------------------------------------------------
-
-
 def test_severity_numbers_match_the_otel_bands() -> None:
     assert 1 <= fs.Severity.TRACE <= 4
     assert 5 <= fs.Severity.DEBUG <= 8
@@ -239,9 +213,6 @@ def test_stdlib_levels_between_bands_round_down() -> None:
     assert fs.severity_from_stdlib(100) == fs.Severity.FATAL
 
 
-# --- loss accounting --------------------------------------------------------
-
-
 def test_log_loss_reasons_are_distinct_and_dense() -> None:
     values = [int(r) for r in fs.LossReason]
     assert values == sorted(set(values))
@@ -267,9 +238,6 @@ def test_log_flags_do_not_collide() -> None:
     assert len({*flags}) == len(flags)
     for flag in flags:
         assert flag.bit_count() == 1
-
-
-# --- C mirror ---------------------------------------------------------------
 
 
 def _header_text() -> str:
@@ -325,8 +293,6 @@ def test_c_loss_reason_count_covers_the_log_reasons() -> None:
 
 
 def test_c_log_cell_layout_matches_python(tmp_path: Path) -> None:
-    """Compile a probe and compare sizeof/offsetof against the Python struct.
-    This is the byte-for-byte guarantee for the log cell."""
     import shutil
 
     cc = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
@@ -351,9 +317,7 @@ def test_c_log_cell_layout_matches_python(tmp_path: Path) -> None:
         "}\n"
     )
     binary = tmp_path / "probe"
-    subprocess.run(
-        [cc, "-std=c11", str(probe), "-o", str(binary)], check=True, capture_output=True
-    )
+    subprocess.run([cc, "-std=c11", str(probe), "-o", str(binary)], check=True, capture_output=True)
     output = subprocess.run([str(binary)], check=True, capture_output=True, text=True).stdout
     values = dict(line.split("=") for line in output.strip().splitlines())
 

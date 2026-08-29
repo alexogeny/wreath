@@ -151,9 +151,7 @@ async def run(dsn: str, iterations: int, trials: int) -> dict[str, Any]:
         started = perf_counter_ns()
         drained = 0
         while True:
-            delivery = await outbox.claim_due(
-                session, lease_owner="benchmark", lease_seconds=30
-            )
+            delivery = await outbox.claim_due(session, lease_owner="benchmark", lease_seconds=30)
             if delivery is None:
                 break
             await outbox.mark_sending(session, delivery)

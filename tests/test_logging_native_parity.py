@@ -1,20 +1,3 @@
-"""Every log-cell packing boundary against the wire definition, byte for byte.
-
-`wreath_nfr_log` packs a record straight into a ring cell in C. `pack_value`
-plus `LogCell.encode` define the sink/off-loop boundary, and the request-owned
-buffer packs held records into request-owned cells. The contract is not "all produce
-something readable" -- it is that the 64 bytes are *identical*, for every shape
-each boundary can be handed, because a reader cannot tell which packed a cell.
-
-The corpus below is deliberately weighted towards the cases where two
-independent implementations drift apart: a bool that is also an int, an int one
-past the wire slot, a string exactly on the clip boundary, a multi-byte
-character straddling it, lone surrogates, bytes that are not valid UTF-8, more
-arguments than a cell holds, and fewer arguments than the site declares. Each
-was a place a hand-written C packer could plausibly disagree, and the point of
-the test is that none of them does.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -249,7 +232,6 @@ def test_the_emitter_matches_the_wire_definition(
 def test_emitted_cells_decode_to_the_same_record(
     label: str, fields: tuple[LogField, ...], values: tuple[object, ...]
 ) -> None:
-    """Identical bytes are necessary; decoding without raising is the point."""
     registry = SiteRegistry()
     native, _mismatches = _native_cell(registry, 7, Severity.WARN, 99, fields, values)
     decoded = LogCell.decode(native)
@@ -262,12 +244,6 @@ def test_emitted_cells_decode_to_the_same_record(
 def test_emission_boundaries_count_the_same_type_mismatches(
     label: str, fields: tuple[LogField, ...], values: tuple[object, ...]
 ) -> None:
-    """A mismatch is counted on both paths, never raised on either.
-
-    The count is what tells an operator a call site is lying about its types, so
-    a native emitter that packed identical bytes while counting differently
-    would be a silent regression in the only signal there is.
-    """
     registry = SiteRegistry()
     expected = sum(
         pack_value(registry, values[i] if i < len(values) else None, spec)[1]
@@ -291,9 +267,7 @@ def test_the_request_buffer_packs_the_same_promoted_record(
         values,
         flags=0x01,
     )
-    buffered, mismatches = _buffered_cell(
-        registry, 7, Severity.DEBUG, 99, fields, values
-    )
+    buffered, mismatches = _buffered_cell(registry, 7, Severity.DEBUG, 99, fields, values)
     expected_mismatches = sum(
         pack_value(registry, values[i] if i < len(values) else None, spec)[1]
         for i, spec in enumerate(fields)
@@ -303,13 +277,6 @@ def test_the_request_buffer_packs_the_same_promoted_record(
 
 
 def test_the_fingerprint_key_is_the_registrys_own() -> None:
-    """Both halves must hash with one key, or correlation breaks in-process.
-
-    A fingerprint exists so two occurrences of one value can be recognised as
-    the same within a recording. If the native emitter hashed with the worker's
-    key while the Python path used the registry's, records from the two would
-    never match -- and nothing would raise to say so.
-    """
     fields = (_field(str, HASHED),)
     first = SiteRegistry()
     second = SiteRegistry()
@@ -320,13 +287,11 @@ def test_the_fingerprint_key_is_the_registrys_own() -> None:
 
     different = _native_cell(second, 7, Severity.WARN, 99, fields, ("tenant",))[0]
     assert different != same, (
-        "two registries fingerprinted one value identically; the key is not "
-        "process-local after all"
+        "two registries fingerprinted one value identically; the key is not process-local after all"
     )
 
 
 def test_a_full_ring_is_a_counted_drop_not_an_error() -> None:
-    """The same posture the recorder takes for a completion it cannot fit."""
     recorder = _flight.Recorder(_flight.MODE_PULSE, ring_records=2, active_requests=4)
     registry = SiteRegistry()
     key = registry.key
@@ -351,7 +316,6 @@ def test_the_emitter_refuses_a_malformed_call_rather_than_packing_garbage() -> N
 
 
 def test_the_installed_runtime_uses_the_native_emitter_when_one_exists() -> None:
-    """The wiring, not just the packer: a recorder-backed runtime must use it."""
     recorder = _flight.Recorder(_flight.MODE_PULSE, ring_records=64, active_requests=8)
     runtime = log.LogRuntime(
         log.recorder_sink(recorder),
@@ -376,14 +340,6 @@ def test_the_installed_runtime_uses_the_native_emitter_when_one_exists() -> None
 
 
 def test_a_template_whose_value_types_drift_still_packs_the_value_passed() -> None:
-    """The kwargs tier interns on template *text*, which does not pin the types.
-
-    `log.info("v is {v}", v=1)` and the same line with a string reach one
-    interned site, whose declared fields are whichever call arrived first.
-    Packing the second call against the first call's types would turn its value
-    into a counted mismatch and lose it -- which the Python packer never did, so
-    the native emitter must not either.
-    """
     recorder = _flight.Recorder(_flight.MODE_PULSE, ring_records=64, active_requests=8)
     runtime = log.LogRuntime(
         log.recorder_sink(recorder),

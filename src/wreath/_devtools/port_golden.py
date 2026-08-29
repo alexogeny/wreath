@@ -121,11 +121,14 @@ def check(root: Path, *, update: bool = False) -> tuple[list[GoldenFinding], int
     for golden, source in pairs:
         name = str(golden.relative_to(root))
         if not source.exists():
-            findings.append(GoldenFinding(
-                name, MISSING_SOURCE,
-                f"no corpus source at {source.relative_to(root)}; the golden test "
-                "parametrizes over goldens, so this one silently stopped being checked",
-            ))
+            findings.append(
+                GoldenFinding(
+                    name,
+                    MISSING_SOURCE,
+                    f"no corpus source at {source.relative_to(root)}; the golden test "
+                    "parametrizes over goldens, so this one silently stopped being checked",
+                )
+            )
             continue
 
         try:
@@ -135,11 +138,14 @@ def check(root: Path, *, update: bool = False) -> tuple[list[GoldenFinding], int
             continue
 
         if emit_module(source) != emitted:
-            findings.append(GoldenFinding(
-                name, NON_DETERMINISTIC,
-                "two emits of the same source differ; a golden written from this "
-                "would pin one of several outputs",
-            ))
+            findings.append(
+                GoldenFinding(
+                    name,
+                    NON_DETERMINISTIC,
+                    "two emits of the same source differ; a golden written from this "
+                    "would pin one of several outputs",
+                )
+            )
             continue
 
         try:
@@ -156,10 +162,13 @@ def check(root: Path, *, update: bool = False) -> tuple[list[GoldenFinding], int
             golden.write_text(emitted, encoding="utf-8")
             findings.append(GoldenFinding(name, DRIFT, "rewritten from the emitter", True))
         else:
-            findings.append(GoldenFinding(
-                name, DRIFT,
-                "differs from a fresh emit; re-run with --update if the change was intended",
-            ))
+            findings.append(
+                GoldenFinding(
+                    name,
+                    DRIFT,
+                    "differs from a fresh emit; re-run with --update if the change was intended",
+                )
+            )
 
     return findings, len(pairs)
 
@@ -170,10 +179,11 @@ def main(argv: list[str] | None = None) -> int:
         description="Check (or regenerate) the pinned `wreath port` emitter output.",
     )
     parser.add_argument(
-        "--update", action="store_true",
+        "--update",
+        action="store_true",
         help="rewrite goldens that differ from a fresh emit (drift only; a golden "
-             "with no source, or one whose emit is non-deterministic or does not "
-             "compile, is reported and left alone)",
+        "with no source, or one whose emit is non-deterministic or does not "
+        "compile, is reported and left alone)",
     )
     parser.add_argument("--format", choices=("text", "json"), default="text")
     args = parser.parse_args(argv)
@@ -183,11 +193,16 @@ def main(argv: list[str] | None = None) -> int:
     blocking = [f for f in findings if not f.updated]
 
     if args.format == "json":
-        print(json.dumps({
-            "goldens": seen,
-            "updated": sum(1 for f in findings if f.updated),
-            "findings": [f.as_dict() for f in findings],
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "goldens": seen,
+                    "updated": sum(1 for f in findings if f.updated),
+                    "findings": [f.as_dict() for f in findings],
+                },
+                indent=2,
+            )
+        )
     else:
         for finding in findings:
             print(finding.render())

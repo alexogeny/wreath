@@ -46,8 +46,15 @@ _EXTENSIONS: frozenset[str] = frozenset(
 )
 _REQUIRED_EXTENSIONS = frozenset(
     {
-        "_core", "_client", "_docs", "_dupscan", "_lint", "_postgres",
-        "_server", "_edge", "_testrunner",
+        "_core",
+        "_client",
+        "_docs",
+        "_dupscan",
+        "_lint",
+        "_postgres",
+        "_server",
+        "_edge",
+        "_testrunner",
     }
 )
 
@@ -72,7 +79,6 @@ def extension(name: str) -> Any | None:
 
 
 # Any-typed: the compiled module is invisible to static analysis.
-#
 # `_core` is the one eager load. Nearly every facade
 # wants it, so the dlopen is paid once here rather than discovered as an
 # `AttributeError` deep in a request. Everything else waits for a caller that

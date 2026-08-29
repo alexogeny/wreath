@@ -91,9 +91,6 @@ async def diagnose_n_plus_one(
     )
 
 
-# --- what one trace caused ---------------------------------------------------
-
-
 @dataclass(frozen=True, slots=True)
 class TracedWork:
     """One durable unit of work carrying a trace id."""
@@ -272,8 +269,7 @@ async def find_work_with_trace(
         columns = await _relation_columns(connection, schema, source.relation)
         if not columns:
             omitted.append(
-                f'{source.plural}: "{schema}".{source.relation} does not exist '
-                "on this database"
+                f'{source.plural}: "{schema}".{source.relation} does not exist on this database'
             )
             continue
         if "trace_context" not in columns:
@@ -289,8 +285,12 @@ async def find_work_with_trace(
         # de-duplicated.
         wanted = dict.fromkeys(
             (
-                source.key, source.label, source.state, "tenant",
-                "trace_context", source.detail,
+                source.key,
+                source.label,
+                source.state,
+                "tenant",
+                "trace_context",
+                source.detail,
             )
         )
         rows = await connection.fetch(
@@ -315,16 +315,13 @@ async def find_work_with_trace(
     columns = await _relation_columns(connection, workflow_schema, instances)
     if not columns:
         omitted.append(
-            f'workflows: "{workflow_schema}".{instances} does not exist on this '
-            "database"
+            f'workflows: "{workflow_schema}".{instances} does not exist on this database'
         )
     elif "trace_context" not in columns:
-        omitted.append(
-            f'workflows: "{workflow_schema}".{instances} has no trace_context column'
-        )
+        omitted.append(f'workflows: "{workflow_schema}".{instances} has no trace_context column')
     else:
         rows = await connection.fetch(
-            f'SELECT key, workflow, state, tenant, trace_context '
+            f"SELECT key, workflow, state, tenant, trace_context "
             f'FROM "{workflow_schema}".{instances} '
             "WHERE split_part(trace_context, '-', 2) = $1 ORDER BY key",
             trace_id,
@@ -343,8 +340,7 @@ async def find_work_with_trace(
             )
     omitted.append(
         "ephemeral bus messages: they carry no trace context, because doing so "
-        "would mean a versioned envelope around a live wire format -- deferred "
-        "deliberately, see docs/reference/roadmap.md"
+        "would mean a versioned envelope around a live wire format"
     )
     return TraceLookup(trace_id=trace_id, work=tuple(work), omitted=tuple(omitted))
 
@@ -449,9 +445,6 @@ class NPlusOneGuard:
         return response
 
 
-# --- extension readiness -----------------------------------------------------
-
-
 async def check_extension_types(registry: Any) -> list[str]:
     """Report extension types a registry needs that its database lacks.
 
@@ -475,9 +468,7 @@ async def check_extension_types(registry: Any) -> list[str]:
     columns = declared_extension_columns(registry)
     if not columns:
         return []
-    wanted = {
-        column.pg_type.type_name: column.pg_type.extension for _, column in columns
-    }
+    wanted = {column.pg_type.type_name: column.pg_type.extension for _, column in columns}
     users: dict[str, list[str]] = {}
     for spec, column in columns:
         users.setdefault(column.pg_type.type_name, []).append(
@@ -497,9 +488,6 @@ async def check_extension_types(registry: Any) -> list[str]:
         for item in found
         if not item.installed
     ]
-
-
-# --- split logging streams ---------------------------------------------------
 
 
 def check_logging_streams(*, active: bool | None = None) -> list[str]:
@@ -542,9 +530,10 @@ def check_logging_streams(*, active: bool | None = None) -> list[str]:
             continue
         if name in bridged:
             continue
-        if all(
-            isinstance(h, _stdlib_logging.NullHandler) for h in logger.handlers
-        ) and not logger.propagate:
+        if (
+            all(isinstance(h, _stdlib_logging.NullHandler) for h in logger.handlers)
+            and not logger.propagate
+        ):
             # A NullHandler on a non-propagating logger is a library silencing
             # itself, not a stream competing with wreath's.
             continue
@@ -555,9 +544,6 @@ def check_logging_streams(*, active: bool | None = None) -> list[str]:
             f"two streams deliberately"
         )
     return findings
-
-
-# --- email deliverability ----------------------------------------------------
 
 
 def check_email_deliverability(
@@ -711,19 +697,15 @@ def _dmarc_policy(record: str) -> str | None:
     return None
 
 
-# --- preflight ---------------------------------------------------------------
-#
 # The wiring omission is the failure mode wreath is most exposed to, because it
 # ships fifty-seven subsystems and most of them refuse loudly *somewhere*: at
 # startup, at configuration time, or in a plan a separate command prints. Loudly
 # somewhere is not the same as loudly in one place, and the answers were spread
 # across `wreath infra infer`, the hardening ruleset, and the route table.
-#
 # `preflight` asks all of them at once and prints one report. It aggregates and
 # does not invent: every finding here is one another part of wreath already
 # knows how to produce, which is what keeps it from becoming a fourth opinion
 # that disagrees with the three.
-#
 # It also prints what it could **not** ask, which is the half that makes the
 # rest safe to read. `wreath doctor trace` established the shape: a report that
 # lists three findings and stops is read as "there are three", so every source
@@ -774,14 +756,12 @@ class Preflight:
 _UNCHECKED: tuple[str, ...] = (
     "wreath's own tables exist in the target database -- `wreath schema check "
     "<target>` (needs a database)",
-    "your models match the live schema -- `wreath migrations detect <target>` "
-    "(needs a database)",
+    "your models match the live schema -- `wreath migrations detect <target>` (needs a database)",
     "source-level security defects -- `wreath audit code` (a separate ruleset "
     "over your files, and the other half of what `hardening` runs at startup)",
     "N+1 queries under real traffic -- `wreath doctor n-plus-one <socket>` "
     "(needs a running server)",
-    "mail will actually be delivered -- `wreath.doctor.check_email_deliverability` "
-    "(needs DNS)",
+    "mail will actually be delivered -- `wreath.doctor.check_email_deliverability` (needs DNS)",
     "whether a per-worker default is safe for your fleet -- preflight cannot see "
     "it. Sessions, idempotency, quotas and second-factor challenges all default "
     "to an in-process store, which is correct for one worker and wrong for four; "
@@ -915,7 +895,8 @@ def _tenancy_findings(app: Any) -> list[PreflightFinding]:
 
     registries = getattr(app, "_orm_registries", None) or {}
     isolated = [
-        name for name, registry in registries.items()
+        name
+        for name, registry in registries.items()
         if getattr(getattr(registry, "schema_mode", None), "kind", None) == "isolated"
     ]
     if not isolated:
@@ -923,8 +904,7 @@ def _tenancy_findings(app: Any) -> list[PreflightFinding]:
     # `_global_middleware` holds `(priority, order, middleware)`, so the
     # middleware is the third element rather than the entry.
     installed = any(
-        isinstance(entry[2], TenancyMiddleware)
-        for entry in getattr(app, "_global_middleware", ())
+        isinstance(entry[2], TenancyMiddleware) for entry in getattr(app, "_global_middleware", ())
     )
     if installed:
         return []
@@ -957,9 +937,7 @@ def _public_routes(app: Any) -> list[str]:
     if image is None:
         return []
     public: list[str] = []
-    for route, requirement in zip(
-        image.routes(), image.requirements(), strict=True
-    ):
+    for route, requirement in zip(image.routes(), image.requirements(), strict=True):
         if requirement.access_level == 0:
             methods = "/".join(sorted(route.methods)) or "ANY"
             public.append(f"{methods} {route.path}")
@@ -1008,9 +986,6 @@ def preflight_as_dict(report: Preflight) -> dict[str, Any]:
         ],
         "unchecked": list(report.unchecked),
     }
-
-
-# --- route and security manifest --------------------------------------------
 
 
 def _qualified(value: Any) -> str:
@@ -1084,14 +1059,10 @@ def route_manifest(app: Any, *, application: str = "") -> dict[str, Any]:
     if diagnostics:
         raise TypegenError(diagnostics)
     api = build_api_model(app, allow_unknown=True)
-    operations = {
-        (operation.method, operation.path): operation for operation in api.operations
-    }
+    operations = {(operation.method, operation.path): operation for operation in api.operations}
     app_middleware = tuple(
         item[2]
-        for item in sorted(
-            getattr(app, "_middleware", ()), key=lambda item: (item[0], item[1])
-        )
+        for item in sorted(getattr(app, "_middleware", ()), key=lambda item: (item[0], item[1]))
     )
     global_middleware = tuple(
         item[2]
@@ -1103,9 +1074,7 @@ def route_manifest(app: Any, *, application: str = "") -> dict[str, Any]:
     qualified_global_middleware = [_qualified(item) for item in global_middleware]
     entries: list[dict[str, Any]] = []
     requirements = image.requirements() if image is not None else ()
-    for index, (route, requirement) in enumerate(
-        zip(routes, requirements, strict=True)
-    ):
+    for index, (route, requirement) in enumerate(zip(routes, requirements, strict=True)):
         security = {
             "access": _access(requirement),
             "declared": requirement.declares_access,
@@ -1216,16 +1185,12 @@ def route_manifest(app: Any, *, application: str = "") -> dict[str, Any]:
             }
         )
     entries.sort(key=lambda entry: (entry["path"], entry["method"]))
-    declared = {
-        action for actions in declared_actions(app).values() for action in actions
-    }
+    declared = {action for actions in declared_actions(app).values() for action in actions}
     vocabulary = getattr(app, "_authorization_vocabulary", None)
     return {
         "version": 1,
         "application": application or "application",
-        "strict_access_declarations": bool(
-            getattr(app, "_require_access_declarations", False)
-        ),
+        "strict_access_declarations": bool(getattr(app, "_require_access_declarations", False)),
         "authorization": {
             "declared": sorted(declared),
             "vocabulary": list(vocabulary.actions) if vocabulary is not None else None,

@@ -1,28 +1,3 @@
-"""Second factors, stage three: WebAuthn registration and assertion.
-
-One test per bullet of the plan's "Security requirements, stated as
-requirements" section, deliberately not merged. A single test that posts a
-tampered assertion and checks for a 401 passes with `type`, `origin`, the RP ID
-hash and the counter all unchecked, as long as *something* rejects it -- which is
-precisely how a ceremony ships with one of the four missing.
-
-**The authenticator here is synthetic.** `_Authenticator` mints a real P-256 or
-Ed25519 key pair with `cryptography` (a dev/test dependency, never a runtime
-one), signs the real `authenticatorData || SHA-256(clientDataJSON)` preimage, and
-frames the result in real CBOR/COSE/DER. That proves wreath agrees with an
-independent signature implementation about the wire formats; it does **not**
-prove interoperability with anything, because the same test module wrote the
-bytes it reads back.
-
-**One recorded ceremony does.** `test_the_w3c_recorded_registration_verifies`
-and `test_the_w3c_recorded_assertion_verifies` are transcribed from the W3C
-WebAuthn Level 3 specification's own section 16.2 test vectors, hex for hex,
-with the source cited where they sit. Nothing here produced them.
-
-Run under `python -O` as well as normally -- that is the interpreter mode where a
-check written as an `assert` would silently not exist.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -88,9 +63,6 @@ PASSWORD = "correct horse battery staple"
 #: file reads a stored hash. A test that asserted two users hash differently
 #: would have to call `hash_password` itself, which is what it is asserting about.
 PASSWORD_HASH = hash_password(PASSWORD)
-
-
-# --- a synthetic authenticator ----------------------------------------------
 
 
 def _cbor(value: Any) -> bytes:
@@ -223,13 +195,8 @@ class _Authenticator:
         }
 
 
-# --- the round trip ---------------------------------------------------------
-
-
 async def _enrol(store: Any, device: _Authenticator, user_id: str = "user-1") -> Any:
-    begun = begin_webauthn_registration(
-        user_id=user_id, account="ann@example.test", rp_id=RP_ID
-    )
+    begun = begin_webauthn_registration(user_id=user_id, account="ann@example.test", rp_id=RP_ID)
     minted = device.register(begun.challenge)
     return await confirm_webauthn_registration(
         store,
@@ -243,15 +210,12 @@ async def _enrol(store: Any, device: _Authenticator, user_id: str = "user-1") ->
 
 @pytest.mark.parametrize("algorithm", ["es256", "ed25519"])
 async def test_a_registration_and_assertion_round_trip(algorithm: str) -> None:
-    """The whole ceremony, both accepted algorithms."""
     store = InMemorySecondFactorStore()
     device = _Authenticator(algorithm=algorithm)
     credential, _ = await _enrol(store, device)
     assert credential.kind == "webauthn"
 
-    begun = begin_webauthn_assertion(
-        [credential], rp_id=RP_ID
-    )
+    begun = begin_webauthn_assertion([credential], rp_id=RP_ID)
     minted = device.assertion(begun.challenge, sign_count=1)
     result = await verify_webauthn_assertion(
         store,
@@ -268,7 +232,6 @@ async def test_a_registration_and_assertion_round_trip(algorithm: str) -> None:
 
 
 async def test_an_rs256_authenticator_is_refused_by_name() -> None:
-    """A second signature scheme for a rare case is a cost with no return."""
     store = InMemorySecondFactorStore()
     device = _Authenticator()
     device.cose = _cbor({1: 3, 3: -257, -1: b"\x00" * 256, -2: b"\x01\x00\x01"})
@@ -307,24 +270,20 @@ async def _assert(
     )
 
 
-# --- type, challenge, origin, RP ID hash: four checks, four tests -----------
-
-
 async def test_a_registration_will_not_answer_an_assertion_type() -> None:
-    """`webauthn.create` and `webauthn.get` are not interchangeable."""
     store = InMemorySecondFactorStore()
     device = _Authenticator()
-    begun = begin_webauthn_registration(
-        user_id="user-1", account="ann@example.test", rp_id=RP_ID
-    )
+    begun = begin_webauthn_registration(user_id="user-1", account="ann@example.test", rp_id=RP_ID)
     minted = device.register(begun.challenge)
-    minted["client_data"] = device.client_data(
-        ceremony="assert", challenge=begun.challenge
-    )
+    minted["client_data"] = device.client_data(ceremony="assert", challenge=begun.challenge)
     with pytest.raises(WebAuthnError, match="client data type"):
         await confirm_webauthn_registration(
-            store, "user-1", challenge=begun.challenge, rp_id=RP_ID,
-            origins=(ORIGIN,), **minted,
+            store,
+            "user-1",
+            challenge=begun.challenge,
+            rp_id=RP_ID,
+            origins=(ORIGIN,),
+            **minted,
         )
     assert await store.credentials("user-1") == []
 
@@ -338,7 +297,6 @@ async def test_an_assertion_will_not_answer_a_registration_type() -> None:
 
 
 async def test_an_assertion_answering_a_different_challenge_is_refused() -> None:
-    """The challenge is what stops a recorded ceremony being replayed."""
     store = InMemorySecondFactorStore()
     device = _Authenticator()
     credential, _ = await _enrol(store, device)
@@ -347,7 +305,6 @@ async def test_an_assertion_answering_a_different_challenge_is_refused() -> None
 
 
 async def test_an_assertion_collected_at_another_origin_is_refused() -> None:
-    """The attack the ceremony exists to prevent."""
     store = InMemorySecondFactorStore()
     device = _Authenticator()
     credential, _ = await _enrol(store, device)
@@ -356,7 +313,6 @@ async def test_an_assertion_collected_at_another_origin_is_refused() -> None:
 
 
 async def test_an_assertion_signed_for_another_rp_id_is_refused() -> None:
-    """The origin lives in the client's statement; the RP ID hash in the signed one."""
     store = InMemorySecondFactorStore()
     device = _Authenticator()
     credential, _ = await _enrol(store, device)
@@ -367,20 +323,21 @@ async def test_an_assertion_signed_for_another_rp_id_is_refused() -> None:
 async def test_a_registration_signed_for_another_rp_id_is_refused() -> None:
     store = InMemorySecondFactorStore()
     device = _Authenticator()
-    begun = begin_webauthn_registration(
-        user_id="user-1", account="ann@example.test", rp_id=RP_ID
-    )
+    begun = begin_webauthn_registration(user_id="user-1", account="ann@example.test", rp_id=RP_ID)
     minted = device.register(begun.challenge, rp_id="evil.test")
     with pytest.raises(WebAuthnError, match="different RP ID"):
         await confirm_webauthn_registration(
-            store, "user-1", challenge=begun.challenge, rp_id=RP_ID,
-            origins=(ORIGIN,), **minted,
+            store,
+            "user-1",
+            challenge=begun.challenge,
+            rp_id=RP_ID,
+            origins=(ORIGIN,),
+            **minted,
         )
     assert await store.credentials("user-1") == []
 
 
 async def test_a_cross_origin_ceremony_is_refused() -> None:
-    """The origin matches inside an iframe the user cannot see."""
     store = InMemorySecondFactorStore()
     device = _Authenticator()
     credential, _ = await _enrol(store, device)
@@ -389,7 +346,6 @@ async def test_a_cross_origin_ceremony_is_refused() -> None:
 
 
 async def test_an_assertion_with_no_user_presence_is_refused() -> None:
-    """Somebody touched the authenticator, or this did not happen."""
     store = InMemorySecondFactorStore()
     device = _Authenticator()
     credential, _ = await _enrol(store, device)
@@ -398,43 +354,36 @@ async def test_an_assertion_with_no_user_presence_is_refused() -> None:
 
 
 async def test_a_registration_with_no_user_presence_is_refused() -> None:
-    """The same requirement one ceremony earlier, and nothing had ever run it.
-
-    The assertion twin above was covered and this one was not: a registration is
-    the ceremony that *creates* the credential, so an authenticator that enrolled
-    one without anybody touching it is a factor the account holder never agreed
-    to and cannot see -- and it then satisfies every later assertion honestly.
-    """
     store = InMemorySecondFactorStore()
     device = _Authenticator()
-    begun = begin_webauthn_registration(
-        user_id="user-1", account="ann@example.test", rp_id=RP_ID
-    )
+    begun = begin_webauthn_registration(user_id="user-1", account="ann@example.test", rp_id=RP_ID)
     minted = device.register(begun.challenge, user_present=False)
     with pytest.raises(WebAuthnError, match="user presence"):
         await confirm_webauthn_registration(
-            store, "user-1", challenge=begun.challenge, rp_id=RP_ID,
-            origins=(ORIGIN,), **minted,
+            store,
+            "user-1",
+            challenge=begun.challenge,
+            rp_id=RP_ID,
+            origins=(ORIGIN,),
+            **minted,
         )
     assert await store.credentials("user-1") == []
 
 
 async def test_an_attestation_that_is_not_none_is_refused() -> None:
-    """Verifying an attestation statement is a metadata service and a non-goal."""
     store = InMemorySecondFactorStore()
     device = _Authenticator()
-    begun = begin_webauthn_registration(
-        user_id="user-1", account="ann@example.test", rp_id=RP_ID
-    )
+    begun = begin_webauthn_registration(user_id="user-1", account="ann@example.test", rp_id=RP_ID)
     minted = device.register(begun.challenge, fmt="packed")
     with pytest.raises(WebAuthnError, match="packed"):
         await confirm_webauthn_registration(
-            store, "user-1", challenge=begun.challenge, rp_id=RP_ID,
-            origins=(ORIGIN,), **minted,
+            store,
+            "user-1",
+            challenge=begun.challenge,
+            rp_id=RP_ID,
+            origins=(ORIGIN,),
+            **minted,
         )
-
-
-# --- the signature actually has to verify -----------------------------------
 
 
 async def test_a_tampered_signature_is_refused() -> None:
@@ -446,14 +395,17 @@ async def test_a_tampered_signature_is_refused() -> None:
     minted["signature"] = minted["signature"][:-1] + bytes([minted["signature"][-1] ^ 1])
     with pytest.raises(WebAuthnError):
         await verify_webauthn_assertion(
-            store, "user-1", challenge=begun.challenge,
-            credential_id=device.credential_id, rp_id=RP_ID, origins=(ORIGIN,),
+            store,
+            "user-1",
+            challenge=begun.challenge,
+            credential_id=device.credential_id,
+            rp_id=RP_ID,
+            origins=(ORIGIN,),
             **minted,
         )
 
 
 async def test_authenticator_data_is_covered_by_the_signature() -> None:
-    """Raising the counter by hand must not be free."""
     store = InMemorySecondFactorStore()
     device = _Authenticator()
     credential, _ = await _enrol(store, device)
@@ -462,14 +414,17 @@ async def test_authenticator_data_is_covered_by_the_signature() -> None:
     minted["authenticator_data"] = device.auth_data(sign_count=99)
     with pytest.raises(WebAuthnError, match="signature did not verify"):
         await verify_webauthn_assertion(
-            store, "user-1", challenge=begun.challenge,
-            credential_id=device.credential_id, rp_id=RP_ID, origins=(ORIGIN,),
+            store,
+            "user-1",
+            challenge=begun.challenge,
+            credential_id=device.credential_id,
+            rp_id=RP_ID,
+            origins=(ORIGIN,),
             **minted,
         )
 
 
 async def test_another_users_credential_never_answers_for_this_one() -> None:
-    """The credential id comes off the wire; the lookup is owner-scoped."""
     store = InMemorySecondFactorStore()
     device = _Authenticator()
     credential, _ = await _enrol(store, device, user_id="user-2")
@@ -477,11 +432,7 @@ async def test_another_users_credential_never_answers_for_this_one() -> None:
         await _assert(store, device, credential, user_id="user-1")
 
 
-# --- the signature counter --------------------------------------------------
-
-
 async def test_a_counter_that_goes_backwards_is_refused() -> None:
-    """A stored non-zero counter dropping is the cloned-authenticator signal."""
     store = InMemorySecondFactorStore()
     device = _Authenticator()
     credential, _ = await _enrol(store, device)
@@ -491,7 +442,6 @@ async def test_a_counter_that_goes_backwards_is_refused() -> None:
 
 
 async def test_a_counter_that_stands_still_above_zero_is_refused() -> None:
-    """Not merely backwards: an authenticator that counts must keep counting."""
     store = InMemorySecondFactorStore()
     device = _Authenticator()
     credential, _ = await _enrol(store, device)
@@ -501,7 +451,6 @@ async def test_a_counter_that_stands_still_above_zero_is_refused() -> None:
 
 
 async def test_a_counter_dropping_to_zero_from_above_is_refused() -> None:
-    """Zero means "not reported" only while it has always been zero."""
     store = InMemorySecondFactorStore()
     device = _Authenticator()
     credential, _ = await _enrol(store, device)
@@ -511,7 +460,6 @@ async def test_a_counter_dropping_to_zero_from_above_is_refused() -> None:
 
 
 async def test_an_authenticator_that_always_reports_zero_keeps_working() -> None:
-    """Many do. Treating that as a regression locks out working hardware."""
     store = InMemorySecondFactorStore()
     device = _Authenticator()
     credential, _ = await _enrol(store, device)
@@ -539,9 +487,7 @@ class _Overtaken:
         rows = await self._inner.credentials(user_id)
         for row in rows:
             if row.kind == "webauthn":
-                await self._inner.touch(
-                    row.id, counter=self._overtake_to, at=datetime.now(UTC)
-                )
+                await self._inner.touch(row.id, counter=self._overtake_to, at=datetime.now(UTC))
         return rows
 
     async def add(self, credential: Any) -> Any:
@@ -556,12 +502,6 @@ class _Overtaken:
 
 
 async def test_an_assertion_that_loses_the_counter_advance_is_refused() -> None:
-    """Losing the race says exactly what a stalled counter says: refuse.
-
-    The pre-check compares against the count this request read, which a
-    concurrent assertion has already made stale. Only the store knows, and only
-    because it refused to move the counter.
-    """
     store = InMemorySecondFactorStore()
     device = _Authenticator()
     credential, _ = await _enrol(store, device)
@@ -573,11 +513,6 @@ async def test_an_assertion_that_loses_the_counter_advance_is_refused() -> None:
 
 
 async def test_a_zero_counter_that_cannot_advance_is_not_a_refusal() -> None:
-    """An advance from zero to zero is one no store can ever win.
-
-    Reading that as a race would refuse every authenticator that does not
-    implement the counter, which is most of them.
-    """
     store = InMemorySecondFactorStore()
     device = _Authenticator()
     credential, _ = await _enrol(store, device)
@@ -586,11 +521,7 @@ async def test_a_zero_counter_that_cannot_advance_is_not_a_refusal() -> None:
     assert (await store.credentials("user-1"))[0].counter == 0
 
 
-# --- user verification ------------------------------------------------------
-
-
 def test_both_ceremonies_ask_for_user_verification() -> None:
-    """Requested for second-factor use, per the plan; `required` is stage four."""
     registration = begin_webauthn_registration(
         user_id="user-1", account="ann@example.test", rp_id=RP_ID
     )
@@ -600,7 +531,6 @@ def test_both_ceremonies_ask_for_user_verification() -> None:
 
 
 async def test_the_user_verification_outcome_is_recorded() -> None:
-    """Recorded rather than enforced, because a policy may care either way."""
     store = InMemorySecondFactorStore()
     device = _Authenticator()
     credential, _ = await _enrol(store, device)
@@ -611,13 +541,15 @@ async def test_the_user_verification_outcome_is_recorded() -> None:
 
 
 async def test_user_verification_can_be_required() -> None:
-    """The knob a caller that has decided reaches for."""
     store = InMemorySecondFactorStore()
     device = _Authenticator()
     credential, _ = await _enrol(store, device)
     with pytest.raises(WebAuthnError, match="requires user verification"):
         await _assert(
-            store, device, credential, user_verified=False,
+            store,
+            device,
+            credential,
+            user_verified=False,
             require_user_verification=True,
         )
 
@@ -625,9 +557,7 @@ async def test_user_verification_can_be_required() -> None:
 async def test_user_verification_can_be_required_at_registration() -> None:
     store = InMemorySecondFactorStore()
     device = _Authenticator()
-    begun = begin_webauthn_registration(
-        user_id="user-1", account="ann@example.test", rp_id=RP_ID
-    )
+    begun = begin_webauthn_registration(user_id="user-1", account="ann@example.test", rp_id=RP_ID)
     minted = device.register(begun.challenge, user_verified=False)
 
     with pytest.raises(WebAuthnError, match="registration requires user verification"):
@@ -641,9 +571,6 @@ async def test_user_verification_can_be_required_at_registration() -> None:
             **minted,
         )
     assert await store.credentials("user-1") == []
-
-
-# --- registration bookkeeping -----------------------------------------------
 
 
 async def test_registering_the_same_credential_twice_is_refused() -> None:
@@ -665,9 +592,7 @@ async def test_a_non_webauthn_factor_cannot_claim_a_credential_id() -> None:
             label="Phone",
             created_at=datetime.now(UTC),
             last_used_at=None,
-            material=pack_credential(
-                device.credential_id, device.cose, user_verified=True
-            ),
+            material=pack_credential(device.credential_id, device.cose, user_verified=True),
         )
     )
 
@@ -680,9 +605,7 @@ async def test_registration_records_the_supplied_time() -> None:
     store = InMemorySecondFactorStore()
     device = _Authenticator()
     moment = 1_700_000_000.0
-    begun = begin_webauthn_registration(
-        user_id="user-1", account="ann@example.test", rp_id=RP_ID
-    )
+    begun = begin_webauthn_registration(user_id="user-1", account="ann@example.test", rp_id=RP_ID)
 
     credential, _ = await confirm_webauthn_registration(
         store,
@@ -711,7 +634,6 @@ async def test_assertion_records_the_supplied_time() -> None:
 
 
 async def test_a_first_security_key_issues_recovery_codes() -> None:
-    """A user whose only factor is a key they can lose is the lockout risk."""
     store = InMemorySecondFactorStore()
     _, codes = await _enrol(store, _Authenticator())
     assert len(codes) == 10
@@ -720,7 +642,6 @@ async def test_a_first_security_key_issues_recovery_codes() -> None:
 
 
 async def test_a_second_key_does_not_mint_a_second_set_of_codes() -> None:
-    """Two pieces of paper in circulation, neither invalidating the other."""
     store = InMemorySecondFactorStore()
     await _enrol(store, _Authenticator())
     _, codes = await _enrol(store, _Authenticator(credential_id=b"cred-id-1"))
@@ -728,9 +649,6 @@ async def test_a_second_key_does_not_mint_a_second_set_of_codes() -> None:
     rows = await store.credentials("user-1")
     assert sum(1 for row in rows if row.kind == "recovery") == 10
     assert sum(1 for row in rows if row.kind == "webauthn") == 2
-
-
-# --- the parsers, which read attacker-supplied bytes ------------------------
 
 
 def test_the_cbor_decoder_reads_what_an_authenticator_writes() -> None:
@@ -755,20 +673,17 @@ def test_the_cbor_decoder_reads_what_an_authenticator_writes() -> None:
     ],
 )
 def test_the_cbor_decoder_refuses_what_ctap2_never_emits(name: str, encoded: bytes) -> None:
-    """Anything canonical CBOR forbids is one more thing a signer can disagree on."""
     with pytest.raises(WebAuthnError):
         cbor_decode(encoded)
 
 
 def test_the_cbor_decoder_bounds_its_own_recursion() -> None:
-    """Nesting is input, so the stack it costs has to be bounded by something."""
     deep = b"\x81" * 64 + b"\x01"
     with pytest.raises(WebAuthnError, match="too deep"):
         cbor_decode(deep)
 
 
 def test_the_der_signature_parser_demands_minimal_integers() -> None:
-    """Two encodings of one signature is a malleability nobody needs."""
     minimal = bytes([0x30, 0x06, 0x02, 0x01, 0x7F, 0x02, 0x01, 0x01])
     assert der_signature_to_raw(minimal) == (127).to_bytes(32, "big") + (1).to_bytes(32, "big")
     padded = bytes([0x30, 0x07, 0x02, 0x02, 0x00, 0x7F, 0x02, 0x01, 0x01])
@@ -792,14 +707,12 @@ def test_the_der_signature_parser_refuses_malformed_signatures(encoded: bytes) -
 
 
 def test_a_public_key_off_the_curve_is_refused() -> None:
-    """Off-curve arithmetic is not ECDSA, and the point is attacker-supplied."""
     off = _cbor({1: 2, 3: -7, -1: 1, -2: b"\x01" * 32, -3: b"\x02" * 32})
     with pytest.raises(WebAuthnError, match="not a point on P-256"):
         parse_cose_key(off)
 
 
 def test_a_cose_key_must_match_its_own_algorithm() -> None:
-    """An ES256 label over an Ed25519 body is not a key this can verify."""
     mismatched = _cbor({1: 1, 3: -7, -1: 6, -2: b"\x01" * 32})
     with pytest.raises(WebAuthnError, match="EC2 over P-256"):
         parse_cose_key(mismatched)
@@ -811,14 +724,12 @@ def test_authenticator_data_shorter_than_its_header_is_refused() -> None:
 
 
 def test_authenticator_data_with_bytes_left_over_is_refused() -> None:
-    """A byte no flag accounts for is a byte the signature covers and nothing reads."""
     device = _Authenticator()
     with pytest.raises(WebAuthnError, match="trailing bytes"):
         parse_authenticator_data(device.auth_data() + b"\x00")
 
 
 def test_a_credential_id_longer_than_the_buffer_is_refused() -> None:
-    """The length is two attacker-chosen bytes ahead of the data it describes."""
     device = _Authenticator()
     data = bytearray(device.auth_data(attested=True))
     data[53:55] = struct.pack(">H", 1000)
@@ -839,14 +750,6 @@ def test_stored_material_round_trips_and_refuses_a_truncated_row() -> None:
 
 
 def test_packing_refuses_material_the_header_cannot_describe() -> None:
-    """Both 16-bit length fields, and the empty case each of them shares.
-
-    `pack_credential` writes the two lengths into an `H` each, so 65536 bytes
-    would wrap to 0 and `unpack_credential` would then read a credential id of
-    nothing followed by a key made of the id -- a silent corruption of stored
-    material rather than a refusal. Nothing had ever passed either bound; the
-    refusals were written and never watched.
-    """
     with pytest.raises(WebAuthnError, match="credential id must be 1..65535"):
         pack_credential(b"", b"key-bytes", user_verified=True)
     with pytest.raises(WebAuthnError, match="credential id must be 1..65535"):
@@ -864,14 +767,8 @@ def test_packing_refuses_material_the_header_cannot_describe() -> None:
     assert restored.user_verified is False
 
 
-# --- nothing here is logged, and no invariant depends on assert -------------
-
-
 def test_a_begun_ceremony_keeps_its_challenge_out_of_its_repr() -> None:
-    """A dataclass repr reaches logs and error reporters without anyone choosing."""
-    begun = begin_webauthn_registration(
-        user_id="user-1", account="ann@example.test", rp_id=RP_ID
-    )
+    begun = begin_webauthn_registration(user_id="user-1", account="ann@example.test", rp_id=RP_ID)
     text = repr(begun)
     assert b64url_encode(begun.challenge) not in text
     assert "example.test" not in text
@@ -885,7 +782,6 @@ async def test_a_webauthn_credentials_repr_carries_no_key_material() -> None:
 
 
 def test_the_webauthn_wire_module_contains_no_assert_statements() -> None:
-    """`python -O` deletes `assert`; every check in there must be a `raise`."""
     import ast
 
     import wreath._webauthn as module
@@ -895,19 +791,15 @@ def test_the_webauthn_wire_module_contains_no_assert_statements() -> None:
     assert [node for node in ast.walk(tree) if isinstance(node, ast.Assert)] == []
 
 
-# --- one recorded ceremony, from a source anyone can go and check -----------
-#
 # Everything above this line is signed by `_Authenticator`, which proves wreath
 # agrees with `cryptography` about the wire formats and proves nothing at all
 # about interoperability: the same module wrote the bytes and read them back.
 # These two are not ours. They are transcribed, byte for byte, from the
 # **W3C Web Authentication Level 3** specification's own test vectors:
-#
 #   Web Authentication: An API for accessing Public Key Credentials -- Level 3
 #   W3C Candidate Recommendation Snapshot, 26 May 2026
 #   Section 16.2, "ES256 Credential with No Attestation"
 #   https://www.w3.org/TR/2026/CR-webauthn-3-20260526/#sctn-test-vectors-none-es256
-#
 # Section 16 states the use these are for in as many words: "Relying Party
 # implementers may check that they can successfully validate the registration
 # outputs given the same challenge input, and that they can successfully
@@ -915,15 +807,12 @@ def test_the_webauthn_wire_module_contains_no_assert_statements() -> None:
 # credential public key and credential ID from the associated registration
 # example." The registration and the assertion below are the same credential,
 # which is why the second can be verified against a key the first stored.
-#
 # The specification prints them as hex, so they are hex here: a transcription
 # anyone can diff against the published document without re-encoding anything
 # first. Section 16.1 fixes the RP ID as `example.org` and the origin as
 # `https://example.org` for every vector in the section.
-#
 # Two properties of *this* vector are worth knowing before reading the
 # assertions below, because both would otherwise look like defects:
-#
 # * The registration's clientDataJSON carries an `extraData` member the
 #   specification put there deliberately, to check that a relying party does not
 #   choke on a field it has never heard of. Wreath reads the three members it
@@ -968,8 +857,7 @@ _W3C_ASSERT_CHALLENGE = bytes.fromhex(
     "39c0e7521417ba54d43e8dc95174f423dee9bf3cd804ff6d65c857c9abf4d408"
 )
 _W3C_ASSERT_AUTH_DATA = bytes.fromhex(
-    "bfabc37432958b063360d3ad6461c9c4735ae7f8edd46592a5e0f01452b2e4b519000000"
-    "00"
+    "bfabc37432958b063360d3ad6461c9c4735ae7f8edd46592a5e0f01452b2e4b51900000000"
 )
 _W3C_ASSERT_CLIENT_DATA = bytes.fromhex(
     "7b2274797065223a22776562617574686e2e676574222c226368616c6c656e6765223a22"
@@ -996,13 +884,6 @@ async def _w3c_registered(store: Any) -> Any:
 
 
 async def test_the_w3c_recorded_registration_verifies() -> None:
-    """W3C WebAuthn L3 section 16.2, the registration half.
-
-    The credential id and the AAGUID are asserted against the values the
-    specification publishes beside the blob, not against what wreath decoded --
-    a parser that agreed with itself about a misread field would still pass a
-    round trip and fails here.
-    """
     parsed = parse_attestation_object(_W3C_REG_ATTESTATION)
     assert parsed.aaguid == _W3C_AAGUID
     assert parsed.credential_id == _W3C_CREDENTIAL_ID
@@ -1018,12 +899,6 @@ async def test_the_w3c_recorded_registration_verifies() -> None:
 
 
 async def test_the_w3c_recorded_assertion_verifies() -> None:
-    """W3C WebAuthn L3 section 16.2, the authentication half, same credential.
-
-    The signature is over `authenticatorData || SHA-256(clientDataJSON)` and was
-    produced by neither wreath nor `cryptography`, so this is the one check in
-    the file that says the ceremony would work against something that is not us.
-    """
     store = InMemorySecondFactorStore()
     credential, _ = await _w3c_registered(store)
     result = await verify_webauthn_assertion(
@@ -1045,7 +920,6 @@ async def test_the_w3c_recorded_assertion_verifies() -> None:
 
 
 async def test_the_w3c_recorded_assertion_is_bound_to_its_own_challenge() -> None:
-    """A recorded ceremony is only useful if it also fails where it should."""
     store = InMemorySecondFactorStore()
     await _w3c_registered(store)
     with pytest.raises(WebAuthnError, match="different challenge"):
@@ -1060,9 +934,6 @@ async def test_the_w3c_recorded_assertion_is_bound_to_its_own_challenge() -> Non
             rp_id=_W3C_RP_ID,
             origins=(_W3C_ORIGIN,),
         )
-
-
-# --- the router: where the challenge lives, and for how long ----------------
 
 
 class _Clock:
@@ -1141,9 +1012,7 @@ def _app(
             )
         )
     )
-    app.include_router(
-        user_router(users, secret="u" * 32, second_factors=factors, clock=clock)
-    )
+    app.include_router(user_router(users, secret="u" * 32, second_factors=factors, clock=clock))
     options.setdefault("rp_id", RP_ID)
     options.setdefault("origins", (ORIGIN,))
     # No `pytest.warns` wrapper any more: a router built without `enrolments=`
@@ -1167,9 +1036,7 @@ def _app(
         went through `/users/login` would be asserting a refusal whose subject
         the login had already removed (a check that has nothing to check).
         """
-        request.state.session["principal"] = {
-            "sub": user_id, "type": "User", "roles": []
-        }
+        request.state.session["principal"] = {"sub": user_id, "type": "User", "roles": []}
         return {"status": "adopted"}
 
     @app.post("/forget")
@@ -1211,9 +1078,7 @@ def _wire(minted: dict[str, bytes]) -> dict[str, str]:
     return {name: b64url_encode(raw) for name, raw in minted.items()}
 
 
-async def _http_register(
-    client: Any, device: _Authenticator, cookie: str, **options: Any
-) -> Any:
+async def _http_register(client: Any, device: _Authenticator, cookie: str, **options: Any) -> Any:
     begun = await client.post("/auth/2fa/webauthn/begin", headers={"cookie": cookie})
     assert begun.status == 200, begun.json()
     challenge = b64url_decode(begun.json()["challenge"])
@@ -1221,9 +1086,7 @@ async def _http_register(
 
 
 async def _http_assert(client: Any, device: _Authenticator, cookie: str, **options: Any) -> Any:
-    begun = await client.post(
-        "/auth/2fa/webauthn/verify/begin", headers={"cookie": cookie}
-    )
+    begun = await client.post("/auth/2fa/webauthn/verify/begin", headers={"cookie": cookie})
     assert begun.status == 200, begun.json()
     challenge = b64url_decode(begun.json()["challenge"])
     return begun, device.assertion(challenge, **options)
@@ -1241,7 +1104,6 @@ async def _enrolled(client: Any, device: _Authenticator, cookie: str) -> str:
 
 
 async def test_a_passkey_registers_and_then_finishes_a_pending_login() -> None:
-    """The ceremony end to end, through the router that mounts it."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
     store = _MemorySessionStore()
@@ -1277,12 +1139,9 @@ async def test_a_passkey_registers_and_then_finishes_a_pending_login() -> None:
 
 
 async def test_a_discoverable_passkey_is_a_first_factor() -> None:
-    """No email or password is needed once a resident passkey names its owner."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
-    async with TestClient(
-        _app(users, factors, clock, passkey_login=True)
-    ) as client:
+    async with TestClient(_app(users, factors, clock, passkey_login=True)) as client:
         user = await _seed(users)
         cookie = _cookie(await _http_login(client))
 
@@ -1308,9 +1167,7 @@ async def test_a_discoverable_passkey_is_a_first_factor() -> None:
         assert login.status == 200, login.json()
         assert login.json()["allowCredentials"] == []
         assert login.json()["userVerification"] == "required"
-        assertion = device.assertion(
-            b64url_decode(login.json()["challenge"]), sign_count=1
-        )
+        assertion = device.assertion(b64url_decode(login.json()["challenge"]), sign_count=1)
         completed = await client.post(
             "/auth/2fa/webauthn/login",
             json={"id": b64url_encode(device.credential_id), **_wire(assertion)},
@@ -1318,15 +1175,12 @@ async def test_a_discoverable_passkey_is_a_first_factor() -> None:
         )
         assert completed.status == 200, completed.json()
         assert completed.json()["id"] == user.id
-        session = (
-            await client.get("/session", headers={"cookie": _cookie(completed)})
-        ).json()
+        session = (await client.get("/session", headers={"cookie": _cookie(completed)})).json()
         assert session["principal"]["sub"] == user.id
         assert session["principal"]["second_factor_uv"] is True
 
 
 async def test_the_user_verification_outcome_reaches_the_session() -> None:
-    """A policy may care whether a PIN was entered, so it is written down."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
     store = _MemorySessionStore()
@@ -1356,13 +1210,10 @@ async def test_the_user_verification_outcome_reaches_the_session() -> None:
 
 
 async def test_a_challenge_is_single_use() -> None:
-    """Replaying the assertion that just worked must not work again."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
     challenges = _CountingChallengeStore()
-    async with TestClient(
-        _app(users, factors, clock, challenges=challenges)
-    ) as client:
+    async with TestClient(_app(users, factors, clock, challenges=challenges)) as client:
         await _seed(users)
         cookie = await _enrolled(client, device, _cookie(await _http_login(client)))
         begun, minted = await _http_assert(client, device, cookie, sign_count=1)
@@ -1381,13 +1232,10 @@ async def test_a_challenge_is_single_use() -> None:
 
 
 async def test_a_failed_ceremony_spends_its_challenge_too() -> None:
-    """Otherwise a recorded assertion has until the TTL to be posted again."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
     challenges = _CountingChallengeStore()
-    async with TestClient(
-        _app(users, factors, clock, challenges=challenges)
-    ) as client:
+    async with TestClient(_app(users, factors, clock, challenges=challenges)) as client:
         await _seed(users)
         cookie = await _enrolled(client, device, _cookie(await _http_login(client)))
         begun, minted = await _http_assert(
@@ -1404,13 +1252,10 @@ async def test_a_failed_ceremony_spends_its_challenge_too() -> None:
 
 
 async def test_beginning_again_abandons_the_previous_challenge() -> None:
-    """One live challenge per session, not one per reload of the page."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
     challenges = _CountingChallengeStore()
-    async with TestClient(
-        _app(users, factors, clock, challenges=challenges)
-    ) as client:
+    async with TestClient(_app(users, factors, clock, challenges=challenges)) as client:
         await _seed(users)
         cookie = await _enrolled(client, device, _cookie(await _http_login(client)))
         begun, minted = await _http_assert(client, device, cookie, sign_count=1)
@@ -1428,13 +1273,6 @@ async def test_beginning_again_abandons_the_previous_challenge() -> None:
 
 
 async def test_a_challenge_is_single_use_with_no_stores_configured_at_all() -> None:
-    """The property the deleted warning used to disclaim.
-
-    No `enrolments=`, no `challenges=`, and a cookie-backed `SessionPolicy`
-    -- the exact deployment the old warning said was only as single-use as the
-    cookie. It is single-use now, because the challenge is not in the cookie:
-    the default `ChallengeStore` holds it and the consume spends it.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
     async with TestClient(_app(users, factors, clock)) as client:
@@ -1457,17 +1295,6 @@ async def test_a_challenge_is_single_use_with_no_stores_configured_at_all() -> N
 
 
 async def test_a_registration_challenge_cannot_answer_an_assertion() -> None:
-    """Cross-ceremony confusion, refused by the consuming statement itself.
-
-    The two ceremonies are different *kinds* in the store, so a registration
-    challenge posted to `/verify` matches no row -- rather than being read back
-    and rejected by a check afterwards, which is the shape that spends the row
-    on the way to refusing it.
-
-    It answers `ceremony_expired` and not the binding refusal: the row belongs
-    to the right *user*, it is simply the wrong ceremony, and telling those two
-    apart is what `peek` is for.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
     async with TestClient(_app(users, factors, clock)) as client:
@@ -1488,12 +1315,6 @@ async def test_a_registration_challenge_cannot_answer_an_assertion() -> None:
 
 
 async def test_a_verify_with_no_identity_on_the_session_is_refused() -> None:
-    """The subject is a precondition, so there has to be one.
-
-    A session carrying a ceremony marker but neither a pending login nor a
-    principal has nobody whose challenge this could be. It is refused before the
-    store is touched -- there is no candidate to match a row against.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
     async with TestClient(_app(users, factors, clock)) as client:
@@ -1516,10 +1337,6 @@ async def test_a_verify_with_no_identity_on_the_session_is_refused() -> None:
 
 
 async def test_a_throttled_caller_cannot_spend_a_challenge() -> None:
-    """The ordering hazard: the limiter keys on a subject known from the session
-    without reading the record, so it must run *before* the consume. Consuming
-    first would let a rate-limited attacker burn the ceremony of the account
-    they are hammering on their way to being refused."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
     challenges = _CountingChallengeStore()
@@ -1533,9 +1350,7 @@ async def test_a_throttled_caller_cannot_spend_a_challenge() -> None:
         bad = {"id": b64url_encode(device.credential_id), **_wire(minted)}
         bad["signature"] = b64url_encode(b"\x00" * 64)
 
-        first = await client.post(
-            "/auth/2fa/webauthn/verify", json=bad, headers={"cookie": cookie}
-        )
+        first = await client.post("/auth/2fa/webauthn/verify", json=bad, headers={"cookie": cookie})
         assert first.status == 401
         # Now throttled. Begin a fresh ceremony and confirm the refusal does not
         # cost it: the challenge is still live afterwards.
@@ -1570,13 +1385,10 @@ async def test_a_challenge_expires() -> None:
 
 
 async def test_a_challenge_is_bound_to_the_session_that_began_it() -> None:
-    """Another browser holding the same assertion has no challenge to spend."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
     challenges = _CountingChallengeStore()
-    async with TestClient(
-        _app(users, factors, clock, challenges=challenges)
-    ) as client:
+    async with TestClient(_app(users, factors, clock, challenges=challenges)) as client:
         await _seed(users)
         cookie = await _enrolled(client, device, _cookie(await _http_login(client)))
         begun, minted = await _http_assert(client, device, cookie, sign_count=1)
@@ -1593,20 +1405,10 @@ async def test_a_challenge_is_bound_to_the_session_that_began_it() -> None:
 
 
 async def test_a_begun_registration_does_not_survive_a_logout() -> None:
-    """A live challenge belongs to the ceremony that began it, and to no later one.
-
-    Session rotation carries contents over, so before this it took a sign-out
-    *and* a sign-in as somebody else to leave a challenge sitting on a browser
-    that had changed hands -- with the row behind it waiting out its TTL on the
-    server. Logging out ends the ceremony now: the marker goes, and so does the
-    row, which is the half a cleared cookie key would have left behind.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
     challenges = _CountingChallengeStore()
-    async with TestClient(
-        _app(users, factors, clock, challenges=challenges)
-    ) as client:
+    async with TestClient(_app(users, factors, clock, challenges=challenges)) as client:
         await _seed(users)
         bob = await _seed(users, "bob@example.test")
         cookie = _cookie(await _http_login(client))
@@ -1630,20 +1432,10 @@ async def test_a_begun_registration_does_not_survive_a_logout() -> None:
 
 
 async def test_a_registration_is_bound_to_the_user_who_began_it() -> None:
-    """The stage-two bug, in its stage-three shape.
-
-    A session that changes hands without `user_router` seeing it -- an OAuth2
-    callback writing the principal itself, which is what `/adopt` stands in for
-    -- still holds the challenge the previous person's ceremony began.
-    Confirming it would attach their authenticator to this account, and who the
-    ceremony was begun for is the only thing that refuses it.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
     challenges = _CountingChallengeStore()
-    async with TestClient(
-        _app(users, factors, clock, challenges=challenges)
-    ) as client:
+    async with TestClient(_app(users, factors, clock, challenges=challenges)) as client:
         await _seed(users)
         bob = await _seed(users, "bob@example.test")
         cookie = _cookie(await _http_login(client))
@@ -1665,7 +1457,6 @@ async def test_a_registration_is_bound_to_the_user_who_began_it() -> None:
 
 
 async def test_a_pending_login_cannot_finish_somebody_elses_ceremony() -> None:
-    """The same binding on the assertion half, not only on registration."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
     async with TestClient(_app(users, factors, clock)) as client:
@@ -1694,7 +1485,6 @@ async def test_a_pending_login_cannot_finish_somebody_elses_ceremony() -> None:
 
 
 async def test_the_listing_shows_the_key_and_never_its_material() -> None:
-    """Labels and dates. Not the public key, and not the credential id."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
     async with TestClient(_app(users, factors, clock)) as client:
@@ -1710,12 +1500,9 @@ async def test_the_listing_shows_the_key_and_never_its_material() -> None:
 
 
 async def test_verification_is_throttled_per_user() -> None:
-    """A signature is expensive to forge and cheap to post; bound the posting."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
-    async with TestClient(
-        _app(users, factors, clock, max_verify_attempts=2)
-    ) as client:
+    async with TestClient(_app(users, factors, clock, max_verify_attempts=2)) as client:
         await _seed(users)
         cookie = await _enrolled(client, device, _cookie(await _http_login(client)))
         statuses = []
@@ -1731,9 +1518,6 @@ async def test_verification_is_throttled_per_user() -> None:
             )
             statuses.append(refused.status)
         assert statuses == [401, 401, 429]
-
-
-# --- enrolling a factor is not proving one -----------------------------------
 
 
 async def _enrol_totp(client: Any, clock: _Clock, cookie: str) -> str:
@@ -1752,13 +1536,6 @@ async def _enrol_totp(client: Any, clock: _Clock, cookie: str) -> str:
 
 
 async def test_registering_a_further_passkey_does_not_stamp_the_session() -> None:
-    """A key the caller just chose proves possession of *their* authenticator.
-
-    The stamp answers "did this caller prove a factor the account already had".
-    If enrolling answered it, somebody holding a stolen session would answer it
-    with an authenticator of their own -- which is the one thing the step-up
-    guard exists to refuse.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock, step_up_ttl=300.0)) as client:
         await _seed(users)
@@ -1777,7 +1554,6 @@ async def test_registering_a_further_passkey_does_not_stamp_the_session() -> Non
 
 
 async def test_registering_a_further_passkey_does_not_satisfy_the_removal_guard() -> None:
-    """The same defect where it bites: turning the victim's real factor off."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock, step_up_ttl=300.0)) as client:
         await _seed(users)
@@ -1792,9 +1568,7 @@ async def test_registering_a_further_passkey_does_not_satisfy_the_removal_guard(
         ).status == 403
 
         # The enrolment itself is refused, so there is no passkey to prove.
-        refused = await client.post(
-            "/auth/2fa/webauthn/begin", headers={"cookie": cookie}
-        )
+        refused = await client.post("/auth/2fa/webauthn/begin", headers={"cookie": cookie})
         assert refused.status == 403
         assert refused.json() == {"error": "second_factor_required"}
         assert (
@@ -1803,13 +1577,6 @@ async def test_registering_a_further_passkey_does_not_satisfy_the_removal_guard(
 
 
 async def test_a_stale_session_cannot_enrol_a_passkey_and_step_up_with_it() -> None:
-    """Declining to stamp the enrolment is not enough: `/verify` stamps too.
-
-    Registering a passkey never stamped the session, but nothing stopped the
-    caller registering one and then *proving* it a request later, which does.
-    The detour costs one round trip and ends with the attacker's own key as the
-    only factor on the account, so the enrolment is what has to be refused.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock, step_up_ttl=300.0)) as client:
         await _seed(users)
@@ -1834,13 +1601,10 @@ async def test_a_stale_session_cannot_enrol_a_passkey_and_step_up_with_it() -> N
 
 
 async def test_a_stale_session_cannot_enrol_totp_beside_a_passkey() -> None:
-    """The mirror image, so neither enrolment route carries the hole alone."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock, step_up_ttl=300.0)) as client:
         await _seed(users)
-        cookie = await _enrolled(
-            client, _Authenticator(), _cookie(await _http_login(client))
-        )
+        cookie = await _enrolled(client, _Authenticator(), _cookie(await _http_login(client)))
         listed = (await client.get("/auth/2fa", headers={"cookie": cookie})).json()
         victim_factor = listed["factors"][0]["id"]
 
@@ -1854,14 +1618,11 @@ async def test_a_stale_session_cannot_enrol_totp_beside_a_passkey() -> None:
 
 
 async def test_enrolling_totp_beside_a_passkey_does_not_stamp_either() -> None:
-    """A fresh stamp permits the enrolment, and the enrolment does not renew it."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock, step_up_ttl=300.0)) as client:
         await _seed(users)
         enrolled_at = int(clock.now)
-        cookie = await _enrolled(
-            client, _Authenticator(), _cookie(await _http_login(client))
-        )
+        cookie = await _enrolled(client, _Authenticator(), _cookie(await _http_login(client)))
 
         clock.now += 60
         cookie = await _enrol_totp(client, clock, cookie)
@@ -1870,21 +1631,15 @@ async def test_enrolling_totp_beside_a_passkey_does_not_stamp_either() -> None:
 
 
 async def test_a_first_factor_still_stamps_so_it_can_be_undone() -> None:
-    """The condition must not cost the case it was written for."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock, step_up_ttl=300.0)) as client:
         await _seed(users)
-        cookie = await _enrolled(
-            client, _Authenticator(), _cookie(await _http_login(client))
-        )
+        cookie = await _enrolled(client, _Authenticator(), _cookie(await _http_login(client)))
         listed = (await client.get("/auth/2fa", headers={"cookie": cookie})).json()
         removed = await client.delete(
             f"/auth/2fa/{listed['factors'][0]['id']}", headers={"cookie": cookie}
         )
         assert removed.status == 200
-
-
-# --- an oversized key is a refusal, not a 500 --------------------------------
 
 
 def _padded_cose(device: _Authenticator, padding: int) -> bytes:
@@ -1905,7 +1660,6 @@ def test_an_oversized_cose_key_is_refused_by_the_parser() -> None:
 
 
 async def test_an_oversized_cose_key_is_a_400_and_not_a_500() -> None:
-    """It used to be a `ValueError` from `pack_credential`, which nothing caught."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
     device.cose = _padded_cose(device, 70_000)
@@ -1923,7 +1677,6 @@ async def test_an_oversized_cose_key_is_a_400_and_not_a_500() -> None:
 
 
 async def test_a_key_within_the_bound_still_registers() -> None:
-    """A blanket refusal would pass the test above and break every real key."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
     device.cose = _padded_cose(device, 64)
@@ -1934,7 +1687,6 @@ async def test_a_key_within_the_bound_still_registers() -> None:
 
 
 async def test_without_an_rp_id_there_are_no_passkey_routes() -> None:
-    """An application that does not want passkeys gets no passkey endpoints."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     app = Wreath()
     app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
@@ -1945,18 +1697,11 @@ async def test_without_an_rp_id_there_are_no_passkey_routes() -> None:
 
 
 def test_origins_without_an_rp_id_are_a_configuration_error() -> None:
-    """Configuring origins for routes that are not mounted reads as "it is on"."""
     with pytest.raises(ValueError, match="rp_id"):
-        second_factor_router(
-            InMemoryUserStore(), InMemorySecondFactorStore(), origins=(ORIGIN,)
-        )
-
-
-# --- the default origin set, and the loopback exception ---------------------
+        second_factor_router(InMemoryUserStore(), InMemorySecondFactorStore(), origins=(ORIGIN,))
 
 
 def test_the_default_origin_set_is_https_only_off_loopback() -> None:
-    """The default is an allowlist, so it widens for exactly one case."""
     assert default_origins("example.com") == ("https://example.com",)
 
 
@@ -1970,20 +1715,16 @@ def test_the_default_origin_set_is_https_only_off_loopback() -> None:
     ],
 )
 def test_loopback_admits_http_in_the_default_origin_set(rp_id: str, host: str) -> None:
-    """A browser treats loopback as a secure context; WebAuthn works there."""
     assert default_origins(rp_id) == (f"https://{host}", f"http://{host}")
 
 
 async def test_a_localhost_ceremony_on_a_port_verifies_by_default() -> None:
-    """`http://localhost:8000` is the first setup anybody has, so it must fit."""
     store = InMemorySecondFactorStore()
     device = _Authenticator()
     begun = begin_webauthn_registration(
         user_id="user-1", account="ann@example.test", rp_id="localhost"
     )
-    minted = device.register(
-        begun.challenge, rp_id="localhost", origin="http://localhost:8000"
-    )
+    minted = device.register(begun.challenge, rp_id="localhost", origin="http://localhost:8000")
     credential, _ = await confirm_webauthn_registration(
         store,
         "user-1",
@@ -1996,13 +1737,10 @@ async def test_a_localhost_ceremony_on_a_port_verifies_by_default() -> None:
 
 
 def _client_data(origin: str, challenge: bytes = b"c" * 32) -> bytes:
-    return _Authenticator().client_data(
-        ceremony="register", challenge=challenge, origin=origin
-    )
+    return _Authenticator().client_data(ceremony="register", challenge=challenge, origin=origin)
 
 
 def test_a_non_loopback_rp_id_still_refuses_http() -> None:
-    """The loopback case is a special case, not a licence to downgrade."""
     with pytest.raises(WebAuthnError, match="origin"):
         check_client_data(
             _client_data("http://example.test"),
@@ -2025,7 +1763,6 @@ def test_a_non_loopback_rp_id_still_refuses_http() -> None:
     ],
 )
 def test_the_loopback_exception_widens_to_nothing_else(origin: str) -> None:
-    """Loopback only, never a wildcard: an over-broad default is the vulnerability."""
     with pytest.raises(WebAuthnError, match="origin"):
         check_client_data(
             _client_data(origin),
@@ -2036,7 +1773,6 @@ def test_the_loopback_exception_widens_to_nothing_else(origin: str) -> None:
 
 
 def test_a_named_origin_off_loopback_gets_no_port_tolerance() -> None:
-    """Only loopback is port-flexible; everything else is matched exactly."""
     with pytest.raises(WebAuthnError, match="origin"):
         check_client_data(
             _client_data("https://example.test:8443"),
@@ -2047,7 +1783,6 @@ def test_a_named_origin_off_loopback_gets_no_port_tolerance() -> None:
 
 
 async def test_a_localhost_router_accepts_a_ported_ceremony_with_no_origins_named() -> None:
-    """End to end: the router's own default, not just the helper's."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     await _seed(users)
     app = _app(users, factors, clock, rp_id="localhost", origins=())
@@ -2064,19 +1799,7 @@ async def test_a_localhost_router_accepts_a_ported_ceremony_with_no_origins_name
         assert done.status == 200, done.json()
 
 
-# --- where the second-factor state lives, said out loud at startup ----------
-
-
 def test_a_router_built_without_a_store_warns_about_nothing() -> None:
-    """The warning this replaced could only name *half* its condition.
-
-    It fired on `enrolments=None` and then had to say "if your SessionPolicy
-    also has no store=, that means a cookie", because a router built before any
-    application exists cannot see the middleware. A warning nobody can act on
-    with certainty is one people learn to ignore. There is nothing to warn about
-    now: ceremony state goes to a `ChallengeStore` whose default is a real one,
-    so the property holds rather than being announced as absent.
-    """
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         second_factor_router(InMemoryUserStore(), InMemorySecondFactorStore())
@@ -2093,7 +1816,6 @@ def test_a_router_given_a_store_warns_about_nothing() -> None:
 
 
 def test_an_impossible_setting_fails_where_it_is_written() -> None:
-    """Not on the first ceremony, by which time it is a 500 to a real user."""
     with pytest.raises(ValueError, match="user verification"):
         second_factor_router(
             InMemoryUserStore(),
@@ -2103,8 +1825,6 @@ def test_an_impossible_setting_fails_where_it_is_written() -> None:
         )
 
 
-# --- the ceremony parameters nothing had ever made refuse ---------------------
-#
 # `wreath mutant --operators guard.remove-raise` reported each of these
 # UNREACHED across all 213 tests of the second-factor suite. The ceremony tests
 # above all pass well-formed parameters, which is the right thing for them to
@@ -2116,12 +1836,6 @@ def test_an_impossible_setting_fails_where_it_is_written() -> None:
 
 
 def test_a_ceremony_with_no_usable_origin_is_refused() -> None:
-    """An empty origin list is "accept any origin", spelled as an oversight.
-
-    `check_client_data` compares the collected origin against this tuple, so an
-    empty one would compare against nothing -- which is the phishing case the
-    origin check exists for.
-    """
     from wreath._secondfactor import _webauthn_origins
 
     with pytest.raises(ValueError, match="non-empty origin"):
@@ -2136,7 +1850,6 @@ def test_a_ceremony_with_no_usable_origin_is_refused() -> None:
 
 
 def test_a_ceremony_with_no_rp_id_is_refused() -> None:
-    """The RP ID is hashed into `authenticatorData`; an empty one binds nothing."""
     from wreath._secondfactor import _webauthn_rp_id
 
     with pytest.raises(ValueError, match="needs an RP ID"):
@@ -2150,28 +1863,23 @@ def test_a_ceremony_with_no_rp_id_is_refused() -> None:
 
 
 def test_a_challenge_too_short_to_resist_replay_is_refused() -> None:
-    """A caller may supply its own challenge; it may not supply a guessable one.
-
-    The floor is 16 bytes even though `WEBAUTHN_CHALLENGE_BYTES` mints 32, so
-    the refusal is about what is *acceptable* rather than about what wreath
-    happens to produce.
-    """
     from wreath._secondfactor import WEBAUTHN_CHALLENGE_BYTES, _webauthn_challenge
 
     with pytest.raises(ValueError, match="at least 16 bytes"):
         _webauthn_challenge(b"\x00" * 15)
-    assert len(_webauthn_challenge(b"\x00" * 16)) == 16       # the floor is admitted
+    assert len(_webauthn_challenge(b"\x00" * 16)) == 16  # the floor is admitted
     assert len(_webauthn_challenge(None)) == WEBAUTHN_CHALLENGE_BYTES
 
     with pytest.raises(ValueError, match="at least 16 bytes"):
         begin_webauthn_registration(
-            user_id="u1", account="ann@example.test", rp_id=RP_ID,
+            user_id="u1",
+            account="ann@example.test",
+            rp_id=RP_ID,
             challenge=b"\x00" * 8,
         )
 
 
 def test_a_registration_with_no_account_name_is_refused() -> None:
-    """The account name is what the authenticator shows the person choosing a key."""
     with pytest.raises(ValueError, match="needs an account name"):
         begin_webauthn_registration(user_id="u1", account="", rp_id=RP_ID)
 
@@ -2185,7 +1893,9 @@ def test_a_registration_with_no_account_name_is_refused() -> None:
     ],
 )
 def test_registration_refuses_invalid_handles_and_verification_policy(
-    user_id: str, user_verification: str, message: str,
+    user_id: str,
+    user_verification: str,
+    message: str,
 ) -> None:
     with pytest.raises(ValueError, match=message):
         begin_webauthn_registration(

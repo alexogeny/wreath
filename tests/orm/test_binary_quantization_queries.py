@@ -1,15 +1,3 @@
-"""The two `bit` distances and the three `sparsevec` ones, and what they compile to.
-
-`test_vector_queries.py` covers the four dense-vector operators. These are the
-ones that arrived with the other two column types, and the reason they are a
-separate file is that they are *type-gated*: `<~>` and `<%>` exist over
-PostgreSQL's `bit` and nothing else, and the four dense operators exist over
-`vector`, `halfvec` and `sparsevec` and not over `bit`. A method that compiles
-against the wrong column type produces SQL PostgreSQL rejects with a message
-about an undefined operator, naming neither the column nor the line that wrote
-it -- so the refusals here matter as much as the emissions.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -41,20 +29,12 @@ class Database:
 class Document(Model, table="documents", schema="app"):
     id: Mapped[int] = column(Int64, primary_key=True)
     body: Mapped[str] = column(Text)
-    signature: Mapped[str] = column(
-        Bit(16), index="hnsw", index_ops="bit_hamming_ops"
-    )
-    terms: Mapped[SparseVector] = column(
-        Sparsevec(30), index="hnsw", index_ops="sparsevec_l2_ops"
-    )
+    signature: Mapped[str] = column(Bit(16), index="hnsw", index_ops="bit_hamming_ops")
+    terms: Mapped[SparseVector] = column(Sparsevec(30), index="hnsw", index_ops="sparsevec_l2_ops")
 
 
 class Documents(Queries[Document]):
-    nearest = (
-        query()
-        .order_by(Document.signature.hamming_distance(Param("q")))
-        .limit(5)
-    )
+    nearest = query().order_by(Document.signature.hamming_distance(Param("q"))).limit(5)
 
 
 @pytest.fixture
@@ -79,9 +59,6 @@ def _sql(registry: Registry, select: object) -> str:
     return compile_select(registry, select).sql
 
 
-# -- the bit distances --------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("method", "operator"),
     [("hamming_distance", "<~>"), ("jaccard_distance", "<%>")],
@@ -97,15 +74,12 @@ def test_each_bit_operator_compiles_to_its_symbol(
 def test_a_bit_distance_orders_descending_too(registry: Registry) -> None:
     sql = _sql(
         registry,
-        Document.select().order_by(
-            Document.signature.hamming_distance(SIGNATURE).desc()
-        ),
+        Document.select().order_by(Document.signature.hamming_distance(SIGNATURE).desc()),
     )
     assert 'ORDER BY ("t0"."signature" <~> $1) DESC' in sql
 
 
 def test_a_bit_distance_is_a_threshold_on_the_left(registry: Registry) -> None:
-    """A hamming distance is a count, so comparing it is the natural filter."""
     compiled = compile_select(
         registry,
         Document.select().where(Document.signature.hamming_distance(SIGNATURE) < 4),
@@ -114,7 +88,6 @@ def test_a_bit_distance_is_a_threshold_on_the_left(registry: Registry) -> None:
 
 
 def test_a_bit_distance_is_not_a_predicate_on_its_own(registry: Registry) -> None:
-    """PostgreSQL would refuse it later, with a message about WHERE's argument."""
     with pytest.raises(TypeError, match="yields a distance"):
         Document.select().where(Document.signature.hamming_distance(SIGNATURE))
 
@@ -144,9 +117,6 @@ def test_a_declared_query_binds_the_signature_per_call(registry: Registry) -> No
     assert 'ORDER BY ("t0"."signature" <~> $1) ASC' in _sql(registry, bound)
 
 
-# -- the sparsevec distances --------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("method", "operator"),
     [
@@ -159,7 +129,6 @@ def test_a_declared_query_binds_the_signature_per_call(registry: Registry) -> No
 def test_a_sparsevec_takes_the_dense_operators(
     registry: Registry, method: str, operator: str
 ) -> None:
-    """Same four operators as `vector`; only the operand type differs."""
     distance = getattr(Document.terms, method)(TERMS)
     sql = _sql(registry, Document.select().order_by(distance))
     assert f'ORDER BY ("t0"."terms" {operator} $1) ASC' in sql
@@ -175,11 +144,7 @@ def test_the_sparse_value_reaches_the_parameters_as_a_sparse_vector(
     assert compiled.bind_oids == (SPARSEVEC_OID,)
 
 
-# -- the type gate ------------------------------------------------------------
-
-
 def test_a_bit_column_refuses_the_dense_operators() -> None:
-    """`bit` has no `<=>`; the refusal names the type it actually is."""
     with pytest.raises(DeclarationError, match="not bit"):
         Document.signature.cosine_distance([1.0])
 
@@ -202,9 +167,7 @@ def test_the_wrong_dimension_is_refused_before_the_query_is_built(
     with pytest.raises(ValueError, match="dimension 30, got one of dimension 40"):
         _sql(
             registry,
-            Document.select().order_by(
-                Document.terms.l2_distance(SparseVector(40, {1: 1.0}))
-            ),
+            Document.select().order_by(Document.terms.l2_distance(SparseVector(40, {1: 1.0}))),
         )
 
 

@@ -216,14 +216,11 @@ def _python_facts(tree: ast.Module) -> _PythonFacts:
         for keyword in node.keywords:
             if keyword.arg == "schema" and isinstance(keyword.value, ast.Constant):
                 qualified = bool(keyword.value.value)
-            elif keyword.arg == "relations" and isinstance(
-                keyword.value, (ast.Tuple, ast.List)
-            ):
+            elif keyword.arg == "relations" and isinstance(keyword.value, (ast.Tuple, ast.List)):
                 declared = tuple(
                     element.value
                     for element in keyword.value.elts
-                    if isinstance(element, ast.Constant)
-                    and isinstance(element.value, str)
+                    if isinstance(element, ast.Constant) and isinstance(element.value, str)
                 )
         if qualified:
             relations.update(declared)
@@ -359,9 +356,13 @@ def _scan_text(where: str, line: int, sql: str, encodable: frozenset[str]) -> li
         target = _TYPE_ALIASES.get(spelled, spelled)
         if target and target not in encodable:
             findings.append(
-                Finding("SQL001", f"{where}:{line}", f"placeholder cast to {target!r}, which the"
-                        " driver cannot encode; the prepared statement carries that inference,"
-                        " so this works once and raises on every call after")
+                Finding(
+                    "SQL001",
+                    f"{where}:{line}",
+                    f"placeholder cast to {target!r}, which the"
+                    " driver cannot encode; the prepared statement carries that inference,"
+                    " so this works once and raises on every call after",
+                )
             )
     for match in _BARE_COMPARISON.finditer(sql):
         column = match.group(2).lower()
@@ -369,10 +370,14 @@ def _scan_text(where: str, line: int, sql: str, encodable: frozenset[str]) -> li
         if column_type is None or column_type in encodable:
             continue
         findings.append(
-            Finding("SQL002", f"{where}:{line}", f"{match.group(0).strip()!r} compares a"
-                    f" placeholder against {column!r} ({column_type}), so PostgreSQL infers the"
-                    f" parameter as {column_type} -- which the driver cannot encode. Cast it:"
-                    f" `{column} = $N::text`")
+            Finding(
+                "SQL002",
+                f"{where}:{line}",
+                f"{match.group(0).strip()!r} compares a"
+                f" placeholder against {column!r} ({column_type}), so PostgreSQL infers the"
+                f" parameter as {column_type} -- which the driver cannot encode. Cast it:"
+                f" `{column} = $N::text`",
+            )
         )
     return findings
 
@@ -421,16 +426,10 @@ def _sql_statements(source: str) -> list[tuple[int, str]]:
         tree = ast.parse(source)
     except SyntaxError:
         return []
-    return [
-        (line, text)
-        for line, text in _python_facts(tree).strings
-        if _SQL_HINT.search(text)
-    ]
+    return [(line, text) for line, text in _python_facts(tree).strings if _SQL_HINT.search(text)]
 
 
-def _scan_qualification(
-    where: str, line: int, sql: str, owned: frozenset[str]
-) -> list[Finding]:
+def _scan_qualification(where: str, line: int, sql: str, owned: frozenset[str]) -> list[Finding]:
     """SQL003 -- an unqualified reference to a table wreath owns.
 
     Wreath's own tables are always written `"wreath"."jobs"` and never resolved
@@ -446,7 +445,8 @@ def _scan_qualification(
             continue
         findings.append(
             Finding(
-                "SQL003", f"{where}:{line}",
+                "SQL003",
+                f"{where}:{line}",
                 f"{reference!r} is a wreath-owned table referenced without its "
                 f'schema; write \'"wreath"."{reference}"\' so it resolves '
                 "regardless of search_path, which a tenant session rebinds",
@@ -496,11 +496,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="wreath-sql-lint",
         description="Report parameters whose PostgreSQL type is inferred as something"
-                    " the driver cannot encode.",
+        " the driver cannot encode.",
     )
     parser.add_argument("--root", default=None, help="repository root (default: detected)")
-    parser.add_argument("--show-encodable", action="store_true",
-                        help="print the type set derived from the driver and exit")
+    parser.add_argument(
+        "--show-encodable",
+        action="store_true",
+        help="print the type set derived from the driver and exit",
+    )
     args = parser.parse_args(argv)
     root = Path(args.root).resolve() if args.root else repo_root()
     if args.show_encodable:

@@ -1,13 +1,3 @@
-"""The SCIM filter grammar of RFC 7644 section 3.4.2.2.
-
-A filter is the one place a directory hands this provider a program to run, so
-the tests here are weighted towards what it must *refuse*: an attribute nothing
-holds, a nesting depth chosen to exhaust the stack, a value that was never
-quoted. Every refusal asserts its own sentence rather than just the exception
-type -- every message here mentions the word "filter", so asserting that proves
-nothing about which branch fired.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -38,9 +28,6 @@ ATTRIBUTES = frozenset({"id", "username", "active", "emails", "groups", "meta"})
 
 def ok(source: str) -> bool:
     return matches(parse(source, attributes=ATTRIBUTES), USER)
-
-
-# --- the operators ----------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -93,7 +80,6 @@ def test_a_string_comparison_ignores_case_in_both_directions() -> None:
 
 
 def test_a_boolean_never_equals_a_number() -> None:
-    """`True == 1` in Python and does not in SCIM."""
     assert matches(parse("active eq true", attributes=None), USER)
     assert not matches(parse("active eq 1", attributes=None), USER)
 
@@ -109,11 +95,7 @@ def test_pr_is_false_for_an_empty_string_and_an_empty_list() -> None:
     assert not matches(parse("groups pr", attributes=None), empty)
 
 
-# --- structure --------------------------------------------------------------
-
-
 def test_and_binds_tighter_than_or() -> None:
-    """`a or b and c` is `a or (b and c)`, so a false `a` still depends on both."""
     node = parse(
         'userName eq "nobody" or userName sw "alice" and active eq true',
         attributes=ATTRIBUTES,
@@ -168,15 +150,7 @@ def test_values_at_walks_case_insensitively() -> None:
     assert values_at(USER, "nothing.here") == []
 
 
-# --- refusals ---------------------------------------------------------------
-
-
 def test_an_attribute_this_provider_does_not_hold_is_refused_not_answered() -> None:
-    """The one refusal that keeps a directory from re-creating everybody.
-
-    Answering `externalId eq "x"` with an empty page says "no such user", and a
-    directory acts on that by provisioning them a second time.
-    """
     with pytest.raises(FilterError) as caught:
         parse('externalId eq "abc"', attributes=ATTRIBUTES)
     assert "does not hold an attribute named 'externalid'" in caught.value.detail
@@ -189,14 +163,13 @@ def test_an_unheld_attribute_inside_a_value_path_is_refused_too() -> None:
 
 
 def test_nesting_deeper_than_the_budget_is_refused() -> None:
-    source = "(" * (MAX_DEPTH + 1) + 'userName pr' + ")" * (MAX_DEPTH + 1)
+    source = "(" * (MAX_DEPTH + 1) + "userName pr" + ")" * (MAX_DEPTH + 1)
     with pytest.raises(FilterError) as caught:
         parse(source, attributes=ATTRIBUTES)
     assert f"deeper than {MAX_DEPTH} levels" in caught.value.detail
 
 
 def test_nesting_at_the_budget_is_accepted() -> None:
-    """The boundary, from the other side: the limit is off-by-one sensitive."""
     source = "(" * MAX_DEPTH + "userName pr" + ")" * MAX_DEPTH
     assert matches(parse(source, attributes=ATTRIBUTES), USER)
 
@@ -254,12 +227,10 @@ def test_a_json_escape_survives_into_the_comparison(source: str, expected: str) 
 
 
 def test_a_non_string_key_in_a_resource_is_skipped_rather_than_lowercased() -> None:
-    """`values_at` takes whatever a caller has; only JSON guarantees string keys."""
     assert values_at({1: "surprise", "userName": "alice"}, "userName") == ["alice"]
 
 
 def test_a_quoted_keyword_is_a_value_and_not_an_operator() -> None:
-    """`"and"` is a string. Reading the token's *kind* is what keeps it one."""
     node = parse('userName eq "and"', attributes=None)
     assert isinstance(node, Compare)
     assert node.value == "and"
@@ -267,11 +238,6 @@ def test_a_quoted_keyword_is_a_value_and_not_an_operator() -> None:
 
 
 def test_a_quoted_keyword_cannot_join_two_expressions() -> None:
-    """The token's *kind* is what makes `and` an operator, not its text.
-
-    Without that, `"and"` between two expressions would parse as a conjunction
-    -- a filter the grammar rejects would quietly mean something.
-    """
     with pytest.raises(FilterError) as caught:
         parse('userName pr "and" userName pr', attributes=None)
     assert "trailing input" in caught.value.detail
@@ -284,7 +250,6 @@ def test_null_is_a_value_rather_than_an_unquoted_word() -> None:
 
 
 def test_walking_into_a_string_yields_nothing_rather_than_raising() -> None:
-    """`userName` is a string, so a sub-attribute of it names nothing."""
     assert values_at(USER, "userName.nonsense") == []
 
 

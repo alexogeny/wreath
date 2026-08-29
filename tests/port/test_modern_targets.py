@@ -1,16 +1,3 @@
-"""Constructs wreath grew an answer for after the rule catalog was written.
-
-A porting tool ages badly in one specific way: a construct is catalogued as
-"unsupported — keep the library", wreath later ships the thing, and the report
-goes on telling porters to keep a dependency they could now delete. Every rule
-here was chosen by counting occurrences in a real production FastAPI/ormar
-codebase, so the catalog spends its attention where the work actually is.
-
-Ordered by how much of an application each accounts for: alembic operations
-~1400, cachetools ~170, arrow ~110, strawberry ~450, `Body(...)` 80, HTTP status
-constants 72, `httpx.AsyncClient` 70, `dependency_overrides` 87, FastAPI's
-`TestClient` 63.
-"""
 import pytest
 
 port = pytest.importorskip("wreath.port")
@@ -33,9 +20,6 @@ def _message(tmp_path, source: str, rule_id: str) -> str:
     raise AssertionError(f"{rule_id} was not reported for:\n{source}")
 
 
-# --- caching: the payoff of ORM-driven invalidation --------------------------------
-
-
 CACHETOOLS = """
 from cachetools import TTLCache, cached
 
@@ -53,12 +37,6 @@ def test_a_cachetools_store_is_pointed_at_the_wreath_cache(tmp_path) -> None:
 
 
 def test_a_cachetools_decorator_is_pointed_at_invalidate_on(tmp_path) -> None:
-    """The upgrade, not just the equivalent.
-
-    A `TTLCache(ttl=300)` is a guess about how stale the data may get. Wreath's
-    `@cached(invalidate_on=[...])` clears on the committed write instead, so the
-    message has to name that rather than offering a like-for-like TTL.
-    """
     message = _message(tmp_path, CACHETOOLS, "cache.decorator")
     assert "invalidate_on" in message
 
@@ -69,7 +47,6 @@ def test_an_lru_cache_is_recognised_too(tmp_path) -> None:
 
 
 def test_a_module_reports_its_cache_stores_once_each(tmp_path) -> None:
-    """Two stores are two decisions; ten uses of one store are not ten."""
     source = (
         "from cachetools import TTLCache\n"
         "a = TTLCache(maxsize=1, ttl=1)\n"
@@ -79,41 +56,23 @@ def test_a_module_reports_its_cache_stores_once_each(tmp_path) -> None:
 
 
 def test_the_functools_lru_cache_is_left_alone(tmp_path) -> None:
-    """Stdlib memoization is not a framework cache and needs no porting."""
     source = "from functools import lru_cache\n\n@lru_cache\ndef f(x):\n    return x\n"
     assert "cache.store" not in _rule_ids(tmp_path, source)
     assert "cache.decorator" not in _rule_ids(tmp_path, source)
 
 
-# --- time -------------------------------------------------------------------------
-
-
 def test_arrow_is_reported_once_per_module(tmp_path) -> None:
-    source = (
-        "import arrow\n"
-        "a = arrow.utcnow()\n"
-        "b = arrow.get('2026-07-26')\n"
-        "c = arrow.now()\n"
-    )
+    source = "import arrow\na = arrow.utcnow()\nb = arrow.get('2026-07-26')\nc = arrow.now()\n"
     assert _rule_ids(tmp_path, source).count("time.arrow") == 1
 
 
 def test_the_arrow_message_names_temporal_now_that_it_ships(tmp_path) -> None:
-    """This rule used to say a native temporal layer was designed, not shipped.
-
-    It shipped. Leaving the old wording in place would have told porters to
-    hand-roll the stdlib equivalent of code wreath now owns — which is the exact
-    way a porting tool goes stale, and the reason the catalog is re-audited when
-    a subsystem lands.
-    """
     message = _message(tmp_path, "import arrow\nx = arrow.utcnow()\n", "time.arrow")
     assert "temporal" in message
     assert "designed" not in message
 
 
-@pytest.mark.parametrize(
-    "call", ["arrow.utcnow()", "arrow.now()", "arrow.get('2026-07-26')"]
-)
+@pytest.mark.parametrize("call", ["arrow.utcnow()", "arrow.now()", "arrow.get('2026-07-26')"])
 def test_an_arrow_rename_is_translated(tmp_path, call) -> None:
     source = f"import arrow\nx = {call}\n"
     (finding,) = [f for f in _analyze(tmp_path, source) if f.rule_id == "time.arrow"]
@@ -121,18 +80,10 @@ def test_an_arrow_rename_is_translated(tmp_path, call) -> None:
 
 
 def test_an_arrow_calendar_shift_still_needs_a_decision(tmp_path) -> None:
-    """`shift(months=)` is not a fixed number of seconds, and temporal says so.
-
-    The split is per-constructor rather than per-module precisely so this does
-    not ride along on the translated verdict the clock calls earn.
-    """
     source = "import arrow\nx = arrow.Arrow.fromdate(d).shift(months=6)\n"
     ids = _rule_ids(tmp_path, source)
     assert "time.arrow_other" in ids
     assert "time.arrow" not in ids
-
-
-# --- GraphQL: a rule that had gone stale ------------------------------------------
 
 
 STRAWBERRY = """
@@ -160,30 +111,19 @@ def test_a_strawberry_type_points_at_wreath_graphql(tmp_path) -> None:
 
 
 def test_a_strawberry_resolver_is_reported_separately(tmp_path) -> None:
-    """A computed field is real logic to port; an `auto` field is not."""
     assert "graphql.resolver" in _rule_ids(tmp_path, STRAWBERRY)
 
 
 def test_auto_fields_do_not_each_become_a_finding(tmp_path) -> None:
-    """`strawberry.auto` is the single most common GraphQL token there is.
-
-    Wreath derives fields from the ORM model, so every one of them is deleted
-    rather than ported. Billing 305 findings for work that is a no-op would bury
-    the two findings that matter.
-    """
     assert "graphql.auto_field" not in _rule_ids(tmp_path, STRAWBERRY)
 
 
 def test_a_graphql_server_is_no_longer_unsupported(tmp_path) -> None:
-    """`wreath.graphql` shipped; the catalog said "no equivalent" for too long."""
     source = "from strawberry.fastapi import GraphQLRouter\nr = GraphQLRouter(schema)\n"
     findings = [f for f in _analyze(tmp_path, source) if f.rule_id == "graphql.mount"]
     assert findings
     assert all(f.tag == port.NEEDS_REVIEW for f in findings)
     assert all("GraphQL" in f.message for f in findings)
-
-
-# --- outbound HTTP ------------------------------------------------------------------
 
 
 def test_an_httpx_client_points_at_the_managed_pool(tmp_path) -> None:
@@ -200,26 +140,11 @@ def test_an_httpx_client_points_at_the_managed_pool(tmp_path) -> None:
 
 
 def test_httpx_is_reported_once_per_module(tmp_path) -> None:
-    source = (
-        "import httpx\n"
-        "a = httpx.AsyncClient()\n"
-        "b = httpx.AsyncClient()\n"
-    )
+    source = "import httpx\na = httpx.AsyncClient()\nb = httpx.AsyncClient()\n"
     assert _rule_ids(tmp_path, source).count("ext.httpx") == 1
 
 
-# --- migrations -----------------------------------------------------------------------
-
-
 def test_a_schema_operation_points_at_wreath_migrations(tmp_path) -> None:
-    """Ordinary DDL over modelled objects has no wreath counterpart to hand-write.
-
-    Wreath's migration source of truth is the ORM image: `detect` reads the
-    change off the models and `generate` emits the artifact. So the determined
-    target for these two lines is *no code* — the same shape of answer as
-    `extra="forbid"` (drop it) or `jsonable_encoder` (drop it), both of which the
-    catalog already calls translated.
-    """
     source = (
         "from alembic import op\n"
         "import sqlalchemy as sa\n"
@@ -236,40 +161,67 @@ def test_a_schema_operation_points_at_wreath_migrations(tmp_path) -> None:
 @pytest.mark.parametrize(
     ("call", "expected", "why"),
     [
-        ("op.rename_table('paddock', 'pasture')", "mig.rename",
-         "an image differ reads a rename as drop+create, which moves no data"),
-        ("op.alter_column('llama', 'grade', new_column_name='band')", "mig.rename",
-         "same hazard, spelled as a column rename"),
-        ("op.create_index('i', 'llama', ['name'], postgresql_where=sa.text('grade > 3'))",
-         "mig.index_manual", "a partial index is emitted as a MANUAL op"),
-        ("op.create_index('i', 'llama', [sa.text('lower(name)')])", "mig.index_manual",
-         "an expression index is not btree-over-columns"),
-        ("op.create_index('i', 'llama', columns)", "mig.index_manual",
-         "a runtime column list is not readable here"),
-        ("op.add_column('llama', sa.Column('shorn_at', sa.Time()))",
-         "mig.unmodelled_type", "wreath.orm.types has no Time PgType"),
-        ("op.create_table('t', sa.Column('kind', sa.Enum('a', 'b')))", "mig.unmodelled_type",
-         "nor an Enum type"),
-        ("op.create_check_constraint('c', 'llama', 'grade > 0')", "mig.schema_op",
-         "a check constraint is not in what detection reads"),
-        ("op.drop_constraint('uq_llama_name', 'llama')", "mig.schema_op",
-         "the call does not say which constraint kind, so the model attribute is unknown"),
-        ("op.create_table('t', sa.Column('r', sa.Integer(), "
-         "sa.ForeignKey('o.id', ondelete='CASCADE')))", "mig.schema_op",
-         "a referential action belongs to the constraint, not to a modelled column"),
-        ("op.alter_column('llama', 'name', comment='the name')", "mig.schema_op",
-         "wreath does not model column comments"),
+        (
+            "op.rename_table('paddock', 'pasture')",
+            "mig.rename",
+            "an image differ reads a rename as drop+create, which moves no data",
+        ),
+        (
+            "op.alter_column('llama', 'grade', new_column_name='band')",
+            "mig.rename",
+            "same hazard, spelled as a column rename",
+        ),
+        (
+            "op.create_index('i', 'llama', ['name'], postgresql_where=sa.text('grade > 3'))",
+            "mig.index_manual",
+            "a partial index is emitted as a MANUAL op",
+        ),
+        (
+            "op.create_index('i', 'llama', [sa.text('lower(name)')])",
+            "mig.index_manual",
+            "an expression index is not btree-over-columns",
+        ),
+        (
+            "op.create_index('i', 'llama', columns)",
+            "mig.index_manual",
+            "a runtime column list is not readable here",
+        ),
+        (
+            "op.add_column('llama', sa.Column('shorn_at', sa.Time()))",
+            "mig.unmodelled_type",
+            "wreath.orm.types has no Time PgType",
+        ),
+        (
+            "op.create_table('t', sa.Column('kind', sa.Enum('a', 'b')))",
+            "mig.unmodelled_type",
+            "nor an Enum type",
+        ),
+        (
+            "op.create_check_constraint('c', 'llama', 'grade > 0')",
+            "mig.schema_op",
+            "a check constraint is not in what detection reads",
+        ),
+        (
+            "op.drop_constraint('uq_llama_name', 'llama')",
+            "mig.schema_op",
+            "the call does not say which constraint kind, so the model attribute is unknown",
+        ),
+        (
+            "op.create_table('t', sa.Column('r', sa.Integer(), "
+            "sa.ForeignKey('o.id', ondelete='CASCADE')))",
+            "mig.schema_op",
+            "a referential action belongs to the constraint, not to a modelled column",
+        ),
+        (
+            "op.alter_column('llama', 'name', comment='the name')",
+            "mig.schema_op",
+            "wreath does not model column comments",
+        ),
     ],
 )
 def test_a_migration_operation_outside_what_detect_reads_is_not_derived(
     tmp_path, call, expected, why
 ) -> None:
-    """The honesty half of the Alembic verdict.
-
-    Every one of these *looks* like ordinary DDL. The rename pair is the one worth
-    keeping: it is the only ordinary-looking operation whose derived form is
-    actively wrong rather than merely absent.
-    """
     source = f"from alembic import op\nimport sqlalchemy as sa\ndef upgrade():\n    {call}\n"
     ids = _rule_ids(tmp_path, source)
     assert expected in ids, f"{call}: {why}"
@@ -277,7 +229,6 @@ def test_a_migration_operation_outside_what_detect_reads_is_not_derived(
 
 
 def test_a_plain_foreign_key_and_primary_key_still_derive(tmp_path) -> None:
-    """Detection covers primary keys and foreign keys, so these stay derivable."""
     source = (
         "from alembic import op\n"
         "import sqlalchemy as sa\n"
@@ -296,11 +247,6 @@ def test_raw_sql_in_a_migration_stays_manual(tmp_path) -> None:
 
 
 def test_a_data_migration_is_called_out_as_its_own_hazard(tmp_path) -> None:
-    """`op.get_bind()` means the migration rewrites rows, not just the schema.
-
-    That is the operation that takes an hour on a large table and blocks a
-    deploy, so it deserves naming rather than being counted as one more DDL op.
-    """
     source = (
         "from alembic import op\n"
         "def upgrade():\n"
@@ -311,31 +257,17 @@ def test_a_data_migration_is_called_out_as_its_own_hazard(tmp_path) -> None:
 
 
 def test_a_variable_named_op_is_not_mistaken_for_alembic(tmp_path) -> None:
-    """Name resolution, not string matching: `op` is a common local name."""
     source = "class Thing:\n    pass\nop = Thing()\nop.add_column('x')\n"
     assert "mig.schema_op" not in _rule_ids(tmp_path, source)
 
 
-# --- responses and status ---------------------------------------------------------------
-
-
 def test_a_status_constant_translates(tmp_path) -> None:
-    source = (
-        "from fastapi import status\n"
-        "def f():\n"
-        "    return status.HTTP_404_NOT_FOUND\n"
-    )
+    source = "from fastapi import status\ndef f():\n    return status.HTTP_404_NOT_FOUND\n"
     findings = [f for f in _analyze(tmp_path, source) if f.rule_id == "resp.status_const"]
     assert findings and all(f.tag == port.TRANSLATED for f in findings)
 
 
 def test_a_status_constant_raise_is_a_literal_exception(tmp_path) -> None:
-    """`status.HTTP_404_NOT_FOUND` is a literal wearing a name.
-
-    It is how a real codebase spells the status far more often than a bare
-    integer, so treating it as unresolvable would push the majority of
-    `HTTPException` sites into needs-review for no reason.
-    """
     source = (
         "from fastapi import HTTPException, status\n"
         "def f():\n"
@@ -365,11 +297,7 @@ def test_a_response_class_translates(tmp_path) -> None:
 
 
 def test_jsonable_encoder_translates_to_nothing(tmp_path) -> None:
-    """Wreath serializes dataclasses and ORM rows directly, so the call is dropped."""
-    source = (
-        "from fastapi.encoders import jsonable_encoder\n"
-        "x = jsonable_encoder({'a': 1})\n"
-    )
+    source = "from fastapi.encoders import jsonable_encoder\nx = jsonable_encoder({'a': 1})\n"
     findings = [f for f in _analyze(tmp_path, source) if f.rule_id == "resp.jsonable"]
     assert findings and all(f.tag == port.TRANSLATED for f in findings)
 
@@ -386,7 +314,6 @@ def test_a_plain_body_marker_is_an_ordinary_body_param(tmp_path) -> None:
 
 
 def test_an_embedded_body_marker_needs_review(tmp_path) -> None:
-    """`embed=True` changes the wire shape, so it is not a 1:1 port."""
     source = (
         "from fastapi import APIRouter, Body\n"
         "router = APIRouter()\n"
@@ -410,9 +337,6 @@ def test_a_response_class_route_option_needs_review(tmp_path) -> None:
     assert "route.response_class" in _rule_ids(tmp_path, source)
 
 
-# --- auth schemes --------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "scheme",
     ["HTTPBearer", "HTTPBasic", "APIKeyHeader", "OAuth2PasswordBearer"],
@@ -423,7 +347,6 @@ def test_a_declarative_security_scheme_points_at_a_backend(tmp_path, scheme) -> 
 
 
 def test_security_wraps_a_dependency(tmp_path) -> None:
-    """`Security(...)` is `Depends(...)` plus scopes; wreath has no scope slot."""
     source = (
         "from fastapi import Security\n"
         "from fastapi.security import HTTPBearer\n"
@@ -434,21 +357,13 @@ def test_security_wraps_a_dependency(tmp_path) -> None:
     assert "auth.security" in _rule_ids(tmp_path, source)
 
 
-# --- the test suite itself ---------------------------------------------------------
-
-
 def test_a_fastapi_test_client_is_reported(tmp_path) -> None:
-    """Wreath's client is async, so the rewrite is real work, not a rename."""
-    source = (
-        "from fastapi.testclient import TestClient\n"
-        "client = TestClient(app)\n"
-    )
+    source = "from fastapi.testclient import TestClient\nclient = TestClient(app)\n"
     message = _message(tmp_path, source, "test.client")
     assert "async with" in message
 
 
 def test_a_dependency_override_points_at_acting_as(tmp_path) -> None:
-    """Most overrides swap the auth dependency, and wreath has a way to do that."""
     source = "app.dependency_overrides[authenticate] = lambda: rider\n"
     message = _message(tmp_path, source, "test.dependency_override_auth")
     assert "acting_as" in message
@@ -459,25 +374,12 @@ def test_a_dependency_override_points_at_acting_as(tmp_path) -> None:
 def test_clearing_the_override_map_is_neither_an_identity_nor_an_adapter(
     tmp_path,
 ) -> None:
-    """`app.dependency_overrides = {}` overrides nothing; it resets everything.
-
-    The verdict was read off the *subscript key*, and this statement has none --
-    so it fell to the `else` and was reported as "this overrides an application
-    adapter", advice about a construct that is not on the line. The generic rule
-    was written for exactly this and was reachable from nowhere.
-    """
     source = "app.dependency_overrides = {}\n"
     message = _message(tmp_path, source, "test.dependency_override")
     assert "no dependency_overrides in wreath" in message
 
 
 def test_a_reset_does_not_swallow_the_auth_override_after_it(tmp_path) -> None:
-    """One finding per *kind*, not one per module.
-
-    A suite that clears the map in its first check and swaps the auth dependency
-    in the next reported only the clear: the module's single slot had been taken
-    by the least informative of the two.
-    """
     source = (
         "app.dependency_overrides = {}\n"
         "app.dependency_overrides[authenticate] = lambda: rider\n"
@@ -489,26 +391,14 @@ def test_a_reset_does_not_swallow_the_auth_override_after_it(tmp_path) -> None:
     assert rules.count("test.dependency_override_adapter") == 1
 
 
-# --- libraries to keep -----------------------------------------------------------
-
-
 def test_pandas_is_reported_once_and_left_alone(tmp_path) -> None:
-    """198 files use it. It is not a framework feature and wreath will not try."""
-    source = (
-        "import pandas as pd\n"
-        "a = pd.DataFrame()\n"
-        "b = pd.DataFrame()\n"
-    )
+    source = "import pandas as pd\na = pd.DataFrame()\nb = pd.DataFrame()\n"
     findings = [f for f in _analyze(tmp_path, source) if f.rule_id == "ext.pandas"]
     assert len(findings) == 1
     assert findings[0].tag == port.UNSUPPORTED
 
 
-# --- the catalog itself -------------------------------------------------------------
-
-
 def test_every_rule_is_reachable_by_id() -> None:
-    """A rule nobody can emit is dead weight the report never explains."""
     from wreath._port.rules import RULES
 
     assert all(isinstance(v, tuple) and len(v) == 4 for v in RULES.values())

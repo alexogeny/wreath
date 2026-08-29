@@ -62,9 +62,6 @@ BLOCKED = "blocked"
 DONE = "done"
 
 
-# --- the denominator ---------------------------------------------------------
-
-
 class Denominator:
     """Where the number under the percentage comes from."""
 
@@ -209,9 +206,6 @@ def position(key: Key, value: Any) -> float | None:
             return None
         return position(key, parsed)
     return None
-
-
-# --- the reported shape ------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)

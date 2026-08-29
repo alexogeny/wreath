@@ -18,27 +18,52 @@ _FIELD_DEFAULTS = frozenset({"default", "default_factory"})
 #: `Field(...)` schema keywords. Metadata with a Wreath ``Field`` home is kept
 #: by the exact rule below; the remainder is documentation-only and may be
 #: dropped without changing runtime behaviour.
-_FIELD_DOC_ONLY = frozenset({
-    "description", "title", "examples", "example", "json_schema_extra", "deprecated",
-})
+_FIELD_DOC_ONLY = frozenset(
+    {
+        "description",
+        "title",
+        "examples",
+        "example",
+        "json_schema_extra",
+        "deprecated",
+    }
+)
 # Pydantic metadata with the same runtime meaning on ``wreath.binding.Field``.
 # ``regex`` is the Pydantic-v1 spelling of Wreath's ``pattern``. Deliberately
 # absent: ``multiple_of``, decimal digit constraints, strictness and exclusion;
 # those do not have the same contract and keep the generic review verdict.
-_WREATH_FIELD_METADATA = frozenset({
-    "alias", "description", "gt", "ge", "lt", "le",
-    "min_length", "max_length", "pattern", "regex",
-})
+_WREATH_FIELD_METADATA = frozenset(
+    {
+        "alias",
+        "description",
+        "gt",
+        "ge",
+        "lt",
+        "le",
+        "min_length",
+        "max_length",
+        "pattern",
+        "regex",
+    }
+)
 
 
 #: pydantic v1 `con*` factory names, which are a constraint wearing a type's
 #: clothes. Shared with `_Analyzer._annotation_is_constrained` and the emitter.
-_CONSTRAINED_TYPES = frozenset({
-    "confloat", "conint", "constr", "condecimal", "conbytes", "conlist", "conset", "condate",
-})
+_CONSTRAINED_TYPES = frozenset(
+    {
+        "confloat",
+        "conint",
+        "constr",
+        "condecimal",
+        "conbytes",
+        "conlist",
+        "conset",
+        "condate",
+    }
+)
 
 
-# --- predicates shared with the emitter -------------------------------------
 # The analyzer decides a verdict and the emitter performs the rewrite, so a
 # predicate the two disagree about is the worst kind of codemod bug: the report
 # says "translated" and the output is not. They are defined once here and
@@ -88,20 +113,14 @@ def pydantic_field_rule(imports: _Imports, stmt: ast.AnnAssign) -> str:
         and any(keyword.arg in _WREATH_FIELD_METADATA for keyword in value.keywords)
         and all(
             keyword.arg is not None
-            and keyword.arg
-            in _FIELD_DEFAULTS | _FIELD_DOC_ONLY | _WREATH_FIELD_METADATA
+            and keyword.arg in _FIELD_DEFAULTS | _FIELD_DOC_ONLY | _WREATH_FIELD_METADATA
             for keyword in value.keywords
         )
     ):
         return "pydantic.field_metadata_exact"
-    if _is_field_constraint(value, imports) or _is_constrained_annotation(
-        stmt.annotation, imports
-    ):
+    if _is_field_constraint(value, imports) or _is_constrained_annotation(stmt.annotation, imports):
         return "pydantic.field_constraint"
-    if not (
-        isinstance(value, ast.Call)
-        and imports.origin(value.func).split(".")[-1] == "Field"
-    ):
+    if not (isinstance(value, ast.Call) and imports.origin(value.func).split(".")[-1] == "Field"):
         return "pydantic.field"
     # `Field(default, ...)` takes the default positionally and nothing else; a
     # second positional is pydantic v1's `default_factory` slot, which this does
@@ -137,7 +156,7 @@ def field_has_default(imports: _Imports, stmt: ast.AnnAssign) -> bool:
             "pydantic.field",
             "pydantic.field_metadata_exact",
         }:
-            return True                       # left in place, `=` and all
+            return True  # left in place, `=` and all
         if any(keyword.arg in _FIELD_DEFAULTS for keyword in value.keywords):
             return True
         # `Field(...)` with an Ellipsis first argument is pydantic's spelling of
@@ -199,14 +218,11 @@ def _model_config_value(stmt: ast.stmt) -> ast.expr | None:
 def _literal_name_collection(node: ast.AST) -> bool:
     """Whether a projection names every selected column statically."""
     return isinstance(node, (ast.Set, ast.List, ast.Tuple)) and all(
-        isinstance(item, ast.Constant) and isinstance(item.value, str)
-        for item in node.elts
+        isinstance(item, ast.Constant) and isinstance(item.value, str) for item in node.elts
     )
 
 
-def pydantic_projection_rule(
-    node: ast.Attribute, parents: dict[int, ast.AST]
-) -> str:
+def pydantic_projection_rule(node: ast.Attribute, parents: dict[int, ast.AST]) -> str:
     """Classify an ormar ``get_pydantic`` projection by what can be emitted.
 
     A bare call or literal ``include``/``exclude`` is a declaration Wreath's
@@ -242,9 +258,7 @@ def _literal_members(annotation: ast.AST, imports: _Imports) -> frozenset[object
     ):
         return None
     values = (
-        annotation.slice.elts
-        if isinstance(annotation.slice, ast.Tuple)
-        else [annotation.slice]
+        annotation.slice.elts if isinstance(annotation.slice, ast.Tuple) else [annotation.slice]
     )
     if not all(isinstance(value, ast.Constant) for value in values):
         return None
@@ -308,9 +322,11 @@ def redundant_literal_validator(
     ):
         return False
     compared = check.comparators[0].elts
-    return all(isinstance(value, ast.Constant) for value in compared) and frozenset(
-        value.value for value in compared if isinstance(value, ast.Constant)
-    ) == members
+    return (
+        all(isinstance(value, ast.Constant) for value in compared)
+        and frozenset(value.value for value in compared if isinstance(value, ast.Constant))
+        == members
+    )
 
 
 def _plain_graphql_dataclass(imports: _Imports, node: ast.ClassDef) -> bool:

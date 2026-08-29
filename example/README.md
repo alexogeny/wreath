@@ -4,9 +4,7 @@ A wildlife camera-trap network for four reserves, built on wreath. This is the
 framework's canonical example: **one application that uses the parts together**,
 rather than a gallery of snippets that each use one.
 
-It is not a tutorial. If you have not written a wreath handler yet, start at
-`docs/getting-started/`. This is the second thing you read — *I understand the
-pieces; show me one that is real.*
+It is a complete application rather than a tutorial.
 
 ## Running it
 
@@ -55,9 +53,7 @@ async def main():
 asyncio.run(main())'
 ```
 
-The seed writes 141,398 rows in about 13 seconds and is deterministic: two
-people running it see the same rows and the same ids, which is what lets the
-[walkthrough](../docs/example/walkthrough.md) quote real numbers.
+The seed writes 141,398 rows in about 13 seconds and is deterministic.
 
 Finally, serve it:
 
@@ -70,8 +66,7 @@ curl -s -b jar.txt localhost:8000/reserves                      # needs a sessio
 ```
 
 The observations are not public — only the species vocabulary is — so the
-interesting routes want a session. `docs/example/quickstart.md` walks this whole
-sequence with the output each command prints.
+interesting routes want a session.
 
 ## What is here so far
 
@@ -88,9 +83,6 @@ and the authorization that decides who sees what.
 - `camera_trap/app.py` — the application, and the target the CLI loads
 - `camera_trap/seed.py` — deterministic seed data
 - `migrations/` — the generated v1 artifact
-
-`docs/example/walkthrough.md` tours the schema in `psql`;
-`docs/example/read-api.md` walks the nine routes with real transcripts.
 
 Later stages add object storage and uploads, the analysis layer with its charts,
 a second chapter that recodes `review_state` with a deferred migration, and an

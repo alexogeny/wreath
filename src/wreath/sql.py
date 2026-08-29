@@ -163,7 +163,7 @@ class Statement:
         if not isinstance(template, Template):
             raise TypeError(
                 "Statement() takes a t-string (PEP 750), not "
-                f"{type(template).__name__}. Write t\"SELECT ... {{value}}\" rather "
+                f'{type(template).__name__}. Write t"SELECT ... {{value}}" rather '
                 'than f"SELECT ... {value}": an f-string has already pasted the '
                 "value into the SQL by the time it gets here, which is the "
                 "injection this type exists to make unwritable."
@@ -175,11 +175,7 @@ class Statement:
         self.args: tuple[Any, ...] = tuple(args)
 
     def __eq__(self, other: object) -> bool:
-        return (
-            isinstance(other, Statement)
-            and other.text == self.text
-            and other.args == self.args
-        )
+        return isinstance(other, Statement) and other.text == self.text and other.args == self.args
 
     def __hash__(self) -> int:
         return hash((Statement, self.text, self.args))

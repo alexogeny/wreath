@@ -25,14 +25,56 @@ from .sources import _SKIPPABLE, _parse_file
 #: builtin, plus the methods `dict`, `list`, `str`, `set` and a file answer to.
 #: A repository is very likely to have its own `get`, `count` or `update`, and
 #: matching by name would then rewrite every `payload.get(...)` in the tree.
-_AMBIGUOUS_CALL_NAMES = frozenset(dir(builtins)) | frozenset({
-    "get", "keys", "values", "items", "update", "copy", "pop", "setdefault",
-    "append", "extend", "insert", "remove", "discard", "clear", "add",
-    "count", "index", "sort", "reverse", "join", "split", "strip", "format",
-    "encode", "decode", "read", "write", "close", "flush", "send", "seek",
-    "startswith", "endswith", "replace", "lower", "upper", "title",
-    "first", "last", "all", "any", "one", "run", "execute", "save", "delete",
-})
+_AMBIGUOUS_CALL_NAMES = frozenset(dir(builtins)) | frozenset(
+    {
+        "get",
+        "keys",
+        "values",
+        "items",
+        "update",
+        "copy",
+        "pop",
+        "setdefault",
+        "append",
+        "extend",
+        "insert",
+        "remove",
+        "discard",
+        "clear",
+        "add",
+        "count",
+        "index",
+        "sort",
+        "reverse",
+        "join",
+        "split",
+        "strip",
+        "format",
+        "encode",
+        "decode",
+        "read",
+        "write",
+        "close",
+        "flush",
+        "send",
+        "seek",
+        "startswith",
+        "endswith",
+        "replace",
+        "lower",
+        "upper",
+        "title",
+        "first",
+        "last",
+        "all",
+        "any",
+        "one",
+        "run",
+        "execute",
+        "save",
+        "delete",
+    }
+)
 
 
 def _function_query_names(
@@ -59,24 +101,25 @@ def _function_query_names(
                 for child in ast.walk(node):
                     enclosing.setdefault(id(child), node.name)
     for node in ast.walk(tree):
-        if not (isinstance(node, ast.Attribute)
-                and isinstance(node.value, ast.Attribute)
-                and node.value.attr == "objects"):
+        if not (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Attribute)
+            and node.value.attr == "objects"
+        ):
             continue
         call = parents.get(id(node))
         if not isinstance(call, ast.Call):
             continue
         rule_id = query_rule(
-            node.attr, call,
+            node.attr,
+            call,
             chain_tail(node, parents),
             model=ast.unparse(node.value.value),
             relations=orm_relations,
             columns=orm_columns,
             tables=orm_tables,
             unique_constraints=orm_unique_constraints,
-            plain_mappings=plain_filter_mappings(
-                call, parents
-            ),
+            plain_mappings=plain_filter_mappings(call, parents),
         )
         owner = enclosing.get(id(node))
         if owner is not None and rule_id in QUERY_TRANSLATED and query_chain_runs(node, parents):
@@ -198,6 +241,7 @@ def session_functions(
                 definitions[candidate.name] = definitions.get(candidate.name, 0) + 1
         for name, called in _called_names(tree).items():
             calls.setdefault(name, set()).update(called)
+
     # A unique definition is resolvable by name. The narrow duplicate case is a
     # protocol/ABC declaration plus its one implementation: both signatures
     # deliberately move together. Treating *every* repeated name as the same
@@ -214,7 +258,7 @@ def session_functions(
             callers_by_target.setdefault(target, set()).add(caller)
     needs = {name for name in runs if usable(name)}
     pending = deque(needs)
-    while pending:                            # climb each reverse edge once
+    while pending:  # climb each reverse edge once
         target = pending.popleft()
         for caller in callers_by_target.get(target, ()):
             if caller not in needs and usable(caller):
@@ -245,9 +289,7 @@ def session_sites(
     FunctionKey = tuple[str, str | None, str]
     ClassKey = tuple[str, str]
     common_root = Path(
-        os.path.commonpath([str(path.resolve()) for path in files])
-        if files
-        else os.curdir
+        os.path.commonpath([str(path.resolve()) for path in files]) if files else os.curdir
     )
     if common_root.suffix == ".py":
         common_root = common_root.parent
@@ -284,9 +326,7 @@ def session_sites(
                 key = (path, node.name)
                 classes[key] = node
                 class_bases[key] = frozenset(
-                    name
-                    for base in node.bases
-                    for name in _annotation_names(base)
+                    name for base in node.bases for name in _annotation_names(base)
                 )
             elif isinstance(node, ast.AsyncFunctionDef):
                 owner = enclosing_class(path, node, parents)
@@ -298,12 +338,8 @@ def session_sites(
     for key in classes:
         classes_by_name.setdefault(key[1], []).append(key)
     definitions_by_name: dict[str, list[FunctionKey]] = {}
-    definitions_by_owner: dict[
-        tuple[str, str | None], dict[str, FunctionKey]
-    ] = {}
-    definitions_by_path: dict[
-        str, list[tuple[FunctionKey, ast.AsyncFunctionDef]]
-    ] = {}
+    definitions_by_owner: dict[tuple[str, str | None], dict[str, FunctionKey]] = {}
+    definitions_by_path: dict[str, list[tuple[FunctionKey, ast.AsyncFunctionDef]]] = {}
     for key in definitions:
         definitions_by_name.setdefault(key[2], []).append(key)
         definitions_by_owner.setdefault((key[0], key[1]), {})[key[2]] = key
@@ -372,7 +408,9 @@ def session_sites(
                 target = (
                     statement.target
                     if isinstance(statement, ast.AnnAssign)
-                    else statement.targets[0] if len(statement.targets) == 1 else None
+                    else statement.targets[0]
+                    if len(statement.targets) == 1
+                    else None
                 )
                 if isinstance(target, ast.Name):
                     types[target.id] = _annotation_names(statement.value.func)
@@ -387,7 +425,9 @@ def session_sites(
                 target = (
                     statement.target
                     if isinstance(statement, ast.AnnAssign)
-                    else statement.targets[0] if len(statement.targets) == 1 else None
+                    else statement.targets[0]
+                    if len(statement.targets) == 1
+                    else None
                 )
                 value = statement.value
                 if not (
@@ -480,9 +520,7 @@ def session_sites(
                     else:
                         targets.update(
                             methods_for(
-                                receiver_types.get(caller, {}).get(
-                                    receiver.id, frozenset()
-                                ),
+                                receiver_types.get(caller, {}).get(receiver.id, frozenset()),
                                 func.attr,
                             )
                         )
@@ -494,16 +532,12 @@ def session_sites(
                 ):
                     targets.update(
                         methods_for(
-                            class_attributes.get(caller[1], {}).get(
-                                receiver.attr, frozenset()
-                            ),
+                            class_attributes.get(caller[1], {}).get(receiver.attr, frozenset()),
                             func.attr,
                         )
                     )
                 elif isinstance(receiver, ast.Call):
-                    targets.update(
-                        methods_for(_annotation_names(receiver.func), func.attr)
-                    )
+                    targets.update(methods_for(_annotation_names(receiver.func), func.attr))
                 if not targets and len(definitions_by_name.get(func.attr, ())) == 1:
                     targets.add(definitions_by_name[func.attr][0])
             if targets:
@@ -549,22 +583,13 @@ def session_sites(
         for target in targets
     }
     supported = {
-        key
-        for key in needs & injectable
-        if not is_test_path(key[0]) and key not in blocked_by_test
+        key for key in needs & injectable if not is_test_path(key[0]) and key not in blocked_by_test
     }
-    inbound = {
-        target
-        for calls in edges.values()
-        for _call, targets in calls
-        for target in targets
-    }
+    inbound = {target for calls in edges.values() for _call, targets in calls for target in targets}
     supported.update(
         key
         for key in direct
-        if key not in inbound
-        and not is_test_path(key[0])
-        and key not in blocked_by_test
+        if key not in inbound and not is_test_path(key[0]) and key not in blocked_by_test
     )
     pending = deque(supported)
     while pending:
@@ -582,9 +607,7 @@ def session_sites(
                 pending.append(candidate)
     needs = supported
 
-    definition_sites = frozenset(
-        (key[0], definitions[key].lineno) for key in needs
-    )
+    definition_sites = frozenset((key[0], definitions[key].lineno) for key in needs)
     call_sites = frozenset(
         (caller[0], call.lineno, call.col_offset)
         for caller, calls in edges.items()

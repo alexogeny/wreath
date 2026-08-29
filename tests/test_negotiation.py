@@ -1,4 +1,3 @@
-"""Content negotiation + the MessagePack encoder (spec byte-vectors)."""
 from __future__ import annotations
 
 from typing import cast
@@ -28,28 +27,28 @@ def _request(accept: str) -> Request:
     return cast(Request, _Req(accept))
 
 
-# --- MessagePack encoder vs the spec's byte layout --------------------------
-
-
-@pytest.mark.parametrize("value, expected_hex", [
-    (None, "c0"),
-    (False, "c2"),
-    (True, "c3"),
-    (0, "00"),
-    (127, "7f"),
-    (128, "cc80"),
-    (255, "ccff"),
-    (256, "cd0100"),
-    (-1, "ff"),
-    (-32, "e0"),
-    (-33, "d0df"),
-    (1.5, "cb3ff8000000000000"),
-    ("", "a0"),
-    ("a", "a161"),
-    (b"\x01", "c40101"),
-    ([1, 2, 3], "9301020304"[:8]),      # 93 01 02 03
-    ({"a": 1}, "81a16101"),
-])
+@pytest.mark.parametrize(
+    "value, expected_hex",
+    [
+        (None, "c0"),
+        (False, "c2"),
+        (True, "c3"),
+        (0, "00"),
+        (127, "7f"),
+        (128, "cc80"),
+        (255, "ccff"),
+        (256, "cd0100"),
+        (-1, "ff"),
+        (-32, "e0"),
+        (-33, "d0df"),
+        (1.5, "cb3ff8000000000000"),
+        ("", "a0"),
+        ("a", "a161"),
+        (b"\x01", "c40101"),
+        ([1, 2, 3], "9301020304"[:8]),  # 93 01 02 03
+        ({"a": 1}, "81a16101"),
+    ],
+)
 def test_msgpack_known_vectors(value, expected_hex) -> None:
     assert packb(value).hex() == expected_hex
 
@@ -57,17 +56,14 @@ def test_msgpack_known_vectors(value, expected_hex) -> None:
 def test_msgpack_round_trips_through_a_nested_structure() -> None:
     # Structural check: encodes without error and starts with a fixmap of 2.
     encoded = packb({"items": [1, "two", None], "ok": True})
-    assert encoded[0] == 0x82   # map with 2 entries
-
-
-# --- Accept parsing + negotiation -------------------------------------------
+    assert encoded[0] == 0x82  # map with 2 entries
 
 
 def test_parse_accept_orders_by_q_then_specificity() -> None:
     parsed = parse_accept("*/*;q=0.1, application/json;q=0.9, application/msgpack")
-    assert parsed[0][0] == "application/msgpack"     # q=1.0
-    assert parsed[1][0] == "application/json"        # q=0.9
-    assert parsed[-1][0] == "*/*"                    # q=0.1
+    assert parsed[0][0] == "application/msgpack"  # q=1.0
+    assert parsed[1][0] == "application/json"  # q=0.9
+    assert parsed[-1][0] == "*/*"  # q=0.1
 
 
 def test_parse_accept_uses_specificity_when_quality_is_equal() -> None:
@@ -79,29 +75,17 @@ def test_parse_accept_uses_specificity_when_quality_is_equal() -> None:
 
 
 def test_parse_accept_ignores_empty_elements_and_media_ranges() -> None:
-    assert parse_accept(", ;q=0.5, application/json, ") == [
-        ("application/json", 1.0)
-    ]
+    assert parse_accept(", ;q=0.5, application/json, ") == [("application/json", 1.0)]
 
 
 def test_parse_accept_takes_the_first_q_not_the_last() -> None:
-    """RFC 9110 s12.4.2: `q` ends the media-range parameters and everything
-    after it is accept-ext, so a later `q=` is an extension that happens to be
-    spelled `q` rather than a restated weight.
-
-    The three copies of this walk disagreed here -- the two Accept-Language
-    readers stopped at the first `q`, this one let the last overwrite it -- so
-    the same header scored differently depending on which entry point read it.
-    """
-    assert parse_accept("application/json;q=0.9;q=0.1") == [
-        ("application/json", 0.9)
-    ]
+    assert parse_accept("application/json;q=0.9;q=0.1") == [("application/json", 0.9)]
 
 
 def test_negotiate_defaults_to_json() -> None:
     assert negotiate(None) is JSON
     assert negotiate("*/*") is JSON
-    assert negotiate("application/*") is JSON        # first matching serializer
+    assert negotiate("application/*") is JSON  # first matching serializer
 
 
 def test_negotiate_selects_msgpack_when_preferred() -> None:
@@ -111,7 +95,7 @@ def test_negotiate_selects_msgpack_when_preferred() -> None:
 
 def test_negotiate_unsatisfiable_returns_none() -> None:
     assert negotiate("application/xml") is None
-    assert negotiate("application/json;q=0") is None   # explicitly not acceptable
+    assert negotiate("application/json;q=0") is None  # explicitly not acceptable
 
 
 def test_serialize_picks_format_and_sets_headers() -> None:

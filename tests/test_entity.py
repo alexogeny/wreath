@@ -1,27 +1,3 @@
-"""A name has one owner, and a question reaches whoever owns it.
-
-The tree already answered "exactly one process owns this right now" six ways --
-an advisory lock, a job lease and fence, a store claim, a pass row lock, a
-single-use `DELETE ... RETURNING`, and `wreath.streams` borrowing the queue's
-fence outright. What none of them could express is the *other* half of a
-stateful gateway: a message aimed at whoever holds a name, sent from a worker
-that does not know which one that is.
-
-These tests use a fake database that runs the real statements' *semantics* --
-not their SQL -- because the interesting properties are concurrency ones and a
-container is not available on every machine. The SQL itself is exercised
-against real PostgreSQL by the store suite it is built on; what is proved here
-is the contract:
-
-* a second holder is refused while a lease is live, and admitted once it lapses;
-* the fence moves on a handover and **not** on a renewal;
-* `release` is scoped to the owner, so a lapsed holder cannot delete its
-  successor's row on the way out;
-* `ask` reaches the holder on another worker, carries the answer back, reports
-  a handler failure as a failure rather than as a timeout, and refuses a name
-  nobody holds without waiting for the deadline.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -161,9 +137,6 @@ def _ownership(db: FakeOwnershipDB, *, owner: str, lease: float = 30.0) -> Owner
     return own
 
 
-# --- ownership -----------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_name_admits_one_holder() -> None:
     clock = FakeClock()
@@ -297,9 +270,6 @@ async def test_releasing_a_name_nobody_holds_reports_false() -> None:
     # asked whether it gave something up, and it did not.
     own = _ownership(FakeOwnershipDB(FakeClock()), owner="a")
     assert await own.release("device:absent") is False
-
-
-# --- ask and answer ------------------------------------------------------------------
 
 
 class FakeBus:
@@ -477,8 +447,8 @@ async def test_a_second_reply_to_one_question_is_ignored() -> None:
     "message",
     [
         "not a mapping",
-        {"reply": {"soc": 1}},                        # no correlation
-        {"correlation": 7, "reply": {}},              # correlation not a string
+        {"reply": {"soc": 1}},  # no correlation
+        {"correlation": 7, "reply": {}},  # correlation not a string
         {"correlation": "c", "ask": 1, "kind": "device", "name": "abc"},
         {"correlation": "c", "ask": "device:abc", "kind": 1, "name": "abc"},
         # Unhashable: without the `kind` check this reaches `_answers.get(...)`
@@ -491,7 +461,6 @@ async def test_a_malformed_message_is_dropped_rather_than_raising(message: Any) 
     # Every worker sees every message, so a payload from a newer build -- or
     # from something else publishing on the channel -- must not take a
     # subscriber down.
-    #
     # The `holder` count is what makes this test able to tell. Each field check
     # is one clause of an `or`, so dropping any single one still refuses via the
     # others and no handler runs either way -- the assertion has to be that the
@@ -540,19 +509,7 @@ def test_one_answer_per_kind() -> None:
             return None
 
 
-# --- registration ---------------------------------------------------------------------
-
-
 def test_a_registered_registry_contributes_its_table_to_the_schema() -> None:
-    """An `EntityRegistry` built by hand is a table nothing creates.
-
-    `Wreath.schema_components` collects a claim by *asking* the registries it
-    walks, and a user-held object is in none of them -- so `wreath_entity` was
-    emitted by `wreath schema sql` and applied by nothing, which is the exact
-    defect that mechanism exists to prevent. `app.entities()` registers it, and
-    `EntityRegistry.schema_owners` is what carries the claim from the `Ownership`
-    that actually owns the table.
-    """
     from wreath import Wreath
 
     app = Wreath()
@@ -585,8 +542,6 @@ def test_a_duplicate_registry_name_is_refused() -> None:
         app.entities(database="main", bus="events")
 
 
-# --- the renewal service --------------------------------------------------------------
-#
 # A lease without a keep-alive is a lease every caller writes a loop for, once
 # per name, at one round trip each. These pin that the loop is the registry's,
 # that it costs a bounded number of statements however much a worker holds, and
@@ -642,8 +597,8 @@ async def test_a_name_taken_while_held_is_noticed_and_counted() -> None:
     mine._on_lost = seen.append
 
     await mine.hold("device", "abc")
-    clock.advance(31)                       # the lease lapses
-    await theirs.hold("device:abc")         # another worker takes it
+    clock.advance(31)  # the lease lapses
+    await theirs.hold("device:abc")  # another worker takes it
     await mine._tick()
 
     assert mine.lost == 1
@@ -773,13 +728,8 @@ async def test_a_tick_holding_nothing_asks_the_database_nothing() -> None:
 
 def test_the_renewal_interval_is_a_third_of_the_lease() -> None:
     # Two consecutive ticks can be lost to a slow database before a name is.
-    registry = EntityRegistry(
-        FakeOwnershipDB(FakeClock()), FakeBus(), lease=seconds(30)
-    )
+    registry = EntityRegistry(FakeOwnershipDB(FakeClock()), FakeBus(), lease=seconds(30))
     assert registry._renew_every == pytest.approx(10.0)
-
-
-# --- controls `wreath mutant` found nothing watching ----------------------------------
 
 
 @pytest.mark.asyncio
@@ -822,7 +772,7 @@ async def test_a_grace_does_not_resurrect_a_name_already_lost() -> None:
     await mine.hold("device", "abc")
     clock.advance(31)
     await theirs.hold("device:abc")
-    await mine._tick()                       # notices the loss, drops it locally
+    await mine._tick()  # notices the loss, drops it locally
     await mine._let_go("device:abc", seconds(5))
 
     assert mine.held == frozenset()

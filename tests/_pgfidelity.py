@@ -1,27 +1,3 @@
-"""What PostgreSQL refuses, so the doubles can refuse it too.
-
-Three defects reached working-looking code in one session because the test
-doubles accepted statements a real server rejects:
-
-* ``$1::regclass`` in the default progress denominator -- **worked on the first
-  call and raised on every one after**, because only the prepared statement
-  carries the inferred parameter type;
-* ``= ANY($1)`` with a Python list, in three places, two of them safety
-  refusals that had therefore never once fired;
-* a predicate the passes fake could not parse, so the branch was untestable,
-  so it was untested, so a renamed symbol in it survived a green suite.
-
-The common cause is that a fake models neither PostgreSQL's type system nor its
-prepared-statement cache. This module closes that, and every rule in it was
-**measured against PostgreSQL 17.10 first** -- see
-``tests/postgres/test_double_fidelity.py``, which runs the same assertions
-against a real connection so a divergence is a test failure rather than a
-discovery six months later.
-
-Nothing here is inferred from documentation or from what PostgreSQL "should"
-do. A stricter fiction is still a fiction.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -66,8 +42,6 @@ __all__ = [
     "record",
 ]
 
-# --- the rules, re-exported --------------------------------------------------
-#
 # `check_bindable`, `check_single_statement` and the cast tables live in
 # `wreath._replay_adapters` and are imported above. They are named here in the
 # vocabulary a test reads in, but they are the same functions the shipped

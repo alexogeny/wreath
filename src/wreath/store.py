@@ -52,19 +52,99 @@ from .kv import KV
 #: list -- that is hundreds long and mostly words nobody names a table -- but
 #: the ones people actually reach for. A name from here reaches the generated
 #: DDL unquoted and fails there, a long way from the declaration that caused it.
-_RESERVED = frozenset({
-    "all", "analyse", "analyze", "and", "any", "array", "as", "asc", "authorization",
-    "between", "both", "case", "cast", "check", "collate", "column", "constraint",
-    "create", "cross", "current_date", "current_role", "current_time",
-    "current_timestamp", "current_user", "default", "deferrable", "desc", "distinct",
-    "do", "else", "end", "except", "false", "fetch", "for", "foreign", "from", "grant",
-    "group", "having", "in", "initially", "inner", "intersect", "into", "is", "join",
-    "lateral", "leading", "left", "like", "limit", "localtime", "localtimestamp",
-    "natural", "not", "null", "offset", "on", "only", "or", "order", "outer", "overlaps",
-    "placing", "primary", "references", "returning", "right", "select", "session_user",
-    "similar", "some", "symmetric", "table", "then", "to", "trailing", "true", "union",
-    "unique", "user", "using", "variadic", "verbose", "when", "where", "window", "with",
-})
+_RESERVED = frozenset(
+    {
+        "all",
+        "analyse",
+        "analyze",
+        "and",
+        "any",
+        "array",
+        "as",
+        "asc",
+        "authorization",
+        "between",
+        "both",
+        "case",
+        "cast",
+        "check",
+        "collate",
+        "column",
+        "constraint",
+        "create",
+        "cross",
+        "current_date",
+        "current_role",
+        "current_time",
+        "current_timestamp",
+        "current_user",
+        "default",
+        "deferrable",
+        "desc",
+        "distinct",
+        "do",
+        "else",
+        "end",
+        "except",
+        "false",
+        "fetch",
+        "for",
+        "foreign",
+        "from",
+        "grant",
+        "group",
+        "having",
+        "in",
+        "initially",
+        "inner",
+        "intersect",
+        "into",
+        "is",
+        "join",
+        "lateral",
+        "leading",
+        "left",
+        "like",
+        "limit",
+        "localtime",
+        "localtimestamp",
+        "natural",
+        "not",
+        "null",
+        "offset",
+        "on",
+        "only",
+        "or",
+        "order",
+        "outer",
+        "overlaps",
+        "placing",
+        "primary",
+        "references",
+        "returning",
+        "right",
+        "select",
+        "session_user",
+        "similar",
+        "some",
+        "symmetric",
+        "table",
+        "then",
+        "to",
+        "trailing",
+        "true",
+        "union",
+        "unique",
+        "user",
+        "using",
+        "variadic",
+        "verbose",
+        "when",
+        "where",
+        "window",
+        "with",
+    }
+)
 
 #: The row alias every generated statement uses, so a caller writing its own SQL
 #: against the same store can reference columns the same way.
@@ -192,9 +272,7 @@ class Keyed:
         if self.ttl is None:
             raise ValueError("a claim needs a ttl to set the deadline from")
         if any(not column.null for column in self.columns):
-            raise ValueError(
-                "a claim resets the payload, so every payload column must be nullable"
-            )
+            raise ValueError("a claim resets the payload, so every payload column must be nullable")
 
     def statements(self) -> tuple[str, ...]:
         """DDL for the backing table, one statement per element.
@@ -280,7 +358,6 @@ def rows_affected(status: Any) -> int | None:
 def _interval(seconds: float | str | datetime.timedelta) -> Sql:
     # A float is rendered as a literal (the store owns the lifetime); a string is
     # a placeholder, for when the caller supplies it per write.
-    #
     # A `timedelta` -- which is what `wreath.temporal.Duration` is -- is read
     # first and reduced to seconds. It deliberately does *not* go through
     # `Duration.of`, because a `str` here is a bind placeholder rather than an
@@ -326,9 +403,7 @@ class _Statements:
     def define(self, name: str, sql: str, *, workload: str = "write") -> None:
         """Register `sql` under `name` for lazy preparation."""
         if name in self._defined:
-            raise ValueError(
-                f"{name!r} is already defined on this {self._statement_owner}"
-            )
+            raise ValueError(f"{name!r} is already defined on this {self._statement_owner}")
         # PostgreSQL truncates rather than refuses an over-long prepared name.
         # Refuse while the application is being described, before two distinct
         # declarations can silently acquire the same server-side name.
@@ -370,9 +445,7 @@ class _Statements:
     def _entry(self, name: str) -> _Defined:
         entry = self._defined.get(name)
         if entry is None:
-            raise ValueError(
-                f"no SQL named {name!r} on this {self._statement_owner}"
-            )
+            raise ValueError(f"no SQL named {name!r} on this {self._statement_owner}")
         return entry
 
 
@@ -406,9 +479,7 @@ class PostgresStore(_Statements):
 
     _statement_owner = "store"
 
-    def __init__(
-        self, database: Any, declaration: Keyed, *, read_workload: str = "write"
-    ) -> None:
+    def __init__(self, database: Any, declaration: Keyed, *, read_workload: str = "write") -> None:
         self._database = database
         self._declaration = declaration
         self._init_statements()

@@ -4,16 +4,31 @@ Not a spec-complete DOM — just enough structure (parent/children, attributes, 
 text, and 1-based `(line, col)` from `getpos()`) for the curated audit rules to
 locate findings. Zero third-party dependencies by design.
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterator
 from html.parser import HTMLParser
 
 # HTML void elements never have children / end tags.
-VOID = frozenset({
-    "area", "base", "br", "col", "embed", "hr", "img", "input",
-    "link", "meta", "param", "source", "track", "wbr",
-})
+VOID = frozenset(
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+)
 
 
 class Node:

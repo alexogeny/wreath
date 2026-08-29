@@ -1,5 +1,3 @@
-"""Feature-flag rule evaluation, env loading, and determinism."""
-
 from __future__ import annotations
 
 from wreath.flags import FeatureFlags, FlagView, evaluate_rule
@@ -24,9 +22,7 @@ def test_percentage_is_deterministic():
 
 
 def test_percentage_spreads_subjects():
-    enabled = sum(
-        evaluate_rule("50%", "beta", {"id": f"user-{i}"}) for i in range(200)
-    )
+    enabled = sum(evaluate_rule("50%", "beta", {"id": f"user-{i}"}) for i in range(200))
     assert 60 < enabled < 140  # roughly half, not everyone/no-one
 
 

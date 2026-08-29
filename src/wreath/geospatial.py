@@ -51,7 +51,6 @@ from ._geodesy import EARTH_RADIUS_M, latitude_span, longitude_span
 from ._native import _core as _core_module
 
 # The `hasattr` asks one question: was this built before `geospatial.c` landed.
-#
 # The distance is the only thing selected. The radius and the two span
 # conversions above have no C arm -- see `wreath._geodesy` for why.
 #: `geo_haversine(lat1, lon1, lat2, lon2)` -- great-circle metres on the sphere
@@ -218,8 +217,7 @@ class BoundingBox:
     def contains(self, point: Coordinate) -> bool:
         """Whether `point` falls in this box. The cheap half of `within`."""
         return (
-            self.lat_min <= point.lat <= self.lat_max
-            and self.lon_min <= point.lon <= self.lon_max
+            self.lat_min <= point.lat <= self.lat_max and self.lon_min <= point.lon <= self.lon_max
         )
 
     def __eq__(self, other: object) -> bool:
@@ -283,7 +281,6 @@ def bounding_boxes(centre: Coordinate, metres: float) -> tuple[BoundingBox, ...]
 
     # A circle reaching a pole has no finite longitude bound -- every meridian
     # passes through it -- and `longitude_span` says so with its -1.0 sentinel.
-    #
     # There was an explicit `lat_max >= 90 or lat_min <= -90` fast path here.
     # A mutation pass removed it and nothing objected, correctly: when the band
     # crosses a pole, `cos(radians(widest))` is <= 0 or the ratio reaches 1, so
@@ -386,9 +383,7 @@ class Polygon:
         object.__setattr__(self, "vertices", (*ring, ring[0]))
 
     def __setattr__(self, name: str, value: Any) -> None:
-        raise AttributeError(
-            f"Polygon is immutable; build a new one rather than setting {name!r}"
-        )
+        raise AttributeError(f"Polygon is immutable; build a new one rather than setting {name!r}")
 
     def __delattr__(self, name: str) -> None:
         raise AttributeError("Polygon is immutable")
@@ -497,9 +492,7 @@ class Grid:
             or not isinstance(column, int)
             or not 0 <= column < self.columns
         ):
-            raise GeospatialError(
-                f"column must be in 0..{self.columns - 1}, got {column!r}"
-            )
+            raise GeospatialError(f"column must be in 0..{self.columns - 1}, got {column!r}")
 
     def cell(self, row: int, column: int) -> BoundingBox:
         """The bounds of one cell, clamped to the valid coordinate range."""
@@ -639,9 +632,7 @@ class Trajectory:
         object.__setattr__(
             self,
             "_native",
-            _core_module.geo_trajectory_compile(
-                fixes, GeospatialError, Coordinate, _DATETIME_CAPI
-            ),
+            _core_module.geo_trajectory_compile(fixes, GeospatialError, Coordinate, _DATETIME_CAPI),
         )
         object.__setattr__(self, "_grid_cache", None)
 
@@ -717,9 +708,7 @@ class Trajectory:
         if end < start:
             raise GeospatialError(f"between() end {end!r} is before start {start!r}")
         return self._from_native(
-            _core_module.geo_trajectory_between(
-                self._native, start, end, _DATETIME_CAPI
-            )
+            _core_module.geo_trajectory_between(self._native, start, end, _DATETIME_CAPI)
         )
 
     def grid_summary(
@@ -741,12 +730,7 @@ class Trajectory:
         if end < start:
             raise GeospatialError(f"grid_summary() end {end!r} is before start {start!r}")
         cached = self._grid_cache
-        if (
-            cached is not None
-            and cached[0] is start
-            and cached[1] is end
-            and cached[2] is lattice
-        ):
+        if cached is not None and cached[0] is start and cached[1] is end and cached[2] is lattice:
             return cached[3]
         result = _core_module.geo_trajectory_grid_summary(
             self._native,

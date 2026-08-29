@@ -81,9 +81,7 @@ def graphql_operations(schema: Schema, *, path: str = "/graphql") -> tuple[Opera
                 Parameter("offset", "offset", "query", TypeRef("integer"), False),
             )
         else:
-            parameters = (
-                Parameter("id", "id", "query", TypeRef("string"), True),
-            )
+            parameters = (Parameter("id", "id", "query", TypeRef("string"), True),)
         operations.append(
             Operation(
                 id=f"graphql{root.name[0].upper()}{root.name[1:]}",

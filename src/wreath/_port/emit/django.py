@@ -16,8 +16,6 @@ from .targets import _DJANGO_PYANN, _PG_PYANN
 
 
 class _DjangoModels(_EmitterState):
-    # -- Django models ---------------------------------------------------------
-
     def _django_pyann(self, pgtype: str, nullable: bool) -> str:
         base = _DJANGO_PYANN.get(pgtype, "str")
         if base.startswith("uuid."):
@@ -113,8 +111,10 @@ class _DjangoModels(_EmitterState):
             return
         name = stmt.targets[0].id
         arg0 = call.args[0]
-        target_name = arg0.id if isinstance(arg0, ast.Name) else (
-            arg0.attr if isinstance(arg0, ast.Attribute) else None
+        target_name = (
+            arg0.id
+            if isinstance(arg0, ast.Name)
+            else (arg0.attr if isinstance(arg0, ast.Attribute) else None)
         )
         if target_name is None or isinstance(arg0, ast.Constant):
             # A string reference ("app.Model") names a class this pass cannot

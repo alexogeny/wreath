@@ -1,10 +1,3 @@
-"""The bearer verifier (and its backing DB query) must run exactly once per request.
-
-Thesis under test: profiling the lifecycle benchmark suggested the auth backend
-authenticates twice per request (decision-router probe + route guard), which
-would mean a duplicated database SELECT on every authenticated request.
-"""
-
 from wreath import Wreath
 from wreath.auth import BearerTokenBackend, Identity
 from wreath.authorization import roles
@@ -35,9 +28,7 @@ def _counting_app() -> tuple[Wreath, list[str]]:
 async def test_verifier_runs_exactly_once_per_authorized_request():
     app, calls = _counting_app()
     client = TestClient(app)
-    response = await client.post(
-        "/admin/users/42", headers={"Authorization": "Bearer admin"}
-    )
+    response = await client.post("/admin/users/42", headers={"Authorization": "Bearer admin"})
     assert response.status == 200
     assert len(calls) == 1, f"verifier ran {len(calls)}x for one request: {calls}"
 
@@ -45,8 +36,6 @@ async def test_verifier_runs_exactly_once_per_authorized_request():
 async def test_verifier_runs_exactly_once_per_denied_request():
     app, calls = _counting_app()
     client = TestClient(app)
-    response = await client.post(
-        "/admin/users/42", headers={"Authorization": "Bearer wrong"}
-    )
+    response = await client.post("/admin/users/42", headers={"Authorization": "Bearer wrong"})
     assert response.status in (401, 403)
     assert len(calls) == 1, f"verifier ran {len(calls)}x for one request: {calls}"

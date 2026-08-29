@@ -1,5 +1,3 @@
-"""Fixtures for the generated admin. The doubles live in `_doubles.py`."""
-
 from __future__ import annotations
 
 import pytest

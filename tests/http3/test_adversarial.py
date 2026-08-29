@@ -1,13 +1,3 @@
-"""Red-team the framework over real HTTP/3, driven by a real QUIC client.
-
-HTTP/3 rides QUIC, whose per-connection encryption makes the byte-level replay
-harness inapplicable (see docs/reference/replay.md). So the owned HTTP/3 request
-handling is red-teamed the only way a QUIC endpoint can be driven — with a real
-``curl --http3`` client sending adversarial *requests* (bad methods, missing
-routes, hostile paths, header floods, handler faults) — asserting the framework
-answers with an owned status and never crashes or hangs, deterministically.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -68,10 +58,10 @@ async def test_adversarial_requests_get_owned_statuses_not_crashes() -> None:
     server, port = await _serve()
     try:
         cases = {
-            "/nonexistent": {404},                        # no route
-            "/../../etc/passwd": {400, 404},              # traversal-looking path
-            "/ping/" + "x" * 4000: {400, 404, 414},       # very long path
-            "/boom": {500},                               # handler raises -> owned 500
+            "/nonexistent": {404},  # no route
+            "/../../etc/passwd": {400, 404},  # traversal-looking path
+            "/ping/" + "x" * 4000: {400, 404, 414},  # very long path
+            "/boom": {500},  # handler raises -> owned 500
         }
         for path, allowed in cases.items():
             status = await _status(port, path)
@@ -124,9 +114,6 @@ async def test_concurrent_mixed_requests_all_get_owned_answers() -> None:
     finally:
         await server.close()
         await server.wait_closed()
-
-
-# --- self-review gaps: methods, query, bodies --------------------------------
 
 
 async def test_head_and_hostile_query_are_handled() -> None:

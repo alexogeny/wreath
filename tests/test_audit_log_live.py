@@ -1,19 +1,3 @@
-"""The audit trail, against a real PostgreSQL.
-
-The claim this suite has to earn is **completeness by construction**: not "the
-handler remembered to record", but "the write recorded itself". So the tests
-that matter are the ones a hand-rolled trail fails --
-
-* a write from a background task with no request anywhere near it,
-* a write that rolls back leaving no record,
-* a write with nobody's name on it, refused before it reaches the database,
-* an `UPDATE` against the trail itself, refused by the database.
-
-`test_neutering_the_hook_makes_these_tests_fail` is the falsification: it drives
-the same write with the trail unhooked and asserts the record does *not* appear,
-so a suite that passed because nothing ran would be caught.
-"""
-
 from __future__ import annotations
 
 import json
@@ -160,9 +144,6 @@ async def _records(trail, key: str):
     ]
 
 
-# -- completeness ----------------------------------------------------------
-
-
 async def test_an_insert_records_itself(registry, trail, sessions):
     session = sessions(registry, trail)
     with actor("user:41"):
@@ -208,7 +189,6 @@ async def test_a_delete_records_itself_with_the_row_it_removed(registry, trail, 
 
 
 async def test_a_write_from_a_background_task_is_recorded_the_same_way(registry, trail, sessions):
-    """The case a hand-rolled trail misses: no request, no handler, no reminder."""
     import asyncio
 
     async def nightly():
@@ -230,9 +210,6 @@ async def test_a_model_with_no_audit_facet_records_nothing(registry, trail, sess
     assert trail.recorded == 0
 
 
-# -- redaction -------------------------------------------------------------
-
-
 async def test_a_redacted_column_records_that_it_changed_but_not_to_what(registry, trail, sessions):
     session = sessions(registry, trail)
     with actor("user:41"):
@@ -246,9 +223,6 @@ async def test_a_redacted_column_records_that_it_changed_but_not_to_what(registr
     assert "-27.4" not in json.dumps(fields)
 
 
-# -- attribution -----------------------------------------------------------
-
-
 async def test_an_unattributed_write_is_refused(registry, trail, sessions):
     session = sessions(registry, trail)
     session.add(Photo(id=6, caption="anonymous", exif_gps=None))
@@ -260,11 +234,6 @@ async def test_an_unattributed_write_is_refused(registry, trail, sessions):
 async def test_an_unattributed_write_never_reaches_the_database(
     registry, trail, database, sessions
 ):
-    """Refused *before* the statement, not after.
-
-    A write that has already happened cannot be undone by a failed append, so
-    the check that can refuse has to run first.
-    """
     session = sessions(registry, trail)
     session.add(Photo(id=7, caption="anonymous", exif_gps=None))
     with pytest.raises(Unattributed):
@@ -272,9 +241,7 @@ async def test_an_unattributed_write_never_reaches_the_database(
 
     connection = await database.acquire("write")
     try:
-        count = await connection.fetchval(
-            f'SELECT count(*) FROM "{_SCHEMA}".photos WHERE id = 7'
-        )
+        count = await connection.fetchval(f'SELECT count(*) FROM "{_SCHEMA}".photos WHERE id = 7')
     finally:
         await database.release("write", connection)
     assert count == 0
@@ -302,11 +269,7 @@ async def test_an_empty_actor_is_refused_at_the_point_it_is_bound(registry, trai
                 pass
 
 
-# -- atomicity -------------------------------------------------------------
-
-
 async def test_a_rolled_back_write_leaves_no_record(registry, trail, sessions):
-    """The record and the row commit together or not at all."""
     session = sessions(registry, trail)
     with actor("user:41"), pytest.raises(RuntimeError, match="deliberate"):
         async with session.begin():
@@ -318,12 +281,6 @@ async def test_a_rolled_back_write_leaves_no_record(registry, trail, sessions):
 
 
 async def test_a_flush_of_many_audited_rows_records_every_one(registry, trail, sessions):
-    """The records are batched; completeness is what the batch must not cost.
-
-    A flush appends one statement per power-of-two rung rather than one per
-    instance, so this is the test that a row in the middle of a rung -- or in a
-    rung of its own -- is not the one that goes missing.
-    """
     session = sessions(registry, trail)
     with actor("user:41"):
         for identifier in range(100, 111):
@@ -337,15 +294,7 @@ async def test_a_flush_of_many_audited_rows_records_every_one(registry, trail, s
         assert records[0]["fields"]["caption"] == f"herd {identifier}"
 
 
-async def test_a_rolled_back_flush_of_many_leaves_none_of_their_records(
-    registry, trail, sessions
-):
-    """The batch is inside the transaction, not beside it.
-
-    Deferring the append to the end of the flush would be a defect if the batch
-    escaped the transaction the writes are in -- eleven records describing
-    eleven writes that never happened. Asserted by rolling them back.
-    """
+async def test_a_rolled_back_flush_of_many_leaves_none_of_their_records(registry, trail, sessions):
     session = sessions(registry, trail)
     with actor("user:41"), pytest.raises(RuntimeError, match="deliberate"):
         async with session.begin():
@@ -361,14 +310,8 @@ async def test_a_rolled_back_flush_of_many_leaves_none_of_their_records(
 async def test_a_flush_that_fails_partway_records_nothing_and_stays_clean(
     registry, trail, database, sessions
 ):
-    """A failed flush must not leave its records queued for the next one.
-
-    The rows it described rolled back with the transaction, so appending them
-    later would be an audit trail for work that never happened -- and it would
-    appear attached to whatever the *next* flush did.
-    """
     session = sessions(registry, trail)
-    await _apply(database, f'INSERT INTO "{_SCHEMA}".photos VALUES (300, \'taken\', NULL)')
+    await _apply(database, f"INSERT INTO \"{_SCHEMA}\".photos VALUES (300, 'taken', NULL)")
 
     with actor("user:41"), pytest.raises(Exception, match="duplicate key|unique"):
         session.add(Photo(id=299, caption="fine", exif_gps=None))
@@ -387,9 +330,6 @@ async def test_a_flush_that_fails_partway_records_nothing_and_stays_clean(
     assert await _records(trail, "299") == []
 
 
-# -- immutability ----------------------------------------------------------
-
-
 async def test_the_trail_refuses_an_update_from_the_database_itself(
     registry, trail, database, sessions
 ):
@@ -402,7 +342,7 @@ async def test_the_trail_refuses_an_update_from_the_database_itself(
     try:
         with pytest.raises(Exception, match="append-only"):
             await connection.execute(
-                f'UPDATE "{_SCHEMA}".audit_records SET actor = \'somebody else\''
+                f"UPDATE \"{_SCHEMA}\".audit_records SET actor = 'somebody else'"
             )
         with pytest.raises(Exception, match="append-only"):
             await connection.execute(f'DELETE FROM "{_SCHEMA}".audit_records')
@@ -410,9 +350,6 @@ async def test_the_trail_refuses_an_update_from_the_database_itself(
             await connection.execute(f'TRUNCATE "{_SCHEMA}".audit_records')
     finally:
         await database.release("write", connection)
-
-
-# -- erasure ---------------------------------------------------------------
 
 
 async def test_forgetting_a_subject_removes_only_that_subject(registry, trail, sessions):
@@ -430,12 +367,6 @@ async def test_forgetting_a_subject_removes_only_that_subject(registry, trail, s
 async def test_the_erasure_permission_does_not_outlive_its_transaction(
     registry, trail, database, sessions
 ):
-    """`SET LOCAL` means exactly one transaction, and that is the safety.
-
-    A setting that leaked would hand the *next* user of a pooled connection the
-    right to delete audit records, which is a far worse failure than not having
-    an erasure path at all.
-    """
     session = sessions(registry, trail)
     with actor("user:41"):
         session.add(Photo(id=13, caption="stays", exif_gps=None))
@@ -451,17 +382,7 @@ async def test_the_erasure_permission_does_not_outlive_its_transaction(
     assert len(await _records(trail, "13")) == 1
 
 
-# -- falsification ---------------------------------------------------------
-
-
 async def test_neutering_the_hook_makes_these_tests_fail(registry, trail, sessions):
-    """The suite's own falsifier.
-
-    Drives the same write through a session with no trail installed and asserts
-    the record does *not* appear. If the hook were dead -- unwired, or wired to
-    a model attribute that no longer exists -- every test above would still pass
-    for the wrong reason, and this one would fail.
-    """
     session = Session(registry, "write", audit=None)
     try:
         with actor("user:41"):

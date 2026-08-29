@@ -1,21 +1,3 @@
-"""AES-GCM against answers nobody in this repository wrote.
-
-This file checks every instruction path against two external references:
-
-* the **SP 800-38D known-answer vectors** (McGrew and Viega's test cases 1-4,
-  the AES-128 ones with a 96-bit IV), transcribed as literals. A vector is worth
-  more than a library here, because it cannot be wrong in a way that tracks a
-  bug -- it is a constant.
-* **`cryptography`'s `AESGCM`**, which is OpenSSL. That is a *test* dependency
-  and never imported by anything under `src/wreath`; the whole reason
-  `wreath._webpush` exists is that Wreath's core takes no such dependency.
-
-Test cases 5 and 6 are deliberately absent: their IVs are 64 and 480 bits, and
-this profile takes a 96-bit nonce only -- which is what RFC 8291 and every
-JWE-adjacent use of GCM specify, and what makes J0 the nonce with a counter
-rather than a GHASH of the IV.
-"""
-
 from __future__ import annotations
 
 import os
@@ -33,9 +15,7 @@ from wreath._webpush import (
 _scalar_encrypt = _core._aes128gcm_encrypt_scalar
 _scalar_decrypt = _core._aes128gcm_decrypt_scalar
 
-ARMS: tuple[str, ...] = (
-    () if _core is None else tuple(getattr(_core, "aesgcm_arms", tuple)())
-)
+ARMS: tuple[str, ...] = () if _core is None else tuple(getattr(_core, "aesgcm_arms", tuple)())
 
 #: (key, nonce, plaintext, aad, ciphertext, tag), all hex.
 #: NIST SP 800-38D / "The Galois/Counter Mode of Operation (GCM)", cases 1-4.
@@ -97,7 +77,6 @@ def test_both_paths_reproduce_the_nist_vectors(encrypt, vector: tuple[str, ...])
 @pytest.mark.parametrize("size", [0, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 1000, 4000])
 @pytest.mark.parametrize("aad_size", [0, 16, 37])
 def test_both_paths_match_openssl(encrypt, size: int, aad_size: int) -> None:
-    """`cryptography` is OpenSSL, and OpenSSL is not this repository."""
     key, nonce = os.urandom(16), os.urandom(12)
     plaintext, aad = os.urandom(size), os.urandom(aad_size)
     expected = AESGCM(key).encrypt(nonce, plaintext, aad or None)
@@ -105,11 +84,6 @@ def test_both_paths_match_openssl(encrypt, size: int, aad_size: int) -> None:
 
 
 def test_the_facade_produces_what_openssl_decrypts() -> None:
-    """Whichever path this machine binds, read back by an independent receiver.
-
-    The direction matters: an encryptor and a decryptor written together can
-    agree on a wrong ciphertext, and only a foreign decryptor rules that out.
-    """
     key, nonce = os.urandom(16), os.urandom(12)
     plaintext, aad = os.urandom(1234), os.urandom(19)
     message = aes128gcm_encrypt(key, nonce, plaintext, aad)
@@ -118,7 +92,6 @@ def test_the_facade_produces_what_openssl_decrypts() -> None:
 
 @pytest.mark.parametrize("size", [0, 17, 4000])
 def test_both_paths_decrypt_what_openssl_encrypted(size: int) -> None:
-    """The other direction, so decryption is pinned to something foreign too."""
     key, nonce = os.urandom(16), os.urandom(12)
     plaintext, aad = os.urandom(size), os.urandom(11)
     message = AESGCM(key).encrypt(nonce, plaintext, aad or None)
@@ -128,11 +101,6 @@ def test_both_paths_decrypt_what_openssl_encrypted(size: int) -> None:
 
 
 def test_openssl_refuses_a_message_whose_tag_this_module_altered() -> None:
-    """The tag is authenticating, not a checksum -- confirmed from outside.
-
-    Without this, a tag computed by some consistent-but-wrong rule would satisfy
-    every test in this file that only compares Wreath to Wreath.
-    """
     key, nonce = os.urandom(16), os.urandom(12)
     message = bytearray(aes128gcm_encrypt(key, nonce, b"payload"))
     message[-TAG_BYTES] ^= 0x01

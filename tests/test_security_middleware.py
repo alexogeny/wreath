@@ -55,11 +55,7 @@ async def test_trusted_host_rejects_before_handler_and_accepts_subdomains() -> N
 
 @pytest.mark.asyncio
 async def test_trusted_host_rejects_authorities_with_userinfo_or_malformed_ports() -> None:
-    app = Wreath(
-        http_policy=HttpPolicy(
-            trusted_host=TrustedHostPolicy(("good.example", "[::1]"))
-        )
-    )
+    app = Wreath(http_policy=HttpPolicy(trusted_host=TrustedHostPolicy(("good.example", "[::1]"))))
     called = 0
 
     @app.get("/")
@@ -203,8 +199,6 @@ async def test_structured_hsts_is_https_only() -> None:
         SecurityHeadersPolicy(hsts_max_age=10, hsts_preload=True)
 
 
-# --- the configuration refusals nothing had ever made fire --------------------
-#
 # `wreath mutant --operators guard.remove-raise` reported every refusal in these
 # three constructors UNREACHED: each is a documented contract that holds, and
 # none had ever been executed. They matter more than most argument checks
@@ -214,7 +208,6 @@ async def test_structured_hsts_is_https_only() -> None:
 
 
 def test_a_trusted_host_list_that_allows_nothing_is_refused() -> None:
-    """An empty list would refuse every request; that is a config bug, not a policy."""
     with pytest.raises(ValueError, match="allowed_hosts must not be empty"):
         TrustedHostPolicy([])
 
@@ -222,7 +215,7 @@ def test_a_trusted_host_list_that_allows_nothing_is_refused() -> None:
 @pytest.mark.parametrize(
     "pattern",
     [
-        "http://api.example.com",   # a URL, not a host
+        "http://api.example.com",  # a URL, not a host
         "api.example.com/path",
         "api.example.com:8080/x",
         "",
@@ -237,12 +230,6 @@ def test_a_trusted_host_pattern_that_is_not_a_host_is_refused(pattern: str) -> N
 
 @pytest.mark.parametrize("pattern", ["ex*.com", "*example.com", "a.*.com", "**.com"])
 def test_a_wildcard_anywhere_but_a_leading_label_is_refused(pattern: str) -> None:
-    """`*` and `*.example.com` are the only two wildcard shapes.
-
-    A mid-label wildcard reads as far narrower than it matches -- `*example.com`
-    looks like a subdomain rule and would admit `evilexample.com` -- so it is
-    refused at construction rather than silently honoured.
-    """
     with pytest.raises(ValueError, match="invalid trusted-host pattern"):
         TrustedHostPolicy([pattern])
 
@@ -291,23 +278,18 @@ async def test_websocket_origin_requests_are_matched_exactly_and_required() -> N
 @pytest.mark.parametrize(
     "origin",
     [
-        "ftp://app.example",            # not a browser origin scheme
-        "app.example",                  # no scheme at all
-        "https://",                     # no host
-        "https://user@app.example",     # userinfo is not part of an origin
+        "ftp://app.example",  # not a browser origin scheme
+        "app.example",  # no scheme at all
+        "https://",  # no host
+        "https://user@app.example",  # userinfo is not part of an origin
         "https://user:pw@app.example",
-        "https://app.example/path",     # an origin has no path ...
-        "https://app.example?q=1",      # ... no query ...
-        "https://app.example#f",        # ... and no fragment
+        "https://app.example/path",  # an origin has no path ...
+        "https://app.example?q=1",  # ... no query ...
+        "https://app.example#f",  # ... and no fragment
         "https://app.example:notaport",
     ],
 )
 def test_an_origin_that_is_not_a_browser_origin_is_refused(origin: str) -> None:
-    """Refused at construction, because a bad entry is a hole, not an error.
-
-    A value that does not normalise is one no browser will ever send, so it
-    would sit in the allow-list matching nothing while looking like cover.
-    """
     from wreath.policy.security import WebSocketOriginPolicy
 
     with pytest.raises(ValueError, match="invalid WebSocket origin"):
@@ -315,16 +297,17 @@ def test_an_origin_that_is_not_a_browser_origin_is_refused(origin: str) -> None:
 
 
 def test_origins_are_normalised_to_scheme_host_and_non_default_port() -> None:
-    """Comparison is exact bytes, so normalisation is what makes it correct."""
     from wreath.policy.security import WebSocketOriginPolicy
 
-    allowed = WebSocketOriginPolicy([
-        "https://App.Example",          # case-folded
-        "https://app.example:443",      # the default port is dropped
-        "http://app.example:80",
-        "http://app.example:8080",      # a non-default one is kept
-        "https://app.example/",         # a bare slash is not a path
-    ]).allowed_origins
+    allowed = WebSocketOriginPolicy(
+        [
+            "https://App.Example",  # case-folded
+            "https://app.example:443",  # the default port is dropped
+            "http://app.example:80",
+            "http://app.example:8080",  # a non-default one is kept
+            "https://app.example/",  # a bare slash is not a path
+        ]
+    ).allowed_origins
     assert allowed == (
         b"https://app.example",
         b"https://app.example",
@@ -335,10 +318,10 @@ def test_origins_are_normalised_to_scheme_host_and_non_default_port() -> None:
 
 
 def test_hsts_settings_that_contradict_each_other_are_refused() -> None:
-    """Two spellings of one header, and a max-age that cannot mean anything."""
     with pytest.raises(ValueError, match="mutually exclusive"):
         SecurityHeadersPolicy(
-            hsts_max_age=31_536_000, strict_transport_security="max-age=600",
+            hsts_max_age=31_536_000,
+            strict_transport_security="max-age=600",
         )
     for bad in (-1, "31536000", True):
         with pytest.raises(ValueError, match="non-negative integer"):
@@ -365,20 +348,6 @@ def test_hsts_preload_requires_each_prerequisite(
 
 
 def test_normalize_host_is_the_gate_that_makes_the_shape_check_dead() -> None:
-    """Which of the two wildcard checks actually refuses a bad pattern.
-
-    `TrustedHostPolicy.__init__` refuses a malformed wildcard twice: once
-    because `_normalize_host` returns None, and again in an explicit shape loop.
-    `wreath mutant` reported the second one UNREACHED, and it is: `*` survives
-    normalisation only as the whole pattern or as a leading `*.` label, so
-    nothing that reaches the loop can fail it.
-
-    That is fine as defence in depth, but it means `_normalize_host` is the only
-    live gate on an *allowlist* -- and `*example.com` reading like a subdomain
-    rule while matching `evilexample.com` is exactly the mistake that must not
-    get through. This pins the coupling, so loosening `_normalize_host` turns
-    the second check live rather than silently opening a hole.
-    """
     from wreath.policy.security import _normalize_host
 
     for bad in ("ex*.com", "*example.com", "a.*.com", "**.com", "*.*.com", "x*"):

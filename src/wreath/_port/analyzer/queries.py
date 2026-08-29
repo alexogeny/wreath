@@ -46,11 +46,15 @@ _QUERY_RULE = {
 
 # ormar keyword lookup -> the wreath comparison it becomes, as an operator.
 LOOKUP_OPERATOR: dict[str, str] = {
-    "": "==", "exact": "==", "gt": ">", "gte": ">=", "lt": "<", "lte": "<=",
+    "": "==",
+    "exact": "==",
+    "gt": ">",
+    "gte": ">=",
+    "lt": "<",
+    "lte": "<=",
 }
 # ormar keyword lookup -> the column method it becomes, and how the value is
 # spelled inside it. `%s` is the value as written.
-#
 # The pattern lookups were held back for a long time on the grounds that
 # wrapping a value in wildcards is "a decision about what the author meant".
 # It is not: ormar's own `icontains` compiles to `ILIKE '%' || value || '%'`,
@@ -81,7 +85,6 @@ _MECHANICAL_LOOKUPS = frozenset(LOOKUP_OPERATOR) | frozenset(LOOKUP_METHOD) | {"
 # ordering explicit and the source has none to carry over; `delete` because a
 # bulk delete has no query form; `values` because the rows come back as models
 # rather than dicts, which the caller sees; `update` because it is a write.
-#
 #   "kwargs"   — keyword filters, checked the same way the head's are
 #   "value"    — one argument carried across untouched (limit/offset)
 #   "columns"  — string literals naming columns, which resolve to `Model.<col>`
@@ -161,15 +164,11 @@ def _projection_names(call: ast.Call | None) -> tuple[str, ...] | None:
     names: list[str] = []
     for argument in arguments:
         values = (
-            argument.elts
-            if isinstance(argument, (ast.List, ast.Tuple, ast.Set))
-            else (argument,)
+            argument.elts if isinstance(argument, (ast.List, ast.Tuple, ast.Set)) else (argument,)
         )
         for value in values:
             if not (
-                isinstance(value, ast.Constant)
-                and isinstance(value.value, str)
-                and value.value
+                isinstance(value, ast.Constant) and isinstance(value.value, str) and value.value
             ):
                 return None
             names.append(value.value)
@@ -187,9 +186,7 @@ def _projection_is_mechanical(
     names = _projection_names(call)
     if names is None:
         return False
-    declared = set((columns or {}).get(model, ())) | set(
-        (relations or {}).get(model, ())
-    )
+    declared = set((columns or {}).get(model, ())) | set((relations or {}).get(model, ()))
     return not declared or set(names) <= declared
 
 
@@ -233,24 +230,18 @@ def _eager_paths(call: ast.Call | None) -> tuple[str, ...] | None:
     paths: list[str] = []
     for argument in call.args:
         values = (
-            argument.elts
-            if isinstance(argument, (ast.List, ast.Tuple, ast.Set))
-            else (argument,)
+            argument.elts if isinstance(argument, (ast.List, ast.Tuple, ast.Set)) else (argument,)
         )
         for value in values:
             if not (
-                isinstance(value, ast.Constant)
-                and isinstance(value.value, str)
-                and value.value
+                isinstance(value, ast.Constant) and isinstance(value.value, str) and value.value
             ):
                 return None
             paths.append(value.value)
     return tuple(paths) if paths else None
 
 
-def _relation_path_resolves(
-    model: str, path: str, relations: dict[str, dict[str, str]]
-) -> bool:
+def _relation_path_resolves(model: str, path: str, relations: dict[str, dict[str, str]]) -> bool:
     current = model
     for name in path.split("__"):
         target = relations.get(current, {}).get(name)
@@ -281,13 +272,14 @@ def _eager_names_are_literal(
         return all("__" not in path for path in paths)
     return all(_relation_path_resolves(model, path, relations) for path in paths)
 
+
 # Tail verbs that only a specific head makes mechanical. `first` is the case:
 # `orm.query.first` is held back because "first without an order is not
 # deterministic" — an objection that does not apply when the head *is* the
 # order. Keyed by head so `filter(a=1).first()` keeps the old verdict.
 _TAIL_NEEDS_HEAD: dict[str, frozenset[str]] = {
     "first": frozenset({"order_by"}),
-    "last": frozenset(),                  # reversing the declared order is a decision
+    "last": frozenset(),  # reversing the declared order is a decision
 }
 
 
@@ -330,9 +322,7 @@ def _lookup_is_mechanical(
         )
     if not column:
         return False
-    if "__" in column and not _resolved_column_path(
-        model, column, relations or {}, columns or {}
-    ):
+    if "__" in column and not _resolved_column_path(model, column, relations or {}, columns or {}):
         return False
     if suffix == "isnull":
         return isinstance(value, ast.Constant) and value.value in _NULL_METHOD
@@ -373,7 +363,7 @@ def _call_is_mechanical(
     likewise — the keys are a runtime value, so there is nothing to check.
     """
     if call is None:
-        return True                       # `.objects.all` with no call at all
+        return True  # `.objects.all` with no call at all
     if call.args:
         return False
     return all(
@@ -396,9 +386,7 @@ def _call_is_mechanical(
     )
 
 
-def plain_filter_mappings(
-    call: ast.Call | None, parents: dict[int, ast.AST]
-) -> frozenset[str]:
+def plain_filter_mappings(call: ast.Call | None, parents: dict[int, ast.AST]) -> frozenset[str]:
     """Names of ``**mapping`` arguments proven to contain plain field keys.
 
     This is deliberately a tiny data-flow proof, not an ormar dictionary
@@ -450,8 +438,7 @@ def plain_filter_mappings(
             and value.func.id == "dict"
             and not value.args
             and all(
-                keyword.arg is not None and "__" not in keyword.arg
-                for keyword in value.keywords
+                keyword.arg is not None and "__" not in keyword.arg for keyword in value.keywords
             )
         )
 
@@ -493,14 +480,9 @@ def plain_filter_mappings(
             valid = (
                 not node.args
                 and all(
-                    keyword.arg is not None and "__" not in keyword.arg
-                    for keyword in node.keywords
+                    keyword.arg is not None and "__" not in keyword.arg for keyword in node.keywords
                 )
-            ) or (
-                len(node.args) == 1
-                and not node.keywords
-                and plain_dict(node.args[0])
-            )
+            ) or (len(node.args) == 1 and not node.keywords and plain_dict(node.args[0]))
             (safe if valid else unsafe).add(node.func.value.id)
             continue
         if isinstance(node, ast.Call) and node is not call:
@@ -556,9 +538,7 @@ def query_rule(
         if declared is not None and not names <= declared:
             return base
     elif verb in ("values", "values_list"):
-        if not _projection_is_mechanical(
-            call, model=model, relations=relations, columns=columns
-        ):
+        if not _projection_is_mechanical(call, model=model, relations=relations, columns=columns):
             return base
     elif verb == "select_all":
         # An unknown model is not a relation-free model. `select_all()` is an
@@ -579,9 +559,7 @@ def query_rule(
         if _pagination_values(call) is None:
             return base
     elif verb in ("select_related", "prefetch_related"):
-        if not _eager_names_are_literal(
-            call, model=model, relations=relations
-        ):
+        if not _eager_names_are_literal(call, model=model, relations=relations):
             return base
     elif verb == "create":
         if call is None or call.args:
@@ -668,7 +646,7 @@ def _tail_step_is_mechanical(
     if kind is None:
         return False
     if call is None:
-        return True                       # referenced, not called
+        return True  # referenced, not called
     if kind == "kwargs":
         return _call_is_mechanical(
             call,
@@ -687,14 +665,14 @@ def _tail_step_is_mechanical(
     if kind == "write_values":
         return not call.args and bool(call.keywords)
     if kind == "relations":
-        return _eager_names_are_literal(
-            call, model=model, relations=relations
-        )
+        return _eager_names_are_literal(call, model=model, relations=relations)
     # `order_by("name")` / `order_by("-created")` resolve to `Model.<col>` and
     # `.desc()`. A non-literal is a runtime column name, which is a lookup this
     # analyzer cannot do.
-    return bool(call.args) and not call.keywords and all(
-        _order_argument_is_mechanical(argument, model) for argument in call.args
+    return (
+        bool(call.args)
+        and not call.keywords
+        and all(_order_argument_is_mechanical(argument, model) for argument in call.args)
     )
 
 
@@ -735,29 +713,39 @@ def query_chain_runs(head: ast.AST, parents: dict[int, ast.AST]) -> bool:
 
 
 #: The chain verbs that execute a query.
-_RUNNING_VERBS = frozenset({
-    "all",
-    "get_or_none",
-    "get",
-    "first",
-    "create",
-    "count",
-    "exists",
-    "update",
-    "delete",
-    "get_or_create",
-})
+_RUNNING_VERBS = frozenset(
+    {
+        "all",
+        "get_or_none",
+        "get",
+        "first",
+        "create",
+        "count",
+        "exists",
+        "update",
+        "delete",
+        "get_or_create",
+    }
+)
 
 
 #: Query verdicts the emitter writes out in full. Defined here rather than in
 #: `emit` because `TreeContext` has to agree with it while deciding which
 #: functions need a session, and a second copy of the list would drift.
-QUERY_TRANSLATED = frozenset({
-    "orm.query.filter_exact", "orm.query.get_or_none_exact", "orm.query.get_exact",
-    "orm.query.create_exact", "orm.query.all",
-    "orm.query.page_exact",
-    "orm.query.count", "orm.query.exists", "orm.query.order_exact",
-    "orm.query.eager_exact", "orm.query.select_all_exact",
-    "orm.query.get_or_create_exact",
-    "orm.query.values_exact",
-})
+QUERY_TRANSLATED = frozenset(
+    {
+        "orm.query.filter_exact",
+        "orm.query.get_or_none_exact",
+        "orm.query.get_exact",
+        "orm.query.create_exact",
+        "orm.query.all",
+        "orm.query.page_exact",
+        "orm.query.count",
+        "orm.query.exists",
+        "orm.query.order_exact",
+        "orm.query.eager_exact",
+        "orm.query.select_all_exact",
+        "orm.query.get_or_create_exact",
+        "orm.query.values_exact",
+    }
+)

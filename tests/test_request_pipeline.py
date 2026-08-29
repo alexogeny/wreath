@@ -159,9 +159,7 @@ async def test_trusted_host_rejects_before_authentication() -> None:
         auth_calls += 1
         return Identity(token, roles=frozenset({"admin"}))
 
-    app = Wreath(
-        http_policy=HttpPolicy(trusted_host=TrustedHostPolicy(("api.example",)))
-    )
+    app = Wreath(http_policy=HttpPolicy(trusted_host=TrustedHostPolicy(("api.example",))))
     app.configure_auth(BearerTokenBackend(verify))
 
     @app.get("/admin")
@@ -186,9 +184,7 @@ async def test_security_finalizer_covers_auth_denial() -> None:
 
     app = Wreath(
         http_policy=HttpPolicy(
-            security_headers=SecurityHeadersPolicy(
-                content_security_policy="default-src 'none'"
-            )
+            security_headers=SecurityHeadersPolicy(content_security_policy="default-src 'none'")
         )
     )
     app.configure_auth(BearerTokenBackend(verify))
@@ -225,11 +221,7 @@ async def test_cors_finalizer_covers_auth_denial() -> None:
     async def verify(token: str) -> Identity | None:
         return None
 
-    app = Wreath(
-        http_policy=HttpPolicy(
-            cors=CorsPolicy(allow_origins=["https://app.example"])
-        )
-    )
+    app = Wreath(http_policy=HttpPolicy(cors=CorsPolicy(allow_origins=["https://app.example"])))
     app.configure_auth(BearerTokenBackend(verify))
 
     @app.get("/private")
@@ -255,9 +247,7 @@ async def test_global_security_finalizer_covers_static_files(tmp_path: Path) -> 
     (tmp_path / "asset.txt").write_text("asset")
     app = Wreath(
         http_policy=HttpPolicy(
-            security_headers=SecurityHeadersPolicy(
-                content_security_policy="default-src 'none'"
-            )
+            security_headers=SecurityHeadersPolicy(content_security_policy="default-src 'none'")
         )
     )
     app.static("/assets", str(tmp_path))
@@ -391,15 +381,11 @@ async def _hook_order(kind: str) -> tuple[list[str], int]:
         return response
 
     app = Wreath()
-    app.add_global_middleware(
-        MiddlewareHooks(before=outer_before, after=outer_after), priority=0
-    )
+    app.add_global_middleware(MiddlewareHooks(before=outer_before, after=outer_after), priority=0)
     app.add_global_middleware(
         MiddlewareHooks(before=culprit_before, after=culprit_after), priority=1
     )
-    app.add_global_middleware(
-        MiddlewareHooks(before=inner_before, after=inner_after), priority=2
-    )
+    app.add_global_middleware(MiddlewareHooks(before=inner_before, after=inner_after), priority=2)
 
     @app.get("/")
     async def endpoint(request: Any) -> str:
@@ -413,15 +399,6 @@ async def _hook_order(kind: str) -> tuple[list[str], int]:
 
 @pytest.mark.asyncio
 async def test_a_before_that_raises_does_not_run_its_own_after() -> None:
-    """A hook whose `before` never completed must not have its `after` paired.
-
-    Design 22 item 12. `after` is cleanup for preconditions `before`
-    establishes; running it against a `before` that raised part-way is
-    guessing how far it got. `SessionPolicy` is the near-miss --
-    `_after_stored` reads `state._session_loaded` by attribute while reading
-    its siblings with `.get()`, so it is one inserted `await` away from
-    turning an error response into an unrelated `AttributeError` 500.
-    """
     events, status = await _hook_order("raise")
 
     assert "culprit-after" not in events
@@ -432,11 +409,6 @@ async def test_a_before_that_raises_does_not_run_its_own_after() -> None:
 
 @pytest.mark.asyncio
 async def test_a_before_that_returns_a_response_still_runs_its_own_after() -> None:
-    """The other half of the pair: returning a response is a completed `before`.
-
-    Pinned so a future reading of the rule above cannot collapse both cases
-    into `index` and silently drop a short-circuiting hook's `after`.
-    """
     events, status = await _hook_order("short-circuit")
 
     assert events == ["outer-before", "culprit-before", "culprit-after", "outer-after"]

@@ -1,10 +1,3 @@
-"""Helpers shared by the native-reactor spec.
-
-`asyncio_reference` is the oracle: it runs a scenario on a throwaway stock
-asyncio loop and returns the observable result, so a native test can assert
-"behave exactly like asyncio here" without hard-coding what asyncio does. The
-asyncio run is scaffolding inside a red test; it is never a passing row itself.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -127,8 +120,6 @@ def make_tls_contexts(alpn: list[str] | None = None) -> tuple[ssl.SSLContext, ss
     return server, client
 
 
-# --- tiny ASGI apps used across protocol-integration specs -----------------
-
 def echo_app(status: int = 200):
     async def app(scope, receive, send):
         assert scope["type"] == "http"
@@ -140,8 +131,13 @@ def echo_app(status: int = 200):
                 return
             body += msg.get("body", b"")
             more = msg.get("more_body", False)
-        await send({"type": "http.response.start", "status": status,
-                    "headers": [(b"content-type", b"application/octet-stream")]})
+        await send(
+            {
+                "type": "http.response.start",
+                "status": status,
+                "headers": [(b"content-type", b"application/octet-stream")],
+            }
+        )
         await send({"type": "http.response.body", "body": body})
 
     return app
@@ -189,9 +185,8 @@ def reactor_serve(loop, app, protocols=("http/1.1",), config=None):
     try:
         import wreath.reactor as r
     except ImportError as exc:  # not built yet
-        raise AssertionError(
-            "native reactor not built — needs wreath.reactor.serve()"
-        ) from exc
+        raise AssertionError("native reactor not built — needs wreath.reactor.serve()") from exc
     assert hasattr(r, "serve"), "wreath.reactor.serve() not implemented yet"
-    return r.serve(app, host="127.0.0.1", port=0, protocols=tuple(protocols),
-                   config=config, loop=loop)
+    return r.serve(
+        app, host="127.0.0.1", port=0, protocols=tuple(protocols), config=config, loop=loop
+    )

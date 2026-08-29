@@ -1,47 +1,4 @@
-"""The capability map — the `::: capability-map` directive.
-
-`docs/capabilities.md` answers one question for someone still deciding whether
-to use Wreath: *what do I no longer install?* The answer runs to three dozen
-rows and it moves every time a module lands, which makes a hand-written table
-exactly the kind of map this repository has already watched rot once.
-
-So the page carries no table. It carries this directive, and the table is minted
-at build time from `docs/agents/manifest.json` — the file `AGENTS.md` already
-requires a new module to update in the same change, and the file
-`uv run wreath-map-lint` already refuses to let cite a path that is not there. A
-subsystem reaches the capability map by describing itself in the manifest, and
-its links are the `guides` it had to list anyway.
-
-Two fields carry the prose:
-
-* `capability` — the human sentence for the map, or `null` for a subsystem that
-  is implementation rather than a user-facing surface (`devtools`, `example`).
-* `replaces` — the distribution names a reader would recognise. They are
-  vocabulary, not a comparison: they exist to locate a capability in the words
-  the reader already uses, and nothing here claims anything about them.
-
-Everything else in a row is derived, which is what keeps the page honest. The
-"In Wreath" column is the subsystem's own public modules, read from `sources`,
-so it cannot name a module that is not in the tree; the guide links are the
-subsystem's own `guides`, so the docs build's dead-link check holds them to the
-same standard as any hand-written link.
-
-`aliases` reads the same `replaces` names the other way round, as the reverse
-index: a reader who arrives already knowing the word `celery` types it into the
-site search, and the page whose whole job is to answer that should be the first
-result rather than the one that happens to mention it in a table cell. Only
-`replaces` — the capability sentences are the page's own prose and already
-indexed as prose, and promoting them would let the map outrank the guides it
-exists to point at.
-
-They ride in the search index in **their own field**, beside the page's
-front-matter `keywords` rather than merged into it, because they are weaker
-evidence and `scripts.py` scores them accordingly: an alias is a third-party
-name a page happens to list, not a term the page claims about itself. Merged,
-they were equals, and the English words that are also package names showed it —
-`limits` and `arrow` are real distributions, and a search for either outranked
-`RequestLimits` and the guide about porting off `arrow` with a capability map.
-"""
+"""The `::: capability-map` directive."""
 
 from __future__ import annotations
 
@@ -50,12 +7,15 @@ import re
 from pathlib import Path
 
 __all__ = [
-    "MANIFEST", "alias_text", "aliases", "expand", "has_directive", "public_modules",
+    "MANIFEST",
+    "alias_text",
+    "aliases",
+    "expand",
+    "has_directive",
+    "public_modules",
     "table",
 ]
 
-#: The manifest, relative to the docs source directory (it lives under `docs/`
-#: but is excluded from the nav — it is data, not a page).
 MANIFEST = "agents/manifest.json"
 
 _DIRECTIVE = re.compile(r"^:::\s+capability-map\s*$")
@@ -66,10 +26,6 @@ _HEADER = (
     "|---|---|---|---|",
 )
 
-#: What an empty column says. "built in" is the honest answer for a capability
-#: that has no module of its own — advisory locks are a method on the Postgres
-#: connection, not a `wreath.locks` — and an em dash is the answer for "nobody
-#: ships a package for this".
 _NO_PACKAGES = "—"
 _NO_MODULES = "built in"
 
@@ -79,7 +35,10 @@ def has_directive(source: str) -> bool:
 
 
 def expand(
-    source: str, source_dir: Path, page: str = "", sink: list[str] | None = None,
+    source: str,
+    source_dir: Path,
+    page: str = "",
+    sink: list[str] | None = None,
 ) -> str:
     """Replace each `::: capability-map` line with the generated table.
 
@@ -102,8 +61,7 @@ def expand(
         rendered, problems = table(manifest, source_dir, page)
         if sink is not None:
             sink.extend(f"{where}::: capability-map {problem}" for problem in problems)
-    return "\n".join(
-        rendered if _DIRECTIVE.match(line) else line for line in lines)
+    return "\n".join(rendered if _DIRECTIVE.match(line) else line for line in lines)
 
 
 def alias_text(source_dir: Path) -> str:
@@ -115,7 +73,7 @@ def alias_text(source_dir: Path) -> str:
     """
     try:
         manifest = json.loads((source_dir / MANIFEST).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except OSError, json.JSONDecodeError:
         return ""
     return ", ".join(aliases(manifest))
 
@@ -141,7 +99,9 @@ def aliases(manifest: dict) -> list[str]:
 
 
 def table(
-    manifest: dict, source_dir: Path, page: str = "",
+    manifest: dict,
+    source_dir: Path,
+    page: str = "",
 ) -> tuple[str, list[str]]:
     """The capability table as markdown, plus everything wrong with it.
 
@@ -158,17 +118,18 @@ def table(
         if "capability" not in subsystem:
             problems.append(
                 f"subsystem {name!r} has no `capability`: add the sentence it belongs"
-                " on the map with, or `null` to say it is internal")
+                " on the map with, or `null` to say it is internal"
+            )
             continue
         capability = subsystem["capability"]
         if capability is None:
             continue
         guides, missing = _links(subsystem.get("guides", ()), source_dir, prefix)
-        problems.extend(
-            f"{name}: guide {path!r} does not exist" for path in missing)
+        problems.extend(f"{name}: guide {path!r} does not exist" for path in missing)
         rows.append(
             f"| {_cell(str(capability))} | {_packages(subsystem.get('replaces') or ())}"
-            f" | {_modules(subsystem.get('sources', ()))} | {guides or _NO_PACKAGES} |")
+            f" | {_modules(subsystem.get('sources', ()))} | {guides or _NO_PACKAGES} |"
+        )
     return "\n".join([*_HEADER, *rows]), problems
 
 
@@ -215,7 +176,9 @@ def _modules(sources: tuple[str, ...] | list[str]) -> str:
 
 
 def _links(
-    guides: tuple[str, ...] | list[str], source_dir: Path, prefix: str,
+    guides: tuple[str, ...] | list[str],
+    source_dir: Path,
+    prefix: str,
 ) -> tuple[str, list[str]]:
     """Markdown links to a subsystem's guides, titled by each page's own `# H1`.
 

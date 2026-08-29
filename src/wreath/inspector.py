@@ -274,8 +274,6 @@ class InspectorServer:
         except OSError:
             pass
 
-    # -- command handlers -----------------------------------------------------
-
     def _metadata_image(self) -> Any:
         if self._image is None:
             from ._flight_metadata import build_metadata_image
@@ -321,8 +319,6 @@ class InspectorServer:
         if command in _CAPTURE_COMMANDS:
             return self._capture_command(command, payload), 0
         raise InspectorError(f"unknown command: {command}")
-
-    # -- capture control (mutating; token-gated) ------------------------------
 
     def _authorize_capture(self, payload: dict[str, Any]) -> None:
         """Gate a capture-control command on the capability token. The token

@@ -217,9 +217,7 @@ def execute(namespace) -> int:
             if enabled
         ]
         if incompatible:
-            raise ValueError(
-                f"--verify cannot be combined with {', '.join(incompatible)}"
-            )
+            raise ValueError(f"--verify cannot be combined with {', '.join(incompatible)}")
         source_app, candidate_app = (_application_target(spec) for spec in verify_targets)
         cases = load_cases(namespace.cases)
         report = asyncio.run(
@@ -311,7 +309,7 @@ def execute(namespace) -> int:
         # without this it will happily produce a complete "ported" copy of an
         # application it has not translated a line of.
         emit_detection = detect_roots(roots)
-        for warning in (emit_detection.warnings() if emit_detection else ()):
+        for warning in emit_detection.warnings() if emit_detection else ():
             print(f"wreath port: {warning}", file=sys.stderr)
         total = 0
         touched = 0

@@ -82,8 +82,6 @@ def routers(live: LiveMap) -> tuple[Router, ...]:
     stream = Router(prefix="/live", tags=("live",))
     relay = Router(prefix="/ingest", tags=("ingest",))
 
-    # -- in -------------------------------------------------------------------
-
     @relay.post("/positions", summary="A field station relays a batch of positions")
     @authenticated()
     async def ingest_positions(request: Request, session: WriteSession) -> Response:
@@ -100,7 +98,7 @@ def routers(live: LiveMap) -> tuple[Router, ...]:
         Note what is *not* here: no annotation binds this body. `wreath.protobuf`
         is a codec and not a content negotiator, so the bytes are read and
         decoded by hand. That is the shape
-        `docs/cookbook/recipes/accept-a-protobuf-body.md` prescribes.
+        the protobuf decoder expects.
         """
         body = await request.body()
         try:
@@ -109,9 +107,7 @@ def routers(live: LiveMap) -> tuple[Router, ...]:
             raise BadRequest(f"malformed position batch: {error}") from error
 
         try:
-            receipt = await accept(
-                session, batch, now=datetime.datetime.now(tz=datetime.UTC)
-            )
+            receipt = await accept(session, batch, now=datetime.datetime.now(tz=datetime.UTC))
         except IngestRefused as error:
             raise BadRequest(str(error)) from error
 
@@ -126,15 +122,11 @@ def routers(live: LiveMap) -> tuple[Router, ...]:
                 BatchReceipt(
                     accepted=receipt.accepted,
                     rejected=receipt.rejected,
-                    watermark_ms=(
-                        milliseconds(receipt.watermark) if receipt.watermark else 0
-                    ),
+                    watermark_ms=(milliseconds(receipt.watermark) if receipt.watermark else 0),
                 )
             ),
             media_type=MEDIA_TYPE_HEADER,
         )
-
-    # -- out ------------------------------------------------------------------
 
     @animals.get("/", summary="The collared animals")
     @identify()
@@ -312,9 +304,7 @@ def routers(live: LiveMap) -> tuple[Router, ...]:
         return {
             "centre": {"lat": centre.lat, "lon": centre.lon},
             "metres": metres,
-            "items": [
-                _fix_with_landmark(row, animals, landmarks, grid) for row in found
-            ],
+            "items": [_fix_with_landmark(row, animals, landmarks, grid) for row in found],
         }
 
     @fixes.get("/nearest", summary="The fixes closest to a point")
@@ -340,12 +330,8 @@ def routers(live: LiveMap) -> tuple[Router, ...]:
         animals = await _animals(session, {row.animal_id for row in found})
         return {
             "centre": {"lat": centre.lat, "lon": centre.lon},
-            "items": [
-                _fix_with_landmark(row, animals, landmarks, grid) for row in found
-            ],
+            "items": [_fix_with_landmark(row, animals, landmarks, grid) for row in found],
         }
-
-    # -- and one that never quite ends ---------------------------------------
 
     @stream.get("/positions", summary="The live map")
     @identify()
@@ -381,9 +367,6 @@ def routers(live: LiveMap) -> tuple[Router, ...]:
         return SSEResponse(events())
 
     return (relay, animals, fixes, stream)
-
-
-# -- helpers ------------------------------------------------------------------
 
 
 def _window(since: datetime.date, days: int) -> tuple[datetime.datetime, datetime.datetime]:
@@ -439,13 +422,9 @@ def _fix_with_landmark(
     """
     animal = animals.get(row.animal_id)
     precision = grid.get(animal.protection) if animal is not None else None
-    body = fix_json(
-        row, precision=precision, animal=None if animal is None else animal.name
-    )
+    body = fix_json(row, precision=precision, animal=None if animal is None else animal.name)
     if precision is not None and precision.metres == 0.0:
-        found = nearest_landmark(
-            Coordinate(lat=row.latitude, lon=row.longitude), landmarks
-        )
+        found = nearest_landmark(Coordinate(lat=row.latitude, lon=row.longitude), landmarks)
         if found is not None:
             mark, metres = found
             body["nearest"] = landmark_json(mark.name, mark.kind, metres)

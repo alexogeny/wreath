@@ -1,13 +1,3 @@
-"""The wreath-owned schema: bootstrap, upgrade, and the opt-out refusal.
-
-Every test that touches a database is gated on `WREATH_TEST_POSTGRES_DSN` and
-takes a per-worker schema name, because a shared schema races on
-`CREATE SCHEMA IF NOT EXISTS` under `-n 6` and PostgreSQL reports the race as a
-catalog unique violation that reads like anything except a test-isolation bug.
-
-The declaration tests need no database and run everywhere.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -46,13 +36,12 @@ def _jobs(schema: str, *, version: int = 1) -> Component:
     ]
     if version >= 2:
         steps.append(
-            Step(2, (f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS priority int "
-                     "NOT NULL DEFAULT 0",))
+            Step(
+                2,
+                (f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS priority int NOT NULL DEFAULT 0",),
+            )
         )
     return Component(name="jobs", schema=schema, relations=("jobs",), steps=tuple(steps))
-
-
-# --- declaration, no database ------------------------------------------------
 
 
 async def test_a_step_must_carry_statements() -> None:
@@ -71,8 +60,6 @@ async def test_steps_must_ascend_without_repeating() -> None:
 
 
 async def test_an_unquotable_identifier_is_refused() -> None:
-    """Identifiers reach SQL by interpolation because PostgreSQL has no parameter
-    form for one, so the guard is the whole defence."""
     with pytest.raises(ValueError, match="unusable SQL identifier"):
         marker_statements('ev"il')
 
@@ -93,11 +80,8 @@ async def test_emitting_from_a_version_skips_what_is_already_applied() -> None:
     # version -- so the assertion has to name the component's own table rather
     # than any `CREATE TABLE`.
     assert '"wsch_doc"."jobs"' not in sql.split("-- jobs:")[0].split("ALTER")[0]
-    assert "CREATE TABLE IF NOT EXISTS \"wsch_doc\".\"jobs\"" not in sql
+    assert 'CREATE TABLE IF NOT EXISTS "wsch_doc"."jobs"' not in sql
     assert "ADD COLUMN IF NOT EXISTS priority" in sql
-
-
-# --- against a live database -------------------------------------------------
 
 
 async def _database(schema: str):
@@ -137,11 +121,6 @@ async def test_bootstrap_creates_the_schema_and_is_idempotent() -> None:
 
 @requires_db
 async def test_concurrent_bootstraps_do_not_race() -> None:
-    """A fleet of workers starting together serialises on the advisory lock.
-
-    Without the lock this is the `CREATE SCHEMA IF NOT EXISTS` race that
-    PostgreSQL reports as a `pg_namespace_nspname_index` unique violation.
-    """
     schema = _schema("race")
     db = await _database(schema)
     try:
@@ -183,13 +162,6 @@ async def test_an_upgrade_step_applies_once_and_only_once() -> None:
 
 @requires_db
 async def test_an_older_build_runs_against_a_newer_schema() -> None:
-    """The rolling-deploy property, and the reason steps must be additive.
-
-    A fleet mid-rollout has two wreath versions live on one database. The older
-    one must keep working rather than refusing or downgrading -- refusing would
-    make a rollback impossible, which is the situation the marker exists to
-    survive.
-    """
     schema = _schema("rollback")
     db = await _database(schema)
     try:
@@ -219,7 +191,6 @@ async def test_opting_out_without_the_schema_refuses_by_name() -> None:
 
 @requires_db
 async def test_opting_out_after_a_dba_applied_the_ddl_starts_cleanly() -> None:
-    """The enterprise path: a role without CREATE, a DBA who ran `emit_sql`."""
     schema = _schema("dba")
     db = await _database(schema)
     try:
@@ -228,9 +199,7 @@ async def test_opting_out_after_a_dba_applied_the_ddl_starts_cleanly() -> None:
         # Strip comment lines first, then split: a comment sits on the same
         # chunk as the statement after it, so filtering whole chunks would drop
         # `CREATE SCHEMA` along with the header.
-        body = "\n".join(
-            line for line in sql.splitlines() if not line.strip().startswith("--")
-        )
+        body = "\n".join(line for line in sql.splitlines() if not line.strip().startswith("--"))
         connection = await db.acquire("write")
         try:
             for statement in body.split(";\n"):
@@ -245,12 +214,6 @@ async def test_opting_out_after_a_dba_applied_the_ddl_starts_cleanly() -> None:
 
 @requires_db
 async def test_the_users_migration_diff_cannot_see_the_wreath_schema() -> None:
-    """Separation is by construction: the catalog read is scoped to one schema.
-
-    This is why no filter has to be maintained, and the test exists so that a
-    future change widening that scope is caught here rather than by a user whose
-    `wreath migrations generate` proposes dropping the job queue.
-    """
     schema = _schema("isolate")
     user_schema = f"{schema}_app"
     db = await _database(schema)
@@ -258,9 +221,7 @@ async def test_the_users_migration_diff_cannot_see_the_wreath_schema() -> None:
     try:
         await connection.execute(f'DROP SCHEMA IF EXISTS "{user_schema}" CASCADE')
         await connection.execute(f'CREATE SCHEMA "{user_schema}"')
-        await connection.execute(
-            f'CREATE TABLE "{user_schema}"."thing" (id bigint PRIMARY KEY)'
-        )
+        await connection.execute(f'CREATE TABLE "{user_schema}"."thing" (id bigint PRIMARY KEY)')
         await db.release("write", connection)
         await bootstrap(db, [_jobs(schema)], schema=schema)
 
@@ -280,16 +241,7 @@ async def test_the_users_migration_diff_cannot_see_the_wreath_schema() -> None:
         await _drop(db, schema)
 
 
-# --- stage 2: every subsystem registers, and the app applies them -------------
-
-
 async def test_every_subsystem_that_owns_tables_offers_a_component() -> None:
-    """The registry is complete, asserted against the subsystems themselves.
-
-    Nine components, nine names. A subsystem that grows tables and forgets
-    `component()` reintroduces the whole defect for itself -- its DDL is emitted
-    and never applied -- so this is the check that the collection is not partial.
-    """
     from wreath._passes import ledger
     from wreath._series import settle
     from wreath.jobs import JobRunner
@@ -311,8 +263,15 @@ async def test_every_subsystem_that_owns_tables_offers_a_component() -> None:
         PostgresWebhookOutbox().component(),
     ]
     assert [c.name for c in claims] == [
-        "jobs", "messaging", "passes", "series", "session",
-        "ratelimit", "idempotency", "webhook-inbox", "webhook-outbox",
+        "jobs",
+        "messaging",
+        "passes",
+        "series",
+        "session",
+        "ratelimit",
+        "idempotency",
+        "webhook-inbox",
+        "webhook-outbox",
     ]
     # Every one declares what must exist, or `verify` has nothing to check.
     assert all(c.relations for c in claims)
@@ -321,12 +280,6 @@ async def test_every_subsystem_that_owns_tables_offers_a_component() -> None:
 
 
 async def test_schema_sql_is_a_derivation_of_the_statements() -> None:
-    """`schema_sql()` joins the steps; it is never a second copy of the DDL.
-
-    `jobs` carried both for one stage -- the same sixteen columns written twice --
-    which is the shape this repository treats as a defect. Asserted for every
-    producer so a future one cannot reintroduce it.
-    """
     from wreath._passes import ledger
     from wreath._series import settle
     from wreath.jobs import JobRunner
@@ -349,12 +302,6 @@ async def test_schema_sql_is_a_derivation_of_the_statements() -> None:
 
 
 async def test_unqualified_components_emit_no_create_schema() -> None:
-    """Five components predate the `wreath` schema and stay where their rows are.
-
-    Emitting `CREATE SCHEMA` for them would create a schema nothing then uses,
-    and *moving* them is not additive -- a worker on the previous version looks
-    for the unqualified name. So `qualified` is False and `sql()` says so.
-    """
     from wreath.session_store import PostgresSessionStore
     from wreath.webhooks import PostgresWebhookInbox
 
@@ -367,13 +314,6 @@ async def test_unqualified_components_emit_no_create_schema() -> None:
 
 
 async def test_an_app_with_no_database_registers_no_claim_to_bootstrap() -> None:
-    """A webhook inbox is handed a session per call and never sees a database.
-
-    With no database registered there is nothing for its tables to be missing
-    *from*, so the claim is skipped rather than refused. Vacuous, not degraded --
-    and the distinction matters, because refusing here broke every existing
-    webhook test the first time this was wired.
-    """
     import wreath
     from wreath.webhooks import PostgresWebhookInbox
 

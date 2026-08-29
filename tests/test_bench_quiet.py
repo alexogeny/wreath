@@ -1,11 +1,3 @@
-"""The safety properties of `wreath-bench --quiet`, pinned.
-
-Every test here exists because the failure it guards against costs the operator
-their desktop or their terminal. They are cheap, they run without privileges,
-and none of them touches a real session -- the freeze paths are exercised
-against synthetic cgroup trees under `tmp_path`.
-"""
-
 from __future__ import annotations
 
 import json
@@ -30,11 +22,7 @@ def _no_real_container_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(quiet, "container_runtimes", lambda: ())
 
 
-# --- the ancestry exemption, which is the property that matters most ---------
-
-
 def test_session_ancestry_walks_to_the_root() -> None:
-    """Every ancestor is listed, ending at `/`, so none can be missed."""
     ancestry = quiet.session_ancestry()
     if not ancestry:  # pragma: no cover - cgroup v1 or a non-Linux runner
         pytest.skip("no cgroup v2 path for this process")
@@ -45,13 +33,6 @@ def test_session_ancestry_walks_to_the_root() -> None:
 
 
 def test_no_freezable_target_is_an_ancestor_of_this_process() -> None:
-    """The benchmark can never freeze the shell it was launched from.
-
-    On a GNOME desktop the benchmark runs *inside* the terminal's `app.slice`,
-    so "freeze the user session" would include the operator's shell. This is the
-    assertion that makes that impossible, and it is the reason `--quiet=2` is
-    safe to offer at all.
-    """
     exempt = set(quiet.session_ancestry())
     if not exempt:  # pragma: no cover - see above
         pytest.skip("no cgroup v2 path for this process")
@@ -84,12 +65,6 @@ _MUST_NEVER_FREEZE = (
 
 
 def test_session_infrastructure_is_never_a_freeze_target() -> None:
-    """Excluding ancestors is not enough; a frozen D-Bus hangs the terminal too.
-
-    The terminal survives a frozen `dbus.socket` exactly as long as it takes to
-    make its next D-Bus call. Same for the ssh-agent and the session manager --
-    none of them is an ancestor, and all of them take the desktop with them.
-    """
     for target in quiet.freezable_targets():
         lowered = target.name.lower()
         for banned in _MUST_NEVER_FREEZE:
@@ -101,7 +76,8 @@ def test_session_infrastructure_is_never_a_freeze_target() -> None:
 
 
 def test_only_scopes_with_a_freeze_control_are_targets(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app_slice = tmp_path / "user.slice" / "app.slice"
     eligible = app_slice / "app-browser.scope"
@@ -120,26 +96,11 @@ def test_only_scopes_with_a_freeze_control_are_targets(
 
 
 def test_the_implementation_still_covers_everything_the_test_requires() -> None:
-    """The two lists may diverge only in the safe direction.
-
-    The implementation may ban *more* than the test demands; it may never ban
-    less. Without this, the independent list above silently stops matching what
-    the code does.
-    """
     missing = set(_MUST_NEVER_FREEZE) - set(quiet._NEVER_FREEZE)
     assert not missing, f"the implementation no longer excludes {sorted(missing)}"
 
 
-# --- core allocation --------------------------------------------------------
-
-
 def test_split_cores_never_shares_a_physical_core() -> None:
-    """Server and generator must not hold two threads of one core.
-
-    This is the defect the split was written to fix: taking CPUs 0 and 1 on a
-    uniform SMT machine gives the server one thread each of two cores and hands
-    both siblings to the generator, so the two sides contend inside a core.
-    """
     cores = quiet.physical_cores()
     if not cores:  # pragma: no cover - no sysfs topology
         pytest.skip("no CPU topology available")
@@ -158,12 +119,6 @@ def test_split_cores_never_shares_a_physical_core() -> None:
 def test_benchmark_workers_use_distinct_physical_cores_before_smt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A sorted affinity mask is not a physical-core ordering.
-
-    Ryzen numbers siblings adjacently (0,1), (2,3); selecting the first two
-    logical CPUs therefore puts two workers on one core and leaves the second
-    allocated core idle.
-    """
     monkeypatch.setattr(
         wreath_server,
         "physical_cores",
@@ -176,15 +131,11 @@ def test_benchmark_workers_use_distinct_physical_cores_before_smt(
     assert wreath_server._worker_cpu(2, available) == 0
 
 
-# --- the journal and restore ------------------------------------------------
-
-
 def test_restore_of_a_missing_journal_is_a_clean_no_op(tmp_path: Path) -> None:
     assert quiet.restore(tmp_path / "absent.json") == []
 
 
 def test_restore_is_idempotent(tmp_path: Path) -> None:
-    """Running restore twice must not fail, and must not undo anything twice."""
     node = tmp_path / "knob"
     node.write_text("1")
     journal = tmp_path / "journal.json"
@@ -198,7 +149,6 @@ def test_restore_is_idempotent(tmp_path: Path) -> None:
 
 
 def test_restore_runs_in_reverse_order(tmp_path: Path) -> None:
-    """Later changes are undone first, so a dependent pair unwinds correctly."""
     order: list[str] = []
     for name in ("a", "b"):
         (tmp_path / name).write_text("changed")
@@ -224,7 +174,6 @@ def test_a_freeze_change_restores_the_previous_value(tmp_path: Path) -> None:
 
 
 def test_a_stopped_service_is_started_only_if_it_was_active(tmp_path: Path) -> None:
-    """A service that was already stopped must not be started by the restore."""
     calls: list[list[str]] = []
 
     def fake_run(command: list[str], **_: object) -> object:
@@ -258,17 +207,9 @@ def test_the_journal_round_trips(tmp_path: Path) -> None:
     assert json.loads(path.read_text())["changes"][0]["kind"] == "sysfs"
 
 
-# --- refusing to act without a proven restore -------------------------------
-
-
 def test_apply_refuses_when_the_watchdog_cannot_be_armed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No restore, no quieting -- and nothing is changed on the way to refusing.
-
-    This is the assertion that makes the whole feature safe to offer: a change
-    this process cannot guarantee to undo is one it must not make.
-    """
     monkeypatch.setattr(quiet, "arm_watchdog", lambda *a, **k: "")
     journal = tmp_path / "journal.json"
     with pytest.raises(quiet.QuietRefused, match="watchdog"):
@@ -277,13 +218,6 @@ def test_apply_refuses_when_the_watchdog_cannot_be_armed(
 
 
 def test_the_watchdog_uses_system_scope_as_root(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Tier 1 arrives via sudo, and `--user` cannot work there.
-
-    Root has no user manager of its own, and `sudo -E` hands it the calling
-    user's `XDG_RUNTIME_DIR`, whose bus refuses another uid. Arming with `--user`
-    therefore failed exactly when tier 1 was asked for, and `apply()` refused to
-    quiet anything -- the watchdog was unarmable in the only case it exists for.
-    """
     calls: list[list[str]] = []
 
     def fake_run(command: list[str], **_: object) -> object:
@@ -306,7 +240,6 @@ def test_the_watchdog_uses_system_scope_as_root(monkeypatch: pytest.MonkeyPatch)
 def test_the_watchdog_uses_user_scope_unprivileged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without root there is no system bus to write to, so user scope stands."""
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
     assert quiet.watchdog_scope() == "--user"
 
@@ -314,11 +247,6 @@ def test_the_watchdog_uses_user_scope_unprivileged(
 def test_a_failed_arming_reports_what_systemd_said(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The refusal carries systemd's sentence, not a guess about it.
-
-    "systemd-run unavailable or refused" describes two unrelated causes with
-    different fixes, and left an operator with nothing to act on.
-    """
 
     def fake_run(_command: list[str], **_kwargs: object) -> object:
         return type(
@@ -335,13 +263,6 @@ def test_a_failed_arming_reports_what_systemd_said(
 
 
 def test_the_journal_avoids_tmp_when_root(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`/tmp` cannot hold a file two uids take turns writing.
-
-    It is world-writable and sticky, and `fs.protected_regular` forbids opening a
-    file there that the opener does not own -- root included, with no capability
-    exemption. A tier-0 run as the user left a journal that the `sudo` run tier 1
-    requires could not reopen, and the failure was a raw `PermissionError`.
-    """
     monkeypatch.delenv("WREATH_QUIET_JOURNAL", raising=False)
     monkeypatch.setattr(os, "geteuid", lambda: 0)
     assert quiet._default_journal() == Path("/run/wreath-quiet.json")
@@ -354,11 +275,6 @@ def test_the_journal_avoids_tmp_when_root(monkeypatch: pytest.MonkeyPatch) -> No
 def test_an_unwritable_journal_refuses_before_arming(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No journal, no changes -- and the refusal must precede the watchdog.
-
-    Refusing *after* arming leaves a live timer behind on every attempt; five of
-    them accumulated on one machine from a repeated failure at this point.
-    """
     armed: list[object] = []
     monkeypatch.setattr(quiet, "arm_watchdog", lambda *a, **k: armed.append(a) or "unit")
     blocker = tmp_path / "not-a-directory"
@@ -372,13 +288,13 @@ def test_an_unwritable_journal_refuses_before_arming(
 def test_a_failed_first_change_disarms_the_watchdog(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Nothing changed means nothing to undo, so the timer must not be left armed."""
     step = quiet.Step(
         tier=1,
         description="synthetic",
         command="true",
-        change=quiet.Change(kind="sysfs", target=str(tmp_path / "knob"),
-                            previous="powersave", desired="performance"),
+        change=quiet.Change(
+            kind="sysfs", target=str(tmp_path / "knob"), previous="powersave", desired="performance"
+        ),
     )
     disarmed: list[str] = []
     monkeypatch.setattr(quiet, "plan", lambda *a, **k: [step])
@@ -386,7 +302,8 @@ def test_a_failed_first_change_disarms_the_watchdog(
     monkeypatch.setattr(quiet, "watchdog_armed", lambda *a, **k: True)
     monkeypatch.setattr(quiet, "disarm_watchdog", lambda unit, **k: disarmed.append(unit))
     monkeypatch.setattr(
-        quiet, "_apply_one",
+        quiet,
+        "_apply_one",
         lambda _change: (_ for _ in ()).throw(PermissionError(13, "Permission denied")),
     )
     journal = tmp_path / "journal.json"
@@ -400,7 +317,6 @@ def test_a_failed_first_change_disarms_the_watchdog(
 def test_apply_refuses_when_the_armed_watchdog_is_not_active(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Arming is not trusted on its own; systemd is asked whether it took."""
     monkeypatch.setattr(quiet, "arm_watchdog", lambda *a, **k: "phantom-unit")
     monkeypatch.setattr(quiet, "watchdog_armed", lambda *a, **k: False)
     with pytest.raises(quiet.QuietRefused, match="does not report it active"):
@@ -408,13 +324,9 @@ def test_apply_refuses_when_the_armed_watchdog_is_not_active(
 
 
 def test_tier_zero_needs_no_watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Tier 0 changes nothing that needs undoing, so it must not demand one."""
     monkeypatch.setattr(quiet, "arm_watchdog", lambda *a, **k: "")
     journal = quiet.apply(0, allow_competing=True)
     assert journal.changes == []
-
-
-# --- the plan ---------------------------------------------------------------
 
 
 def test_the_plan_is_ordered_by_tier() -> None:
@@ -462,13 +374,11 @@ def test_service_states_fail_closed_when_systemd_omits_a_unit(
 
 
 def test_only_privileged_steps_carry_a_change() -> None:
-    """Tier 0 is applied in-process, so it has nothing to journal or undo."""
     for step in quiet.plan(0):
         assert step.change is None
 
 
 def test_every_privileged_step_records_a_previous_value() -> None:
-    """A change with no `previous` cannot be undone, so it must not exist."""
     for step in quiet.plan(2):
         if step.change is not None:
             assert step.change.previous != "", f"{step.description} has no prior value"
@@ -476,24 +386,12 @@ def test_every_privileged_step_records_a_previous_value() -> None:
 
 
 def test_the_service_list_is_named_not_inferred() -> None:
-    """A rule like "stop anything idle" is how a harness takes out a database."""
     assert quiet.NOISY_SERVICES, "the service list is empty"
     for service in quiet.NOISY_SERVICES:
         assert service.endswith((".service", ".timer"))
 
 
-# --- named applications -----------------------------------------------------
-
-
 def test_no_named_application_can_match_session_infrastructure() -> None:
-    """`HEAVY_APPS` must not be able to reach anything `_NEVER_FREEZE` bans.
-
-    The two lists are matched against the same scope names, so an entry like
-    "dbus" in the app list would collide with the denylist and the outcome would
-    depend on which check ran first. Keeping them provably disjoint means a
-    careless addition to the app list cannot take out the desktop even if the
-    ordering is later changed.
-    """
     for app in quiet.HEAVY_APPS:
         for banned in _MUST_NEVER_FREEZE:
             assert banned not in app and app not in banned, (
@@ -502,19 +400,6 @@ def test_no_named_application_can_match_session_infrastructure() -> None:
 
 
 def test_named_app_targets_are_a_subset_of_freezable_targets() -> None:
-    """Named targeting must inherit every safety filter, not re-derive them.
-
-    `named_app_targets` is a filter over `freezable_targets`, so the ancestry
-    exemption and the denylist apply unchanged.
-
-    The subset assertion alone is **not enough**, and finding that out is why
-    this test has two halves. A mutation that made `named_app_targets` walk the
-    whole cgroup tree itself still satisfied the subset on this machine, purely
-    because the paths it found happened to coincide -- a machine with a banned
-    scope under a different parent would have been silently unprotected. So the
-    delegation itself is asserted, not just its observable result on whatever
-    machine the suite happens to run on.
-    """
     named = set(quiet.named_app_targets())
     every = set(quiet.freezable_targets())
     assert named <= every, f"named targeting escaped the safety filter: {named - every}"
@@ -532,12 +417,6 @@ def test_named_app_targets_are_a_subset_of_freezable_targets() -> None:
 
 
 def test_a_named_app_is_frozen_at_tier_one_not_only_at_tier_two() -> None:
-    """The measured advice is to stop at tier 1, so tier 1 must cover browsers.
-
-    Before this, `--quiet=1` left a browser running -- the noisiest thing on a
-    developer desktop -- because freezing lived only in the tier nobody was
-    told to use.
-    """
     if not quiet.named_app_targets():  # pragma: no cover - no heavy app running
         pytest.skip("no named application is running on this machine")
     tiers = {step.tier for step in quiet.plan(1) if "freeze application" in step.description}
@@ -545,7 +424,6 @@ def test_a_named_app_is_frozen_at_tier_one_not_only_at_tier_two() -> None:
 
 
 def test_tier_two_does_not_refreeze_what_tier_one_named() -> None:
-    """A cgroup journalled twice would be thawed twice, and read as two changes."""
     targets = [
         step.change.target
         for step in quiet.plan(2)
@@ -554,32 +432,22 @@ def test_tier_two_does_not_refreeze_what_tier_one_named() -> None:
     assert len(targets) == len(set(targets)), "a cgroup appears twice in the plan"
 
 
-# --- containers -------------------------------------------------------------
-
-
 def _container(name: str, *, auto: bool = False, unknown: bool = False) -> quiet.Container:
     return quiet.Container("docker", f"id-{name}", name, "img", auto, unknown)
 
 
 def test_an_auto_remove_container_is_destructive_to_stop() -> None:
-    """`--rm` means stopping DELETES it, which is data loss, not a quiet-down."""
     assert _container("rm", auto=True).destructive_to_stop
     assert not _container("keep").destructive_to_stop
 
 
 def test_an_undeterminable_container_is_assumed_destructive() -> None:
-    """When the inspect fails, the safe answer is to leave the container alone.
-
-    Defaulting the other way means one flaky `docker inspect` is enough to
-    delete somebody's database.
-    """
     assert _container("mystery", unknown=True).destructive_to_stop
 
 
 def test_the_stop_path_skips_a_container_it_would_destroy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The `--rm` guard lives on the stop path and is proved there, not assumed."""
     monkeypatch.setattr(quiet, "CONTAINER_ACTION", "stop")
     monkeypatch.setattr(
         quiet,
@@ -597,11 +465,8 @@ def test_the_stop_path_skips_a_container_it_would_destroy(
 def test_the_default_action_never_destroys_a_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pause is the default *because* it makes the `--rm` hazard unreachable."""
     monkeypatch.setattr(quiet, "CONTAINER_ACTION", "pause")
-    monkeypatch.setattr(
-        quiet, "running_containers", lambda **_: (_container("rm-one", auto=True),)
-    )
+    monkeypatch.setattr(quiet, "running_containers", lambda **_: (_container("rm-one", auto=True),))
     changes = [s.change for s in quiet._container_steps() if s.change is not None]
     assert len(changes) == 1, "pause skipped a container it did not need to skip"
     assert changes[0].kind == "container-pause"
@@ -610,7 +475,6 @@ def test_the_default_action_never_destroys_a_container(
 def test_a_paused_container_is_unpaused_and_a_stopped_one_started(
     tmp_path: Path,
 ) -> None:
-    """Each container action has its own inverse; using one for both wedges it."""
     calls: list[list[str]] = []
 
     def fake_run(command: list[str], **_: object) -> object:
@@ -630,24 +494,13 @@ def test_a_paused_container_is_unpaused_and_a_stopped_one_started(
 
 
 def test_a_container_change_carries_its_name_for_a_human(tmp_path: Path) -> None:
-    """A bare hex id in a journal tells an operator nothing at 3am."""
-    monkey = quiet.Change("container-pause", "docker\tdeadbeef\twreath-test-pg", "running",
-                          "pause")
+    monkey = quiet.Change("container-pause", "docker\tdeadbeef\twreath-test-pg", "running", "pause")
     path = tmp_path / "journal.json"
     quiet.Journal(changes=[monkey]).write(path)
     assert "wreath-test-pg" in path.read_text()
 
 
-# --- competing workloads ----------------------------------------------------
-
-
 def test_the_competing_check_never_finds_itself() -> None:
-    """A check that always fires gets overridden by habit, and then it is not one.
-
-    This process is a Python interpreter running out of this repository, which
-    is exactly the pattern the check looks for. Excluding the caller's whole
-    ancestry is what stops it reporting the benchmark as its own competitor.
-    """
     own = quiet._own_process_tree()
     assert os.getpid() in own, "the checker does not exempt itself"
     for workload in quiet.competing_workloads():
@@ -655,12 +508,6 @@ def test_the_competing_check_never_finds_itself() -> None:
 
 
 def test_an_idle_shell_in_the_repository_is_not_a_competing_workload() -> None:
-    """Being *in* the repo is not the same as *working*.
-
-    The first version matched any process whose cwd was the repository, which
-    caught every idle shell and pipeline member. Reporting those trains the
-    operator to pass `--allow-competing` reflexively.
-    """
     assert not quiet._is_workload("/usr/bin/bash")
     assert not quiet._is_workload("/usr/bin/head")
     assert not quiet._is_workload("/usr/bin/less")
@@ -670,23 +517,15 @@ def test_an_idle_shell_in_the_repository_is_not_a_competing_workload() -> None:
 
 
 def test_the_competing_check_reads_proc_not_the_command_line() -> None:
-    """Association with the repo comes from `exe`/`cwd`, never a cmdline match.
-
-    A process launched as `.venv/bin/python` from the repository root has no
-    absolute path in its command line at all, so a substring match reports an
-    idle machine while an agent is running -- the exact failure the check exists
-    to prevent. This pins the resolution to `/proc`.
-    """
     source = Path(quiet.__file__).read_text()
     body = source.split("def competing_workloads")[1].split("\ndef ")[0]
-    assert "_proc_link(entry, \"exe\")" in body
-    assert "_proc_link(entry, \"cwd\")" in body
+    assert '_proc_link(entry, "exe")' in body
+    assert '_proc_link(entry, "cwd")' in body
 
 
 def test_apply_refuses_while_another_workload_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The measurement is guarded as well as the machine, at every tier."""
     monkeypatch.setattr(
         quiet,
         "competing_workloads",
@@ -699,7 +538,6 @@ def test_apply_refuses_while_another_workload_runs(
 def test_the_competing_refusal_can_be_overridden_deliberately(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An override must exist, or the check blocks a legitimate measurement."""
     monkeypatch.setattr(
         quiet,
         "competing_workloads",

@@ -89,14 +89,11 @@ _ISO_ALIASES: dict[str, str] = {
 
 _ISO_ALIAS_SOURCE = {
     "IsoDateTime": (
-        '/** ISO-8601 timestamp with a UTC offset, e.g.\n'
+        "/** ISO-8601 timestamp with a UTC offset, e.g.\n"
         ' *  "2026-07-26T09:30:00+00:00". */\n'
         "export type IsoDateTime = string;"
     ),
-    "IsoDate": (
-        '/** ISO-8601 calendar date, e.g. "2026-07-26". */\n'
-        "export type IsoDate = string;"
-    ),
+    "IsoDate": ('/** ISO-8601 calendar date, e.g. "2026-07-26". */\nexport type IsoDate = string;'),
 }
 
 
@@ -145,7 +142,7 @@ def ts_type(node: tuple[Any, ...]) -> str:
     if kind == "array":
         inner = ts_type(args[0]) if args else "unknown"
         needs_parens = args and args[0][0] in ("union", "literal")
-        return (f"({inner})[]" if needs_parens else f"{inner}[]")
+        return f"({inner})[]" if needs_parens else f"{inner}[]"
     if kind == "tuple":
         return "[" + ", ".join(ts_type(arg) for arg in args) + "]"
     if kind == "record":
@@ -168,10 +165,7 @@ def ts_type(node: tuple[Any, ...]) -> str:
         # have to agree on for no gain. Inline always compiles and cannot
         # drift.
         inner = ts_type(args[0]) if args else "unknown"
-        return (
-            "{ items: readonly " + inner + "[]; total: number; "
-            "page: number; size: number }"
-        )
+        return "{ items: readonly " + inner + "[]; total: number; page: number; size: number }"
     raise ValueError(
         f"no TypeScript type for TypeKind {kind!r}. A kind added to "
         "`wreath.typegen.model.TypeKind` must be rendered here and in "
@@ -198,14 +192,12 @@ def render_models(declarations: tuple[Any, ...], flags: int = 0) -> bytes:
     interfaces, in the order supplied (Python owns ordering)."""
     parts: list[str] = [GENERATOR_HEADER]
     blocks = [_ISO_ALIAS_SOURCE[alias] for alias in _aliases_used(declarations)]
-    blocks += [
-        "\n".join(_render_interface(name, fields)) for name, fields in declarations
-    ]
+    blocks += ["\n".join(_render_interface(name, fields)) for name, fields in declarations]
     parts.append("\n\n".join(blocks) + ("\n" if blocks else ""))
     return "".join(parts).encode("utf-8")
 
 
-_CLIENT_PRELUDE = '''\
+_CLIENT_PRELUDE = """\
 export interface WreathClientOptions {
   baseUrl: string;
   fetch?: typeof globalThis.fetch;
@@ -241,7 +233,7 @@ async function decodeBody(response: Response): Promise<unknown> {
   }
   return await response.text();
 }
-'''
+"""
 
 
 def _method_lines(operation: tuple[Any, ...]) -> list[str]:
@@ -276,8 +268,7 @@ def _method_lines(operation: tuple[Any, ...]) -> list[str]:
     for client_name, wire_name, _location, _type_tuple, required in header_params:
         guard = "" if required else f"if (parameters.{client_name} !== undefined) "
         body.append(
-            f"      {guard}headers.set"
-            f'("{_escape(wire_name)}", String(parameters.{client_name}));'
+            f'      {guard}headers.set("{_escape(wire_name)}", String(parameters.{client_name}));'
         )
     request_init: list[str] = [f'method: "{method}"']
     if request_body is not None:
@@ -317,9 +308,7 @@ def _path_expression(path: str, path_params: list[Any]) -> str:
         if segment.startswith("{") and segment.endswith("}"):
             wire = segment[1:-1]
             client = wire_to_client.get(wire, wire)
-            out.append(
-                "/${encodeURIComponent(String(parameters." + client + "))}"
-            )
+            out.append("/${encodeURIComponent(String(parameters." + client + "))}")
         else:
             out.append("/" + segment)
     return "".join(out) or "/"
@@ -337,9 +326,7 @@ def render_client(payload: tuple[Any, ...], flags: int = 0) -> bytes:
     parts.append("export class WreathClient {\n")
     parts.append("  private readonly baseUrl: string;\n")
     parts.append("  private readonly fetchImpl: typeof globalThis.fetch;\n")
-    parts.append(
-        "  private readonly headers: WreathClientOptions[\"headers\"];\n\n"
-    )
+    parts.append('  private readonly headers: WreathClientOptions["headers"];\n\n')
     parts.append("  constructor(options: WreathClientOptions) {\n")
     parts.append('    this.baseUrl = options.baseUrl.replace(/\\/$/, "");\n')
     parts.append("    this.fetchImpl = options.fetch ?? globalThis.fetch;\n")

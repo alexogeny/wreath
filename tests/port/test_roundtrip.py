@@ -1,8 +1,3 @@
-"""Emitted code must be valid Python, and porting must be idempotent.
-
-Skipped today; auto-activates when the tool ships. Design 07 §4 (round-trip
-``ast.parse`` guard) and §3 (idempotency / no-clobber of unchanged sources).
-"""
 import ast
 
 import pytest

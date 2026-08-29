@@ -1,12 +1,3 @@
-"""The statement a series renders, and the envelope it assembles from the rows.
-
-The SQL assertions here are about *shape*, not text: that the spine is
-generated on the local wall clock and converted back afterwards, that the
-half-open range is honoured once, and that the top-N fold happens before
-aggregation rather than after. Each of those is a bug that reads as a plausible
-chart, which is why they are pinned by structure rather than by eye.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -40,16 +31,7 @@ def sql_of(database):
 
 
 class TestTheSpine:
-    async def test_it_is_generated_in_local_time_and_converted_back(
-        self, session, database
-    ):
-        """The order is the whole trick, and getting it backwards is the DST bug.
-
-        `generate_series` stepping over *naive* local timestamps advances by a
-        calendar day, which is what a reader means by "daily". Stepping over
-        `timestamptz` advances by exactly 24 hours, so the day a clock changes
-        is an hour out and every boundary after it is wrong.
-        """
+    async def test_it_is_generated_in_local_time_and_converted_back(self, session, database):
         view = series().measure(n=count())
         await run(view, session, database, [])
         sql = sql_of(database)
@@ -59,12 +41,6 @@ class TestTheSpine:
         assert '"s"."b" AT TIME ZONE' in sql, "and converted back for the payload"
 
     async def test_the_upper_bound_is_exclusive(self, session, database):
-        """A range ending exactly on a boundary excludes the bucket starting there.
-
-        Written once, as one microsecond subtracted before truncating, because
-        the off-by-one in a chart comes from writing the boundary twice with two
-        different intentions.
-        """
         await run(series().measure(n=count()), session, database, [])
         assert "- interval '1 microsecond'" in sql_of(database)
 
@@ -75,9 +51,7 @@ class TestTheSpine:
         assert sql.count("date_trunc('month'") == 3, "assignment plus both spine bounds"
         assert "interval '1 month'" in sql
 
-    async def test_the_range_filters_the_rows_as_well_as_the_spine(
-        self, session, database
-    ):
+    async def test_the_range_filters_the_rows_as_well_as_the_spine(self, session, database):
         await run(series().measure(n=count()), session, database, [])
         sql = sql_of(database)
         assert '"t0"."started_at" >= $' in sql and '"t0"."started_at" < $' in sql
@@ -86,9 +60,7 @@ class TestTheSpine:
 class TestTopN:
     def _view(self):
         return (
-            series()
-            .measure(started=count(), pace=avg(Trek.distance_km))
-            .by(Trek.paddock_id, top=2)
+            series().measure(started=count(), pace=avg(Trek.distance_km)).by(Trek.paddock_id, top=2)
         )
 
     async def test_survivors_are_ranked_over_the_whole_range_not_per_bucket(
@@ -108,37 +80,22 @@ class TestTopN:
         survivors = sql[sql.index('"survivors"') : sql.index('"agg"')]
 
         assert " WHERE " in survivors
-        assert " FROM \"treks\" AS \"t0\" AND " not in survivors
+        assert ' FROM "treks" AS "t0" AND ' not in survivors
 
-    async def test_a_filtered_survivor_query_appends_its_range_with_and(
-        self, session, database
-    ):
+    async def test_a_filtered_survivor_query_appends_its_range_with_and(self, session, database):
         view = self._view().where(Trek.grade == "open")
         await run(view, session, database, [])
         sql = sql_of(database)
         survivors = sql[sql.index('"survivors"') : sql.index('"agg"')]
 
         assert survivors.count(" WHERE ") == 1
-        assert " AND (\"t0\".\"started_at\" >=" in survivors
+        assert ' AND ("t0"."started_at" >=' in survivors
 
-    async def test_ties_break_on_the_key_so_the_survivor_set_is_stable(
-        self, session, database
-    ):
-        """Without a deterministic tie-break, two runs of one query can differ.
-
-        A series that appears and vanishes between refreshes is worse than one
-        that is merely wrong, because nothing in the chart says it happened.
-        """
+    async def test_ties_break_on_the_key_so_the_survivor_set_is_stable(self, session, database):
         await run(self._view(), session, database, [])
         assert ", 1 ASC LIMIT" in sql_of(database)
 
     async def test_the_fold_happens_before_aggregation(self, session, database):
-        """So the remainder's average is a real average, not an average of averages.
-
-        Folding after aggregation is the tempting shape -- group, rank, then
-        re-aggregate the tail -- and it silently produces a mean of means, which
-        is not the mean of anything unless every group is the same size.
-        """
         await run(self._view(), session, database, [])
         sql = sql_of(database)
         agg = sql[sql.index('"agg" AS') :]
@@ -156,22 +113,17 @@ class TestTopN:
         assert {item.key for item in other} == {None}
         assert {item.label for item in other} == {"other"}
 
-    async def test_a_genuinely_null_group_stays_distinct_from_the_fold(
-        self, session, database
-    ):
-        """Both carry a null key, so `other` is what tells them apart.
-
-        A grouping column that is nullable will produce a null-keyed series of
-        its own, and merging it into the remainder would silently add the
-        unassigned rows to the tail.
-        """
+    async def test_a_genuinely_null_group_stays_distinct_from_the_fold(self, session, database):
         rows = [
-            (utc(2026, 1, 1), None, False, 4, 1.0),   # paddock_id IS NULL, survived
-            (utc(2026, 1, 1), None, True, 9, 3.0),    # the folded tail
+            (utc(2026, 1, 1), None, False, 4, 1.0),  # paddock_id IS NULL, survived
+            (utc(2026, 1, 1), None, True, 9, 3.0),  # the folded tail
         ]
         result = await run(self._view(), session, database, rows)
-        counts = {(item.key, item.other): item.values for item in result.series
-                  if item.measure == "started"}
+        counts = {
+            (item.key, item.other): item.values
+            for item in result.series
+            if item.measure == "started"
+        }
         assert counts[(None, False)] == (4,)
         assert counts[(None, True)] == (9,)
 
@@ -210,15 +162,7 @@ class TestFill:
         result = await run(series().measure(n=count()), session, database, rows)
         assert result.series[0].values == (3, 0, 5)
 
-    async def test_an_average_fills_with_none_so_the_renderer_draws_a_gap(
-        self, session, database
-    ):
-        """An average of no rows is undefined; zero is not a synonym for it.
-
-        Filling it with zero draws a line plunging to the floor on every quiet
-        day, which reads as a collapse in the thing being measured rather than
-        as an absence of it.
-        """
+    async def test_an_average_fills_with_none_so_the_renderer_draws_a_gap(self, session, database):
         rows = [
             (utc(2026, 1, 1), 4.0),
             (utc(2026, 1, 2), None),
@@ -244,43 +188,27 @@ class TestFill:
 
 
 class TestEnvelope:
-    async def test_every_bucket_in_the_range_is_present_even_when_empty(
-        self, session, database
-    ):
+    async def test_every_bucket_in_the_range_is_present_even_when_empty(self, session, database):
         rows = [(utc(2026, 1, 1), 1), (utc(2026, 1, 2), None), (utc(2026, 1, 3), 2)]
         result = await run(series().measure(n=count()), session, database, rows)
         assert result.buckets == (utc(2026, 1, 1), utc(2026, 1, 2), utc(2026, 1, 3))
         assert len(result) == 3
 
     async def test_two_measures_are_two_named_series_never_one(self, session, database):
-        """Merging them is the dual-axis trap: two units, one pair of axes.
-
-        The alignment of the two scales is arbitrary, so the chart invents a
-        correlation that is not in the data. Keeping them separate and labelled
-        means a renderer that wants them together *can* -- by facetting, or by
-        indexing both to a common base.
-        """
         rows = [(utc(2026, 1, 1), 2, 8.0)]
-        view = series().measure(
-            started=count(), distance=sum_(Trek.distance_km, unit="km")
-        )
+        view = series().measure(started=count(), distance=sum_(Trek.distance_km, unit="km"))
         result = await run(view, session, database, rows)
         assert len(result.series) == 2
         by_name = {item.measure: item for item in result.series}
         assert by_name["started"].kind == "count" and by_name["started"].unit is None
         assert by_name["distance"].kind == "sum" and by_name["distance"].unit == "km"
 
-    async def test_a_series_is_identified_by_its_key_not_its_position(
-        self, session, database
-    ):
-        """A filter change that drops one group must not repaint the others.
-
-        A reader who learned that paddock 10 is the blue line should still be
-        looking at paddock 10 after someone narrows the date range.
-        """
+    async def test_a_series_is_identified_by_its_key_not_its_position(self, session, database):
         view = series().measure(n=count()).by(Trek.paddock_id, top=3)
         both = await run(
-            view, session, database,
+            view,
+            session,
+            database,
             [(utc(2026, 1, 1), 7, False, 1), (utc(2026, 1, 1), 10, False, 4)],
         )
         one = await run(view, session, database, [(utc(2026, 1, 1), 10, False, 4)])
@@ -289,11 +217,12 @@ class TestEnvelope:
         assert surviving.key == original.key == 10
         assert surviving.label == original.label == "10"
 
-    async def test_the_envelope_records_the_range_zone_and_bucket_it_used(
-        self, session, database
-    ):
+    async def test_the_envelope_records_the_range_zone_and_bucket_it_used(self, session, database):
         result = await run(
-            series().measure(n=count()), session, database, [],
+            series().measure(n=count()),
+            session,
+            database,
+            [],
             zone="Pacific/Auckland",
         )
         assert result.zone == "Pacific/Auckland"
@@ -301,11 +230,6 @@ class TestEnvelope:
         assert result.range is WEEK
 
     async def test_an_empty_spine_row_does_not_invent_a_series(self, session, database):
-        """A bucket where nothing matched establishes the bucket and nothing else.
-
-        Grouped, such a row arrives with a null key and null measures. Treating
-        it as a series would put an unnamed empty line in every legend.
-        """
         rows = [
             (utc(2026, 1, 1), 10, False, 4),
             (utc(2026, 1, 2), None, None, None),
@@ -318,15 +242,11 @@ class TestEnvelope:
 
 class TestZone:
     async def test_the_readers_zone_reaches_the_statement(self, session, database):
-        await run(
-            series().measure(n=count()), session, database, [], zone="Pacific/Auckland"
-        )
+        await run(series().measure(n=count()), session, database, [], zone="Pacific/Auckland")
         _sql, args = database.connection.calls[-1]
         assert "Pacific/Auckland" in args
 
-    async def test_stored_in_is_the_default_when_a_reader_names_none(
-        self, session, database
-    ):
+    async def test_stored_in_is_the_default_when_a_reader_names_none(self, session, database):
         view = series(stored_in=zone("Pacific/Auckland")).measure(n=count())
         database.connection.responses.clear()
         result = await view.run(session, range=WEEK)
@@ -338,9 +258,7 @@ class TestZone:
 
     async def test_a_zone_object_or_a_name_both_work(self, session, database):
         for value in ("Europe/London", zone("Europe/London")):
-            result = await run(
-                series().measure(n=count()), session, database, [], zone=value
-            )
+            result = await run(series().measure(n=count()), session, database, [], zone=value)
             assert result.zone == "Europe/London"
 
 
@@ -372,8 +290,8 @@ class TestParameters:
     async def test_a_cached_plan_rebinds_every_series_shape(
         self, session, database, grouped, compared
     ):
-        view = series().measure(n=count()).where(
-            Trek.herd_id == Param("herd"), Trek.grade == "open"
+        view = (
+            series().measure(n=count()).where(Trek.herd_id == Param("herd"), Trek.grade == "open")
         )
         if grouped:
             view = view.by(Trek.paddock_id, top=2)
@@ -410,6 +328,8 @@ class TestParameters:
 class TestRunArguments:
     async def test_a_range_is_required_and_must_be_a_range(self, session, database):
         with pytest.raises(SeriesError, match="needs range=Range"):
-            await series().measure(n=count()).run(
-                session, range=(utc(2026, 1, 1), utc(2026, 1, 2)), zone="UTC"
+            await (
+                series()
+                .measure(n=count())
+                .run(session, range=(utc(2026, 1, 1), utc(2026, 1, 2)), zone="UTC")
             )

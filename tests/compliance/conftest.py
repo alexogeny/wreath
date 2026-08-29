@@ -1,9 +1,3 @@
-"""Shared harness for the compliance suite.
-
-`drive_request` feeds raw request bytes to the real native HTTP/1 protocol and
-returns the raw response bytes, so a test can assert on the actual status line
-and headers a client would see. `status_of` / `header_block` parse those bytes.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -70,7 +64,7 @@ def drive_request(request: bytes, *, app: Any = None, config: ServerConfig | Non
         transport = CapturingTransport()
         protocol.connection_made(transport)
         protocol.data_received(request)
-        for _ in range(20):            # let the app task and response drain
+        for _ in range(20):  # let the app task and response drain
             await asyncio.sleep(0)
         protocol.connection_lost(None)
         await asyncio.sleep(0)

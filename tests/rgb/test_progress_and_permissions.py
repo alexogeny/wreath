@@ -1,6 +1,3 @@
-"""Task-progress exposure and the permissions endpoints (report 23: R-28, R-30,
-R-33, R-34, G-24, G-25, G-27, G-28, G-29, G-31)."""
-
 from __future__ import annotations
 
 import asyncio
@@ -20,7 +17,7 @@ class TestProgressAuthorization:
         registry.report("7", 50, "halfway")
 
         response = status_response(registry, "7", authorize=lambda task_id: False)
-        assert response.status == 404          # not 403; see the test below
+        assert response.status == 404  # not 403; see the test below
         assert b"halfway" not in response.body
 
     def test_status_answers_when_the_guard_says_yes(self):
@@ -32,8 +29,6 @@ class TestProgressAuthorization:
         assert b"halfway" in response.body
 
     def test_an_unknown_task_is_indistinguishable_from_a_refused_one(self):
-        """Otherwise the 404/403 split is itself an oracle for which task ids
-        exist, which is most of what enumeration wants."""
         registry = ProgressRegistry()
         registry.report("7", 50, "halfway")
 

@@ -1,10 +1,3 @@
-"""a03, a16, a17 -- three ways request text is allowed to choose the code path.
-
-a17 resolves a dotted name from the body and calls whatever it finds. a03 walks
-a JSON object onto an ORM row with `setattr`, so the client decides which
-columns it may write. a16 case-maps an address before testing it against a staff
-allow-list, and Unicode case mapping is not injective.
-"""
 from __future__ import annotations
 
 import importlib

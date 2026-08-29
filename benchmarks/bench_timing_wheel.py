@@ -6,11 +6,8 @@ finished in time). This measures that exact churn (schedule two, cancel two)
 against the timer store each event loop ships (asyncio's heap, uvloop's libuv
 heap), plus the memory each holds per live timer.
 
-The wheel is the one durable artifact of the reactor exploration; the full story
-and the fairness work behind the 4096-slot choice live in the essay at
-docs/explorations/the-timer-that-wouldnt-settle.md. The exploratory five-way
-shootout is benchmarks/bench_timer_shootout.py (reference only, not in the
-default battery).
+The exploratory five-way shootout is benchmarks/bench_timer_shootout.py
+(reference only, not in the default battery).
 """
 
 from __future__ import annotations
@@ -31,8 +28,6 @@ try:
 except ImportError:  # pragma: no cover - optional
     uvloop = None
 
-#: Slots for the shipped wheel: enough that the framework's timeout range lands
-#: with rounds≈0, sized in the essay against a 1M-op ultra-diverse workload.
 WHEEL_SLOTS = 4096
 
 
@@ -128,8 +123,9 @@ def main():
     if uvloop is not None:
         arms["uvloop"] = lambda: _Loop(uvloop.new_event_loop())
 
-    churn = {name: bench_request_churn(make, args.iterations, args.trials)
-             for name, make in arms.items()}
+    churn = {
+        name: bench_request_churn(make, args.iterations, args.trials) for name, make in arms.items()
+    }
     memory = {name: bench_memory(make) for name, make in arms.items()}
 
     document = {

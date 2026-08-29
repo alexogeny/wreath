@@ -34,15 +34,15 @@ class Client:
 
 @pytest.mark.asyncio
 async def test_turnstile_validates_origin_action_and_forwards_trusted_client() -> None:
-    client = Client({
-        "success": True,
-        "hostname": "app.example",
-        "action": "signup",
-        "challenge_ts": "2026-08-13T01:02:03Z",
-    })
-    request = Request(
-        {"type": "http", "client": ("203.0.113.8", 1234), "headers": []}, receive
+    client = Client(
+        {
+            "success": True,
+            "hostname": "app.example",
+            "action": "signup",
+            "challenge_ts": "2026-08-13T01:02:03Z",
+        }
     )
+    request = Request({"type": "http", "client": ("203.0.113.8", 1234), "headers": []}, receive)
     result = await Turnstile(
         client, secret="secret", hostname="app.example", action="signup"
     ).verify("token", request)
@@ -80,9 +80,7 @@ async def test_dependency_layers_over_the_bot_challenge_protocol() -> None:
             return ChallengeResult(provider="custom")
 
     dependency = challenge_dependency(Challenge(), header="x-challenge")
-    request = Request(
-        {"type": "http", "headers": [(b"x-challenge", b"proof")]}, receive
-    )
+    request = Request({"type": "http", "headers": [(b"x-challenge", b"proof")]}, receive)
     assert (await dependency(request)).provider == "custom"
     assert seen == ["proof"]
 
@@ -126,9 +124,7 @@ async def test_turnstile_refuses_an_empty_token_and_non_success_status() -> None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "payload", [[], {"success": False}], ids=("non-object", "failure")
-)
+@pytest.mark.parametrize("payload", [[], {"success": False}], ids=("non-object", "failure"))
 async def test_turnstile_refuses_each_unsuccessful_payload(payload: object) -> None:
     request = Request({"type": "http", "headers": []}, receive)
     with pytest.raises(ChallengeRefused, match="rejected the token"):

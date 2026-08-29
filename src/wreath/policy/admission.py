@@ -49,9 +49,7 @@ class ConcurrencyPolicy:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("ConcurrencyPolicy limit must be a positive integer")
         if retry_after is not None and (
-            isinstance(retry_after, bool)
-            or not isinstance(retry_after, int)
-            or retry_after < 0
+            isinstance(retry_after, bool) or not isinstance(retry_after, int) or retry_after < 0
         ):
             raise ValueError("ConcurrencyPolicy retry_after must be a non-negative integer")
         if not isinstance(detail, str) or not detail:
@@ -86,10 +84,15 @@ class ConcurrencyPolicy:
         from .base import PolicyContract
 
         return PolicyContract(
-            responses=((503, ResponseSpec(
-                description="The application has no free handler-concurrency permit.",
-                media_type="application/problem+json",
-            )),),
+            responses=(
+                (
+                    503,
+                    ResponseSpec(
+                        description="The application has no free handler-concurrency permit.",
+                        media_type="application/problem+json",
+                    ),
+                ),
+            ),
         )
 
 

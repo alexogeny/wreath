@@ -1,21 +1,3 @@
-"""Stage five: materialise, verify, and only then the irreversible step.
-
-The rule the rest of this file exists to protect is one sentence:
-
-    Counters are progress, never proof.
-
-``rows_done == denominator`` is a statement about the pass's own bookkeeping,
-and the failure it absorbs perfectly is a walk that skipped one range and
-double-counted another. So verification is always a question the database
-answers, and the strongest form asks it in the terms the database will go on
-enforcing afterwards.
-
-The other half is that the gate *publishes* rather than acts. A deferred
-migration's terminal step is not a statement the pass runs -- it is permission
-for a later migration someone else runs, which is why the fact has to outlive
-the process that established it.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -99,9 +81,6 @@ def database(world):
     return FakeDatabase(world)
 
 
-# --- the declaration ----------------------------------------------------------
-
-
 def test_a_verification_that_restates_the_walk_is_refused():
     # The seductive mistake: if the walk selected `grade_text IS NULL` and the
     # check asks `grade_text IS NULL`, a walk whose predicate was subtly wrong
@@ -174,9 +153,6 @@ def test_an_unknown_scope_is_refused():
     assert "'pass' or 'unit'" in str(caught.value)
 
 
-# --- verification -------------------------------------------------------------
-
-
 async def test_the_gate_publishes_a_fact_when_the_table_agrees(database, world):
     walk = convert_pass()
 
@@ -188,9 +164,7 @@ async def test_the_gate_publishes_a_fact_when_the_table_agrees(database, world):
     assert all(row["grade_text"] == "moderate" for row in world.rows)
 
 
-async def test_the_published_fact_is_readable_by_something_that_is_not_the_pass(
-    database, world
-):
+async def test_the_published_fact_is_readable_by_something_that_is_not_the_pass(database, world):
     # The whole point of publishing rather than acting: the consumer is a
     # migration deciding whether it may narrow the column, and it holds a
     # connection and a schema, not a pass declaration.
@@ -282,16 +256,7 @@ async def test_a_verification_that_could_not_run_is_not_a_verdict(database, worl
     assert (await walk.status(database)).phase == "done"
 
 
-async def test_a_bug_in_the_verification_is_not_reported_as_could_not_run(
-    database, world
-):
-    """A driver error is transient. A `TypeError` is a bug and must surface.
-
-    `Constraint`/`NoRowsMatch` used to catch `Exception`, so a mistake building
-    the SQL came back as "verification could not run" with `transient=True` --
-    a wrong answer wearing a retry, which the pass would then repeat forever
-    against a check that can never run.
-    """
+async def test_a_bug_in_the_verification_is_not_reported_as_could_not_run(database, world):
     walk = convert_pass()
 
     def a_programming_error(sql, args):
@@ -344,9 +309,6 @@ async def test_clearing_the_hole_un_bars_the_gate(database, world):
     assert status.holes_open == 0
     assert status.gate_barred is False
     assert [fact.fact for fact in await published_facts(database)] == ["trek.grade_text"]
-
-
-# --- the terminal step --------------------------------------------------------
 
 
 async def test_the_terminal_step_runs_once_after_the_fact_is_published(database, world):
@@ -426,9 +388,6 @@ async def test_resuming_mid_gate_re_verifies_rather_than_trusting(database, worl
     assert (await walk.status(database)).phase == "done"
 
 
-# --- letting the database verify ----------------------------------------------
-
-
 async def test_a_constraint_is_added_not_valid_then_validated(database, world):
     walk = convert_pass(
         gate=Gate(
@@ -499,9 +458,6 @@ async def test_reconcile_compares_two_independent_counts(database, world):
 
     assert result.complete is True
     assert [fact.fact for fact in await published_facts(database)] == ["trek.rollup"]
-
-
-# --- per-unit scope -----------------------------------------------------------
 
 
 def unit_gate_pass(then, **overrides):

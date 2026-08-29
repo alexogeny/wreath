@@ -113,7 +113,6 @@ class _EmitterState(ast.NodeVisitor):
         self._removed_middleware_imports: set[str] = set()
         self._used_names: set[str] = set()
 
-    # -- helpers -----------------------------------------------------------------
     def _seg(self, node: ast.AST) -> str:
         return ast.get_source_segment(self.src, node) or ""
 
@@ -128,9 +127,7 @@ class _EmitterState(ast.NodeVisitor):
     def _enclosing_is_async(self, node: ast.AST) -> bool:
         """Whether the function this node sits in can hold an `await`."""
         owner = self._parents.get(id(node))
-        while owner is not None and not isinstance(
-            owner, (ast.FunctionDef, ast.AsyncFunctionDef)
-        ):
+        while owner is not None and not isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
             owner = self._parents.get(id(owner))
         return isinstance(owner, ast.AsyncFunctionDef)
 

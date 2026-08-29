@@ -58,6 +58,7 @@ _SHARD_HISTORY_COVERAGE = 0.8
 _LIVE_FUZZ_GOLD_RATIO = 0.05
 _FUZZ_SCHEDULE_SEED = "wreath-fuzz-v1"
 
+
 @dataclass(frozen=True, slots=True)
 class RunnerConfig:
     """Options consumed by Wreath rather than forwarded to pytest."""
@@ -106,9 +107,7 @@ class RunnerConfig:
         stage_events = value.get("stage_events")
         collection_shards = value.get("collection_shards", ())
         if grid != "never":
-            raise ValueError(
-                f"unknown test grid mode {grid!r}; the static form is 'never'"
-            )
+            raise ValueError(f"unknown test grid mode {grid!r}; the static form is 'never'")
         if not isinstance(workers, str):
             raise ValueError("test worker count must be text")
         if not isinstance(slowest, int) or slowest < 0:
@@ -474,9 +473,7 @@ class RunActivity:
         outliers = [test for test in tests if test.finished and test.duration > threshold]
         utilization = 0.0
         if self.wall_seconds > 0.0 and self.workers > 0:
-            utilization = float(durations["total_seconds"]) / (
-                self.wall_seconds * self.workers
-            )
+            utilization = float(durations["total_seconds"]) / (self.wall_seconds * self.workers)
         return {
             "version": 1,
             "kind": "wreath-test-run",
@@ -488,10 +485,7 @@ class RunActivity:
             "worker_utilization": utilization,
             "counts": {**self.counts(), "files": len(files)},
             "durations": durations,
-            "outliers": [
-                {"nodeid": test.nodeid, "seconds": test.duration}
-                for test in outliers
-            ],
+            "outliers": [{"nodeid": test.nodeid, "seconds": test.duration} for test in outliers],
             "slowest": [
                 {"nodeid": test.nodeid, "seconds": test.duration, "outcome": test.outcome}
                 for test in tests[:slowest]
@@ -567,10 +561,7 @@ _GROUP_BUCKET = {
     "failed": "failed",
     "error": "failed",
 }
-_GROUP_ORDER = {
-    name: index
-    for index, name in enumerate(_GROUP_LABELS)
-}
+_GROUP_ORDER = {name: index for index, name in enumerate(_GROUP_LABELS)}
 
 
 def _tile(
@@ -678,20 +669,14 @@ def _mutation_lines(
     if mutation.state == "running":
         scope = f" · {mutation.total} sampled controls" if mutation.total else ""
         allocation = (
-            f" · workers {mutation.test_workers} test / "
-            f"{mutation.mutant_workers} mutant"
+            f" · workers {mutation.test_workers} test / {mutation.mutant_workers} mutant"
             if mutation.test_workers or mutation.mutant_workers
             else ""
         )
         action = (
-            "testing controls"
-            if mutation.mutating_files
-            else "preparing controls beside tests"
+            "testing controls" if mutation.mutating_files else "preparing controls beside tests"
         )
-        return [
-            f"  Mutation   {mutation_tile} {mutation.mode}{scope} · {action}"
-            f"{allocation}"
-        ]
+        return [f"  Mutation   {mutation_tile} {mutation.mode}{scope} · {action}{allocation}"]
     if mutation.state == "unrated":
         return [f"  Mutation   {mutation.mode} · no eligible declared controls"]
     if mutation.state == "error":
@@ -713,9 +698,7 @@ def _mutation_lines(
     verified_label = "file" if verified_count == 1 else "files"
     without_evidence = max(0, passing_files - verified_count)
     without_evidence_text = (
-        f" · {without_evidence} without mutation evidence"
-        if without_evidence
-        else ""
+        f" · {without_evidence} without mutation evidence" if without_evidence else ""
     )
     lines = [
         f"  Mutation   {mutation.mode} · {rating} · {mutation.rating_action}",
@@ -825,9 +808,7 @@ def render_activity(
     lines.append("")
     lines.extend(_state_legend_lines(width=width))
     if mutation is not None:
-        passing_files = sum(
-            file_state.outcome == "passed" for file_state in file_states
-        )
+        passing_files = sum(file_state.outcome == "passed" for file_state in file_states)
         lines.extend(
             _mutation_lines(
                 mutation,
@@ -905,9 +886,7 @@ class ActivityRenderer:
         self.stream = stream
         self.slowest = slowest
         if mode != "never":
-            raise ValueError(
-                f"unknown test grid mode {mode!r}; the static form is 'never'"
-            )
+            raise ValueError(f"unknown test grid mode {mode!r}; the static form is 'never'")
         self.disabled = False
         self.mutation: MutationActivity | None = None
         self.fuzz: FuzzActivity | None = None
@@ -986,7 +965,7 @@ class ActivityRenderer:
         try:
             self.stream.write(value)
             self.stream.flush()
-        except (OSError, ValueError):
+        except OSError, ValueError:
             self.disabled = True
             return False
         return True
@@ -1104,7 +1083,7 @@ def _history_weights(path: Path) -> tuple[dict[str, float], dict[str, float]]:
     """Return per-test and fallback per-file means from a history document."""
     try:
         history = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return {}, {}
     if not isinstance(history, dict) or history.get("version") != 1:
         return {}, {}
@@ -1170,7 +1149,7 @@ def _xdist_group(nodeid: str) -> str | None:
     `LoadGroupScheduling`, which is not the class being subclassed here.
     """
     at = nodeid.rfind("@")
-    return nodeid[at + 1:] if at > nodeid.rfind("]") else None
+    return nodeid[at + 1 :] if at > nodeid.rfind("]") else None
 
 
 class HistoricalSchedulerPlugin:
@@ -1223,8 +1202,7 @@ class HistoricalSchedulerPlugin:
                     self.maxschedchunk = len(collection)
 
                 weights = [
-                    _historical_weight(nodeid, test_weights, file_weights)
-                    for nodeid in collection
+                    _historical_weight(nodeid, test_weights, file_weights) for nodeid in collection
                 ]
                 groups: dict[str, list[int]] = {}
                 singles: list[int] = []
@@ -1235,8 +1213,7 @@ class HistoricalSchedulerPlugin:
                     else:
                         groups.setdefault(name, []).append(index)
 
-                units = [(sum(weights[i] for i in members), members)
-                         for members in groups.values()]
+                units = [(sum(weights[i] for i in members), members) for members in groups.values()]
                 units += [(weights[i], [i]) for i in singles if weights[i] >= _LPT_SECONDS]
                 units.sort(key=lambda unit: unit[0], reverse=True)
                 tail = [i for i in singles if weights[i] < _LPT_SECONDS]
@@ -1298,9 +1275,7 @@ class CollectionShardPlugin:
         try:
             worker_index = int(worker_id.removeprefix("gw"))
         except ValueError as error:
-            raise ValueError(
-                f"xdist worker id {worker_id!r} must have the form 'gwN'"
-            ) from error
+            raise ValueError(f"xdist worker id {worker_id!r} must have the form 'gwN'") from error
         return owner != worker_index
 
     def pytest_sessionfinish(self, session: Any) -> None:
@@ -1370,8 +1345,7 @@ class MutationTracePlugin:
     def pytest_sessionfinish(self, session: Any, exitstatus: int) -> None:
         self.tracer.stop()
         hits = [
-            [f"{path}:{line}", list(nodes)]
-            for (path, line), nodes in self.tracer.index().items()
+            [f"{path}:{line}", list(nodes)] for (path, line), nodes in self.tracer.index().items()
         ]
         _atomic_json(self.output, {"hits": hits})
         with self.live_output.open("a", encoding="utf-8") as stream:
@@ -1394,9 +1368,7 @@ class ActivityPlugin:
         self.mutation_activity_path = (
             Path(config.mutation_activity) if config.mutation_activity else None
         )
-        self.mutation_event_state = _MutationEventState(
-            total=config.mutation_samples
-        )
+        self.mutation_event_state = _MutationEventState(total=config.mutation_samples)
         self.stage_events = Path(config.stage_events) if config.stage_events else None
         self._emitted_stage_files: set[str] = set()
 
@@ -1629,16 +1601,12 @@ def _has_xdist_argument(arguments: list[str]) -> bool:
 
 
 def _has_xdist_distribution(arguments: list[str]) -> bool:
-    return any(
-        argument == "--dist" or argument.startswith("--dist=")
-        for argument in arguments
-    )
+    return any(argument == "--dist" or argument.startswith("--dist=") for argument in arguments)
 
 
 def _has_xdist_restart(arguments: list[str]) -> bool:
     return any(
-        argument == "--max-worker-restart"
-        or argument.startswith("--max-worker-restart=")
+        argument == "--max-worker-restart" or argument.startswith("--max-worker-restart=")
         for argument in arguments
     )
 
@@ -1698,10 +1666,7 @@ def _collection_modules(arguments: list[str], *, forced: bool) -> tuple[Path, ..
         for candidate in candidates:
             if candidate.name == "conftest.py":
                 continue
-            if not (
-                candidate.name.startswith("test_")
-                or candidate.name.endswith("_test.py")
-            ):
+            if not (candidate.name.startswith("test_") or candidate.name.endswith("_test.py")):
                 continue
             relative = candidate.resolve().relative_to(root.parent if root.is_file() else root)
             if _ignored_test_path(relative):
@@ -1749,7 +1714,7 @@ def _recent_file_weights(path: Path) -> dict[Path, float]:
     """Read file costs from the newest broad run, excluding stale gated files."""
     try:
         history = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return {}
     if not isinstance(history, dict) or history.get("version") != 1:
         return {}
@@ -1767,9 +1732,7 @@ def _recent_file_weights(path: Path) -> dict[Path, float]:
     if not valid_runs:
         return {}
     largest = max(int(run["counts"]["collected"]) for run in valid_runs)
-    broad = [
-        run for run in valid_runs if int(run["counts"]["collected"]) >= largest * 0.9
-    ]
+    broad = [run for run in valid_runs if int(run["counts"]["collected"]) >= largest * 0.9]
     stamp = str(broad[-1]["finished_at"])
     files = history.get("files")
     if not isinstance(files, dict):
@@ -1918,9 +1881,7 @@ def _mutation_arguments(namespace: Any) -> list[str]:
 
 
 def _resolve_mutant_workers(raw: str) -> int:
-    return _resolve_worker_count(
-        raw, option="--mutant-workers", auto_cap=_MAX_AUTO_MUTANT_WORKERS
-    )
+    return _resolve_worker_count(raw, option="--mutant-workers", auto_cap=_MAX_AUTO_MUTANT_WORKERS)
 
 
 def _resolve_worker_count(raw: str, *, option: str, auto_cap: int) -> int:
@@ -1996,9 +1957,7 @@ def _prepare_mutation_trace(namespace: Any, directory: Path) -> MutationTraceSpe
         return None
     watched, whole_files = watch_selected_identifiers(roots, repo, selected)
     if history_path is not None:
-        _write_mutation_sample_cache(
-            history_path, cache_key, selected, watched, whole_files
-        )
+        _write_mutation_sample_cache(history_path, cache_key, selected, watched, whole_files)
     output_dir = directory / "mutation-trace"
     output_dir.mkdir()
     return MutationTraceSpec(selected, watched, whole_files, output_dir)
@@ -2009,7 +1968,7 @@ def _read_mutation_sample_cache(
 ) -> tuple[frozenset[str], dict[str, frozenset[int]], frozenset[str]] | None:
     try:
         history = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
     if not isinstance(history, dict) or history.get("version") != 1:
         return None
@@ -2051,7 +2010,7 @@ def _write_mutation_sample_cache(
         loaded = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(loaded, dict) and loaded.get("version") == 1:
             history = loaded
-    except (OSError, ValueError):
+    except OSError, ValueError:
         pass
     history["mutation_sample"] = {
         "key": key,
@@ -2070,9 +2029,7 @@ def _trace_environment(spec: MutationTraceSpec) -> str:
         {
             "root_pid": os.getpid(),
             "output_dir": str(spec.output_dir),
-            "watched": {
-                path: sorted(lines) for path, lines in spec.watched.items()
-            },
+            "watched": {path: sorted(lines) for path, lines in spec.watched.items()},
         },
         separators=(",", ":"),
     )
@@ -2085,13 +2042,13 @@ def _write_reused_baseline(
 ) -> bool:
     try:
         activity = json.loads(activity_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return False
     documents: list[dict[str, Any]] = []
     for path in spec.output_dir.glob("trace-*.json"):
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
         if isinstance(value, dict):
             documents.append(value)
@@ -2183,9 +2140,7 @@ def _consume_mutation_events(path: Path, state: _MutationEventState) -> None:
                 state.mutating_files = set().union(*state.active.values())
         elif event == "finished":
             tested = state.active.pop(int(value.get("ordinal", 0)), set())
-            state.mutating_files = (
-                set().union(*state.active.values()) if state.active else set()
-            )
+            state.mutating_files = set().union(*state.active.values()) if state.active else set()
             if value.get("outcome") == "killed":
                 killers = value.get("killers")
                 if isinstance(killers, list):
@@ -2225,10 +2180,7 @@ def _mutation_activity_from_report(mode: str, report: dict[str, Any]) -> Mutatio
             killers = mutant.get("killers")
             if not isinstance(killers, list):
                 continue
-            verified.update(
-                _path_from_nodeid(str(nodeid))
-                for nodeid in killers
-            )
+            verified.update(_path_from_nodeid(str(nodeid)) for nodeid in killers)
     verified_files = frozenset(verified)
     report["verified_test_files"] = sorted(verified_files)
     baseline_failures = 0
@@ -2269,15 +2221,11 @@ def _mutation_activity_from_report(mode: str, report: dict[str, Any]) -> Mutatio
 def _mutation_gold_files(report: dict[str, Any]) -> tuple[str, ...]:
     """Files with positive mutation evidence from at least one exact killer."""
     verified_value = report.get("verified_test_files")
-    verified = {
-        str(path) for path in verified_value
-    } if isinstance(verified_value, list) else set()
+    verified = {str(path) for path in verified_value} if isinstance(verified_value, list) else set()
     return tuple(sorted(verified))
 
 
-def _mutation_gold_tests(
-    report: dict[str, Any], selected_files: Iterable[str]
-) -> tuple[str, ...]:
+def _mutation_gold_tests(report: dict[str, Any], selected_files: Iterable[str]) -> tuple[str, ...]:
     """Exact killing tests that provide the minimum fuzz surface per gold file."""
     selected_lookup = dict.fromkeys(selected_files, True)
     killers: list[str] = []
@@ -2364,11 +2312,7 @@ def _fuzz_activity(
     return FuzzActivity(
         state=state,
         selected_files=selected_files,
-        active_files=(
-            frozenset(events.active_counts)
-            if state == "running"
-            else frozenset()
-        ),
+        active_files=(frozenset(events.active_counts) if state == "running" else frozenset()),
         passed_files=frozenset(events.passed_files),
         failed_files=frozenset(events.failed_files),
         incomplete_files=frozenset(events.incomplete_files),
@@ -2483,9 +2427,7 @@ def _finish_fuzz_process(
     try:
         raw_report = json.loads(fuzz.report_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, ValueError) as error:
-        diagnostic = fuzz.log_path.read_text(
-            encoding="utf-8", errors="replace"
-        )[-4000:]
+        diagnostic = fuzz.log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
         raise ValueError(f"fuzz phase returned no valid report:\n{diagnostic}") from error
     if not isinstance(raw_report, dict):
         raise ValueError("fuzz phase report must be an object")
@@ -2568,12 +2510,8 @@ def _merge_fuzz_batches(
             collections.Counter(),
         )
     )
-    passed_files = set().union(
-        *(activity.passed_files & selected_files for activity in activities)
-    )
-    failed_files = set().union(
-        *(activity.failed_files & selected_files for activity in activities)
-    )
+    passed_files = set().union(*(activity.passed_files & selected_files for activity in activities))
+    failed_files = set().union(*(activity.failed_files & selected_files for activity in activities))
     incomplete_files = set().union(
         *(activity.incomplete_files & selected_files for activity in activities)
     )
@@ -2636,9 +2574,7 @@ def _fuzz_confidence(
     selected: Sequence[str] | None = None,
 ) -> tuple[dict[str, Any], FuzzActivity, int]:
     """Run each gold file's killers and explicit fuzz cases in a fresh pass."""
-    chosen = tuple(selected) if selected is not None else _mutation_gold_files(
-        mutation_report
-    )
+    chosen = tuple(selected) if selected is not None else _mutation_gold_files(mutation_report)
     if not chosen:
         report, activity = _no_gold_fuzz()
         return report, activity, 0
@@ -2766,9 +2702,7 @@ def _finish_mutation_process(
             )
     raw_report = mutation.output_path.read_text(encoding="utf-8")
     if returncode != 0:
-        raise ValueError(
-            "mutation confidence phase failed; its diagnostic is printed above"
-        )
+        raise ValueError("mutation confidence phase failed; its diagnostic is printed above")
     try:
         report = json.loads(raw_report)
     except (TypeError, ValueError) as error:
@@ -2776,9 +2710,7 @@ def _finish_mutation_process(
     if not isinstance(report, dict):
         raise ValueError("mutation confidence report must be an object")
     report["baseline_reused"] = mutation.baseline_reused
-    report["failed_mutation_test_files"] = sorted(
-        mutation.event_state.survivor_candidate_files
-    )
+    report["failed_mutation_test_files"] = sorted(mutation.event_state.survivor_candidate_files)
     activity = _mutation_activity_from_report(str(namespace.mutant), report)
     survived = activity.counts.get("survived", 0)
     unreached = activity.counts.get("unreached", 0)
@@ -2848,9 +2780,7 @@ def execute(namespace: Any) -> int:
 
         return execute_dual(namespace)
     if engine != "pytest":
-        raise ValueError(
-            f"unknown test engine {engine!r}; expected pytest, native, or dual"
-        )
+        raise ValueError(f"unknown test engine {engine!r}; expected pytest, native, or dual")
     global _ACTIVE_ACTIVITY_PLUGIN
     _ACTIVE_ACTIVITY_PLUGIN = None
     if namespace.slowest < 0:
@@ -2915,9 +2845,7 @@ def execute(namespace: Any) -> int:
         prepared_mutation = None
         if trace_spec is not None:
             selection_path = temporary_path / "mutation-selection.json"
-            selection_path.write_text(
-                json.dumps(sorted(trace_spec.selected)), encoding="utf-8"
-            )
+            selection_path.write_text(json.dumps(sorted(trace_spec.selected)), encoding="utf-8")
             baseline_wait_path = temporary_path / "mutation-baseline.json"
             prepared_mutation = _start_mutation_process(
                 namespace,
@@ -2934,14 +2862,10 @@ def execute(namespace: Any) -> int:
             history=None if namespace.no_history else namespace.history,
             mutation_mode=str(namespace.mutant),
             mutation_samples=(
-                int(namespace.mutant_samples)
-                if namespace.mutant in {"auto", "sample"}
-                else 0
+                int(namespace.mutant_samples) if namespace.mutant in {"auto", "sample"} else 0
             ),
             mutation_activity=(
-                str(prepared_mutation.activity_path)
-                if prepared_mutation is not None
-                else None
+                str(prepared_mutation.activity_path) if prepared_mutation is not None else None
             ),
             stage_events=namespace.stage_events,
             collection_shards=collection_shards,
@@ -2976,9 +2900,7 @@ def execute(namespace: Any) -> int:
         if namespace.mutant == "off":
             return pytest_status
         passed_tests = (
-            activity_plugin.activity.counts()["passed"]
-            if activity_plugin is not None
-            else 0
+            activity_plugin.activity.counts()["passed"] if activity_plugin is not None else 0
         )
         if not passed_tests:
             if prepared_mutation is not None:
@@ -3035,15 +2957,13 @@ def execute(namespace: Any) -> int:
                     selection=selection_path,
                     renderer=renderer,
                 )
-        except (OSError, ValueError):
+        except OSError, ValueError:
             if activity_plugin is not None:
                 activity_plugin.finish_mutation(
                     MutationActivity(mode=str(namespace.mutant), state="error")
                 )
             raise
-        mutation_activity = _mutation_activity_from_report(
-            str(namespace.mutant), mutation
-        )
+        mutation_activity = _mutation_activity_from_report(str(namespace.mutant), mutation)
         if user_report is not None:
             _attach_mutation_report(user_report, mutation)
         if namespace.fuzz == "off":

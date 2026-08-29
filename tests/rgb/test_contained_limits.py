@@ -1,5 +1,3 @@
-"""Framework-level bounds and allow-lists (report 23: B-09, G-47, G-68, R-50)."""
-
 from __future__ import annotations
 
 import pytest
@@ -21,26 +19,18 @@ class TestHeaderBounds:
         )
 
     def test_the_header_count_is_left_to_the_server(self):
-        """Deliberately unbounded here: every server bounds the header block
-        already, and a second check cost a crossing in `pre_activation` --
-        the number the boundary baseline exists to protect. The *parse* is what
-        needed a bound, and that is the cookie one below."""
         headers = [(f"x-{n}".encode(), b"v") for n in range(500)]
         assert len(self._request(headers)._index_headers()) == 500
 
     def test_an_enormous_cookie_header_is_refused(self):
         from wreath.exceptions import RequestHeaderFieldsTooLarge
 
-        request = self._request(
-            [(b"cookie", b"a=" + b"x" * 100_000)], max_cookie_bytes=8192
-        )
+        request = self._request([(b"cookie", b"a=" + b"x" * 100_000)], max_cookie_bytes=8192)
         with pytest.raises(RequestHeaderFieldsTooLarge):
             _ = request.cookies
 
     def test_ordinary_headers_are_unaffected(self):
-        request = self._request(
-            [(b"host", b"example.com"), (b"cookie", b"sid=abc; theme=dark")]
-        )
+        request = self._request([(b"host", b"example.com"), (b"cookie", b"sid=abc; theme=dark")])
         assert request._index_headers()[b"host"] == b"example.com"
         assert request.cookies == {"sid": "abc", "theme": "dark"}
 
@@ -151,7 +141,9 @@ class TestCrudFieldAllowList:
                 pass
 
         router = crud_router(
-            model, lambda request: _Session(), operations=("list",),
+            model,
+            lambda request: _Session(),
+            operations=("list",),
             fields=("id", "name"),
         )
 
@@ -168,7 +160,9 @@ class TestCrudFieldAllowList:
 
         with pytest.raises(ValueError, match="nope"):
             crud_router(
-                self._model(), lambda request: None, operations=("list",),
+                self._model(),
+                lambda request: None,
+                operations=("list",),
                 fields=("id", "nope"),
             )
 
@@ -177,8 +171,11 @@ class TestCrudFieldAllowList:
 
         with pytest.raises(ValueError, match="fields"):
             crud_router(
-                self._model(), lambda request: None, operations=("list",),
-                fields=("id",), expose=("dob",),
+                self._model(),
+                lambda request: None,
+                operations=("list",),
+                fields=("id",),
+                expose=("dob",),
             )
 
     def test_the_deny_list_still_applies_without_fields(self):
@@ -211,27 +208,21 @@ class TestCsrfTrustedHosts:
     def test_a_forged_host_is_refused_when_hosts_are_named(self):
         from wreath.policy.csrf import CsrfPolicy
 
-        middleware = CsrfPolicy(
-            "k" * 32, secure=False, trusted_hosts=["app.example"]
-        )
+        middleware = CsrfPolicy("k" * 32, secure=False, trusted_hosts=["app.example"])
         request, headers = self._request(b"evil.example", b"http://evil.example")
         assert middleware._origin_valid(request, headers) is False
 
     def test_the_configured_host_still_passes(self):
         from wreath.policy.csrf import CsrfPolicy
 
-        middleware = CsrfPolicy(
-            "k" * 32, secure=False, trusted_hosts=["app.example"]
-        )
+        middleware = CsrfPolicy("k" * 32, secure=False, trusted_hosts=["app.example"])
         request, headers = self._request(b"app.example", b"http://app.example")
         assert middleware._origin_valid(request, headers) is True
 
     def test_a_port_is_matched_as_written(self):
         from wreath.policy.csrf import CsrfPolicy
 
-        middleware = CsrfPolicy(
-            "k" * 32, secure=False, trusted_hosts=["app.example:8000"]
-        )
+        middleware = CsrfPolicy("k" * 32, secure=False, trusted_hosts=["app.example:8000"])
         request, headers = self._request(b"app.example:8000", b"http://app.example:8000")
         assert middleware._origin_valid(request, headers) is True
 

@@ -56,8 +56,6 @@ except ImportError:  # pragma: no cover - reported, not raised
 
 GRADES = ("intern", "junior", "senior")
 
-# -- wreath -----------------------------------------------------------------------
-
 
 class Employee(Model):
     id: Mapped[int] = column(Int64, primary_key=True)
@@ -76,9 +74,6 @@ class Intern(Employee, table="constraint_bench_interns"):
     def pay_band(salary: int, tenure_months: int) -> bool:
         """an intern past six months cannot be paid more than 40k"""
         return not (tenure_months > 6 and salary > 40_000)
-
-
-# -- hand-written Python -------------------------------------------------------
 
 
 class HandIntern:
@@ -110,8 +105,7 @@ def handwritten(payload: dict[str, Any]) -> HandIntern:
         errors.append({"loc": ["body", "name"], "msg": "expected str", "type": "text"})
     elif not 1 <= len(name) <= 200:
         errors.append(
-            {"loc": ["body", "name"], "msg": "length must be between 1 and 200",
-             "type": "length"}
+            {"loc": ["body", "name"], "msg": "length must be between 1 and 200", "type": "length"}
         )
 
     salary = payload.get("salary")
@@ -120,9 +114,7 @@ def handwritten(payload: dict[str, Any]) -> HandIntern:
     elif not _INT64_LOW <= salary < _INT64_HIGH:
         errors.append({"loc": ["body", "salary"], "msg": "out of range", "type": "int8"})
     elif salary < 0:
-        errors.append(
-            {"loc": ["body", "salary"], "msg": "value must be at least 0", "type": "ge"}
-        )
+        errors.append({"loc": ["body", "salary"], "msg": "value must be at least 0", "type": "ge"})
     elif salary > 50_000:
         errors.append(
             {"loc": ["body", "salary"], "msg": "value must be at most 50000", "type": "le"}
@@ -130,22 +122,16 @@ def handwritten(payload: dict[str, Any]) -> HandIntern:
 
     tenure = payload.get("tenure_months")
     if type(tenure) is not int:
-        errors.append(
-            {"loc": ["body", "tenure_months"], "msg": "expected int8", "type": "int8"}
-        )
+        errors.append({"loc": ["body", "tenure_months"], "msg": "expected int8", "type": "int8"})
     elif not _INT64_LOW <= tenure < _INT64_HIGH:
-        errors.append(
-            {"loc": ["body", "tenure_months"], "msg": "out of range", "type": "int8"}
-        )
+        errors.append({"loc": ["body", "tenure_months"], "msg": "out of range", "type": "int8"})
     elif tenure < 0:
         errors.append(
-            {"loc": ["body", "tenure_months"], "msg": "value must be at least 0",
-             "type": "ge"}
+            {"loc": ["body", "tenure_months"], "msg": "value must be at least 0", "type": "ge"}
         )
     elif tenure > 8:
         errors.append(
-            {"loc": ["body", "tenure_months"], "msg": "value must be at most 8",
-             "type": "le"}
+            {"loc": ["body", "tenure_months"], "msg": "value must be at most 8", "type": "le"}
         )
 
     grade = payload.get("grade")
@@ -153,8 +139,7 @@ def handwritten(payload: dict[str, Any]) -> HandIntern:
         errors.append({"loc": ["body", "grade"], "msg": "expected str", "type": "text"})
     elif grade != "intern":
         errors.append(
-            {"loc": ["body", "grade"], "msg": "value must be one of 'intern'",
-             "type": "one_of"}
+            {"loc": ["body", "grade"], "msg": "value must be one of 'intern'", "type": "one_of"}
         )
 
     for key in payload:
@@ -175,9 +160,6 @@ def handwritten(payload: dict[str, Any]) -> HandIntern:
             ]
         )
     return HandIntern(name, salary, tenure, grade)  # type: ignore[arg-type]
-
-
-# -- pydantic ------------------------------------------------------------------
 
 
 def _build_pydantic() -> Any:
@@ -205,8 +187,6 @@ def _build_pydantic() -> Any:
 
     return PydanticIntern
 
-
-# -- payloads ------------------------------------------------------------------
 
 ACCEPTED = {"name": "Ada Lovelace", "salary": 30_000, "tenure_months": 3, "grade": "intern"}
 #: Breaks the salary cap and the grade, and is otherwise sound: the rejecting
@@ -236,9 +216,6 @@ def _rejects(
         raise RuntimeError("a body that breaks two rules was accepted")
 
     return reject
-
-
-# -- harness -------------------------------------------------------------------
 
 
 def _measure(operation: Callable[[], Any], warmup: int, trials: int, rows: int) -> list[float]:
@@ -303,7 +280,8 @@ def _agree(
         except Exception as error:  # noqa: BLE001 - each contender raises its own type
             reported = errors_of[name](error)
             fields = sorted(
-                str(item["loc"][-1]) for item in reported  # type: ignore[index]
+                str(item["loc"][-1])
+                for item in reported  # type: ignore[index]
             )
             if fields != ["grade", "salary"]:
                 raise RuntimeError(

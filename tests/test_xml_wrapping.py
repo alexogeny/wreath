@@ -1,21 +1,3 @@
-"""XML Signature Wrapping, defeated by construction rather than by checking.
-
-XSW is the SAML vulnerability class. It works because a signature layer and an
-assertion consumer walk the tree *separately* and can be made to disagree about
-which subtree was signed: the verifier finds the original assertion by its
-``ID`` and checks it, while the consumer takes "the first assertion" and reads
-an attacker's forgery sitting beside it.
-
-Two properties in this parser remove the disagreement:
-
-* **Every element carries the byte range it was parsed from**, so a caller
-  canonicalizes and verifies *the original bytes of a named subtree* and then
-  reads its values from that same subtree. There is no second lookup to
-  disagree with the first.
-* **A repeated ``ID`` is a refusal, not a resolution order.** No document
-  reaches the consumer with two candidates for one identifier.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -49,9 +31,7 @@ def test_an_element_reports_the_bytes_it_was_parsed_from() -> None:
     assert doc.subtree_bytes(assertion) == raw
 
 
-# --------------------------------------------------------------------------
 # The classic wrapping shapes
-# --------------------------------------------------------------------------
 
 DUPLICATE_ID = b"""<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol">
 <saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_a1">
@@ -102,13 +82,6 @@ def test_a_duplicate_id_is_refused_however_deeply_it_is_buried() -> None:
 
 
 def test_an_id_hidden_inside_a_ds_object_still_counts_as_a_duplicate() -> None:
-    """The Object-embedded copy cannot pass as a distinct identifier.
-
-    ``WRAPPED_IN_OBJECT`` gives the two assertions different IDs, so neither
-    lookup is ambiguous -- and that is the point: the verifier asked for
-    ``_a1`` and gets exactly the buried one, whose bytes are the ones it
-    canonicalizes. It never sees the forgery at ``_forged``.
-    """
     doc = parse(WRAPPED_IN_OBJECT)
     signed = doc.find_id("_a1")
     assert signed is not None
@@ -117,12 +90,6 @@ def test_an_id_hidden_inside_a_ds_object_still_counts_as_a_duplicate() -> None:
 
 
 def test_the_verified_subtree_is_the_only_thing_a_consumer_can_read() -> None:
-    """Verifier and consumer cannot disagree, because there is one lookup.
-
-    A caller resolves the signed ID once, canonicalizes *those* bytes, and then
-    reads the subject out of *that* element. The forged assertion is not
-    reachable from the handle the verification produced.
-    """
     doc = parse(RELOCATED_UNDER_A_WRAPPER)
     signed = doc.find_id("_a1")
     assert signed is not None
@@ -138,15 +105,6 @@ def test_the_verified_subtree_is_the_only_thing_a_consumer_can_read() -> None:
 
 
 def test_relocating_a_subtree_changes_its_canonical_form() -> None:
-    """Moving a signed assertion under a wrapper is detectable.
-
-    Exclusive canonicalization renders the namespace declarations the subtree
-    *visibly utilizes*, so an assertion that inherited ``saml:`` from an
-    ancestor in one document and declares it itself in another still
-    canonicalizes identically -- that is the point of *exclusive* c14n. What
-    does change is the content, and this asserts the two wrapping shapes are
-    distinguishable by their canonical bytes.
-    """
     original = parse(LEGITIMATE)
     relocated = parse(RELOCATED_UNDER_A_WRAPPER)
 

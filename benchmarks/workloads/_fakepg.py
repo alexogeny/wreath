@@ -64,9 +64,7 @@ class FakePostgres:
             self.server.close()
             await self.server.wait_closed()
 
-    async def _handle(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             startup_len = struct.unpack("!I", await reader.readexactly(4))[0]
             payload = await reader.readexactly(startup_len - 4)
@@ -139,7 +137,7 @@ class FakePostgres:
                     transaction_status = b"I"
                 writer.write(_message(b"Z", transaction_status))
                 await writer.drain()
-        except (asyncio.IncompleteReadError, ConnectionError):
+        except asyncio.IncompleteReadError, ConnectionError:
             pass
         finally:
             writer.close()

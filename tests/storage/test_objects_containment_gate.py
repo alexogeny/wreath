@@ -1,21 +1,3 @@
-"""`normalize_key`'s containment gate, proved against its own definition.
-
-The gate is a security control: it is the single place a traversal or a control
-character is refused before a key reaches a filesystem or a URL. Its per-segment
-scan was a per-character generator expression and is now one compiled-regex
-search, which is 3-4x faster and would be a vulnerability rather than a
-regression if it accepted one input more.
-
-So these tests are differential rather than exemplary. `_reference` below is the
-predicate as it was shipped -- `any(ord(c) < 0x20 or ord(c) == 0x7F for c in
-part)`, spelled out longhand so no import can quietly make it agree -- and the
-corpus is generated: every C0 code point and DEL in every position of a segment,
-the traversal cases the gate exists for, the empty and dot segments, and the
-non-ASCII ranges an over-eager character class would swallow (C1 controls,
-U+2028/U+2029, NBSP, astral planes). Both the verdict *and* the message are
-compared, because every refusal here names the key and a test that asserted only
-that would pass on whichever branch fired.
-"""
 from __future__ import annotations
 
 import pytest
@@ -158,12 +140,6 @@ CORPUS = _corpus()
 
 
 def test_objects_normalize_key_matches_the_per_character_predicate():
-    """Verdict and message identical to the scan the regex replaced.
-
-    One test over the whole corpus rather than 864 parametrised ones: the
-    failure names every key that disagreed, which is more useful than the first
-    one alphabetically, and the suite does not grow by a thousand ids.
-    """
     disagreed = [
         (key, _outcome(normalize_key, key), _outcome(_reference, key))
         for key in CORPUS
@@ -173,14 +149,12 @@ def test_objects_normalize_key_matches_the_per_character_predicate():
 
 
 def test_objects_normalize_key_corpus_exercises_both_verdicts():
-    """The corpus would prove nothing if it were all refusals, or all keys."""
     outcomes = [_outcome(normalize_key, key)[0] for key in CORPUS]
     assert outcomes.count("ok") > 50
     assert outcomes.count("refused") > 50
 
 
 def test_objects_normalize_key_refuses_every_c0_and_del_by_name():
-    """The control-character branch fires, rather than some earlier refusal."""
     for code in [*range(0x00, 0x20), 0x7F]:
         key = f"photos/a{chr(code)}b.png"
         with pytest.raises(ObjectError) as excinfo:
@@ -189,7 +163,6 @@ def test_objects_normalize_key_refuses_every_c0_and_del_by_name():
 
 
 def test_objects_normalize_key_accepts_the_boundary_code_points():
-    """0x20 and 0x21 are legal; 0x7E is legal and 0x7F is not."""
     assert normalize_key("a b") == "a b"
     assert normalize_key("a!b") == "a!b"
     assert normalize_key("a~b") == "a~b"
@@ -200,6 +173,5 @@ def test_objects_normalize_key_accepts_the_boundary_code_points():
 
 
 def test_objects_normalize_key_scans_every_segment_not_only_the_first():
-    """A control character in a later segment is refused just the same."""
     with pytest.raises(ObjectError, match="control character"):
         normalize_key("a/b/c/d/e/f/g/h/i/\x00")

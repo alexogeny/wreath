@@ -1,13 +1,3 @@
-"""The database-skip banner, and the convention that keeps its count honest.
-
-The banner counts skips whose *reason* names ``WREATH_TEST_POSTGRES_DSN``. That
-is what makes the count derived rather than a hardcoded 47 that rots the moment
-someone adds a suite -- but it only holds while every gated test says so in its
-reason. `test_every_gated_module_names_the_variable_in_its_reason` is the pin:
-add a gated test that skips with a vaguer reason and it fails, here, loudly,
-instead of the count quietly drifting below reality.
-"""
-
 from __future__ import annotations
 
 import ast
@@ -54,7 +44,6 @@ def test_the_count_is_derived_from_the_reason_text() -> None:
 
 
 def test_a_report_with_no_longrepr_is_not_counted() -> None:
-    """xdist and some plugins hand back skips whose longrepr is a bare string."""
     assert gated.gated_skip_count([_Report(True, None)]) == 0
     assert gated.gated_skip_count([_Report(True, "Skipped: whatever")]) == 0
 
@@ -80,16 +69,6 @@ def _mentions_dsn(call: ast.Call) -> bool:
 
 
 def test_every_gated_module_names_the_variable_in_its_reason() -> None:
-    """Every module that gates on the DSN must say so where a skip can see it.
-
-    Scans the tree rather than listing files, so a suite that does not exist yet
-    is covered the day it is written. A module may mention the variable in prose
-    only -- what matters is that a module which *gates* on it puts the name in
-    the reason, because the reason is what the banner counts.
-
-    Parsed rather than grepped: this file is full of the variable inside string
-    literals, and a text scan flags itself.
-    """
     tests = pathlib.Path(__file__).parent
     offenders = []
     for path in sorted(tests.rglob("test_*.py")):
@@ -109,7 +88,6 @@ def test_every_gated_module_names_the_variable_in_its_reason() -> None:
 
 
 def test_the_banner_reads_differently_when_no_runtime_is_installed() -> None:
-    """The two situations are different and must not read the same."""
     with_runtime = "\n".join(gated.banner_lines(9, "podman"))
     without = "\n".join(gated.banner_lines(9, None))
 
@@ -128,7 +106,6 @@ def test_the_banner_reads_differently_when_no_runtime_is_installed() -> None:
 
 
 def test_the_runtime_probe_prefers_the_first_installed() -> None:
-    """Driven through a fake `which` so both branches run on any machine."""
     assert gated.container_runtime(lambda name: None) is None
     assert gated.container_runtime(lambda name: "/usr/bin/" + name) == "docker"
     only_podman = gated.container_runtime(
@@ -163,12 +140,6 @@ class _Item:
 
 
 def test_the_excluded_marks_come_from_the_expression_not_the_registry() -> None:
-    """Registered and *excluded* are different sets.
-
-    The first cut read `config.getini("markers")`, which includes `asyncio`
-    because pytest-asyncio registers it -- so three deselected async tests
-    reported "3 asyncio, 3 network". Only the expression explains a deselection.
-    """
     expr = "not fuzz and not performance and not network and not thesis"
     assert gated.marks_in_expression(expr) == ("fuzz", "performance", "network", "thesis")
     assert gated.marks_in_expression("") == ()
@@ -178,10 +149,6 @@ def test_the_excluded_marks_come_from_the_expression_not_the_registry() -> None:
 
 
 def test_the_total_counts_tests_while_the_breakdown_counts_marks() -> None:
-    """A test carrying two excluded marks is one test, not two.
-
-    Summing the per-mark tallies reported six tests for three.
-    """
     items = [_Item("network"), _Item("network", "fuzz"), _Item("asyncio")]
     counts = gated.deselected_by_mark(items, ("network", "fuzz"))
 
@@ -193,8 +160,6 @@ def test_the_total_counts_tests_while_the_breakdown_counts_marks() -> None:
 
 
 def test_worker_counts_merge_by_max_because_every_worker_sees_them_all() -> None:
-    """Under xdist each worker collects the whole suite and deselects the same
-    items, so all six report the same number. Summing would claim 6x reality."""
     one = {gated.TOTAL: 104, "network": 60}
     merged = gated.merge_worker_counts({}, one)
     for _ in range(5):
@@ -204,7 +169,6 @@ def test_worker_counts_merge_by_max_because_every_worker_sees_them_all() -> None
 
 
 def test_a_worker_that_collected_more_wins() -> None:
-    """Max, not first-wins: a worker seeing more is the truthful one."""
     merged = gated.merge_worker_counts({gated.TOTAL: 3, "network": 3}, {gated.TOTAL: 9, "fuzz": 6})
     assert merged[gated.TOTAL] == 9
     assert merged["network"] == 3
@@ -213,14 +177,18 @@ def test_a_worker_that_collected_more_wins() -> None:
 
 def test_disjoint_collection_shards_sum_their_deselections(monkeypatch) -> None:
     monkeypatch.setattr(suite_config, "_DESELECTED", {})
-    first = SimpleNamespace(workeroutput={
-        "wreath_collection_shard": True,
-        "gated_deselected": {gated.TOTAL: 3, "network": 3},
-    })
-    second = SimpleNamespace(workeroutput={
-        "wreath_collection_shard": True,
-        "gated_deselected": {gated.TOTAL: 2, "fuzz": 2},
-    })
+    first = SimpleNamespace(
+        workeroutput={
+            "wreath_collection_shard": True,
+            "gated_deselected": {gated.TOTAL: 3, "network": 3},
+        }
+    )
+    second = SimpleNamespace(
+        workeroutput={
+            "wreath_collection_shard": True,
+            "gated_deselected": {gated.TOTAL: 2, "fuzz": 2},
+        }
+    )
 
     suite_config.pytest_testnodedown(first, None)
     suite_config.pytest_testnodedown(second, None)
@@ -233,12 +201,6 @@ def test_disjoint_collection_shards_sum_their_deselections(monkeypatch) -> None:
 
 
 def test_the_deselect_banner_asks_for_a_flag_not_a_database() -> None:
-    """The two halves must not read alike.
-
-    A skip wants a DSN; a deselection wants `-m ''`, and no database in the
-    world changes that. Sending someone to start a container is worse than
-    silence.
-    """
     text = "\n".join(gated.deselect_lines({gated.TOTAL: 104, "network": 60, "fuzz": 44}))
     assert "104 tests were not collected" in text
     assert "60 network" in text and "44 fuzz" in text
@@ -252,14 +214,6 @@ def test_the_deselect_banner_asks_for_a_flag_not_a_database() -> None:
 
 
 def test_every_mark_the_default_run_excludes_is_a_declared_marker() -> None:
-    """The pin that keeps the deselection count honest.
-
-    The banner counts items carrying a mark named in the active ``-m``
-    expression. If that expression names a mark nobody declares -- a typo, or a
-    marker later renamed -- pytest deselects nothing, the banner says nothing,
-    and the tests it was meant to surface go quiet again. Reading both out of
-    `pyproject.toml` makes the drift a failure here instead.
-    """
     config = tomllib.loads(
         pathlib.Path(__file__).resolve().parents[1].joinpath("pyproject.toml").read_text()
     )

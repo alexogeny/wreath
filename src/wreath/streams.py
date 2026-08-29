@@ -349,9 +349,7 @@ class StreamEvent:
         """
         if self.kind == KIND_CHUNK:
             try:
-                return ServerSentEvent(
-                    data=self.data.decode("utf-8"), event=KIND_CHUNK, id=self.id
-                )
+                return ServerSentEvent(data=self.data.decode("utf-8"), event=KIND_CHUNK, id=self.id)
             except UnicodeDecodeError:
                 return ServerSentEvent(
                     data=b64_encode(self.data),
@@ -646,8 +644,6 @@ class Streams:
         #: replaying from the start, which is otherwise a silent duplicate.
         self.cursor_refusals = 0
 
-    # -- declaration ---------------------------------------------------------
-
     @property
     def log(self) -> PostgresLog:
         """The chunk log. Its `component`, `retention_pass` and `dropped` are the
@@ -716,8 +712,6 @@ class Streams:
     def registered(self, kind: str) -> bool:
         """Whether `kind` has a producer in *this* process."""
         return kind in self._producers
-
-    # -- starting ------------------------------------------------------------
 
     async def start(
         self,
@@ -789,16 +783,16 @@ class Streams:
         _check_key(key)
         fence, index = await self._head(key)
         await self._log.append(
-            key, fence=fence, idx=index + 1, kind=KIND_CANCELLED, body=None,
+            key,
+            fence=fence,
+            idx=index + 1,
+            kind=KIND_CANCELLED,
+            body=None,
             detail=reason[:2000],
         )
         return await self._jobs.cancel(key=_dedup(key))
 
-    # -- the producer's side -------------------------------------------------
-
-    async def _produce(
-        self, entry: _Producer, context: Any, key: str, args: list[Any]
-    ) -> None:
+    async def _produce(self, entry: _Producer, context: Any, key: str, args: list[Any]) -> None:
         """One attempt at one stream, inside a durable job.
 
         Which of the two retry disciplines applies is decided here, once, on the
@@ -842,13 +836,10 @@ class Streams:
         """
         declaration = self._log.declaration
         await self._run(
-            f"DELETE FROM {self._log.table} "
-            f"WHERE {declaration.stream} = $1 AND fence < $2",
+            f"DELETE FROM {self._log.table} WHERE {declaration.stream} = $1 AND fence < $2",
             key,
             fence,
         )
-
-    # -- the reader's side ---------------------------------------------------
 
     async def follow(
         self,
@@ -892,11 +883,7 @@ class Streams:
             ValueError: `since` is not a cursor for `key`.
         """
         _check_key(key)
-        start = (
-            since
-            if isinstance(since, StreamCursor)
-            else StreamCursor.decode(since, key=key)
-        )
+        start = since if isinstance(since, StreamCursor) else StreamCursor.decode(since, key=key)
         idle_for = self._idle if idle is None else idle
         poll_for = self._poll if poll is None else poll
         if idle_for <= 0 or poll_for <= 0:
@@ -930,7 +917,10 @@ class Streams:
                 if row_fence > fence:
                     if fence > 0:
                         yield StreamEvent(
-                            KIND_SUPERSEDED, position, row_fence, index,
+                            KIND_SUPERSEDED,
+                            position,
+                            row_fence,
+                            index,
                             detail=_SUPERSEDED,
                         )
                     fence = row_fence
@@ -952,9 +942,7 @@ class Streams:
                 # both are cases where holding the connection open forever is
                 # the wrong answer; the client reconnects with this id and
                 # resumes exactly where it stopped.
-                yield StreamEvent(
-                    KIND_TIMEOUT, position, fence, index, detail=_TIMED_OUT
-                )
+                yield StreamEvent(KIND_TIMEOUT, position, fence, index, detail=_TIMED_OUT)
                 return
             await asyncio.sleep(poll_for)
 
@@ -997,9 +985,7 @@ class Streams:
             return JSONResponse({"error": str(error), "key": key[:64]}, status=400)
         try:
             resume = (
-                since
-                if isinstance(since, StreamCursor)
-                else StreamCursor.decode(since, key=key)
+                since if isinstance(since, StreamCursor) else StreamCursor.decode(since, key=key)
             )
         except ValueError as error:
             self.cursor_refusals += 1
@@ -1014,8 +1000,6 @@ class Streams:
     ) -> AsyncIterator[ServerSentEvent]:
         async for event in self.follow(key, since=since, idle=idle, poll=poll):
             yield event.as_sse()
-
-    # -- counters ------------------------------------------------------------
 
     def counters(self) -> Any:
         """This registry's counters, for `wreath.metrics.collect`.
@@ -1051,8 +1035,6 @@ class Streams:
             "cursor_refusals": self.cursor_refusals,
             "dropped": self._log.dropped,
         }
-
-    # -- SQL this module owns ------------------------------------------------
 
     async def _max_fence(self, key: str) -> int:
         """The highest attempt that has settled rows for `key`, or 0.
@@ -1115,14 +1097,11 @@ class Streams:
 #: The text a `superseded` event carries. One string, so a client can match on
 #: it and a test can assert the distinct message rather than the field name.
 _SUPERSEDED: Final = (
-    "a retried attempt replaced everything delivered so far; discard it and "
-    "render what follows"
+    "a retried attempt replaced everything delivered so far; discard it and render what follows"
 )
 
 #: The text a `timeout` event carries.
-_TIMED_OUT: Final = (
-    "nothing arrived within the idle window; reconnect with this id to resume"
-)
+_TIMED_OUT: Final = "nothing arrived within the idle window; reconnect with this id to resume"
 
 
 def _dedup(key: str) -> str:

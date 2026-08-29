@@ -1,21 +1,3 @@
-"""`python -O` is a supported deployment mode, so no invariant may use `assert`.
-
-`-O` strips every `assert` statement. An `assert` guarding a wire format or a
-struct layout therefore vanishes in exactly the interpreter mode nothing else
-here exercises -- the module imports with a wrong layout and says nothing, which
-is a check that silently has nothing to check (a check that has nothing to check).
-
-Eight module-level `assert`s guarded struct layouts in `wreath._flight_schema`
-and `wreath.migrations` until this was measured: under `-O`, a completion cell
-packed to 60 bytes where the format requires 64 imported without complaint.
-Function-local assertions later accumulated around stream state, key families,
-and ORM declarations, so the ratchet now covers all runtime code. Devtool probes
-remain test-like measurement subjects and may use assertions for their results.
-
-`assert` remains correct in `tests/` -- it is pytest's idiom, and `-O` is never
-used to run a test suite.
-"""
-
 from __future__ import annotations
 
 import ast
@@ -61,11 +43,6 @@ def test_no_runtime_assert_guards_an_invariant() -> None:
 
 @pytest.mark.parametrize("module", ["wreath._flight_schema", "wreath.migrations"])
 def test_the_layout_modules_import_under_O(module: str) -> None:
-    """The converted modules must still import cleanly with asserts stripped.
-
-    A raise that fires on a *correct* layout would be worse than the assert it
-    replaced, so this runs the real interpreter rather than trusting the source.
-    """
     result = subprocess.run(
         [sys.executable, "-O", "-c", f"import {module}"],
         capture_output=True,

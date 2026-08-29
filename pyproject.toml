@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wreath"
-version = "0.3.3"
+version = "0.3.4"
 description = "A Python 3.14-first, dependency-free ASGI framework core"
 readme = "README.md"
 requires-python = "==3.14.*"
@@ -27,20 +27,15 @@ classifiers = [
 # implementation into the framework. The base wheel always carries the
 # portable native core. `linux` adds the io_uring reactor, while `h3` and
 # `http3` are aliases for the same HTTP/3 extension and its bundled QUIC stack.
-linux = ["wreath-linux==0.3.3; sys_platform == 'linux'"]
-h3 = ["wreath-http3==0.3.3; sys_platform == 'linux'"]
-http3 = ["wreath-http3==0.3.3; sys_platform == 'linux'"]
+linux = ["wreath-linux==0.3.4; sys_platform == 'linux'"]
+h3 = ["wreath-http3==0.3.4; sys_platform == 'linux'"]
+http3 = ["wreath-http3==0.3.4; sys_platform == 'linux'"]
 
-# PyPI renders these as the project's sidebar links. Without them the listing
-# has no way back to the source or the documentation, and every relative link
-# in the README resolves against pypi.org instead. The README uses absolute
-# URLs for the same reason.
 [project.urls]
 Homepage = "https://github.com/alexogeny/wreath"
 Documentation = "https://alexogeny.github.io/wreath/"
 Source = "https://github.com/alexogeny/wreath"
 Issues = "https://github.com/alexogeny/wreath/issues"
-Changelog = "https://alexogeny.github.io/wreath/release_notes/index.html"
 
 [dependency-groups]
 dev = [
@@ -188,16 +183,11 @@ wreath-cpu-probe = "wreath._devtools.cpu_probe:main"
 wreath-query-probe = "wreath._devtools.query_probe:main"
 # Drives an ASan/UBSan build and attributes what it finds; see _devtools/sanitize.py.
 wreath-sanitize = "wreath._devtools.sanitize:main"
-# Checks that the agent-facing maps still describe the repository.
-wreath-map-lint = "wreath._devtools.map_lint:main"
 # Borrowed credit and committed debris; stdlib-only so CI runs it unbuilt.
 wreath-hygiene = "wreath._devtools.hygiene:main"
 # Fails when a compiled extension is older than the sources it is built from.
 # Not in the gate yet: `_http3` is genuinely stale and cannot be rebuilt here.
 wreath-build-lint = "wreath._devtools.build_lint:main"
-# Fails when the roadmap claims a surface is absent and the symbol resolves.
-# Not in the gate yet: the one in-scope row still needs its `absent:` marker.
-wreath-roadmap-lint = "wreath._devtools.roadmap_lint:main"
 # Fails when a query's parameter type would be inferred as something the driver
 # cannot encode -- the shape that works once and raises on every call after.
 wreath-sql-lint = "wreath._devtools.sql_lint:main"
@@ -214,7 +204,6 @@ wreath-decomp = "wreath._devtools.decomp:main"
 # Task runners. Each installs the dependency group it needs with
 # `uv sync --inexact`, so switching jobs cannot uninstall the last one.
 wreath-check = "wreath._devtools.tasks:check"
-wreath-docs = "wreath._devtools.tasks:docs"
 wreath-bench = "wreath._devtools.tasks:bench"
 # Quiet the machine for benchmarking, reversibly. Separate from `wreath-bench`
 # so `--restore` is reachable from a fresh shell after a crash.
@@ -225,7 +214,7 @@ wreath-bench-report = "wreath._devtools.bench_report:main"
 [tool.uv]
 # `uv sync` reconciles the venv to exactly the selected groups, removing
 # everything else. Naming dev here keeps it installed for every sync and for
-# `uv run --group docs`/`--group benchmark`, so working on one group cannot
+# `uv run --group benchmark`, so working on that group cannot
 # quietly uninstall the toolchain the tests and native builds need.
 default-groups = ["dev"]
 
@@ -346,14 +335,8 @@ extend-immutable-calls = ["wreath.binding.Depends", "Depends"]
 # changing the rendered document to satisfy a rule about Python source. Scoped
 # deliberately: E501 only, and only here.
 "src/wreath/_admin/pages.py" = ["E501"]
-# Generated, and generated from prose. `_capability_data.py` is compiled out of
-# `docs/agents/manifest.json` by `wreath-map-lint --fix`, and each row carries
-# that subsystem's capability sentence verbatim -- several run past 100
-# characters, and the sentence is the manifest's wording rather than this file's.
-# Wrapping them would mean the generator choosing line breaks inside somebody
-# else's prose, and MAP015 compares this file byte for byte, so those breaks
-# would then have to be reproduced exactly on every regeneration. Scoped
-# deliberately: E501 only, and only in the generated file.
+# Capability sentences are stored as single literals so each index row remains
+# easy to scan and update.
 "src/wreath/_capability_data.py" = ["E501"]
 # The hardening corpus is defective code on purpose: each file reproduces a
 # planted application defect so `wreath.hardening` can be proved to find it, and

@@ -67,9 +67,7 @@ _ORPHANING = frozenset({"n", "d"})
 _BLOCKING = frozenset({"a", "r"})
 
 
-def build_plan(
-    registry: PrivacyRegistry, orm_registry: Any, subject_id: str
-) -> ErasurePlan:
+def build_plan(registry: PrivacyRegistry, orm_registry: Any, subject_id: str) -> ErasurePlan:
     """Derive what erasing one subject would do. Opens nothing, writes nothing.
 
     Raises:
@@ -138,9 +136,7 @@ def build_plan(
     )
 
 
-def build_export_plan(
-    registry: PrivacyRegistry, orm_registry: Any, subject_id: str
-) -> ExportPlan:
+def build_export_plan(registry: PrivacyRegistry, orm_registry: Any, subject_id: str) -> ExportPlan:
     """The same traversal in read mode, for a subject-access request.
 
     Derived from the erasure plan rather than from a second walk, because two
@@ -234,9 +230,7 @@ def _root_deleted(registry: PrivacyRegistry) -> bool:
     return registry.subject_delete
 
 
-def _match_column(
-    reach: Reach, registry: PrivacyRegistry, root: type, model: type
-) -> str:
+def _match_column(reach: Reach, registry: PrivacyRegistry, root: type, model: type) -> str:
     if model is root:
         return registry.subject_key
     classification = registry.classifications.get(model)
@@ -328,9 +322,7 @@ def _orphan_risks(
     return risks
 
 
-def _surviving_references(
-    graph: Graph, tables: list[TableAction]
-) -> list[SurvivingReference]:
+def _surviving_references(graph: Graph, tables: list[TableAction]) -> list[SurvivingReference]:
     """`NO ACTION`/`RESTRICT` edges from a surviving row to a deleted one.
 
     Every model in the graph is considered, not only the classified ones: the
@@ -457,9 +449,7 @@ def _notes(
             "traversal cannot reach. Erasure refuses to run until each is resolved."
         )
     if any(not cycle.deferrable for cycle in cycles):
-        notes.append(
-            "BLOCKED: a foreign-key cycle admits no ordering of plain deletes."
-        )
+        notes.append("BLOCKED: a foreign-key cycle admits no ordering of plain deletes.")
     if surviving:
         notes.append(
             f"BLOCKED: {len(surviving)} foreign key(s) point at rows this plan "

@@ -1,16 +1,3 @@
-"""Unit coverage for `wreath.grpc`'s framing, statuses, deadlines and refusals.
-
-These tests are wreath judging wreath, so they cannot establish that the bytes
-are gRPC -- only `tests/test_grpc_interop.py`, which puts Google's own client on
-the other end, can do that. What they *can* do is pin the edges an interop suite
-never reaches: a length prefix that lies, a timeout unit nobody sends, a
-handler that raises after the first message is already on the wire.
-
-The wire vectors below are written from the gRPC specification rather than
-captured from this implementation, so a regression fails as a spec mismatch
-instead of agreeing with itself.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -100,13 +87,9 @@ class Pong:
 
 class TestFraming:
     def test_the_prefix_is_a_flag_byte_and_a_big_endian_length(self):
-        """Hand-computed from the specification: one zero flag byte, then four
-        bytes of length, then the payload."""
         assert frame_message(b"abc") == b"\x00\x00\x00\x00\x03abc"
 
     def test_an_empty_message_still_carries_a_prefix(self):
-        """A zero-length message is a real message, not an absence -- a client
-        that sent one is waiting for a reply to it."""
         assert frame_message(b"") == b"\x00\x00\x00\x00\x00"
 
     def test_a_frame_round_trips_through_the_unframer(self):
@@ -118,8 +101,6 @@ class TestFraming:
         assert Unframer().feed(chunk) == [b"one", b"two", b"three"]
 
     def test_a_message_split_across_chunks_is_reassembled(self):
-        """A message may span DATA frames, so the reader cannot assume a chunk
-        boundary is a message boundary."""
         whole = frame_message(b"abcdefgh")
         unframer = Unframer()
         assert unframer.feed(whole[:3]) == []
@@ -127,17 +108,11 @@ class TestFraming:
         assert unframer.feed(whole[7:]) == [b"abcdefgh"]
 
     def test_finishing_a_complete_stream_does_not_raise(self):
-        """The negative half of the refusal below, and it is load-bearing:
-        without it a `finish()` that *always* raised would pass every other test
-        in this class, and every well-formed call would end in INTERNAL.
-        Found by the mutation pass, which is exactly the gap it looks for."""
         unframer = Unframer()
         unframer.feed(frame_message(b"abc"))
         unframer.finish()
 
     def test_a_partial_trailing_message_is_refused_not_dropped(self):
-        """Silently discarding a half-message would turn a truncated stream
-        into a successful call over less data than the client sent."""
         unframer = Unframer()
         unframer.feed(frame_message(b"abc")[:-1])
         with pytest.raises(GrpcError) as caught:
@@ -145,9 +120,6 @@ class TestFraming:
         assert caught.value.status is Status.INTERNAL
 
     def test_a_length_beyond_the_limit_is_refused_before_allocating(self):
-        """The four length bytes are attacker-controlled. The refusal must come
-        from the declared length alone, without waiting for -- or reserving --
-        the bytes it claims."""
         unframer = Unframer(max_message_bytes=16)
         oversized = b"\x00" + (999_999).to_bytes(4, "big")
         with pytest.raises(GrpcError) as caught:
@@ -159,15 +131,6 @@ class TestFraming:
         assert DEFAULT_MAX_MESSAGE_BYTES == 4 * 1024 * 1024
 
     def test_a_compressed_message_on_an_identity_call_is_refused_by_name(self):
-        """The flag says compressed and the call declared no encoding.
-
-        The specification's own name for this is "Compressed-Flag set but no
-        grpc-encoding", and it is `INTERNAL` rather than `UNIMPLEMENTED`: the
-        peer is not asking for something unsupported, it is contradicting the
-        header it sent. The message names *identity* so it cannot be confused
-        with the header-level refusal of an unsupported coding, which is the
-        other place a compression complaint comes from.
-        """
         unframer = Unframer()
         with pytest.raises(GrpcError) as caught:
             unframer.feed(b"\x01\x00\x00\x00\x03abc")
@@ -192,9 +155,6 @@ class TestTimeouts:
 
     @pytest.mark.parametrize("value", ["", "5", "S", "-1S", "5X", "1.5S", "999999999S"])
     def test_a_malformed_timeout_is_refused_rather_than_ignored(self, value):
-        """Treating an unparseable deadline as "no deadline" would let a call
-        outlive the caller waiting on it, which is the one outcome the header
-        exists to prevent."""
         with pytest.raises(GrpcError) as caught:
             parse_timeout(value)
         assert caught.value.status is Status.INVALID_ARGUMENT
@@ -215,8 +175,6 @@ class TestStatusMapping:
         assert status_for(exc)[0] is expected
 
     def test_an_unrecognised_exception_is_unknown_not_something_retryable(self):
-        """UNAVAILABLE and ABORTED both tell a client the call is worth
-        retrying. An exception nobody classified must never say that."""
         status, _ = status_for(RuntimeError("boom"))
         assert status is Status.UNKNOWN
 
@@ -233,8 +191,6 @@ class TestGrpcMessageEncoding:
         assert percent_encode("not for you") == "not for you"
 
     def test_a_newline_cannot_forge_a_header(self):
-        """An unescaped newline in an error string would let a handler inject a
-        trailer of its own choosing."""
         assert "\n" not in percent_encode("a\nb")
         assert percent_encode("a\nb") == "a%0Ab"
 
@@ -247,8 +203,6 @@ class TestGrpcMessageEncoding:
 
 class TestServiceDeclaration:
     def test_a_non_message_request_type_is_refused_at_declaration(self):
-        """gRPC carries protobuf. Catching this when the service is built beats
-        catching it on the first call in production."""
         service = GrpcService("t.S")
         with pytest.raises(TypeError, match="not a @message"):
 
@@ -261,8 +215,6 @@ class TestServiceDeclaration:
             GrpcService("/t.S")
 
     def test_every_method_becomes_one_post_route_at_the_grpc_path(self):
-        """The path *is* `/{service}/{method}` -- that is how a gRPC client
-        addresses a call, not a wreath convention layered on top."""
         service = GrpcService("camera.Tracker")
 
         @service.unary(request=Ping, response=Pong)
@@ -276,8 +228,6 @@ class TestServiceDeclaration:
         assert routes[0].methods == ("POST",)
 
     def test_route_metadata_reaches_the_definition_unchanged(self):
-        """`permissions=` here must mean what it means on a REST route, or the
-        promise of one authorization vocabulary across protocols is false."""
         service = GrpcService("t.S")
 
         @service.unary(request=Ping, response=Pong, permissions=("track:read",))
@@ -286,16 +236,9 @@ class TestServiceDeclaration:
             return Pong(text="x")
 
         route = next(iter(service.router().routes))
-        assert any(
-            "track:read" in check.values
-            for check in route.requirement.permission_checks
-        )
+        assert any("track:read" in check.values for check in route.requirement.permission_checks)
 
     def test_an_auth_decorator_on_the_method_survives_the_wrapper(self):
-        """The route registers a wrapper around the user's function, so a
-        requirement recorded by `@roles` on *their* function has to be carried
-        across. Without that the decorator reads as enforcement and enforces
-        nothing -- the precise shape of an unwatched control."""
         from wreath.authorization import roles
 
         service = GrpcService("t.S")
@@ -319,13 +262,6 @@ class TestServiceDeclaration:
         assert any("ranger" in check.values for check in merged.role_checks)
 
     def test_grpc_dispatch_over_asgi_answers_a_framed_reply_and_a_status(self):
-        """Drive the whole dispatch path without a socket.
-
-        Between "the framer agrees with the unframer" and "grpcio accepts the
-        bytes" sits the dispatch itself, and only the interop suite reached it
-        -- which is `network`-marked and needs TLS. This drives the ASGI
-        messages directly, so the default suite covers the path too.
-        """
         from wreath import Wreath
         from wreath.grpc import frame_message
         from wreath.protobuf import encode
@@ -351,10 +287,6 @@ class TestServiceDeclaration:
         assert payload == frame_message(encode(Pong(text="HI")))
 
     def test_a_call_over_http1_is_refused_naming_the_transport(self):
-        """ASGI gives no way to learn at startup which protocols the server
-        speaks, so this is the first thing every call checks. The refusal has to
-        name the reason -- a `200` whose trailers never arrive is the failure
-        this replaces."""
         from wreath import Wreath
         from wreath.grpc import frame_message
         from wreath.protobuf import encode
@@ -368,9 +300,7 @@ class TestServiceDeclaration:
 
         app = Wreath()
         app.include_router(service.router())
-        sent = _drive(
-            app, "/t.S/M", frame_message(encode(Ping(text="hi"))), http_version="1.1"
-        )
+        sent = _drive(app, "/t.S/M", frame_message(encode(Ping(text="hi"))), http_version="1.1")
         trailers = _grpc_status_headers(sent)
         assert trailers[b"grpc-status"] == str(int(Status.UNIMPLEMENTED)).encode()
         assert b"HTTP/2" in trailers[b"grpc-message"]
@@ -392,8 +322,6 @@ class TestServiceDeclaration:
         assert trailers[b"grpc-status"] == str(int(Status.INTERNAL)).encode()
 
     def test_a_unary_call_carrying_two_messages_is_refused(self):
-        """Two messages on a unary path means the client used the wrong call
-        shape. Taking the first would silently reinterpret it as a valid call."""
         from wreath import Wreath
         from wreath.grpc import frame_message
         from wreath.protobuf import encode
@@ -427,22 +355,11 @@ class TestServiceDeclaration:
         return app
 
     def test_a_request_with_no_content_type_at_all_is_refused(self):
-        """The header may be absent, not merely wrong. Without this the `or ""`
-        fallback is never taken and a missing header would reach the comparison
-        as None."""
         sent = _drive(self._echo_app(), "/t.S/M", b"", content_type=None)
         trailers = _grpc_status_headers(sent)
         assert trailers[b"grpc-status"] == str(int(Status.INTERNAL)).encode()
 
     def test_an_unsupported_request_encoding_is_refused_by_name(self):
-        """A coding this server does not implement is named, not decoded at.
-
-        `deflate` is a real gRPC coding and wreath does not implement it, so the
-        client is told exactly that rather than handed a codec failure from
-        three layers down. The refusal also carries `grpc-accept-encoding`, so a
-        client that can re-send knows what to re-send as -- which is the whole
-        reason the specification puts that header on the response.
-        """
         from wreath.grpc import frame_message
         from wreath.protobuf import encode
 
@@ -458,17 +375,12 @@ class TestServiceDeclaration:
         assert (b"grpc-accept-encoding", b"identity,gzip") in sent[0]["headers"]
 
     def test_a_unary_call_carrying_no_message_is_refused(self):
-        """An empty body on a unary path is not an empty message -- nothing was
-        framed at all. Defaulting it would invent a request the client never
-        sent."""
         sent = _drive(self._echo_app(), "/t.S/M", b"")
         trailers = _grpc_status_headers(sent)
         assert trailers[b"grpc-status"] == str(int(Status.INVALID_ARGUMENT)).encode()
         assert b"none" in trailers[b"grpc-message"]
 
     def test_grpc_routes_stay_out_of_the_openapi_document(self):
-        """A gRPC method is not a REST operation; describing it as one would put
-        a path in the document that no HTTP client can call."""
         service = GrpcService("t.S")
 
         @service.unary(request=Ping, response=Pong)
@@ -499,23 +411,10 @@ class TestCompression:
         assert unframer.feed(self._gzip_frame(b"hello" * 20)) == [b"hello" * 20]
 
     def test_an_uncompressed_message_is_still_read_on_a_gzip_call(self):
-        """The flag is per message, so a client may compress some and not others.
-
-        A server that assumed every message on a `grpc-encoding: gzip` call was
-        compressed would fail on exactly the small ones a sensible client leaves
-        alone.
-        """
         unframer = Unframer(encoding="gzip")
         assert unframer.feed(frame_message(b"plain")) == [b"plain"]
 
     def test_a_gzip_message_exceeding_the_limit_is_refused_after_decoding(self):
-        """The bomb: a wire length well inside the ceiling, a decoded one past it.
-
-        The length check on the prefix cannot catch this -- it sees a few dozen
-        bytes -- so the decoder has to carry the same bound, and the refusal has
-        to name the *decoded* limit rather than repeating the wire-length
-        complaint, or the two are indistinguishable in a log.
-        """
         bomb = self._gzip_frame(b"\x00" * 2_000_000)
         assert len(bomb) < 8192, "the wire length must stay inside the ceiling"
         unframer = Unframer(max_message_bytes=8192, encoding="gzip")
@@ -531,21 +430,12 @@ class TestCompression:
         assert caught.value.status is Status.INTERNAL
 
     def test_the_two_compression_refusals_do_not_share_a_message(self):
-        """The trap this suite has hit before: two refusals, one message.
-
-        A test that asserted only "gzip appears in the text" would pass whichever
-        branch fired, including a fallthrough. These two are different failures
-        with different remedies -- change the coding, versus stop setting the
-        flag -- so they must read differently.
-        """
         with pytest.raises(GrpcError) as flagged:
             Unframer().feed(b"\x01\x00\x00\x00\x03abc")
         with pytest.raises(GrpcError) as unsupported:
             negotiated_encoding("deflate")
         assert flagged.value.message != unsupported.value.message
         assert flagged.value.status is not unsupported.value.status
-
-    # -- end to end, through the ASGI dispatch --------------------------------
 
     def _echo_app(self):
         from wreath import Wreath
@@ -562,9 +452,7 @@ class TestCompression:
         return app
 
     def _payload(self, sent) -> bytes:
-        return b"".join(
-            m.get("body", b"") for m in sent if m["type"] == "http.response.body"
-        )
+        return b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
 
     def test_a_gzip_request_body_reaches_the_handler_decoded(self):
         from wreath.compression import gzip_compress
@@ -595,12 +483,9 @@ class TestCompression:
         body = self._payload(sent)
         assert body[0] == 1
         assert len(body) < len(encode(Pong(text=big)))
-        assert gzip_decompress(body[5:], max_output_bytes=1 << 20) == encode(
-            Pong(text=big)
-        )
+        assert gzip_decompress(body[5:], max_output_bytes=1 << 20) == encode(Pong(text=big))
 
     def test_a_client_that_did_not_ask_for_gzip_gets_identity(self):
-        """The negative space. Compressing unasked is a client-side decode error."""
         from wreath.protobuf import encode
 
         big = "x" * 4096
@@ -609,12 +494,6 @@ class TestCompression:
         assert self._payload(sent) == frame_message(encode(Pong(text=big)))
 
     def test_an_incompressible_reply_is_sent_uncompressed(self):
-        """Compression that makes a message larger is not compression.
-
-        gzip's header and trailer cost ~20 bytes, so a short reply comes out
-        bigger. The flag is per message precisely so a server may decline, and a
-        client reads flag 0 correctly whatever the call declared.
-        """
         from wreath.protobuf import encode
 
         sent = _drive(
@@ -640,9 +519,7 @@ class TestCompression:
             ("snappy", "identity"),
         ],
     )
-    def test_the_reply_coding_is_read_from_what_the_client_accepts(
-        self, header, expected
-    ):
+    def test_the_reply_coding_is_read_from_what_the_client_accepts(self, header, expected):
         assert reply_encoding(header) == expected
 
     def test_the_server_advertises_both_codings_it_accepts(self):
@@ -652,12 +529,6 @@ class TestCompression:
         assert (b"grpc-accept-encoding", b"identity,gzip") in sent[0]["headers"]
 
     def test_a_coding_in_accept_that_this_server_lacks_is_simply_not_used(self):
-        """`grpc-accept-encoding` is a list of what the client *can* read.
-
-        Naming one this server does not implement is not an error -- identity is
-        always acceptable -- so the reply is uncompressed rather than refused.
-        Refusing here would break every client that lists its full repertoire.
-        """
         from wreath.protobuf import encode
 
         sent = _drive(

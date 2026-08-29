@@ -1,11 +1,3 @@
-"""JSONB and array query operators, the Array type, and index methods.
-
-The SQL-generation and coercion tests here are pure Python (no database and no
-native codec), so they exercise the real expressions/compiler paths. The binary
-array wire codec (codec.c) and its round trip need the native build and a live
-PostgreSQL, and live in the driver integration tests instead.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -37,9 +29,6 @@ def registry() -> Registry:
 
 def _where(registry: Registry, predicate):
     return compile_select(registry, Doc.select(Doc.id).where(predicate))
-
-
-# -- jsonb operators ---------------------------------------------------------
 
 
 def test_jsonb_contains_renders_and_binds_jsonb(registry: Registry) -> None:
@@ -89,9 +78,6 @@ def test_jsonb_path_as_json_contains(registry: Registry) -> None:
     assert compiled.bind_oids == (1009, Jsonb.oid)
 
 
-# -- array operators ---------------------------------------------------------
-
-
 def test_array_contains(registry: Registry) -> None:
     compiled = _where(registry, Doc.tags.contains(["x"]))
     assert compiled.sql.endswith('WHERE "t0"."tags" @> $1')
@@ -119,14 +105,9 @@ def test_array_all_eq(registry: Registry) -> None:
     assert compiled.bind_values == (3,)
 
 
-# -- shape keys distinguish the new operators --------------------------------
-
-
 def test_operators_get_distinct_shape_keys(registry: Registry) -> None:
     contains = shape_of(registry, Doc.select(Doc.id).where(Doc.data.contains({"a": 1})))
-    contained = shape_of(
-        registry, Doc.select(Doc.id).where(Doc.data.contained_by({"a": 1}))
-    )
+    contained = shape_of(registry, Doc.select(Doc.id).where(Doc.data.contained_by({"a": 1})))
     assert contains != contained
 
 
@@ -134,9 +115,6 @@ def test_shape_key_is_independent_of_array_length(registry: Registry) -> None:
     one = shape_of(registry, Doc.select(Doc.id).where(Doc.data.has_any(["a"])))
     many = shape_of(registry, Doc.select(Doc.id).where(Doc.data.has_any(["a", "b", "c"])))
     assert one == many  # the whole array is a single bound parameter
-
-
-# -- build-time type guards --------------------------------------------------
 
 
 def test_has_key_requires_jsonb_not_plain_json(registry: Registry) -> None:
@@ -167,9 +145,6 @@ def test_empty_operands_are_rejected(registry: Registry) -> None:
 def test_path_requires_json_or_jsonb(registry: Registry) -> None:
     with pytest.raises(DeclarationError):
         Doc.tags.path(["a"])
-
-
-# -- the Array type -----------------------------------------------------------
 
 
 def test_array_coerces_elements_and_rejects_mistyped() -> None:
@@ -213,9 +188,6 @@ def test_unsupported_element_has_no_array() -> None:
 
     assert 1009 in BY_OID  # text[] registered for result validation
     assert BY_OID[1009].oid == 1009
-
-
-# -- index method resolution --------------------------------------------------
 
 
 def test_index_true_is_btree() -> None:

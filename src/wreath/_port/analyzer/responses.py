@@ -19,17 +19,32 @@ from .imports import _Imports
 #: spelling of a 500 by some distance, and it used to fall through to a
 #: needs-review annotation over a name whose import the emitter had dropped.
 STATUS_EXCEPTION: dict[int, str] = {
-    400: "BadRequest", 401: "Unauthorized", 403: "Forbidden", 404: "NotFound",
-    405: "MethodNotAllowed", 409: "Conflict", 413: "PayloadTooLarge",
-    422: "UnprocessableEntity", 429: "TooManyRequests",
-    431: "RequestHeaderFieldsTooLarge", 500: "HTTPException",
+    400: "BadRequest",
+    401: "Unauthorized",
+    403: "Forbidden",
+    404: "NotFound",
+    405: "MethodNotAllowed",
+    409: "Conflict",
+    413: "PayloadTooLarge",
+    422: "UnprocessableEntity",
+    429: "TooManyRequests",
+    431: "RequestHeaderFieldsTooLarge",
+    500: "HTTPException",
 }
 
 # fastapi.responses / starlette.responses classes wreath ships an equivalent of.
-_RESPONSE_CLASSES = frozenset({
-    "JSONResponse", "HTMLResponse", "PlainTextResponse", "RedirectResponse",
-    "StreamingResponse", "FileResponse", "ORJSONResponse", "UJSONResponse",
-})
+_RESPONSE_CLASSES = frozenset(
+    {
+        "JSONResponse",
+        "HTMLResponse",
+        "PlainTextResponse",
+        "RedirectResponse",
+        "StreamingResponse",
+        "FileResponse",
+        "ORJSONResponse",
+        "UJSONResponse",
+    }
+)
 
 # Response classes wreath ships that are not in the fastapi.responses set above.
 # A handler already returning one of these carries its own status, so a route
@@ -43,8 +58,11 @@ def status_int(imports: _Imports, node: ast.AST | None) -> int | None:
     `status.HTTP_404_NOT_FOUND` is a literal wearing a name, and applications
     spell the status that way far more often than as a bare integer.
     """
-    if isinstance(node, ast.Constant) and isinstance(node.value, int) \
-            and not isinstance(node.value, bool):
+    if (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, int)
+        and not isinstance(node.value, bool)
+    ):
         return node.value
     if not isinstance(node, ast.Attribute) or not node.attr.startswith("HTTP_"):
         return None
@@ -158,9 +176,11 @@ def response_class_rule(imports: _Imports, value: ast.expr, node) -> str:
             continue  # the handler builds its own response; the keyword was dead
         if isinstance(returned, (ast.Dict, ast.List, ast.Tuple, ast.DictComp, ast.ListComp)):
             continue
-        if isinstance(returned, ast.Constant) and (
-            returned.value is None or isinstance(returned.value, (bool, int, float))
-        ) and not isinstance(returned.value, str):
+        if (
+            isinstance(returned, ast.Constant)
+            and (returned.value is None or isinstance(returned.value, (bool, int, float)))
+            and not isinstance(returned.value, str)
+        ):
             continue
         return "route.response_class"
     return "route.response_class_default"

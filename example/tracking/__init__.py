@@ -7,11 +7,8 @@ charges by the byte, the coordinate is the record rather than a column beside
 it, the data arrives days late when a collar loses the sky, and the answer a
 reader gets depends on who is reading.
 
-It is deliberately the smaller of the two examples. Routing, CRUD, paging, the
-read API and migrations as artifacts are taught by the camera trap and are not
-taught again here. What is here is ingest, place, policy and realtime.
-
-Start at ``docs/tracking/index.md``.
+It is deliberately the smaller of the two examples. What is here is ingest,
+place, policy and realtime.
 """
 
 from __future__ import annotations

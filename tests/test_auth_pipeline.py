@@ -165,9 +165,7 @@ async def test_python_authorization_fallback_accepts_a_matching_role() -> None:
         receive,
     )
     request._set_identity(Identity("alice", roles=frozenset({"admin"})))
-    requirement = AuthRequirement(
-        role_checks=(SetRequirement(frozenset({"admin"}), "all"),)
-    )
+    requirement = AuthRequirement(role_checks=(SetRequirement(frozenset({"admin"}), "all"),))
 
     response = await Wreath()._authorize_request(
         request,

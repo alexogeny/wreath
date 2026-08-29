@@ -1,5 +1,3 @@
-"""RequestIdPolicy: inbound validation, minting, and echo."""
-
 from __future__ import annotations
 
 import os
@@ -27,7 +25,7 @@ def test_validator_accepts_correlation_ids_and_rejects_injection() -> None:
         (b"newline\ninjected", False),
         (b"semi;colon", False),
         (b"<script>", False),
-        (b"quote\"", False),
+        (b'quote"', False),
         (b"\x00null", False),
         (b"caf\xc3\xa9", False),  # non-ASCII
     ):
@@ -37,13 +35,6 @@ def test_validator_accepts_correlation_ids_and_rejects_injection() -> None:
 
 
 def test_validator_applies_the_same_charset_under_a_shorter_bound() -> None:
-    """The charset and the length bound are separate rejections.
-
-    A 64-byte bound rather than 128, because the length check and the charset
-    check are separate rejections and a validator that conflated them would look
-    correct at a single limit. `b"-" * 200` is the one that separates them: every
-    byte is in the charset, so only the bound can refuse it.
-    """
     for value, expected in (
         (b"abc", True),
         (b"a.b-c_d", True),
@@ -57,9 +48,7 @@ def test_validator_applies_the_same_charset_under_a_shorter_bound() -> None:
 
 
 async def test_valid_inbound_id_is_reused_and_echoed() -> None:
-    app = Wreath(
-        http_policy=HttpPolicy(request_id=RequestIdPolicy(trust_inbound=True))
-    )
+    app = Wreath(http_policy=HttpPolicy(request_id=RequestIdPolicy(trust_inbound=True)))
     seen: list[str] = []
 
     @app.get("/")
@@ -75,9 +64,7 @@ async def test_valid_inbound_id_is_reused_and_echoed() -> None:
 
 
 async def test_hostile_inbound_id_is_replaced_not_sanitized() -> None:
-    app = Wreath(
-        http_policy=HttpPolicy(request_id=RequestIdPolicy(trust_inbound=True))
-    )
+    app = Wreath(http_policy=HttpPolicy(request_id=RequestIdPolicy(trust_inbound=True)))
 
     @app.get("/")
     async def index(request: Any) -> str:
@@ -107,9 +94,7 @@ async def test_inbound_id_is_distrusted_by_default() -> None:
 
 
 async def test_ids_are_minted_per_request_and_can_go_unechoed() -> None:
-    app = Wreath(
-        http_policy=HttpPolicy(request_id=RequestIdPolicy(echo=False))
-    )
+    app = Wreath(http_policy=HttpPolicy(request_id=RequestIdPolicy(echo=False)))
     seen: list[str] = []
 
     @app.get("/")
@@ -171,17 +156,14 @@ class TestNativeRandomHex:
             assert re.fullmatch(r"[0-9a-f]+", value)
 
     def test_it_does_not_repeat(self) -> None:
-        """Correlation ids collide silently: two requests become one in a trace."""
         drawn = {_core.random_hex(16) for _ in range(5000)}
         assert len(drawn) == 5000
 
     def test_it_refuses_a_size_its_buffer_cannot_hold(self) -> None:
-        """A stack buffer bounds this; the bound is checked, not assumed."""
         for size in (0, -1, 65, 1 << 20):
             with pytest.raises(ValueError):
                 _core.random_hex(size)
 
     def test_random_hex_renders_lowercase_hex_two_chars_per_byte(self) -> None:
-        """The shape `os.urandom(n).hex()` produces, which is what callers parse."""
         assert re.fullmatch(r"[0-9a-f]{32}", _core.random_hex(16))
         assert len(_core.random_hex(16)) == len(os.urandom(16).hex())

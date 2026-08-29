@@ -42,15 +42,21 @@ from .config import Palette
 from .repo import RepoInfo, compact
 from .scripts import BOOT
 
-_SANS = ('ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", '
-         '"Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif')
+_SANS = (
+    'ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", '
+    '"Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif'
+)
 #: `ui-serif` resolves to New York on Apple platforms and Cambria on Windows —
 #: both genuinely good text faces — with Charter and Georgia as the floor. No
 #: web font is downloaded, so the display voice costs nothing and never flashes.
-_SERIF = ('ui-serif, "New York", Charter, "Bitstream Charter", "Iowan Old Style", '
-          'Cambria, "Palatino Linotype", Georgia, serif')
-_MONO = ('ui-monospace, SFMono-Regular, "SF Mono", "Cascadia Mono", "JetBrains Mono", '
-         'Menlo, Consolas, "Liberation Mono", monospace')
+_SERIF = (
+    'ui-serif, "New York", Charter, "Bitstream Charter", "Iowan Old Style", '
+    'Cambria, "Palatino Linotype", Georgia, serif'
+)
+_MONO = (
+    'ui-monospace, SFMono-Regular, "SF Mono", "Cascadia Mono", "JetBrains Mono", '
+    'Menlo, Consolas, "Liberation Mono", monospace'
+)
 
 _FACES = {"system": _SANS, "sans": _SANS, "serif": _SERIF, "mono": _MONO}
 
@@ -60,16 +66,16 @@ _FACES = {"system": _SANS, "sans": _SANS, "serif": _SERIF, "mono": _MONO}
 #: scale would want because the display face is set at regular weight: at 40px
 #: a serif carries a page title on size alone and never needs faux bold.
 _TYPE = (
-    "--text-2xs:.6875rem;"     # 11px — eyebrows, kbd, nav section labels
-    "--text-xs:.75rem;"        # 12px — captions, copy button, code meta
-    "--text-sm:.8125rem;"      # 13px — TOC, tabs, table cells
-    "--text-ui:.875rem;"       # 14px — sidebar links, search results
-    "--text-base:1rem;"        # 16px — body
-    "--text-lg:1.125rem;"      # 18px — lead paragraph, h4
-    "--text-xl:1.375rem;"      # 22px — h3
-    "--text-2xl:1.75rem;"      # 28px — h2
-    "--text-3xl:2.5rem;"       # 40px — h1
-    "--text-4xl:3.5rem;"       # 56px — a hero headline, and only that
+    "--text-2xs:.6875rem;"  # 11px — eyebrows, kbd, nav section labels
+    "--text-xs:.75rem;"  # 12px — captions, copy button, code meta
+    "--text-sm:.8125rem;"  # 13px — TOC, tabs, table cells
+    "--text-ui:.875rem;"  # 14px — sidebar links, search results
+    "--text-base:1rem;"  # 16px — body
+    "--text-lg:1.125rem;"  # 18px — lead paragraph, h4
+    "--text-xl:1.375rem;"  # 22px — h3
+    "--text-2xl:1.75rem;"  # 28px — h2
+    "--text-3xl:2.5rem;"  # 40px — h1
+    "--text-4xl:3.5rem;"  # 56px — a hero headline, and only that
 )
 
 #: Optical tracking. Type tightens as it grows and opens as it shrinks: at 40px
@@ -92,15 +98,7 @@ _SPACE = (
     "--space-5:1.5rem;--space-6:2rem;--space-7:3rem;--space-8:4rem;"
 )
 
-#: Layout constants. `--measure` bounds *all* content, not just paragraphs:
-#: capping `<p>` alone (as this did) left code blocks and tables running past
-#: the text's right edge, which is the single most obvious "unfinished" tell.
-#: `--header-h` is the sticky offset every other sticky element is positioned
-#: against. It is now simply the bar: the header used to grow by a second row
-#: of section tabs, and the sticky offset had to be recomputed per page
-#: depending on whether that row existed. One row, one height, one offset.
-_LAYOUT = ("--measure:73ch;--sidebar-w:16rem;--toc-w:14rem;"
-           "--bar-h:3.25rem;--header-h:var(--bar-h);")
+_LAYOUT = "--measure:73ch;--sidebar-w:16rem;--toc-w:14rem;--bar-h:3.25rem;--header-h:var(--bar-h);"
 
 
 def _colour_tokens(palette: Palette) -> tuple[str, str]:
@@ -121,10 +119,8 @@ def _colour_tokens(palette: Palette) -> tuple[str, str]:
     # A heavy brand primary reads as too-dark body links and is often below AA
     # on a dark surface, so dark links lighten the brand rather than inherit it.
     dark_link = palette.dark_link or f"color-mix(in oklab, {palette.primary} 45%, #ffffff)"
-    dark_primary = (palette.dark_primary
-                    or f"color-mix(in oklab, {palette.primary} 62%, #ffffff)")
-    dark_accent = (palette.dark_accent
-                   or f"color-mix(in oklab, {palette.accent} 62%, #ffffff)")
+    dark_primary = palette.dark_primary or f"color-mix(in oklab, {palette.primary} 62%, #ffffff)"
+    dark_accent = palette.dark_accent or f"color-mix(in oklab, {palette.accent} 62%, #ffffff)"
     light = (
         f"--primary:{palette.primary};--accent:{palette.accent};"
         f"--bg:{palette.bg};--surface:{palette.surface};"
@@ -179,21 +175,36 @@ def _colour_tokens(palette: Palette) -> tuple[str, str]:
 #: the theme rather than on top of it. Measured floor across all five themes and
 #: both modes is 5.2:1 against the code surface (AA wants 4.5), and the hues stay
 #: distinguishable from each other, which pure derivation could not manage.
-_TINT = 78                                  # % of the tuned hue; the rest is --fg
+_TINT = 78  # % of the tuned hue; the rest is --fg
 
 
 def _syntax(light: bool) -> str:
     hues = (
-        {"keyword": "#b02a5b", "string": "#0a6b3d", "number": "#0b5fa5",
-         "builtin": "#6b3fc0", "operator": "#b5390d", "variable": "#8a4b06"}
-        if light else
-        {"keyword": "#ff8098", "string": "#7ee787", "number": "#79c0ff",
-         "builtin": "#d2a8ff", "operator": "#ffab70", "variable": "#ffc857"}
+        {
+            "keyword": "#b02a5b",
+            "string": "#0a6b3d",
+            "number": "#0b5fa5",
+            "builtin": "#6b3fc0",
+            "operator": "#b5390d",
+            "variable": "#8a4b06",
+        }
+        if light
+        else {
+            "keyword": "#ff8098",
+            "string": "#7ee787",
+            "number": "#79c0ff",
+            "builtin": "#d2a8ff",
+            "operator": "#ffab70",
+            "variable": "#ffc857",
+        }
     )
-    return "".join(
-        f"--tok-{name}:color-mix(in oklab, {hue} {_TINT}%, var(--fg));"
-        for name, hue in hues.items()
-    ) + "--tok-comment:var(--fg-subtle);"
+    return (
+        "".join(
+            f"--tok-{name}:color-mix(in oklab, {hue} {_TINT}%, var(--fg));"
+            for name, hue in hues.items()
+        )
+        + "--tok-comment:var(--fg-subtle);"
+    )
 
 
 #: The critical paint layer: reset, page colours, type, and the layout frame.
@@ -716,8 +727,26 @@ dialog.palette[open]{animation:pop .14s ease-out;}
    two pages in the whole site open with one, and the band is built from the same
    three voices as everything else -- mono eyebrow, display headline, body lede.
    No panel, no fill, no gradient; the space around it does the work. */
-.hero{padding:var(--space-6) 0 var(--space-7);
- border-bottom:1px solid var(--border);margin-bottom:var(--space-7);}
+.hero{position:relative;isolation:isolate;overflow:hidden;
+ padding:var(--hero-pad,var(--space-6) 0 var(--space-7));
+ border:1px solid var(--hero-border,var(--border));
+ border-width:var(--hero-border-width,0 0 1px);border-radius:var(--hero-radius,0);
+ background:var(--hero-bg,transparent);box-shadow:var(--hero-shadow,none);
+ margin-bottom:var(--space-7);}
+.hero::before,.hero::after{content:"";position:absolute;z-index:-1;
+ border-radius:50%;pointer-events:none;opacity:var(--hero-glow,0);filter:blur(2px);}
+.hero::before{width:24rem;height:24rem;right:-10rem;top:-13rem;
+ background:radial-gradient(circle,var(--tint-strong),transparent 68%);}
+.hero::after{width:19rem;height:19rem;right:5rem;bottom:-15rem;
+ background:radial-gradient(circle,
+ color-mix(in oklab,var(--accent) 18%,transparent),transparent 70%);}
+.hero-signals{display:flex;flex-wrap:wrap;gap:var(--space-2);margin-top:var(--space-5);}
+.hero-signals span{padding:.3rem .65rem;border:1px solid var(--border);
+ border-radius:999px;background:color-mix(in oklab,var(--bg) 72%,transparent);
+ color:var(--fg-muted);font-family:var(--font-mono);font-size:var(--text-2xs);
+ letter-spacing:.02em;}
+.layout.no-side .hero.wide,.layout.no-side .story-grid.wide{width:min(80rem,calc(100vw - 3rem));
+ margin-left:50%;transform:translateX(-50%);}
 
 /* --- the dependency plate -------------------------------------------------- */
 /* The home page's opener. A herbarium plate: a small-caps caption, the
@@ -804,6 +833,38 @@ dialog.palette[open]{animation:pop .14s ease-out;}
  background:var(--tint);text-decoration:none;}
 .hero-action:hover::after{color:var(--link);}
 .hero-action.primary{border-color:var(--link);color:var(--link);}
+
+/* --- story cards ---------------------------------------------------------- */
+.story-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+ gap:var(--space-4);margin:var(--space-7) 0;}
+.story-card{position:relative;display:flex;min-height:17rem;flex-direction:column;
+ padding:var(--space-5);overflow:hidden;color:var(--fg);text-decoration:none;
+ border:1px solid var(--border);border-radius:var(--radius);
+ background:var(--card-bg,var(--bg));box-shadow:var(--card-shadow,var(--shadow-1));
+ transition:transform .2s ease,border-color .2s ease,box-shadow .2s ease;}
+.story-card::before{content:"";position:absolute;width:12rem;height:12rem;
+ right:-7rem;top:-7rem;border-radius:50%;opacity:var(--card-glow,0);
+ background:radial-gradient(circle,var(--tint-strong),transparent 68%);
+ transition:transform .25s ease,opacity .25s ease;}
+.story-card:hover{transform:translateY(-3px);border-color:var(--link);
+ box-shadow:var(--card-hover-shadow,var(--shadow-2));}
+.story-card:hover::before{transform:scale(1.2);opacity:1;}
+.story-card h2{margin:var(--space-6) 0 0;font-family:var(--font-display);
+ font-size:var(--text-xl);line-height:1.15;letter-spacing:var(--track-xl);}
+.story-card p{margin:var(--space-3) 0 var(--space-6);color:var(--fg-muted);
+ line-height:1.55;font-size:var(--text-ui);}
+.story-index,.story-meta{font-family:var(--font-mono);font-size:var(--text-2xs);
+ text-transform:uppercase;letter-spacing:var(--track-caps);color:var(--fg-subtle);}
+.story-meta{margin-top:auto;color:var(--fg-muted);}
+.story-arrow{position:absolute;right:var(--space-5);top:var(--space-5);
+ color:var(--link);font-size:var(--text-lg);transition:transform .2s ease;}
+.story-card:hover .story-arrow{transform:translate(2px,-2px);}
+@media (max-width:44rem){
+ .story-grid{grid-template-columns:1fr;}
+ .story-card{min-height:14rem;}
+ .layout.no-side .hero.wide,.layout.no-side .story-grid.wide{width:100%;
+  margin-left:0;transform:none;}
+}
 
 /* --- explanatory figures ---------------------------------------------------- */
 /* Every figure runs one 8s timeline shared by both halves of its comparison, so
@@ -1040,26 +1101,38 @@ main{view-transition-name:content;}
 FEELS: dict[str, str] = {
     "flat": ":root{--shadow-1:none;--shadow-2:none;}",
     "elevated": "",
-    "papery":
-        ":root{--radius:5px;--border-width:1px;"
-        "--shadow-1:0 1px 3px rgba(80,60,20,.14);"
-        "--surface-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'"
-        "%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' "
-        "numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' "
-        "filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E\");}",
-    "hardcore":
-        ":root{--radius:0px;--border-width:2px;--shadow-1:none;--shadow-2:none;"
-        "--shadow-3:0 0 0 2px var(--fg);}"
-        "header.site{border-bottom-width:2px;}"
-        ".prose h1,.prose h2{text-transform:uppercase;letter-spacing:var(--track-caps);}"
-        ".icon-btn,.search-open,.copy-btn,.table-wrap,.code,kbd,.to-top{border-radius:0;}"
-        ".to-top{border-width:2px;}",
-    "orby":
-        ":root{--radius:16px;--shadow-1:0 2px 10px rgba(0,0,0,.08);"
-        "--shadow-2:0 10px 34px rgba(0,0,0,.14);}"
-        ".search-open,.copy-btn,kbd,.icon-btn{border-radius:999px;}"
-        "dialog.palette{border-radius:18px;}"
-        "header.site{backdrop-filter:saturate(1.2) blur(6px);}",
+    "papery": ":root{--radius:5px;--border-width:1px;"
+    "--shadow-1:0 1px 3px rgba(80,60,20,.14);"
+    "--surface-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'"
+    "%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' "
+    "numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' "
+    "filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E\");}",
+    "hardcore": ":root{--radius:0px;--border-width:2px;--shadow-1:none;--shadow-2:none;"
+    "--shadow-3:0 0 0 2px var(--fg);}"
+    "header.site{border-bottom-width:2px;}"
+    ".prose h1,.prose h2{text-transform:uppercase;letter-spacing:var(--track-caps);}"
+    ".icon-btn,.search-open,.copy-btn,.table-wrap,.code,kbd,.to-top{border-radius:0;}"
+    ".to-top{border-width:2px;}",
+    "orby": ":root{--radius:16px;--shadow-1:0 2px 10px rgba(0,0,0,.08);"
+    "--shadow-2:0 10px 34px rgba(0,0,0,.14);}"
+    ".search-open,.copy-btn,kbd,.icon-btn{border-radius:999px;}"
+    "dialog.palette{border-radius:18px;}"
+    "header.site{backdrop-filter:saturate(1.2) blur(6px);}",
+    "luminous": ":root{--radius:18px;"
+    "--surface-image:radial-gradient(circle at 8% 0%,var(--tint-strong),transparent 34rem),"
+    "radial-gradient(circle at 94% 12%,"
+    "color-mix(in oklab,var(--accent) 10%,transparent),transparent 30rem);"
+    "--hero-pad:var(--space-8) var(--space-7);--hero-border-width:1px;"
+    "--hero-radius:calc(var(--radius) * 1.35);"
+    "--hero-bg:linear-gradient(135deg,color-mix(in oklab,var(--bg) 90%,transparent),"
+    "color-mix(in oklab,var(--surface) 78%,transparent));"
+    "--hero-border:color-mix(in oklab,var(--link) 28%,var(--border));"
+    "--hero-shadow:var(--shadow-2);--hero-glow:1;"
+    "--card-bg:color-mix(in oklab,var(--bg) 88%,transparent);--card-glow:.68;"
+    "--card-shadow:0 10px 35px color-mix(in oklab,var(--primary) 8%,transparent);"
+    "--card-hover-shadow:0 20px 54px color-mix(in oklab,var(--primary) 15%,transparent);"
+    "}header.site{backdrop-filter:saturate(1.4) blur(18px);"
+    "-webkit-backdrop-filter:saturate(1.4) blur(18px);}",
 }
 
 
@@ -1080,11 +1153,15 @@ def _tab_rules() -> str:
     for index in range(_MAX_TABS):
         checked = f".tabbed>input:nth-of-type({index + 1}):checked"
         rules.append(f"{checked}~.tab-panel:nth-of-type({index + 2}){{display:block;}}")
-        rules.append(f"{checked}~.tab-labels>.tab-label:nth-of-type({index + 1})"
-                     "{color:var(--link);border-bottom-color:var(--link);}")
-        rules.append(f".tabbed>input:nth-of-type({index + 1}):focus-visible"
-                     f"~.tab-labels>.tab-label:nth-of-type({index + 1})"
-                     "{outline:2px solid var(--link);outline-offset:-2px;}")
+        rules.append(
+            f"{checked}~.tab-labels>.tab-label:nth-of-type({index + 1})"
+            "{color:var(--link);border-bottom-color:var(--link);}"
+        )
+        rules.append(
+            f".tabbed>input:nth-of-type({index + 1}):focus-visible"
+            f"~.tab-labels>.tab-label:nth-of-type({index + 1})"
+            "{outline:2px solid var(--link);outline-offset:-2px;}"
+        )
     return "".join(rules)
 
 
@@ -1102,8 +1179,7 @@ def _root_blocks(palette: Palette, feel: str) -> str:
     return (
         f":root{{{base}}}"
         f"@media (prefers-color-scheme: dark){{:root:not([data-theme=light]){{{dark_block}}}}}"
-        f":root[data-theme=dark]{{{dark_block}}}"
-        + FEELS.get(feel, "")
+        f":root[data-theme=dark]{{{dark_block}}}" + FEELS.get(feel, "")
     )
 
 
@@ -1144,33 +1220,31 @@ def stylesheet(palette: Palette, feel: str = "flat") -> str:
 #: doughnut rather than as woven stems.
 _MARK = (
     '<svg class="mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">'
-    '<g stroke="currentColor" stroke-width="1.5" stroke-linecap="round">'
-    # The two stems. Each is a full circle nudged off-centre in opposite
-    # directions, so they touch at four points and read as a braid.
-    '<circle cx="12" cy="12" r="8.1" opacity=".95"/>'
-    '<circle cx="12" cy="12" r="6.4" opacity=".55"/>'
-    # Leaves, as short strokes leaning off the outer stem.
-    '<g stroke-width="1.3" opacity=".8">'
-    '<path d="M12 3.9v-2.1"/><path d="m18.6 6.9 1.7-1.2"/>'
-    '<path d="m20.1 14.4 2 .6"/><path d="M12 20.1v2.1"/>'
-    '<path d="m5.4 17.1-1.7 1.2"/><path d="m3.9 9.6-2-.6"/>'
-    "</g>"
-    "</g>"
-    # The two flowers, at the eight and two o'clock the engraving puts them.
-    '<circle cx="17.7" cy="7.4" r="1.35" fill="currentColor"/>'
-    '<circle cx="6.3" cy="16.6" r="1.35" fill="currentColor"/>'
+    '<circle cx="12" cy="12" r="8.25" stroke="currentColor" stroke-width="1.4" opacity=".35"/>'
+    '<path d="M4.8 8.1c3.1-4.8 11.3-4.8 14.4 0s-1 11.6-7.2 11.6S1.7 12.9 4.8 8.1Z" '
+    'stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>'
+    '<path d="M7.2 4.8c4.8-3.1 11.6 1 11.6 7.2s-6.8 10.3-11.6 7.2-4.8-11.3 0-14.4Z" '
+    'stroke="currentColor" stroke-width="1.15" stroke-linecap="round" opacity=".68"/>'
+    '<circle cx="18.6" cy="8" r="1.55" fill="currentColor"/>'
+    '<circle cx="6.1" cy="16.4" r="1.15" fill="currentColor" opacity=".65"/>'
     "</svg>"
 )
 
-_ICON_SEARCH = ('<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" '
-                'stroke-width="1.8" stroke-linecap="round" aria-hidden="true">'
-                '<circle cx="8.6" cy="8.6" r="5.4"/><path d="M12.6 12.6 17 17"/></svg>')
-_ICON_MENU = ('<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" '
-              'stroke-width="1.8" stroke-linecap="round" aria-hidden="true">'
-              '<path d="M3 6h14M3 10h14M3 14h14"/></svg>')
-_ICON_CHEVRON = ('<svg class="chev" viewBox="0 0 20 20" fill="none" '
-                 'stroke="currentColor" stroke-width="1.7" stroke-linecap="round" '
-                 'stroke-linejoin="round" aria-hidden="true"><path d="m6 8 4 4 4-4"/></svg>')
+_ICON_SEARCH = (
+    '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" '
+    'stroke-width="1.8" stroke-linecap="round" aria-hidden="true">'
+    '<circle cx="8.6" cy="8.6" r="5.4"/><path d="M12.6 12.6 17 17"/></svg>'
+)
+_ICON_MENU = (
+    '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" '
+    'stroke-width="1.8" stroke-linecap="round" aria-hidden="true">'
+    '<path d="M3 6h14M3 10h14M3 14h14"/></svg>'
+)
+_ICON_CHEVRON = (
+    '<svg class="chev" viewBox="0 0 20 20" fill="none" '
+    'stroke="currentColor" stroke-width="1.7" stroke-linecap="round" '
+    'stroke-linejoin="round" aria-hidden="true"><path d="m6 8 4 4 4-4"/></svg>'
+)
 #: The theme control reports its state by *showing* it: three icons in the
 #: markup, one revealed per mode by CSS. Swapping them in script would leave the
 #: button lying about itself for as long as the runtime takes to arrive.
@@ -1186,64 +1260,75 @@ _ICONS_THEME = (
     'M1.8 10h2.2M16 10h2.2M3.7 16.3l1.6-1.6M14.7 5.3l1.6-1.6"/></svg>'
     '<svg class="i-moon" viewBox="0 0 20 20" fill="none" stroke="currentColor" '
     'stroke-width="1.7" stroke-linejoin="round" aria-hidden="true">'
-    '<path d="M16.2 12.3A6.8 6.8 0 0 1 7.7 3.8a6.9 6.9 0 1 0 8.5 8.5z"/></svg>')
-_ICON_MORE = ('<svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">'
-              '<circle cx="4.6" cy="10" r="1.5"/><circle cx="10" cy="10" r="1.5"/>'
-              '<circle cx="15.4" cy="10" r="1.5"/></svg>')
-_ICON_TOP = ('<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" '
-             'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" '
-             'aria-hidden="true"><path d="M10 16V4M4.8 9.2 10 4l5.2 5.2"/></svg>')
+    '<path d="M16.2 12.3A6.8 6.8 0 0 1 7.7 3.8a6.9 6.9 0 1 0 8.5 8.5z"/></svg>'
+)
+_ICON_MORE = (
+    '<svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">'
+    '<circle cx="4.6" cy="10" r="1.5"/><circle cx="10" cy="10" r="1.5"/>'
+    '<circle cx="15.4" cy="10" r="1.5"/></svg>'
+)
+_ICON_TOP = (
+    '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" '
+    'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" '
+    'aria-hidden="true"><path d="M10 16V4M4.8 9.2 10 4l5.2 5.2"/></svg>'
+)
 
 #: One stroked mark per `config.ICONS` name, drawn on the same 20-unit grid and
 #: the same 1.7 weight as the rest of the chrome so a header link never reads as
 #: a pasted-in logo. `github` and `gitlab` are filled marks because a stroked
 #: outline of either is unrecognisable at 18px.
-_STROKE = ('viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" '
-           'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"')
+_STROKE = (
+    'viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" '
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"'
+)
 _FILL = 'viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"'
 ICON_MARKS: dict[str, str] = {
     "link": f'<svg {_STROKE}><path d="M8.4 11.6a3.4 3.4 0 0 0 5 .3l2.2-2.2a3.4 3.4 0 0 '
-            f'0-4.8-4.8L9.5 6.2"/><path d="M11.6 8.4a3.4 3.4 0 0 0-5-.3l-2.2 2.2a3.4 3.4 '
-            f'0 0 0 4.8 4.8l1.3-1.3"/></svg>',
+    f'0-4.8-4.8L9.5 6.2"/><path d="M11.6 8.4a3.4 3.4 0 0 0-5-.3l-2.2 2.2a3.4 3.4 '
+    f'0 0 0 4.8 4.8l1.3-1.3"/></svg>',
     "home": f'<svg {_STROKE}><path d="M3.2 9.4 10 3.6l6.8 5.8"/>'
-            f'<path d="M5 8.6v7.8h10V8.6"/><path d="M8.2 16.4v-4.2h3.6v4.2"/></svg>',
+    f'<path d="M5 8.6v7.8h10V8.6"/><path d="M8.2 16.4v-4.2h3.6v4.2"/></svg>',
     "github": f'<svg {_FILL}><path d="M10 1.4a8.6 8.6 0 0 0-2.7 16.8c.43.08.59-.19.59-.41'
-              f'0-.2-.01-.87-.01-1.58-2.18.4-2.74-.53-2.92-1.02-.1-.25-.53-1.02-.9-1.23'
-              f'-.31-.16-.75-.57-.02-.58.69-.01 1.18.63 1.34.9.78 1.32 2.03.95 2.53.72'
-              f'.08-.57.31-.95.56-1.17-1.94-.22-3.96-.97-3.96-4.31 0-.95.34-1.74.9-2.35'
-              f'-.09-.22-.39-1.12.09-2.33 0 0 .73-.23 2.4.9a8.1 8.1 0 0 1 4.36 0c1.66'
-              f'-1.13 2.39-.9 2.39-.9.48 1.21.18 2.11.09 2.33.56.61.9 1.39.9 2.35 0 3.35'
-              f'-2.03 4.09-3.96 4.31.31.27.59.79.59 1.6 0 1.16-.01 2.09-.01 2.38 0 .23'
-              f'.16.5.6.41A8.6 8.6 0 0 0 10 1.4z"/></svg>',
+    f"0-.2-.01-.87-.01-1.58-2.18.4-2.74-.53-2.92-1.02-.1-.25-.53-1.02-.9-1.23"
+    f"-.31-.16-.75-.57-.02-.58.69-.01 1.18.63 1.34.9.78 1.32 2.03.95 2.53.72"
+    f".08-.57.31-.95.56-1.17-1.94-.22-3.96-.97-3.96-4.31 0-.95.34-1.74.9-2.35"
+    f"-.09-.22-.39-1.12.09-2.33 0 0 .73-.23 2.4.9a8.1 8.1 0 0 1 4.36 0c1.66"
+    f"-1.13 2.39-.9 2.39-.9.48 1.21.18 2.11.09 2.33.56.61.9 1.39.9 2.35 0 3.35"
+    f"-2.03 4.09-3.96 4.31.31.27.59.79.59 1.6 0 1.16-.01 2.09-.01 2.38 0 .23"
+    f'.16.5.6.41A8.6 8.6 0 0 0 10 1.4z"/></svg>',
     "gitlab": f'<svg {_FILL}><path d="M10 18.4 6.7 8.2h6.6L10 18.4zM10 18.4 2.2 8.2h4.5'
-              f'L10 18.4zM2.2 8.2 1.2 11.4c-.1.3 0 .6.27.8L10 18.4 2.2 8.2zM2.2 8.2h4.5'
-              f'L4.8 2.3c-.1-.3-.5-.3-.6 0L2.2 8.2zM10 18.4l3.3-10.2h4.5L10 18.4z'
-              f'M17.8 8.2l1 3.2c.1.3 0 .6-.27.8L10 18.4l7.8-10.2zM17.8 8.2h-4.5l1.9-5.9'
-              f'c.1-.3.5-.3.6 0l2 5.9z"/></svg>',
+    f"L10 18.4zM2.2 8.2 1.2 11.4c-.1.3 0 .6.27.8L10 18.4 2.2 8.2zM2.2 8.2h4.5"
+    f"L4.8 2.3c-.1-.3-.5-.3-.6 0L2.2 8.2zM10 18.4l3.3-10.2h4.5L10 18.4z"
+    f"M17.8 8.2l1 3.2c.1.3 0 .6-.27.8L10 18.4l7.8-10.2zM17.8 8.2h-4.5l1.9-5.9"
+    f'c.1-.3.5-.3.6 0l2 5.9z"/></svg>',
     "package": f'<svg {_STROKE}><path d="M10 2.8 16.6 6v8L10 17.2 3.4 14V6z"/>'
-               f'<path d="M3.4 6 10 9.2 16.6 6"/><path d="M10 9.2v8"/></svg>',
+    f'<path d="M3.4 6 10 9.2 16.6 6"/><path d="M10 9.2v8"/></svg>',
     "chat": f'<svg {_STROKE}><path d="M16.6 12.2a1.8 1.8 0 0 1-1.8 1.8H7.2L3.4 17V5.4'
-            f'a1.8 1.8 0 0 1 1.8-1.8h9.6a1.8 1.8 0 0 1 1.8 1.8z"/></svg>',
+    f'a1.8 1.8 0 0 1 1.8-1.8h9.6a1.8 1.8 0 0 1 1.8 1.8z"/></svg>',
     "mail": f'<svg {_STROKE}><path d="M3.2 5.4h13.6v9.2H3.2z"/>'
-            f'<path d="m3.2 6 6.8 4.6L16.8 6"/></svg>',
+    f'<path d="m3.2 6 6.8 4.6L16.8 6"/></svg>',
     "rss": f'<svg {_STROKE}><path d="M4.4 4.2a11.4 11.4 0 0 1 11.4 11.4"/>'
-           f'<path d="M4.4 9.2a6.4 6.4 0 0 1 6.4 6.4"/>'
-           f'<circle cx="4.9" cy="15.1" r="1.1" fill="currentColor" stroke="none"/></svg>',
+    f'<path d="M4.4 9.2a6.4 6.4 0 0 1 6.4 6.4"/>'
+    f'<circle cx="4.9" cy="15.1" r="1.1" fill="currentColor" stroke="none"/></svg>',
     "book": f'<svg {_STROKE}><path d="M3.6 4.2h4.2A2.2 2.2 0 0 1 10 6.4v9.4a1.8 1.8 0 0 '
-            f'0-1.8-1.8H3.6z"/><path d="M16.4 4.2h-4.2A2.2 2.2 0 0 0 10 6.4v9.4a1.8 1.8 '
-            f'0 0 1 1.8-1.8h4.6z"/></svg>',
+    f'0-1.8-1.8H3.6z"/><path d="M16.4 4.2h-4.2A2.2 2.2 0 0 0 10 6.4v9.4a1.8 1.8 '
+    f'0 0 1 1.8-1.8h4.6z"/></svg>',
 }
 
 #: Star and fork, drawn only next to a repository link that carries counts.
-_ICON_STAR = ('<svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">'
-              '<path d="m10 2.8 2.24 4.54 5.01.73-3.62 3.53.85 4.99L10 14.24l-4.48 2.35'
-              '.85-4.99L2.75 8.07l5.01-.73z"/></svg>')
-_ICON_FORK = ('<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" '
-              'stroke-width="1.8" stroke-linecap="round" aria-hidden="true">'
-              '<circle cx="5.6" cy="4.8" r="1.9"/><circle cx="14.4" cy="4.8" r="1.9"/>'
-              '<circle cx="10" cy="15.2" r="1.9"/>'
-              '<path d="M5.6 6.7v1.1a2.2 2.2 0 0 0 2.2 2.2h4.4a2.2 2.2 0 0 0 2.2-2.2V6.7'
-              'M10 10v3.3"/></svg>')
+_ICON_STAR = (
+    '<svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">'
+    '<path d="m10 2.8 2.24 4.54 5.01.73-3.62 3.53.85 4.99L10 14.24l-4.48 2.35'
+    '.85-4.99L2.75 8.07l5.01-.73z"/></svg>'
+)
+_ICON_FORK = (
+    '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" '
+    'stroke-width="1.8" stroke-linecap="round" aria-hidden="true">'
+    '<circle cx="5.6" cy="4.8" r="1.9"/><circle cx="14.4" cy="4.8" r="1.9"/>'
+    '<circle cx="10" cy="15.2" r="1.9"/>'
+    '<path d="M5.6 6.7v1.1a2.2 2.2 0 0 0 2.2 2.2h4.4a2.2 2.2 0 0 0 2.2-2.2V6.7'
+    'M10 10v3.3"/></svg>'
+)
 
 
 def repo_link(info: RepoInfo | None) -> str:
@@ -1266,18 +1351,23 @@ def repo_link(info: RepoInfo | None) -> str:
     mark = ICON_MARKS.get(info.host or "link", ICON_MARKS["link"])
     stats = ""
     if info.stars > 0 or info.forks > 0:
-        stats = (f'<span class="stat">{_ICON_STAR}'
-                 f'<span>{_e(compact(info.stars))}</span></span>'
-                 f'<span class="stat">{_ICON_FORK}'
-                 f'<span>{_e(compact(info.forks))}</span></span>')
-        label = (f"{info.title} on {info.host or 'the web'}: "
-                 f"{info.stars} stars, {info.forks} forks")
+        stats = (
+            f'<span class="stat">{_ICON_STAR}'
+            f"<span>{_e(compact(info.stars))}</span></span>"
+            f'<span class="stat">{_ICON_FORK}'
+            f"<span>{_e(compact(info.forks))}</span></span>"
+        )
+        label = f"{info.title} on {info.host or 'the web'}: {info.stars} stars, {info.forks} forks"
     else:
         label = f"{info.title} on {info.host or 'the web'}"
-    body = (f'<span class="repo-name">{_e(info.title)}</span>'
-            f'{f"<span class=\"repo-stats\">{stats}</span>" if stats else ""}')
-    return (f'<a class="more-item repo" href="{_e(info.url)}" rel="noopener noreferrer" '
-            f'aria-label="{_e(label)}">{mark}<span class="repo-text">{body}</span></a>')
+    body = (
+        f'<span class="repo-name">{_e(info.title)}</span>'
+        f"{f'<span class="repo-stats">{stats}</span>' if stats else ''}"
+    )
+    return (
+        f'<a class="more-item repo" href="{_e(info.url)}" rel="noopener noreferrer" '
+        f'aria-label="{_e(label)}">{mark}<span class="repo-text">{body}</span></a>'
+    )
 
 
 def link_row(links) -> str:
@@ -1286,7 +1376,9 @@ def link_row(links) -> str:
         return ""
     return "".join(
         f'<a class="more-item" href="{_e(link.url)}" rel="noopener noreferrer">'
-        f'{ICON_MARKS[link.icon]}<span>{_e(link.label)}</span></a>' for link in links)
+        f"{ICON_MARKS[link.icon]}<span>{_e(link.label)}</span></a>"
+        for link in links
+    )
 
 
 def _more(repo_html: str, links_html: str) -> str:
@@ -1306,25 +1398,45 @@ def _more(repo_html: str, links_html: str) -> str:
     body = f"{repo_html}{links_html}"
     if not body:
         return ""
-    return ('<details class="more"><summary aria-label="Links and options">'
-            f'{_ICON_MORE}</summary><div class="more-menu">{body}</div></details>')
+    return (
+        '<details class="more"><summary aria-label="Links and options">'
+        f'{_ICON_MORE}</summary><div class="more-menu">{body}</div></details>'
+    )
 
 
 def page(
-    *, site_name: str, page_title: str, content: str, nav_html: str, toc_html: str,
-    css_href: str, palette: Palette, search_root: str = "", description: str = "",
-    footer: str = "", home_href: str = "index.html", feel: str = "flat",
-    js_href: str = "assets/docs.js", tabs_html: str = "", canonical: str = "",
-    repo_html: str = "", links_html: str = "", section_title: str = "",
-    section_href: str = "", map_href: str = "",
+    *,
+    site_name: str,
+    page_title: str,
+    content: str,
+    nav_html: str,
+    toc_html: str,
+    css_href: str,
+    palette: Palette,
+    search_root: str = "",
+    description: str = "",
+    footer: str = "",
+    home_href: str = "index.html",
+    feel: str = "flat",
+    js_href: str = "assets/docs.js",
+    tabs_html: str = "",
+    canonical: str = "",
+    repo_html: str = "",
+    links_html: str = "",
+    section_title: str = "",
+    section_href: str = "",
+    map_href: str = "",
 ) -> str:
     """Assemble one full HTML document (no external requests)."""
     title = f"{page_title} · {site_name}" if page_title else site_name
     meta_desc = f'<meta name="description" content="{_e(description)}">' if description else ""
     link_canonical = f'<link rel="canonical" href="{_e(canonical)}">' if canonical else ""
-    toc = (f'<aside class="toc" aria-label="On this page">'
-           f'<div class="toc-head">On this page</div>{toc_html}</aside>'
-           if toc_html else "")
+    toc = (
+        f'<aside class="toc" aria-label="On this page">'
+        f'<div class="toc-head">On this page</div>{toc_html}</aside>'
+        if toc_html
+        else ""
+    )
     # The sidebar names the section it is showing, and the name is the link back
     # to that section's own landing page. Without it the only route from a
     # cookbook recipe to the cookbook index was a nav entry labelled "Overview",
@@ -1332,26 +1444,22 @@ def page(
     # to -- the way back existed and did not read as one. It also gives the
     # mobile drawer a heading, which it never had.
     side_head = (
-        f'<a class="side-head" href="{_e(section_href)}">'
-        f'{_e(section_title)}</a>'
-        if nav_html and section_title and section_href else "")
-    side = (f'<nav class="side" id="site-nav" aria-label="Documentation">'
-            f'{side_head}{nav_html}</nav>'
-            if nav_html else "")
-    # The section switcher, where a row of tabs used to be. Twelve top-level
-    # entries is a navigation, not a tab bar: the row overflowed on every
-    # viewport and hid the overflow behind `scrollbar-width:none`, so on a phone
-    # there were eight sections a reader had no way to know about. As a
-    # disclosure it costs one line of the bar instead of a whole second row, it
-    # says which section you are in rather than making you find the underlined
-    # one, and `<details>` gives keyboard operation and a working no-JS
-    # fallback without a line of script.
+        f'<a class="side-head" href="{_e(section_href)}">{_e(section_title)}</a>'
+        if nav_html and section_title and section_href
+        else ""
+    )
+    side = (
+        f'<nav class="side" id="site-nav" aria-label="Documentation">{side_head}{nav_html}</nav>'
+        if nav_html
+        else ""
+    )
     sections = (
         f'<details class="sections"><summary aria-label="Switch section">'
         f'<span class="sections-here">{_e(section_title) or "Sections"}</span>'
-        f'{_ICON_CHEVRON}</summary>'
+        f"{_ICON_CHEVRON}</summary>"
         f'<div class="sections-menu">{tabs_html}</div></details>'
-        if tabs_html else ""
+        if tabs_html
+        else ""
     )
     browse = f'<a class="browse" href="{_e(map_href)}">Browse</a>' if map_href else ""
     layout_class = "layout" if nav_html else "layout no-side"
@@ -1393,7 +1501,7 @@ def page(
         'autocomplete="off" spellcheck="false"><kbd>esc</kbd></div>'
         '<div class="palette-results" id="docs-results" aria-live="polite"></div>'
         '<div class="palette-hint"><kbd>&uarr;</kbd><kbd>&darr;</kbd> navigate'
-        '<kbd>&crarr;</kbd> open<kbd>esc</kbd> close</div></dialog>'
+        "<kbd>&crarr;</kbd> open<kbd>esc</kbd> close</div></dialog>"
         f'<button class="to-top" id="to-top" type="button" aria-label="Back to top">'
         f"{_ICON_TOP}</button>"
         f'<script src="{_e(js_href)}" defer></script>'
@@ -1402,8 +1510,9 @@ def page(
 
 
 def _e(text: str) -> str:
-    return (text.replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;").replace('"', "&quot;"))
+    return (
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    )
 
 
 __all__ = ["FEELS", "critical_css", "page", "stylesheet"]

@@ -1,5 +1,3 @@
-"""OpenAPI generation tests."""
-
 from __future__ import annotations
 
 import json
@@ -149,9 +147,7 @@ async def test_enable_docs_routes() -> None:
         }
         await app(scope, receive, send)
         content_type = dict(sent[0]["headers"]).get(b"content-type", b"")
-        body = b"".join(
-            m.get("body", b"") for m in sent if m["type"] == "http.response.body"
-        )
+        body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
         return sent[0]["status"], content_type, body
 
     status, content_type, body = await call("/openapi.json")
@@ -178,9 +174,7 @@ def test_operation_ids_match_typegen() -> None:
     typegen_ids = {op.id for op in api.operations}
 
     openapi_ids = {
-        operation["operationId"]
-        for path in spec["paths"].values()
-        for operation in path.values()
+        operation["operationId"] for path in spec["paths"].values() for operation in path.values()
     }
     assert openapi_ids == typegen_ids
     # The canonical derivation, not handler.__name__.
@@ -188,7 +182,6 @@ def test_operation_ids_match_typegen() -> None:
 
 
 def test_operation_ids_are_one_fact_across_all_control_planes() -> None:
-    """Multi-method explicit ids used to drift by consumer."""
     from wreath.doctor import route_manifest
     from wreath.typegen import build_api_model
 
@@ -238,9 +231,7 @@ def test_empty_route_metadata_and_components_are_omitted() -> None:
     operation = spec["paths"]["/plain"]["get"]
 
     assert set(operation) == {"operationId", "responses"}
-    assert operation["responses"] == {
-        "200": {"description": "Successful response"}
-    }
+    assert operation["responses"] == {"200": {"description": "Successful response"}}
     assert "components" not in spec
 
 
@@ -260,9 +251,7 @@ def test_response_and_parameterized_return_annotations_have_distinct_schemas() -
         "description": "Successful response"
     }
     assert spec["paths"]["/names"]["get"]["responses"]["200"]["content"] == {
-        "application/json": {
-            "schema": {"type": "array", "items": {"type": "string"}}
-        }
+        "application/json": {"schema": {"type": "array", "items": {"type": "string"}}}
     }
 
 
@@ -280,10 +269,7 @@ def test_query_defaults_and_one_sided_bounds_are_exact() -> None:
         raise NotImplementedError
 
     operation = generate_openapi(app)["paths"]["/filters"]["get"]
-    parameters = {
-        parameter["name"]: parameter
-        for parameter in operation["parameters"]
-    }
+    parameters = {parameter["name"]: parameter for parameter in operation["parameters"]}
     assert parameters["required"]["required"] is True
     assert "default" not in parameters["required"]["schema"]
     assert parameters["optional"]["required"] is False
@@ -488,11 +474,7 @@ def test_operation_responses_security_deprecation_and_visibility() -> None:
     assert operation["responses"]["201"]["description"] == "Created widget"
     assert operation["responses"]["409"] == {
         "description": "Name conflict",
-        "content": {
-            "application/json": {
-                "schema": {"$ref": "#/components/schemas/ConflictBody"}
-            }
-        },
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ConflictBody"}}},
     }
     assert operation["responses"]["400"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/ConflictBody"

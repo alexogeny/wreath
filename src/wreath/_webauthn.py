@@ -1,16 +1,11 @@
 """WebAuthn wire formats: CBOR, COSE keys, authenticator data, and signatures.
 
-Stage three of `docs/plans/second-factors-totp-webauthn.md`. Everything in here
-is parsing, framing, and one signature check -- and **the signature check is
+Everything in here is parsing, framing, and one signature check -- and **the signature check is
 delegated, not implemented**. `wreath._auth._ecverify` already verifies ES256
 over NIST P-256 and Ed25519 over edwards25519 without a dependency, written for
 JWT and pinned against the RFC 8032 and NIST CAVP vectors, so this module reuses
 it verbatim. There is no cryptographic algorithm here and there is not meant to
 be one.
-
-The CBOR decoder stays Python for the reason the plan gives: it runs at most
-twice per registration on a few hundred bytes, so moving it to C would save time
-nobody can measure.
 
 Everything a caller can be handed here is attacker-controlled -- a browser posts
 it -- so the parsers are strict on purpose and every refusal is a `raise`
@@ -86,9 +81,6 @@ class WebAuthnError(ValueError):
     """
 
 
-# --- base64url --------------------------------------------------------------
-
-
 def b64url_decode(text: str) -> bytes:
     """The inverse, tolerant of missing padding and nothing else.
 
@@ -109,7 +101,6 @@ def b64url_decode(text: str) -> bytes:
         # refusal inside the decode loop. Empty stays a local check because this
         # caller rejects it and the shared decoder, like native `jose.c`,
         # answers `b""`.
-        #
         # `rstrip` because the set this replaced contained `=`, so a *padded*
         # value was accepted here and the shared decoder is unpadded-only.
         # Stripping first keeps every input that used to decode decoding, and
@@ -122,8 +113,6 @@ def b64url_decode(text: str) -> bytes:
     except ValueError as exc:  # binascii.Error is a ValueError
         raise WebAuthnError("value is not base64url") from exc
 
-
-# --- CBOR (RFC 8949), the canonical subset CTAP2 emits ----------------------
 
 #: Attestation objects nest three deep (map -> map -> value). Eight is generous
 #: and still bounds the recursion below, which is otherwise driven by input.
@@ -234,8 +223,6 @@ def _cbor_item(data: bytes, index: int, depth: int) -> tuple[Any, int]:
     raise WebAuthnError("CBOR tags are not accepted")
 
 
-# --- COSE keys (RFC 8152) ---------------------------------------------------
-
 #: COSE algorithm identifiers. Only the first two are verified here; RS256 is
 #: named so that refusing it can say which algorithm it refused.
 ES256 = -7
@@ -307,9 +294,6 @@ def parse_cose_key(data: bytes | dict[Any, Any]) -> CoseKey:
     return CoseKey(algorithm=ES256, x=bytes(x), y=bytes(y))
 
 
-# --- ECDSA signatures arrive DER-encoded ------------------------------------
-
-
 def der_signature_to_raw(signature: bytes) -> bytes:
     """Convert `SEQUENCE { r INTEGER, s INTEGER }` to the fixed 64-byte r||s form.
 
@@ -369,8 +353,6 @@ def verify_signature(key: CoseKey, signed: bytes, signature: bytes) -> bool:
         der_signature_to_raw(signature),
     )
 
-
-# --- authenticator data -----------------------------------------------------
 
 _FLAG_UP = 0x01
 _FLAG_UV = 0x04
@@ -464,9 +446,7 @@ def parse_authenticator_data(data: bytes) -> AuthenticatorData:
         parse_cose_key(decoded)
         public_key = data[start:index]
         if len(public_key) > MAX_COSE_KEY_BYTES:
-            raise WebAuthnError(
-                f"a COSE public key may not exceed {MAX_COSE_KEY_BYTES} bytes"
-            )
+            raise WebAuthnError(f"a COSE public key may not exceed {MAX_COSE_KEY_BYTES} bytes")
     if flags & _FLAG_ED:
         # Decoded and discarded: nothing here reads an extension, but the bytes
         # have to be consumed to know that the buffer ends where it should.
@@ -492,9 +472,6 @@ def check_rp_id_hash(auth_data: AuthenticatorData, rp_id: str) -> None:
     expected = hashlib.sha256(rp_id.encode("utf-8")).digest()
     if not hmac.compare_digest(expected, auth_data.rp_id_hash):
         raise WebAuthnError("the authenticator signed for a different RP ID")
-
-
-# --- attestation objects ----------------------------------------------------
 
 
 def parse_attestation_object(data: bytes) -> AuthenticatorData:
@@ -529,8 +506,6 @@ def parse_attestation_object(data: bytes) -> AuthenticatorData:
     return auth_data
 
 
-# --- origins ----------------------------------------------------------------
-
 #: The two loopback names. 127.0.0.0/8 is matched arithmetically below rather
 #: than listed, and `::1` appears in both the bare and the bracketed form
 #: because an RP ID is a bare host while an origin brackets an IPv6 literal.
@@ -551,9 +526,7 @@ def is_loopback_host(host: str) -> bool:
     parts = name.split(".")
     if len(parts) != 4 or parts[0] != "127":
         return False
-    return all(
-        part.isdigit() and len(part) <= 3 and int(part) <= 255 for part in parts
-    )
+    return all(part.isdigit() and len(part) <= 3 and int(part) <= 255 for part in parts)
 
 
 def default_origins(rp_id: str) -> tuple[str, ...]:
@@ -635,9 +608,6 @@ def origin_accepted(origin: str, accepted: Sequence[str]) -> bool:
     return bare in accepted
 
 
-# --- client data ------------------------------------------------------------
-
-
 @dataclass(frozen=True, slots=True)
 class ClientData:
     """The browser's own statement about the ceremony, already checked."""
@@ -691,8 +661,6 @@ def check_client_data(
     return ClientData(type=expected_type, origin=origin)
 
 
-# --- what gets stored -------------------------------------------------------
-
 #: Magic and version for `SecondFactor.material` on a webauthn credential. The
 #: stored shape is a `bytes` blob by design (stage one settled the record), so
 #: it names itself: a row written by a later format is rejected rather than
@@ -710,9 +678,7 @@ class StoredCredential:
     user_verified: bool = False
 
 
-def pack_credential(
-    credential_id: bytes, public_key: bytes, *, user_verified: bool
-) -> bytes:
+def pack_credential(credential_id: bytes, public_key: bytes, *, user_verified: bool) -> bytes:
     """Encode a registered credential for `SecondFactor.material`.
 
     `user_verified` records whether the *registration* was verified (a PIN or a

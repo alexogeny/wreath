@@ -1,10 +1,3 @@
-"""The boot policy: what a finding does to an application that is starting.
-
-The rules themselves are tested elsewhere (`tests/audit/test_code_rules.py` per
-rule, `tests/test_hardening_corpus.py` per handler). What is tested here is the
-part that is new -- that the audit runs at startup at all, that `block` really
-does refuse to start, and that `warn` really does start.
-"""
 from __future__ import annotations
 
 import importlib
@@ -73,6 +66,7 @@ def application(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     `__module__` through `sys.modules` to a file. A handler defined in this test
     module would resolve to this test module, which is not what is under test.
     """
+
     def build(source: str, name: str, **kwargs):
         package = tmp_path / name
         package.mkdir()
@@ -86,9 +80,6 @@ def application(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         return app
 
     return build
-
-
-# -- resolve_policy ---------------------------------------------------------
 
 
 def test_the_default_policy_is_warn() -> None:
@@ -123,20 +114,23 @@ def test_an_unknown_policy_in_the_environment_names_the_variable(
         resolve_policy("warn")
 
 
-# -- apply_policy -----------------------------------------------------------
-
-
 def _error() -> Finding:
     return Finding(
-        rule_id="sql-interpolation", severity=Severity.ERROR,
-        surface="shop/routes.py", message="built by interpolation", location="7:11",
+        rule_id="sql-interpolation",
+        severity=Severity.ERROR,
+        surface="shop/routes.py",
+        message="built by interpolation",
+        location="7:11",
     )
 
 
 def _warning() -> Finding:
     return Finding(
-        rule_id="case-mapped-authz", severity=Severity.WARN,
-        surface="shop/routes.py", message="case mapped", location="12:4",
+        rule_id="case-mapped-authz",
+        severity=Severity.WARN,
+        surface="shop/routes.py",
+        message="case mapped",
+        location="12:4",
     )
 
 
@@ -202,15 +196,11 @@ def test_an_error_is_logged_at_error_level_and_a_warning_at_warning(
     with caplog.at_level(logging.WARNING, logger="wreath.hardening"):
         apply_policy([_error(), _warning()], "warn")
     levels = {
-        record.levelno
-        for record in caplog.records
-        if "sql-interpolation" in record.getMessage()
+        record.levelno for record in caplog.records if "sql-interpolation" in record.getMessage()
     }
     assert levels == {logging.ERROR}
     levels = {
-        record.levelno
-        for record in caplog.records
-        if "case-mapped-authz" in record.getMessage()
+        record.levelno for record in caplog.records if "case-mapped-authz" in record.getMessage()
     }
     assert levels == {logging.WARNING}
 
@@ -269,9 +259,6 @@ def test_a_bad_policy_written_in_code_names_the_parameter() -> None:
         resolve_policy("strict")
 
 
-# -- what gets scanned ------------------------------------------------------
-
-
 def test_the_application_package_is_what_is_scanned(application) -> None:
     app = application(DEFECTIVE, "shop_scanned")
     roots = application_sources(app)
@@ -326,7 +313,6 @@ def test_a_handler_defined_in_main_is_skipped(
     # `__main__.__file__` is the script that was run, and its directory is the
     # working directory -- which is a scripts folder or a home directory far
     # more often than it is the application.
-    #
     # `__main__` is given a real `__file__` on purpose: under pytest it has one
     # that points into the runner, so a test that did not set it would pass
     # whether or not the guard is there.
@@ -414,18 +400,13 @@ def test_the_corrected_handler_produces_nothing(application) -> None:
     assert audit_application(app).findings == []
 
 
-# -- the two policies, end to end -------------------------------------------
-
-
 def test_block_refuses_an_application_carrying_a_defect(application) -> None:
     app = application(DEFECTIVE, "shop_blocked", hardening="block")
     with pytest.raises(HardeningError, match="sql-interpolation"):
         check_application(app, "block")
 
 
-def test_warn_starts_it_and_says_so(
-    application, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_warn_starts_it_and_says_so(application, caplog: pytest.LogCaptureFixture) -> None:
     app = application(DEFECTIVE, "shop_warned", hardening="warn")
     with caplog.at_level(logging.WARNING, logger="wreath.hardening"):
         reported = check_application(app, "warn")
@@ -445,12 +426,6 @@ def test_block_starts_a_clean_application(application) -> None:
 
 @pytest.mark.asyncio
 async def test_lifespan_startup_fails_under_block(application) -> None:
-    """The property the whole module exists for: it does not serve.
-
-    Driven through the ASGI lifespan protocol rather than through
-    `check_application`, because "the audit refuses" and "the application does
-    not start" are two different claims and only this one is the promise.
-    """
     app = application(DEFECTIVE, "shop_lifespan", hardening="block")
     sent: list[dict] = []
     incoming = iter(({"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}))
@@ -466,9 +441,6 @@ async def test_lifespan_startup_fails_under_block(application) -> None:
     assert "lifespan.startup.complete" not in replies
     failure = next(m for m in sent if m["type"] == "lifespan.startup.failed")
     assert "sql-interpolation" in failure["message"]
-
-
-# -- the configuration tier -------------------------------------------------
 
 
 class _Policy:

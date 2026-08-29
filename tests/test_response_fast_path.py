@@ -1,12 +1,3 @@
-"""The response coercion fast paths must be byte-for-byte equivalent to the
-Response/TextResponse/JSONResponse constructors they replace.
-
-_coerce_response builds str/bytes/dict handler returns in a single frame via
-coerce_text/coerce_json/coerce_bytes. These guard that the shortcut produces
-identical status, headers, and body to the full constructors, so the speedup
-never changes what a client sees.
-"""
-
 from __future__ import annotations
 
 import ast
@@ -110,14 +101,8 @@ def _assert_exact_response_shortcuts() -> None:
         for node in ast.walk(functions["_finish_http_plain"])
         if isinstance(node, ast.If)
     }
-    assert (
-        "response.__class__ is PreparedResponse and native_response"
-        in finish_tests
-    )
-    assert (
-        "response.__class__ is PreparedResponse and native_response"
-        in plain_finish_tests
-    )
+    assert "response.__class__ is PreparedResponse and native_response" in finish_tests
+    assert "response.__class__ is PreparedResponse and native_response" in plain_finish_tests
     select_source = ast.unparse(functions["_select_dispatch"])
     assert select_source.count("self._classify is not None") == 3
     plain_source = ast.unparse(functions["_handle_http_plain"])
@@ -125,7 +110,6 @@ def _assert_exact_response_shortcuts() -> None:
 
 
 def test_every_compiled_dispatcher_activates_exact_responses_without_coercion() -> None:
-    """A reusable response must not fall back into the generic type ladder."""
     _assert_exact_response_shortcuts()
 
 
@@ -179,11 +163,7 @@ async def test_exact_response_bypasses_coercion_in_every_dispatch_shape(
 ) -> None:
     import wreath.app as app_module
 
-    response = (
-        Response(b"ready")
-        if response_type is Response
-        else PreparedResponse.text("ready")
-    )
+    response = Response(b"ready") if response_type is Response else PreparedResponse.text("ready")
     coerce_response = app_module._coerce_response
 
     def reject_exact_response(value: Any, *, status: int = 200) -> Any:
@@ -231,9 +211,9 @@ async def test_exact_response_bypasses_coercion_in_every_dispatch_shape(
     async def auth_handler(request: Any) -> PreparedResponse:
         return response
 
-    assert (
-        await _invoke_asgi(auth, headers=[(b"authorization", b"Bearer token")])
-    )[1]["body"] == b"ready"
+    assert (await _invoke_asgi(auth, headers=[(b"authorization", b"Bearer token")]))[1][
+        "body"
+    ] == b"ready"
     assert auth._dispatch_http.__name__ == "_handle_http_plain_auth"
 
     compartment = Wreath()
@@ -265,9 +245,7 @@ async def test_exact_response_bypasses_coercion_in_every_dispatch_shape(
         async def _wreath_response(self, status: Any, headers: Any, body: Any) -> None:
             calls.append((status, headers, body))
 
-        def _wreath_response_nowait(
-            self, status: Any, headers: Any, body: Any
-        ) -> None:
+        def _wreath_response_nowait(self, status: Any, headers: Any, body: Any) -> None:
             calls.append((status, headers, body))
 
     sync_auth = Wreath()

@@ -8,7 +8,7 @@ parts are re-derived four times -- and they are the parts that fail silently:
 * **the cursor**, which is the whole of it. A `bigserial` is allocated *before*
   commit, so a reader that remembers `max(seq)` skips every row a slower
   transaction commits afterwards with a lower number. The gap is invisible,
-  intermittent and load-dependent -- see `docs/reference/log.md` for the proof;
+  intermittent and load-dependent;
 * the table name reaches SQL by interpolation, so it must be a plain identifier;
 * the schema is *offered* (`Log.component`) and never applied, because schema
   changes belong in the migration history with the rest of the schema;
@@ -20,8 +20,7 @@ parts are re-derived four times -- and they are the parts that fail silently:
   removes are a number in a ledger rather than a policy nobody drove;
 * appends **batch**. `append_many` decomposes a batch into powers-of-two
   multi-row inserts, because a producer whose rows are small and frequent would
-  otherwise pay a round trip each -- which is the write amplification a buffer
-  exists to remove and, before this, did not;
+  otherwise pay one round trip per row;
 * an unflushed batch lost to a worker's death is **counted**, never absorbed.
 
 Declare the shape and pick what it holds:
@@ -134,7 +133,6 @@ class Cursor(NamedTuple):
         # spellings are equivalent (the separator is ASCII either way), and one
         # scan is both cheaper and impossible to half-remove -- a mutation run
         # found the per-half form had an operand no test distinguished.
-        #
         # `str.isdigit` rather than `int(...)` in a `try`: `int` accepts leading
         # whitespace, a leading sign, and Unicode digits from other scripts, so
         # `" +7"` and a full-width `"７"` both parse, and `int("７")` really is 7.
@@ -497,8 +495,6 @@ class PostgresLog(_Statements):
         # last element is 1 -- which is what makes that search total.
         self._rungs = tuple(reversed(rungs))
 
-    # -- declaration ---------------------------------------------------------
-
     @property
     def database(self) -> Any:
         """The `wreath.postgres.Database` this log runs against.
@@ -529,12 +525,8 @@ class PostgresLog(_Statements):
         """DDL for the backing table, semicolon-joined."""
         return self._declaration.schema_sql()
 
-    # -- statements ----------------------------------------------------------
-
     def _statement_name(self, name: str) -> str:
         return f"{self._declaration.prefix}_{name}_{self._declaration.table}"
-
-    # -- appending -----------------------------------------------------------
 
     async def append(self, stream: str, /, *, connection: Any = None, **values: Any) -> Cursor:
         """Append one row to `stream`, returning where it landed.
@@ -702,8 +694,6 @@ class PostgresLog(_Statements):
             )
         return bound
 
-    # -- reading -------------------------------------------------------------
-
     async def read(
         self, stream: str | None = None, *, after: Cursor, limit: int = DEFAULT_LIMIT
     ) -> Batch:
@@ -741,8 +731,6 @@ class PostgresLog(_Statements):
         """
         latest = int(await self.statement("latest").fetchval())
         return max(0, latest - await self.horizon())
-
-    # -- retention -----------------------------------------------------------
 
     async def purge(self) -> str:
         """Drop rows past their retention.
@@ -784,8 +772,6 @@ class PostgresLog(_Statements):
     def retention_pass(self, *, name: str, **options: Any) -> Any:
         """This log's retention walk. See `wreath.log.retention_pass`."""
         return retention_pass(self._declaration, name=name, **options)
-
-    # -- buffered appends ----------------------------------------------------
 
     def buffered(self, stream: str) -> _Buffer:
         """A byte-or-millisecond buffer over `append` for one stream.
@@ -911,7 +897,6 @@ class _Buffer:
             # does not match the declaration are both losses of exactly this
             # batch, and the caller is the only one who knows which of those it
             # can carry on from.
-            #
             # `PostgresError` is named explicitly because it is **not** an
             # `OSError`: it descends straight from `Exception`, so a server-side
             # refusal -- the single most likely way a flush fails -- would

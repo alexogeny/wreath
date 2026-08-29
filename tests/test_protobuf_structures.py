@@ -1,12 +1,3 @@
-"""Repeated fields, nested messages, enums, oneof, maps, and unknown fields.
-
-Cycle 1 (`tests/test_protobuf.py`) covers the scalar wire format and the
-refusals. This file covers everything with structure, where the interesting
-failures are about *representation choice* rather than byte layout: packed
-versus unpacked, implicit versus explicit presence, and what happens to a field
-number this build has never heard of.
-"""
-
 from __future__ import annotations
 
 import enum
@@ -66,9 +57,6 @@ class Maps:
     nested: dict[str, Inner] = field(2)
 
 
-# -- repeated ---------------------------------------------------------------
-
-
 def test_repeated_scalars_pack_into_one_length_delimited_field() -> None:
     # field 1, LEN -> tag 0x0A; three varints in one body.
     assert encode(Repeats(numbers=[1, 2, 300])) == b"\x0a\x04\x01\x02\xac\x02"
@@ -100,13 +88,8 @@ def test_an_empty_repeated_field_writes_nothing() -> None:
 
 
 def test_repeated_round_trips() -> None:
-    original = Repeats(
-        numbers=[1, 2, 3], names=["x", "y"], loose=[9], children=[Inner(value=4)]
-    )
+    original = Repeats(numbers=[1, 2, 3], names=["x", "y"], loose=[9], children=[Inner(value=4)])
     assert decode(Repeats, encode(original)) == original
-
-
-# -- nested messages --------------------------------------------------------
 
 
 def test_a_nested_message_is_length_delimited() -> None:
@@ -131,9 +114,6 @@ def test_nested_round_trips() -> None:
     assert decode(Nested, encode(original)) == original
 
 
-# -- enums ------------------------------------------------------------------
-
-
 def test_an_enum_encodes_as_a_varint_and_omits_its_zero() -> None:
     assert encode(WithEnum(quality=Quality.UNKNOWN)) == b""
     assert encode(WithEnum(quality=Quality.POOR)) == b"\x08\x02"
@@ -150,9 +130,6 @@ def test_an_unknown_enum_value_survives_as_the_integer_the_peer_sent() -> None:
     decoded = decode(WithEnum, b"\x08\x63")
     assert decoded.quality == 99
     assert encode(decoded) == b"\x08\x63"
-
-
-# -- oneof ------------------------------------------------------------------
 
 
 def test_setting_one_oneof_member_encodes_only_it() -> None:
@@ -184,9 +161,6 @@ def test_a_non_optional_oneof_member_is_refused_at_declaration() -> None:
     assert "oneof" in str(caught.value).lower()
 
 
-# -- maps -------------------------------------------------------------------
-
-
 def test_a_map_encodes_as_repeated_key_value_entries() -> None:
     # Each entry is a length-delimited message of {1: key, 2: value}.
     assert encode(Maps(counts={"a": 1})) == b"\x0a\x05\x0a\x01a\x10\x01"
@@ -216,9 +190,6 @@ def test_a_float_map_key_is_refused_at_declaration() -> None:
             m: dict[float, int] = field(1)
 
 
-# -- unknown fields ---------------------------------------------------------
-
-
 def test_an_unknown_field_survives_a_decode_encode_round_trip() -> None:
     # Field 15 is not declared on Inner. A newer peer sent it; an older build
     # must hand it back untouched or the newer peer loses data by relaying.
@@ -239,11 +210,11 @@ def test_a_message_with_no_unknown_fields_reports_none() -> None:
 
 def test_unknown_fields_of_every_wire_type_survive() -> None:
     raw = (
-        b"\x08\x01"                          # known field 1
-        b"\x78\x2a"                          # unknown 15, varint
-        b"\x7d\x01\x00\x00\x00"              # unknown 15, i32
+        b"\x08\x01"  # known field 1
+        b"\x78\x2a"  # unknown 15, varint
+        b"\x7d\x01\x00\x00\x00"  # unknown 15, i32
         b"\x81\x01\x01\x00\x00\x00\x00\x00\x00\x00"  # unknown 16, i64
-        b"\x8a\x01\x01z"                     # unknown 17, len
+        b"\x8a\x01\x01z"  # unknown 17, len
     )
     assert encode(decode(Inner, raw)) == raw
 

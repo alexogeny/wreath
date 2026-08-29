@@ -1,17 +1,3 @@
-"""Durable subscriber groups are discovered fleet-wide, not per process.
-
-A durable publish fans out one copy per subscriber *group*. Discovering those
-groups from the subscriptions registered in the publishing process works right
-up until the consumer lives somewhere else -- a service deployed later, or a
-different service entirely against the same bus. Then the publisher enqueues
-nothing for it: no error, no dead letter, the message simply never existed for
-that group. That is data loss wearing a limitation's clothes.
-
-These tests pin the fix and, just as importantly, pin that it cannot regress a
-deployment that has not applied the new DDL: local registrations are *unioned*
-with the persisted ones, so the worst case is exactly today's behaviour.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -85,9 +71,7 @@ class FakeConnection:
 
     def registrations(self) -> list[tuple[Any, ...]]:
         return [
-            args
-            for sql, args in self.calls
-            if "INSERT INTO" in sql and "message_groups" in sql
+            args for sql, args in self.calls if "INSERT INTO" in sql and "message_groups" in sql
         ]
 
 
@@ -130,9 +114,6 @@ def _durable(bus: MessageBus, channel: str, group: str) -> None:
         pass
 
 
-# --- the registry itself ------------------------------------------------------
-
-
 def test_the_schema_declares_the_group_registry() -> None:
     sql = _bus(FakeDatabase()).schema_sql()
     assert "message_groups" in sql
@@ -154,7 +135,6 @@ async def test_starting_registers_every_durable_group() -> None:
 
 
 async def test_an_ephemeral_subscription_registers_nothing() -> None:
-    """Ephemeral fan-out has no groups; a row for one would be a lie."""
     database = FakeDatabase()
     bus = _bus(database)
 
@@ -167,7 +147,6 @@ async def test_an_ephemeral_subscription_registers_nothing() -> None:
 
 
 async def test_registration_is_an_upsert_so_a_restart_is_a_heartbeat() -> None:
-    """Idempotent across restarts, and the primary key serialises racing workers."""
     database = FakeDatabase()
     bus = _bus(database)
     _durable(bus, "order_placed", "billing")
@@ -180,22 +159,17 @@ async def test_registration_is_an_upsert_so_a_restart_is_a_heartbeat() -> None:
 
 
 async def test_a_registry_that_cannot_be_written_does_not_fail_startup() -> None:
-    """The DDL is never auto-applied, so a missing table must not stop the bus."""
     database = FakeDatabase()
     database.connection.execute_error = RuntimeError('relation "message_groups"')
     bus = _bus(database)
     _durable(bus, "order_placed", "billing")
 
-    await bus.start(FakeSupervisor())          # must not raise
+    await bus.start(FakeSupervisor())  # must not raise
 
     assert bus.group_registry_errors >= 1
 
 
-# --- discovery ----------------------------------------------------------------
-
-
 async def test_a_group_registered_by_another_process_receives_a_copy() -> None:
-    """The whole point: this process never declared `analytics`."""
     database = FakeDatabase()
     database.connection.group_rows = [
         {"channel": "order_placed", "group": "analytics"},
@@ -212,7 +186,7 @@ async def test_local_and_remote_groups_are_unioned_without_duplicates() -> None:
     database = FakeDatabase()
     database.connection.group_rows = [
         {"channel": "order_placed", "group": "analytics"},
-        {"channel": "order_placed", "group": "billing"},     # also registered here
+        {"channel": "order_placed", "group": "billing"},  # also registered here
     ]
     bus = _bus(database)
     _durable(bus, "order_placed", "billing")
@@ -238,7 +212,6 @@ async def test_groups_on_another_channel_are_not_fanned_out_to() -> None:
 
 
 async def test_a_local_group_still_receives_a_copy_with_an_empty_registry() -> None:
-    """A deployment that has not applied the new DDL must behave as it did."""
     database = FakeDatabase()
     bus = _bus(database)
     _durable(bus, "order_placed", "billing")
@@ -250,13 +223,12 @@ async def test_a_local_group_still_receives_a_copy_with_an_empty_registry() -> N
 
 
 async def test_a_local_group_survives_an_unreachable_registry() -> None:
-    """A lost copy is worse than a duplicate one, so the fallback is local."""
     database = FakeDatabase()
     database.connection.fetch_error = RuntimeError("the database is down")
     bus = _bus(database)
     _durable(bus, "order_placed", "billing")
 
-    await bus.start(FakeSupervisor())          # must not raise
+    await bus.start(FakeSupervisor())  # must not raise
     await bus.publish("order_placed", {"id": 1}, durable=True)
 
     assert database.connection.inserted_groups() == ["billing"]
@@ -264,7 +236,6 @@ async def test_a_local_group_survives_an_unreachable_registry() -> None:
 
 
 async def test_a_publish_without_start_falls_back_to_local_groups() -> None:
-    """Scripts and tests publish on a bus the supervisor never started."""
     database = FakeDatabase()
     bus = _bus(database)
     _durable(bus, "order_placed", "billing")
@@ -274,11 +245,7 @@ async def test_a_publish_without_start_falls_back_to_local_groups() -> None:
     assert database.connection.inserted_groups() == ["billing"]
 
 
-# --- cost and freshness ---------------------------------------------------------
-
-
 async def test_the_registry_is_not_read_once_per_publish() -> None:
-    """Discovery is a timer, not a query on the write path."""
     database = FakeDatabase()
     database.connection.group_rows = [
         {"channel": "order_placed", "group": "analytics"},
@@ -319,12 +286,7 @@ async def test_the_refresher_is_supervised() -> None:
     assert any(name.endswith(":groups") for name in supervisor.spawned)
 
 
-# --- the silent case, made observable -------------------------------------------
-
-
 async def test_a_publish_with_no_group_anywhere_is_counted() -> None:
-    """Still a no-op -- publishing before any consumer exists is legitimate --
-    but no longer invisible."""
     database = FakeDatabase()
     bus = _bus(database)
 
@@ -341,9 +303,7 @@ async def test_a_caller_can_insist_that_someone_is_listening() -> None:
     await bus.start(FakeSupervisor())
 
     with pytest.raises(NoSubscriberGroup, match="order_placed"):
-        await bus.publish(
-            "order_placed", {"id": 1}, durable=True, require_group=True
-        )
+        await bus.publish("order_placed", {"id": 1}, durable=True, require_group=True)
 
 
 async def test_requiring_a_group_passes_when_one_is_known() -> None:
@@ -363,7 +323,6 @@ async def test_requiring_a_group_is_meaningless_for_an_ephemeral_publish() -> No
 
 
 async def test_known_groups_answers_the_deploy_time_question() -> None:
-    """"Will anything receive what I publish?" -- checkable before shipping."""
     database = FakeDatabase()
     database.connection.group_rows = [
         {"channel": "order_placed", "group": "analytics"},
@@ -377,16 +336,7 @@ async def test_known_groups_answers_the_deploy_time_question() -> None:
     assert bus.known_groups("trek_started") == frozenset()
 
 
-# --- fan-out shape ---------------------------------------------------------------
-
-
 async def test_one_doorbell_serves_the_whole_fan_out() -> None:
-    """The doorbell only sets a wake event, so one NOTIFY covers every group.
-
-    It mattered less when groups came from local registrations; with fleet-wide
-    discovery a busy channel can have many, and one redundant NOTIFY per group
-    is round trips spent saying the same thing.
-    """
     database = FakeDatabase()
     database.connection.group_rows = [
         {"channel": "order_placed", "group": "analytics"},

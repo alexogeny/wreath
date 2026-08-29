@@ -49,9 +49,7 @@ def _h2load_version() -> str:
         if found is None:
             _H2LOAD_VERSION = "unknown"
         else:
-            probe = subprocess.run(
-                [found.path, "--version"], capture_output=True, text=True
-            )
+            probe = subprocess.run([found.path, "--version"], capture_output=True, text=True)
             version = probe.stdout.strip() or "unknown"
             # The version string is identical with and without HTTP/3, so it
             # cannot stand alone as provenance for an h3 row.
@@ -107,10 +105,7 @@ def _drain_background(
     failed = stats["failed"] - baseline["failed"]
     expected = warmup_requests + measured_requests
     valid = (
-        failed == 0
-        and stats["inflight"] == 0
-        and completed == started
-        and completed == expected
+        failed == 0 and stats["inflight"] == 0 and completed == started and completed == expected
     )
     return {
         "started": started,
@@ -186,7 +181,9 @@ def _wait_until_ready_h3(process: subprocess.Popen[bytes], host: str, port: int)
             raise RuntimeError(f"server exited with status {process.returncode}")
         probe = subprocess.run(
             [found.path, "--h3", "-n", "1", "-c", "1", f"https://{host}:{port}/"],
-            capture_output=True, text=True, timeout=20,
+            capture_output=True,
+            text=True,
+            timeout=20,
         )
         last = probe.stdout + probe.stderr
         if "1 succeeded" in last:
@@ -314,8 +311,7 @@ def _generator_threads(requested: int | None, connections: int) -> int:
         return 1
     available = os.sched_getaffinity(0)
     cores = sum(
-        1 for siblings in physical_cores().values()
-        if any(cpu in available for cpu in siblings)
+        1 for siblings in physical_cores().values() if any(cpu in available for cpu in siblings)
     )
     return max(1, min(cores or 1, connections))
 
@@ -366,8 +362,14 @@ def _server_command(
             str(args.prearm),
         ]
         if tls:
-            command += ["--protocol", protocol, "--tls-cert", args.tls_cert,
-                        "--tls-key", args.tls_key]
+            command += [
+                "--protocol",
+                protocol,
+                "--tls-cert",
+                args.tls_cert,
+                "--tls-key",
+                args.tls_key,
+            ]
         server = f"{framework} ({native_loop})"
     elif framework == "axum":
         command = [
@@ -430,8 +432,14 @@ def _server_command(
             str(workers),
         ]
         if tls:
-            command += ["--protocol", protocol, "--tls-cert", args.tls_cert,
-                        "--tls-key", args.tls_key]
+            command += [
+                "--protocol",
+                protocol,
+                "--tls-cert",
+                args.tls_cert,
+                "--tls-key",
+                args.tls_key,
+            ]
         server = "sanic-native"
     else:
         command = [
@@ -482,11 +490,7 @@ def _stop_server(process: subprocess.Popen[bytes]) -> None:
         process.kill()
         process.wait(timeout=5)
     if process.returncode not in (0, -15):
-        error = (
-            process.stderr.read().decode("utf-8", errors="replace")
-            if process.stderr
-            else ""
-        )
+        error = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
         if error:
             print(error, file=sys.stderr)
 
@@ -567,13 +571,9 @@ async def _run_protocol(
                 try:
                     # An h3-only server has no TCP listener; probe it over QUIC.
                     if protocol == "h3":
-                        await asyncio.to_thread(
-                            _wait_until_ready_h3, process, args.host, port
-                        )
+                        await asyncio.to_thread(_wait_until_ready_h3, process, args.host, port)
                     else:
-                        await asyncio.to_thread(
-                            _wait_until_ready, process, args.host, port
-                        )
+                        await asyncio.to_thread(_wait_until_ready, process, args.host, port)
                 except (TimeoutError, RuntimeError) as error:
                     print(f"[skip] {framework}: {error}", flush=True)
                     return False
@@ -595,8 +595,8 @@ async def _run_protocol(
                             connections=args.connections or args.concurrency,
                             streams_per_connection=args.streams_per_connection,
                             threads=_generator_threads(
-                                args.generator_threads,
-                                args.connections or args.concurrency),
+                                args.generator_threads, args.connections or args.concurrency
+                            ),
                             warmup_requests=args.warmup_requests,
                             method=method,
                             body=spec.body,
@@ -606,8 +606,7 @@ async def _run_protocol(
                     except h2load.H2LoadError as error:
                         # Never fall back to the built-in generator here: it
                         # would answer HTTP/1.1 and the row would say h3.
-                        print(f"[skip] {framework}/{scenario} {protocol}: {error}",
-                              flush=True)
+                        print(f"[skip] {framework}/{scenario} {protocol}: {error}", flush=True)
                         break
                     generator = h2load.LOAD_GENERATOR
                     generator_version = _h2load_version()
@@ -675,8 +674,7 @@ async def _run_protocol(
                     "load_generator_version": generator_version,
                     "server_tls_version": None,
                     "normalized_100k_seconds": (
-                        result.duration_seconds * 100_000
-                        / max(1, result.requests + result.errors)
+                        result.duration_seconds * 100_000 / max(1, result.requests + result.errors)
                     ),
                     **asdict(result),
                 }
@@ -739,7 +737,8 @@ async def run(args: argparse.Namespace) -> None:
         # A run driven by a saturated generator measures the generator. Record
         # what drove it so a throughput number can be trusted or dismissed.
         "generator_threads": _generator_threads(
-            args.generator_threads, args.connections or args.concurrency),
+            args.generator_threads, args.connections or args.concurrency
+        ),
         "server_cpus": os.environ.get("WREATH_BENCH_SERVER_CPUS", "unpinned"),
         "request_tiers": {
             framework: args.requests if args.requests is not None else REQUEST_TIERS[framework]
@@ -775,8 +774,7 @@ async def run(args: argparse.Namespace) -> None:
         metadata["completed_scenarios"] = len(rows)
         persist()
         print(
-            f"[report] updated {latest_report} "
-            f"({len(rows)}/{metadata['total_scenarios']})",
+            f"[report] updated {latest_report} ({len(rows)}/{metadata['total_scenarios']})",
             flush=True,
         )
 
@@ -795,10 +793,14 @@ async def run(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--framework", nargs="+", choices=FRAMEWORKS,
-                        default=list(DEFAULT_FRAMEWORKS),
-                        help="arms to run; defaults to every arm installable in "
-                             "one environment (see OPT_IN_FRAMEWORKS in scenarios.py)")
+    parser.add_argument(
+        "--framework",
+        nargs="+",
+        choices=FRAMEWORKS,
+        default=list(DEFAULT_FRAMEWORKS),
+        help="arms to run; defaults to every arm installable in "
+        "one environment (see OPT_IN_FRAMEWORKS in scenarios.py)",
+    )
     parser.add_argument("--scenario", nargs="+", choices=SCENARIOS, default=list(SCENARIOS))
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument(
@@ -814,24 +816,33 @@ def main() -> None:
     )
     parser.add_argument("--warmup-requests", type=int, default=10)
     parser.add_argument(
-        "--prearm", type=int, default=0, metavar="N",
+        "--prearm",
+        type=int,
+        default=0,
+        metavar="N",
         help="wreath arms only: synthetic connections each worker drives "
-             "through its own stack before serving. The h2load warmup runs on "
-             "separate connections, so it cannot warm a worker its connections "
-             "never landed on.",
+        "through its own stack before serving. The h2load warmup runs on "
+        "separate connections, so it cannot warm a worker its connections "
+        "never landed on.",
     )
     parser.add_argument(
-        "--generator-threads", type=int, default=None, metavar="N",
+        "--generator-threads",
+        type=int,
+        default=None,
+        metavar="N",
         help="h2load threads (default: one per physical core the generator "
-             "has). One thread saturates near 130k req/s, below several arms "
-             "in this matrix, and cannot measure a multi-worker server at all.",
+        "has). One thread saturates near 130k req/s, below several arms "
+        "in this matrix, and cannot measure a multi-worker server at all.",
     )
     parser.add_argument(
-        "--workers", type=int, default=1, metavar="N",
+        "--workers",
+        type=int,
+        default=1,
+        metavar="N",
         help="workers per server arm (default 1). Every arm gets the same "
-             "count, including the ones whose runtimes would otherwise size "
-             "themselves; pair with a server CPU set of the same size "
-             "(wreath-bench --multi does both).",
+        "count, including the ones whose runtimes would otherwise size "
+        "themselves; pair with a server CPU set of the same size "
+        "(wreath-bench --multi does both).",
     )
     parser.add_argument("--loop", choices=("auto", "asyncio", "uvloop"), default="auto")
     parser.add_argument("--http", choices=("auto", "h11", "httptools"), default="auto")
@@ -841,19 +852,31 @@ def main() -> None:
     # capable generator (h2load), invoked as a subprocess -- not by importing a
     # client protocol library into this process.
     parser.add_argument(
-        "--protocol", nargs="+", default=["http/1.1"],
+        "--protocol",
+        nargs="+",
+        default=["http/1.1"],
         choices=("http/1.1", "h2", "h3"),
         help="protocols to measure (h2/h3 require --load-generator h2load + TLS)",
     )
-    parser.add_argument("--trials", type=int, default=1,
-                        help="measured trials per row (>=5 for protocol comparisons)")
-    parser.add_argument("--connections", type=int, default=None,
-                        help="in-flight connections (defaults to --concurrency)")
+    parser.add_argument(
+        "--trials",
+        type=int,
+        default=1,
+        help="measured trials per row (>=5 for protocol comparisons)",
+    )
+    parser.add_argument(
+        "--connections",
+        type=int,
+        default=None,
+        help="in-flight connections (defaults to --concurrency)",
+    )
     parser.add_argument("--streams-per-connection", type=int, default=1)
     parser.add_argument("--tls-cert", default=None)
     parser.add_argument("--tls-key", default=None)
     parser.add_argument(
-        "--load-generator", choices=("auto", "builtin", "h2load"), default="auto",
+        "--load-generator",
+        choices=("auto", "builtin", "h2load"),
+        default="auto",
         help="'builtin' is HTTP/1.1-only; 'h2load' exercises h2/h3 as a subprocess",
     )
     parsed = parser.parse_args()

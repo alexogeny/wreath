@@ -383,16 +383,19 @@ def compile_series(
     if step is None:
         builder.text(primary)
     else:
-        shifted = _window(
-            builder, at_sql, start=start, end=end, zone_name=zone_name, step=step
-        )
+        shifted = _window(builder, at_sql, start=start, end=end, zone_name=zone_name, step=step)
         builder.text(f"({primary} OR {shifted})")
     columns = 1 + (compare is not None) + 2 * grouped
     builder.text(f" GROUP BY {', '.join(str(n) for n in range(1, columns + 1))})")
 
     _spine(
-        builder, declaration, start=start, end=end, trunc=trunc,
-        zone_name=zone_name, step=step,
+        builder,
+        declaration,
+        start=start,
+        end=end,
+        trunc=trunc,
+        zone_name=zone_name,
+        step=step,
     )
 
     builder.text(f"SELECT {quote('s')}.{quote('b')} AT TIME ZONE ")
@@ -529,13 +532,25 @@ def _spine(
         return
     builder.text(f", {quote('spine')} AS (")
     _spine_arm(
-        builder, start=start, end=end, trunc=trunc, zone_name=zone_name,
-        width=width, shift=None, period=CURRENT,
+        builder,
+        start=start,
+        end=end,
+        trunc=trunc,
+        zone_name=zone_name,
+        width=width,
+        shift=None,
+        period=CURRENT,
     )
     builder.text(" UNION ALL ")
     _spine_arm(
-        builder, start=start, end=end, trunc=trunc, zone_name=zone_name,
-        width=width, shift=step, period=PREVIOUS,
+        builder,
+        start=start,
+        end=end,
+        trunc=trunc,
+        zone_name=zone_name,
+        width=width,
+        shift=step,
+        period=PREVIOUS,
     )
     builder.text(") ")
 

@@ -1,10 +1,3 @@
-"""Ecosystem compatibility — the make-or-break for the whole project.
-
-ASGI handlers await arbitrary third-party coroutines. If any of these fail on
-the native reactor, the reactor is not a drop-in loop and the project is dead.
-Every primitive here is stdlib asyncio building on the loop's public contract;
-they pass on asyncio by construction, so failures are pure reactor gaps.
-"""
 from __future__ import annotations
 
 import asyncio

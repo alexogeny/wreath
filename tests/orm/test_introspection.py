@@ -1,13 +1,3 @@
-"""Startup schema validation against the catalog.
-
-Most of this file drives a scripted fake, which is right for the comparison
-logic and wrong for the catalog read itself: the fake answers with `str` and
-`int`, and the real driver does not. `pg_catalog` is made of `name`, `oid`,
-`"char"`, `int2[]` and `int2vector`, none of which the driver has a codec for,
-so every one of those tests passed against rows no PostgreSQL would send. The
-live tests at the end of this file are the ones that read a real catalog.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -74,16 +64,12 @@ async def test_foreign_key_validation_checks_the_referenced_column() -> None:
         ],
     )
 
-    issues = await _validate_constraints(
-        database.connection, spec, {1: "id", 2: "parent_id"}
-    )
+    issues = await _validate_constraints(database.connection, spec, {1: "id", 2: "parent_id"})
 
     assert [issue.issue_code for issue in issues] == ["missing_foreign_key"]
 
 
-def catalog_row(
-    name: str, position: int, oid: int, not_null: bool, default: str = ""
-) -> list[Any]:
+def catalog_row(name: str, position: int, oid: int, not_null: bool, default: str = "") -> list[Any]:
     """One pg_attribute row in the shape _COLUMNS_SQL selects."""
     return ["public", "accounts", name, position, oid, not_null, 0, default]
 
@@ -260,15 +246,12 @@ async def test_validation_never_writes_ddl() -> None:
         assert sql.strip().upper().startswith("SELECT")
 
 
-# --------------------------------------------------------------------------
 # Against a real catalog.
-#
 # Everything above answers "does the comparison draw the right conclusion from
 # these rows". These answer "are those the rows PostgreSQL sends", which is the
 # question the fake cannot be asked -- and the one that was wrong. Until this
 # ran, `validate_schema` had never completed against a database: the read
 # raised inside the reader task and the caller waited forever.
-# --------------------------------------------------------------------------
 
 _DDL = """
 CREATE TABLE {schema}.parents (
@@ -333,17 +316,6 @@ def _live_models(schema: str) -> list[type]:
 async def test_the_default_validate_schema_completes_against_a_real_catalog(
     live_schema: tuple[str, Any],
 ) -> None:
-    """The shipped default, end to end, against PostgreSQL.
-
-    `validate_schema` is not passed: `"error"` is what a `Registry` and
-    `app.orm()` use when nobody says otherwise, so the default is what has to
-    work. It did not. The catalog read raised in the reader task, which is not
-    the caller's task, and lifespan startup hung there forever -- so a wreath
-    app with default settings never finished starting against a real database.
-
-    `asyncio.wait_for` is the assertion for that half. A plain `await` would
-    have hung the suite rather than failed this test.
-    """
     schema, database = live_schema
     registry = Registry(database, _live_models(schema))
 
@@ -358,15 +330,6 @@ async def test_the_default_validate_schema_completes_against_a_real_catalog(
 async def test_a_real_catalog_mismatch_is_reported_not_silently_accepted(
     live_schema: tuple[str, Any],
 ) -> None:
-    """The live pass above must not be passing vacuously.
-
-    Every catalog value the comparison keys on comes back through a codec: the
-    column name (`name`), the type OID (`oid`), the primary-key and unique
-    column lists (`int2[]` and `int2vector`), the foreign-key target
-    (`int2[]`). Decoded wrongly, they do not report a mismatch -- they report
-    *everything* as a mismatch, which is what an uncast read did. So this pins
-    both directions: the two issues below and no others.
-    """
     schema, database = live_schema
 
     class Wrong(Model, table="parents", schema=schema):
@@ -390,12 +353,6 @@ async def test_a_real_catalog_mismatch_is_reported_not_silently_accepted(
 async def test_the_catalog_read_survives_a_composite_key_and_a_foreign_key(
     live_schema: tuple[str, Any],
 ) -> None:
-    """A multi-column `conkey`/`indkey` is where the array decode actually bites.
-
-    Single-column vectors render as `{1}` and `1`, which several wrong readings
-    survive by accident. Two columns give `{1,2}` and `1 2`, and a composite
-    foreign key gives a `confkey` that has to line up positionally with it.
-    """
     schema, database = live_schema
     connection = await connect(_DSN)
     try:
@@ -419,9 +376,7 @@ async def test_the_catalog_read_survives_a_composite_key_and_a_foreign_key(
     assert not diff, f"a matching composite key reported {diff.report()}"
 
 
-# --------------------------------------------------------------------------
 # Physical column order, which is not declaration order.
-#
 # `attnum` is the order PostgreSQL created a column in. Nothing makes that the
 # order a model declares its columns in -- and wreath's own DDL generator sorts
 # its operations, so its tables routinely disagree with the declarations that
@@ -429,7 +384,6 @@ async def test_the_catalog_read_survives_a_composite_key_and_a_foreign_key(
 # order the DDL creates them, which is why they passed while a foreign key's
 # target was being compared as a raw `confkey` integer against a declaration
 # index. These are the tests that do not grant that coincidence.
-# --------------------------------------------------------------------------
 
 #: `id` is created *last* here and declared *first* below, so its attnum is 3
 #: and its declaration index is 0. Any comparison that conflates the two reports
@@ -497,15 +451,6 @@ def _shuffled_models(schema: str) -> list[type]:
 async def test_a_foreign_key_validates_when_the_target_was_created_out_of_order(
     shuffled_schema: tuple[str, Any],
 ) -> None:
-    """The blocker: a correct schema, reported as missing every foreign key.
-
-    `confkey` here is `{4}` -- `reserves.id` is the fourth column PostgreSQL
-    created -- while the declaration puts `id` first. Comparing the two reported
-    `missing_foreign_key` on a constraint the database has. `validate_schema`
-    defaults to `"error"`, so this was a hard startup failure for any application
-    whose tables were not created in declaration order, which includes every
-    application whose tables wreath's own migration artifact created.
-    """
     schema, database = shuffled_schema
     registry = Registry(database, _shuffled_models(schema))
 
@@ -520,14 +465,6 @@ async def test_a_foreign_key_validates_when_the_target_was_created_out_of_order(
 async def test_the_out_of_order_pass_is_not_vacuous(
     shuffled_schema: tuple[str, Any],
 ) -> None:
-    """Resolving both sides to names must not resolve everything to a match.
-
-    The failure mode of the fix is the mirror of the bug it replaces: pair the
-    columns by name and a foreign key that points somewhere else entirely could
-    be accepted. So this declares a reference to `reserves.slug` where the
-    database points at `reserves.id`, on the same out-of-order table, and
-    requires exactly that one issue -- not zero, and not one per column.
-    """
     schema, database = shuffled_schema
     reserve, _ = _shuffled_models(schema)
 
@@ -549,12 +486,6 @@ async def test_the_out_of_order_pass_is_not_vacuous(
 async def test_the_target_table_is_read_once_however_many_keys_point_at_it(
     shuffled_schema: tuple[str, Any],
 ) -> None:
-    """Resolving a target's columns must not become a per-constraint round trip.
-
-    The target of a foreign key is usually another mapped model, so the position
-    map is shared across the whole validation run. Without the cache this is a
-    catalog read per constraint, on a path that runs at every startup.
-    """
     schema, database = shuffled_schema
     models = _shuffled_models(schema)
     registry = Registry(database, models, validate_schema="warn")

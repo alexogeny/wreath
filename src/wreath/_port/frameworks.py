@@ -175,18 +175,12 @@ def route_methods(attr: str, call: ast.Call | None) -> tuple[str, ...] | None:
     if call is None:
         return ("get",)
     named = next(
-        (
-            keyword.value
-            for keyword in call.keywords
-            if keyword.arg in ("methods", "method")
-        ),
+        (keyword.value for keyword in call.keywords if keyword.arg in ("methods", "method")),
         None,
     )
     if named is None:
         return ("get",)
-    values = (
-        named.elts if isinstance(named, (ast.List, ast.Tuple, ast.Set)) else (named,)
-    )
+    values = named.elts if isinstance(named, (ast.List, ast.Tuple, ast.Set)) else (named,)
     methods: list[str] = []
     seen: set[str] = set()
     for value in values:

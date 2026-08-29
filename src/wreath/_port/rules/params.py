@@ -7,7 +7,6 @@ from __future__ import annotations
 from ..ir import NEEDS_REVIEW, TRANSLATED
 
 PARAMS: dict[str, tuple[str, str, str, str]] = {
-    # -- params ---------------------------------------------------------------
     "param.query": (
         "param",
         "params",

@@ -87,9 +87,7 @@ def _summary(samples: list[float], units: int) -> dict[str, object]:
     }
 
 
-async def _time(
-    build: Any, warmup: int, trials: int, check: Any
-) -> tuple[list[float], int]:
+async def _time(build: Any, warmup: int, trials: int, check: Any) -> tuple[list[float], int]:
     statements = 0
     samples: list[float] = []
     for index in range(warmup + trials):

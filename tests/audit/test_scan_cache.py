@@ -1,18 +1,3 @@
-"""`scan_paths` reuses a file's findings while its mtime and size hold.
-
-The boot audit runs on **every** lifespan startup, so a test suite that enters
-`TestClient` once per test re-reads the application's whole package once per
-test. `tests/conftest.py::_startup_audit_off` measured that before this cache
-existed -- 674 runs for 65.6 seconds of worker time, 71% of it re-reading files
-that had not changed -- and worked around it by turning the audit off wholesale,
-an escape hatch no application of anyone else's gets.
-
-**Both directions are asserted, because a cache that never invalidates and a
-cache that never hits are both fast and only one of them is correct.** The hit
-is proved by counting reads, the miss by changing a file and demanding the new
-finding.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -64,7 +49,6 @@ def test_an_unchanged_tree_is_not_read_a_second_time(tmp_path: Path, counted: li
 def test_a_changed_file_is_read_again_and_its_new_findings_win(
     tmp_path: Path, counted: list[Path]
 ) -> None:
-    """The half that a cache keyed on the path alone would get wrong."""
     module = tmp_path / "handlers.py"
     module.write_text(UNSAFE, encoding="utf-8")
     assert "dynamic-import" in _rules(tmp_path)
@@ -79,12 +63,6 @@ def test_a_changed_file_is_read_again_and_its_new_findings_win(
 def test_a_rewrite_of_identical_length_is_still_noticed(
     tmp_path: Path, counted: list[Path]
 ) -> None:
-    """Size alone cannot carry the key, so mtime has to be in it.
-
-    `st_mtime_ns` is nanoseconds and a rewrite is a separate syscall, so this is
-    a real distinction rather than a hopeful one -- but it is the weakest edge
-    of the fingerprint and therefore the one worth pinning.
-    """
     module = tmp_path / "handlers.py"
     module.write_text(UNSAFE, encoding="utf-8")
     assert "dynamic-import" in _rules(tmp_path)
@@ -96,13 +74,6 @@ def test_a_rewrite_of_identical_length_is_still_noticed(
 
 
 def test_the_cache_holds_one_entry_per_path(tmp_path: Path, counted: list[Path]) -> None:
-    """Bounded by the tree, not by uptime.
-
-    An entry keyed on `(path, mtime, size)` would accumulate one row per
-    revision of a file that a long-running process re-scans, which is a leak
-    with a slow fuse. Keying on the path and replacing the value makes a file
-    evict its own stale findings.
-    """
     module = tmp_path / "handlers.py"
     for index in range(5):
         module.write_text(f"{UNSAFE}# revision {index}\n", encoding="utf-8")

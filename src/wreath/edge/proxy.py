@@ -35,9 +35,7 @@ DEFAULT_VIA_NAME = "wreath"
 #: `POST` is absent and stays absent. A client that knows its POST is safe to
 #: repeat says so with `Idempotency-Key`, which `wreath.policy.idempotency`
 #: already speaks -- and that is a claim only the client can make.
-IDEMPOTENT: frozenset[str] = frozenset(
-    {"GET", "HEAD", "PUT", "DELETE", "OPTIONS", "TRACE"}
-)
+IDEMPOTENT: frozenset[str] = frozenset({"GET", "HEAD", "PUT", "DELETE", "OPTIONS", "TRACE"})
 
 #: Methods with no request body to read. `GET` with a body is legal and
 #: meaningless -- RFC 9110 §9.3.1 says content on one has no defined semantics --
@@ -84,7 +82,12 @@ class ReverseProxy:
     """
 
     __slots__ = (
-        "_attempts", "_buffer_below", "_clients", "_max_body", "_pool", "_via",
+        "_attempts",
+        "_buffer_below",
+        "_clients",
+        "_max_body",
+        "_pool",
+        "_via",
     )
 
     def __init__(
@@ -162,9 +165,7 @@ class ReverseProxy:
             headers = forwardable(response.headers)
             small = self._buffered_length(response)
             if small is not None:
-                return await self._buffered(
-                    stream, response, upstream, started, headers
-                )
+                return await self._buffered(stream, response, upstream, started, headers)
             return StreamingResponse(
                 self._relay(stream, response, upstream, started),
                 status=response.status,
@@ -199,7 +200,7 @@ class ReverseProxy:
         """Read a small body, release the connection, and reply in one piece."""
         try:
             chunks = [chunk async for chunk in response.iter_bytes()]
-        except (ClientError, OSError):
+        except ClientError, OSError:
             self._pool.failed(upstream)
             raise
         finally:
@@ -208,9 +209,7 @@ class ReverseProxy:
         self._pool.succeeded(upstream, time.monotonic() - started)
         return Response(b"".join(chunks), status=response.status, headers=headers)
 
-    async def _relay(
-        self, stream: Any, response: Any, upstream: Upstream, started: float
-    ) -> Any:
+    async def _relay(self, stream: Any, response: Any, upstream: Upstream, started: float) -> Any:
         """Yield the upstream body, then account for the request either way.
 
         The bookkeeping lives here rather than beside the `choose` call because
@@ -221,7 +220,7 @@ class ReverseProxy:
         try:
             async for chunk in response.iter_bytes():
                 yield chunk
-        except (ClientError, OSError):
+        except ClientError, OSError:
             self._pool.failed(upstream)
             raise
         else:

@@ -180,9 +180,7 @@ class Seal:
 
     def __post_init__(self) -> None:
         if self.on_late not in ("correct", "reopen"):
-            raise ValueError(
-                f"seal(on_late=) is 'correct' or 'reopen', got {self.on_late!r}"
-            )
+            raise ValueError(f"seal(on_late=) is 'correct' or 'reopen', got {self.on_late!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,9 +267,6 @@ def params_key(values: dict[str, Any]) -> str:
     for name in sorted(values):
         digest.update(f"{name}\x00{values[name]!r}\x00".encode())
     return digest.hexdigest()
-
-
-# -- reading and writing settled rows -----------------------------------------
 
 
 def select_settled(*, schema: str = SCHEMA) -> str:
@@ -374,9 +369,7 @@ def difference(
         was, now = settled.get(name), current.get(name)
         if was == now:
             continue
-        if measure.has_identity and isinstance(was, (int, float)) and isinstance(
-            now, (int, float)
-        ):
+        if measure.has_identity and isinstance(was, (int, float)) and isinstance(now, (int, float)):
             delta[name] = now - was
         else:
             # Not additive: an average cannot be corrected by adding anything,

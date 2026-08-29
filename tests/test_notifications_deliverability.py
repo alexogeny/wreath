@@ -1,16 +1,3 @@
-"""The deliverability check, and the DNS client under it.
-
-`wreath.doctor.check_email_deliverability` asks the one question the code cannot
-answer about itself: is the sending domain's DNS actually configured to let this
-mail through. Every test here injects a resolver rather than reaching the
-network -- a diagnostic whose tests depend on the internet is a diagnostic that
-goes red for reasons that have nothing to do with it.
-
-The DNS client's own parsing is tested against captured wire bytes, which is the
-only way to cover the parts that only appear in a real answer: multi-string TXT
-records, name compression, and NXDOMAIN.
-"""
-
 from __future__ import annotations
 
 import struct
@@ -60,17 +47,11 @@ def test_a_fully_configured_domain_reports_nothing() -> None:
 
 
 def test_an_unsigned_sender_is_the_first_finding() -> None:
-    """Ordering matters: the missing signature explains the rest."""
     findings = check_email_deliverability(sender(), resolve=stub(HEALTHY))
     assert "sends unsigned mail" in findings[0]
 
 
 def test_a_missing_dkim_record_names_the_record_to_publish() -> None:
-    """The fix belongs in the same output as the finding.
-
-    A finding that says "DKIM is not configured" sends the reader to a search
-    engine; one that names `sel._domainkey.example.com` does not.
-    """
     records = dict(HEALTHY)
     del records["sel._domainkey.example.com"]
     findings = check_email_deliverability(sender(dkim=signer()), resolve=stub(records))
@@ -78,12 +59,6 @@ def test_a_missing_dkim_record_names_the_record_to_publish() -> None:
 
 
 def test_a_revoked_dkim_key_is_distinguished_from_a_missing_one() -> None:
-    """An empty `p=` is a revocation, and it fails *differently*.
-
-    Both look like "DKIM is broken" from the outside; only one is fixed by
-    publishing a record, so reporting them with one message would send half the
-    readers down the wrong path.
-    """
     records = dict(HEALTHY) | {"sel._domainkey.example.com": ["v=DKIM1; k=rsa; p="]}
     findings = check_email_deliverability(sender(dkim=signer()), resolve=stub(records))
     assert any("revoked" in line for line in findings)
@@ -94,7 +69,8 @@ def test_a_versioned_dkim_record_without_a_key_is_revoked_not_missing() -> None:
         "sel._domainkey.example.com": ["v=DKIM1; k=rsa"],
     }
     findings = check_email_deliverability(
-        sender(dkim=signer()), resolve=stub(records),
+        sender(dkim=signer()),
+        resolve=stub(records),
     )
 
     assert any("revoked" in line for line in findings)
@@ -102,12 +78,6 @@ def test_a_versioned_dkim_record_without_a_key_is_revoked_not_missing() -> None:
 
 
 def test_a_misaligned_signing_domain_is_reported_even_when_dns_is_perfect() -> None:
-    """The failure that looks like success: DKIM passes and DMARC still fails.
-
-    A key published for the signing domain verifies, so every DKIM debugger says
-    "pass" -- and the mail is still rejected, because DMARC checks the signing
-    domain against the From domain and these do not match.
-    """
     records = dict(HEALTHY) | {"sel._domainkey.other.example": ["v=DKIM1; k=rsa; p=MIIBIjANBg"]}
     findings = check_email_deliverability(
         sender(dkim=signer(domain="other.example")), resolve=stub(records)
@@ -117,9 +87,7 @@ def test_a_misaligned_signing_domain_is_reported_even_when_dns_is_perfect() -> N
 
 def test_an_ed25519_signer_needs_the_key_type_published() -> None:
     records = dict(HEALTHY)
-    findings = check_email_deliverability(
-        sender(dkim=signer(key=ED)), resolve=stub(records)
-    )
+    findings = check_email_deliverability(sender(dkim=signer(key=ED)), resolve=stub(records))
     assert any("k=ed25519" in line for line in findings)
 
 
@@ -130,16 +98,12 @@ def test_a_missing_spf_record_is_reported() -> None:
 
 
 def test_two_spf_records_are_reported_as_a_permerror() -> None:
-    """RFC 7208 requires exactly one; a receiver seeing two gives up."""
-    records = dict(HEALTHY) | {
-        "example.com": ["v=spf1 include:a -all", "v=spf1 include:b -all"]
-    }
+    records = dict(HEALTHY) | {"example.com": ["v=spf1 include:a -all", "v=spf1 include:b -all"]}
     findings = check_email_deliverability(sender(dkim=signer()), resolve=stub(records))
     assert any("permerror" in line for line in findings)
 
 
 def test_a_permissive_spf_record_is_reported() -> None:
-    """`+all` authorises the internet, and looks configured while doing it."""
     records = dict(HEALTHY) | {"example.com": ["v=spf1 +all"]}
     findings = check_email_deliverability(sender(dkim=signer()), resolve=stub(records))
     assert any("+all" in line for line in findings)
@@ -158,11 +122,6 @@ def test_p_none_is_reported_as_below_the_baseline() -> None:
 
 
 def test_an_unreachable_resolver_says_so_instead_of_reporting_misconfiguration() -> None:
-    """"I could not tell" is a different report from "it is not configured".
-
-    Conflating them is how a check gets ignored: one slow nameserver and the
-    tool starts claiming every domain is broken.
-    """
     findings = check_email_deliverability(sender(dkim=signer()), resolve=stub({}, unreachable=True))
     assert findings
     assert all("could not read" in line for line in findings)
@@ -172,9 +131,6 @@ def test_a_sender_with_no_from_address_is_reported_once() -> None:
     findings = check_email_deliverability(sender(from_addr=""), resolve=stub(HEALTHY))
     assert len(findings) == 1
     assert "no from address" in findings[0]
-
-
-# --- the DNS client -----------------------------------------------------------
 
 
 def _response(query_id: int, *records: bytes, rcode: int = 0, answers: int | None = None) -> bytes:
@@ -195,12 +151,6 @@ def _txt(*strings: bytes) -> bytes:
 
 
 def test_a_multi_string_txt_record_is_joined() -> None:
-    """A 2048-bit DKIM key arrives as several character-strings.
-
-    Each is capped at 255 octets, and the record means nothing until they are
-    concatenated -- splitting on the wrong boundary is why a correctly published
-    key sometimes reads as malformed.
-    """
     from wreath._dns import _parse
 
     parsed = _parse(_response(7, _txt(b"v=DKIM1; k=rsa; p=AAAA", b"BBBBCCCC")), 7)
@@ -208,7 +158,6 @@ def test_a_multi_string_txt_record_is_joined() -> None:
 
 
 def test_an_nxdomain_is_an_empty_answer_not_an_error() -> None:
-    """"There is no such name" is a definite answer, and a finding."""
     from wreath._dns import _parse
 
     assert _parse(_response(7, rcode=3), 7) == ()
@@ -222,7 +171,6 @@ def test_a_mismatched_response_id_is_refused() -> None:
 
 
 def test_a_server_failure_is_an_error_not_an_empty_answer() -> None:
-    """SERVFAIL must not read as "the record is absent"."""
     from wreath._dns import _parse
 
     with pytest.raises(ValueError, match="rcode 2"):
@@ -252,13 +200,6 @@ def test_an_over_long_name_is_refused_without_a_socket() -> None:
 
 
 def test_a_truncated_udp_answer_is_retried_over_tcp(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The TC bit, which a long SPF or DKIM record actually sets.
-
-    A 2048-bit DKIM key does not fit a 512-byte UDP answer, so the server
-    truncates and sets TC, and a resolver that ignores it reads a *partial*
-    record -- which parses, and is wrong. That failure looks like a malformed
-    key rather than a protocol bug, so it is worth pinning.
-    """
     import socket
     import struct
 
@@ -296,7 +237,6 @@ def test_a_truncated_udp_answer_is_retried_over_tcp(monkeypatch: pytest.MonkeyPa
 
 
 def test_an_untruncated_answer_is_not_re_asked_over_tcp(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The other half: a resolver that always retries doubles every lookup."""
     import socket
     import struct
 

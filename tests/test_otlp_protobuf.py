@@ -1,18 +1,3 @@
-"""OTLP over protobuf: field numbers, wire bytes, and the exporter's encoding.
-
-The bar here is that the bytes are *OTLP*, not merely that they survive a round
-trip through this repository's own codec. Three things enforce that, in
-descending order of how much they prove:
-
-1. **Field numbers are asserted against `opentelemetry-proto`.** A number is the
-   whole contract with a collector, and it is checkable by reading the
-   specification rather than by running anything.
-2. **A wire vector is hand-computed** from the tag/length rules, so a framing
-   bug fails as a spec mismatch instead of agreeing with itself.
-3. Real requests from `_otlp.py`'s builders are encoded and decoded back, which
-   catches conversion mistakes the first two would not see.
-"""
-
 from __future__ import annotations
 
 import json
@@ -26,8 +11,6 @@ from wreath import _otlp_proto as proto
 from wreath._export import OtlpHttpExporter
 from wreath._otlp import build_logs_request, build_metrics_request
 from wreath.protobuf import decode
-
-# -- 1. field numbers, against opentelemetry-proto ---------------------------
 
 #: (message, python field name, number) transcribed from opentelemetry-proto:
 #: common/v1/common.proto, resource/v1/resource.proto, trace/v1/trace.proto,
@@ -111,28 +94,12 @@ def test_field_numbers_match_opentelemetry_proto(cls: type, name: str, number: i
     assert plan[names.index(name)][0] == number
 
 
-# -- 2. a hand-computed wire vector ------------------------------------------
-
-
 def test_the_framing_matches_a_hand_computed_vector() -> None:
-    """One span carrying only `name="x"`, nested three deep.
-
-    Span.name is field 5, wire type 2 -> tag `2a`, length `01`, `78` ("x").
-        -> `2a 01 78`, three bytes.
-    ScopeSpans.spans is field 2, wire type 2 -> tag `12`, length `03`.
-        -> `12 03 2a 01 78`, five bytes.
-    ResourceSpans.scope_spans is field 2 -> tag `12`, length `05`.
-        -> `12 05 12 03 2a 01 78`, seven bytes.
-    ExportTraceServiceRequest.resource_spans is field 1 -> tag `0a`, length `07`.
-    """
     raw = proto.encode_traces({"resourceSpans": [{"scopeSpans": [{"spans": [{"name": "x"}]}]}]})
-    assert raw == bytes.fromhex("0a07" "1205" "1203" "2a0178")
+    assert raw == bytes.fromhex("0a07120512032a0178")
 
 
 def test_ids_travel_as_bytes_not_hex_text() -> None:
-    """OTLP/JSON carries trace and span ids as hex strings; the wire carries
-    the raw 16 and 8 bytes. Sending the *text* would give a collector a 32-byte
-    trace id, which it rejects."""
     span = {"traceId": "ff" * 16, "spanId": "ab" * 8}
     raw = proto.encode_traces({"resourceSpans": [{"scopeSpans": [{"spans": [span]}]}]})
     request = decode(proto.ExportTraceServiceRequest, raw)
@@ -142,31 +109,19 @@ def test_ids_travel_as_bytes_not_hex_text() -> None:
 
 
 def test_sixty_four_bit_values_survive_past_the_double_range() -> None:
-    """OTLP/JSON sends 64-bit ints as decimal strings precisely because a JSON
-    number is a double. A nanosecond timestamp is already past 2^53, so reading
-    one as a float would silently round it."""
     stamp = 1_753_900_000_123_456_789
     assert stamp > 2**53
     raw = proto.encode_traces(
-        {
-            "resourceSpans": [
-                {"scopeSpans": [{"spans": [{"startTimeUnixNano": str(stamp)}]}]}
-            ]
-        }
+        {"resourceSpans": [{"scopeSpans": [{"spans": [{"startTimeUnixNano": str(stamp)}]}]}]}
     )
     request = decode(proto.ExportTraceServiceRequest, raw)
     assert request.resource_spans[0].scope_spans[0].spans[0].start_time_unix_nano == stamp
 
 
-# -- 3. the real builders ----------------------------------------------------
-
-
 def test_a_real_metrics_request_survives_the_conversion() -> None:
     from wreath._projector import ProjectorLoss, ProjectorSnapshot, RouteMetric
 
-    metric = RouteMetric(
-        route_id=3, count=7, errors=2, duration_us_sum=1234, duration_us_max=900
-    )
+    metric = RouteMetric(route_id=3, count=7, errors=2, duration_us_sum=1234, duration_us_max=900)
     metric.buckets[2] = 5
     metric.buckets[3] = 2
     snapshot = ProjectorSnapshot(
@@ -203,9 +158,7 @@ def test_a_real_metrics_request_survives_the_conversion() -> None:
 def test_direct_metric_writer_matches_the_declared_mapping() -> None:
     from wreath._projector import ProjectorLoss, ProjectorSnapshot, RouteMetric
 
-    first = RouteMetric(
-        route_id=3, count=7, errors=2, duration_us_sum=1234, duration_us_max=900
-    )
+    first = RouteMetric(route_id=3, count=7, errors=2, duration_us_sum=1234, duration_us_max=900)
     first.buckets[2] = 5
     first.buckets[5] = 2
     second = RouteMetric(route_id=9, errors=-1)
@@ -259,9 +212,7 @@ def test_direct_metric_writer_keeps_an_empty_request_empty() -> None:
         loss=ProjectorLoss(),
         pending=0,
     )
-    assert proto.encode_projected_metrics(
-        snapshot, start_unix_nano=1, now_unix_nano=2
-    ) == b""
+    assert proto.encode_projected_metrics(snapshot, start_unix_nano=1, now_unix_nano=2) == b""
 
 
 def test_direct_trace_writer_matches_the_declared_mapping() -> None:
@@ -357,11 +308,14 @@ def test_direct_trace_writer_matches_the_declared_mapping() -> None:
             resource_attributes=attributes,
         )
     )
-    assert proto.encode_projected_traces(
-        traces,
-        image=image,
-        resource_attributes=attributes,
-    ) == defined
+    assert (
+        proto.encode_projected_traces(
+            traces,
+            image=image,
+            resource_attributes=attributes,
+        )
+        == defined
+    )
 
 
 def test_direct_trace_writer_keeps_an_empty_request_empty() -> None:
@@ -457,20 +411,20 @@ def test_direct_log_writer_matches_the_declared_mapping() -> None:
             resource_attributes=attributes,
         )
     )
-    assert proto.encode_projected_logs(
-        records,
-        registry=registry,
-        resource_attributes=attributes,
-    ) == defined
+    assert (
+        proto.encode_projected_logs(
+            records,
+            registry=registry,
+            resource_attributes=attributes,
+        )
+        == defined
+    )
 
 
 def test_direct_log_writer_keeps_an_empty_request_empty() -> None:
     from wreath._logsite import SiteRegistry
 
     assert proto.encode_projected_logs((), registry=SiteRegistry()) == b""
-
-
-# -- 4/5. the exporter -------------------------------------------------------
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -511,10 +465,8 @@ TRACES = {"resourceSpans": [{"scopeSpans": [{"spans": [{"name": "GET /x"}]}]}]}
 
 
 def test_the_exporter_sends_protobuf_by_default() -> None:
-    posts = _serve(
-        lambda base: OtlpHttpExporter(base, timeout=5.0).export_traces(TRACES)
-    )
-    (path, content_type, body), = posts
+    posts = _serve(lambda base: OtlpHttpExporter(base, timeout=5.0).export_traces(TRACES))
+    ((path, content_type, body),) = posts
     assert path == "/v1/traces"
     assert content_type == "application/x-protobuf"
     # And the body really is the message it claims to be.
@@ -526,7 +478,7 @@ def test_json_remains_selectable() -> None:
     posts = _serve(
         lambda base: OtlpHttpExporter(base, timeout=5.0, encoding="json").export_traces(TRACES)
     )
-    (_path, content_type, body), = posts
+    ((_path, content_type, body),) = posts
     assert content_type == "application/json"
     assert json.loads(body) == TRACES
 
@@ -547,16 +499,8 @@ def test_empty_requests_are_still_skipped_in_both_encodings() -> None:
     assert _serve(drive) == []
 
 
-# -- the refusal that keeps the mapping honest -------------------------------
-
-
 def test_an_undeclared_otlp_key_is_refused_rather_than_dropped() -> None:
-    """If a builder starts emitting a field this module has not declared,
-    silently dropping it would export telemetry that lost data and still looked
-    successful. `links` is a real OTLP Span field that nothing here builds."""
     with pytest.raises(ValueError) as excinfo:
-        proto.encode_traces(
-            {"resourceSpans": [{"scopeSpans": [{"spans": [{"links": []}]}]}]}
-        )
+        proto.encode_traces({"resourceSpans": [{"scopeSpans": [{"spans": [{"links": []}]}]}]})
     assert "links" in str(excinfo.value)
     assert "Span" in str(excinfo.value)

@@ -28,7 +28,6 @@ AUTH: dict[str, tuple[str, str, str, str]] = {
 }
 
 AUTH_SCHEMES: dict[str, tuple[str, str, str, str]] = {
-    # -- auth schemes ---------------------------------------------------------
     "auth.security_scheme": (
         "auth",
         "other",

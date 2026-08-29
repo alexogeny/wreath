@@ -40,13 +40,9 @@ def route_path(path: str, style: str) -> str:
     ROUTE_SPECS as written.
     """
     if style == "sanic":
-        return path.replace("{tenant_id}", "<tenant_id:str>").replace(
-            "{item_id}", "<item_id:str>"
-        )
+        return path.replace("{tenant_id}", "<tenant_id:str>").replace("{item_id}", "<item_id:str>")
     if style == "django":
-        return path.replace("{tenant_id}", "<str:tenant_id>").replace(
-            "{item_id}", "<str:item_id>"
-        )
+        return path.replace("{tenant_id}", "<str:tenant_id>").replace("{item_id}", "<str:item_id>")
     if style == "flask":
         return path.replace("{tenant_id}", "<tenant_id>").replace("{item_id}", "<item_id>")
     return path
@@ -82,7 +78,8 @@ ROUTE_SPECS = tuple(_route_spec(index) for index in range(ROUTE_COUNT))
 #: benchmarks/README.md -- add to that list rather than deleting a name here.
 FRAMEWORKS = (
     "wreath",
-    "wreath-native", "wreath-metal",
+    "wreath-native",
+    "wreath-metal",
     "starlette",
     "fastapi",
     "sanic",
@@ -118,8 +115,15 @@ _WREATH_ONLY = frozenset({"wreath", "wreath-native", "wreath-metal"})
 _ROUTED_FRAMEWORKS = _ALL - {"granian-rsgi"}
 _REQUEST_FEATURE_FRAMEWORKS = frozenset(
     {
-        "wreath", "wreath-native", "wreath-metal",
-        "starlette", "fastapi", "sanic", "django", "flask", "panther",
+        "wreath",
+        "wreath-native",
+        "wreath-metal",
+        "starlette",
+        "fastapi",
+        "sanic",
+        "django",
+        "flask",
+        "panther",
         # Rust: implemented in benchmarks/rust_arms/axum_server/, response for response
         # against the Starlette arm. BlackSheep is absent here (both arms of it),
         # so the granian pair stays comparable to the uvicorn one.
@@ -132,13 +136,17 @@ _REQUEST_FEATURE_FRAMEWORKS = frozenset(
 _STREAMING_FRAMEWORKS = frozenset(
     {"wreath", "wreath-native", "wreath-metal", "starlette", "fastapi"}
 )
-_BACKGROUND_FRAMEWORKS = frozenset(
-    {"wreath", "wreath-native", "wreath-metal", "starlette"}
-)
+_BACKGROUND_FRAMEWORKS = frozenset({"wreath", "wreath-native", "wreath-metal", "starlette"})
 _WEBSOCKET_FRAMEWORKS = frozenset(
     {
-        "wreath", "wreath-native", "wreath-metal",
-        "starlette", "fastapi", "sanic", "blacksheep", "blacksheep-granian",
+        "wreath",
+        "wreath-native",
+        "wreath-metal",
+        "starlette",
+        "fastapi",
+        "sanic",
+        "blacksheep",
+        "blacksheep-granian",
     }
 )
 # Template rendering and HTTP caching are expressible in every ASGI-tier
@@ -146,8 +154,14 @@ _WEBSOCKET_FRAMEWORKS = frozenset(
 # webhook HMAC profile is a Wreath framework primitive, so only Wreath implements it.
 _TEMPLATE_FRAMEWORKS = frozenset(
     {
-        "wreath", "wreath-native", "wreath-metal",
-        "starlette", "fastapi", "sanic", "blacksheep", "blacksheep-granian",
+        "wreath",
+        "wreath-native",
+        "wreath-metal",
+        "starlette",
+        "fastapi",
+        "sanic",
+        "blacksheep",
+        "blacksheep-granian",
         "panther",
     }
 )
@@ -159,9 +173,7 @@ _CACHE_FRAMEWORKS = _TEMPLATE_FRAMEWORKS | {"axum", "granian-rsgi"}
 _WEBHOOK_FRAMEWORKS = _WREATH_ONLY
 
 JSON_REQUEST_BODY = b'{"message":"hello","values":[1,2,3,4]}'
-TYPED_REQUEST_BODY = (
-    b'{"name":"benchmark-item","price":19.99,"tags":["a","b","c"],"active":true}'
-)
+TYPED_REQUEST_BODY = b'{"name":"benchmark-item","price":19.99,"tags":["a","b","c"],"active":true}'
 SMALL_REQUEST_BODY = b"x" * 1_024
 LARGE_RESPONSE_BODY = b"x" * 65_536
 STREAM_CHUNKS = (b"a" * 256, b"b" * 256, b"c" * 256, b"d" * 256)
@@ -339,12 +351,8 @@ SCENARIOS = {
         headers=(("Content-Type", "application/json"),),
         frameworks=_REQUEST_FEATURE_FRAMEWORKS,
     ),
-    "response-64k": Scenario(
-        "GET", "/response-64k", frameworks=_REQUEST_FEATURE_FRAMEWORKS
-    ),
-    "stream-4x256": Scenario(
-        "GET", "/stream-4x256", frameworks=_STREAMING_FRAMEWORKS
-    ),
+    "response-64k": Scenario("GET", "/response-64k", frameworks=_REQUEST_FEATURE_FRAMEWORKS),
+    "stream-4x256": Scenario("GET", "/stream-4x256", frameworks=_STREAMING_FRAMEWORKS),
     "background-noop": Scenario(
         "GET",
         "/background-noop",
@@ -359,9 +367,7 @@ SCENARIOS = {
         protocols=HTTP1_ONLY,
         background=True,
     ),
-    "routing-shallow-get": Scenario(
-        "GET", "/status/leaf-9995", frameworks=_ROUTED_FRAMEWORKS
-    ),
+    "routing-shallow-get": Scenario("GET", "/status/leaf-9995", frameworks=_ROUTED_FRAMEWORKS),
     "routing-versioned-post": Scenario(
         "POST", "/api/v1/items/category-5/leaf-9996", frameworks=_ROUTED_FRAMEWORKS
     ),

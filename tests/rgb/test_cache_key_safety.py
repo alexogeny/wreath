@@ -1,5 +1,3 @@
-"""What a shared response cache must refuse (report 23: R-09, R-10, R-12, R-76)."""
-
 from __future__ import annotations
 
 from wreath import Wreath
@@ -94,12 +92,8 @@ class TestPublicKeyAndPrincipals:
             return {"who": request.identity.id}
 
         async with TestClient(app) as client:
-            first = await client.get(
-                "/me?view=profile", headers={"x-user": "ann"}
-            )
-            second = await client.get(
-                "/me?view=profile", headers={"x-user": "bo"}
-            )
+            first = await client.get("/me?view=profile", headers={"x-user": "ann"})
+            second = await client.get("/me?view=profile", headers={"x-user": "bo"})
 
         assert first.json() == {"who": "ann"}
         assert second.json() == {"who": "bo"}, "one principal was served another's body"
@@ -118,12 +112,8 @@ class TestPublicKeyAndPrincipals:
             return {"who": request.identity.id}
 
         async with TestClient(app) as client:
-            first = await client.get(
-                "/me?view=profile", headers={"x-user": "ann"}
-            )
-            second = await client.get(
-                "/me?view=profile", headers={"x-user": "bo"}
-            )
+            first = await client.get("/me?view=profile", headers={"x-user": "ann"})
+            second = await client.get("/me?view=profile", headers={"x-user": "bo"})
 
         assert first.json() == {"who": "ann"}
         assert second.json() == {"who": "bo"}

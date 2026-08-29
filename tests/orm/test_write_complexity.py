@@ -62,9 +62,7 @@ async def test_insert_compiles_once_per_distinct_column_set(
     assert builds[0] == 2
 
 
-async def test_insert_compiles_once_per_model(
-    session: Session, database: FakeDatabase
-) -> None:
+async def test_insert_compiles_once_per_model(session: Session, database: FakeDatabase) -> None:
     for index in range(8):
         session.add(_user(index))
         session.add(Post(id=index, author_id=index, title="t"))
@@ -119,9 +117,7 @@ async def test_update_distinct_dirty_sets_compile_separately(
     assert builds[0] == 2
 
 
-async def test_delete_compiles_once_per_model(
-    registry: Registry, database: FakeDatabase
-) -> None:
+async def test_delete_compiles_once_per_model(registry: Registry, database: FakeDatabase) -> None:
     session = Session(registry, "write")
     users = []
     for index in range(16):

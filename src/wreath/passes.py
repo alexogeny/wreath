@@ -89,9 +89,6 @@ def _seconds(value: Any, *, what: str, allow_zero: bool = False) -> float:
     return _duration.seconds(value, what=what, allow_zero=allow_zero)
 
 
-# --- what to walk ------------------------------------------------------------
-
-
 @dataclass(frozen=True, slots=True)
 class Table:
     """A table to walk that the ORM does not own.
@@ -152,8 +149,6 @@ class Rows:
         object.__setattr__(self, "keys", _keyset.normalise(self.key))
         object.__setattr__(self, "within", _seconds(self.within, what="Rows within"))
 
-    # -- the range source protocol -------------------------------------------
-    #
     # A ChunkedPass calls these; a caller declares Rows(...) and never does.
 
     def refuse(self, *, table: str) -> None:
@@ -249,9 +244,6 @@ class Rows:
                 reverse=True,
             )
         return None if end is None else (cursor, end)
-
-
-# --- how far to walk ---------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,9 +397,6 @@ class Sealed:
             raise ValueError("a non-empty sealed frontier must decode to a timestamp")
         operator = ">" if keys[0].descending else "<"
         return f"{keys[0].name} {operator} {binds.add(decoded[0])}"
-
-
-# --- what the work is --------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -627,9 +616,6 @@ def _rows_in(tag: Any) -> int:
         return 0
     parts = tag.rsplit(" ", 1)
     return int(parts[1]) if len(parts) == 2 and parts[1].isdigit() else 0
-
-
-# --- the pass ----------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -941,8 +927,6 @@ class ChunkedPass:
                 )
         self._ledger = _ledger.Ledger(schema=schema, name=name, tenant=tenant)
 
-    # -- what a driver reads -------------------------------------------------
-    #
     # A declaration is read-only once built. Every refusal has already run, so
     # anything reading these -- the driver, the CLI, a test -- is looking at a
     # shape that was validated at declaration time and cannot drift afterwards.
@@ -1100,8 +1084,6 @@ class ChunkedPass:
     def __repr__(self) -> str:
         return f"<ChunkedPass {self._name!r} over {self._table}>"
 
-    # -- schema ---------------------------------------------------------------
-
     def schema_sql(self) -> str:
         """DDL for the shared ledger table. Apply it as a migration.
 
@@ -1110,8 +1092,6 @@ class ChunkedPass:
         process started is a schema change with no history and no review.
         """
         return self._ledger.schema_sql()
-
-    # -- running --------------------------------------------------------------
 
     async def run_shift(
         self,

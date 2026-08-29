@@ -1,14 +1,3 @@
-"""Stage 5 forensic capture over HTTP/2.
-
-A Wreath app dispatches HTTP/2 through the native ``_RequestContext`` scope and
-the ``native_response`` fast path — the same seam as HTTP/1 — so the whole capture
-surface (header allow/hash, deny-by-default, response side, bodies, per-arm
-narrowing) works on HTTP/2 with no protocol-specific code. These tests drive the
-native ``Http2Protocol`` with a Forensic recorder and assert on the committed
-capture slabs. (The dict-scope ``_wreath_flight`` path is for bare ASGI apps,
-which never install a capture plan.)
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -84,8 +73,12 @@ async def _drive_capture(
     body: bytes = b"",
 ) -> list[CaptureSlab]:
     rec = _flight.Recorder(
-        _flight.MODE_FORENSIC, ring_records=256, active_requests=16,
-        capture_slabs=8, slab_bytes=4096, detailed_sample_rate=1.0,
+        _flight.MODE_FORENSIC,
+        ring_records=256,
+        active_requests=16,
+        capture_slabs=8,
+        slab_bytes=4096,
+        detailed_sample_rate=1.0,
     )
     loop = asyncio.get_event_loop()
     protocol = Http2Protocol(app, ServerConfig(protocols=("h2",)), loop, set(), recorder=rec)

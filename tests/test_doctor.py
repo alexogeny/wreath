@@ -1,17 +1,3 @@
-"""N+1 detection: live in development, forensic in production.
-
-N+1 is the most common performance bug in an ORM-backed API and the least
-visible one -- every query is fast, there are just fifty of them, and nothing
-in a green test suite says so. Wreath can see it because it owns both halves:
-the ORM knows which model each query hydrated, and the Flight Recorder knows
-which route the request was on.
-
-Two surfaces over one signal. :class:`NPlusOneGuard` fails the request the
-moment the same model is queried once too often, so the traceback points at the
-line that did it. :func:`find_n_plus_one` reads recorded traces after the fact,
-so a production route can be diagnosed without reproducing it.
-"""
-
 from __future__ import annotations
 
 import sys
@@ -35,8 +21,6 @@ from wreath.doctor import (
 )
 from wreath.orm.registry import Registry
 from wreath.orm.session import Session
-
-# --- recorded traces ---------------------------------------------------------
 
 ROUTES = [
     {"id": 1, "method": "GET", "path": "/llamas"},
@@ -69,73 +53,68 @@ def _herd_trace(treks: int, *, request_id: int = 1) -> dict[str, Any]:
 
 
 def test_a_repeated_model_query_is_a_finding() -> None:
-    findings = find_n_plus_one([_herd_trace(50)], threshold=10,
-                               routes=ROUTES, models=MODELS)
+    findings = find_n_plus_one([_herd_trace(50)], threshold=10, routes=ROUTES, models=MODELS)
 
     (finding,) = findings
     assert finding.route == "GET /llamas"
     assert finding.request_id == 1
-    assert finding.queries == 51                 # the one, plus the fifty
+    assert finding.queries == 51  # the one, plus the fifty
     assert finding.worst == Repetition(model="Trek", count=50, total_us=1500)
 
 
 def test_a_finding_describes_itself_in_one_line() -> None:
-    (finding,) = find_n_plus_one([_herd_trace(50)], threshold=10,
-                                 routes=ROUTES, models=MODELS)
+    (finding,) = find_n_plus_one([_herd_trace(50)], threshold=10, routes=ROUTES, models=MODELS)
     described = finding.explain()
     assert "GET /llamas" in described
-    assert "51" in described                     # statements issued
-    assert "50" in described                     # of them for one model
+    assert "51" in described  # statements issued
+    assert "50" in described  # of them for one model
     assert "Trek" in described
 
 
 def test_a_query_run_a_handful_of_times_is_not_a_finding() -> None:
-    """Below the threshold this is ordinary work, not a defect."""
-    assert find_n_plus_one([_herd_trace(3)], threshold=10,
-                           routes=ROUTES, models=MODELS) == []
+    assert find_n_plus_one([_herd_trace(3)], threshold=10, routes=ROUTES, models=MODELS) == []
 
 
 def test_many_distinct_models_queried_once_each_is_not_a_finding() -> None:
     phases = []
     for model_id in range(1, 40):
         phases += [_phase("db_query"), _phase("orm_hydrate", model_id)]
-    assert find_n_plus_one([_trace(phases=phases)], threshold=10,
-                           routes=ROUTES, models=MODELS) == []
+    assert (
+        find_n_plus_one([_trace(phases=phases)], threshold=10, routes=ROUTES, models=MODELS) == []
+    )
 
 
 def test_the_threshold_is_inclusive() -> None:
-    assert find_n_plus_one([_herd_trace(10)], threshold=10,
-                           routes=ROUTES, models=MODELS)
-    assert not find_n_plus_one([_herd_trace(9)], threshold=10,
-                               routes=ROUTES, models=MODELS)
+    assert find_n_plus_one([_herd_trace(10)], threshold=10, routes=ROUTES, models=MODELS)
+    assert not find_n_plus_one([_herd_trace(9)], threshold=10, routes=ROUTES, models=MODELS)
 
 
 def test_an_unmapped_model_id_still_reports() -> None:
-    """A stale metadata image must degrade to a number, never to silence."""
-    (finding,) = find_n_plus_one([_herd_trace(20)], threshold=10,
-                                 routes=ROUTES, models=[])
+    (finding,) = find_n_plus_one([_herd_trace(20)], threshold=10, routes=ROUTES, models=[])
     assert finding.worst.model == "model:5"
 
 
 def test_an_unmapped_route_id_still_reports() -> None:
-    (finding,) = find_n_plus_one([_herd_trace(20)], threshold=10,
-                                 routes=[], models=MODELS)
+    (finding,) = find_n_plus_one([_herd_trace(20)], threshold=10, routes=[], models=MODELS)
     assert finding.route == "route:1"
 
 
 def test_findings_come_back_worst_first() -> None:
     findings = find_n_plus_one(
-        [_herd_trace(12, request_id=1), _herd_trace(80, request_id=2),
-         _herd_trace(30, request_id=3)],
-        threshold=10, routes=ROUTES, models=MODELS,
+        [
+            _herd_trace(12, request_id=1),
+            _herd_trace(80, request_id=2),
+            _herd_trace(30, request_id=3),
+        ],
+        threshold=10,
+        routes=ROUTES,
+        models=MODELS,
     )
     assert [f.request_id for f in findings] == [2, 3, 1]
 
 
 def test_a_trace_with_no_phases_is_ignored() -> None:
-    """An unsampled request carries no phases; it is not evidence of anything."""
-    assert find_n_plus_one([_trace(phases=[])], threshold=2,
-                           routes=ROUTES, models=MODELS) == []
+    assert find_n_plus_one([_trace(phases=[])], threshold=2, routes=ROUTES, models=MODELS) == []
 
 
 def test_one_trace_can_name_more_than_one_offender() -> None:
@@ -144,13 +123,11 @@ def test_one_trace_can_name_more_than_one_offender() -> None:
         phases += [_phase("db_query"), _phase("orm_hydrate", 5)]
     for _ in range(40):
         phases += [_phase("db_query"), _phase("orm_hydrate", 6)]
-    (finding,) = find_n_plus_one([_trace(phases=phases)], threshold=10,
-                                 routes=ROUTES, models=MODELS)
+    (finding,) = find_n_plus_one(
+        [_trace(phases=phases)], threshold=10, routes=ROUTES, models=MODELS
+    )
     assert [r.model for r in finding.repetitions] == ["Llama", "Trek"]
     assert finding.worst.count == 40
-
-
-# --- the live guard ----------------------------------------------------------
 
 
 class Req:
@@ -195,7 +172,7 @@ async def test_the_guard_binds_a_ledger_for_the_request() -> None:
     assert ledger.route == "GET /llamas"
 
     await guard.after(request, "response")
-    assert query_ledger.get(None) is None      # and unbound again afterwards
+    assert query_ledger.get(None) is None  # and unbound again afterwards
 
 
 @pytest.mark.asyncio
@@ -217,15 +194,14 @@ async def test_a_request_under_the_limit_passes_through() -> None:
 
 @pytest.mark.asyncio
 async def test_the_query_that_crosses_the_limit_is_the_one_that_raises() -> None:
-    """The traceback must point at the offending query, not at the response."""
     guard = NPlusOneGuard(limit=5)
     await guard.before(Req())
     ledger = query_ledger.get(None)
 
     for _ in range(4):
-        ledger.record("Trek")                  # four is fine
+        ledger.record("Trek")  # four is fine
     with pytest.raises(NPlusOneDetected) as caught:
-        ledger.record("Trek")                  # the fifth is not
+        ledger.record("Trek")  # the fifth is not
 
     message = str(caught.value)
     assert "GET /llamas" in message
@@ -236,17 +212,16 @@ async def test_the_query_that_crosses_the_limit_is_the_one_that_raises() -> None
 
 @pytest.mark.asyncio
 async def test_the_guard_can_report_instead_of_raising() -> None:
-    """In staging you want the finding logged, not the request failed."""
     seen: list[Finding] = []
     guard = NPlusOneGuard(limit=3, on_detect=seen.append)
     await guard.before(Req())
     ledger = query_ledger.get(None)
 
     for _ in range(5):
-        ledger.record("Trek")                  # never raises
+        ledger.record("Trek")  # never raises
 
     assert [f.worst.model for f in seen] == ["Trek"]
-    assert seen[0].worst.count == 3            # reported once, when it tripped
+    assert seen[0].worst.count == 3  # reported once, when it tripped
 
 
 def test_a_ledger_counts_each_model_separately() -> None:
@@ -271,9 +246,6 @@ def test_a_ledger_reports_only_the_models_that_crossed_the_limit() -> None:
     finding = ledger.finding()
     assert finding is not None
     assert [r.model for r in finding.repetitions] == ["Trek"]
-
-
-# --- the ORM seam ------------------------------------------------------------
 
 
 @pytest.fixture
@@ -318,11 +290,6 @@ async def test_a_fetch_tells_the_ledger_which_model_it_hydrated(
 async def test_the_orm_seam_is_inert_until_a_guard_exists(
     registry: Registry, database: FakeDatabase
 ) -> None:
-    """No guard anywhere in the process means the seam never reads the ledger.
-
-    That read is a Python/native boundary crossing, and a production app that
-    will never install a guard should not pay one per query to find out.
-    """
     import wreath._nplusone as module
 
     module.WATCHING = False
@@ -349,7 +316,6 @@ async def test_a_fetch_without_a_ledger_is_untouched(
 async def test_the_guard_stops_a_real_loop_at_the_query_that_crossed_it(
     registry: Registry, database: FakeDatabase
 ) -> None:
-    """End to end: a loop of ORM reads raises from inside the fifth one."""
     guard = NPlusOneGuard(limit=5)
     await guard.before(Req(path="/users"))
 
@@ -369,7 +335,6 @@ async def test_the_guard_stops_a_real_loop_at_the_query_that_crossed_it(
 async def test_an_armed_request_records_an_orm_hydrate_phase(
     registry: Registry, database: FakeDatabase
 ) -> None:
-    """The recorder half: the phase carries the model, so a trace can name it."""
     from wreath._flight_markers import phase_marker
     from wreath._flight_schema import PhaseKind
 
@@ -384,15 +349,14 @@ async def test_an_armed_request_records_an_orm_hydrate_phase(
 
     hydrations = [p for p in recorded if p[0] == int(PhaseKind.ORM_HYDRATE)]
     assert len(hydrations) == 1
-    assert hydrations[0][1] == 7                   # dependency_id names the model
-    assert hydrations[0][3] >= 0                   # and it was timed
+    assert hydrations[0][1] == 7  # dependency_id names the model
+    assert hydrations[0][3] >= 0  # and it was timed
 
 
 @pytest.mark.asyncio
 async def test_an_unstamped_model_records_no_phase(
     registry: Registry, database: FakeDatabase
 ) -> None:
-    """No metadata image means no ID to attribute to; a zero would be a lie."""
     from wreath._flight_markers import phase_marker
     from wreath._flight_schema import PhaseKind
 
@@ -408,13 +372,9 @@ async def test_an_unstamped_model_records_no_phase(
 
 
 def test_the_metadata_image_knows_its_model_names(registry: Registry) -> None:
-    """Without this the doctor can only ever report `model:7`."""
     from wreath._flight_metadata import _model_names
 
     assert _model_names(registry) == ["Post", "User"]
-
-
-# --- reading a running server ------------------------------------------------
 
 
 class StubInspector:
@@ -422,20 +382,24 @@ class StubInspector:
 
     def __init__(self, traces: list, *, tables: dict | None = None) -> None:
         self.traces = traces
-        self.tables = tables if tables is not None else {
-            "routes": ROUTES, "models": MODELS
-        }
+        self.tables = tables if tables is not None else {"routes": ROUTES, "models": MODELS}
         self.asked: list[str] = []
 
     async def timeline(self, *, offset: int = 0, limit: int = 256) -> dict:
         self.asked.append(f"timeline:{limit}")
-        return {"traces": self.traces[offset : offset + limit],
-                "total": len(self.traces), "assembled": len(self.traces)}
+        return {
+            "traces": self.traces[offset : offset + limit],
+            "total": len(self.traces),
+            "assembled": len(self.traces),
+        }
 
     async def metadata(self, table: str, *, offset: int = 0, limit: int = 256) -> dict:
         self.asked.append(f"metadata:{table}")
-        return {"table": table, "rows": self.tables.get(table, []),
-                "total": len(self.tables.get(table, []))}
+        return {
+            "table": table,
+            "rows": self.tables.get(table, []),
+            "total": len(self.tables.get(table, [])),
+        }
 
 
 @pytest.mark.asyncio
@@ -457,7 +421,6 @@ async def test_a_healthy_server_yields_no_findings() -> None:
 
 @pytest.mark.asyncio
 async def test_the_doctor_survives_a_server_with_no_model_table() -> None:
-    """An older server, or one with no ORM: report the IDs, do not crash."""
     client = StubInspector([_herd_trace(50)], tables={"routes": ROUTES})
     (finding,) = await diagnose_n_plus_one(client, threshold=10)
     assert finding.worst.model == "model:5"
@@ -552,13 +515,6 @@ def _same_named_key(module: str) -> str:
 
 
 def test_two_models_of_the_same_name_are_counted_separately() -> None:
-    """`billing.Invoice` and `reporting.Invoice` are two models, not one.
-
-    `__qualname__` is `"Invoice"` for both, so keying on it alone made one
-    query to each look like two queries to one -- tripping the guard on two
-    innocent reads, in exactly the trees where it is most likely to happen
-    (design 19 found 73 of 405 names defined in more than one file).
-    """
     tripped: list[Finding] = []
     ledger = QueryLedger(limit=2, route="GET /invoices", on_exceeded=tripped.append)
 
@@ -571,7 +527,6 @@ def test_two_models_of_the_same_name_are_counted_separately() -> None:
 
 
 def test_an_ambiguous_name_is_reported_with_its_module() -> None:
-    """When two share a bare name, the finding must say which one looped."""
     ledger = QueryLedger(limit=2, route="GET /invoices")
     for _ in range(2):
         ledger.record(_same_named_key("billing"))
@@ -583,7 +538,6 @@ def test_an_ambiguous_name_is_reported_with_its_module() -> None:
 
 
 def test_an_unambiguous_name_keeps_its_short_form() -> None:
-    """The module prefix is noise until it is the answer."""
     ledger = QueryLedger(limit=2, route="GET /treks")
     for _ in range(3):
         ledger.record("myapp.models.Trek")

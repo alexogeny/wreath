@@ -1,21 +1,3 @@
-"""`wreath.kv` behaviour.
-
-`KV` is an LRU table with an optional per-entry deadline. That is a specified
-policy, not an implementation detail -- `set` evicts the least recently used
-entry at the ceiling, `items` reports most recently used first, and an entry is
-gone once `now` reaches its deadline -- so the randomised sweep at the bottom
-drives it against that specification written out in `_ModelKV`.
-
-The counters are checked by conservation rather than by the model, because
-expiry is lazy: an entry whose deadline passed is reclaimed on the next read or
-rebuild that reaches it, so `expirations` at any instant depends on what has
-been touched, not only on what has died. What cannot vary is the total. Every
-key that entered has been evicted, expired, removed, or is still resident, and
-the one defect this file has already caught -- the native rebuild reclaiming
-expired entries without adding them to `expirations` -- is exactly a break in
-that sum.
-"""
-
 from __future__ import annotations
 
 import random
@@ -183,9 +165,7 @@ class TestExpiry:
         assert table.get("key", now=9.5) == 3
         assert table.get("key", now=10.0) is None
 
-    def test_keep_deadline_starts_a_fresh_window_once_the_old_one_is_gone(
-        self, arm
-    ) -> None:
+    def test_keep_deadline_starts_a_fresh_window_once_the_old_one_is_gone(self, arm) -> None:
         table = arm(max_entries=8, ttl=10.0)
         table.set("key", 1, now=0.0)
         table.set("key", 2, now=20.0, keep_deadline=True)
@@ -316,17 +296,6 @@ def test_colliding_hashes_stay_distinguishable(arm) -> None:
 
 @pytest.mark.parametrize("arm", ARMS, ids=ARM_IDS)
 def test_now_is_accepted_positionally_on_both_arms(arm) -> None:
-    """The wrappers pass `now` positionally, and one arm used to refuse it.
-
-    `wreath.cache.BoundedCache` and `wreath.store.MemoryStore` call these four
-    methods with `now` as a positional argument, deliberately: a keyword forces
-    the C method to build an argument tuple and a keyword dict per call, which
-    together cost more than the lookup they carry.
-
-    A behaviour test cannot catch a broken *convention*, because it calls the
-    method whichever way it likes and gets the right answer either way. This one
-    calls it the way the callers do.
-    """
     table = arm(max_entries=8, ttl=10.0)
     assert table.claim("key", "held", None, 0.0) is True
     assert table.get("key", "-", 1.0) == "held"
@@ -339,7 +308,6 @@ def test_now_is_accepted_positionally_on_both_arms(arm) -> None:
 
 @pytest.mark.parametrize("arm", ARMS, ids=ARM_IDS)
 def test_an_injected_clock_reaches_both_arms_through_the_wrappers(arm) -> None:
-    """The end of the same bug, from the caller's side."""
     from wreath.cache import BoundedCache
 
     class _Table(BoundedCache):
@@ -372,9 +340,7 @@ class TestByteBudget:
         assert len(table) == 3
         assert table.evictions == 2
 
-    def test_the_least_recently_used_goes_first_under_the_byte_bound_too(
-        self, arm
-    ) -> None:
+    def test_the_least_recently_used_goes_first_under_the_byte_bound_too(self, arm) -> None:
         table = arm(max_entries=100, max_bytes=1000)
         table.set("a", 1, cost=400)
         table.set("b", 2, cost=400)
@@ -384,9 +350,7 @@ class TestByteBudget:
         assert table.get("b") is None
         assert table.get("c") == 3
 
-    def test_an_entry_larger_than_the_whole_budget_leaves_the_table_empty(
-        self, arm
-    ) -> None:
+    def test_an_entry_larger_than_the_whole_budget_leaves_the_table_empty(self, arm) -> None:
         # Rather than sitting there over the bound. Both hand-written caches
         # this replaces behaved this way, because they evicted after inserting.
         table = arm(max_entries=100, max_bytes=100)
@@ -394,9 +358,7 @@ class TestByteBudget:
         assert len(table) == 0
         assert table.bytes == 0
 
-    def test_rewriting_a_key_replaces_its_cost_rather_than_adding_to_it(
-        self, arm
-    ) -> None:
+    def test_rewriting_a_key_replaces_its_cost_rather_than_adding_to_it(self, arm) -> None:
         table = arm(max_entries=10, max_bytes=10_000)
         table.set("a", 1, cost=100)
         table.set("a", 2, cost=250)
@@ -417,9 +379,7 @@ class TestByteBudget:
         table.clear()
         assert table.bytes == 0
 
-    def test_no_byte_bound_means_costs_are_recorded_but_never_enforced(
-        self, arm
-    ) -> None:
+    def test_no_byte_bound_means_costs_are_recorded_but_never_enforced(self, arm) -> None:
         table = arm(max_entries=10)
         assert table.max_bytes is None
         for i in range(5):
@@ -532,9 +492,6 @@ def test_a_cycle_through_the_table_is_collectable(arm) -> None:
     del node, table
     gc.collect()
     assert reference() is None, "the cycle collector must be able to see through it"
-
-
-# --- the specification, and a randomised sweep against it -------------------
 
 
 class _ModelKV:
@@ -704,13 +661,6 @@ def test_the_table_matches_its_specification_step_for_step(
 def test_every_key_that_entered_is_accounted_for(
     seed: int, max_entries: int, ttl: float | None
 ) -> None:
-    """Admissions == evictions + expirations + removals + residents.
-
-    The counters are what an operator reads, and they are the half a
-    result-for-result comparison passes straight through: the native rebuild
-    once reclaimed expired entries without adding them to `expirations`, and
-    every operation still answered correctly. Conservation is what that breaks.
-    """
     steps = _script(seed)
     table = KV(max_entries=max_entries, ttl=ttl)
 
@@ -743,18 +693,15 @@ def test_every_key_that_entered_is_accounted_for(
     # it judges every deadline against the real monotonic clock and reads zero
     # for a table driven on a script clock.
     resident = len(table.items(now=final))
-    assert admissions == (
-        counters.evictions + counters.expirations + removals + resident
-    ), (counters, resident, admissions, removals)
+    assert admissions == (counters.evictions + counters.expirations + removals + resident), (
+        counters,
+        resident,
+        admissions,
+        removals,
+    )
 
 
 def test_purge_reclaims_every_dead_entry_and_leaves_the_live_ones() -> None:
-    """The one arrangement where the count is determined: nothing read since.
-
-    Four entries expire and four do not, and no operation between the writes
-    and the purge touches any of them -- so no lazy reclaim has happened and
-    `purge` must report exactly the four that died.
-    """
     table = KV(max_entries=16, ttl=5.0)
     for index in range(4):
         table.set(f"dead{index}", index, now=0.0)
@@ -767,12 +714,6 @@ def test_purge_reclaims_every_dead_entry_and_leaves_the_live_ones() -> None:
 
 
 def test_a_rebuild_counts_every_expired_entry_it_reclaims() -> None:
-    """The defect this file caught, as a test that names it.
-
-    Expiry is lazy, so the entries below are still occupying slots when the
-    insert at the end forces a rebuild. All eight died; `expirations` must say
-    eight, whether they were reclaimed one at a time on read or all at once.
-    """
     table = KV(max_entries=8, ttl=5.0)
     for index in range(8):
         table.set(f"k{index}", index, now=0.0)

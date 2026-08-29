@@ -103,8 +103,6 @@ class BusBridge:
             # it starts, so a bridge built after startup would never listen.
             bus.subscribe(channel)(self._receive)
 
-    # -- introspection ---------------------------------------------------------
-
     @property
     def channel(self) -> str:
         return self._channel
@@ -123,8 +121,6 @@ class BusBridge:
     def inflight(self) -> int:
         """Deferred publishes not yet finished. For tests and health output."""
         return len(self._inflight)
-
-    # -- outbound ---------------------------------------------------------------
 
     async def publish(self, payload: Mapping[str, Any]) -> None:
         """Publish inline, letting a bus failure reach the caller.
@@ -191,8 +187,6 @@ class BusBridge:
         delivery, and it should not be defeatable by a key collision.
         """
         return {**payload, "origin": self._origin}
-
-    # -- inbound ----------------------------------------------------------------
 
     async def _receive(self, message: Any) -> None:
         """Hand a foreign payload to the caller. Deliberately never publishes."""

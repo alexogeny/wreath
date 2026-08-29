@@ -1,21 +1,3 @@
-"""The example's schema and seed against a real PostgreSQL.
-
-Skipped without ``WREATH_TEST_POSTGRES_DSN``. These assert the numbers
-``docs/example/walkthrough.md`` prints, so the page cannot drift away from the
-data without a test going red -- which is the whole reason the example is a
-tested package rather than prose.
-
-The schema is built here by executing the checked-in migration artifact's DDL in
-the order the artifact emits it. That sentence used to need a paragraph of
-apology: the engine sorted every constraint into one block by content-hash name,
-so a foreign key could land before the primary key it referenced, and this file
-carried a helper that reordered them. The engine now ranks foreign keys after
-both keys and unique indexes, ``wreath migrations apply`` applies this artifact
-end to end, and the reordering is gone —
-:func:`test_the_artifact_emits_its_statements_in_a_usable_order` is what remains
-of it, so a regression is a failing test rather than a rediscovered workaround.
-"""
-
 from __future__ import annotations
 
 import os
@@ -69,15 +51,6 @@ async def seeded():
 
 
 def test_the_artifact_emits_its_statements_in_a_usable_order() -> None:
-    """Tables, then columns, then keys and indexes, then foreign keys.
-
-    A foreign key needs the key or unique index it points at to exist already,
-    and for a while the engine sorted every constraint into one block by its
-    content-hash name -- so ``stations``' foreign key to ``reserves`` landed nine
-    statements before ``reserves`` got its primary key, and the example could not
-    apply its own migration. This asserts the property rather than the fix, so it
-    stays true whatever the emitter does next. No database needed.
-    """
     ranks = {"create table": 0, "add column": 1, "foreign key": 3}
 
     def rank(statement: str) -> int:
@@ -95,15 +68,6 @@ def test_the_artifact_emits_its_statements_in_a_usable_order() -> None:
 
 @skip_without_database
 async def test_the_artifact_builds_the_whole_schema(seeded) -> None:
-    """Nine model tables plus the durable queue, and the partial indexes survived.
-
-    The tenth table is `ingest_jobs`, and counting it separately is the point.
-    It does **not** come from the migration artifact: `wreath migrations
-    generate` derives that from the ORM models, and the job queue is not one --
-    it is described by `JobRunner.schema_sql()` and applied alongside. So this
-    assertion is really two, and splitting them is what stops a future artifact
-    losing a model table while the queue keeps the total right.
-    """
     # One placeholder per value rather than `= ANY($1)`: the driver refuses to
     # bind a list, because a sequence has no inferable element type. Its own
     # error says to write it this way. `QUEUE_TABLES` is one name today, and
@@ -113,15 +77,13 @@ async def test_the_artifact_builds_the_whole_schema(seeded) -> None:
     (queue_table,) = QUEUE_TABLES
 
     model_tables = await seeded.fetchval(
-        "SELECT count(*) FROM pg_tables "
-        "WHERE schemaname = $1::text AND tablename <> $2::text",
+        "SELECT count(*) FROM pg_tables WHERE schemaname = $1::text AND tablename <> $2::text",
         SCHEMA,
         queue_table,
     )
     assert model_tables == 9
     queue_tables = await seeded.fetchval(
-        "SELECT count(*) FROM pg_tables "
-        "WHERE schemaname = $1::text AND tablename = $2::text",
+        "SELECT count(*) FROM pg_tables WHERE schemaname = $1::text AND tablename = $2::text",
         SCHEMA,
         queue_table,
     )
@@ -140,11 +102,6 @@ async def test_the_artifact_builds_the_whole_schema(seeded) -> None:
 
 @skip_without_database
 async def test_a_partial_index_covers_its_own_predicate(seeded) -> None:
-    """PostgreSQL stored the predicate wreath declared, in its normal form.
-
-    If these drift apart, ``wreath migrations detect`` reports a change on every
-    run forever, which is the failure partial-index support was built to avoid.
-    """
     # Restricted to the ORM's own tables. The durable queue brings a partial
     # index of its own (`jobs_dedup_idx`, `WHERE dedup_key IS NOT NULL`), and
     # it is not one of the five this test is about — it is `JobRunner`'s, and
@@ -171,12 +128,6 @@ async def test_a_partial_index_covers_its_own_predicate(seeded) -> None:
 
 @skip_without_database
 async def test_captures_read_back_in_the_reserve_wall_clock(seeded) -> None:
-    """Nocturnal species are nocturnal *in local time*, not in UTC.
-
-    This is the assertion the walkthrough's night-versus-day table rests on, and
-    the one that failed when the seed generated hours in UTC: a +09:30 reserve
-    showed its night species peaking at local noon.
-    """
     rows = await seeded.fetch(
         "SELECT date_part('hour', s.captured_at AT TIME ZONE r.timezone)::int, "
         "       count(*) FILTER (WHERE sp.nocturnal), "
@@ -196,7 +147,6 @@ async def test_captures_read_back_in_the_reserve_wall_clock(seeded) -> None:
 
 @skip_without_database
 async def test_a_late_card_is_queryable(seeded) -> None:
-    """``deployment_id`` makes "how late was this row" a question with an answer."""
     stale = await seeded.fetchval(
         "SELECT count(*) FROM ("
         f'  SELECT d.id FROM "{SCHEMA}".deployments d '
@@ -210,7 +160,6 @@ async def test_a_late_card_is_queryable(seeded) -> None:
 
 @skip_without_database
 async def test_the_review_state_column_holds_the_mess(seeded) -> None:
-    """Chapter two needs the flaw to be in the database, not just the generator."""
     spellings = await seeded.fetch(
         f'SELECT DISTINCT review_state FROM "{SCHEMA}".sightings ORDER BY 1'
     )
@@ -220,15 +169,7 @@ async def test_the_review_state_column_holds_the_mess(seeded) -> None:
 
 @skip_without_database
 async def test_seeding_twice_leaves_the_same_rows(seeded) -> None:
-    """The determinism claim, end to end through the driver and back.
-
-    The sibling module proves the *generator* is deterministic. This proves
-    nothing is lost or reordered on the way through PostgreSQL -- which is the
-    form the walkthrough's reader actually depends on.
-    """
-    digest = (
-        f'SELECT md5(string_agg(s::text, \'|\' ORDER BY s.id)) FROM "{SCHEMA}".sightings s'
-    )
+    digest = f"SELECT md5(string_agg(s::text, '|' ORDER BY s.id)) FROM \"{SCHEMA}\".sightings s"
     first = await seeded.fetchval(digest)
     await seed(seeded, sightings=SAMPLE)
     second = await seeded.fetchval(digest)
@@ -236,7 +177,6 @@ async def test_seeding_twice_leaves_the_same_rows(seeded) -> None:
 
 
 def test_the_generator_matches_the_walkthrough_counts() -> None:
-    """The numbers ``walkthrough.md`` prints. No database needed."""
     # Building all 140,000 sightings merely to count them made this assertion
     # spend about 1.3 seconds allocating rows whose contents it never read.
     # The default is the walkthrough contract; a one-row generation proves the

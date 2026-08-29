@@ -1,17 +1,3 @@
-"""The caller's permissions, derived from the policies that enforce them.
-
-Every team with a real authorization model maintains it twice: once in the
-policies the server evaluates, and once in the frontend, as a pile of
-`user.role === 'editor'` checks deciding which buttons to render. The second
-copy drifts, and it drifts silently -- a button that should be hidden is merely
-a 403 the user did not expect, so nothing fails loudly enough to notice.
-
-Wreath owns the Cedar engine *and* the typegen IR, so the second copy can be
-deleted rather than maintained. The actions the UI may ask about are the
-actions the API declares on its routes; the answers come from the same engine
-that will enforce them on the next request.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -57,9 +43,7 @@ class _Backend:
         if not header or not header.startswith("Bearer "):
             return None
         name, _, roles = header[7:].partition(":")
-        return Identity(
-            name, roles=frozenset(r for r in roles.split(",") if r)
-        )
+        return Identity(name, roles=frozenset(r for r in roles.split(",") if r))
 
 
 def _app(*, mount: bool = True) -> Wreath:
@@ -97,7 +81,7 @@ def _app(*, mount: bool = True) -> Wreath:
     async def read_trek(request) -> dict:
         return {"ok": True}
 
-    @app.get("/health")                      # no policy: not a permission
+    @app.get("/health")  # no policy: not a permission
     async def health(request) -> dict:
         return {"ok": True}
 
@@ -107,8 +91,6 @@ def _app(*, mount: bool = True) -> Wreath:
     return app
 
 
-# --- acting as a role ---------------------------------------------------------
-#
 # Testing authorization means running the same request as several people. Doing
 # that with headers means every test carries a token-shaped literal that has
 # nothing to do with what it is checking.
@@ -128,18 +110,13 @@ async def test_a_client_can_act_as_a_role_without_a_token() -> None:
 async def test_acting_as_reaches_the_permissions_endpoint_too() -> None:
     async with TestClient(_app()) as client:
         admin = client.acting_as("root", roles=["admin"])
-        body = (await admin.post(
-            "/permissions", json={"type": "Llama", "ids": ["7"]}
-        )).json()
+        body = (await admin.post("/permissions", json={"type": "Llama", "ids": ["7"]})).json()
 
-    assert body["permissions"]["7"] == [
-        "Llama::delete", "Llama::edit", "Llama::read"
-    ]
+    assert body["permissions"]["7"] == ["Llama::delete", "Llama::edit", "Llama::read"]
 
 
 @pytest.mark.asyncio
 async def test_two_actors_do_not_interfere() -> None:
-    """The identity rides the request, not the backend, so this is safe."""
     async with TestClient(_app()) as client:
         admin = client.acting_as("root", roles=["admin"])
         rider = client.acting_as("bo", roles=["rider"])
@@ -162,7 +139,6 @@ async def test_an_identity_can_be_passed_whole() -> None:
 
 @pytest.mark.asyncio
 async def test_mixing_an_identity_and_roles_is_refused() -> None:
-    """Two sources for the same fact is how a test ends up lying about itself."""
     async with TestClient(_app()) as client:
         with pytest.raises(TypeError, match="not both"):
             client.acting_as(Identity("ada"), roles=["editor"])
@@ -171,13 +147,12 @@ async def test_mixing_an_identity_and_roles_is_refused() -> None:
 @pytest.mark.asyncio
 async def test_a_plain_client_is_still_anonymous() -> None:
     async with TestClient(_app()) as client:
-        client.acting_as("root", roles=["admin"])       # exists, unused
+        client.acting_as("root", roles=["admin"])  # exists, unused
         assert (await client.get("/llamas/7")).status == 401
 
 
 @pytest.mark.asyncio
 async def test_the_applications_own_backend_is_restored_afterwards() -> None:
-    """`acting_as` bypasses authentication; it must not leak past the client."""
     app = _app()
     original = app._auth_backend
     async with TestClient(app) as client:
@@ -193,11 +168,7 @@ async def test_default_headers_ride_every_request() -> None:
         assert (await editor.get("/llamas/7")).status == 200
 
 
-# --- the vocabulary comes from the routes -------------------------------------
-
-
 def test_the_actions_are_read_off_the_routes() -> None:
-    """The one list. A hand-maintained second copy is the thing being deleted."""
     assert declared_actions(_app()) == {
         "Llama": ("Llama::delete", "Llama::edit", "Llama::read"),
         "Trek": ("Trek::read",),
@@ -206,8 +177,7 @@ def test_the_actions_are_read_off_the_routes() -> None:
 
 def test_a_route_with_no_policy_contributes_nothing() -> None:
     vocabulary = declared_actions(_app())
-    assert not any("health" in action for actions in vocabulary.values()
-                   for action in actions)
+    assert not any("health" in action for actions in vocabulary.values() for action in actions)
 
 
 def test_an_app_with_no_policies_has_an_empty_vocabulary() -> None:
@@ -220,16 +190,12 @@ def test_an_app_with_no_policies_has_an_empty_vocabulary() -> None:
     assert declared_actions(app) == {}
 
 
-# --- the endpoint --------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_the_endpoint_publishes_the_vocabulary() -> None:
-    """So a generated client knows what it may ask about, without being told."""
     async with TestClient(_app()) as client:
-        body = (await client.get(
-            "/permissions", headers={"authorization": "Bearer ada:editor"}
-        )).json()
+        body = (
+            await client.get("/permissions", headers={"authorization": "Bearer ada:editor"})
+        ).json()
 
     assert body["resources"] == {
         "Llama": ["Llama::delete", "Llama::edit", "Llama::read"],
@@ -239,38 +205,29 @@ async def test_the_endpoint_publishes_the_vocabulary() -> None:
 
 @pytest.mark.asyncio
 async def test_the_vocabulary_is_not_handed_to_anonymous_callers() -> None:
-    """It is the whole authorization surface: every type, every action.
-
-    It was open so a generated client could discover it -- but the generated
-    client reads the vocabulary from the app object at *build* time (see
-    `test_the_api_model_carries_the_permission_vocabulary`) and only ever calls
-    `POST /permissions` at runtime. Nothing shipped needs this anonymously, so
-    it is closed.
-    """
     async with TestClient(_app()) as client:
         assert (await client.get("/permissions")).status == 401
 
 
 @pytest.mark.asyncio
 async def test_the_vocabulary_is_still_the_same_list_for_every_caller() -> None:
-    """Authenticated, not filtered: it is what the API enforces, not a grant."""
     async with TestClient(_app()) as client:
         rider = client.acting_as("bo", roles=["rider"])
         admin = client.acting_as("root", roles=["admin"])
 
-        assert (await rider.get("/permissions")).json() == (
-            await admin.get("/permissions")
-        ).json()
+        assert (await rider.get("/permissions")).json() == (await admin.get("/permissions")).json()
 
 
 @pytest.mark.asyncio
 async def test_an_editor_gets_exactly_what_the_policies_allow() -> None:
     async with TestClient(_app()) as client:
-        body = (await client.post(
-            "/permissions",
-            json={"type": "Llama", "ids": ["7"]},
-            headers={"authorization": "Bearer ada:editor"},
-        )).json()
+        body = (
+            await client.post(
+                "/permissions",
+                json={"type": "Llama", "ids": ["7"]},
+                headers={"authorization": "Bearer ada:editor"},
+            )
+        ).json()
 
     assert body["permissions"] == {"7": ["Llama::edit", "Llama::read"]}
 
@@ -278,27 +235,27 @@ async def test_an_editor_gets_exactly_what_the_policies_allow() -> None:
 @pytest.mark.asyncio
 async def test_an_admin_gets_everything() -> None:
     async with TestClient(_app()) as client:
-        body = (await client.post(
-            "/permissions",
-            json={"type": "Llama", "ids": ["7"]},
-            headers={"authorization": "Bearer root:admin"},
-        )).json()
+        body = (
+            await client.post(
+                "/permissions",
+                json={"type": "Llama", "ids": ["7"]},
+                headers={"authorization": "Bearer root:admin"},
+            )
+        ).json()
 
-    assert body["permissions"]["7"] == [
-        "Llama::delete", "Llama::edit", "Llama::read"
-    ]
+    assert body["permissions"]["7"] == ["Llama::delete", "Llama::edit", "Llama::read"]
 
 
 @pytest.mark.asyncio
 async def test_a_reader_gets_nothing_on_llamas_but_something_on_treks() -> None:
     async with TestClient(_app()) as client:
         headers = {"authorization": "Bearer bob:"}
-        llamas = (await client.post(
-            "/permissions", json={"type": "Llama", "ids": ["7"]}, headers=headers
-        )).json()
-        treks = (await client.post(
-            "/permissions", json={"type": "Trek", "ids": ["3"]}, headers=headers
-        )).json()
+        llamas = (
+            await client.post("/permissions", json={"type": "Llama", "ids": ["7"]}, headers=headers)
+        ).json()
+        treks = (
+            await client.post("/permissions", json={"type": "Trek", "ids": ["3"]}, headers=headers)
+        ).json()
 
     assert llamas["permissions"] == {"7": []}
     assert treks["permissions"] == {"3": ["Trek::read"]}
@@ -306,17 +263,19 @@ async def test_a_reader_gets_nothing_on_llamas_but_something_on_treks() -> None:
 
 @pytest.mark.asyncio
 async def test_one_call_answers_for_a_whole_list() -> None:
-    """A table of fifty rows must not be fifty round trips."""
     async with TestClient(_app()) as client:
-        body = (await client.post(
-            "/permissions",
-            json={"type": "Llama", "ids": [str(n) for n in range(50)]},
-            headers={"authorization": "Bearer ada:editor"},
-        )).json()
+        body = (
+            await client.post(
+                "/permissions",
+                json={"type": "Llama", "ids": [str(n) for n in range(50)]},
+                headers={"authorization": "Bearer ada:editor"},
+            )
+        ).json()
 
     assert len(body["permissions"]) == 50
-    assert all(allowed == ["Llama::edit", "Llama::read"]
-               for allowed in body["permissions"].values())
+    assert all(
+        allowed == ["Llama::edit", "Llama::read"] for allowed in body["permissions"].values()
+    )
 
 
 def _bounded_app(max_ids: int) -> Wreath:
@@ -328,12 +287,6 @@ def _bounded_app(max_ids: int) -> Wreath:
 
 @pytest.mark.asyncio
 async def test_a_list_past_the_ceiling_is_refused_and_the_limit_is_named() -> None:
-    """`ids x actions` policy evaluations on one connection is the cost model.
-
-    Unbounded, one authenticated request carrying a hundred thousand ids is
-    half a million Cedar decisions on a single connection. The limit is named in
-    the refusal so the caller can page rather than guess.
-    """
     async with TestClient(_bounded_app(3)) as client:
         response = await client.post(
             "/permissions",
@@ -347,7 +300,6 @@ async def test_a_list_past_the_ceiling_is_refused_and_the_limit_is_named() -> No
 
 @pytest.mark.asyncio
 async def test_the_ceiling_refuses_rather_than_truncating() -> None:
-    """A short answer draws a table whose remaining rows are silently wrong."""
     async with TestClient(_bounded_app(3)) as client:
         response = await client.post(
             "/permissions",
@@ -361,18 +313,19 @@ async def test_the_ceiling_refuses_rather_than_truncating() -> None:
 @pytest.mark.asyncio
 async def test_a_list_exactly_at_the_ceiling_is_answered() -> None:
     async with TestClient(_bounded_app(3)) as client:
-        body = (await client.post(
-            "/permissions",
-            json={"type": "Llama", "ids": ["1", "2", "3"]},
-            headers={"authorization": "Bearer ada:editor"},
-        )).json()
+        body = (
+            await client.post(
+                "/permissions",
+                json={"type": "Llama", "ids": ["1", "2", "3"]},
+                headers={"authorization": "Bearer ada:editor"},
+            )
+        ).json()
 
     assert len(body["permissions"]) == 3
 
 
 @pytest.mark.asyncio
 async def test_the_default_ceiling_is_a_generous_ui_page() -> None:
-    """Fifty rows is the documented case; two hundred is the documented bound."""
     async with TestClient(_app()) as client:
         headers = {"authorization": "Bearer ada:editor"}
         allowed = await client.post(
@@ -393,7 +346,6 @@ async def test_the_default_ceiling_is_a_generous_ui_page() -> None:
 
 @pytest.mark.asyncio
 async def test_the_ceiling_is_checked_before_the_resource_type_is_looked_up() -> None:
-    """The cheapest refusal first: an oversized body must not cost a lookup."""
     async with TestClient(_bounded_app(1)) as client:
         response = await client.post(
             "/permissions",
@@ -408,11 +360,13 @@ async def test_the_ceiling_is_checked_before_the_resource_type_is_looked_up() ->
 @pytest.mark.asyncio
 async def test_a_caller_can_narrow_the_actions_it_cares_about() -> None:
     async with TestClient(_app()) as client:
-        body = (await client.post(
-            "/permissions",
-            json={"type": "Llama", "ids": ["7"], "actions": ["Llama::delete"]},
-            headers={"authorization": "Bearer ada:editor"},
-        )).json()
+        body = (
+            await client.post(
+                "/permissions",
+                json={"type": "Llama", "ids": ["7"], "actions": ["Llama::delete"]},
+                headers={"authorization": "Bearer ada:editor"},
+            )
+        ).json()
 
     assert body["permissions"] == {"7": []}
 
@@ -432,7 +386,6 @@ async def test_every_requested_action_must_be_a_string() -> None:
 
 @pytest.mark.asyncio
 async def test_an_action_outside_the_declared_set_is_refused() -> None:
-    """Otherwise the endpoint is an oracle for probing arbitrary policies."""
     async with TestClient(_app()) as client:
         response = await client.post(
             "/permissions",
@@ -464,7 +417,6 @@ async def test_an_anonymous_caller_is_told_to_authenticate() -> None:
 
 @pytest.mark.asyncio
 async def test_the_answer_is_never_cached_by_a_shared_cache() -> None:
-    """It is per-principal by definition; a proxy replaying it would be a leak."""
     async with TestClient(_app()) as client:
         response = await client.post(
             "/permissions",
@@ -489,16 +441,14 @@ async def test_the_endpoint_needs_an_authorizer() -> None:
     assert response.status in (401, 500)
 
 
-# --- the per-user manifest ------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_the_manifest_says_what_this_user_can_ever_do() -> None:
-    """Fetched once at sign-in; it is what the chrome needs, not per-row truth."""
     async with TestClient(_app()) as client:
-        body = (await client.get(
-            "/permissions/manifest", headers={"authorization": "Bearer ada:editor"}
-        )).json()
+        body = (
+            await client.get(
+                "/permissions/manifest", headers={"authorization": "Bearer ada:editor"}
+            )
+        ).json()
 
     assert body["principal"] == "ada"
     assert sorted(body["roles"]) == ["editor"]
@@ -511,12 +461,16 @@ async def test_the_manifest_says_what_this_user_can_ever_do() -> None:
 @pytest.mark.asyncio
 async def test_the_manifest_differs_by_principal() -> None:
     async with TestClient(_app()) as client:
-        editor = (await client.get(
-            "/permissions/manifest", headers={"authorization": "Bearer ada:editor"}
-        )).json()
-        admin = (await client.get(
-            "/permissions/manifest", headers={"authorization": "Bearer root:admin"}
-        )).json()
+        editor = (
+            await client.get(
+                "/permissions/manifest", headers={"authorization": "Bearer ada:editor"}
+            )
+        ).json()
+        admin = (
+            await client.get(
+                "/permissions/manifest", headers={"authorization": "Bearer root:admin"}
+            )
+        ).json()
 
     assert admin["allowed"]["Llama"] != editor["allowed"]["Llama"]
     assert "Llama::delete" in admin["allowed"]["Llama"]
@@ -524,7 +478,6 @@ async def test_the_manifest_differs_by_principal() -> None:
 
 @pytest.mark.asyncio
 async def test_the_manifest_is_revalidatable_so_the_client_stops_asking() -> None:
-    """The whole point: one fetch, then 304s until something actually changes."""
     async with TestClient(_app()) as client:
         headers = {"authorization": "Bearer ada:editor"}
         first = await client.get("/permissions/manifest", headers=headers)
@@ -540,22 +493,24 @@ async def test_the_manifest_is_revalidatable_so_the_client_stops_asking() -> Non
 
 @pytest.mark.asyncio
 async def test_the_manifest_etag_changes_when_the_users_roles_do() -> None:
-    """A promotion must not be masked by a cached manifest."""
     async with TestClient(_app()) as client:
-        before = (await client.get(
-            "/permissions/manifest", headers={"authorization": "Bearer ada:editor"}
-        )).header("etag")
-        after = (await client.get(
-            "/permissions/manifest",
-            headers={"authorization": "Bearer ada:editor,admin"},
-        )).header("etag")
+        before = (
+            await client.get(
+                "/permissions/manifest", headers={"authorization": "Bearer ada:editor"}
+            )
+        ).header("etag")
+        after = (
+            await client.get(
+                "/permissions/manifest",
+                headers={"authorization": "Bearer ada:editor,admin"},
+            )
+        ).header("etag")
 
     assert before != after
 
 
 @pytest.mark.asyncio
 async def test_the_manifest_etag_changes_when_the_policies_do() -> None:
-    """A deploy that widens a policy must invalidate every cached manifest."""
     async def tags(policies: str) -> str:
         app = _app()
         app.configure_auth(_Backend(), CedarAuthorizer(engine=CedarPolicies(policies)))
@@ -582,8 +537,6 @@ async def test_the_manifest_is_private_and_anonymous_callers_are_refused() -> No
         assert b"private" in response.header("cache-control", "").encode()
 
 
-# --- the tag on the policy set --------------------------------------------------
-#
 # The manifest is only worth fetching once if its `ETag` is trustworthy, and the
 # half of the tag that identifies the *policy set* used to be `id(engine)`.
 
@@ -615,13 +568,6 @@ class _EngineHolder:
 
 
 def test_a_replaced_engine_never_carries_the_tag_of_the_one_it_replaced() -> None:
-    """A reload must move the tag, and an address could not promise that.
-
-    CPython hands the next same-shaped allocation the block it has just freed,
-    so fingerprinting an engine by `id()` made a reload invisible -- and an
-    invisible reload is a stale manifest with no event that could ever correct
-    it. It also put a heap address in a client-visible header.
-    """
     from wreath._auth.permissions import _policy_fingerprint
 
     first = _OpaqueEngine(1)
@@ -635,14 +581,6 @@ def test_a_replaced_engine_never_carries_the_tag_of_the_one_it_replaced() -> Non
 
 
 def test_the_built_in_engine_is_fingerprinted_through_its_public_surface() -> None:
-    """No private-attribute reach into a sibling module.
-
-    The tag has to be the policy text, and it has to come from `source` -- the
-    same attribute the probe order offers every third-party engine. Reading
-    `_source` worked but made the built-in a special case, so a public property
-    that happened to be removed would silently degrade the shipped engine to a
-    per-instance token rather than failing.
-    """
     from wreath._auth.permissions import _policy_fingerprint
 
     engine = CedarPolicies(POLICIES)
@@ -651,14 +589,6 @@ def test_the_built_in_engine_is_fingerprinted_through_its_public_surface() -> No
 
 
 def test_the_built_in_authorizer_is_fingerprinted_without_digging_out_its_engine() -> None:
-    """The content path asks the authorizer, which delegates to its engine.
-
-    Reaching through `authorizer._engine` read a private name owned by
-    `_auth/cedar.py` from another module. A rename there would not have raised:
-    the `getattr` would have handed back the authorizer, every probe would have
-    missed, and the tag would have dropped to a per-instance token -- so
-    `If-None-Match` would stop matching across workers with no error anywhere.
-    """
     from wreath._auth.permissions import _policy_fingerprint
 
     authorizer = CedarAuthorizer(engine=CedarPolicies(POLICIES))
@@ -667,25 +597,10 @@ def test_the_built_in_authorizer_is_fingerprinted_without_digging_out_its_engine
 
 
 def test_the_fingerprint_still_knows_the_private_engine_name() -> None:
-    """The guard for the one reach that survives, in the fallback path.
-
-    An engine exposing nothing is tagged per *engine*, not per authorizer, so
-    two adapters over one policy set agree. That still needs `_engine`. The
-    consequence of a rename differs by path -- a redundant refetch here, a
-    silently stale manifest on the content path -- but it should fail loudly
-    either way rather than degrade.
-    """
     assert "_engine" in CedarAuthorizer.__slots__
 
 
 def test_two_authorizers_over_one_engine_agree_on_the_tag() -> None:
-    """A second adapter over the same policies must not mint a second tag.
-
-    Otherwise every client behind it refetches a manifest that has not moved.
-    Checked on the opaque path deliberately: content-derived tags agree for the
-    trivial reason that the content is equal, so only the token path can show
-    that the identity is the engine's rather than the adapter's.
-    """
     from wreath._auth.permissions import _policy_fingerprint
 
     engine = _OpaqueEngine(4)
@@ -696,11 +611,6 @@ def test_two_authorizers_over_one_engine_agree_on_the_tag() -> None:
 
 
 def test_an_opaque_engines_tag_is_minted_once_not_per_read() -> None:
-    """`_shared_fingerprint` is re-read on every stream keep-alive tick.
-
-    A tag that changed per read would tell every open stream that the policy set
-    had moved, every few seconds, forever.
-    """
     from wreath._auth.permissions import _shared_fingerprint
 
     app = _app()
@@ -711,33 +621,21 @@ def test_an_opaque_engines_tag_is_minted_once_not_per_read() -> None:
 
 @pytest.mark.asyncio
 async def test_two_workers_holding_the_same_policies_agree_on_the_etag() -> None:
-    """Otherwise `If-None-Match` never matches, and the manifest is refetched.
-
-    Each worker parses the same policy text into its own engine object, so a tag
-    derived from that object's address differs per worker and per restart -- and
-    the revalidation this whole feature is built on succeeds exactly never.
-    """
 
     async def tag() -> str:
         async with TestClient(_app()) as client:
-            return (await client.get(
-                "/permissions/manifest",
-                headers={"authorization": "Bearer ada:editor"},
-            )).header("etag")
+            return (
+                await client.get(
+                    "/permissions/manifest",
+                    headers={"authorization": "Bearer ada:editor"},
+                )
+            ).header("etag")
 
     assert await tag() == await tag()
 
 
-# --- the vocabulary is read once per route table, not once per request ----------
-
-
 @pytest.mark.asyncio
 async def test_a_route_declared_after_mounting_reaches_the_vocabulary() -> None:
-    """`permissions_router` promises this order works, so the memo must see it.
-
-    The memo is built when the router is constructed, which here is before the
-    only policy in the application exists.
-    """
     app = Wreath()
     app.configure_auth(_Backend(), CedarAuthorizer(engine=CedarPolicies(POLICIES)))
     app.include_router(permissions_router(app))
@@ -758,11 +656,6 @@ async def test_a_route_declared_after_mounting_reaches_the_vocabulary() -> None:
 
 
 def test_the_vocabulary_memo_notices_a_route_replaced_in_place() -> None:
-    """`wreath.replay` swaps every endpoint for a stub and back again.
-
-    That keeps the route *count* identical, so a memo keyed on how many routes
-    there are would answer from a table that no longer exists.
-    """
     import dataclasses
 
     from wreath._auth.permissions import _vocabulary_reader
@@ -776,24 +669,19 @@ def test_the_vocabulary_memo_notices_a_route_replaced_in_place() -> None:
     assert "Llama" in read()
 
     app._routes[:] = [
-        dataclasses.replace(
-            route, endpoint=unpoliced, requirement=AuthRequirement()
-        )
+        dataclasses.replace(route, endpoint=unpoliced, requirement=AuthRequirement())
         for route in app._routes
     ]
     assert read() == {}
 
 
 def test_the_vocabulary_memo_answers_the_same_dict_while_the_routes_hold() -> None:
-    """The point of the memo: no rebuild between two requests that changed nothing."""
     from wreath._auth.permissions import _vocabulary_reader
 
     read = _vocabulary_reader(_app())
     assert read() is read()
 
 
-# --- the stream that tells the client to refetch -------------------------------
-#
 # The manifest half stops the client asking; this half tells it when to ask
 # again. The test client buffers a response until the application finishes, so
 # these end the stream by closing the document -- which is what a disconnected
@@ -849,30 +737,24 @@ async def test_the_stream_is_a_private_event_stream() -> None:
 
 @pytest.mark.asyncio
 async def test_a_role_change_reaches_the_stream() -> None:
-    """The half no bolt-on can do: the ORM already announced the write."""
     app, document = _streaming_app(roles_model="Membership")
     async with TestClient(app) as client:
         editor = client.acting_as("ada", roles=["editor"])
-        response = await _stream(
-            editor, document, lambda: publish_write(frozenset({"Membership"}))
-        )
+        response = await _stream(editor, document, lambda: publish_write(frozenset({"Membership"})))
 
     assert _changes(response) == [{"reason": "roles", "etag": None}]
 
 
 @pytest.mark.asyncio
 async def test_a_role_change_carries_no_etag_because_the_one_we_hold_is_stale() -> None:
-    """Naming a tag here would tell the client to skip the refetch it needs."""
     app, document = _streaming_app(roles_model="Membership")
     async with TestClient(app) as client:
         editor = client.acting_as("ada", roles=["editor"])
         manifest = await editor.get("/permissions/manifest")
-        response = await _stream(
-            editor, document, lambda: publish_write(frozenset({"Membership"}))
-        )
+        response = await _stream(editor, document, lambda: publish_write(frozenset({"Membership"})))
 
-    assert manifest.header("etag")            # the manifest can state a tag
-    assert _changes(response)[0]["etag"] is None    # ... the stream must not
+    assert manifest.header("etag")  # the manifest can state a tag
+    assert _changes(response)[0]["etag"] is None  # ... the stream must not
 
 
 @pytest.mark.asyncio
@@ -880,9 +762,7 @@ async def test_a_write_to_an_unrelated_model_is_not_a_permission_change() -> Non
     app, document = _streaming_app(roles_model="Membership")
     async with TestClient(app) as client:
         editor = client.acting_as("ada", roles=["editor"])
-        response = await _stream(
-            editor, document, lambda: publish_write(frozenset({"Llama"}))
-        )
+        response = await _stream(editor, document, lambda: publish_write(frozenset({"Llama"})))
 
     assert _changes(response) == []
 
@@ -892,9 +772,7 @@ async def test_a_policy_reload_carries_the_new_etag_so_a_client_can_skip() -> No
     app, document = _streaming_app()
     async with TestClient(app) as client:
         editor = client.acting_as("ada", roles=["editor"])
-        response = await _stream(
-            editor, document, lambda: document.notify_all("policies")
-        )
+        response = await _stream(editor, document, lambda: document.notify_all("policies"))
         current = (await editor.get("/permissions/manifest")).header("etag")
 
     # The roles we hold are still current on a policy change, so the tag is the
@@ -907,9 +785,7 @@ async def test_only_the_principal_whose_document_moved_is_told() -> None:
     app, document = _streaming_app()
     async with TestClient(app) as client:
         ada = client.acting_as("ada", roles=["editor"])
-        response = await _stream(
-            ada, document, lambda: document.notify("User::bo", "roles")
-        )
+        response = await _stream(ada, document, lambda: document.notify("User::bo", "roles"))
 
     assert _changes(response) == []
 
@@ -936,7 +812,6 @@ async def test_the_stream_needs_an_authorizer() -> None:
 
 @pytest.mark.asyncio
 async def test_too_many_streams_is_refused_and_the_manifest_still_works() -> None:
-    """The registry is bounded, so the fallback has to be the feature minus push."""
     app, _document = _streaming_app(max_subscribers=0)
     async with TestClient(app) as client:
         editor = client.acting_as("ada", roles=["editor"])
@@ -949,21 +824,16 @@ async def test_too_many_streams_is_refused_and_the_manifest_still_works() -> Non
 
 @pytest.mark.asyncio
 async def test_a_stream_that_ends_leaves_nothing_behind() -> None:
-    """A registry that only grows is the leak this has to not be."""
     app, document = _streaming_app(roles_model="Membership")
     async with TestClient(app) as client:
         editor = client.acting_as("ada", roles=["editor"])
         await _stream(editor, document, lambda: None)
 
     assert document.subscribers == 0
-    assert not document.watching   # and the ORM subscription went with it
-
-
-# --- what the client is generated from ----------------------------------------
+    assert not document.watching  # and the ORM subscription went with it
 
 
 def test_the_api_model_carries_the_permission_vocabulary() -> None:
-    """So the generated client is typed on the same actions the server enforces."""
     from wreath.typegen import build_api_model
 
     api = build_api_model(_app(), allow_unknown=True)
@@ -975,9 +845,7 @@ def test_the_typescript_target_emits_a_typed_permissions_module() -> None:
     from wreath.typegen import build_api_model
     from wreath.typegen.targets.typescript import render_typescript
 
-    files = render_typescript(
-        build_api_model(_app(), allow_unknown=True), react_query=True
-    )
+    files = render_typescript(build_api_model(_app(), allow_unknown=True), react_query=True)
     source = files["permissions.ts"]
 
     # The union is the server's vocabulary, so a typo is a compile error.
@@ -989,7 +857,7 @@ def test_the_typescript_target_emits_a_typed_permissions_module() -> None:
     # The React hook is separate: it needs react-query, the fetcher does not.
     hook = files["use-permissions.ts"]
     assert "usePermissions" in hook and "usePermission" in hook
-    assert '@tanstack/react-query' in hook
+    assert "@tanstack/react-query" in hook
 
 
 def test_no_permissions_module_when_the_api_declares_none() -> None:
@@ -1008,8 +876,7 @@ def test_no_permissions_module_when_the_api_declares_none() -> None:
 
 @pytest.mark.parametrize(
     ("action", "expected"),
-    [("Llama::read", "canRead"), ("Llama::force_sync", "canForceSync"),
-     ("read", "canRead")],
+    [("Llama::read", "canRead"), ("Llama::force_sync", "canForceSync"), ("read", "canRead")],
 )
 def test_action_names_become_readable_flags(action: str, expected: str) -> None:
     from wreath.typegen.targets.typescript import permission_flag
@@ -1017,8 +884,6 @@ def test_action_names_become_readable_flags(action: str, expected: str) -> None:
     assert permission_flag(action) == expected
 
 
-# --- how many policy evaluations run at once ----------------------------------
-#
 # Every answer here is one `authorizer.authorize` per (resource, action). With
 # the built-in engine that is in-process and the order never matters. With a
 # *remote* authorizer -- which the `CedarEngine` protocol invites -- each one is
@@ -1063,9 +928,7 @@ def _counting_app(*, delay: float = 0.0, **router: Any) -> tuple[Wreath, Any]:
 async def test_the_manifest_evaluates_its_actions_concurrently() -> None:
     app, counter = _counting_app(delay=0.01)
     async with TestClient(app) as client:
-        response = await client.acting_as("root", roles=["admin"]).get(
-            "/permissions/manifest"
-        )
+        response = await client.acting_as("root", roles=["admin"]).get("/permissions/manifest")
 
     assert response.status == 200
     # Llama has three actions and Trek one; every one is still asked.
@@ -1085,9 +948,9 @@ async def test_the_batch_bounds_concurrency_across_ids_not_just_actions() -> Non
         )
 
     assert response.status == 200
-    assert counter.calls == 30                  # 10 ids x 3 actions
-    assert counter.peak == 8                    # the declared ceiling, reached
-    assert counter.peak <= 8                    # and never exceeded
+    assert counter.calls == 30  # 10 ids x 3 actions
+    assert counter.peak == 8  # the declared ceiling, reached
+    assert counter.peak <= 8  # and never exceeded
 
 
 @pytest.mark.asyncio
@@ -1127,11 +990,16 @@ async def test_concurrent_evaluation_keeps_every_answer_with_its_own_id() -> Non
     app, _ = _counting_app(delay=0.001, max_concurrency=4)
     async with TestClient(app) as client:
         editor = client.acting_as("ada", roles=["editor"])
-        body = (await editor.post(
-            "/permissions",
-            json={"type": "Llama", "ids": [str(n) for n in range(9)],
-                  "actions": ["Llama::read", "Llama::delete", "Llama::edit"]},
-        )).json()
+        body = (
+            await editor.post(
+                "/permissions",
+                json={
+                    "type": "Llama",
+                    "ids": [str(n) for n in range(9)],
+                    "actions": ["Llama::read", "Llama::delete", "Llama::edit"],
+                },
+            )
+        ).json()
 
     assert sorted(body["permissions"]) == sorted(str(n) for n in range(9))
     for identifier, granted in body["permissions"].items():
@@ -1142,17 +1010,12 @@ async def test_concurrent_evaluation_keeps_every_answer_with_its_own_id() -> Non
 async def test_the_manifest_keeps_each_action_under_its_own_resource_type() -> None:
     app, _ = _counting_app(max_concurrency=4)
     async with TestClient(app) as client:
-        body = (await client.acting_as("ada", roles=["editor"]).get(
-            "/permissions/manifest"
-        )).json()
+        body = (await client.acting_as("ada", roles=["editor"]).get("/permissions/manifest")).json()
 
     # Flattened for evaluation, reassembled per type: a shifted slice would put
     # a Llama action under Trek. Order is the vocabulary's, which is sorted.
     assert body["allowed"]["Llama"] == ["Llama::edit", "Llama::read"]
     assert body["allowed"]["Trek"] == ["Trek::read"]
-
-
-# --- one cache-control header, and it is the handler's ------------------------
 
 
 @pytest.mark.asyncio
@@ -1172,8 +1035,5 @@ async def test_a_composed_cache_middleware_leaves_one_cache_control() -> None:
         admin = client.acting_as("root", roles=["admin"])
         for path in ("/permissions", "/permissions/manifest"):
             response = await admin.get(path)
-            headers = [
-                value for key, value in response.headers
-                if key.lower() == b"cache-control"
-            ]
+            headers = [value for key, value in response.headers if key.lower() == b"cache-control"]
             assert headers == [b"private, no-store"], path

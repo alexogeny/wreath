@@ -1,4 +1,3 @@
-"""Regression tests for native HTTP/2 response and HPACK boundaries."""
 from __future__ import annotations
 
 import pytest
@@ -71,9 +70,7 @@ async def test_header_block_larger_than_configured_limit_is_rejected(make_driver
     config = ServerConfig(protocols=("h2",), max_header_list_bytes=64)
     driver = make_driver(app, config)
     await driver.preface()
-    block = support.HpackEncoder().encode(
-        support.request_headers() + [(b"x-large", b"a" * 128)]
-    )
+    block = support.HpackEncoder().encode(support.request_headers() + [(b"x-large", b"a" * 128)])
     await driver.feed_and_settle(
         support.encode_frame(
             support.HEADERS,
@@ -89,11 +86,8 @@ async def test_header_block_larger_than_configured_limit_is_rejected(make_driver
 
 
 async def test_hpack_stops_at_configured_header_count(make_driver) -> None:
-    """Compressed one-byte fields must not expand into an unbounded Python list."""
     app, captured = scope_capture_app()
-    config = ServerConfig(
-        protocols=("h2",), max_header_count=8, max_header_list_bytes=1 << 20
-    )
+    config = ServerConfig(protocols=("h2",), max_header_count=8, max_header_list_bytes=1 << 20)
     driver = make_driver(app, config)
     await driver.preface()
     headers = support.request_headers(extra=[(b"accept", b"")] * 32)

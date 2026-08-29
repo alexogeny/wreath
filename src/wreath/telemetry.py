@@ -12,8 +12,6 @@ so these let user code opt in only at the call site, degrading to an immutable
 (worker, ring, projector, exporter) lives behind `wreath._native._flight`,
 `wreath._projector`, `wreath._otlp`, and `wreath._export`.
 
-See `docs/plans/native-flight-recorder-stage-1.md` (modes, sizing) and
-`docs/plans/native-flight-recorder-stage-1.md`.
 """
 
 from __future__ import annotations
@@ -88,8 +86,6 @@ _ACTIVE_SLOT_BYTES = 128
 #: A single log2 histogram is HISTOGRAM_BUCKETS 64-bit counters.
 _HISTOGRAM_BYTES = HISTOGRAM_BUCKETS * 8
 
-# --- logging's fixed tables (measured Python-object footprints) -------------
-#
 # These four were guesses at plausible shapes until `benchmarks/bench_logging.py
 # --suite memory` measured them: it builds each table at its default capacity
 # and reads `tracemalloc`'s *current* allocation across the build, so a
@@ -98,7 +94,6 @@ _HISTOGRAM_BYTES = HISTOGRAM_BUCKETS * 8
 # record by 1.6x, a buffered record by 1.3x -- and low is the dangerous
 # direction for a budget, because it under-reports what a configuration will
 # actually reserve. Each is now the measured figure rounded up.
-#
 # They remain estimates rather than exact reservations, and the emitter moving
 # to C did not change that: these describe Python *tables*, not the packing.
 # Re-measure with the suite above when the objects change shape.
@@ -207,8 +202,7 @@ class LoggingConfig:
 
     Every one is a ceiling with counted overflow, never a growth trigger: a full
     site table degrades to uninterned records, a full scratch buffer drops the
-    record, a full writer queue drops and counts. See
-    `docs/reference/logging.md`.
+    record, and a full writer queue drops and counts.
     """
 
     enabled: bool = True
@@ -405,19 +399,13 @@ class TelemetryConfig:
             phase_scratch=(
                 self.phase_slots * PHASE_BLOCK_BYTES if self.mode >= Mode.DETAILED else 0
             ),
-            capture=(
-                self.capture_slabs * self.slab_bytes
-                if self.mode is Mode.FORENSIC
-                else 0
-            ),
+            capture=(self.capture_slabs * self.slab_bytes if self.mode is Mode.FORENSIC else 0),
             export_queue=(self.otlp.export_queue * CELL_SIZE if self.otlp.enabled else 0),
             logging=self.logging.memory_bytes(self.active_requests),
         )
         # Guard against a computed budget that is itself implausible.
         if budget.total > (1 << 40):
-            raise TelemetryConfigError(
-                f"computed memory budget {budget.total} bytes exceeds 1 TiB"
-            )
+            raise TelemetryConfigError(f"computed memory budget {budget.total} bytes exceeds 1 TiB")
         return budget
 
 
@@ -426,8 +414,6 @@ def _require(condition: bool, message: str) -> None:
         raise TelemetryConfigError(message)
 
 
-# --- lazy OpenTelemetry bridge (Stage 4c) -----------------------------------
-#
 # The recorder generates and carries trace/span IDs in native code; the request
 # path never constructs a Python OpenTelemetry object. These helpers let user
 # code or third-party instrumentation *opt in* to the OTel API when it wants to,
@@ -680,8 +666,6 @@ def annotate_otel(span: object, facts: object) -> None:
     setter(client_fact_attributes(facts))
 
 
-# --- Prometheus exposition bridge -------------------------------------------
-#
 # Where the OTLP path (`wreath._otlp`/`wreath._export`) pushes the projector's
 # aggregated metrics to a collector, this bridge renders the *same* projector
 # snapshot as Prometheus text exposition to be *scraped*. It is opt-in and off the
@@ -773,9 +757,15 @@ def activate_statsd(
     from ._statsd import StatsDBridge
 
     return StatsDBridge(
-        source, host=host, port=port, prefix=prefix,
-        dogstatsd=dogstatsd, tags=tags, route_labels=route_labels,
-        app=app, counter_sources=counter_sources,
+        source,
+        host=host,
+        port=port,
+        prefix=prefix,
+        dogstatsd=dogstatsd,
+        tags=tags,
+        route_labels=route_labels,
+        app=app,
+        counter_sources=counter_sources,
     )
 
 
@@ -800,7 +790,11 @@ def activate_cloudwatch_emf(
     from ._cloudwatch_emf import EmfBridge
 
     return EmfBridge(
-        source, namespace=namespace, dimensions=dimensions,
-        route_labels=route_labels, cumulative=cumulative, app=app,
+        source,
+        namespace=namespace,
+        dimensions=dimensions,
+        route_labels=route_labels,
+        cumulative=cumulative,
+        app=app,
         counter_sources=counter_sources,
     )

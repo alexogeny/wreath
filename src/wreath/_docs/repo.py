@@ -75,16 +75,14 @@ def _counts(host: str, slug: str, warnings: list[str]) -> tuple[int, int] | None
     if key in _CACHE:
         return _CACHE[key]
     if os.environ.get("WREATH_DOCS_OFFLINE"):
-        return None                       # asked for silence; not a failure
+        return None  # asked for silence; not a failure
     payload = _get(host, slug, warnings)
     if payload is None:
         return None
     if host == "github":
-        counts = (int(payload.get("stargazers_count", 0)),
-                  int(payload.get("forks_count", 0)))
+        counts = (int(payload.get("stargazers_count", 0)), int(payload.get("forks_count", 0)))
     else:
-        counts = (int(payload.get("star_count", 0)),
-                  int(payload.get("forks_count", 0)))
+        counts = (int(payload.get("star_count", 0)), int(payload.get("forks_count", 0)))
     _CACHE[key] = counts
     return counts
 
@@ -100,8 +98,10 @@ def _get(host: str, slug: str, warnings: list[str]) -> dict | None:
         with urllib.request.urlopen(request, timeout=_TIMEOUT) as response:  # noqa: S310
             body = response.read(1 << 20)
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
-        warnings.append(f"repo stats: {host} did not answer for {slug} ({exc}); "
-                        "the header link is rendered without counts")
+        warnings.append(
+            f"repo stats: {host} did not answer for {slug} ({exc}); "
+            "the header link is rendered without counts"
+        )
         return None
     try:
         payload = json.loads(body)

@@ -1,10 +1,3 @@
-"""Organisations, memberships and invitations, at the store.
-
-The identity-layer half of tenancy. Two properties carry the weight: a role name
-is meaningless without the organisation it applies in, and an invitation must
-survive the invitee having no account yet.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -25,17 +18,7 @@ def _store() -> InMemoryOrganizationStore:
     return InMemoryOrganizationStore(roles=ROLES)
 
 
-# --- the id rule -------------------------------------------------------------
-
-
 def test_an_organization_id_may_not_contain_a_colon() -> None:
-    """A colon in an id would let one tenant's id spell another tenant's role.
-
-    Roles are namespaced `"<org>:<role>"`, so an organisation literally named
-    `"acme:admin"` produces the qualified role `"acme:admin:member"` -- but also
-    collides with `acme`'s admin in any policy doing prefix work. Refused at the
-    only place it can be: construction.
-    """
     with pytest.raises(ValueError, match="must not contain ':'"):
         Organization(id="acme:evil")
 
@@ -45,12 +28,8 @@ def test_an_organization_id_must_be_non_empty() -> None:
         Organization(id="")
 
 
-# --- membership --------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_one_user_two_organizations_with_different_roles() -> None:
-    """The case a single-tenant model cannot express, and the leak it invites."""
     store = _store()
     await store.add_member("acme", "alice", roles={"admin"})
     await store.add_member("globex", "alice", roles={"member"})
@@ -72,8 +51,6 @@ async def test_one_user_two_organizations_with_different_roles() -> None:
 
 @pytest.mark.asyncio
 async def test_an_undeclared_role_is_refused() -> None:
-    """Roles are a declared vocabulary; that is what makes startup validation
-    of a policy naming one possible at all."""
     store = _store()
     with pytest.raises(ValueError, match="unknown role"):
         await store.add_member("acme", "alice", roles={"amdin"})
@@ -124,12 +101,8 @@ async def test_creating_a_duplicate_organization_is_refused() -> None:
         await store.create(Organization(id="acme"))
 
 
-# --- invitations -------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_an_invitation_survives_the_invitee_having_no_account() -> None:
-    """The whole reason this is a record rather than a call."""
     store = _store()
     invitation = await store.invite("acme", "new@example.com", roles={"member"})
 
@@ -190,25 +163,13 @@ async def test_invitations_are_listed_per_organization() -> None:
 
 @pytest.mark.asyncio
 async def test_the_synchronous_read_agrees_with_the_asynchronous_one() -> None:
-    """`Memberships` reads the sync half on the request path; a divergence
-    between the two would be an authorization answer that depends on which
-    method happened to be called."""
     store = _store()
     await store.add_member("acme", "alice", roles={"admin"})
     assert store.memberships_for("alice") == await store.memberships("alice")
 
 
-# --- cases the mutation sweep named ------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_an_unexpired_invitation_is_accepted() -> None:
-    """The half of expiry that fails *open* if the comparison breaks.
-
-    Dropping `now >= expires_at` leaves `expires_at is not None`, so every timed
-    invitation reads as expired -- which refuses, and therefore looks correct to
-    every test that only checks refusal.
-    """
     store = _store()
     invitation = await store.invite("acme", "a@example.com", roles={"member"}, ttl=60, now=1000.0)
     membership = await store.accept(invitation.token, "alice", now=1059.0)
@@ -225,13 +186,6 @@ async def test_expiry_is_inclusive_at_the_boundary() -> None:
 
 @pytest.mark.asyncio
 async def test_a_token_matches_only_its_own_invitation() -> None:
-    """With several invitations outstanding, the comparison must select one.
-
-    A guard that always fires would hand the *first* invitation to whoever
-    presented any token -- cross-organisation membership by typo. The earlier
-    unknown-token test could not catch it, because with no invitations issued
-    the loop never runs.
-    """
     store = _store()
     await store.invite("acme", "a@example.com", roles={"admin"})
     second = await store.invite("globex", "b@example.com", roles={"member"})
@@ -257,15 +211,11 @@ async def test_an_unknown_token_is_refused_with_invitations_outstanding() -> Non
 
 @pytest.mark.asyncio
 async def test_invite_and_accept_default_their_clock_to_the_wall_clock() -> None:
-    """`now=` is injectable for tests; the default path must still work."""
     store = _store()
     invitation = await store.invite("acme", "a@example.com", roles={"member"}, ttl=3600)
     assert invitation.expires_at is not None
     membership = await store.accept(invitation.token, "alice")
     assert membership.organization == "acme"
-
-
-# --- durable PostgreSQL store -----------------------------------------------
 
 
 class _Statement:
@@ -360,7 +310,6 @@ async def test_acceptance_consumes_and_writes_membership_in_one_statement() -> N
 
 
 async def test_an_accepted_postgres_invitation_stays_consumed_for_a_new_store() -> None:
-    """A fresh object represents the API process after a restart."""
     database = _Database()
     database.rows["wreath_organization_invitation_state"] = ("alice", False)
 

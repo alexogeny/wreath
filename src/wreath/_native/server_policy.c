@@ -50,15 +50,6 @@ wreath_policy_ready(void)
 }
 
 
-static PyObject *
-program_item(WreathPolicyProgram *program, Py_ssize_t index)
-{
-    if (program == NULL || program->descriptor == NULL) return NULL;
-    PyObject *value = PyTuple_GET_ITEM(program->descriptor, index);
-    return value == Py_None ? NULL : value;
-}
-
-
 static uint64_t
 policy_now_ns(void)
 {
@@ -120,26 +111,13 @@ static PyObject *
 find_header(PyObject *headers, const char *name, Py_ssize_t name_size,
             Py_ssize_t *count)
 {
-    PyObject *found = NULL;
-    Py_ssize_t matches = 0;
-    Py_ssize_t size = wreath_headers_count(headers);
-    if (size < 0) return NULL;
-    for (Py_ssize_t i = 0; i < size; i++) {
-        const char *candidate;
-        const char *value;
-        Py_ssize_t candidate_size;
-        Py_ssize_t value_size;
-        if (wreath_headers_view(headers, i, &candidate, &candidate_size,
-                                &value, &value_size) < 0) return NULL;
-        if (candidate_size == name_size &&
-            memcmp(candidate, name, (size_t)name_size) == 0) {
-            if (found == NULL) found = wreath_headers_value_borrowed(headers, i);
-            if (found == NULL) return NULL;
-            matches++;
-        }
-    }
+    Py_ssize_t first;
+    Py_ssize_t matches;
+    if (wreath_headers_find(
+            headers, name, name_size, &first,
+            count == NULL ? NULL : &matches) < 0) return NULL;
     if (count != NULL) *count = matches;
-    return found; /* borrowed */
+    return first < 0 ? NULL : wreath_headers_value_borrowed(headers, first);
 }
 
 
@@ -588,7 +566,7 @@ run_ai_scraping(const WreathCoreCAPI *core, PyObject *config,
 int
 wreath_policy_program_load(WreathPolicyProgram *program, PyObject *app)
 {
-    program->core = NULL;
+    memset(program, 0, sizeof(*program));
     program->descriptor = PyObject_GetAttrString(app, "_wreath_policy");
     if (program->descriptor == NULL) {
         if (PyErr_ExceptionMatches(PyExc_AttributeError)) {
@@ -612,23 +590,40 @@ wreath_policy_program_load(WreathPolicyProgram *program, PyObject *app)
         PyErr_SetString(PyExc_RuntimeError, "unsupported native HTTP policy descriptor");
         return -1;
     }
-    PyObject *ai_scraping = program_item(program, WREATH_POLICY_AI_SCRAPING);
-    PyObject *compression = program_item(program, WREATH_POLICY_COMPRESSION);
-    PyObject *maintenance = program_item(program, WREATH_POLICY_MAINTENANCE);
-    PyObject *csrf = program_item(program, WREATH_POLICY_CSRF);
-    PyObject *timing = program_item(program, WREATH_POLICY_TIMING);
-    if (ai_scraping != NULL || compression != NULL || csrf != NULL || timing != NULL) {
+    PyObject **lowered[] = {
+        &program->proxy,
+        &program->trusted_host,
+        &program->ai_scraping,
+        &program->rate,
+        &program->request_id,
+        &program->timing,
+        &program->cors,
+        &program->csrf,
+        &program->security,
+        &program->websocket_origin,
+        &program->cache,
+        &program->compression,
+        &program->maintenance,
+    };
+    for (Py_ssize_t index = 1; index < WREATH_POLICY_SIZE; index++) {
+        PyObject *value = PyTuple_GET_ITEM(program->descriptor, index);
+        *lowered[index - 1] = value == Py_None ? NULL : value;
+    }
+    if (program->ai_scraping != NULL || program->compression != NULL ||
+        program->csrf != NULL || program->timing != NULL) {
         program->core = (const WreathCoreCAPI *)PyCapsule_Import(
             WREATH_CORE_CAPI_NAME, 0);
         if (program->core == NULL) return -1;
-        if (ai_scraping != NULL &&
-            !ai_scraping_config_valid(program->core, ai_scraping)) return -1;
-        if (compression != NULL && !compression_config_valid(compression)) return -1;
+        if (program->ai_scraping != NULL &&
+            !ai_scraping_config_valid(
+                program->core, program->ai_scraping)) return -1;
+        if (program->compression != NULL &&
+            !compression_config_valid(program->compression)) return -1;
     }
-    if (maintenance != NULL && !maintenance_config_valid(maintenance)) return -1;
+    if (program->maintenance != NULL &&
+        !maintenance_config_valid(program->maintenance)) return -1;
     program->response_transform = (unsigned char)(
-        program_item(program, WREATH_POLICY_CACHE) != NULL ||
-        program_item(program, WREATH_POLICY_COMPRESSION) != NULL);
+        program->cache != NULL || program->compression != NULL);
     return 0;
 }
 
@@ -637,8 +632,7 @@ void
 wreath_policy_program_clear(WreathPolicyProgram *program)
 {
     Py_CLEAR(program->descriptor);
-    program->core = NULL;
-    program->response_transform = 0;
+    memset(program, 0, sizeof(*program));
 }
 
 
@@ -1217,8 +1211,8 @@ wreath_policy_ingress(WreathPolicyProgram *program, WreathPolicyState *state,
         PyUnicode_CompareWithASCIIString(method, "HEAD") == 0);
     state->client = Py_NewRef(client);
     state->scheme = Py_NewRef(scheme);
-    if (program_item(program, WREATH_POLICY_COMPRESSION) != NULL) {
-        PyObject *compression = program_item(program, WREATH_POLICY_COMPRESSION);
+    if (program->compression != NULL) {
+        PyObject *compression = program->compression;
         PyObject *accepted = find_header(headers, "accept-encoding", 15, NULL);
         int fallback = 0;
         int allow_dcz = PyTuple_CheckExact(compression) &&
@@ -1237,17 +1231,17 @@ wreath_policy_ingress(WreathPolicyProgram *program, WreathPolicyState *state,
             }
         }
     }
-    if (program_item(program, WREATH_POLICY_SECURITY) != NULL) {
+    if (program->security != NULL) {
         state->completed |= WREATH_POLICY_DONE_SECURITY;
     }
 
-    PyObject *proxy = program_item(program, WREATH_POLICY_PROXY);
+    PyObject *proxy = program->proxy;
     if (proxy != NULL) {
         if (run_proxy(state, proxy, headers) < 0) return -1;
         state->completed |= WREATH_POLICY_DONE_PROXY;
     }
 
-    PyObject *trusted = program_item(program, WREATH_POLICY_TRUSTED_HOST);
+    PyObject *trusted = program->trusted_host;
     if (trusted != NULL) {
         Py_ssize_t count = 0;
         PyObject *host = find_header(headers, "host", 4, &count);
@@ -1257,27 +1251,27 @@ wreath_policy_ingress(WreathPolicyProgram *program, WreathPolicyState *state,
         }
     }
 
-    PyObject *maintenance = program_item(program, WREATH_POLICY_MAINTENANCE);
+    PyObject *maintenance = program->maintenance;
     if (maintenance != NULL) {
         int result = run_maintenance(maintenance, path, reply);
         if (result != 0) return result;
     }
 
-    PyObject *ai_scraping = program_item(program, WREATH_POLICY_AI_SCRAPING);
+    PyObject *ai_scraping = program->ai_scraping;
     if (ai_scraping != NULL) {
         int result = run_ai_scraping(
             program->core, ai_scraping, method, path, headers, reply);
         if (result != 0) return result;
     }
 
-    PyObject *rate = program_item(program, WREATH_POLICY_RATE);
+    PyObject *rate = program->rate;
     if (rate != NULL) {
         int result = run_rate(state, rate, reply);
         state->completed |= WREATH_POLICY_DONE_RATE;
         if (result != 0) return result;
     }
 
-    PyObject *request_id = program_item(program, WREATH_POLICY_REQUEST_ID);
+    PyObject *request_id = program->request_id;
     if (request_id != NULL) {
         PyObject *name = PyTuple_GET_ITEM(request_id, 0);
         int trust = PyTuple_GET_ITEM(request_id, 1) == Py_True;
@@ -1290,20 +1284,20 @@ wreath_policy_ingress(WreathPolicyProgram *program, WreathPolicyState *state,
         state->completed |= WREATH_POLICY_DONE_REQUEST_ID;
     }
 
-    PyObject *timing = program_item(program, WREATH_POLICY_TIMING);
+    PyObject *timing = program->timing;
     if (timing != NULL) {
         state->started_ns = policy_now_ns();
         state->completed |= WREATH_POLICY_DONE_TIMING;
     }
 
-    PyObject *cors = program_item(program, WREATH_POLICY_CORS);
+    PyObject *cors = program->cors;
     if (cors != NULL) {
         int result = cors_preflight(state, cors, method, headers, reply);
         state->completed |= WREATH_POLICY_DONE_CORS;
         if (result != 0) return result;
     }
 
-    PyObject *csrf = program_item(program, WREATH_POLICY_CSRF);
+    PyObject *csrf = program->csrf;
     if (csrf != NULL) {
         int result = run_csrf(state, csrf, method, headers, reply);
         state->completed |= WREATH_POLICY_DONE_CSRF;
@@ -1332,8 +1326,7 @@ int
 wreath_policy_websocket_origin(WreathPolicyProgram *program, PyObject *headers,
                                WreathPolicyReply *reply)
 {
-    PyObject *config = program_item(
-        program, WREATH_POLICY_WEBSOCKET_ORIGIN);
+    PyObject *config = program->websocket_origin;
     if (config == NULL) return 0;
     Py_ssize_t count = 0;
     PyObject *origin = find_header(headers, "origin", 6, &count);
@@ -1532,7 +1525,7 @@ wreath_policy_response(WreathPolicyProgram *program, WreathPolicyState *state,
                         "native response policy requires list headers and bytes body");
         return -1;
     }
-    PyObject *cache = program_item(program, WREATH_POLICY_CACHE);
+    PyObject *cache = program->cache;
     if (cache != NULL && response_index_literal(headers, "cache-control", 13) < 0) {
         PyObject *value = PyTuple_GET_ITEM(cache, 0);
         if (PyTuple_GET_ITEM(cache, 1) == Py_True &&
@@ -1547,7 +1540,7 @@ wreath_policy_response(WreathPolicyProgram *program, WreathPolicyState *state,
             if (result < 0) return -1;
         }
     }
-    PyObject *compression = program_item(program, WREATH_POLICY_COMPRESSION);
+    PyObject *compression = program->compression;
     if (compression == NULL || state->compression_coding == 0 || state->method_is_head ||
         (authenticated && PyTuple_GET_ITEM(compression, 3) != Py_True)) return 0;
     long status = PyLong_AsLong(status_obj);
@@ -1644,12 +1637,12 @@ wreath_policy_egress(WreathPolicyProgram *program, WreathPolicyState *state,
         return -1;
     }
     if (state->completed & WREATH_POLICY_DONE_SECURITY) {
-        PyObject *security = program_item(program, WREATH_POLICY_SECURITY);
+        PyObject *security = program->security;
         int https = PyUnicode_CompareWithASCIIString(state->scheme, "https") == 0;
         if (append_missing(headers, PyTuple_GET_ITEM(security, https ? 1 : 0)) < 0) return -1;
     }
     if (state->completed & WREATH_POLICY_DONE_CSRF) {
-        PyObject *csrf = program_item(program, WREATH_POLICY_CSRF);
+        PyObject *csrf = program->csrf;
         if (state->csrf_minter && append_vary(headers, "sec-fetch-site", 14) < 0) {
             return -1;
         }
@@ -1711,10 +1704,10 @@ wreath_policy_egress(WreathPolicyProgram *program, WreathPolicyState *state,
         }
     }
     if (state->completed & WREATH_POLICY_DONE_CORS) {
-        if (cors_egress(state, program_item(program, WREATH_POLICY_CORS), headers) < 0) return -1;
+        if (cors_egress(state, program->cors, headers) < 0) return -1;
     }
     if (state->completed & WREATH_POLICY_DONE_TIMING) {
-        PyObject *timing = program_item(program, WREATH_POLICY_TIMING);
+        PyObject *timing = program->timing;
         state->elapsed_ns = policy_now_ns() - state->started_ns;
         if (PyTuple_GET_ITEM(timing, 1) == Py_True) {
             PyObject *metric = PyTuple_GET_ITEM(timing, 0);
@@ -1763,7 +1756,7 @@ wreath_policy_egress(WreathPolicyProgram *program, WreathPolicyState *state,
         }
     }
     if (state->completed & WREATH_POLICY_DONE_REQUEST_ID) {
-        PyObject *config = program_item(program, WREATH_POLICY_REQUEST_ID);
+        PyObject *config = program->request_id;
         if (PyTuple_GET_ITEM(config, 2) == Py_True &&
             replace_header(headers, PyTuple_GET_ITEM(config, 0), state->request_id) < 0) {
             return -1;

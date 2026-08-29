@@ -18,9 +18,10 @@ from wreath.testing import TestClient
 
 def test_typed_mapping_flags_preserve_scalar_types_and_defaults() -> None:
     provider = FeatureFlags({"enabled": "on", "limit": "12", "ratio": "0.5"})
-    flags = FlagSet(provider, (
-        Flag("enabled", False), Flag("limit", 3), Flag("ratio", 1.0), Flag("mode", "safe")
-    ))
+    flags = FlagSet(
+        provider,
+        (Flag("enabled", False), Flag("limit", 3), Flag("ratio", 1.0), Flag("mode", "safe")),
+    )
     assert flags.value(Flag("enabled", False), {"id": "ada"}) is True
     assert flags.value(Flag("limit", 3)) == 12
     assert flags.value(Flag("ratio", 1.0)) == 0.5

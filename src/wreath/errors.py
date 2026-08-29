@@ -91,9 +91,7 @@ class SentryErrorReporter:
 
     __slots__ = ("_capture", "_client_facts", "_new_scope")
 
-    def __init__(
-        self, *, client_facts: _ClientFactsResolver | None = None
-    ) -> None:
+    def __init__(self, *, client_facts: _ClientFactsResolver | None = None) -> None:
         try:
             sentry_sdk = importlib.import_module("sentry_sdk")
         except ImportError as exc:
@@ -101,9 +99,7 @@ class SentryErrorReporter:
                 "SentryErrorReporter requires the optional 'sentry-sdk' package; "
                 "install sentry-sdk and initialize it before registration"
             ) from exc
-        if client_facts is not None and not callable(
-            getattr(client_facts, "resolve", None)
-        ):
+        if client_facts is not None and not callable(getattr(client_facts, "resolve", None)):
             raise TypeError("Sentry client_facts must expose resolve(request)")
         self._capture = sentry_sdk.capture_exception
         self._client_facts = client_facts
@@ -114,9 +110,7 @@ class SentryErrorReporter:
             self._capture(event.error)
             return
         if not callable(self._new_scope):
-            raise RuntimeError(
-                "Sentry client-facts context requires sentry-sdk with new_scope()"
-            )
+            raise RuntimeError("Sentry client-facts context requires sentry-sdk with new_scope()")
         from .client_facts import client_fact_attributes
 
         facts = self._client_facts.resolve(event.request)

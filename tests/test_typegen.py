@@ -1,5 +1,3 @@
-"""Canonical model, schema shapes, operation ids, and TypeScript rendering."""
-
 from __future__ import annotations
 
 import enum
@@ -65,9 +63,6 @@ class UnsupportedShape:
 
 def _model(app: Wreath, **kwargs: Any) -> Any:
     return build_api_model(app, **kwargs)
-
-
-# --- operation ids ---------------------------------------------------------
 
 
 def test_derives_deterministic_operation_id() -> None:
@@ -136,9 +131,6 @@ def test_two_methods_one_route_get_distinct_ids() -> None:
     assert set(resolved.values()) == {"thingGET", "thingPOST"}
 
 
-# --- schema shapes ---------------------------------------------------------
-
-
 def _returns(app: Wreath) -> TypeRef:
     return _model(app).operations[0].response_body
 
@@ -179,9 +171,7 @@ def test_list_tuple_and_record() -> None:
 
     by_name = {f.wire_name: f.type for f in _model(app).models[0].fields}
     assert by_name["items"] == TypeRef("array", arguments=(TypeRef("integer"),))
-    assert by_name["pair"] == TypeRef(
-        "tuple", arguments=(TypeRef("integer"), TypeRef("string"))
-    )
+    assert by_name["pair"] == TypeRef("tuple", arguments=(TypeRef("integer"), TypeRef("string")))
     assert by_name["variadic"] == TypeRef("array", arguments=(TypeRef("integer"),))
     assert by_name["mapping"] == TypeRef("record", arguments=(TypeRef("number"),))
 
@@ -215,9 +205,6 @@ def test_same_name_models_get_distinct_aliases() -> None:
     assert len(names) == 2
 
 
-# --- strictness ------------------------------------------------------------
-
-
 def test_strict_rejects_unsupported_annotation() -> None:
     app = Wreath()
 
@@ -242,16 +229,11 @@ def test_allow_unknown_maps_to_unknown_not_any() -> None:
     assert ": any" not in files["models.ts"]
 
 
-# --- rendering / golden ----------------------------------------------------
-
-
 def _generate_fixture(**kwargs: Any) -> dict[str, str]:
     from tests.typegen.app import app
 
     api = build_api_model(app, title="Fixture API", version="2.0.0")
-    return render_typescript(
-        api, react_query=True, base_url_env="VITE_API_URL", **kwargs
-    )
+    return render_typescript(api, react_query=True, base_url_env="VITE_API_URL", **kwargs)
 
 
 def test_generation_matches_golden() -> None:

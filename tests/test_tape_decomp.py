@@ -1,5 +1,3 @@
-"""First-class HTTP policy cost decomposition and its silent-failure guards."""
-
 from __future__ import annotations
 
 import asyncio
@@ -84,8 +82,7 @@ def test_a_shared_app_activates_each_arm_before_it_is_measured() -> None:
 
 def test_the_sample_rate_limiter_cannot_drain_during_a_benchmark() -> None:
     limiter = next(
-        factory() for factory in POLICY_FACTORIES
-        if isinstance(factory(), RateLimitPolicy)
+        factory() for factory in POLICY_FACTORIES if isinstance(factory(), RateLimitPolicy)
     )
     # Behavioral, not a private-attribute assertion: a full decomposition drives
     # well over a million requests through one bucket, and the limit must be out

@@ -5,7 +5,6 @@ from __future__ import annotations
 from ..ir import NEEDS_REVIEW
 
 CONFIDENCE: dict[str, tuple[str, str, str, str]] = {
-    # -- confidence -----------------------------------------------------------
     "resolve.star_import": (
         "star_import",
         "other",

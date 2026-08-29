@@ -1,12 +1,3 @@
-"""Resources: what a model reads, and what it is allowed to read.
-
-A resource is addressed by a URI rather than by a name and an argument object,
-which is what makes it subscribable and what makes its Cedar identity its own
-URI. The assertions here are about that difference, and about the same failure
-model tools have: a refusal, a not-found, and a reader that broke are three
-facts and never one.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -213,7 +204,6 @@ async def test_a_reader_that_says_no_is_not_a_reader_that_broke() -> None:
 
 
 async def test_a_resource_is_gated_on_its_own_uri() -> None:
-    """A resource has a stable identity; a tool has to resolve one per call."""
     seen: list[object] = []
 
     class Recording:
@@ -359,7 +349,6 @@ async def test_the_capability_is_advertised_only_when_something_is_declared() ->
 
 
 async def test_resource_templates_are_listed_as_none_rather_than_refused() -> None:
-    """A capability that implies a method must not answer method-not-found."""
     app, _ = build()
     async with TestClient(app) as client:
         session, _ = await initialize(client)

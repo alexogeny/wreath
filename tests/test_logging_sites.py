@@ -1,14 +1,3 @@
-"""Stage 2 of first-class logging: interned call sites and the two API tiers.
-
-The registration tier (`log.event`) declares a site's template, severity, field
-names, types and redaction dispositions once, at import, and returns a callable
-that emits only the dynamic half. The kwargs tier (`log.info` and friends)
-interns lazily on the template text and dispatches argument types at runtime.
-
-Both tiers land in the same ring. What differs is where the work happens, and
-these tests pin that difference rather than assume it.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -24,9 +13,6 @@ def sink() -> list[fs.LogCell]:
     records: list[fs.LogCell] = []
     with log.testing_runtime(records.append):
         yield records
-
-
-# --- registration -----------------------------------------------------------
 
 
 def test_event_registration_returns_a_callable_site(sink: list[fs.LogCell]) -> None:
@@ -83,11 +69,7 @@ def test_registering_the_same_event_name_twice_is_refused() -> None:
             log.event("dup.name", "b {v}", fields=(log.field("v", int),))
 
 
-# --- redaction (deny-by-default) --------------------------------------------
-
-
 def test_an_undeclared_string_field_is_hashed(sink: list[fs.LogCell]) -> None:
-    """Deny-by-default: to see a string in cleartext you declare RAW for it."""
     site = log.event("redact.default", "token {token}", fields=(log.field("token", str),))
     site("hunter2")
     (cell,) = sink
@@ -97,9 +79,7 @@ def test_an_undeclared_string_field_is_hashed(sink: list[fs.LogCell]) -> None:
 
 
 def test_a_declared_raw_string_field_is_verbatim(sink: list[fs.LogCell]) -> None:
-    site = log.event(
-        "redact.raw", "route {route}", fields=(log.field("route", str, log.RAW),)
-    )
+    site = log.event("redact.raw", "route {route}", fields=(log.field("route", str, log.RAW),))
     site("/orders")
     assert sink[0].args == (fs.LogArg.text("/orders"),)
     assert not sink[0].flags & fs.LOG_FLAG_REDACTED
@@ -136,9 +116,6 @@ def test_a_length_disposition_keeps_only_the_length(sink: list[fs.LogCell]) -> N
     assert sink[0].args == (fs.LogArg.length(8),)
 
 
-# --- level gating -----------------------------------------------------------
-
-
 def test_a_disabled_site_is_falsey_and_emits_nothing() -> None:
     with log.testing_runtime(lambda _c: None, level=log.INFO) as records:
         chatty = log.event("gate.debug", "x {v}", level=log.DEBUG, fields=(log.field("v", int),))
@@ -158,12 +135,8 @@ class _Explosive:
 
 
 def test_a_disabled_call_does_not_pack_its_arguments() -> None:
-    """The premise of the whole promotion story: verbose instrumentation is
-    affordable only if a disabled call stops at the level compare."""
     with log.testing_runtime(lambda _c: None, level=log.WARN):
-        chatty = log.event(
-            "gate.nopack", "v {v}", level=log.DEBUG, fields=(log.field("v", str),)
-        )
+        chatty = log.event("gate.nopack", "v {v}", level=log.DEBUG, fields=(log.field("v", str),))
         chatty(_Explosive())
 
 
@@ -176,14 +149,10 @@ def test_a_disabled_kwargs_call_does_not_intern_a_site() -> None:
 
 
 def test_the_guard_and_the_call_agree(sink: list[fs.LogCell]) -> None:
-    """`if SITE:` must never disagree with what the call itself would do."""
     site = log.event("gate.agree", "v {v}", level=log.INFO, fields=(log.field("v", int),))
     if site:
         site(1)
     assert len(sink) == 1
-
-
-# --- the kwargs tier --------------------------------------------------------
 
 
 def test_kwargs_tier_emits_and_interns(sink: list[fs.LogCell]) -> None:
@@ -195,7 +164,6 @@ def test_kwargs_tier_emits_and_interns(sink: list[fs.LogCell]) -> None:
 
 
 def test_kwargs_tier_hashes_strings_and_keeps_scalars(sink: list[fs.LogCell]) -> None:
-    """D5: an undeclared string can never reach the record in cleartext."""
     log.warn("charge {attempt} via {gateway}", attempt=2, gateway="stripe")
     (cell,) = sink
     assert cell.severity == fs.Severity.WARN
@@ -230,15 +198,10 @@ def test_kwargs_tier_respects_the_level(sink: list[fs.LogCell]) -> None:
 
 
 def test_kwargs_tier_keys_on_template_text_not_identity(sink: list[fs.LogCell]) -> None:
-    """A template built at runtime must not mint a new site every call -- and
-    identity would, because a fresh str object is a fresh key."""
     for _ in range(3):
         template = "".join(["dynamic ", "{v}"])
         log.info(template, v=1)
     assert len({c.site_id for c in sink}) == 1
-
-
-# --- bounded tables and honest degradation ----------------------------------
 
 
 def test_site_table_overflow_is_counted_and_records_stay_uninterned() -> None:
@@ -251,14 +214,12 @@ def test_site_table_overflow_is_counted_and_records_stay_uninterned() -> None:
 
 
 def test_emitting_without_a_runtime_does_not_raise() -> None:
-    """Import-time and pre-boot logging must degrade, never explode."""
     site = log.event("noruntime.site", "v {v}", fields=(log.field("v", int),))
     site(1)
     log.info("no runtime yet {v}", v=1)
 
 
 def test_a_type_mismatch_is_counted_not_raised(sink: list[fs.LogCell]) -> None:
-    """A log call must not be able to break the request that made it."""
     site = log.event("mismatch.site", "n {n}", fields=(log.field("n", int),))
     site("not an int")
     assert len(sink) == 1
@@ -283,12 +244,7 @@ def test_too_few_positional_arguments_pads_rather_than_raising(sink: list[fs.Log
     assert log.arity_mismatch_count() == 1
 
 
-# --- rendering the static half ---------------------------------------------
-
-
 def test_a_site_renders_its_record_from_the_template(sink: list[fs.LogCell]) -> None:
-    """The record carries only arguments; the message is reconstructed from the
-    interned template off the request path."""
     site = log.event(
         "render.site",
         "user {user} denied {resource}",

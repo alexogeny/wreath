@@ -70,14 +70,15 @@ class _ModelRewrite(_EmitterState):
                 target = (
                     statement.target
                     if isinstance(statement, ast.AnnAssign)
-                    else statement.targets[0] if len(statement.targets) == 1 else None
+                    else statement.targets[0]
+                    if len(statement.targets) == 1
+                    else None
                 )
                 if isinstance(target, ast.Name) and target.id == "model_config":
                     self._replace_all_of(statement, "# wreath-port: legacy settings config removed")
                     continue
             if not (
-                isinstance(statement, ast.AnnAssign)
-                and isinstance(statement.target, ast.Name)
+                isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name)
             ):
                 continue
             value = statement.value
@@ -153,26 +154,30 @@ class _ModelRewrite(_EmitterState):
         # A body that is *only* a `super().__init__(...)` forward does what the
         # dataclass already does, so the method goes entirely. Two shapes reach
         # here and both were broken:
-        #
         #   def __init__(self):           -> renaming it to `__post_init__` and
         #       super().__init__()           deleting the call left a `def` with
         #                                    no body: a syntax error the
         #                                    round-trip guard turned into
         #                                    `EmitError` on a four-line input.
-        #
         #   def __init__(self, **kw):     -> kept verbatim, so the ported class
         #       super().__init__(**kw)       called `object.__init__(host=...)`
         #                                    and raised `TypeError` on the first
         #                                    construction, from a module that
         #                                    parsed and compiled clean.
-        forwards_only = len(init.body) == 1 and not call.args and (
-            not call.keywords
-            or all(k.arg is None for k in call.keywords)
-            and bool(init.args.kwarg)
+        forwards_only = (
+            len(init.body) == 1
+            and not call.args
+            and (
+                not call.keywords
+                or all(k.arg is None for k in call.keywords)
+                and bool(init.args.kwarg)
+            )
         )
         if forwards_only and not (
-            init.args.posonlyargs or init.args.kwonlyargs
-            or len(init.args.args) > 1 or init.args.vararg
+            init.args.posonlyargs
+            or init.args.kwonlyargs
+            or len(init.args.args) > 1
+            or init.args.vararg
         ):
             self._replace_all_of(init, "")
             return
@@ -284,17 +289,14 @@ class _ModelRewrite(_EmitterState):
                     self._delete_decorator(decorator)
             self._removed_pydantic_imports.update({"validator", "field_validator"})
             self._resolve(marker.lineno, "pydantic.validator")
-            calls.extend(
-                f"self.{field} = self.{statement.name}(self.{field})" for field in fields
-            )
+            calls.extend(f"self.{field} = self.{statement.name}(self.{field})" for field in fields)
         if not calls:
             return
         existing = next(
             (
                 statement
                 for statement in node.body
-                if isinstance(statement, ast.FunctionDef)
-                and statement.name == "__post_init__"
+                if isinstance(statement, ast.FunctionDef) and statement.name == "__post_init__"
             ),
             None,
         )
@@ -343,14 +345,19 @@ class _ModelRewrite(_EmitterState):
                 and len(child.targets) == 1
                 and isinstance(child.targets[0], ast.Name)
             }
-            if declarative and settings and settings <= {
-                "arbitrary_types_allowed",
-                "from_attributes",
-                "orm_mode",
-                "protected_namespaces",
-                "use_enum_values",
-                "validate_default",
-            }:
+            if (
+                declarative
+                and settings
+                and settings
+                <= {
+                    "arbitrary_types_allowed",
+                    "from_attributes",
+                    "orm_mode",
+                    "protected_namespaces",
+                    "use_enum_values",
+                    "validate_default",
+                }
+            ):
                 self._replace_all_of(stmt, "# wreath-port: redundant model config removed")
                 self._resolve(stmt.lineno, "pydantic.config_class")
             else:
@@ -379,10 +386,7 @@ class _ModelRewrite(_EmitterState):
                     pass
                 return
             rule_id = pydantic_field_rule(self.imports, stmt)
-            if (
-                rule_id == "pydantic.field_metadata_exact"
-                and isinstance(stmt.value, ast.Call)
-            ):
+            if rule_id == "pydantic.field_metadata_exact" and isinstance(stmt.value, ast.Call):
                 self._rewrite_field_metadata(stmt, stmt.value)
                 return
             if rule_id != "pydantic.field":
@@ -422,9 +426,7 @@ class _ModelRewrite(_EmitterState):
             else:
                 self._drop_redundant_model_config(stmt, stmt.value)
 
-    def _drop_redundant_model_config(
-        self, stmt: ast.stmt, value: ast.expr | None
-    ) -> bool:
+    def _drop_redundant_model_config(self, stmt: ast.stmt, value: ast.expr | None) -> bool:
         # `None` because an `AnnAssign` may carry no value at all (`x: int`);
         # it takes the same answer as any other non-call.
         if not isinstance(value, ast.Call):
@@ -448,8 +450,16 @@ class _ModelRewrite(_EmitterState):
         metadata: list[str] = []
         for keyword in call.keywords:
             if keyword.arg in {
-                "alias", "description", "gt", "ge", "lt", "le",
-                "min_length", "max_length", "pattern", "regex",
+                "alias",
+                "description",
+                "gt",
+                "ge",
+                "lt",
+                "le",
+                "min_length",
+                "max_length",
+                "pattern",
+                "regex",
             }:
                 name = "pattern" if keyword.arg == "regex" else keyword.arg
                 metadata.append(f"{name}={self._seg(keyword.value)}")
@@ -515,9 +525,7 @@ class _ModelRewrite(_EmitterState):
         else:
             projected_name = None
         arguments = [self._seg(func.value)]
-        arguments.extend(
-            f"{keyword.arg}={self._seg(keyword.value)}" for keyword in node.keywords
-        )
+        arguments.extend(f"{keyword.arg}={self._seg(keyword.value)}" for keyword in node.keywords)
         if projected_name is not None:
             arguments.append(f"name={projected_name!r}")
         self.needs.add("model_dataclass")

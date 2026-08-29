@@ -76,7 +76,6 @@ the name here, so the subquery and the walk can never disagree about *which*
 table they mean -- but they agree on being unqualified too. Put the schema on
 the `search_path`, or use a logical schema.
 
-Reference: `docs/reference/privacy.md`. Guide: `docs/guides/privacy.md`.
 """
 
 from __future__ import annotations
@@ -177,9 +176,7 @@ class Privacy:
 
     __slots__ = ("_erasure_record_retain", "_registry", "_orm")
 
-    def __init__(
-        self, registry: Any = None, *, erasure_record_retain: float | None = None
-    ) -> None:
+    def __init__(self, registry: Any = None, *, erasure_record_retain: float | None = None) -> None:
         self._orm = registry
         self._registry = PrivacyRegistry()
         self._erasure_record_retain = erasure_record_retain
@@ -191,8 +188,6 @@ class Privacy:
             # silent gap this module exists to make visible.
             declare_registry(self._registry, registry)
             self._publish()
-
-    # -- declaration --------------------------------------------------------
 
     def subject(self, model: type, *, key: str = "id", delete: bool = False) -> None:
         """Name the model that is a data subject, and its identity column."""
@@ -238,13 +233,9 @@ class Privacy:
             self._publish()
         return found
 
-    def retain(
-        self, model: type, *, after: float, on: str, reason: str = ""
-    ) -> None:
+    def retain(self, model: type, *, after: float, on: str, reason: str = "") -> None:
         """Declare how long this model's rows live, measured from `on`."""
         self._registry.retain(model, after=after, on=on, reason=reason)
-
-    # -- reading ------------------------------------------------------------
 
     def plan(self, subject_id: str, *, registry: Any = None) -> ErasurePlan:
         """What erasing one subject would do. Opens nothing, writes nothing."""
@@ -264,9 +255,7 @@ class Privacy:
 
     def retention(self) -> tuple[str, ...]:
         """Every declared retention window, and every table that lacks one."""
-        return describe_retention(
-            self._registry, erasure_record_retain=self._erasure_record_retain
-        )
+        return describe_retention(self._registry, erasure_record_retain=self._erasure_record_retain)
 
     def retention_passes(self, **kwargs: Any) -> tuple[tuple[Retention, Any], ...]:
         """One `ChunkedPass` per declared window, for `jobs.drive` to schedule."""
@@ -299,8 +288,6 @@ class Privacy:
             await database.release(workload, connection)
         return missing_edges(graph, catalog_edge_rows(rows, schema))
 
-    # -- doing --------------------------------------------------------------
-
     def prepare(
         self,
         subject_id: str,
@@ -320,9 +307,7 @@ class Privacy:
         from ._privacy.execute import prepare as _prepare
 
         kwargs.setdefault("record_retain", self._erasure_record_retain)
-        return _prepare(
-            self._registry, orm, str(subject_id), plan=plan, digest=digest, **kwargs
-        )
+        return _prepare(self._registry, orm, str(subject_id), plan=plan, digest=digest, **kwargs)
 
     async def erase(
         self,
@@ -357,9 +342,7 @@ class Privacy:
             ErasureIncomplete: a pass stopped before the end of its walk. The
                 walks resume, so the fix is to run this again.
         """
-        prepared = self.prepare(
-            subject_id, digest=digest, registry=registry, **kwargs
-        )
+        prepared = self.prepare(subject_id, digest=digest, registry=registry, **kwargs)
         for _action, walk in prepared.steps:
             if walk is not None:
                 await walk.run(database)
@@ -376,18 +359,12 @@ class Privacy:
         """
         from ._privacy.record import ErasureRecord
 
-        return ErasureRecord(
-            schema=schema, retain=self._erasure_record_retain
-        ).bind(database)
-
-    # -- internals ----------------------------------------------------------
+        return ErasureRecord(schema=schema, retain=self._erasure_record_retain).bind(database)
 
     def _resolve(self, registry: Any) -> Any:
         resolved = registry if registry is not None else self._orm
         if resolved is None:
-            raise ValueError(
-                "no ORM registry: pass one to Privacy(registry) or to the call"
-            )
+            raise ValueError("no ORM registry: pass one to Privacy(registry) or to the call")
         return resolved
 
     def _publish(self) -> None:

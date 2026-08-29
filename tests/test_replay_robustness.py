@@ -1,12 +1,3 @@
-"""Adversarial robustness of the replay machinery itself, plus framework edges
-found by reviewing the red-team suite for gaps.
-
-A recording and a fault schedule are *untrusted inputs*: a corrupt or malicious
-one must be detected or safely ignored, never crash the reader or drive it out of
-bounds. And the replay/adapter plumbing must isolate cleanly between runs. These
-tests hold the tooling to the same standard the tooling holds the framework.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -56,9 +47,6 @@ def _app() -> wreath.Wreath:
         raise RuntimeError("kaboom")
 
     return app
-
-
-# --- untrusted recording / schedule inputs -----------------------------------
 
 
 def test_a_corrupt_chunk_crc_is_detected_not_silently_accepted() -> None:
@@ -111,9 +99,6 @@ async def test_a_recording_that_opens_with_an_immediate_reset_is_safe() -> None:
     assert b"pong" not in result.response
 
 
-# --- fault parameters out of range -------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_fault_index_past_the_last_segment_is_a_noop() -> None:
     rec = record_transport_segments([GET[:20], GET[20:]])
@@ -147,9 +132,6 @@ async def test_multiple_faults_in_one_schedule_all_apply() -> None:
     assert a.matches(b)
 
 
-# --- body split across segments, cut mid-body --------------------------------
-
-
 @pytest.mark.asyncio
 async def test_body_split_across_segments_with_a_midbody_reset() -> None:
     post = b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\nConnection: close\r\n\r\n01234"
@@ -163,14 +145,13 @@ async def test_body_split_across_segments_with_a_midbody_reset() -> None:
     assert a.matches(b)
 
 
-# --- endpoint-plan edges ------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_replace_with_a_plain_exception_maps_to_500() -> None:
     result = await replay_endpoint_plan(
-        _app(), CanonicalRequest("GET", "/ping"),
-        mode=PlanMode.REPLACE, recorded_exception=RuntimeError("unexpected"),
+        _app(),
+        CanonicalRequest("GET", "/ping"),
+        mode=PlanMode.REPLACE,
+        recorded_exception=RuntimeError("unexpected"),
     )
     assert result.status == 500
     assert result.deterministic is True
@@ -193,13 +174,11 @@ async def test_invalid_bodies_get_an_owned_validation_status(body: bytes) -> Non
 
     result = await replay_endpoint_plan(
         app,
-        CanonicalRequest("POST", "/items",
-                         headers=((b"content-type", b"application/json"),), body=body),
+        CanonicalRequest(
+            "POST", "/items", headers=((b"content-type", b"application/json"),), body=body
+        ),
     )
     assert result.status in (400, 422)  # owned rejection, never a 500 or a crash
-
-
-# --- adapter isolation and the fan-out path ----------------------------------
 
 
 @pytest.mark.asyncio
@@ -214,7 +193,8 @@ async def test_a_faulted_adapter_is_restored_after_the_replay() -> None:
     original = app._databases["main"]
     double = DatabaseDouble("main", query_faults={0: AdapterFault.SERVER_ERROR})
     result = await replay_endpoint_plan(
-        app, CanonicalRequest("GET", "/u"),
+        app,
+        CanonicalRequest("GET", "/u"),
         adapters=ReplayAdapters(databases={"main": double}),
     )
     assert result.status == 500
@@ -233,7 +213,8 @@ async def test_db_map_fanout_fault_releases_and_maps_to_500() -> None:
 
     double = DatabaseDouble("main", query_faults={0: AdapterFault.SERVER_ERROR})
     result = await replay_endpoint_plan(
-        app, CanonicalRequest("GET", "/fan"),
+        app,
+        CanonicalRequest("GET", "/fan"),
         adapters=ReplayAdapters(databases={"main": double}),
     )
     assert result.status == 500

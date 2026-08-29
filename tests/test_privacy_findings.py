@@ -1,14 +1,3 @@
-"""The findings' edges: what is reported, what is *not*, and what the notes say.
-
-`tests/test_privacy_plan.py` proves each finding fires. This file proves the
-other half, which is where a findings engine actually goes wrong: a report that
-fires on everything is as useless as one that fires on nothing, and the note at
-the bottom of a plan is the only part some readers get to. Every test here
-pairs a case that must be reported with one that must not.
-
-No database. Every assertion is about a decision this module makes.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -40,9 +29,6 @@ def _registry(*models: type) -> Registry:
     return Registry(FakeDatabase(), [Person, *models], validate_schema="off")
 
 
-# -- orphan risks: the edge, the parent, and the wording ----------------------
-
-
 class Receipt(Model, table="receipts"):
     id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('seq')")
     person_id: Mapped[int | None] = column(
@@ -62,29 +48,17 @@ class Invoice(Model, table="invoices"):
 
 
 def test_a_set_default_edge_says_its_default_and_a_set_null_one_says_null() -> None:
-    """Two referential actions, two different things happen to the child row.
-
-    A reader who is told "set to NULL" for a `SET DEFAULT` edge goes looking
-    for null rows and finds none, which is worse than being told nothing.
-    """
     privacy = Privacy(_registry(Receipt, Invoice))
     privacy.subject(Person, key="id", delete=True)
     privacy.classify(Receipt, subject="person_id", personal={"address": Erase.REDACT})
     privacy.classify(Invoice, subject="person_id", personal={"payer": Erase.REDACT})
 
-    details = {
-        risk.edge.from_table: risk.detail for risk in privacy.plan("4711").orphan_risks
-    }
+    details = {risk.edge.from_table: risk.detail for risk in privacy.plan("4711").orphan_risks}
     assert "sets public.receipts.person_id to NULL" in details["public.receipts"]
     assert "sets public.invoices.person_id to its default" in details["public.invoices"]
 
 
 def test_an_orphaning_edge_onto_a_parent_nothing_deletes_is_not_a_risk() -> None:
-    """A `SET NULL` edge is an ordinary schema choice until something deletes.
-
-    Reporting every one of them would bury the real finding in noise, which is
-    the way a findings engine stops being read.
-    """
     privacy = Privacy(_registry(Receipt))
     privacy.subject(Person, key="id")  # anonymised, not deleted
     privacy.classify(Receipt, subject="person_id", personal={"address": Erase.REDACT})
@@ -92,7 +66,6 @@ def test_an_orphaning_edge_onto_a_parent_nothing_deletes_is_not_a_risk() -> None
 
 
 def test_a_blocking_edge_onto_a_deleted_parent_is_not_an_orphan_risk() -> None:
-    """`NO ACTION` strands nothing; it refuses. Different finding, different fix."""
 
     class Kept(Model, table="kept_rows"):
         id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('seq')")
@@ -107,16 +80,7 @@ def test_a_blocking_edge_onto_a_deleted_parent_is_not_an_orphan_risk() -> None:
     assert len(plan.surviving_references) == 1
 
 
-# -- surviving references: which parent, and which child ----------------------
-
-
 def test_a_reference_to_a_parent_that_survives_is_not_reported() -> None:
-    """The finding is about pointing at a row that goes away.
-
-    Two edges from one surviving table, one to a deleted parent and one to a
-    surviving one; only the first is a finding, and a check that looked only at
-    the referential action would report both.
-    """
 
     class Camera(Model, table="cameras"):
         id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('seq')")
@@ -133,13 +97,10 @@ def test_a_reference_to_a_parent_that_survives_is_not_reported() -> None:
     privacy.classify(Photo, subject="owner_id", personal={"caption": Erase.REDACT})
 
     plan = privacy.plan("4711")
-    assert [item.edge.to_table for item in plan.surviving_references] == [
-        "public.people"
-    ]
+    assert [item.edge.to_table for item in plan.surviving_references] == ["public.people"]
 
 
 def test_a_blocked_plan_names_every_kind_of_blocking_finding_it_has() -> None:
-    """The refusal counts each kind, so an operator knows what to go and fix."""
 
     class Kept(Model, table="kept_two"):
         id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('seq')")
@@ -156,21 +117,12 @@ def test_a_blocked_plan_names_every_kind_of_blocking_finding_it_has() -> None:
     assert "1 surviving reference(s)" in str(caught.value)
 
 
-# -- unreachable: classified, and holding something ---------------------------
-
-
 class Orphaned(Model, table="orphaned"):
     id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('seq')")
     contact_string: Mapped[str] = column(Text)
 
 
 def test_an_unreachable_table_with_no_personal_columns_is_not_a_finding() -> None:
-    """"Classified" is not the trigger; *holding personal data* is.
-
-    A model somebody registered to record that it holds nothing is exactly the
-    thing that should not appear as a finding, and it is the shape a
-    classification sweep produces most.
-    """
     privacy = Privacy(_registry(Orphaned))
     privacy.subject(Person, key="id")
     privacy.classify(Orphaned)
@@ -180,7 +132,6 @@ def test_an_unreachable_table_with_no_personal_columns_is_not_a_finding() -> Non
 
 
 def test_a_classified_model_outside_the_registry_says_which_gap_it_is() -> None:
-    """Unmapped and unconnected need different fixes, so they read differently."""
 
     class Elsewhere(Model, table="elsewhere"):
         id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('seq')")
@@ -197,15 +148,11 @@ def test_a_classified_model_outside_the_registry_says_which_gap_it_is() -> None:
     assert [item.table for item in privacy.plan("4711").unreachable] == ["", "orphaned"]
 
 
-# -- the notes: the part of the plan a hurried reader actually reads ----------
-
-
 def _notes(privacy: Privacy) -> str:
     return "\n".join(privacy.plan("4711").notes)
 
 
 def test_a_clean_plan_carries_only_the_backup_note() -> None:
-    """Every other note is a finding, so a clean plan must not grow one."""
 
     class Photo(Model, table="photos_clean"):
         id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('seq')")
@@ -221,7 +168,6 @@ def test_a_clean_plan_carries_only_the_backup_note() -> None:
 
 
 def test_the_notes_name_each_finding_that_is_present() -> None:
-    """One plan with four findings in it, and four sentences that say so."""
     class Kept(Model, table="kept_three"):
         id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('seq')")
         person_id: Mapped[int] = column(Int64, references=Person.id)
@@ -239,9 +185,7 @@ def test_the_notes_name_each_finding_that_is_present() -> None:
     privacy.classify(Kept, subject="person_id", personal={"note": Erase.REDACT})
     privacy.classify(Receipt, subject="person_id", personal={"address": Erase.REDACT})
     privacy.classify(Orphaned, personal={"contact_string": Erase.REDACT})
-    privacy.classify(
-        Ledger, personal={"payer": Erase.REDACT}, exempt="a financial record"
-    )
+    privacy.classify(Ledger, personal={"payer": Erase.REDACT}, exempt="a financial record")
     text = _notes(privacy)
     assert "1 table(s) retain the subject's data" in text
     assert "1 classified table(s) hold personal data this traversal cannot reach" in text
@@ -250,7 +194,6 @@ def test_the_notes_name_each_finding_that_is_present() -> None:
 
 
 def test_the_notes_name_a_pseudonymised_column_and_only_a_pseudonymised_one() -> None:
-    """The note exists to say "this is not erasure", so it must list the right ones."""
     from wreath.passes import Declared
 
     class Ticket(Model, table="tickets"):
@@ -275,28 +218,21 @@ def test_the_notes_name_a_pseudonymised_column_and_only_a_pseudonymised_one() ->
 
 
 def test_a_blocking_cycle_note_and_a_deferrable_one_read_differently() -> None:
-    """A deferrable loop is runnable and a plain one is not; the plan must not blur it."""
 
     def _loop(*, deferrable: bool) -> Privacy:
         suffix = "def" if deferrable else "plain"
 
         class Household(Model, table=f"households_{suffix}"):
-            id: Mapped[int] = column(
-                Int64, primary_key=True, server_default="nextval('seq')"
-            )
+            id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('seq')")
             head_id: Mapped[int | None] = column(Int64, nullable=True)
             label: Mapped[str] = column(Text)
 
         class Member(Model, table=f"members_{suffix}"):
-            id: Mapped[int] = column(
-                Int64, primary_key=True, server_default="nextval('seq')"
-            )
+            id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('seq')")
             household_id: Mapped[int] = column(
                 Int64, references=Household.id, deferrable=deferrable
             )
-            person_id: Mapped[int] = column(
-                Int64, references=Person.id, deferrable=deferrable
-            )
+            person_id: Mapped[int] = column(Int64, references=Person.id, deferrable=deferrable)
             nickname: Mapped[str] = column(Text)
 
         Household.__wreath_column_map__["head_id"].references = Member.id
@@ -319,11 +255,7 @@ def test_a_blocking_cycle_note_and_a_deferrable_one_read_differently() -> None:
     assert carried.blocked is False
 
 
-# -- the graph the findings are derived from ----------------------------------
-
-
 def test_a_registry_with_no_compiled_models_refuses_rather_than_answering() -> None:
-    """An empty graph would make every table unreachable and every plan wrong."""
 
     class Empty:
         specs = ()
@@ -335,7 +267,6 @@ def test_a_registry_with_no_compiled_models_refuses_rather_than_answering() -> N
 
 
 def test_an_edge_to_a_model_the_registry_does_not_compile_is_dropped() -> None:
-    """It cannot be walked, and `unmodelled_edges` reports the same hole live."""
 
     class Away(Model, table="away"):
         id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('seq')")
@@ -350,12 +281,6 @@ def test_an_edge_to_a_model_the_registry_does_not_compile_is_dropped() -> None:
 
 
 def test_a_self_reference_does_not_make_a_table_wait_for_itself() -> None:
-    """A table that references itself would otherwise never become orderable.
-
-    Without the `parent is not child` clause the topological sort records the
-    table as its own dependency, never places it, and reports a cycle where
-    there is only a hierarchy.
-    """
     from wreath._privacy.graph import order_children_first
 
     class Folder(Model, table="folders_order"):
@@ -369,15 +294,7 @@ def test_a_self_reference_does_not_make_a_table_wait_for_itself() -> None:
     assert cycles == []
 
 
-# -- the plan as data ---------------------------------------------------------
-
-
 def test_an_export_plan_carries_no_blocked_or_digest_field() -> None:
-    """`blocked` and `digest` are erasure properties; an export has neither.
-
-    `dataclasses.asdict` drops properties, so both are re-added by hand -- and
-    adding them to the wrong plan type would invent a verdict for a read.
-    """
 
     class Photo(Model, table="photos_export"):
         id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('seq')")
@@ -395,7 +312,6 @@ def test_an_export_plan_carries_no_blocked_or_digest_field() -> None:
 
 
 def test_the_text_rendering_states_every_absence_and_every_presence() -> None:
-    """Both directions of the renderer, because a silence reads as "nothing wrong"."""
 
     class Photo(Model, table="photos_render"):
         id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('seq')")
@@ -424,7 +340,6 @@ def test_the_text_rendering_states_every_absence_and_every_presence() -> None:
 
 
 def test_the_export_rendering_states_every_absence_and_every_presence() -> None:
-    """The subject-access view has its own three sections and its own silences."""
 
     class Photo(Model, table="photos_export_two"):
         id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('seq')")
@@ -454,9 +369,6 @@ def test_the_export_rendering_states_every_absence_and_every_presence() -> None:
     assert text.count("  none.") == 2, "withheld and unreachable both say none"
 
 
-# -- the graph walk that finds the cycles -------------------------------------
-
-
 def _looped(name: str, count: int) -> tuple[Privacy, list[type]]:
     """A ring of `count` tables, each referencing the next, all reachable."""
     models: list[type] = []
@@ -468,9 +380,7 @@ def _looped(name: str, count: int) -> tuple[Privacy, list[type]]:
             "next_id": column(Int64, nullable=True),
             "label": column(Text),
         }
-        models.append(
-            type(f"{name}{index}", (Model,), namespace, table=f"{name}_{index}")
-        )
+        models.append(type(f"{name}{index}", (Model,), namespace, table=f"{name}_{index}"))
     for index, model in enumerate(models):
         target = models[(index + 1) % count]
         model.__wreath_column_map__["next_id"].references = target.id
@@ -482,20 +392,11 @@ def _looped(name: str, count: int) -> tuple[Privacy, list[type]]:
 
 
 def test_two_separate_loops_are_two_components_rather_than_one() -> None:
-    """Each loop is its own finding, and merging them names the wrong tables.
-
-    Driven through `order_children_first` directly rather than through a plan,
-    because every unorderable group in a *plan* hangs off the one subject root
-    and is therefore connected through it. Two genuinely disjoint loops are a
-    property of the ordering, so that is where they are asserted.
-    """
     from wreath._privacy.graph import order_children_first
 
     first, left = _looped("ring_a", 2)
     second, right = _looped("ring_b", 3)
-    graph = build_graph(
-        Registry(FakeDatabase(), [Person, *left, *right], validate_schema="off")
-    )
+    graph = build_graph(Registry(FakeDatabase(), [Person, *left, *right], validate_schema="off"))
     ordered, cycles = order_children_first(graph, {*left, *right})
     assert ordered == []
     assert sorted(len(group) for group in cycles) == [2, 3]
@@ -507,7 +408,6 @@ def test_two_separate_loops_are_two_components_rather_than_one() -> None:
 
 
 def test_a_table_downstream_of_a_loop_is_not_part_of_it() -> None:
-    """Reached *from* a loop is not in it, and the fix is a different edge."""
     from wreath._privacy.graph import order_children_first
 
     _privacy, models = _looped("ring_c", 2)
@@ -528,21 +428,13 @@ def test_a_table_downstream_of_a_loop_is_not_part_of_it() -> None:
 
 
 def test_the_cycle_detail_counts_only_the_edges_inside_the_loop() -> None:
-    """An edge out of the loop must not decide whether the loop is deferrable.
-
-    Both members reference `people` with a plain foreign key while the loop's
-    own edges are deferrable: counting the outward ones would report the loop
-    as blocking and refuse an erasure that can run.
-    """
     from wreath._privacy.graph import order_children_first
     from wreath._privacy.planner import _cycle_findings
 
     _privacy, models = _looped("ring_d", 2)
     for model in models:
         model.__wreath_column_map__["next_id"].deferrable = True
-    graph = build_graph(
-        Registry(FakeDatabase(), [Person, *models], validate_schema="off")
-    )
+    graph = build_graph(Registry(FakeDatabase(), [Person, *models], validate_schema="off"))
     _ordered, groups = order_children_first(graph, set(models))
     findings = _cycle_findings(graph, groups)
     assert [finding.deferrable for finding in findings] == [True]
@@ -550,7 +442,6 @@ def test_the_cycle_detail_counts_only_the_edges_inside_the_loop() -> None:
 
 
 def test_a_registry_whose_specs_are_none_is_refused_like_an_empty_one() -> None:
-    """`specs=None` is a registry that was never compiled, not one with no models."""
 
     class NeverCompiled:
         specs = None
@@ -559,16 +450,7 @@ def test_a_registry_whose_specs_are_none_is_refused_like_an_empty_one() -> None:
         build_graph(NeverCompiled())
 
 
-# -- the export view's own silences -------------------------------------------
-
-
 def test_an_export_lists_a_table_with_no_columns_unless_a_cascade_removes_it() -> None:
-    """Two reasons a table can carry nothing, and only one of them is skipped.
-
-    A reached table with nothing classified is still the subject's row and is
-    exported; a cascaded one with nothing classified is gone by then. Collapsing
-    the two would drop a table out of a subject-access response.
-    """
 
     class Bare(Model, table="bare_reached"):
         id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('seq')")
@@ -582,11 +464,6 @@ def test_an_export_lists_a_table_with_no_columns_unless_a_cascade_removes_it() -
 
 
 def test_an_export_names_the_tables_it_cannot_reach() -> None:
-    """An unreachable table is a gap in a subject-access response too.
-
-    The subject is entitled to know the answer is incomplete, so the section
-    lists them rather than saying none.
-    """
     privacy = Privacy(_registry(Orphaned))
     privacy.subject(Person, key="id")
     privacy.classify(Orphaned, personal={"contact_string": Erase.REDACT})

@@ -1,10 +1,3 @@
-"""`wreath.queue` behaviour: bounds, counted loss, draining, and awaiting.
-
-The awaiting half is written once in `wreath.queue` and sits on top of the
-ring, so the async cases below are about the facade; the ring underneath is
-what the bounds and counted-loss cases drive.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -181,9 +174,7 @@ class TestAwaiting:
         delivered = await queue.get()
         assert delivered is error
 
-    async def test_an_empty_queue_waits_for_a_producer_on_the_same_loop(
-        self, arm
-    ) -> None:
+    async def test_an_empty_queue_waits_for_a_producer_on_the_same_loop(self, arm) -> None:
         queue = arm(capacity=4)
 
         async def produce() -> None:
@@ -247,9 +238,7 @@ class TestAwaiting:
         with pytest.raises(QueueEmpty):
             await asyncio.wait_for(task, timeout=5.0)
 
-    async def test_an_item_offered_during_the_parking_race_is_not_lost(
-        self, arm
-    ) -> None:
+    async def test_an_item_offered_during_the_parking_race_is_not_lost(self, arm) -> None:
         # The window this covers: `get()` finds the ring empty, and a producer
         # offers before the waiter becomes visible. Without the re-check after
         # parking, nothing would wake and the item would sit there.
@@ -356,8 +345,7 @@ class TestLifo:
         for i in range(3):
             queue.offer(i)
         assert queue.snapshot() == [2, 1, 0]
-        assert queue.snapshot() == [queue.get_nowait(), queue.get_nowait(),
-                                    queue.get_nowait()]
+        assert queue.snapshot() == [queue.get_nowait(), queue.get_nowait(), queue.get_nowait()]
 
     def test_a_lifo_still_bounds_and_counts(self, arm) -> None:
         queue = arm(capacity=2, lifo=True)
@@ -432,16 +420,18 @@ class TestPriority:
     def test_a_full_queue_refuses_and_counts(self, heap) -> None:
         queue = heap(capacity=3)
         assert [queue.offer(f"p{p}", p) for p in (5, 1, 9, 0, 7)] == [
-            True, True, True, False, False
+            True,
+            True,
+            True,
+            False,
+            False,
         ]
         assert queue.dropped == 2
         assert queue.drain() == ["p1", "p5", "p9"]
 
     def test_drop_lowest_lets_an_urgent_item_displace_a_queued_one(self, heap) -> None:
         queue = heap(capacity=3, drop_lowest=True)
-        assert [queue.offer(f"p{p}", p) for p in (5, 1, 9, 0, 7)] == [
-            True, True, True, True, False
-        ]
+        assert [queue.offer(f"p{p}", p) for p in (5, 1, 9, 0, 7)] == [True, True, True, True, False]
         # 9 was displaced by 0; 7 is worse than everything left, so it is refused.
         assert queue.drain() == ["p0", "p1", "p5"]
         assert queue.dropped == 2
@@ -612,8 +602,6 @@ class TestRoundRobin:
             RoundRobin(capacity=4, max_lanes=0)
 
 
-# --- one family, one set of rules ------------------------------------------
-#
 # These are about *consistency* rather than about any one container. Each was
 # an asymmetry found by listing the four public types side by side: the same
 # idea spelled two ways is something a reader has to intern twice, and the
@@ -763,7 +751,6 @@ class TestRoundRobinAwaits:
 
 
 def test_kv_and_queue_agree_on_what_clear_returns() -> None:
-    """The asymmetry that started this: same verb, two contracts."""
     from wreath.kv import KV
 
     table = KV(max_entries=8)

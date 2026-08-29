@@ -378,10 +378,8 @@ else:
             raise ValueError("query parameter 'limit' must be an integer from 1 to 8")
         try:
             limit = int(value)
-        except (TypeError, ValueError):
-            raise ValueError(
-                "query parameter 'limit' must be an integer from 1 to 8"
-            ) from None
+        except TypeError, ValueError:
+            raise ValueError("query parameter 'limit' must be an integer from 1 to 8") from None
         if not 1 <= limit <= 8:
             raise ValueError("query parameter 'limit' must be an integer from 1 to 8")
         return limit
@@ -492,9 +490,7 @@ else:
         else:
 
             @app.router.post("/api/reports/{item_id}")
-            async def blacksheep_bound_report(
-                request: Request, item_id: int
-            ) -> Response:
+            async def blacksheep_bound_report(request: Request, item_id: int) -> Response:
                 content = request.content
                 if content is None:
                     raise ValueError("request body is required")

@@ -1,9 +1,3 @@
-"""Signals and name resolution — loop services third-party code also relies on.
-
-getaddrinfo/getnameinfo must go through the loop (executor-backed is fine).
-add_signal_handler is required for graceful shutdown wiring; if the reactor
-chooses to make it a non-goal, flip these to the documented alternative.
-"""
 from __future__ import annotations
 
 import asyncio

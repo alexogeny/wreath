@@ -1,18 +1,3 @@
-"""`wreath.entity`'s statements, against a real server.
-
-`tests/test_entity.py` proves the *contract* — one holder, a fence that moves on
-handover and not on renewal, an owner-scoped release — against a fake whose
-branches mirror each clause of the real statement. What it cannot prove is that
-the statements are valid SQL, that `ON CONFLICT ... DO UPDATE ... WHERE` behaves
-the way the fake assumes, or that two workers racing for one name genuinely
-serialise. Those need PostgreSQL.
-
-The concurrency cases here are the reason this file exists. A claim built as a
-read followed by a write passes every single-threaded test ever written and
-admits two winners under load; the only way to know the `WHERE` clause is doing
-the work is to run it against a server with two callers pushing at once.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -36,8 +21,10 @@ async def _database(label: str = "entity_live") -> Database:
     database = Database(
         name=label,
         dsn=_DSN or "",
-        pools={"write": PoolConfig(min_size=1, max_size=6),
-               "read": PoolConfig(min_size=1, max_size=6)},
+        pools={
+            "write": PoolConfig(min_size=1, max_size=6),
+            "read": PoolConfig(min_size=1, max_size=6),
+        },
     )
     await database.start()
     return database
@@ -89,9 +76,6 @@ async def worker():
     finally:
         for db in made:
             await db.stop()
-
-
-# --- the statements are valid, and mean what the fake assumed -------------------------
 
 
 async def test_the_declared_ddl_applies(database) -> None:
@@ -153,9 +137,6 @@ async def test_an_expired_lease_stops_naming_a_holder(database) -> None:
     assert await own.holder("device:1") is None
 
 
-# --- the batch statements -------------------------------------------------------------
-
-
 async def test_renew_all_extends_every_held_name_in_one_statement(database) -> None:
     own = await _fresh(database, lease=2.0)
     for index in range(20):
@@ -207,16 +188,7 @@ async def test_release_many_is_owner_scoped_too(database, worker) -> None:
     assert await theirs.holder("device:2") == theirs.owner
 
 
-# --- the property a single-threaded test cannot prove ---------------------------------
-
-
 async def test_a_contested_name_admits_exactly_one_winner(database, worker) -> None:
-    """Twenty workers claim one name at once; one row comes back.
-
-    This is what the single `INSERT ... ON CONFLICT DO UPDATE ... WHERE` buys.
-    A read-then-write claim passes every sequential test and admits two winners
-    here, which is the failure the whole design exists to prevent.
-    """
     seed = await _fresh(database)
     table = seed._store.declaration.table
     workers = [await worker(table) for _ in range(8)]
@@ -234,18 +206,11 @@ async def test_concurrent_claims_on_distinct_names_all_succeed(database, worker)
     table = seed._store.declaration.table
     workers = [await worker(table) for _ in range(8)]
 
-    leases = await asyncio.gather(
-        *(w.hold(f"device:{index}") for index, w in enumerate(workers))
-    )
+    leases = await asyncio.gather(*(w.hold(f"device:{index}") for index, w in enumerate(workers)))
     assert all(lease is not None for lease in leases)
 
 
 async def test_a_contested_handover_bumps_the_fence_once(database, worker) -> None:
-    """Many workers race for a lapsed name; the fence moves by exactly one.
-
-    A fence that moved per *attempt* rather than per handover would let a
-    losing worker's completion match a fence nobody holds.
-    """
     seed = await _fresh(database, lease=1.0)
     table = seed._store.declaration.table
     first = await worker(table, lease=1.0)

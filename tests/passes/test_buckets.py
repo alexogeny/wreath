@@ -1,21 +1,3 @@
-"""Stage four: the range source that never asks the table where to go.
-
-Stage one shipped with ``Sealed`` specified and unbuilt, and with the vocabulary
-fixed at "a half-open range over one ordered domain", precisely so the primitive
-would not quietly assume its first caller's shape. This is where that guard gets
-tested: if it held, a bucketed source drops in and everything downstream --
-pacing, the per-chunk transaction, the compare-and-swap, retries, holes,
-progress -- carries on without noticing.
-
-The two rules that are genuinely different here are worth stating, because they
-are differences the design predicted rather than accidents:
-
-* a bucket boundary is **not** required to be unique, because it is a value the
-  calendar produced rather than a row the table happened to hold; and
-* the frontier is tested against a range's **end**, because a bucket cannot
-  settle before the moment it stops accepting rows.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -87,9 +69,6 @@ def database(world):
     return FakeDatabase(world)
 
 
-# --- the declaration ----------------------------------------------------------
-
-
 def test_a_bucket_key_does_not_have_to_be_unique():
     # The refusal a keyset walk needs and a bucketed one must not inherit. A
     # timestamp column is emphatically not unique, and that is fine here.
@@ -125,9 +104,7 @@ def test_a_non_temporal_bucket_column_is_refused():
 
 def test_a_composite_bucket_key_is_refused():
     with pytest.raises(PassDeclarationError) as caught:
-        rollup_pass(
-            units=Buckets(on=(RECORDED, Key("id", "text", unique=True)))
-        )
+        rollup_pass(units=Buckets(on=(RECORDED, Key("id", "text", unique=True))))
 
     assert "one temporal column" in str(caught.value)
 
@@ -158,9 +135,6 @@ def test_per_chunk_must_be_at_least_one():
         rollup_pass(units=Buckets(on=RECORDED, per_chunk=0))
 
     assert "at least 1" in str(caught.value)
-
-
-# --- the arithmetic -----------------------------------------------------------
 
 
 def test_the_next_range_is_computed_not_queried(database, world):
@@ -216,9 +190,6 @@ def test_per_chunk_covers_several_buckets_in_one_range():
     assert units.advance(start) == datetime.datetime(2026, 7, 24, 6, tzinfo=datetime.UTC)
 
 
-# --- the walk -----------------------------------------------------------------
-
-
 async def test_a_bucketed_walk_drops_into_the_existing_machinery(database, world):
     walk = rollup_pass()
 
@@ -255,7 +226,9 @@ async def test_the_walk_asks_the_table_where_to_start_once_per_cycle(database, w
 async def test_since_removes_even_that_one_query(database, world):
     walk = rollup_pass(
         units=Buckets(
-            on=RECORDED, step=Day, zone="UTC",
+            on=RECORDED,
+            step=Day,
+            zone="UTC",
             since=datetime.datetime(2026, 7, 25, tzinfo=datetime.UTC),
         )
     )

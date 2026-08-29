@@ -1,17 +1,3 @@
-"""Zip64 stream framing verified against the stdlib ``zipfile`` reference reader.
-
-Standalone-runnable: ``objects.py`` is import-clean at module level (the ``_fsguard``
-import is lazy inside LocalObjectStore), so it falls back to a by-path load under
-``/usr/bin/python3`` without the built wreath extension. Exercises
-`zip_stream`/`unzip_stream` + `MemoryObjectStore`.
-
-The real ``wreath.objects`` is preferred whenever it imports, and the by-path load is
-only the no-build fallback, because a by-path load defeats `wreath mutant`: it execs
-pristine source into a *second* module object, so a mutation applied to
-``wreath.objects`` in the forked child's memory never reaches the code under test.
-Every `unzip_stream` limit below was reported `survived` by the runtime sweep while
-these tests passed -- the same lie a subprocess test tells, for the same reason.
-"""
 import asyncio
 import importlib
 import importlib.util
@@ -104,7 +90,6 @@ def test_unzip_roundtrip():
 
 
 def test_unzip_refuses_an_entry_over_the_expansion_limit():
-    """A tiny compressed object cannot make extraction allocate an arbitrary entry."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("safe.txt", b"safe")
@@ -184,8 +169,6 @@ def test_unzip_refuses_archive_bytes_while_reading():
     asyncio.run(go())
 
 
-# --- `_zip_entry_count`: the pre-check that bounds work before `zipfile` runs ---
-#
 # Nothing called this function directly, and every one of its framing refusals
 # returns `None` -- "let `zipfile` diagnose it" -- so the whole body could be
 # replaced by `return None` and only the tests below would notice. What is lost
@@ -193,12 +176,10 @@ def test_unzip_refuses_archive_bytes_while_reading():
 # falls through to `zf.infolist()`, which materializes the object graph for every
 # declared entry *before* `max_entries` is checked, which is the allocation this
 # function exists to refuse.
-#
 # Five controls in it are provably redundant rather than untested, and no test
 # below asserts inside the window where they would matter -- a test there would
 # pin an accident instead of the contract. Each is defence in depth, so the tests
 # that pin the *backstop* are named:
-#
 # - `eocd < 0` (:1304) and `zip64 < 0` (:1315) are masked by `directory_start < 0`
 #   (:1326). A negative record offset becomes `directory_end`, and
 #   `directory_end - directory_size` is then negative for every unsigned
@@ -254,22 +235,12 @@ def test_entry_count_counts_an_archive_without_zip64_records():
 
 
 def test_entry_count_stops_one_past_the_limit_instead_of_walking_the_directory():
-    """The early return is the bound -- counting all of a hostile directory is the work refused."""
     archive = _build({f"f{i}.bin": b"x" for i in range(10)})
     assert module._zip_entry_count(archive, 3) == 4
     assert module._zip_entry_count(archive, 64) == 10
 
 
 def test_unzip_refuses_from_the_precheck_before_zipfile_reads_the_directory():
-    """Which of the two entry-count guards refused, pinned by the number in the message.
-
-    The pre-check (`:1390`) stops at `max_entries + 1`; the `infolist()` check
-    below it (`:1398`) reports the true total. Ten entries against a limit of
-    three therefore says "4" from the first and "10" from the second, and
-    asserting "4" is what distinguishes them. `test_unzip_refuses_too_many_entries`
-    above cannot: two entries against a limit of one reads "2 entries" whichever
-    guard fired, so both were free to be deleted with the suite still green.
-    """
     archive = _build({f"f{i}.bin": b"x" for i in range(10)})
 
     async def go():
@@ -293,19 +264,12 @@ def test_entry_count_defers_a_truncated_eocd():
 
 
 def test_entry_count_defers_a_comment_length_that_lies():
-    """`eocd + 22 + comment_bytes != len(raw)`: trailing bytes the record does not account for."""
     archive = _build({"one.bin": b"1"})
     eocd, _, _ = _tail(archive)
     assert module._zip_entry_count(_patch(archive, eocd + 20, b"\x01\x00"), 64) is None
 
 
 def test_entry_count_defers_a_zip64_record_that_overlaps_its_locator():
-    """`zip64 + 56 > locator`: a 56-byte record cannot fit in the space it claims.
-
-    Planted one byte past where the real record starts, so `rfind` prefers it, and
-    with a `record_size` that satisfies the *next* guard -- otherwise that guard
-    refuses this input too and the overlap check is never what is being tested.
-    """
     archive = _build({"one.bin": b"1"})
     _, locator, _ = _tail(archive)
     fake = locator - 55
@@ -326,17 +290,6 @@ def test_entry_count_defers_a_zip64_record_size_that_misses_the_locator():
 
 
 def test_entry_count_walks_no_directory_that_starts_before_the_file():
-    """`directory_start < 0`, and why a negative offset is not self-refusing.
-
-    A negative `cursor` does not raise in Python -- it indexes from the *end*, so
-    `raw[cursor:cursor + 4]` reads real archive bytes and the record signature can
-    match. This declares a directory reaching 74 bytes before the file starts, and
-    a first record whose name length lands the cursor exactly on `directory_end`:
-    without the guard the walk reports one entry from bytes it was never given a
-    directory for. That is the backstop `eocd < 0`, `zip64 < 0` and the
-    `0xFFFFFFFF` sentinel above all lean on, so it is pinned here rather than
-    three times over.
-    """
     archive = _stdlib_archive(1)
     eocd = archive.rfind(b"PK\x05\x06")
     directory_start = struct.unpack_from("<I", archive, eocd + 16)[0]
@@ -348,12 +301,6 @@ def test_entry_count_walks_no_directory_that_starts_before_the_file():
 
 
 def test_entry_count_defers_a_record_that_cannot_fit_before_the_directory_end():
-    """`cursor + 46 > directory_end`: a fixed 46-byte record needs 46 bytes of room.
-
-    The signature is made to match so the bound is the only thing refusing: without
-    it the header fields are unpacked from past the end of the buffer, which is a
-    `struct.error` out of a function whose contract is to return `None`.
-    """
     archive = _stdlib_archive(1)
     eocd = archive.rfind(b"PK\x05\x06")
     raw = _patch(archive, eocd - 10, b"PK\x01\x02")
@@ -362,7 +309,6 @@ def test_entry_count_defers_a_record_that_cannot_fit_before_the_directory_end():
 
 
 def test_entry_count_defers_a_record_that_overruns_the_directory():
-    """A name length that carries the cursor past `directory_end`."""
     archive = _stdlib_archive(2)
     first = archive.find(b"PK\x01\x02")
     raw = _patch(archive, first + 28, struct.pack("<HHH", 60_000, 0, 0))
@@ -370,14 +316,6 @@ def test_entry_count_defers_a_record_that_overruns_the_directory():
 
 
 def test_entry_count_reads_no_zip64_locator_from_before_the_file():
-    """`locator >= 0`, which a negative slice would otherwise satisfy.
-
-    An archive can be as short as its 22-byte end record, which puts `locator` at
-    -20 and `raw[locator:locator + 4]` four bytes from the *end* -- inside the end
-    record itself. These 26 bytes spell the locator signature there, so without the
-    bound the reader would go looking for a zip64 record that no offset in this file
-    points at, and refuse an archive that declares no entries and has none.
-    """
     blob = bytearray(b"\x00" * 4 + b"PK\x05\x06" + b"\x00" * 18)
     blob[10:14] = b"PK\x06\x07"  # cd-start-disk + entries-on-disk, read as a locator
     blob[16:20] = struct.pack("<I", 0)  # directory size
@@ -388,12 +326,6 @@ def test_entry_count_reads_no_zip64_locator_from_before_the_file():
 
 
 def test_entry_count_defers_a_central_record_with_a_wrong_signature():
-    """Only the signature byte is changed, so the walk would otherwise still add up.
-
-    A corruption that also broke the name/extra/comment lengths would be refused
-    by the cursor-overrun guard below instead, and the signature check could be
-    deleted with this test still passing.
-    """
     archive = _stdlib_archive(3)
     first = archive.find(b"PK\x01\x02")
     assert first > 0
@@ -402,15 +334,6 @@ def test_entry_count_defers_a_central_record_with_a_wrong_signature():
 
 
 def test_unzip_extracts_an_archive_the_precheck_cannot_frame():
-    """Trailing bytes: `zipfile` reads the archive, the pre-check declines to count it.
-
-    `zipfile` locates the directory through the end record's offsets and never
-    minds bytes after it; the pre-check requires the end record to be the end of
-    the file, so it returns `None` -- "no answer", not "zero entries". Extraction
-    must proceed on the reader's count, which is what the `is not None` clause
-    buys: without it the comparison is `None > 1024` and a readable archive fails
-    with a `TypeError` instead of extracting.
-    """
     archive = _build({"one.txt": b"one", "two.txt": b"two"}) + b"trailing junk"
     assert module._zip_entry_count(archive, 64) is None
 
@@ -425,13 +348,6 @@ def test_unzip_extracts_an_archive_the_precheck_cannot_frame():
 
 
 def test_unzip_falls_back_to_the_reader_count_when_the_precheck_declines():
-    """The `infolist()` limit, unreachable while the pre-check answers first.
-
-    Its refusal is the only one left when the pre-check returns `None`, and it
-    reports the true total rather than stopping one past the limit -- so "2
-    entries" here, against "4" in the pre-check test above, is what says which
-    guard ran.
-    """
     archive = _build({"one.txt": b"one", "two.txt": b"two"}) + b"trailing junk"
 
     async def go():
@@ -451,7 +367,6 @@ def test_unzip_falls_back_to_the_reader_count_when_the_precheck_declines():
 
 
 def test_unzip_skips_directory_entries():
-    """An object store has no directories, so a zero-byte object named after one is noise."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("dir/", b"")

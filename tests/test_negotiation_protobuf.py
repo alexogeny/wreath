@@ -1,13 +1,3 @@
-"""`application/x-protobuf` as a negotiated response format.
-
-Protobuf is unlike JSON and MessagePack in one way that decides the whole
-design here: those two are *self-describing* and encode any plain structure,
-while protobuf is schema-driven and can only encode a declared message. So the
-serializer is offered but deliberately **not** in `DEFAULT_SERIALIZERS`, and
-handing it something undeclared is a named refusal rather than an obscure
-`AttributeError` from inside the codec.
-"""
-
 from __future__ import annotations
 
 from typing import cast
@@ -69,10 +59,6 @@ def test_serialize_emits_protobuf_bytes_and_headers() -> None:
 
 
 def test_protobuf_is_not_a_default_offer() -> None:
-    """A dict is the overwhelmingly common handler return, and protobuf cannot
-    encode one. Adding it to the defaults would turn every existing
-    `serialize()` call site into a runtime error for any client that asked for
-    protobuf, so it stays opt-in per call site."""
     assert PROTOBUF not in DEFAULT_SERIALIZERS
     assert negotiate("application/x-protobuf") is None
 
@@ -87,8 +73,5 @@ def test_encoding_an_undeclared_value_is_refused_by_name() -> None:
 
 
 def test_the_refusal_reaches_the_caller_rather_than_falling_back() -> None:
-    """`Serializer.encode` is documented as propagating whatever it raises --
-    there is no silent fallback to another format, because a client that asked
-    for protobuf and silently received JSON would parse garbage."""
     with pytest.raises(TypeError):
         serialize(_request("application/x-protobuf"), {"sensor": 7}, serializers=OFFERS)

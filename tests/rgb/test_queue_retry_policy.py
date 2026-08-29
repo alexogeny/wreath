@@ -1,9 +1,3 @@
-"""Retry and reclaim policy for jobs and messaging (report 23: R-17, R-23, R-24, R-25).
-
-Both coordinators share a design and not an implementation, so each of these was
-found in one and checked in the other.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -28,9 +22,7 @@ class FakeDatabase:
 
 
 def _sweep_sql(statements) -> tuple[str, tuple]:
-    return next(
-        call for call in statements if "lease_expiry <" in call[0] and "UPDATE" in call[0]
-    )
+    return next(call for call in statements if "lease_expiry <" in call[0] and "UPDATE" in call[0])
 
 
 class TestReclaimCountsAnAttempt:
@@ -85,7 +77,12 @@ class TestMessagingBackoff:
 
         db, bus, sub = self._bus_with_sub()
         message = Message(
-            channel="thing", group="g", tenant="", payload={}, id=7, fence=1,
+            channel="thing",
+            group="g",
+            tenant="",
+            payload={},
+            id=7,
+            fence=1,
             attempts=attempts,
         )
         await bus._retry(sub, message, "boom")
@@ -100,14 +97,17 @@ class TestMessagingBackoff:
         assert later > first * 2, (first, later)
 
     async def test_configured_retries_bound_the_dead_letter_threshold(self):
-        """R-25: `subscribe(retries=...)` is recorded and never read -- the
-        insert hardcodes `max_attempts = 6` and nothing consults the
-        subscription."""
         from wreath.messaging import Message
 
         db, bus, sub = self._bus_with_sub(retries=2)
         message = Message(
-            channel="thing", group="g", tenant="", payload={}, id=7, fence=1, attempts=2,
+            channel="thing",
+            group="g",
+            tenant="",
+            payload={},
+            id=7,
+            fence=1,
+            attempts=2,
         )
         await bus._retry(sub, message, "boom")
         sql, args = next(

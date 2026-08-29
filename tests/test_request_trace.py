@@ -1,5 +1,3 @@
-"""`wreath-request-trace`: lifecycle boundary counting and its baseline."""
-
 from __future__ import annotations
 
 import json
@@ -41,9 +39,7 @@ def test_a_bare_route_crosses_far_less_than_a_full_stack() -> None:
     realistic, _ = _trace("realistic")
 
     def pre_activation(trace: request_trace.Trace) -> int:
-        return sum(
-            1 for event in trace.events if event.phase in request_trace._PRE_ACTIVATION
-        )
+        return sum(1 for event in trace.events if event.phase in request_trace._PRE_ACTIVATION)
 
     # The full stack has the same single Python entry but substantially more
     # Python-to-C boundaries for routing, policy, and authorization.

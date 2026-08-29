@@ -176,8 +176,10 @@ class FilterSet:
                     f"FilterSet field {public_name!r} operators must be an iterable "
                     f"such as ({declaration!r},), not a bare string"
                 )
-            field = declaration if isinstance(declaration, FilterField) else FilterField(
-                operators=tuple(declaration)
+            field = (
+                declaration
+                if isinstance(declaration, FilterField)
+                else FilterField(operators=tuple(declaration))
             )
             compiled[public_name] = _compile_filter_field(
                 model, typed_columns, column_names, public_name, field
@@ -237,17 +239,14 @@ class Listing:
         columns = frozenset(_as_model(model).__wreath_column_map__)
         for name in allowed_sort:
             if name not in columns:
-                raise ValueError(
-                    f"Listing sort field {name!r} is not a column of {model.__name__}"
-                )
+                raise ValueError(f"Listing sort field {name!r} is not a column of {model.__name__}")
         defaults = tuple(default_sort)
         allowed_names = ", ".join(sorted(allowed_sort)) or "none"
         for token in defaults:
             name = token[1:] if token.startswith("-") else token
             if name not in allowed_sort:
                 raise ValueError(
-                    f"Listing default sort {token!r} is not allowed; use one of "
-                    f"{allowed_names}"
+                    f"Listing default sort {token!r} is not allowed; use one of {allowed_names}"
                 )
         self.filters = filters
         self.model = model
@@ -289,9 +288,7 @@ def _filter_predicate(column: Any, operator: str, operand: Any, name: str) -> An
     if operator == "ilike":
         return column.ilike(operand)
     if operand is not True:
-        raise InvalidPagination(
-            f"filter {name!r} operator {operator!r} takes the literal true"
-        )
+        raise InvalidPagination(f"filter {name!r} operator {operator!r} takes the literal true")
     if operator == "is_null":
         return column.is_null()
     return column.is_not_null()
@@ -440,11 +437,9 @@ def page_params(request: Any) -> PageParams:
 
     It takes the request and reads the query string itself, because a
     dependency's own parameters are never bound from the request -- wreath calls
-    a dependency as `fn(request, **nested_depends)` and nothing else. This
-    signature used to be `page_params(page, size, sort)` carrying `Query()`
-    markers, which meant the request object arrived *as* the page number and the
-    first comparison against it was a 500. That shape is now refused at route
-    compilation rather than failing per request.
+    a dependency as `fn(request, **nested_depends)` and nothing else. A
+    dependency that declares request-bound `Query()` parameters is refused when
+    routes compile.
 
     `page` and `size` are clamped into `[1, MAX_PAGE]` and `[1, MAX_SIZE]`;
     anything unparseable falls back to the default rather than raising, so a

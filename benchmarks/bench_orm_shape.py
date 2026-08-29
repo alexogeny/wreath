@@ -39,15 +39,11 @@ def _build() -> tuple[Any, dict[str, Any]]:
         "all-cols": User.select(),
         "1-pred": User.select().where(User.id == 5),
         "2-pred-and": User.select().where(and_(User.id == 5, User.email == "a")),
-        "3-pred-and": User.select().where(
-            and_(User.id == 5, User.email == "a", User.name == "b")
-        ),
+        "3-pred-and": User.select().where(and_(User.id == 5, User.email == "a", User.name == "b")),
         "nested-bool": User.select().where(
             and_(User.id > 3, or_(User.email == "x", User.name == "y"))
         ),
-        "pred+order+limit": User.select().where(User.id == 5)
-        .order_by(User.created_at)
-        .limit(10),
+        "pred+order+limit": User.select().where(User.id == 5).order_by(User.created_at).limit(10),
     }
     return registry, shapes
 
@@ -101,11 +97,13 @@ def run(rounds: int, iterations: int, warmup: int) -> dict[str, Any]:
         for _ in range(warmup):
             nat_shape(None, query)
             nat_binds(None, query)
-        results.append({
-            "shape": name,
-            "shape_of": _measure(pure_shape, nat_shape, query, rounds, iterations),
-            "collect_binds": _measure(pure_binds, nat_binds, query, rounds, iterations),
-        })
+        results.append(
+            {
+                "shape": name,
+                "shape_of": _measure(pure_shape, nat_shape, query, rounds, iterations),
+                "collect_binds": _measure(pure_binds, nat_binds, query, rounds, iterations),
+            }
+        )
     return {
         "metadata": {
             "python": sys.version,

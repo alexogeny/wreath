@@ -193,9 +193,7 @@ def chunk_predicate(
         parts.append(
             keyset.row_comparison(keys, keyset.after_operator(keys), binds.add_all(cursor_from))
         )
-    parts.append(
-        keyset.row_comparison(keys, keyset.upto_operator(keys), binds.add_all(cursor_to))
-    )
+    parts.append(keyset.row_comparison(keys, keyset.upto_operator(keys), binds.add_all(cursor_to)))
     if frontier:
         parts.append(frontier)
     return " AND ".join(parts)
@@ -275,7 +273,7 @@ async def fetch_key(
 def _field(record: Any, name: str, index: int) -> Any:
     try:
         return record[name]
-    except (KeyError, TypeError):
+    except KeyError, TypeError:
         return record[index]
 
 
@@ -312,8 +310,12 @@ async def run_shift(
             budget=getattr(walk, "query_budget", None),
         ):
             return await _shift(
-                walk, connection, stopping=stopping, deadline=deadline,
-                sleeper=sleeper, clock=clock,
+                walk,
+                connection,
+                stopping=stopping,
+                deadline=deadline,
+                sleeper=sleeper,
+                clock=clock,
             )
     finally:
         await database.release(walk.workload, connection)
@@ -336,7 +338,8 @@ async def _measure(walk: Any, connection: Any, row: Any, keys: Any) -> None:
             f"SELECT {keys[0].name} FROM {walk.table} ORDER BY {order} LIMIT 1"
         )
         floor = (
-            None if record is None
+            None
+            if record is None
             else keyset.encode_cursor(keys[:1], (_field(record, keys[0].name, 0),))
         )
         await ledger.set_keyspace_floor(connection, floor=floor)
@@ -377,9 +380,7 @@ async def _shift(
         rewrites=walk.rewrites,
         trace=driving,
     )
-    await ledger.set_pacing(
-        connection, chunk_limit=walk.units.limit, reason=walk.pace.reason
-    )
+    await ledger.set_pacing(connection, chunk_limit=walk.units.limit, reason=walk.pace.reason)
     row = await ledger.read(connection)
     if row is None:  # pragma: no cover - seeded immediately above
         return ShiftResult(stopped="failed", error="the ledger row could not be seeded")
@@ -387,9 +388,7 @@ async def _shift(
     # nothing else. This is how a hole gets cleared after the walk is over --
     # and a skipped chunk always reaches `done` with its hole still barring the
     # terminal gate, so without this the gate could never be un-barred.
-    finished_but_requeued = (
-        row.phase == DONE and not walk.frontier.recurring and bool(row.pending)
-    )
+    finished_but_requeued = row.phase == DONE and not walk.frontier.recurring and bool(row.pending)
     if row.phase == DONE and not finished_but_requeued:
         if not walk.frontier.recurring:
             return ShiftResult(complete=True)
@@ -407,8 +406,14 @@ async def _shift(
     token = _telemetry.outbound_context.set((parent, "") if parent else None)
     try:
         return await _shift_bound(
-            walk, connection, row=row, finished_but_requeued=finished_but_requeued,
-            stopping=stopping, deadline=deadline, sleeper=sleeper, clock=clock,
+            walk,
+            connection,
+            row=row,
+            finished_but_requeued=finished_but_requeued,
+            stopping=stopping,
+            deadline=deadline,
+            sleeper=sleeper,
+            clock=clock,
         )
     finally:
         _telemetry.outbound_context.reset(token)
@@ -468,11 +473,16 @@ async def _shift_bound(
         unit = await ledger.claim_pending(connection)
         if unit is not None:
             outcome = await _attempt(
-                walk, connection, keys=keys,
+                walk,
+                connection,
+                keys=keys,
                 cursor_from=keyset.decode_cursor(keys, unit.get("from")),
                 cursor_to=keyset.decode_cursor(keys, unit.get("to")),
-                expected=None, holes_open=True,
-                frontier_sql=frontier_sql, sleeper=sleeper, pending=unit,
+                expected=None,
+                holes_open=True,
+                frontier_sql=frontier_sql,
+                sleeper=sleeper,
+                pending=unit,
             )
             if outcome.failed:
                 holes += 1
@@ -495,19 +505,27 @@ async def _shift_bound(
         # `Rows` probes the table; `Buckets` does calendar arithmetic and never
         # asks it at all.
         span = await walk.units.next_range(
-            connection, walk=walk, cursor=cursor, ceiling=ceiling,
+            connection,
+            walk=walk,
+            cursor=cursor,
+            ceiling=ceiling,
             frontier_sql=frontier_sql,
         )
         if span is None:
-            return await _finish(
-                walk, connection, chunks=chunks, rows=rows, holes=holes, row=row
-            )
+            return await _finish(walk, connection, chunks=chunks, rows=rows, holes=holes, row=row)
         range_from, cursor_to = span
 
         outcome = await _attempt(
-            walk, connection, keys=keys, cursor_from=range_from, cursor_to=cursor_to,
-            expected=cursor, holes_open=bool(row.holes_open),
-            frontier_sql=frontier_sql, sleeper=sleeper, pending=None,
+            walk,
+            connection,
+            keys=keys,
+            cursor_from=range_from,
+            cursor_to=cursor_to,
+            expected=cursor,
+            holes_open=bool(row.holes_open),
+            frontier_sql=frontier_sql,
+            sleeper=sleeper,
+            pending=None,
         )
         if outcome.lost:
             # Another worker advanced this pass while we were computing a range.
@@ -531,9 +549,7 @@ async def _shift_bound(
                     walk, connection, cursor_from=range_from, cursor_to=cursor_to
                 )
                 if verdict is not None:
-                    return ShiftResult(
-                        chunks, rows, stopped="blocked", error=verdict, holes=holes
-                    )
+                    return ShiftResult(chunks, rows, stopped="blocked", error=verdict, holes=holes)
         cursor = cursor_to
         rest = walk.pace.rest_after(clock() - started)
         if rest > 0:
@@ -576,9 +592,15 @@ async def _attempt(
         attempts += 1
         try:
             moved, affected = await _run_chunk(
-                walk, connection, keys=keys, cursor_from=cursor_from,
-                cursor_to=cursor_to, expected=expected, holes_open=holes_open,
-                frontier_sql=frontier_sql, pending=pending,
+                walk,
+                connection,
+                keys=keys,
+                cursor_from=cursor_from,
+                cursor_to=cursor_to,
+                expected=expected,
+                holes_open=holes_open,
+                frontier_sql=frontier_sql,
+                pending=pending,
             )
         except Exception as error:  # noqa: BLE001 - a chunk failure is data, not a crash
             last_error = repr(error)
@@ -597,9 +619,7 @@ async def _attempt(
 
     # Out of attempts. Record where it stopped and what would reproduce it,
     # then do what the declaration said to do about it.
-    predicate = walk.units.reproduce(
-        table=walk.table, cursor_from=cursor_from, cursor_to=cursor_to
-    )
+    predicate = walk.units.reproduce(table=walk.table, cursor_from=cursor_from, cursor_to=cursor_to)
     # These three ledger writes are not best-effort bookkeeping: `gate_barred`
     # is `holes_open > 0`, so the hole *is* the fact the terminal gate reads.
     # Suppressing a failure here left no hole, an unbarred gate, and a `skip`
@@ -662,9 +682,7 @@ async def _run_chunk(
             if pending is None:
                 moved = await walk.ledger.advance(
                     tx,
-                    expected=(
-                        None if expected is None else keyset.encode_cursor(keys, expected)
-                    ),
+                    expected=(None if expected is None else keyset.encode_cursor(keys, expected)),
                     cursor=keyset.encode_cursor(keys, cursor_to),
                 )
             else:
@@ -683,8 +701,12 @@ async def _run_chunk(
                 binds, cursor_from=cursor_from, cursor_to=cursor_to, frontier=frontier
             )
             chunk = Chunk(
-                table=walk.table, where=where, cursor_from=cursor_from,
-                cursor_to=cursor_to, model=walk.model, alias=walk.alias,
+                table=walk.table,
+                where=where,
+                cursor_from=cursor_from,
+                cursor_to=cursor_to,
+                model=walk.model,
+                alias=walk.alias,
             )
             affected = await walk.work.apply(tx, chunk, binds)
             await walk.ledger.count_rows(tx, affected)
@@ -696,9 +718,7 @@ async def _run_chunk(
                 # parks the cursor *before* its hole and simply re-walks it;
                 # guarded on the ledger already reporting a hole so a pass that
                 # has never failed pays nothing for the possibility.
-                await walk.ledger.clear_hole(
-                    tx, cursor_to=keyset.encode_cursor(keys, cursor_to)
-                )
+                await walk.ledger.clear_hole(tx, cursor_to=keyset.encode_cursor(keys, cursor_to))
     except _Rollback:
         return False, 0
     return True, affected
@@ -706,9 +726,6 @@ async def _run_chunk(
 
 class _Rollback(Exception):
     """Abandon the chunk transaction after a lost compare-and-swap."""
-
-
-# --- the terminal gate --------------------------------------------------------
 
 
 async def _finish(
@@ -738,8 +755,12 @@ async def _finish(
     row = await ledger.read(connection) or row
     result = await _run_gate(walk, connection, row=row)
     return ShiftResult(
-        chunks, rows, complete=result.complete, stopped=result.stopped,
-        error=result.error, holes=holes,
+        chunks,
+        rows,
+        complete=result.complete,
+        stopped=result.stopped,
+        error=result.error,
+        holes=holes,
     )
 
 

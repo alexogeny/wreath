@@ -30,8 +30,7 @@ class DeploymentArtifact:
     def __post_init__(self) -> None:
         if not isinstance(self.path, str):
             raise TypeError(
-                "deployment artifact path must be a relative string beneath "
-                "the bundle root"
+                "deployment artifact path must be a relative string beneath the bundle root"
             )
         candidate = Path(self.path)
         if (
@@ -57,9 +56,7 @@ class DeploymentBundle:
         seen: set[str] = set()
         for artifact in self.artifacts:
             if not isinstance(artifact, DeploymentArtifact):
-                raise TypeError(
-                    "deployment bundle artifacts must be DeploymentArtifact values"
-                )
+                raise TypeError("deployment bundle artifacts must be DeploymentArtifact values")
             if artifact.path in seen:
                 raise ValueError(
                     f"duplicate deployment artifact path {artifact.path!r}; use one "
@@ -141,12 +138,9 @@ def _compose(
     ]
     if factory:
         command.append("--factory")
-    required_keys = tuple(sorted({
-        key.key
-        for contract in plan.settings
-        for key in contract.keys
-        if key.required
-    }))
+    required_keys = tuple(
+        sorted({key.key for contract in plan.settings for key in contract.keys if key.required})
+    )
     local_stores = tuple(store for store in plan.object_stores if store.backend == "local")
     published_port = _json_line(f"{port}:{port}")
     temporary_path = _json_line("/tmp")
@@ -246,29 +240,29 @@ def deployment_bundle(
 
     compose = _compose(plan, image=image, service=service, port=port, factory=factory)
     plan_json = json.dumps(as_dict(plan), indent=2) + "\n"
-    contract = json.dumps(
-        {
-            "format": "wreath.deployment.v1",
-            "application": plan.application,
-            "image": image,
-            "service": service,
-            "port": port,
-            "factory": factory,
-            "required_environment": sorted({
-                key.key
-                for settings in plan.settings
-                for key in settings.keys
-                if key.required
-            }),
-            "persistent_paths": sorted(
-                store.root
-                for store in plan.object_stores
-                if store.backend == "local" and store.root is not None
-            ),
-            "egress_origins": sorted(rule.origin for rule in plan.egress),
-        },
-        indent=2,
-    ) + "\n"
+    contract = (
+        json.dumps(
+            {
+                "format": "wreath.deployment.v1",
+                "application": plan.application,
+                "image": image,
+                "service": service,
+                "port": port,
+                "factory": factory,
+                "required_environment": sorted(
+                    {key.key for settings in plan.settings for key in settings.keys if key.required}
+                ),
+                "persistent_paths": sorted(
+                    store.root
+                    for store in plan.object_stores
+                    if store.backend == "local" and store.root is not None
+                ),
+                "egress_origins": sorted(rule.origin for rule in plan.egress),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
     payloads = (
         DeploymentArtifact("compose.yaml", compose),
         DeploymentArtifact("infrastructure-plan.json", plan_json),

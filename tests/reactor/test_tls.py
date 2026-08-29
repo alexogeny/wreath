@@ -1,8 +1,3 @@
-"""Native TLS via OpenSSL memory BIO — replaces asyncio's Python SSLProtocol.
-
-Exercises the reactor's own create_server/create_connection TLS path: handshake,
-ALPN (how H1/H2 are chosen), SNI, data, and clean close_notify. RED until built.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -54,7 +49,6 @@ def test_tls_handshake_alpn_and_echo(loop):
 
 
 def test_start_tls_upgrades_a_plain_connection(loop):
-    """create_connection + start_tls is how opportunistic upgrades work."""
     pytest.importorskip("cryptography")
     server_ctx, client_ctx = make_tls_contexts()
     out: dict = {}

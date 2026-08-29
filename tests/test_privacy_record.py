@@ -1,18 +1,3 @@
-"""The record an erasure leaves, and the refusal that keeps it honest.
-
-The live suite proves the row lands in PostgreSQL. These prove the decisions
-around it, which is where the compliance argument actually lives: that a record
-is written only when the ledger says every walk finished, that it carries the
-subject and the digest and *nothing about what was erased*, that a redelivered
-job does not produce a second one, and that the read and the write share one
-transaction so a completion cannot be established on one connection and
-recorded on another.
-
-A fake driver, deliberately. Everything asserted here is a decision this module
-makes; a real database would only be able to confirm that PostgreSQL still
-implements INSERT.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -121,7 +106,7 @@ async def test_a_finished_erasure_appends_one_row_with_the_counts(
     connection = FakeConnection(_done(names, rows=4))
 
     assert await record_erasure(prepared, FakeDatabase(connection)) is True
-    (_sql, values), = connection.appended
+    ((_sql, values),) = connection.appended
     assert values[0] == "4711", "the stream is the subject"
     assert prepared.plan.digest in values
     assert values[-2:] == (len(names), 4 * len(names))
@@ -130,17 +115,11 @@ async def test_a_finished_erasure_appends_one_row_with_the_counts(
 async def test_the_record_carries_the_subject_and_the_digest_and_no_values(
     privacy: Privacy,
 ) -> None:
-    """A record of *what* was erased would be a re-identification store.
-
-    Asserted over the whole bound parameter list rather than over one field:
-    the failure this guards against is a column somebody adds later, and a
-    positional check on two fields would not see it.
-    """
     prepared = privacy.prepare("4711")
     connection = FakeConnection(_done([walk.name for walk in prepared.passes]))
     await record_erasure(prepared, FakeDatabase(connection))
 
-    (_sql, values), = connection.appended
+    ((_sql, values),) = connection.appended
     assert values == (
         "4711",
         "Person",
@@ -152,7 +131,6 @@ async def test_the_record_carries_the_subject_and_the_digest_and_no_values(
 
 
 async def test_nothing_is_recorded_when_a_pass_never_ran(privacy: Privacy) -> None:
-    """The refusal that makes the record worth reading at all."""
     prepared = privacy.prepare("4711")
     connection = FakeConnection([])
 
@@ -165,12 +143,6 @@ async def test_nothing_is_recorded_when_a_pass_never_ran(privacy: Privacy) -> No
 async def test_nothing_is_recorded_when_a_pass_stopped_part_way(
     privacy: Privacy,
 ) -> None:
-    """`blocked` is not `done`, and the difference is the whole point.
-
-    This is the shape the module actually shipped with: a pass that halted on a
-    foreign-key violation while `erase` returned its prepared plan and said
-    nothing. The subject would have been told they were erased.
-    """
     prepared = privacy.prepare("4711")
     names = [walk.name for walk in prepared.passes]
     connection = FakeConnection([(names[0], "done", 3), (names[1], "blocked", 0)])
@@ -185,11 +157,8 @@ async def test_nothing_is_recorded_when_a_pass_stopped_part_way(
 async def test_a_redelivered_erasure_does_not_record_itself_twice(
     privacy: Privacy,
 ) -> None:
-    """Job delivery is at-least-once; two receipts for one erasure is a lie."""
     prepared = privacy.prepare("4711")
-    connection = FakeConnection(
-        _done([walk.name for walk in prepared.passes]), already=True
-    )
+    connection = FakeConnection(_done([walk.name for walk in prepared.passes]), already=True)
 
     assert await record_erasure(prepared, FakeDatabase(connection)) is False
     assert connection.appended == []
@@ -198,12 +167,6 @@ async def test_a_redelivered_erasure_does_not_record_itself_twice(
 async def test_the_completion_read_and_the_append_share_one_transaction(
     privacy: Privacy,
 ) -> None:
-    """A completion read on another connection is one that could have moved.
-
-    The property is not decorative: the ledger row a pass writes is what says
-    the walk finished, and reading it outside the record's transaction would
-    let another worker reopen the pass between the read and the insert.
-    """
     prepared = privacy.prepare("4711")
     connection = FakeConnection(_done([walk.name for walk in prepared.passes]))
     await record_erasure(prepared, FakeDatabase(connection))
@@ -215,7 +178,6 @@ async def test_the_completion_read_and_the_append_share_one_transaction(
 
 
 async def test_the_ledger_read_names_the_erasures_own_passes(privacy: Privacy) -> None:
-    """Every declared pass, and nothing else -- a `LIKE` would sweep in siblings."""
     prepared = privacy.prepare("4711")
     names = [walk.name for walk in prepared.passes]
     connection = FakeConnection(_done(names))
@@ -229,7 +191,6 @@ async def test_the_ledger_read_names_the_erasures_own_passes(privacy: Privacy) -
 async def test_the_record_reads_the_ledger_the_passes_wrote_to(
     privacy: Privacy,
 ) -> None:
-    """One `schema=`, so a record cannot be derived from somebody else's ledger."""
     prepared = privacy.prepare("4711", schema="tenant_seven")
     connection = FakeConnection(_done([walk.name for walk in prepared.passes]))
     await record_erasure(prepared, FakeDatabase(connection))
@@ -241,12 +202,6 @@ async def test_the_record_reads_the_ledger_the_passes_wrote_to(
 async def test_an_erasure_with_no_passes_is_recorded_without_a_ledger_read(
     orm_only: Privacy,
 ) -> None:
-    """Nothing to erase is still an answer, and the answer is evidence too.
-
-    A subject-access-style registry that classifies nothing produces a plan
-    with no writes; recording it says "we looked and there was nothing", which
-    is a different fact from never having looked.
-    """
     prepared = orm_only.prepare("4711")
     assert prepared.passes == ()
     connection = FakeConnection([])
@@ -278,18 +233,12 @@ class FakeWalk:
 async def test_erase_drives_every_pass_and_skips_the_steps_that_have_none(
     privacy: Privacy,
 ) -> None:
-    """A `CASCADE` or `RETAIN` step is listed and must not be driven.
-
-    Driving one would issue a delete the plan did not promise, on top of the
-    delete the database already does.
-    """
     from wreath._privacy.execute import PreparedErasure
 
     prepared = privacy.prepare("4711")
     walks = [FakeWalk(step.name) for step in prepared.passes]
     steps = tuple(
-        (action, walks.pop(0) if step is not None else None)
-        for action, step in prepared.steps
+        (action, walks.pop(0) if step is not None else None) for action, step in prepared.steps
     )
     driven = PreparedErasure(
         plan=prepared.plan,
@@ -306,7 +255,6 @@ async def test_erase_drives_every_pass_and_skips_the_steps_that_have_none(
 
 
 async def test_erase_runs_the_passes_then_records(privacy: Privacy) -> None:
-    """End to end on a fake driver: every walk driven once, one receipt."""
     driven: list[str] = []
 
     class Walk:
@@ -332,8 +280,7 @@ async def test_erase_runs_the_passes_then_records(privacy: Privacy) -> None:
         return execute_module.PreparedErasure(
             plan=made.plan,
             steps=tuple(
-                (action, None if step is None else Walk(step))
-                for action, step in made.steps
+                (action, None if step is None else Walk(step)) for action, step in made.steps
             ),
             record=made.record,
             schema=made.schema,
@@ -351,26 +298,16 @@ async def test_erase_runs_the_passes_then_records(privacy: Privacy) -> None:
 
 
 def test_the_read_side_binds_a_database_and_the_write_side_never_does() -> None:
-    """Retention and inspection are pooled work; a receipt is not.
-
-    `ErasureRecord` holds no `Database` on purpose -- a write that *could*
-    reach for a pooled connection is a write that could commit on its own, and
-    the record's whole value is that it cannot. `bind` is the one place a
-    database belongs, and `purge()` lives there.
-    """
     from wreath._privacy.record import ERASURE_TABLE, ErasureRecord
 
     registry = Registry(FakeDatabase(), [Person, Photo], validate_schema="off")
-    log = Privacy(registry, erasure_record_retain=86400).erasure_records(
-        FakeDatabase()
-    )
+    log = Privacy(registry, erasure_record_retain=86400).erasure_records(FakeDatabase())
     assert ERASURE_TABLE in log.table
     assert "DELETE FROM" in log.sql("purge")
     assert not hasattr(ErasureRecord(), "purge")
 
 
 def test_the_record_table_is_declared_with_the_retention_the_operator_set() -> None:
-    """No default: the honest one is "as long as your oldest backup"."""
     from wreath._privacy.record import ErasureRecord
 
     assert ErasureRecord().declaration.retain is None
@@ -390,7 +327,6 @@ def test_a_set_window_is_reported_as_a_number() -> None:
 
 
 def test_the_ddl_declares_the_age_index_only_when_rows_are_purged() -> None:
-    """An index nothing reads is an index the writes pay for anyway."""
     from wreath.privacy import schema_sql
 
     assert "wreath_erasures_at_idx" not in schema_sql("wreath")
@@ -406,12 +342,6 @@ class Cascaded(Model, table="cascaded"):
 
 
 async def test_erase_skips_a_step_the_database_carries_out_itself() -> None:
-    """A `CASCADE` step is in the plan and has no pass; driving one is a bug.
-
-    It would issue a delete the plan did not promise, on top of the delete the
-    database already does -- and it is the one step in a prepared erasure where
-    `None` is the correct value rather than an omission.
-    """
     registry = Registry(FakeDatabase(), [Person, Cascaded], validate_schema="off")
     privacy = Privacy(registry)
     privacy.subject(Person, key="id", delete=True)
@@ -441,8 +371,7 @@ async def test_erase_skips_a_step_the_database_carries_out_itself() -> None:
         return execute_module.PreparedErasure(
             plan=made.plan,
             steps=tuple(
-                (action, None if step is None else Walk(step))
-                for action, step in made.steps
+                (action, None if step is None else Walk(step)) for action, step in made.steps
             ),
             record=made.record,
             schema=made.schema,
@@ -461,7 +390,6 @@ async def test_erase_skips_a_step_the_database_carries_out_itself() -> None:
 
 
 def test_the_blocked_refusal_counts_a_cycle_only_when_it_blocks() -> None:
-    """A deferrable loop is not a blocking one, and the count must not say it is."""
     from wreath._privacy.execute import ErasureBlocked
 
     class Household(Model, table="households_record"):
@@ -476,9 +404,7 @@ def test_the_blocked_refusal_counts_a_cycle_only_when_it_blocks() -> None:
         nickname: Mapped[str] = column(Text)
 
     Household.__wreath_column_map__["head_id"].references = Member.id
-    registry = Registry(
-        FakeDatabase(), [Person, Household, Member], validate_schema="off"
-    )
+    registry = Registry(FakeDatabase(), [Person, Household, Member], validate_schema="off")
     privacy = Privacy(registry)
     privacy.subject(Person, key="id")
     privacy.classify(Household, personal={"label": Erase.REDACT})
@@ -489,14 +415,7 @@ def test_the_blocked_refusal_counts_a_cycle_only_when_it_blocks() -> None:
     assert "1 blocking foreign-key cycle(s)" in str(caught.value)
 
 
-def test_the_blocked_refusal_does_not_count_a_deferrable_cycle(
-) -> None:
-    """A loop one transaction can carry is not a reason the erasure refuses.
-
-    The plan here is blocked by an unreachable table while a *deferrable* cycle
-    is also present; counting every cycle rather than the blocking ones would
-    send an operator to make a foreign key deferrable that already is.
-    """
+def test_the_blocked_refusal_does_not_count_a_deferrable_cycle() -> None:
     from wreath._privacy.execute import ErasureBlocked
 
     class Household(Model, table="households_def_record"):
@@ -506,9 +425,7 @@ def test_the_blocked_refusal_does_not_count_a_deferrable_cycle(
 
     class Member(Model, table="members_def_record"):
         id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('s')")
-        household_id: Mapped[int] = column(
-            Int64, references=Household.id, deferrable=True
-        )
+        household_id: Mapped[int] = column(Int64, references=Household.id, deferrable=True)
         person_id: Mapped[int] = column(Int64, references=Person.id, deferrable=True)
         nickname: Mapped[str] = column(Text)
 
@@ -518,9 +435,7 @@ def test_the_blocked_refusal_does_not_count_a_deferrable_cycle(
 
     Household.__wreath_column_map__["head_id"].references = Member.id
     Household.__wreath_column_map__["head_id"].deferrable = True
-    registry = Registry(
-        FakeDatabase(), [Person, Household, Member, Loose], validate_schema="off"
-    )
+    registry = Registry(FakeDatabase(), [Person, Household, Member, Loose], validate_schema="off")
     privacy = Privacy(registry)
     privacy.subject(Person, key="id")
     privacy.classify(Household, personal={"label": Erase.REDACT})

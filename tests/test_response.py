@@ -1,9 +1,3 @@
-"""Response header assembly regressions.
-
-The header lists are built through precomputed content-type pairs and a
-cached content-length table; these tests pin the observable output.
-"""
-
 from __future__ import annotations
 
 import os
@@ -52,9 +46,7 @@ async def test_file_response_prefers_native_descriptor_path(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_file_reader_errors_are_relayed_to_the_sender(
-    monkeypatch, tmp_path
-) -> None:
+async def test_file_reader_errors_are_relayed_to_the_sender(monkeypatch, tmp_path) -> None:
     import wreath.response as response_module
 
     path = tmp_path / "asset.bin"
@@ -186,9 +178,6 @@ async def test_streaming_response_unchanged() -> None:
     assert [m.get("body") for m in sent[1:]] == [b"a", b"b", b""]
 
 
-# --- PreparedResponse -----------------------------------------------------------
-
-
 def test_prepared_text_headers_and_body() -> None:
     response = PreparedResponse.text("service healthy")
     assert response.status == 200
@@ -262,11 +251,6 @@ def _fd_is_open(fd: int) -> bool:
 
 
 def test_from_descriptor_closes_the_file_when_the_response_is_never_sent(tmp_path) -> None:
-    """`from_descriptor` takes ownership of an open descriptor, but only the
-    reader ever closed it -- and the reader runs when the response is *sent*.
-    A response built and then dropped (a handler that raises, a middleware that
-    replaces it, a conditional 304 answered instead) leaked the descriptor for
-    the life of the process."""
     path = tmp_path / "asset.bin"
     path.write_bytes(b"payload")
     fd = os.open(path, os.O_RDONLY)
@@ -293,8 +277,6 @@ def test_from_descriptor_close_is_explicit_and_idempotent(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_a_sent_descriptor_response_is_not_closed_twice(tmp_path) -> None:
-    """The reader still owns the descriptor once the send starts, so the
-    ownership handover must leave nothing for `__del__` to close."""
     path = tmp_path / "asset.bin"
     path.write_bytes(b"payload")
     fd = os.open(path, os.O_RDONLY)
@@ -313,14 +295,6 @@ async def test_a_sent_descriptor_response_is_not_closed_twice(tmp_path) -> None:
 
 
 def test_html_response_takes_the_bytes_a_template_already_produced() -> None:
-    """`Template.render_bytes` emits UTF-8; `HTMLResponse` must not make it a str.
-
-    The native renderer produces exactly the bytes that go on the wire. Routing
-    them through `render()` decodes the document and this constructor encodes it
-    straight back -- two full passes over every templated page. Accepting bytes
-    is what lets a caller hand the rendered document over untouched, and the
-    equality below is what pins that the two spellings still agree byte for byte.
-    """
     document = "<p>café &amp; ☃</p>"
 
     from_str = HTMLResponse(document)

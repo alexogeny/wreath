@@ -237,9 +237,7 @@ def _signature(operation: Operation, api: ApiModel) -> tuple[str, list[Parameter
             if parameter.required:
                 parts.append(f"{parameter.python_name}: {annotation}")
             else:
-                parts.append(
-                    f"{parameter.python_name}: {_optional(parameter.type)} = None"
-                )
+                parts.append(f"{parameter.python_name}: {_optional(parameter.type)} = None")
         if wants_key:
             parts.append("idempotency_key: str | None = None")
     return ", ".join(parts), keyword
@@ -264,9 +262,7 @@ def _method_source(operation: Operation, api: ApiModel) -> str:
     lines.append("")
     lines.append(f"        Generated from `{operation.method} {operation.path}`.")
     if operation.behaviours:
-        lines.append(
-            f"        The server declared: {', '.join(operation.behaviours)}."
-        )
+        lines.append(f"        The server declared: {', '.join(operation.behaviours)}.")
     lines.append('        """')
     lines.append(f'        path = f"{path_expression}"')
     if query:
@@ -274,8 +270,7 @@ def _method_source(operation: Operation, api: ApiModel) -> str:
         for parameter in query:
             lines.append(f"        if {parameter.python_name} is not None:")
             lines.append(
-                f'            query.append(("{parameter.wire_name}", '
-                f"str({parameter.python_name})))"
+                f'            query.append(("{parameter.wire_name}", str({parameter.python_name})))'
             )
         lines.append("        if query:")
         lines.append('            path = f"{path}?{_urlencode(query)}"')

@@ -24,8 +24,7 @@
 
 /* --- id generation -------------------------------------------------------- */
 /* A per-worker splitmix64 stream for span/trace ids. Seeded once, off the
- * request path, from the OS CSPRNG when available. Not a cryptographic stream
- * itself; `docs/plans/native-flight-recorder-stage-1.md` tracks upgrading to a refilled CSPRNG pool. */
+ * request path, from the OS CSPRNG when available. */
 static uint64_t
 splitmix64(uint64_t *state)
 {

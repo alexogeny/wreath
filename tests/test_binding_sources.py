@@ -95,8 +95,6 @@ def test_body_cannot_be_combined_with_form() -> None:
         app._compile_routes()
 
 
-# --- FastAPI-style marker defaults -------------------------------------------
-#
 # `limit: int = Query(20)` is the single most common porting mistake from
 # FastAPI. Wreath accepted it and did the wrong thing three times over: the
 # constraints were ignored, nothing bound, and the marker *object* was handed to
@@ -185,8 +183,6 @@ async def test_the_correct_annotated_form_still_binds_and_constrains() -> None:
 
 @pytest.mark.asyncio
 async def test_depends_is_still_written_as_a_default() -> None:
-    """`Depends` is the one marker that *is* a default; the refusal must not
-    catch it."""
     from wreath.binding import Depends
 
     app = Wreath()
@@ -206,15 +202,6 @@ async def test_depends_is_still_written_as_a_default() -> None:
 
 @pytest.mark.asyncio
 async def test_a_repeated_query_parameter_binds_the_first_occurrence() -> None:
-    """`?page=1&page=9` binds 1, and nothing else pinned that.
-
-    The binder folds the parsed pairs into a mapping to answer each declared
-    parameter once, and which occurrence survives that fold is observable to
-    every caller -- a client that appends rather than replaces a parameter gets
-    a different answer if it ever flips. It was `setdefault` in a Python loop
-    and is now the same fold in one C call; this is what makes the two the same
-    fold rather than two spellings that happen to agree today.
-    """
     app = Wreath()
 
     @app.get("/search")

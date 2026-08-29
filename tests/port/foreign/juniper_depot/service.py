@@ -12,8 +12,7 @@ none of it is a rewrite:
 * the dynamic route table — the set of endpoints is not in the source.
 * `cleanup_ctx` whose body does not split at the `yield` — the acquire and the
   release share a `try`, so there is no pair of `on_startup`/`on_shutdown`
-  handlers that reproduces it. Listed in `docs/reference/port-gaps.md` as
-  `lifespan.ctx`.
+  handlers that reproduces it.
 * `StreamResponse` with `prepare()`/`write()` — the handler drives the socket.
   `wreath.response.StreamingResponse` consumes an iterator instead, so the
   control flow inverts.

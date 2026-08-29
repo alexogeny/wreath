@@ -61,9 +61,7 @@ async def test_ai_scrapers_are_refused_by_default_but_user_fetchers_are_not() ->
 @pytest.mark.asyncio
 async def test_an_ai_scraper_cannot_hide_behind_another_bot_product() -> None:
     async with TestClient(_public_app()) as client:
-        response = await client.get(
-            "/", headers={"user-agent": "Googlebot/1.0 GPTBot/1.0"}
-        )
+        response = await client.get("/", headers={"user-agent": "Googlebot/1.0 GPTBot/1.0"})
     assert response.status == 403
 
 
@@ -76,9 +74,7 @@ async def test_ai_scrapers_can_read_the_declaration_that_refuses_them() -> None:
         return robots_txt(app)
 
     async with TestClient(app) as client:
-        response = await client.get(
-            "/robots.txt", headers={"user-agent": "GPTBot/1.0"}
-        )
+        response = await client.get("/robots.txt", headers={"user-agent": "GPTBot/1.0"})
     assert response.status == 200
     assert "User-agent: gptbot\n" in response.text
     assert "Disallow: /\n" in response.text
@@ -107,9 +103,7 @@ async def test_an_application_can_allow_one_ai_scraper_and_refuse_the_rest() -> 
 @pytest.mark.asyncio
 async def test_an_explicit_ai_policy_replaces_the_injected_default() -> None:
     app = _public_app()
-    app.configure_http_policy(
-        HttpPolicy(ai_scraping=AIScrapingPolicy(allow=("gptbot",)))
-    )
+    app.configure_http_policy(HttpPolicy(ai_scraping=AIScrapingPolicy(allow=("gptbot",))))
     async with TestClient(app) as client:
         admitted = await client.get("/", headers={"user-agent": "GPTBot/1.0"})
         refused = await client.get("/", headers={"user-agent": "ClaudeBot/1.0"})
@@ -124,9 +118,7 @@ def test_an_explicit_ai_policy_cannot_be_silently_replaced() -> None:
         )
     )
     with pytest.raises(ValueError, match="ai_scraping.*already configured"):
-        app.configure_http_policy(
-            HttpPolicy(ai_scraping=AIScrapingPolicy(allow=("claudebot",)))
-        )
+        app.configure_http_policy(HttpPolicy(ai_scraping=AIScrapingPolicy(allow=("claudebot",))))
 
 
 @pytest.mark.asyncio

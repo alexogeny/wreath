@@ -1,59 +1,47 @@
 ---
-description: Start with Wreath by goal: build, migrate, look up an API, or verify the framework's claims.
-keywords: start here, documentation home, docs map, learn wreath, navigation
+description: Build contemporary systems that stay coherent under contention, retries and failure.
+keywords: Python ASGI framework realtime jobs MCP SAML SCIM PostgreSQL WebSockets
 boost: 2
 ---
 
-```plate
-caption: Python 3.14 · ASGI · no mandatory runtime dependencies
-title: One system. One obvious home.
-lede: Wreath brings the parts of a production web service into one release. The API names each part plainly, and these docs follow the same rule: choose what you are trying to do, then take one path.
-action: Build your first service -> getting-started/index.md
-action: Browse every path -> map.md
+```hero
+eyebrow: Wreath 0.3.4 · Python 3.14 · ASGI
+title: Build the systems that become somebody's operating surface.
+lede: Realtime rooms, durable work, PostgreSQL, policy and a native server belong to one application—not a week of integration before the interesting work begins.
+signal: realtime under contention
+signal: durable work
+signal: governed AI
+signal: hard tenant boundaries
+action: Meet the nine systems -> stories/index.md
+action: Start with one route -> start/index.md
+wide: true
 ```
 
-Wreath is an ASGI framework, PostgreSQL stack, background-work system, policy
-engine, and native HTTP server. You can use the framework under any conforming
-ASGI server or run the native stack without changing the application.
+```cards
+label: Nine systems built under pressure
+wide: true
+card: Build the app they said was missing | Start with users and hard security boundaries, then inspect how much of the serious request path stays native. | stories/serious-api.md | users · security · measured
+card: Balance a live energy depot | Coordinate microgrids, vehicles and chargers without overcommitting the power that remains. | stories/energy-depot.md | realtime · concurrency
+card: Turn computers into an agent fleet | Assign long-running work across every device a person owns and survive a device disappearing. | stories/agent-fleet.md | devices · durable work
+card: Let customers wire the world together | Turn signed events, schedules and user hooks into durable, inspectable automation runs. | stories/automation-backplane.md | webhooks · workflows · replay
+card: Give an agent tools—safely | Put a governed MCP boundary around real operations instead of building a second, weaker backend. | stories/mcp-control-room.md | MCP · policy · progress
+card: Land the enterprise | Carry a tenant from SAML and SCIM provisioning through isolation, support and deprovisioning. | stories/enterprise.md | tenancy · SSO · SCIM
+card: Ask better questions of time | Analyse irregular series honestly across missing samples, late arrivals and daylight-saving boundaries. | stories/time-series-lab.md | temporal · series
+card: Survive the noon drop | Keep scarce inventory coherent through flash traffic, retries and webhook redelivery. | stories/noon-drop.md | edge · idempotency
+card: Assume the network will fail | Resume field sync and large uploads without exposing data outside the operator's assignment. | stories/field-operations.md | sync · objects · place
+```
 
-## What are you here to do?
+## One system. One obvious home.
 
-| Your goal | The shortest route |
-|---|---|
-| start from an empty directory | [Install Wreath and build one route](getting-started/index.md) |
-| understand the shape before choosing | [See the whole documentation map](map.md) |
-| solve a concrete task | [Open the cookbook](cookbook/index.md) |
-| learn one subsystem | [Follow the guides](guides/routing.md) |
-| look up a public symbol | [Open the API reference](reference/index.md) |
-| migrate an existing FastAPI stack | [Read the side-by-side migration path](from-fastapi/index.md) |
-| evaluate what Wreath replaces | [Inspect the generated capability map](capabilities.md) |
-| check the speed claim | [Read the measurements and method](perf/index.md) |
+A production service needs a router. It also needs validation, identity, data access,
+background work, observability and somewhere to run. Wreath owns those parts and
+keeps the framework usable on any conforming ASGI server.
 
-The **Browse** link in the header returns to this map from every page. `Ctrl K`
-or `/` searches headings, prose, module names, and the package names in the
-capability map.
-
-## The shape of the system
-
-Every feature has one owner. Higher-level features reuse those owners instead
-of building parallel stacks.
-
-| Part | Begin with | It leads to |
-|---|---|---|
-| requests | [Routing](guides/routing.md) | binding, policy, responses, OpenAPI |
-| data | [PostgreSQL](guides/postgres.md) | ORM, migrations, queries, pagination |
-| identity | [Authentication and authorization](guides/auth.md) | users, organisations, SSO, SCIM |
-| long-running work | [Jobs and messaging](guides/jobs.md) | progress, streams, workflows, notifications |
-| service boundaries | [Outbound HTTP](guides/http-client.md) | webhooks, objects, MCP, signatures, provenance |
-| delivery | [Native server](guides/server.md) | caching, compression, static files, edge proxy |
-| operations | [Configuration and state](guides/config-state.md) | health, telemetry, logging, testing, hardening |
-
-## Sixty seconds of Wreath
-
-```python
+```python title="app.py"
 from wreath import Request, Wreath
 
 app = Wreath()
+
 
 @app.get("/hello/{name}")
 async def hello(request: Request, name: str) -> dict:
@@ -61,21 +49,24 @@ async def hello(request: Request, name: str) -> dict:
 ```
 
 ```bash
-wreath run app:app
+uv add wreath
+uv run wreath dev app:app
 ```
 
-The native server is optional. `uvicorn app:app` serves the same application.
+The first route is deliberately ordinary. The interesting part begins when the
+requirements stop being ordinary: only one worker may own a device; a job must
+survive a process; an enterprise identity provider removes a person; a model may
+read freely but must involve a human before it deletes.
 
-## The line Wreath keeps
+This site documents **Wreath 0.3.4**. Check the
+[version, platform and upgrade contract](start/releases.md) before choosing an extra
+or moving an existing application between releases.
 
-The brand may be poetic. The API is not. A route is a route, a job is a job,
-and a connection pool is a connection pool.
+## The contract is the product
 
-The performance story follows the same discipline. Wreath moves repeated work
-to startup and byte-heavy work to native kernels, but only after a retained
-measurement identifies the cost. The [request-path account](internals/index.md)
-shows where Python begins. The [performance page](perf/index.md) carries the
-numbers and their limits.
+Each story starts with a visible system, introduces contention or failure, and
+then names the invariant that must continue to hold. That is the recurring Wreath
+idea: express the boundary early, refuse half-supported shapes, and leave enough
+evidence to explain the outcome afterward.
 
-Wreath is pre-1.0. Implemented surfaces live in the guides and reference. Named
-work that has not shipped lives only in the [roadmap](reference/roadmap.md).
+[Choose a story](stories/index.md) or [build the first application](start/index.md).

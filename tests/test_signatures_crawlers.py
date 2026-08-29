@@ -1,9 +1,3 @@
-"""Crawler declarations derived from the route table, and the 402 shape.
-
-The claim under test is that these cannot drift: a route added, protected or
-removed changes the generated document with no second file to remember.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -57,7 +51,6 @@ def test_public_and_protected_routes_are_split_by_the_frameworks_own_rule():
 
 
 def test_protecting_a_route_moves_it_without_touching_a_second_file():
-    """The anti-drift property, asserted rather than claimed."""
     before = crawler_policy(sample_app())
     assert "/" in before.allow
 
@@ -75,7 +68,6 @@ def test_protecting_a_route_moves_it_without_touching_a_second_file():
 
 
 def test_a_parameterised_path_is_reduced_to_its_static_prefix():
-    """`robots.txt` has no notion of `{slug}`; a literal one matches nothing."""
     assert "/articles/{slug}" not in crawler_policy(sample_app()).allow
 
 
@@ -122,7 +114,6 @@ def test_disallow_collapses_to_covering_prefixes():
 
 
 def test_native_prefix_reduction_agrees_with_an_independent_definition() -> None:
-    """The native sort/walk is checked against ordinary Python prefix semantics."""
     paths = tuple(
         reversed(
             [
@@ -151,11 +142,6 @@ def test_native_prefix_reduction_accepts_an_iterable() -> None:
 
 
 def test_a_path_with_any_protected_method_is_not_advertised_open():
-    """Two methods on one path reduce to one crawlable prefix.
-
-    The narrower statement is the honest one: if anything under `/x/` asks
-    something of the caller, it is not advertised as open.
-    """
     app = Wreath()
 
     @app.get("/x/{item}")
@@ -209,13 +195,8 @@ def test_llms_txt_excludes_a_documented_route_hidden_from_schema():
     assert "/hidden" not in llms_txt(app, title="Example")
 
 
-# --- 402 --------------------------------------------------------------------
-
-
 def test_payment_required_carries_terms_and_no_settlement():
-    error = PaymentRequired(
-        amount="0.002", currency="USD", pay_to="https://pay.example/x"
-    )
+    error = PaymentRequired(amount="0.002", currency="USD", pay_to="https://pay.example/x")
     assert error.status == 402
     header = error.terms().decode()
     assert header.startswith("http-402;")
@@ -229,9 +210,7 @@ async def test_payment_required_renders_as_a_problem_document():
 
     @app.get("/paid")
     async def paid(request) -> dict:
-        raise PaymentRequired(
-            amount="1", currency="USD", pay_to="https://pay.example/x"
-        )
+        raise PaymentRequired(amount="1", currency="USD", pay_to="https://pay.example/x")
 
     from wreath.testing import TestClient
 
@@ -241,10 +220,7 @@ async def test_payment_required_renders_as_a_problem_document():
 
 
 def test_the_scheme_is_the_applications_choice():
-    """No payment protocol is blessed; four were competing in mid-2026."""
-    error = PaymentRequired(
-        amount="1", currency="USDC", pay_to="0xabc", scheme="x402"
-    )
+    error = PaymentRequired(amount="1", currency="USDC", pay_to="0xabc", scheme="x402")
     assert error.terms().decode().startswith("x402;")
 
 

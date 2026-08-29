@@ -47,12 +47,9 @@ _MESSAGES = (
     "フレームワークのベンチマーク",
 )
 _ROWS = tuple(
-    Record(_COLUMNS, (identifier, message))
-    for identifier, message in enumerate(_MESSAGES, 1)
+    Record(_COLUMNS, (identifier, message)) for identifier, message in enumerate(_MESSAGES, 1)
 )
-_EPHEMERAL = Record(
-    _COLUMNS, (0, "Additional fortune added at request time.")
-)
+_EPHEMERAL = Record(_COLUMNS, (0, "Additional fortune added at request time."))
 _BY_MESSAGE = itemgetter("message")
 _BY_MESSAGE_INDEX = itemgetter(1)
 _ORDERED_ROWS = sorted((*_ROWS, _EPHEMERAL), key=_BY_MESSAGE)
@@ -76,9 +73,7 @@ _WIRE_ROWS = tuple(
     for identifier, message in enumerate(_MESSAGES, 1)
     for encoded in (message.encode(),)
 )
-_DECODER_PLAN = _postgres._compile_decoder_plan(
-    (23, 25), (1, 1), _COLUMNS
-)
+_DECODER_PLAN = _postgres._compile_decoder_plan((23, 25), (1, 1), _COLUMNS)
 _SINK: Any = None
 
 
@@ -266,8 +261,9 @@ def _check() -> None:
         raise RuntimeError("Fortunes renderer did not emit 13 data rows")
 
 
-def _timed(payload: Callable[[int], None], operations: int, trials: int,
-           warmup: int) -> tuple[float, list[float]]:
+def _timed(
+    payload: Callable[[int], None], operations: int, trials: int, warmup: int
+) -> tuple[float, list[float]]:
     payload(warmup)
     samples: list[float] = []
     for _ in range(trials):
@@ -282,10 +278,14 @@ def _counted(name: str, operations: int, trials: int, warmup: int) -> dict[str, 
         lambda count: [
             sys.executable,
             __file__,
-            "--arm", name,
-            "--operations", str(count),
-            "--trials", str(trials),
-            "--warmup", str(warmup),
+            "--arm",
+            name,
+            "--operations",
+            str(count),
+            "--trials",
+            str(trials),
+            "--warmup",
+            str(warmup),
         ],
         operations,
         scale=trials,
@@ -324,7 +324,8 @@ def main() -> int:
             "median_us": median,
             "samples_us": samples,
             "counters": _counted(name, args.operations, args.trials, args.warmup)
-            if args.measure else None,
+            if args.measure
+            else None,
         }
     header = f"{'arm':<14} {'us/op':>9} {'instr/op':>12} {'cycles/op':>12} {'IPC':>6}"
     print(header)
@@ -348,8 +349,7 @@ def main() -> int:
             if previous is not None:
                 time_delta = row["median_us"] - previous["median_us"]
                 instruction_delta = (
-                    row["counters"]["instructions"]
-                    - previous["counters"]["instructions"]
+                    row["counters"]["instructions"] - previous["counters"]["instructions"]
                 )
                 print(f"  {name:<14} {time_delta:+8.3f}us {instruction_delta:+10,.0f} instr")
             previous = row
@@ -364,8 +364,7 @@ def main() -> int:
             reference = results[control]
             time_delta = row["median_us"] - reference["median_us"]
             instruction_delta = (
-                row["counters"]["instructions"]
-                - reference["counters"]["instructions"]
+                row["counters"]["instructions"] - reference["counters"]["instructions"]
             )
             print(
                 f"  {name:<16} vs {control:<14} "

@@ -1,10 +1,3 @@
-"""Stage 5 slice 5e: forensic capture, live end-to-end over a real server.
-
-A Forensic server armed via the Inspector captures policy-approved request
-headers on the native path and persists them to a WFR1 file; deny-by-default and
-the arm gate are exercised against real HTTP requests over loopback.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -41,14 +34,21 @@ def _app() -> wreath.Wreath:
 
 def _config(sock: str, wfr1: str) -> ServerConfig:
     return ServerConfig(
-        host="127.0.0.1", port=0, lifespan="off",
+        host="127.0.0.1",
+        port=0,
+        lifespan="off",
         telemetry=TelemetryConfig(
-            mode=Mode.FORENSIC, ring_records=256, active_requests=32,
-            detailed=SamplingPolicy(rate=1.0), capture_slabs=16, slab_bytes=4096,
+            mode=Mode.FORENSIC,
+            ring_records=256,
+            active_requests=32,
+            detailed=SamplingPolicy(rate=1.0),
+            capture_slabs=16,
+            slab_bytes=4096,
         ),
         inspector=InspectorConfig(path=sock, capture_token=TOKEN),
         recording=RecordingPolicy(
-            capture_slabs=16, max_capture_bytes=1 << 20,
+            capture_slabs=16,
+            max_capture_bytes=1 << 20,
             redaction=RedactionPolicy(
                 header_allowlist=frozenset({"x-trace"}),
                 header_hash=frozenset({"x-request-id"}),
@@ -69,7 +69,7 @@ async def _get(port: int, path: str, extra_headers: str = "") -> bytes:
     writer.close()
     try:
         await writer.wait_closed()
-    except (ConnectionResetError, BrokenPipeError):
+    except ConnectionResetError, BrokenPipeError:
         pass
     return body
 
@@ -117,15 +117,10 @@ async def test_armed_forensic_request_captures_headers_to_wfr1(tmp_path) -> None
     assert decoded.clean
     assert len(decoded.slabs) >= 1
     headers_class = CaptureFieldClass.REQUEST_HEADER
-    fields = [
-        f for slab in decoded.slabs for f in slab.fields
-        if f.field_class is headers_class
-    ]
+    fields = [f for slab in decoded.slabs for f in slab.fields if f.field_class is headers_class]
     by_desc = {f.descriptor_id: f for f in fields}
     # x-trace captured verbatim (RAW); x-request-id hashed (never plaintext).
-    raw_values = {
-        f.payload for f in by_desc.values() if f.disposition is CaptureDisposition.RAW
-    }
+    raw_values = {f.payload for f in by_desc.values() if f.disposition is CaptureDisposition.RAW}
     assert b"trace-abc-123" in raw_values
     hashed = [f for f in by_desc.values() if f.disposition is CaptureDisposition.HASHED]
     assert hashed and all(len(f.payload) == 8 for f in hashed)
@@ -154,14 +149,21 @@ async def test_unarmed_forensic_request_captures_nothing(tmp_path) -> None:
 
 def _resp_header_config(sock: str, wfr1: str) -> ServerConfig:
     return ServerConfig(
-        host="127.0.0.1", port=0, lifespan="off",
+        host="127.0.0.1",
+        port=0,
+        lifespan="off",
         telemetry=TelemetryConfig(
-            mode=Mode.FORENSIC, ring_records=256, active_requests=32,
-            detailed=SamplingPolicy(rate=1.0), capture_slabs=16, slab_bytes=4096,
+            mode=Mode.FORENSIC,
+            ring_records=256,
+            active_requests=32,
+            detailed=SamplingPolicy(rate=1.0),
+            capture_slabs=16,
+            slab_bytes=4096,
         ),
         inspector=InspectorConfig(path=sock, capture_token=TOKEN),
         recording=RecordingPolicy(
-            capture_slabs=16, max_capture_bytes=1 << 20,
+            capture_slabs=16,
+            max_capture_bytes=1 << 20,
             redaction=RedactionPolicy(
                 # One allowlisted response header; content-type is deliberately
                 # left out to prove deny-by-default on the response side.
@@ -206,7 +208,9 @@ async def test_armed_request_captures_response_headers(tmp_path) -> None:
     decoded = read_recording(_read(wfr1))
     assert decoded.clean
     response_headers = [
-        f for slab in decoded.slabs for f in slab.fields
+        f
+        for slab in decoded.slabs
+        for f in slab.fields
         if f.field_class is CaptureFieldClass.RESPONSE_HEADER
     ]
     # The allowlisted response header is captured verbatim.
@@ -221,14 +225,21 @@ async def test_armed_request_captures_response_headers(tmp_path) -> None:
 
 def _query_config(sock: str, wfr1: str) -> ServerConfig:
     return ServerConfig(
-        host="127.0.0.1", port=0, lifespan="off",
+        host="127.0.0.1",
+        port=0,
+        lifespan="off",
         telemetry=TelemetryConfig(
-            mode=Mode.FORENSIC, ring_records=256, active_requests=32,
-            detailed=SamplingPolicy(rate=1.0), capture_slabs=16, slab_bytes=4096,
+            mode=Mode.FORENSIC,
+            ring_records=256,
+            active_requests=32,
+            detailed=SamplingPolicy(rate=1.0),
+            capture_slabs=16,
+            slab_bytes=4096,
         ),
         inspector=InspectorConfig(path=sock, capture_token=TOKEN),
         recording=RecordingPolicy(
-            capture_slabs=16, max_capture_bytes=1 << 20,
+            capture_slabs=16,
+            max_capture_bytes=1 << 20,
             redaction=RedactionPolicy(
                 query_allowlist=frozenset({"user"}),
                 query_hash=frozenset({"session"}),
@@ -250,7 +261,9 @@ async def test_armed_request_captures_query_parameters(tmp_path) -> None:
             await client.arm_capture(
                 token=TOKEN,
                 redaction={
-                    "query_allowlist": ["user"], "query_hash": ["session"], "body": "none",
+                    "query_allowlist": ["user"],
+                    "query_hash": ["session"],
+                    "body": "none",
                 },
                 expiry_seconds=60,
             )
@@ -262,7 +275,9 @@ async def test_armed_request_captures_query_parameters(tmp_path) -> None:
     decoded = read_recording(_read(wfr1))
     assert decoded.clean
     params = [
-        f for slab in decoded.slabs for f in slab.fields
+        f
+        for slab in decoded.slabs
+        for f in slab.fields
         if f.field_class is CaptureFieldClass.QUERY_PARAM
     ]
     raw = {f.payload for f in params if f.disposition is CaptureDisposition.RAW}
@@ -277,14 +292,21 @@ async def test_armed_request_captures_query_parameters(tmp_path) -> None:
 
 def _narrowing_config(sock: str, wfr1: str) -> ServerConfig:
     return ServerConfig(
-        host="127.0.0.1", port=0, lifespan="off",
+        host="127.0.0.1",
+        port=0,
+        lifespan="off",
         telemetry=TelemetryConfig(
-            mode=Mode.FORENSIC, ring_records=256, active_requests=32,
-            detailed=SamplingPolicy(rate=1.0), capture_slabs=16, slab_bytes=4096,
+            mode=Mode.FORENSIC,
+            ring_records=256,
+            active_requests=32,
+            detailed=SamplingPolicy(rate=1.0),
+            capture_slabs=16,
+            slab_bytes=4096,
         ),
         inspector=InspectorConfig(path=sock, capture_token=TOKEN),
         recording=RecordingPolicy(
-            capture_slabs=16, max_capture_bytes=1 << 20,
+            capture_slabs=16,
+            max_capture_bytes=1 << 20,
             # The ceiling permits BOTH headers; the arm below narrows to one.
             redaction=RedactionPolicy(
                 header_allowlist=frozenset({"x-one", "x-two"}),
@@ -309,9 +331,7 @@ async def test_arm_narrows_below_the_ceiling(tmp_path) -> None:
                 redaction={"header_allowlist": ["x-one"], "body": "none"},
                 expiry_seconds=60,
             )
-        assert b"pong" in await _get(
-            port, "/ping", "X-One: keep-me\r\nX-Two: drop-me\r\n"
-        )
+        assert b"pong" in await _get(port, "/ping", "X-One: keep-me\r\nX-Two: drop-me\r\n")
     finally:
         await server.close()
         await server.wait_closed()
@@ -319,7 +339,9 @@ async def test_arm_narrows_below_the_ceiling(tmp_path) -> None:
     decoded = read_recording(_read(wfr1))
     assert decoded.clean
     raw = {
-        f.payload for slab in decoded.slabs for f in slab.fields
+        f.payload
+        for slab in decoded.slabs
+        for f in slab.fields
         if f.field_class is CaptureFieldClass.REQUEST_HEADER
     }
     # The arm's header is captured; the ceiling-permitted but un-armed one is not.
@@ -329,18 +351,27 @@ async def test_arm_narrows_below_the_ceiling(tmp_path) -> None:
 
 def _body_config(sock: str, wfr1: str) -> ServerConfig:
     return ServerConfig(
-        host="127.0.0.1", port=0, lifespan="off",
+        host="127.0.0.1",
+        port=0,
+        lifespan="off",
         telemetry=TelemetryConfig(
-            mode=Mode.FORENSIC, ring_records=256, active_requests=32,
-            detailed=SamplingPolicy(rate=1.0), capture_slabs=16, slab_bytes=4096,
+            mode=Mode.FORENSIC,
+            ring_records=256,
+            active_requests=32,
+            detailed=SamplingPolicy(rate=1.0),
+            capture_slabs=16,
+            slab_bytes=4096,
         ),
         inspector=InspectorConfig(path=sock, capture_token=TOKEN),
         recording=RecordingPolicy(
-            capture_slabs=16, max_capture_bytes=1 << 20,
+            capture_slabs=16,
+            max_capture_bytes=1 << 20,
             redaction=RedactionPolicy(
                 # STRUCTURED body -> RAW capture, bounded to 8 bytes (also tests
                 # truncation); no headers captured here (deny-by-default).
-                body=BodyCapture.STRUCTURED, max_body_bytes=8, max_fields=16,
+                body=BodyCapture.STRUCTURED,
+                max_body_bytes=8,
+                max_fields=16,
                 max_depth=8,
             ),
         ),
@@ -363,14 +394,15 @@ async def _post(port: int, path: str, body: bytes) -> bytes:
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
     writer.write(
         f"POST {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {len(body)}\r\n"
-        f"Connection: close\r\n\r\n".encode() + body
+        f"Connection: close\r\n\r\n".encode()
+        + body
     )
     await writer.drain()
     out = await asyncio.wait_for(reader.read(), timeout=2.0)
     writer.close()
     try:
         await writer.wait_closed()
-    except (ConnectionResetError, BrokenPipeError):
+    except ConnectionResetError, BrokenPipeError:
         pass
     return out
 
@@ -385,8 +417,12 @@ async def test_armed_request_captures_bounded_bodies(tmp_path) -> None:
         async with InspectorClient(sock) as client:
             await client.arm_capture(
                 token=TOKEN,
-                redaction={"body": "structured", "max_body_bytes": 8,
-                           "max_fields": 16, "max_depth": 8},
+                redaction={
+                    "body": "structured",
+                    "max_body_bytes": 8,
+                    "max_fields": 16,
+                    "max_depth": 8,
+                },
                 expiry_seconds=60,
             )
         assert b"hello world" in await _post(port, "/echo", b"hello world")

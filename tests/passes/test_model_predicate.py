@@ -1,16 +1,3 @@
-"""``where=`` given a model predicate, which is the branch `ty` caught and pytest did not.
-
-``_render_filter`` has three arms. ``Sql`` and ``str`` both return before the
-lazy ``from .orm.compiler import ...`` at the bottom of the function, so a green
-suite that only ever exercised those two said nothing at all about the third --
-and when the compiler's seam was renamed underneath it, the import broke and
-every test still passed. A type checker found it; a test should have.
-
-So this drives a real model predicate all the way through to the SQL, which
-means the import is exercised, the names are the ones the compiler exports, and
-a future rename fails here rather than in production.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -105,9 +92,7 @@ async def test_a_model_predicate_actually_filters_the_rows(database, world):
     assert sorted(row["tries"] for row in world.rows) == [1, 1, 1, 2, 2, 2]
 
 
-async def test_the_model_predicates_binds_continue_the_keysets_numbering(
-    database, world
-):
+async def test_the_model_predicates_binds_continue_the_keysets_numbering(database, world):
     walk = model_pass()
 
     await walk.run(database, sleep=_nap)
@@ -123,9 +108,7 @@ async def test_the_model_predicates_binds_continue_the_keysets_numbering(
     assert delete.index("$4") > delete.index("(expires, key)")
 
 
-async def test_a_model_predicate_over_a_bare_table_is_refused_with_the_fix(
-    database, world
-):
+async def test_a_model_predicate_over_a_bare_table_is_refused_with_the_fix(database, world):
     # A `Table` carries no model, so there is nothing to resolve the columns
     # against. The refusal has to name the way out rather than just say no.
     walk = ChunkedPass(

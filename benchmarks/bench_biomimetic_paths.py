@@ -53,9 +53,9 @@ def _tape_app(count: int) -> Wreath:
     not, and that is what this measures.
     """
     app = Wreath(
-        http_policy=policy_from_components(
-            [factory() for factory in POLICY_FACTORIES[:count]]
-        ) if count else None
+        http_policy=policy_from_components([factory() for factory in POLICY_FACTORIES[:count]])
+        if count
+        else None
     )
 
     @app.get("/i/{x}")
@@ -155,9 +155,7 @@ def startup_cost() -> None:
 
     imports: list[float] = []
     for _ in range(5):
-        done = subprocess.run(
-            [sys.executable, "-c", code], capture_output=True, text=True
-        )
+        done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
         if done.returncode == 0:
             imports.append(float(done.stdout.strip()))
     if imports:
@@ -198,9 +196,7 @@ def main(argv: list[str] | None = None) -> int:
             for arm in _ordered(arms, index):
                 start = time.perf_counter()
                 await run(arm.app, template, args.iterations)
-                arm.samples.append(
-                    (time.perf_counter() - start) / args.iterations * 1e6
-                )
+                arm.samples.append((time.perf_counter() - start) / args.iterations * 1e6)
 
     asyncio.run(drive())
     print(f"python {platform.python_version()} on {platform.platform()}\n")
@@ -223,18 +219,14 @@ def main(argv: list[str] | None = None) -> int:
             for arm in _ordered(chain, index):
                 start = time.perf_counter()
                 await run(arm.app, template, args.iterations)
-                arm.samples.append(
-                    (time.perf_counter() - start) / args.iterations * 1e6
-                )
+                arm.samples.append((time.perf_counter() - start) / args.iterations * 1e6)
 
     asyncio.run(drive_chain())
     print("\n── wrapper-chain pathways (myelination) ──\n")
     second = report(chain, "layered: binder + validator", "A/A control")
 
     if args.json is not None:
-        args.json.write_text(
-            json.dumps({"middleware": payload, "chain": second}, indent=2) + "\n"
-        )
+        args.json.write_text(json.dumps({"middleware": payload, "chain": second}, indent=2) + "\n")
     return 0
 
 

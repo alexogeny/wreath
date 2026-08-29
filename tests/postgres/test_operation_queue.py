@@ -1,5 +1,3 @@
-"""Connection-owned native operation FIFO behaviour."""
-
 from __future__ import annotations
 
 import pytest

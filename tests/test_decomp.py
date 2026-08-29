@@ -1,5 +1,3 @@
-"""Contracts for `wreath-decomp` and its measurement harness."""
-
 from __future__ import annotations
 
 import asyncio

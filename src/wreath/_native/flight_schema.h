@@ -6,9 +6,7 @@
  * the Python constants, and the _Static_assert lines below fail the build if a
  * struct ever drifts from its 64-byte budget.
  *
- * Stage 0 defines the schema only: no recorder, ring, or runtime code lives
- * here. The Stage 1 runtime API (flight.h) includes this header. See
- * docs/plans/native-flight-recorder-stage-1.md.
+ * No recorder, ring, or runtime code lives here. flight.h includes this header.
  *
  * All fields are little-endian. The field order is chosen so the natural C
  * layout on LP64 little-endian targets already matches the packed Python

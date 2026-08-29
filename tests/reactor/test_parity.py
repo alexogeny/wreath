@@ -1,8 +1,3 @@
-"""Differential parity: the native loop must reproduce asyncio's *observable*
-behaviour on a battery of scenarios. This is the executable definition of "it is
-really an asyncio loop" — each scenario is run on a throwaway asyncio loop
-(the oracle) and on the native loop, and the results must be identical.
-"""
 from __future__ import annotations
 
 import asyncio

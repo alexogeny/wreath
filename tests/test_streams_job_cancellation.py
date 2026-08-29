@@ -1,16 +1,3 @@
-"""`JobRunner.cancel`, which is the only cancellation path a stream has.
-
-`wreath.streams.Streams.cancel` writes its terminal record and then calls this;
-there is deliberately no third mechanism, because a stream *is* a job and the
-fence already exists. So the statement this issues, and the two ways of naming
-the row it issues it against, need cover that runs on every suite -- the live
-half in `tests/test_streams_live.py` is marked `network` and a routine run never
-reaches it.
-
-Fake database, real SQL: the statement text is checked against the driver's
-fidelity rules the way `tests/jobs/test_runner.py` checks the rest of the queue's.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -66,7 +53,6 @@ def _runner(**options) -> tuple[JobRunner, _Database]:
 
 
 async def test_cancel_takes_exactly_one_of_id_and_key() -> None:
-    """Both is undecided; neither would name the whole queue."""
     runner, _database = _runner()
     for arguments in ({}, {"job_id": 7, "key": "k"}):
         with pytest.raises(ValueError) as raised:
@@ -85,7 +71,6 @@ async def test_cancel_by_id_selects_on_the_id() -> None:
 
 
 async def test_cancel_by_key_hashes_the_key_the_way_enqueue_did() -> None:
-    """A raw key would match no row, because `enqueue` stores the digest."""
     runner, database = _runner()
     database.connection.fetch_script = [[{"id": 7}]]
     assert await runner.cancel(key="stream:conversation-7") is True
@@ -96,7 +81,6 @@ async def test_cancel_by_key_hashes_the_key_the_way_enqueue_did() -> None:
 
 
 async def test_cancel_bumps_the_fence_because_that_is_the_whole_mechanism() -> None:
-    """Nothing here reaches into another process; the fence is what stops it."""
     runner, database = _runner()
     database.connection.fetch_script = [[{"id": 7}]]
     await runner.cancel(7)
@@ -116,7 +100,6 @@ async def test_cancelling_a_row_that_moved_reports_false_and_counts_nothing() ->
 
 
 async def test_a_cancelled_job_is_counted_apart_from_a_dead_letter() -> None:
-    """One counter cannot say whether `dead` rows ran out of attempts or were told to stop."""
     runner, database = _runner()
     database.connection.fetch_script = [[{"id": 7}]]
     assert await runner.cancel(7) is True
@@ -126,7 +109,6 @@ async def test_a_cancelled_job_is_counted_apart_from_a_dead_letter() -> None:
 
 
 async def test_cancelling_closes_out_a_watching_client() -> None:
-    """A progress bar left at 60% forever is the failure this avoids."""
     progress = ProgressRegistry()
     database = _Database()
     runner = JobRunner(database, name="work", progress=progress)

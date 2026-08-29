@@ -1,7 +1,3 @@
-"""User-management core: password hashing, action tokens, and lifecycle flows.
-
-Stdlib-only surface (``wreath._userkit``) — no server / native build needed.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -25,8 +21,6 @@ def run(coro):
     return asyncio.run(coro)
 
 
-# --- hashing ---------------------------------------------------------------
-
 def test_password_hash_roundtrip_and_reject():
     h = hash_password("correct horse")
     assert h.startswith("scrypt$")
@@ -37,14 +31,12 @@ def test_password_hash_roundtrip_and_reject():
     assert hash_password("x") != hash_password("x")
 
 
-# --- tokens ----------------------------------------------------------------
-
 def test_token_sign_verify_expire_and_purpose():
     t = sign_token("secret", "verify", "42", ttl=100, now=1000)
     assert verify_token("secret", "verify", t, now=1050) == "42"
-    assert verify_token("secret", "verify", t, now=2000) is None       # expired
-    assert verify_token("secret", "reset", t, now=1050) is None        # wrong purpose
-    assert verify_token("other", "verify", t, now=1050) is None        # wrong secret
+    assert verify_token("secret", "verify", t, now=2000) is None  # expired
+    assert verify_token("secret", "reset", t, now=1050) is None  # wrong purpose
+    assert verify_token("other", "verify", t, now=1050) is None  # wrong secret
     assert verify_token("secret", "verify", "no.dot.here", now=1050) is None
     assert verify_token("secret", "verify", t[:-2] + "zz", now=1050) is None  # tampered mac
 
@@ -52,10 +44,8 @@ def test_token_sign_verify_expire_and_purpose():
 def test_token_bound_single_use():
     t = sign_token("s", "reset", "7", ttl=100, bound="fp1", now=0)
     assert verify_token("s", "reset", t, bound="fp1", now=1) == "7"
-    assert verify_token("s", "reset", t, bound="fp2", now=1) is None    # fingerprint changed
+    assert verify_token("s", "reset", t, bound="fp2", now=1) is None  # fingerprint changed
 
-
-# --- flows -----------------------------------------------------------------
 
 def _links(purpose, token):
     return f"https://app/{purpose}/{token}"
@@ -67,8 +57,9 @@ def test_full_lifecycle():
         mail = CapturingEmailSender()
 
         # register -> unverified user + verification email (use the REAL emailed token)
-        await register(store, mail, secret="s", email="Ann@Example.com ",
-                       password="pw1", link_builder=_links)
+        await register(
+            store, mail, secret="s", email="Ann@Example.com ", password="pw1", link_builder=_links
+        )
         user = await store.get_by_email("ann@example.com")
         assert user is not None and user.is_verified is False
         assert len(mail.verifications) == 1
@@ -84,8 +75,9 @@ def test_full_lifecycle():
         assert (await store.get_by_email("ann@example.com")).is_verified is True
 
         # forgot -> reset email; reset changes the password (single-use)
-        await start_password_reset(store, mail, secret="s", email="ann@example.com",
-                                   link_builder=_links)
+        await start_password_reset(
+            store, mail, secret="s", email="ann@example.com", link_builder=_links
+        )
         assert len(mail.resets) == 1
         rtoken = mail.resets[0][1].rsplit("/", 1)[1]
         assert await reset_password(store, secret="s", token=rtoken, new_password="pw2") is True
@@ -101,15 +93,16 @@ def test_enumeration_safe():
     async def scenario():
         store = InMemoryUserStore()
         mail = CapturingEmailSender()
-        await register(store, mail, secret="s", email="a@b.com", password="pw",
-                       link_builder=_links)
+        await register(store, mail, secret="s", email="a@b.com", password="pw", link_builder=_links)
         # re-register same email: uniform, creates nothing new, sends nothing new
-        await register(store, mail, secret="s", email="a@b.com", password="other",
-                       link_builder=_links)
+        await register(
+            store, mail, secret="s", email="a@b.com", password="other", link_builder=_links
+        )
         assert len(mail.verifications) == 1
         # forgot on unknown email: no email sent, no error
-        await start_password_reset(store, mail, secret="s", email="nobody@b.com",
-                                   link_builder=_links)
+        await start_password_reset(
+            store, mail, secret="s", email="nobody@b.com", link_builder=_links
+        )
         assert len(mail.resets) == 0
 
     run(scenario())

@@ -1,10 +1,3 @@
-"""Loopback socket integration tests for ``wreath.server``.
-
-These drive the server end to end over a real (asyncio) TCP transport, asserting
-on bytes on the wire, through the protocol class the facade resolves — which is
-itself checked in an isolated subprocess.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -25,8 +18,9 @@ from wreath.policy import HttpPolicy, ProxyPolicy
 from wreath.server import ServerConfig, TLSConfig, _select_protocol, serve
 
 
-async def _raw_request(port: int, data: bytes, *, read_until_close: bool = False,
-                       reads: int = 1) -> bytes:
+async def _raw_request(
+    port: int, data: bytes, *, read_until_close: bool = False, reads: int = 1
+) -> bytes:
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
     writer.write(data)
     await writer.drain()
@@ -42,7 +36,7 @@ async def _raw_request(port: int, data: bytes, *, read_until_close: bool = False
     writer.close()
     try:
         await writer.wait_closed()
-    except (ConnectionResetError, BrokenPipeError):
+    except ConnectionResetError, BrokenPipeError:
         pass
     return chunks
 
@@ -56,8 +50,6 @@ async def _serve(app: Any, **config: Any) -> Any:
 def _port(server: Any) -> int:
     return server.sockets[0].getsockname()[1]
 
-
-# --- apps -------------------------------------------------------------------
 
 def make_wreath_app() -> wreath.Wreath:
     app = wreath.Wreath()
@@ -88,12 +80,15 @@ async def minimal_asgi(scope: dict, receive: Any, send: Any) -> None:
         m = await receive()
         if m["type"] == "http.disconnect" or not m.get("more_body", False):
             break
-    await send({"type": "http.response.start", "status": 200,
-                "headers": [(b"content-type", b"text/plain")]})
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"content-type", b"text/plain")],
+        }
+    )
     await send({"type": "http.response.body", "body": b"minimal"})
 
-
-# --- tests ------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_serve_wreath_app() -> None:
@@ -137,7 +132,7 @@ async def test_keep_alive_reuse() -> None:
 async def test_post_fixed_body() -> None:
     server = await _serve(make_wreath_app())
     try:
-        req = (b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello")
+        req = b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello"
         resp = await _raw_request(_port(server), req)
         assert resp.endswith(b"hello")
     finally:
@@ -160,18 +155,9 @@ async def test_post_chunked_body() -> None:
 
 @pytest.mark.asyncio
 async def test_ambiguous_proxy_request_cannot_activate_an_outbound_pivot() -> None:
-    """Reject ambiguous framing before routing a second, protected request.
-
-    The Wreath listener sees the connection as a trusted proxy and the canary is
-    a real internal HTTP server. A normal authenticated request first proves the
-    handler and outbound leg are live. The attack then sends TE+CL ambiguity
-    followed by a complete request to that handler on the same TCP stream.
-    """
     canary_requests = 0
 
-    async def canary(
-        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
+    async def canary(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         nonlocal canary_requests
         canary_requests += 1
         await reader.readuntil(b"\r\n\r\n")
@@ -190,15 +176,9 @@ async def test_ambiguous_proxy_request_cannot_activate_an_outbound_pivot() -> No
     await outbound.start()
 
     pivots = 0
-    app = wreath.Wreath(
-        http_policy=HttpPolicy(
-            proxy=ProxyPolicy(trusted=("127.0.0.0/8",))
-        )
-    )
+    app = wreath.Wreath(http_policy=HttpPolicy(proxy=ProxyPolicy(trusted=("127.0.0.0/8",))))
     app.configure_auth(
-        BearerTokenBackend(
-            lambda token: Identity(id="attacker") if token == "valid" else None
-        )
+        BearerTokenBackend(lambda token: Identity(id="attacker") if token == "valid" else None)
     )
 
     @app.get("/pivot")
@@ -211,26 +191,18 @@ async def test_ambiguous_proxy_request_cannot_activate_an_outbound_pivot() -> No
 
     server = await _serve(app)
     headers = (
-        b"Host: app.example\r\n"
-        b"Authorization: Bearer valid\r\n"
-        b"X-Forwarded-For: 203.0.113.9\r\n"
+        b"Host: app.example\r\nAuthorization: Bearer valid\r\nX-Forwarded-For: 203.0.113.9\r\n"
     )
     try:
-        control = await _raw_request(
-            _port(server), b"GET /pivot HTTP/1.1\r\n" + headers + b"\r\n"
-        )
+        control = await _raw_request(_port(server), b"GET /pivot HTTP/1.1\r\n" + headers + b"\r\n")
         assert b"HTTP/1.1 200" in control
         assert pivots == canary_requests == 1
 
         attack = (
-            b"POST /ignored HTTP/1.1\r\n"
-            + headers
-            + b"Transfer-Encoding: chunked\r\n"
+            b"POST /ignored HTTP/1.1\r\n" + headers + b"Transfer-Encoding: chunked\r\n"
             b"Content-Length: 4\r\n\r\n"
             b"0\r\n\r\n"
-            b"GET /pivot HTTP/1.1\r\n"
-            + headers
-            + b"Connection: close\r\n\r\n"
+            b"GET /pivot HTTP/1.1\r\n" + headers + b"Connection: close\r\n\r\n"
         )
         refused = await asyncio.wait_for(
             _raw_request(_port(server), attack, read_until_close=True), timeout=2.0
@@ -259,7 +231,6 @@ async def test_ambiguous_proxy_request_cannot_activate_an_outbound_pivot() -> No
 async def test_absolute_form_target_is_rejected_before_route_activation(
     target: bytes,
 ) -> None:
-    """An origin server must not reinterpret proxy-form targets as local paths."""
     activated = 0
     app = wreath.Wreath()
 
@@ -295,7 +266,6 @@ async def test_absolute_form_target_is_rejected_before_route_activation(
 async def test_proxy_differential_header_shapes_never_reach_the_app(
     header_block: bytes,
 ) -> None:
-    """Reject obsolete folding, pre-colon whitespace, and embedded controls."""
     activated = 0
 
     async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
@@ -326,10 +296,7 @@ async def test_proxy_differential_header_shapes_never_reach_the_app(
         (b"x-safe", b"ok\n\nHTTP/1.1 200 Injected"),
     ),
 )
-async def test_response_splitting_bytes_never_reach_the_wire(
-    name: bytes, value: bytes
-) -> None:
-    """Validate at Wreath's server boundary even for a raw ASGI application."""
+async def test_response_splitting_bytes_never_reach_the_wire(name: bytes, value: bytes) -> None:
 
     async def malicious(scope: dict[str, Any], receive: Any, send: Any) -> None:
         await send(
@@ -344,7 +311,8 @@ async def test_response_splitting_bytes_never_reach_the_wire(
     server = await _serve(malicious)
     try:
         response = await _raw_request(
-            _port(server), b"GET / HTTP/1.1\r\nHost: app.example\r\n\r\n",
+            _port(server),
+            b"GET / HTTP/1.1\r\nHost: app.example\r\n\r\n",
             read_until_close=True,
         )
     finally:
@@ -409,17 +377,6 @@ async def test_malformed_does_not_call_app() -> None:
 
 @pytest.mark.asyncio
 async def test_an_idle_connection_reports_no_work_to_drain() -> None:
-    """The drain predicate must read a number, not fail to find one.
-
-    `_has_work_to_drain` treats a protocol with no readable `active_requests`
-    as busy, because it cannot tell. That fallback is meant for a foreign
-    protocol object, and every protocol Wreath ships has to stay out of it: a
-    shipped protocol that lands there makes every graceful close spend the
-    whole `shutdown_timeout` draining a connection that owes nothing.
-
-    Asserted on the attribute *and* the predicate, because reading zero from
-    one idle connection would also pass if the counter were hard-wired.
-    """
     server = await _serve(make_wreath_app())
     try:
         port = _port(server)
@@ -439,27 +396,6 @@ async def test_an_idle_connection_reports_no_work_to_drain() -> None:
 
 @pytest.mark.asyncio
 async def test_a_tls_connection_owing_nothing_does_not_hold_the_close() -> None:
-    """A peer that never answers `close_notify` must not detain shutdown.
-
-    `loop.create_server` defaults `ssl_shutdown_timeout` to asyncio's 30
-    seconds, and the TLS unwrap it bounds runs on *every* connection close --
-    so a client that vanishes without a close_notify keeps its transport, and
-    therefore the protocol, alive for half a minute. During a graceful close
-    that is the whole cost: the drain window, the teardown wait and
-    `Server.wait_closed()` all queue behind one unwrap nobody will complete.
-
-    Measured before this test existed: 30.01s of teardown for a gRPC call
-    whose `call` phase was 0.01s. The bound asserted here is deliberately
-    loose -- the defect is a 30-second stall, and a threshold near the real
-    cost would make this flaky on a loaded machine for no extra evidence.
-
-    The client here is a **raw blocking socket that stops being serviced**, not
-    an asyncio one. Two shapes look like they should reproduce this and do not:
-    `transport.abort()` sends a TCP RST, which kills the transport instantly,
-    and an idle `open_connection(ssl=...)` peer answers the server's
-    close_notify by itself because asyncio's own SSL protocol is still running.
-    The stall needs a peer that is connected and simply never replies.
-    """
     cert, key = _make_self_signed()
     server = await serve(
         make_wreath_app(),
@@ -495,8 +431,9 @@ async def test_graceful_shutdown_drains_active_response() -> None:
     release = asyncio.Event()
 
     async def app(scope: dict, receive: Any, send: Any) -> None:
-        await send({"type": "http.response.start", "status": 200,
-                    "headers": [(b"content-length", b"2")]})
+        await send(
+            {"type": "http.response.start", "status": 200, "headers": [(b"content-length", b"2")]}
+        )
         await release.wait()
         await send({"type": "http.response.body", "body": b"ok"})
 
@@ -517,7 +454,7 @@ async def test_graceful_shutdown_drains_active_response() -> None:
     writer.close()
     try:
         await writer.wait_closed()
-    except (ConnectionResetError, BrokenPipeError):
+    except ConnectionResetError, BrokenPipeError:
         pass
 
 
@@ -575,21 +512,12 @@ def test_lifespan_runs() -> None:
 
 
 def test_protocol_selection_survives_a_fresh_interpreter() -> None:
-    """In a subprocess, so it is the real import path rather than this session's.
-
-    This proves a fresh process imports the protocol from the compiled wheel.
-    """
-    code = (
-        "from wreath.server import _select_protocol;"
-        "print(_select_protocol().__module__)"
-    )
+    code = "from wreath.server import _select_protocol;print(_select_protocol().__module__)"
     result = subprocess.run(
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
     assert result.stdout.strip() == "wreath._native._server"
 
-
-# --- helpers ----------------------------------------------------------------
 
 def _make_self_signed() -> tuple[str, str]:
     import datetime
@@ -637,8 +565,6 @@ def _free_port() -> int:  # pragma: no cover - helper
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
-
-# --- Step 1: protocol config and module-boundary freeze ---------------------
 
 def test_http_protocol_alias_remains_http1() -> None:
     # HttpProtocol remains an alias of Http1Protocol.
@@ -737,27 +663,17 @@ async def test_requesting_unbuilt_http3_fails_without_downgrade(
         )
 
 
-# --- buffered native ingress over real transports -----------------------------
-
 try:
     from wreath._native import _server as _native_server
 except ImportError:  # pragma: no cover - native build always present in CI
     _native_server = None
 
-requires_native = pytest.mark.skipif(
-    _native_server is None, reason="native server not built"
-)
+requires_native = pytest.mark.skipif(_native_server is None, reason="native server not built")
 
 
 @requires_native
 @pytest.mark.asyncio
 async def test_real_tcp_traffic_uses_buffered_ingress() -> None:
-    """Production socket traffic must enter through get_buffer()/buffer_updated().
-
-    asyncio selects the buffered receive path via isinstance(protocol,
-    BufferedProtocol); with it, data_received() — the copying path — must never
-    be called for plain TCP traffic.
-    """
     data_received_calls: list[int] = []
 
     class CountingProtocol(_native_server.Http1Protocol):
@@ -807,20 +723,14 @@ async def test_large_post_body_spans_many_buffered_reads() -> None:
 
 @pytest.mark.asyncio
 async def test_large_chunked_body_spans_many_buffered_reads() -> None:
-    """The chunked path compacts the read buffer too.
-
-    Both body paths slice a memoryview of the read buffer and then consume it;
-    consuming compacts once the read cursor passes 64 KiB, and a bytearray
-    cannot be resized while a memoryview export of it is alive.
-    """
     server = await _serve(make_wreath_app())
     try:
         port = _port(server)
         piece = bytes(range(256)) * 64  # 16 KiB per chunk
         chunks = 16  # 256 KiB total, well past the 64 KiB compaction threshold
-        framed = b"".join(
-            b"%x\r\n" % len(piece) + piece + b"\r\n" for _ in range(chunks)
-        ) + b"0\r\n\r\n"
+        framed = (
+            b"".join(b"%x\r\n" % len(piece) + piece + b"\r\n" for _ in range(chunks)) + b"0\r\n\r\n"
+        )
         request = (
             b"POST /echo HTTP/1.1\r\nHost: x\r\nConnection: close\r\n"
             b"Transfer-Encoding: chunked\r\n\r\n" + framed
@@ -843,7 +753,7 @@ async def test_disconnect_during_partial_request_keeps_server_healthy() -> None:
         writer.close()
         try:
             await writer.wait_closed()
-        except (ConnectionResetError, BrokenPipeError):
+        except ConnectionResetError, BrokenPipeError:
             pass
         await asyncio.sleep(0.05)
         resp = await _raw_request(port, b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -874,6 +784,7 @@ def test_buffered_ingress_under_uvloop() -> None:
 
     uvloop.run(scenario())
 
+
 def test_server_response_header_configuration_validates_values() -> None:
     with pytest.raises(ValueError, match="printable ASCII"):
         ServerConfig(server_header="wreath\ninvalid")
@@ -884,19 +795,12 @@ def test_server_response_header_configuration_validates_values() -> None:
 
 
 def test_no_unreachable_socket_helper_survives() -> None:
-    """`_open_socket` bound and listened, and nothing ever called it.
-
-    Kept as a test rather than deleted-and-forgotten because a helper that
-    binds a port is exactly the kind of thing that gets re-added "for the
-    multiworker path" and then diverges from the one `Server._start` uses.
-    """
     import wreath.server as server_module
 
     assert not hasattr(server_module, "_open_socket")
 
 
 def test_server_holds_no_write_only_signal_flag() -> None:
-    """`_signal_handlers_installed` was set and never read by anything."""
     import wreath.server as server_module
 
     async def scenario() -> None:
@@ -918,11 +822,11 @@ async def _ok_app(scope, receive, send) -> None:
     await send({"type": "http.response.body", "body": b"ok"})
 
 
-# --- pre-arming -------------------------------------------------------------
 # The first request a process serves costs multiples of the steady state, and on
 # a single-threaded loop everything arriving alongside it queues behind that.
 # Pre-arming pays it at boot instead. Measured on the metal loop: ~2.1 ms first
 # request without it, ~0.5 ms with, for ~2 ms of startup.
+
 
 @pytest.mark.asyncio
 async def test_prearm_is_off_unless_asked_for() -> None:
@@ -935,13 +839,6 @@ async def test_prearm_is_off_unless_asked_for() -> None:
 
 @pytest.mark.asyncio
 async def test_prearm_warms_the_stack_without_running_the_application() -> None:
-    """The safety property, and the reason pre-arm requests ask for a missing route.
-
-    Warming is worth nothing if it costs a handler side effect at every boot --
-    a counter incremented, a row written, a webhook sent. Pre-arm requests go to
-    a path no route can match, so they exercise ingress, parsing, routing and
-    egress and stop at the framework's own 404.
-    """
     app = make_wreath_app()
     seen: list[str] = []
 
@@ -955,8 +852,7 @@ async def test_prearm_warms_the_stack_without_running_the_application() -> None:
         assert server.prearmed_connections == 3
         assert seen == [], "a pre-arm request reached an application handler"
         # ... and the warmed server still serves normally.
-        resp = await _raw_request(
-            _port(server), b"GET /counted HTTP/1.1\r\nHost: x\r\n\r\n")
+        resp = await _raw_request(_port(server), b"GET /counted HTTP/1.1\r\nHost: x\r\n\r\n")
         assert b"HTTP/1.1 200" in resp
         assert seen == ["hit"]
     finally:
@@ -970,8 +866,8 @@ async def test_the_prearm_path_is_not_routable() -> None:
     server = await _serve(make_wreath_app(), prearm=1)
     try:
         resp = await _raw_request(
-            _port(server),
-            f"GET {Server.PREARM_PATH} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+            _port(server), f"GET {Server.PREARM_PATH} HTTP/1.1\r\nHost: x\r\n\r\n".encode()
+        )
         assert b"HTTP/1.1 404" in resp
     finally:
         await server.close()
@@ -983,7 +879,6 @@ def test_prearm_rejects_a_negative_count() -> None:
 
 
 def test_protocol_class_is_resolved_once_not_per_connection() -> None:
-    """Construction selects once; accepted connections only instantiate it."""
     import asyncio
 
     from wreath.server import Server

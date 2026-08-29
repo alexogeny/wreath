@@ -217,9 +217,13 @@ class ExtensionType(PgType):
         # A stable stand-in for the OID a fingerprint would otherwise record.
         # md5 because this is a name, not a security boundary; the top bit is
         # set so it can never collide with a real built-in OID.
-        self.fingerprint_oid = 0x80000000 | int.from_bytes(
-            hashlib.md5(sql.encode("utf-8"), usedforsecurity=False).digest()[:4], "big"
-        ) & 0x7FFFFFFF
+        self.fingerprint_oid = (
+            0x80000000
+            | int.from_bytes(
+                hashlib.md5(sql.encode("utf-8"), usedforsecurity=False).digest()[:4], "big"
+            )
+            & 0x7FFFFFFF
+        )
         _DECLARED_EXTENSION_TYPES.append(self)
 
     def require_oid(self, doing: str) -> int:
@@ -443,7 +447,6 @@ def _check_numeric(value: Any) -> Decimal:
 def _check_json(value: Any) -> Any:
     # Serializing here rejects unencodable values on assignment instead of at
     # flush time, when the failure is far from the offending line.
-    #
     # This encoding is deliberately **discarded** rather than cached for
     # `_json_to_wire`, and the two dumps are not the same work done twice. The
     # cell holds the caller's own object, so `document.body["a"].append(3)`
@@ -527,16 +530,11 @@ Date = PgType("date", 1082, "date", _check_date)
 Timestamp = PgType("timestamp", 1114, "timestamp without time zone", _check_naive_datetime)
 TimestampTz = PgType("timestamptz", 1184, "timestamp with time zone", _check_aware_datetime)
 Numeric = PgType("numeric", 1700, "numeric", _check_numeric)
-Json = PgType(
-    "json", 114, "json", _check_json, to_wire=_json_to_wire, from_wire=_json_loads
-)
-Jsonb = PgType(
-    "jsonb", 3802, "jsonb", _check_json, to_wire=_json_to_wire, from_wire=_json_loads
-)
+Json = PgType("json", 114, "json", _check_json, to_wire=_json_to_wire, from_wire=_json_loads)
+Jsonb = PgType("jsonb", 3802, "jsonb", _check_json, to_wire=_json_to_wire, from_wire=_json_loads)
 #: A WGS84 position, stored in core PostgreSQL's `point`. Not an extension type:
 #: OID 600 is in the catalog, and core ships a GiST `point_ops` opclass, so the
-#: index a proximity search needs is available with nothing installed. That is
-#: the whole tier-1 claim -- see `docs/guides/geospatial.md`.
+#: index a proximity search needs is available with nothing installed.
 Point = PgType(
     "point", 600, "point", _check_point, to_wire=_point_to_wire, from_wire=_point_from_wire
 )
@@ -545,15 +543,15 @@ Point = PgType(
 #: PostgreSQL array OID for each element OID Wreath can frame. Element types
 #: absent here have no scalar codec, so they have no array form either.
 _ARRAY_OID: dict[int, int] = {
-    16: 1000,    # boolean[]
-    17: 1001,    # bytea[]
-    20: 1016,    # bigint[]
-    21: 1005,    # smallint[]
-    23: 1007,    # integer[]
-    25: 1009,    # text[]
-    114: 199,    # json[]
-    700: 1021,   # real[]
-    701: 1022,   # double precision[]
+    16: 1000,  # boolean[]
+    17: 1001,  # bytea[]
+    20: 1016,  # bigint[]
+    21: 1005,  # smallint[]
+    23: 1007,  # integer[]
+    25: 1009,  # text[]
+    114: 199,  # json[]
+    700: 1021,  # real[]
+    701: 1022,  # double precision[]
     1043: 1015,  # varchar[]
     1082: 1182,  # date[]
     1114: 1115,  # timestamp[]
@@ -633,9 +631,7 @@ def _dense_vector(
     def coerce(value: Any) -> list[float]:
         return _core.float_sequence(value, dim, half)
 
-    return ExtensionType(
-        "vector", type_name, f"{type_name}({dim})", coerce, kind=codec_kind
-    )
+    return ExtensionType("vector", type_name, f"{type_name}({dim})", coerce, kind=codec_kind)
 
 
 def Vector(dim: int) -> ExtensionType:
@@ -768,8 +764,7 @@ def Sparsevec(dim: int) -> ExtensionType:
         raise DeclarationError(f"Sparsevec() requires an int dimension, got {dim!r}")
     if not 1 <= dim <= MAX_SPARSEVEC_DIM:
         raise DeclarationError(
-            f"Sparsevec({dim}) is out of range; pgvector allows 1 to "
-            f"{MAX_SPARSEVEC_DIM} dimensions"
+            f"Sparsevec({dim}) is out of range; pgvector allows 1 to {MAX_SPARSEVEC_DIM} dimensions"
         )
 
     def coerce(value: Any) -> SparseVector:
@@ -787,12 +782,9 @@ def Sparsevec(dim: int) -> ExtensionType:
     )
 
 
-# --- PostGIS geography --------------------------------------------------------
-#
 # Tier 2 of `wreath.geospatial`, and the only part of it that needs an extension.
 # Tier 1 -- `Point`, its GiST index, `within()` and `nearest()` -- is core
-# PostgreSQL and stays available on a server with nothing installed; see
-# `docs/guides/geospatial.md` for which questions each tier answers.
+# PostgreSQL and stays available on a server with nothing installed.
 
 #: EWKB's geometry code for a 2D point, ORed with the flag that says an SRID
 #: follows. PostGIS writes this on output and reads it on input, so it is the
@@ -986,9 +978,7 @@ def Bit(length: int) -> PgType:
     def coerce(value: Any) -> str:
         if isinstance(value, (bytes, bytearray)):
             if len(value) != width:
-                raise ValueError(
-                    f"bit({length}) packs into {width} bytes, got {len(value)}"
-                )
+                raise ValueError(f"bit({length}) packs into {width} bytes, got {len(value)}")
             padding = -length % 8
             number = int.from_bytes(value, "big")
             if padding and number & ((1 << padding) - 1):
@@ -1001,9 +991,7 @@ def Bit(length: int) -> PgType:
         if not isinstance(value, str):
             raise _type_error("str of '0' and '1', or packed bytes", value)
         if len(value) != length:
-            raise ValueError(
-                f"bit({length}) requires exactly {length} bits, got {len(value)}"
-            )
+            raise ValueError(f"bit({length}) requires exactly {length} bits, got {len(value)}")
         if len(value) != value.count("0") + value.count("1"):
             raise ValueError("a bit string may hold only '0' and '1'")
         return value
@@ -1094,9 +1082,7 @@ def TsVector(config: str = "english", *, sources: Any) -> TsVectorType:
         )
     names = tuple(sources)
     if not names:
-        raise DeclarationError(
-            "TsVector(sources=...) requires at least one column to analyse"
-        )
+        raise DeclarationError("TsVector(sources=...) requires at least one column to analyse")
     for name in names:
         if not isinstance(name, str) or not name:
             raise DeclarationError(f"TsVector source {name!r} is not a column name")
@@ -1144,8 +1130,22 @@ Float8 = Float64
 BY_OID: dict[int, PgType] = {
     item.oid: item
     for item in (
-        Bool, Int16, Int32, Int64, Float32, Float64, Text, Varchar,
-        Bytea, Uuid, Date, Timestamp, TimestampTz, Numeric, Json, Jsonb,
+        Bool,
+        Int16,
+        Int32,
+        Int64,
+        Float32,
+        Float64,
+        Text,
+        Varchar,
+        Bytea,
+        Uuid,
+        Date,
+        Timestamp,
+        TimestampTz,
+        Numeric,
+        Json,
+        Jsonb,
     )
 }
 
@@ -1154,8 +1154,22 @@ BY_OID: dict[int, PgType] = {
 # always returns the same OID for a given element, so any of these decodes any
 # column of that array type.
 for _element in (
-    Bool, Int16, Int32, Int64, Float32, Float64, Text, Varchar,
-    Bytea, Uuid, Date, Timestamp, TimestampTz, Numeric, Json, Jsonb,
+    Bool,
+    Int16,
+    Int32,
+    Int64,
+    Float32,
+    Float64,
+    Text,
+    Varchar,
+    Bytea,
+    Uuid,
+    Date,
+    Timestamp,
+    TimestampTz,
+    Numeric,
+    Json,
+    Jsonb,
 ):
     _canonical_array = Array(_element)
     BY_OID[_canonical_array.oid] = _canonical_array

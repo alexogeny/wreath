@@ -1,5 +1,3 @@
-"""Attacker-shaped regressions at HTTP, session, and WebSocket boundaries."""
-
 from __future__ import annotations
 
 import ast
@@ -100,7 +98,6 @@ def _cookie(response: Any) -> str:
 
 
 def test_a_validly_signed_pickle_gadget_is_never_deserialized(tmp_path: Path) -> None:
-    """Knowing the session secret must not expose a pickle-shaped RCE sink."""
     canary = tmp_path / "pickle-rce"
     payload = pickle.dumps(_PickleGadget(canary))
     middleware = SessionPolicy(secret="s" * 32, secure=False)
@@ -111,7 +108,6 @@ def test_a_validly_signed_pickle_gadget_is_never_deserialized(tmp_path: Path) ->
 
 
 def test_template_source_cannot_call_or_construct_python(tmp_path: Path) -> None:
-    """Template source compiles to data lookup opcodes, never Python calls."""
     canary = tmp_path / "template-rce"
     sources = (
         "{{ __import__('pathlib').Path(CANARY).write_text('executed') }}".replace(
@@ -128,7 +124,6 @@ def test_template_source_cannot_call_or_construct_python(tmp_path: Path) -> None
 
 
 def test_runtime_modules_introduce_no_unsafe_deserializer_or_shell_sink() -> None:
-    """Trip if a server-importable module grows a generic code-loading primitive."""
     source_root = Path(__file__).parents[2] / "src" / "wreath"
     # Paths, not basenames: `cli.py` now appears in five packages, and matching
     # on the name alone would excuse every one of them. Each entry names the one
@@ -185,7 +180,6 @@ def test_runtime_modules_introduce_no_unsafe_deserializer_or_shell_sink() -> Non
 
 
 async def test_builtin_login_rotates_a_server_side_session(monkeypatch) -> None:
-    """A planted anonymous SID must not become the victim's authenticated SID."""
     import wreath.users as users
 
     sessions = MemorySessions()
@@ -205,9 +199,7 @@ async def test_builtin_login_rotates_a_server_side_session(monkeypatch) -> None:
         return request.state.session
 
     async def authenticate(_store: Any, email: str, _password: str) -> Any:
-        return SimpleNamespace(
-            id="victim-id", email=email, is_verified=True, is_active=True
-        )
+        return SimpleNamespace(id="victim-id", email=email, is_verified=True, is_active=True)
 
     monkeypatch.setattr(users._userkit, "authenticate", authenticate)
     async with TestClient(app) as client:
@@ -228,9 +220,7 @@ async def test_builtin_login_rotates_a_server_side_session(monkeypatch) -> None:
 
 
 async def test_websocket_honours_trusted_host_middleware() -> None:
-    app = Wreath(
-        http_policy=HttpPolicy(trusted_host=TrustedHostPolicy(["good.example"]))
-    )
+    app = Wreath(http_policy=HttpPolicy(trusted_host=TrustedHostPolicy(["good.example"])))
 
     @app.websocket("/ws")
     async def socket(websocket: Any) -> None:
@@ -246,9 +236,7 @@ async def test_websocket_honours_trusted_host_middleware() -> None:
 
 async def test_cookie_authenticated_websocket_requires_an_allowed_origin() -> None:
     app = Wreath(
-        http_policy=HttpPolicy(
-            websocket_origin=WebSocketOriginPolicy(["https://app.example"])
-        )
+        http_policy=HttpPolicy(websocket_origin=WebSocketOriginPolicy(["https://app.example"]))
     )
 
     @app.websocket("/ws")
@@ -304,9 +292,7 @@ async def test_websocket_authentication_can_load_the_global_session() -> None:
 
 
 async def test_duplicate_host_headers_are_rejected_by_trusted_host() -> None:
-    app = Wreath(
-        http_policy=HttpPolicy(trusted_host=TrustedHostPolicy(["app.example"]))
-    )
+    app = Wreath(http_policy=HttpPolicy(trusted_host=TrustedHostPolicy(["app.example"])))
 
     @app.get("/private")
     async def private(request: Any) -> dict[str, bool]:
@@ -344,9 +330,7 @@ async def test_split_cookie_headers_are_combined_without_losing_values() -> None
 async def test_duplicate_authorization_headers_are_rejected() -> None:
     app = Wreath()
     app.configure_auth(
-        BearerTokenBackend(
-            lambda token: Identity(id="u1") if token == "good" else None
-        )
+        BearerTokenBackend(lambda token: Identity(id="u1") if token == "good" else None)
     )
 
     @app.get("/private")
@@ -425,18 +409,6 @@ async def test_password_reset_email_issuance_is_bounded(monkeypatch) -> None:
 
 
 async def test_encoded_nul_in_a_static_path_is_a_miss_not_a_crash(tmp_path: Path) -> None:
-    """`%00` in a static path must 404 like any other miss.
-
-    The native parser percent-decodes the target before routing, so `%00`
-    reaches `StaticFiles` as a real NUL byte in `path_params["path"]`. `os.open`
-    and `os.lstat` reject an embedded NUL with `ValueError`, which is neither
-    `ContainmentError` nor `OSError` -- so it escaped the lookup's handler and
-    became a 500. That contradicts the documented guarantee that "a missing,
-    unreadable, or escaping path raises `NotFound` -- the same 404 either way,
-    so probing cannot distinguish them": a 500 tells an unauthenticated prober
-    exactly which prefixes are static mounts, and every probe costs the app a
-    logged traceback.
-    """
     root = tmp_path / "public"
     root.mkdir()
     (root / "a.txt").write_text("hello")
@@ -449,13 +421,6 @@ async def test_encoded_nul_in_a_static_path_is_a_miss_not_a_crash(tmp_path: Path
 
 
 async def test_malformed_multipart_body_is_refused_with_400(tmp_path: Path) -> None:
-    """A body the multipart parser cannot read is the caller's fault, not a 500.
-
-    `_decode_body` wraps the JSON body path in `except ValueError -> BadRequest`
-    but ran the multipart tapes outside it, so every route binding `Form()` or
-    `File()` answered 500 to a bad boundary, an unterminated part, or a
-    malformed part header -- all unauthenticated, single-request inputs.
-    """
     app = Wreath()
 
     @app.post("/upload")
@@ -484,20 +449,14 @@ async def test_malformed_multipart_body_is_refused_with_400(tmp_path: Path) -> N
 
 
 async def test_role_check_accepts_any_collection_of_role_names() -> None:
-    """An identity whose roles are a tuple must authorize, not 500.
-
-    `mode="any"` already worked -- `frozenset.isdisjoint` takes any iterable --
-    while the default `mode="all"` used `frozenset <= actual`, which demands a
-    set on the right and raises `TypeError` otherwise. A backend that hands the
-    roles claim straight through (JSON arrays decode to lists) therefore made
-    every *authorized* request a 500 on one mode and succeed on the other.
-    """
     app = Wreath()
     app.configure_auth(
         backend=BearerTokenBackend(
-            lambda token: Identity(id="1", roles=("admin", "user"))  # type: ignore[arg-type]
-            if token == "admin"
-            else None
+            lambda token: (
+                Identity(id="1", roles=("admin", "user"))  # type: ignore[arg-type]
+                if token == "admin"
+                else None
+            )
         )
     )
 

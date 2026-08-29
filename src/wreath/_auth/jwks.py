@@ -152,7 +152,7 @@ class JwksCache:
                 continue  # encryption keys are not signing keys
             try:
                 key = key_from_jwk(jwk)
-            except (JwtError, KeyError, ValueError, TypeError):
+            except JwtError, KeyError, ValueError, TypeError:
                 # The measured set for a Mapping input: JwtError (and its
                 # UnsupportedAlgorithm subclass) for a rejected key, KeyError
                 # for a missing member, ValueError for bad base64url, TypeError
@@ -179,7 +179,6 @@ class JwksCache:
             # is reached by a document that is all `use:enc`, all malformed, or
             # all duplicate `kid` -- in each case the issuer served something
             # readable and none of it signs anything.
-            #
             # Counted, because the previous behaviour's whole problem was that
             # it was silent: `fetch_errors` and `malformed_keys` both stayed at
             # zero while authentication carried on against withdrawn keys.

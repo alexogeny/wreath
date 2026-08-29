@@ -171,8 +171,6 @@ def test_jsonb_rejects_unknown_wire_version(backend: Any) -> None:
         backend._decode_value(3802, 1, b"\x02{}")
 
 
-# --- hex bytea --------------------------------------------------------------
-#
 # Text-format bytea is decoded in C through a nibble table, with no per-field
 # `binascii` import or method dispatch. Behavior must stay byte-for-byte
 # identical to `_pgdriver`.
@@ -183,8 +181,7 @@ HEX_BYTEA_CASES = [
     pytest.param(b"deadbeef", b"\xde\xad\xbe\xef", id="lowercase"),
     pytest.param(b"DEADBEEF", b"\xde\xad\xbe\xef", id="uppercase"),
     pytest.param(b"DeAdBeEf", b"\xde\xad\xbe\xef", id="mixed-case"),
-    pytest.param(b"000102030405060708090a0b0c0d0e0f",
-                 bytes(range(16)), id="all-nibbles"),
+    pytest.param(b"000102030405060708090a0b0c0d0e0f", bytes(range(16)), id="all-nibbles"),
     pytest.param(b"ff" * 4096, b"\xff" * 4096, id="large"),
 ]
 
@@ -197,7 +194,6 @@ def test_hex_bytea_scalar_decode(backend: Any, hex_text: bytes, expected: bytes)
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_hex_bytea_binary_format_is_raw(backend: Any) -> None:
-    """Binary format must keep copying the wire bytes, not decode them."""
     assert backend._decode_value(17, 1, b"\\xdead") == b"\\xdead"
     assert backend._decode_value(17, 1, b"\x00\x01\xff") == b"\x00\x01\xff"
 
@@ -217,14 +213,6 @@ def test_hex_bytea_non_hex_digit_is_rejected(backend: Any, bad: bytes) -> None:
 
 @pytest.mark.skipif(native is None, reason="native PostgreSQL extension not built")
 def test_whitespace_in_hex_bytea_is_a_known_backend_difference() -> None:
-    """Documents a pre-existing pure/native difference, not a new one.
-
-    The pure backend decodes with `bytes.fromhex`, which skips ASCII
-    whitespace; the native decoder rejects any non-hex byte, matching the
-    `binascii.unhexlify` it replaced. PostgreSQL never emits whitespace inside
-    hex `bytea`, so this only concerns malformed input. Asserted here so the
-    difference stays visible rather than being discovered again later.
-    """
     assert pure._decode_value(17, 0, b"\\xab cd") == b"\xab\xcd"
     with pytest.raises(ValueError):
         native._decode_value(17, 0, b"\\xab cd")
@@ -232,7 +220,6 @@ def test_whitespace_in_hex_bytea_is_a_known_backend_difference() -> None:
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_non_hex_text_bytea_passes_through(backend: Any) -> None:
-    """Text without the \\x marker keeps its existing pass-through behavior."""
     assert backend._decode_value(17, 0, b"plain") == b"plain"
     assert backend._decode_value(17, 0, b"") == b""
 

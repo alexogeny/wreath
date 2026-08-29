@@ -109,7 +109,6 @@ class StaleDataError(ORMError):
 
     Raised when an UPDATE or DELETE built from a loaded object affects zero
     rows: another session deleted it, or changed the key it was found by. The
-    statement "succeeded" in the driver's terms, which is why this used to pass
-    unnoticed -- the caller's next read simply disagreed with what it thought it
-    had written.
+    driver may consider the statement successful, but the ORM requires exactly
+    one matching row.
     """

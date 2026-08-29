@@ -1,12 +1,3 @@
-"""The `pytest11` plugin, exercised the way a user's repository sees it.
-
-Every test here runs a *nested* pytest through `pytester` rather than calling the
-fixtures directly, because what is being asserted is discovery: that an installed
-Wreath is enough, with no `conftest.py` import and no copied boilerplate. A test
-that called the fixture functions itself would pass even if the entry point were
-missing, which is the one failure that matters.
-"""
-
 from __future__ import annotations
 
 import json
@@ -29,13 +20,6 @@ asyncio_mode = auto
 def test_installed_plugin_contracts_share_one_fresh_pytest_process(
     pytester: pytest.Pytester,
 ) -> None:
-    """Discovery, fixtures, isolation, lifespan and refusal in one installed run.
-
-    These used to launch five separate pytest children. Their process boundary
-    proves entry-point discovery, but a distinct process per assertion proves
-    nothing more: one nested suite is still a clean external consumer, and its
-    named tests retain each independent contract.
-    """
     pytester.makeini(_INI)
     pytester.makepyfile(
         """
@@ -108,17 +92,6 @@ async def test_request_and_lifespan(wreath_client):
 def test_postgres_fixture_skips_naming_the_variable(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A silent skip is the failure mode this repo already learned once.
-
-    `tests/conftest.py` exists because database-gated suites skipped invisibly for
-    a long time. A plugin shipped to other people must not reintroduce that: the
-    skip reason names the variable to set.
-
-    The variable is unset for the nested run rather than assumed absent -- the
-    subprocess inherits this environment, and `AGENTS.md` tells whoever is running
-    this to export it, so assuming would make the test fail exactly for the people
-    following the instructions.
-    """
     monkeypatch.delenv(_pytest_plugin.DSN_ENV, raising=False)
     pytester.makeini(_INI)
     pytester.makepyfile(
@@ -133,12 +106,6 @@ def test_postgres_fixture_skips_naming_the_variable(
 
 
 def test_plugin_declares_only_prefixed_fixtures() -> None:
-    """Every fixture is `wreath_`-prefixed, because this plugin loads for everyone.
-
-    An installed Wreath activates in every repository that has it, including ones
-    with their own `client` or `db` fixture. A bare name here would shadow
-    somebody else's and the collision would read as their bug.
-    """
     declared = {
         name
         for name in dir(_pytest_plugin)
@@ -150,12 +117,6 @@ def test_plugin_declares_only_prefixed_fixtures() -> None:
 
 @pytest.mark.database
 def test_wreath_db_rolls_back_what_a_test_wrote(pytester: pytest.Pytester) -> None:
-    """The isolation claim, proved across two tests rather than asserted in one.
-
-    A single test cannot show rollback: it would pass just as well if the fixture
-    committed. So the first test writes a row and sees it, the second looks for it
-    and must not find it, and only the teardown between them can be responsible.
-    """
     if not os.environ.get(_pytest_plugin.DSN_ENV):
         pytest.skip("needs WREATH_TEST_POSTGRES_DSN (a live PostgreSQL)")
     pytester.makeini(_INI)
@@ -181,12 +142,6 @@ def test_wreath_db_rolls_back_what_a_test_wrote(pytester: pytest.Pytester) -> No
 
 @pytest.mark.database
 def test_wreath_db_rolls_back_even_when_the_test_raises(pytester: pytest.Pytester) -> None:
-    """Rollback lives in a `finally`, which is the difference from cleanup-at-the-end.
-
-    A suite that tidies up on the last line of each test leaves its rows behind the
-    first time one fails, and every later test in the file then fails for reasons
-    unrelated to what it asserts.
-    """
     if not os.environ.get(_pytest_plugin.DSN_ENV):
         pytest.skip("needs WREATH_TEST_POSTGRES_DSN (a live PostgreSQL)")
     pytester.makeini(_INI)
@@ -224,25 +179,12 @@ def _imported_modules(statement: str) -> set[str]:
 
 
 def test_loading_the_plugin_does_not_import_the_framework() -> None:
-    """pytest imports this module in every repository that installs Wreath.
-
-    `_pytest_plugin` already keeps every Wreath import inside a function for
-    exactly that reason, and package semantics were quietly undoing it: importing
-    a submodule imports its parent first, and `wreath/__init__.py` reached
-    straight for `wreath.app`. Measured, that was 110ms of framework on every
-    `pytest` process anywhere Wreath is installed -- about 57ms of it marginal
-    once pytest's own imports are discounted.
-
-    Asserting on `sys.modules` rather than on a duration, because a timing
-    threshold on a shared machine is a flake generator.
-    """
     loaded = _imported_modules("import wreath._pytest_plugin")
     assert "wreath.app" not in loaded, sorted(loaded)
     assert "wreath.binding" not in loaded, sorted(loaded)
 
 
 def test_importing_the_package_alone_does_not_import_the_framework() -> None:
-    """`import wreath.pagination` should cost `wreath.pagination`."""
     assert "wreath.app" not in _imported_modules("import wreath")
 
 
@@ -258,20 +200,6 @@ def test_importing_the_package_alone_does_not_import_the_framework() -> None:
     ],
 )
 def test_every_public_name_can_be_the_first_one_asked_for(line: str) -> None:
-    """Each name has to work as the *first* thing imported, from a cold start.
-
-    `from wreath import Request, Wreath` -- the first line of the quickstart --
-    resolves `Request` before `Wreath`, and `wreath.request` reaches
-    `._auth.models` -> `._auth` -> `._auth.cedar`, which asks the half-built
-    `wreath.request` for `Request`. Twenty-four modules import it at runtime and
-    that cycle predates the lazy top level; the eager version hid it by
-    importing `.app` first.
-
-    Parametrised over every export because the failure depends entirely on which
-    door the package is entered through, and a single spelling would only ever
-    have tested one door. A subprocess each, because the cycle exists only on a
-    cold `sys.modules`.
-    """
     result = subprocess.run(
         [sys.executable, "-c", line], capture_output=True, text=True, check=False
     )
@@ -279,11 +207,6 @@ def test_every_public_name_can_be_the_first_one_asked_for(line: str) -> None:
 
 
 def test_the_public_names_still_resolve_to_their_modules() -> None:
-    """Laziness that changed what a name means would be a worse bug than the cost.
-
-    Identity rather than `hasattr`: a `__getattr__` that built a second class per
-    access would satisfy a truthiness check and break every `isinstance`.
-    """
     import wreath
     from wreath.app import Wreath
     from wreath.binding import Depends

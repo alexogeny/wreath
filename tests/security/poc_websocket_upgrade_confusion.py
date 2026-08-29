@@ -1,14 +1,3 @@
-"""PoC: turn malformed HTTP/1.1 requests into WebSockets on wreath-metal.
-
-Run from the repository root::
-
-    uv run python tests/security/poc_websocket_upgrade_confusion.py
-
-The script binds only to loopback and uses Wreath's metal event loop, native
-HTTP/1 parser, and normal ``Wreath.websocket`` dispatch.  A vulnerable build
-prints two ``101 Switching Protocols`` status lines and exits successfully.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -28,15 +17,9 @@ def _handshake(connection: bytes, framing: bytes = b"") -> bytes:
         b"GET /ws HTTP/1.1\r\n"
         b"Host: 127.0.0.1\r\n"
         b"Upgrade: websocket\r\n"
-        b"Connection: "
-        + connection
-        + b"\r\n"
-        b"Sec-WebSocket-Key: "
-        + KEY
-        + b"\r\n"
-        b"Sec-WebSocket-Version: 13\r\n"
-        + framing
-        + b"\r\n"
+        b"Connection: " + connection + b"\r\n"
+        b"Sec-WebSocket-Key: " + KEY + b"\r\n"
+        b"Sec-WebSocket-Version: 13\r\n" + framing + b"\r\n"
     )
 
 

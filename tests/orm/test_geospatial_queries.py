@@ -1,12 +1,3 @@
-"""`within()` and `nearest()` — the query half of `wreath.geospatial`.
-
-The property under test is not "the right rows come back". It is that the
-*bounding box reaches SQL as an indexable predicate*, with the exact
-great-circle filter ANDed onto it rather than replacing it. A correct answer
-from a sequential scan is the failure these tests exist to catch, which is why
-the live half asserts the query plan and not only the result.
-"""
-
 from __future__ import annotations
 
 import os
@@ -66,17 +57,13 @@ def _sql(registry: Registry, select: Any) -> str:
 
 
 class TestWithinRenders:
-    def test_it_renders_a_box_containment_the_index_can_answer(
-        self, registry: Registry
-    ) -> None:
+    def test_it_renders_a_box_containment_the_index_can_answer(self, registry: Registry) -> None:
         sql = _sql(registry, Station.select().where(Station.at.within(SYDNEY, 5_000)))
         # `<@ box(point(...), point(...))` is the whole point: it is the only
         # form a GiST `point_ops` index answers.
         assert "<@ box(point(" in sql
 
-    def test_the_exact_filter_is_anded_on_not_substituted(
-        self, registry: Registry
-    ) -> None:
+    def test_the_exact_filter_is_anded_on_not_substituted(self, registry: Registry) -> None:
         sql = _sql(registry, Station.select().where(Station.at.within(SYDNEY, 5_000)))
         # A box is a superset of a circle. Returning the box's rows would be
         # wrong at the corners, so the great-circle test must survive too.
@@ -108,18 +95,14 @@ class TestWithinRenders:
         with pytest.raises(ValueError):
             Station.at.within(SYDNEY, -1)
 
-    def test_within_is_refused_on_a_column_that_is_not_a_point(
-        self, registry: Registry
-    ) -> None:
+    def test_within_is_refused_on_a_column_that_is_not_a_point(self, registry: Registry) -> None:
         with pytest.raises(DeclarationError):
             Station.name.within(SYDNEY, 5_000)
 
 
 class TestNearestIsOrderedAndBounded:
     def test_nearest_is_an_order_key_not_a_predicate(self, registry: Registry) -> None:
-        sql = _sql(
-            registry, Station.select().order_by(Station.at.nearest(SYDNEY)).limit(10)
-        )
+        sql = _sql(registry, Station.select().order_by(Station.at.nearest(SYDNEY)).limit(10))
         assert "ORDER BY" in sql
         assert "asin" in sql.lower()
 
@@ -129,9 +112,7 @@ class TestNearestIsOrderedAndBounded:
         with pytest.raises(DeclarationError, match="limit"):
             compile_select(registry, Station.select().order_by(Station.at.nearest(SYDNEY)))
 
-    def test_an_ordinary_unbounded_ordering_is_still_allowed(
-        self, registry: Registry
-    ) -> None:
+    def test_an_ordinary_unbounded_ordering_is_still_allowed(self, registry: Registry) -> None:
         # The limit rule is for proximity searches only. Without this, dropping
         # either half of the guard's condition would refuse every unbounded
         # `ORDER BY` in the ORM and no test would object -- which is exactly
@@ -139,15 +120,11 @@ class TestNearestIsOrderedAndBounded:
         sql = _sql(registry, Station.select().order_by(Station.name.asc()))
         assert "ORDER BY" in sql
 
-    def test_an_unbounded_ordering_by_a_rank_is_unaffected(
-        self, registry: Registry
-    ) -> None:
+    def test_an_unbounded_ordering_by_a_rank_is_unaffected(self, registry: Registry) -> None:
         # The guard must key on `geo_distance` specifically, not on "is a
         # BinaryExpr". A text-search rank is an unbounded ordering that has
         # always been allowed, and this plan must not quietly outlaw it.
-        sql = _sql(
-            registry, Note.select().order_by(Note.search.rank("llamas").desc())
-        )
+        sql = _sql(registry, Note.select().order_by(Note.search.rank("llamas").desc()))
         assert "ORDER BY" in sql
         assert "ts_rank" in sql
 

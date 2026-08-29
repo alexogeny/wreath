@@ -1,23 +1,3 @@
-"""Tier 2: a PostGIS `geography` column, on the pgvector contract.
-
-Tier 1 needs no extension and is where most of the value is. This is the other
-half of the plan: `geography(Point,4326)`, its GiST index, and the startup
-resolution that decides whether the extension is there at all.
-
-The contract is deliberately word-for-word pgvector's, because it is the same
-mechanism: an extension's type OID is assigned by `CREATE EXTENSION`, so it is
-not a compile-time constant, it is read once at startup, and two things must
-not move with it -- the plan-cache shape token and the model fingerprint. The
-third invariant is a failure rather than a stability: a column of the type on a
-database without the extension fails at *startup*, naming it, rather than at
-the first query with an unrecognised OID.
-
-**Tier 1's no-extension claim is not weakened by any of this.**
-`tests/orm/test_geospatial_live.py` runs the whole tier-1 surface in a database
-it creates from `template0`, which carries no extensions on any image; nothing
-here touches that database.
-"""
-
 from __future__ import annotations
 
 import os
@@ -96,21 +76,16 @@ def _bound(srid: int = 4326) -> ExtensionType:
 
 def _fingerprint(spec: Any) -> bytes:
     return fingerprint_model(
-        spec.schema, spec.table, spec.columns, spec.relationships,
-        spec.table_uniques, spec.table_indexes,
+        spec.schema,
+        spec.table,
+        spec.columns,
+        spec.relationships,
+        spec.table_uniques,
+        spec.table_indexes,
     )
 
 
-# --- declaration --------------------------------------------------------------
-
-
 def test_the_column_spells_the_type_postgres_will_spell_back() -> None:
-    """`format_type` writes `geography(Point,4326)`, with no space.
-
-    The descriptor carries this spelling and the catalog read produces
-    `format_type`'s; a difference of one byte reports the column as drifted on
-    every run forever, which is the pgvector opclass defect in another type.
-    """
     assert Geography().sql == "geography(Point,4326)"
 
 
@@ -140,9 +115,6 @@ def test_the_column_holds_a_coordinate_and_nothing_else() -> None:
         coerce(((-33.8688), 151.2093))
     with pytest.raises(TypeError):
         coerce("POINT(151.2093 -33.8688)")
-
-
-# --- the two things that must not move with the OID ---------------------------
 
 
 def test_the_shape_token_is_name_derived_not_oid_derived() -> None:
@@ -182,18 +154,11 @@ def test_two_srids_fingerprint_differently() -> None:
 
 
 def test_geography_declares_its_own_codec_kind() -> None:
-    """A kind of its own, not `vector`'s: the wire formats share nothing.
-
-    A codec that reused a vector kind would decode EWKB as a list of floats and
-    return a plausible answer rather than raising, which is the failure the
-    kind table exists to make impossible.
-    """
     from wreath.orm import types as orm_types
 
     assert orm_types._EXTENSION_KINDS["geography"] == EXT_KIND_GEOGRAPHY
     assert EXT_KIND_GEOGRAPHY not in {
-        orm_types._EXTENSION_KINDS[name]
-        for name in ("vector", "halfvec", "sparsevec")
+        orm_types._EXTENSION_KINDS[name] for name in ("vector", "halfvec", "sparsevec")
     }
 
 
@@ -203,8 +168,6 @@ def test_every_declared_geography_is_discoverable() -> None:
     assert all(isinstance(item, ExtensionType) for item in declared)
 
 
-# --- the wire form ------------------------------------------------------------
-#
 # `to_wire` produces EWKB hex, which is what `geography_in` reads on the text
 # parameter path *and* what un-hexing gives `geography_recv` on the binary one.
 # One spelling serves both, exactly as `Point`'s `(x,y)` literal does -- and for
@@ -223,12 +186,6 @@ def test_the_wire_form_is_ewkb_hex_with_the_srid_flag() -> None:
 
 
 def test_the_wire_form_puts_longitude_first() -> None:
-    """The convention PostGIS, GeoJSON and PostgreSQL's own `point` all share.
-
-    `Coordinate` refuses a positional pair precisely because this order is the
-    opposite of the one people say aloud, so this is the assertion that catches
-    a transposition at the one boundary where it cannot be seen by reading.
-    """
     raw = bytes.fromhex(_bound().to_wire(SYDNEY))
     x, y = struct.unpack_from("<dd", raw, 9)
     assert x == pytest.approx(SYDNEY.lon)
@@ -241,19 +198,16 @@ def test_the_wire_form_round_trips_through_from_wire() -> None:
 
 
 def test_from_wire_reads_the_binary_form_the_prepared_path_returns() -> None:
-    """A prepared read hands back EWKB bytes, not the hex text form."""
     geography = _bound()
     assert geography.from_wire(bytes.fromhex(geography.to_wire(SYDNEY))) == SYDNEY
 
 
 def test_from_wire_reads_a_big_endian_ewkb() -> None:
-    """Byte order is a field, not an assumption; a peer may write either."""
     payload = struct.pack(">BIIdd", 0, 0x20000001, 4326, SYDNEY.lon, SYDNEY.lat)
     assert Geography().from_wire(payload) == SYDNEY
 
 
 def test_from_wire_reads_an_ewkb_with_no_srid() -> None:
-    """`geography` defaults to 4326, and a WKB without the flag is legal input."""
     payload = struct.pack("<BIdd", 1, 1, SYDNEY.lon, SYDNEY.lat)
     assert Geography().from_wire(payload) == SYDNEY
 
@@ -262,8 +216,8 @@ def test_from_wire_reads_an_ewkb_with_no_srid() -> None:
     "payload",
     [
         b"",
-        b"\x02" + b"\x00" * 24,                                  # bad byte order
-        struct.pack("<BIIdd", 1, 0x20000003, 4326, 1.0, 2.0),    # a polygon
+        b"\x02" + b"\x00" * 24,  # bad byte order
+        struct.pack("<BIIdd", 1, 0x20000003, 4326, 1.0, 2.0),  # a polygon
         struct.pack("<BIIdd", 1, 0x20000001, 4326, 1.0, 2.0)[:20],
         b"not hex at all",
     ],
@@ -277,9 +231,6 @@ def test_an_unreadable_wire_value_is_refused_rather_than_guessed(payload: Any) -
 # same wall `point` hit one type further out -- is held byte-for-byte by
 # `tests/orm/test_geospatial_codec_parity.py`, next to `point`'s. Driving it for
 # real is `test_a_coordinate_round_trips_through_a_geography_column` below.
-
-
-# --- startup ------------------------------------------------------------------
 
 
 class _NoExtensionConnection:
@@ -329,9 +280,6 @@ async def test_binding_a_value_before_resolution_names_the_call() -> None:
     assert caught.value.extension == "postgis"
 
 
-# --- against a real PostGIS ----------------------------------------------------
-
-
 @pytest.mark.skipif(_DSN is None, reason="set WREATH_TEST_POSTGRES_DSN for PostGIS tests")
 @pytest.mark.asyncio
 @pytest.mark.database
@@ -358,12 +306,6 @@ async def test_the_real_oid_is_read_from_the_catalog() -> None:
 @pytest.mark.asyncio
 @pytest.mark.database
 async def test_a_coordinate_round_trips_through_a_geography_column() -> None:
-    """Write a Coordinate, read a Coordinate, through the binary parameter path.
-
-    This is the test that decides whether the wire codec needed a change: a
-    `geography` OID the encoder does not enumerate raises rather than falling
-    back, so an unhandled type fails here and nowhere earlier.
-    """
     from wreath.orm.types import _unbind_extension_oids
 
     db = await connect(_DSN)

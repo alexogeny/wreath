@@ -1,5 +1,3 @@
-"""Broader migration object coverage: composite unique and multi-column indexes."""
-
 from __future__ import annotations
 
 import importlib
@@ -44,26 +42,20 @@ def _statements(tape: bytes) -> list[tuple[int, str]]:
 def _forward_sql() -> list[str]:
     registry = Registry(Database(), [Membership], validate_schema="off")
     empty = b"WMD1\x01\x00\x00\x00\x00\x00\x00\x00"
-    plan = native._migration_plan_descriptors(
-        migrations._registry_descriptor(registry), empty
-    )
+    plan = native._migration_plan_descriptors(migrations._registry_descriptor(registry), empty)
     return [sql for _flags, sql in _statements(native._migration_render_sql(plan))]
 
 
 def test_composite_unique_and_indexes_render_without_manual_operations() -> None:
     registry = Registry(Database(), [Membership], validate_schema="off")
     empty = b"WMD1\x01\x00\x00\x00\x00\x00\x00\x00"
-    plan = native._migration_plan_descriptors(
-        migrations._registry_descriptor(registry), empty
-    )
+    plan = native._migration_plan_descriptors(migrations._registry_descriptor(registry), empty)
     statements = _statements(native._migration_render_sql(plan))
     assert not any(flags & 2 for flags, _sql in statements)  # nothing MANUAL
 
 
 def test_composite_unique_names_both_columns() -> None:
-    assert any(
-        'unique ("org_id", "user_id")' in sql for sql in _forward_sql()
-    )
+    assert any('unique ("org_id", "user_id")' in sql for sql in _forward_sql())
 
 
 def test_multi_column_and_unique_indexes_render() -> None:
@@ -75,9 +67,7 @@ def test_multi_column_and_unique_indexes_render() -> None:
 def test_downgrade_drops_composite_constraints_and_indexes() -> None:
     registry = Registry(Database(), [Membership], validate_schema="off")
     empty = b"WMD1\x01\x00\x00\x00\x00\x00\x00\x00"
-    plan = native._migration_plan_descriptors(
-        migrations._registry_descriptor(registry), empty
-    )
+    plan = native._migration_plan_descriptors(migrations._registry_descriptor(registry), empty)
     reverse = _statements(native._migration_render_sql(native._migration_reverse_plan(plan)))
     text = "\n".join(sql for _flags, sql in reverse)
     assert "drop constraint" in text  # unique + pk
@@ -114,9 +104,7 @@ class Entry(Model, table="entries", schema="app"):
 def _entry_fk_sql() -> list[str]:
     registry = Registry(Database(), [Account, Entry], validate_schema="off")
     empty = b"WMD1\x01\x00\x00\x00\x00\x00\x00\x00"
-    plan = native._migration_plan_descriptors(
-        migrations._registry_descriptor(registry), empty
-    )
+    plan = native._migration_plan_descriptors(migrations._registry_descriptor(registry), empty)
     return [
         sql
         for _flags, sql in _statements(native._migration_render_sql(plan))
@@ -142,9 +130,7 @@ def test_plain_foreign_key_has_no_action_clause() -> None:
 def test_foreign_key_actions_have_no_manual_operations_and_reverse() -> None:
     registry = Registry(Database(), [Account, Entry], validate_schema="off")
     empty = b"WMD1\x01\x00\x00\x00\x00\x00\x00\x00"
-    plan = native._migration_plan_descriptors(
-        migrations._registry_descriptor(registry), empty
-    )
+    plan = native._migration_plan_descriptors(migrations._registry_descriptor(registry), empty)
     forward = _statements(native._migration_render_sql(plan))
     assert not any(flags & 2 for flags, _sql in forward)
     reverse = _statements(native._migration_render_sql(native._migration_reverse_plan(plan)))
@@ -197,14 +183,11 @@ def test_table_constraints_change_the_deployment_fingerprint() -> None:
     assert plain.deployment_fingerprint != constrained.deployment_fingerprint
 
 
-# --- every declarable type renders ------------------------------------------
-#
 # `render_column_type` maps a built-in's OID to its SQL spelling through a switch
 # in `migration_sql.c`, and a type missing from that switch does not fail loudly:
 # it becomes an empty MANUAL statement, so `generate` silently omits the column
 # and then emits the indexes and constraints that reference it. Applying such a
 # plan fails on a column that was never added.
-#
 # Three types were missing when this test was written -- `character varying`,
 # `json`, and `bit(n)` -- and `Varchar` is not an obscure corner. The point of
 # enumerating rather than adding three cases is that the next type added to
@@ -220,9 +203,7 @@ def _renders_as(pg_type: Any) -> str:
 
     registry = Registry(Database(), [Subject], validate_schema="off")
     empty = b"WMD1\x01\x00\x00\x00\x00\x00\x00\x00"
-    plan = native._migration_plan_descriptors(
-        migrations._registry_descriptor(registry), empty
-    )
+    plan = native._migration_plan_descriptors(migrations._registry_descriptor(registry), empty)
     emitted = _statements(native._migration_render_sql(plan))
     assert not any(flags & 2 for flags, _sql in emitted), (
         f"{pg_type.sql!r} produced a MANUAL statement; its OID {pg_type.oid} is "
@@ -265,11 +246,6 @@ def test_every_declarable_builtin_type_renders_rather_than_going_manual(
 
 
 def test_the_enumeration_actually_found_the_types() -> None:
-    """A parametrised suite over an empty list passes while testing nothing.
-
-    The list is built by reflection over `__all__`, so a rename that empties it
-    would turn every arm above into zero arms silently.
-    """
     names = [name for name, _type in _declarable_builtin_types()]
     assert len(names) > 15, names
     for expected in ("Varchar", "Json", "Bit(8)", "Numeric", "Text"):

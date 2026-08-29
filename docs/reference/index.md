@@ -1,38 +1,125 @@
 ---
-description: How to use Wreath's generated API reference and where each public module lives.
-keywords: API docs, class reference, function reference, module index
+description: A compact map of Wreath's public modules, grouped by the problem each one owns.
+keywords: API reference modules capabilities map Wreath surface
+boost: 1.3
 ---
 
-# API reference
+```hero
+eyebrow: Reference · the public surface
+title: Find the owner of the problem.
+lede: Wreath modules are named after the job they do. Start from the boundary in your system, then follow the owning module into its API.
+signal: dependency-free core
+signal: explicit ownership
+signal: startup compilation
+action: Build the first route -> ../start/index.md
+action: Choose a story -> ../stories/index.md
+```
 
-This section answers exact questions about public Python: signatures, fields,
-return values, and exceptions. Its pages are generated from the source Wreath
-imports, so a public symbol and its reference share one owner.
+## Request path
 
-Use the [documentation map](../map.md) or a guide when your question is “which
-part should own this?” Use this reference when you already know the module.
-
-## The shortest index
-
-| You are looking for | Module reference |
+| Need | Module |
 |---|---|
-| application and routing | [`wreath.app`](app.md), [`wreath.router`](router.md) |
-| request input and output | [`wreath.request`](request.md), [`wreath.response`](response.md), [`wreath.binding`](binding.md) |
-| reusable data contracts | [`wreath.contracts`](contracts.md), [`wreath.protobuf`](protobuf.md) |
-| identity and policy | [`wreath.auth`](auth.md), [`wreath.authorization`](authorization.md), [`wreath.tokens`](tokens.md) |
-| PostgreSQL and models | [`wreath.postgres`](postgres.md), [`wreath.orm`](orm.md), [`wreath.migrations`](migrations.md) |
-| queries and lists | [`wreath.queries`](queries.md), [`wreath.pagination`](pagination.md), [`wreath.series`](series.md) |
-| durable work | [`wreath.jobs`](jobs.md), [`wreath.messaging`](messaging.md), [`wreath.workflows`](workflows.md) |
-| outbound boundaries | [`wreath.http_client`](http_client.md), [`wreath.objects`](objects.md), [`wreath.email`](email.md), [`wreath.provenance`](provenance.md) |
-| runtime and operations | [`wreath.server`](server.md), [`wreath.telemetry`](telemetry.md), [`wreath.logging`](logging.md), [`wreath.testing`](testing.md) |
+| application and lifespan | `wreath.app` |
+| routing | `wreath.router` |
+| typed inputs and dependencies | `wreath.binding` |
+| request and response objects | `wreath.request`, `wreath.response` |
+| middleware and first-class policy | `wreath.middleware`, `wreath.policy` |
+| OpenAPI and client generation | `wreath.openapi`, `wreath.typegen` |
+| templates and static assets | `wreath.templates`, `wreath.staticfiles` |
 
-The sidebar contains every public module. `Ctrl K` searches symbol names and
-docstrings across all of them.
+## Identity, policy and tenancy
 
-## Reference rules
+| Need | Module |
+|---|---|
+| identities and authentication | `wreath.auth` |
+| Cedar authorization | `wreath.authorization` |
+| users, sessions and second factors | `wreath.users`, `wreath.session_store` |
+| organisations and membership | `wreath.organizations` |
+| tenant resolution and isolation | `wreath.tenancy` |
+| SAML, OIDC and provider flows | `wreath.saml`, `wreath.sso` |
+| SCIM users and groups | `wreath.organizations.scim_router` |
+| quotas and entitlements | `wreath.quota` |
+| platform support operations | `wreath.platform` |
 
-- A module documents only names in its public surface.
-- Examples are checked against the imported objects during the docs build.
-- A new public module must appear in the repository map and render here.
-- Named but unfinished APIs do not get empty reference pages; they live in the
-  [roadmap](roadmap.md) until they exist.
+## Data and analysis
+
+| Need | Module |
+|---|---|
+| PostgreSQL protocol and pooling | `wreath.postgres` |
+| models, queries and sessions | `wreath.orm` |
+| schema change | `wreath.migrations` |
+| safe SQL and stores | `wreath.sql`, `wreath.store` |
+| time zones, buckets and recurrence | `wreath.temporal` |
+| aggregation and chart projection | `wreath.series` |
+| geographic values and predicates | `wreath.geospatial` |
+| bounded client synchronization | `wreath.sync` |
+| object storage and resumable uploads | `wreath.objects` |
+| artifact attestation | `wreath.provenance` |
+
+## Realtime and durable work
+
+| Lifetime | Module |
+|---|---|
+| one WebSocket connection | `wreath.websocket` |
+| a live room | `wreath.rooms` |
+| cross-worker messages | `wreath.messaging` |
+| resumable output | `wreath.streams` |
+| visible task status | `wreath.progress` |
+| a durable attempt | `wreath.jobs` |
+| several durable steps | `wreath.workflows` |
+| one live owner of an entity | `wreath.entity` |
+| user-facing delivery | `wreath.notifications` |
+
+## AI and protocols
+
+| Need | Module |
+|---|---|
+| MCP tools, resources and prompts | `wreath.mcp` |
+| GraphQL | `wreath.graphql` |
+| gRPC | `wreath.grpc` |
+| Protocol Buffers | `wreath.protobuf` |
+| OAuth authorization server | `wreath.oauth` |
+| HTTP message signatures | `wreath.signatures` |
+
+## Boundaries and delivery
+
+| Need | Module |
+|---|---|
+| outbound HTTP | `wreath.http_client` |
+| service-to-service calls | `wreath.service_client` |
+| verified inbound and durable outbound webhooks | `wreath.webhooks` |
+| native reverse proxy | `wreath.edge` |
+| response caching and purge tags | `wreath.response_cache` |
+| email and push delivery | `wreath.email`, `wreath.notifications` |
+
+## Operations and evidence
+
+| Need | Module |
+|---|---|
+| native HTTP server | `wreath.server` |
+| health and readiness | `wreath.health` |
+| logs, metrics and traces | `wreath.logging`, `wreath.metrics`, `wreath.telemetry` |
+| bounded request evidence | `wreath.recording` |
+| deterministic reproduction | `wreath.replay`, `wreath.simulation` |
+| application testing | `wreath.testing` |
+| startup hardening and diagnostics | `wreath.hardening`, `wreath.doctor` |
+
+## Complete member reference
+
+Every page below is generated from the installed Wreath objects during a strict docs
+build. A renamed class, broken import or stale target fails the build instead of
+quietly publishing fictional API documentation.
+
+- [Application and HTTP](application.md)
+- [First-class policy](policy.md)
+- [Identity and tenancy](identity.md)
+- [Data and analysis](data.md)
+- [Realtime and durable work](realtime.md)
+- [Protocols and delivery](protocols.md)
+- [MCP](mcp.md)
+- [Operations](operations.md)
+- [Tooling](tooling.md)
+
+For task-oriented examples, begin with the [guides](../guides/http-api.md). The
+reference pages answer “what exactly ships?”; the guides answer “how do these parts
+fit together safely?”

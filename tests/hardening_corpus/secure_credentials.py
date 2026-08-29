@@ -1,4 +1,3 @@
-"""a06, a07 and a08 written correctly. Nothing here may produce a finding."""
 from __future__ import annotations
 
 import hashlib

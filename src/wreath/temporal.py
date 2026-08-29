@@ -153,8 +153,6 @@ class Instant(datetime.datetime):
             cls, year, month, day, hour, minute, second, microsecond, tzinfo, fold=fold
         )
 
-    # -- construction --------------------------------------------------------
-    #
     # There is deliberately no `Instant.now()`: `datetime.now` is a classmethod
     # with a different signature, and overriding it incompatibly is the kind of
     # thing that reads fine and then surprises a caller who passed a positional
@@ -213,8 +211,6 @@ class Instant(datetime.datetime):
             fold=value.fold,
         )
 
-    # -- reading -------------------------------------------------------------
-
     def iso(self) -> str:
         """The ISO-8601 form, with an explicit offset.
 
@@ -255,8 +251,6 @@ def parse(text: str) -> Instant:
     return Instant.parse(text)
 
 
-# --- buckets ---------------------------------------------------------------------
-#
 # Bucketing is a timezone problem before it is an aggregation problem: "daily"
 # means daily *where the reader is*. A bucket therefore has to say the same
 # thing in three places at once -- the SQL that assigns a row to a bucket, the
@@ -466,9 +460,7 @@ BUCKETS: dict[str, Bucket] = {
 }
 _SPINE_UNITS = {
     name: unit
-    for unit, name in enumerate(
-        ("minute", "hour", "day", "week", "month", "quarter", "year")
-    )
+    for unit, name in enumerate(("minute", "hour", "day", "week", "month", "quarter", "year"))
 }
 
 
@@ -497,9 +489,7 @@ def spine(
     DST change. The native operation takes only temporal data and a unit index;
     it knows nothing about a series declaration, model, connection or SQL.
     """
-    start_instant, end_instant, unit, tz = _spine_args(
-        start, end, bucket=bucket, in_zone=in_zone
-    )
+    start_instant, end_instant, unit, tz = _spine_args(start, end, bucket=bucket, in_zone=in_zone)
     return _core.series_spine(start_instant, end_instant, unit, tz, _DATETIME_CAPI)
 
 
@@ -516,12 +506,8 @@ def spine_length(
     when only cardinality crosses the boundary, such as sizing a chart or
     enforcing a result limit.
     """
-    start_instant, end_instant, unit, tz = _spine_args(
-        start, end, bucket=bucket, in_zone=in_zone
-    )
-    return _core.series_spine_length(
-        start_instant, end_instant, unit, tz, _DATETIME_CAPI
-    )
+    start_instant, end_instant, unit, tz = _spine_args(start, end, bucket=bucket, in_zone=in_zone)
+    return _core.series_spine_length(start_instant, end_instant, unit, tz, _DATETIME_CAPI)
 
 
 def _spine_args(
@@ -573,12 +559,8 @@ def spine_lengths(
     start_instant = start if type(start) is Instant else Instant.of(start)
     end_instant = end if type(end) is Instant else Instant.of(end)
     tz = _tzinfo(in_zone)
-    return _core.series_spine_lengths(
-        start_instant, end_instant, tuple(units), tz, _DATETIME_CAPI
-    )
+    return _core.series_spine_lengths(start_instant, end_instant, tuple(units), tz, _DATETIME_CAPI)
 
-
-# --- durations -------------------------------------------------------------------
 
 # ISO-8601 durations, restricted to the units that are a fixed number of
 # seconds. Years and months are deliberately absent: "P1M" is 28 to 31 days
@@ -643,9 +625,6 @@ def format_duration(value: datetime.timedelta) -> str:
     if not isinstance(value, datetime.timedelta):
         raise TemporalError(f"expected a timedelta, got {type(value).__name__}")
     return _core.format_duration_parts(value.days, value.seconds, value.microseconds)
-
-
-# --- durations as a declared type ----------------------------------------------------
 
 
 class Duration(datetime.timedelta):
@@ -745,9 +724,6 @@ def weeks(value: float) -> Duration:
     return Duration(weeks=value)
 
 
-# --- recurrence ----------------------------------------------------------------------
-
-
 class RecurrenceError(TemporalError):
     """A recurrence could not be understood, or names something not supported.
 
@@ -827,14 +803,12 @@ class Recurrence:
             ),
         )
 
-    # -- construction --------------------------------------------------------
-
     @classmethod
     def cron(cls, expression: str, *, tz: str | datetime.tzinfo = UTC) -> Recurrence:
         """A five-field cron expression, read on `tz`'s wall clock.
 
-        `tz` defaults to UTC, so an existing expression means exactly what it
-        meant before this type existed.
+        `tz` defaults to UTC. Pass a zone name or `tzinfo` when wall-clock
+        recurrence must follow another zone.
         """
         if not isinstance(expression, str):
             raise RecurrenceError(f"expected a cron expression, got {type(expression).__name__}")
@@ -903,8 +877,6 @@ class Recurrence:
             tz=_tzinfo(tz),
             text=text,
         )
-
-    # -- reading -------------------------------------------------------------
 
     def matches_at(self, moment: datetime.datetime) -> bool:
         """Whether `moment`, read on this recurrence's zone, is a firing time.
@@ -1181,9 +1153,6 @@ def _calendar_fields(
     )
 
 
-# --- the relative formatter ----------------------------------------------------------
-
-
 @dataclass(frozen=True, slots=True)
 class _Locale:
     """One language's phrasing for a relative time.
@@ -1304,9 +1273,6 @@ def _counted(seconds: float, table: _Locale) -> str:
     return table.count(round(seconds / 31557600), "year")
 
 
-# --- rendering for the wire ------------------------------------------------------------
-
-
 def format_iso(value: Any) -> str:
     """The ISO-8601 form of a date, time, datetime, or duration.
 
@@ -1372,8 +1338,6 @@ def jsonable(value: Any) -> Any:
     return value
 
 
-# -- protobuf: the well-known Timestamp -------------------------------------
-#
 # `google.protobuf.Timestamp` is the interchange shape for an instant, and it is
 # what a peer in another language expects on the wire. Declaring it here rather
 # than in `wreath.protobuf` keeps the direction of dependency the same as every

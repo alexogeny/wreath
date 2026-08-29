@@ -1,31 +1,3 @@
-"""Adversarial tests for three controls that held on one wiring and not another.
-
-Every test here was written as an *attack*, watched fail in a scratchpad shadow
-of the tree before the fix, and sits beside a control that passes in **both**
-trees -- so a suite that has simply broken everywhere cannot be mistaken for one
-that caught something (a check that has nothing to check, proved in a scratchpad).
-
-Three defects, all the same shape and none of them the same code:
-
-* **A password reset that ends no sessions and reports success.**
-  `PostgresSessionStore.delete_for` hardcoded `data -> 'principal'`, so a
-  deployment on `user_router(session_key=...)` got a reset that matched no row.
-  Ending the other sessions is the documented point of passing `sessions=`, and
-  it silently did nothing.
-* **A refusal with nothing to check.** `Wreath._reject_session_after_authentication`
-  scanned `add_middleware()` only, so `Router(middleware=[SessionPolicy(...)])`
-  walked past it: sign-in answered 200 and the protected route answered 401 to
-  the cookie sign-in had just issued.
-* **One of three OIDC endpoints not origin-pinned.** `jwks_uri` and
-  `token_endpoint` go through `_same_origin_path`; `authorization_endpoint` was
-  published verbatim from the discovery document and redirected the caller's
-  browser wherever it said.
-
-Assertions here are written as `raise AssertionError`, not `assert`, because
-`python -O` deletes the latter and this file is meant to carry weight in that
-mode too (AGENTS.md).
-"""
-
 from __future__ import annotations
 
 import json
@@ -62,8 +34,6 @@ def _cookie(response: Any) -> str:
     return value.split(";", 1)[0] if value else ""
 
 
-# --- 1. the refusal that scanned only application middleware ------------------
-#
 # `SessionIdentityBackend` reads `request.state.session` during authentication.
 # `SessionPolicy` registered anywhere on the *route* pipeline publishes it
 # afterwards, so the backend is asked for an identity before the session exists.
@@ -146,13 +116,6 @@ async def _scope_outcome(scope: str) -> tuple[Any, Any]:
 async def test_route_scoped_session_middleware_never_401s_a_cookie_it_just_issued(
     scope: str,
 ) -> None:
-    """The attack: publish the session on a router instead of the application.
-
-    Parametrised over every route-scoped registration rather than pinned to the
-    router one, because the defect *is* that one spelling was examined and the
-    others were not -- a test that drove only `Router(middleware=...)` would go
-    green again the moment somebody added `@app.get(middleware=...)`.
-    """
     outcome = await _scope_outcome(scope)
 
     _require(
@@ -167,34 +130,18 @@ async def test_route_scoped_session_middleware_never_401s_a_cookie_it_just_issue
 
 
 async def test_the_application_scoped_registration_is_still_refused() -> None:
-    """Control: the wiring that was already refused must stay refused.
-
-    Passes in both trees. Widening a scan is exactly the change that can lose
-    the case it started from.
-    """
     outcome = await _scope_outcome("app")
 
     _require(outcome[0] == "refused", f"add_middleware() stopped being refused: {outcome}")
 
 
 async def test_the_correct_global_registration_admits_a_valid_cookie() -> None:
-    """Control: the supported wiring works, end to end.
-
-    Passes in both trees. A refusal that fired on a correctly wired application
-    would be a lockout, not a fix -- and a refusal widened until it refuses
-    everything satisfies every attack above.
-    """
     outcome = await _scope_outcome("global")
 
     _require(outcome == (200, 200), f"the global wiring did not sign anybody in: {outcome}")
 
 
 async def test_a_router_middleware_that_publishes_no_session_is_not_refused() -> None:
-    """Control: the refusal is about publishing a session, not about routers.
-
-    Passes in both trees. The scan now walks every route's middleware, so an
-    ordinary router middleware is newly in front of it for the first time.
-    """
     class _Noop:
         async def before(self, request: Any) -> None:
             return None
@@ -210,11 +157,10 @@ async def test_a_router_middleware_that_publishes_no_session_is_not_refused() ->
         return {"id": request.identity.id}
 
     app.include_router(routes)
-    app._compile_routes()   # must not raise
+    app._compile_routes()  # must not raise
 
 
 async def test_a_backend_that_reads_no_session_is_not_refused() -> None:
-    """Standard session policy cannot be smuggled onto a custom hook tape."""
     app = Wreath()
 
     routes = Router(middleware=[SessionPolicy(secret=SECRET, secure=False)])
@@ -232,9 +178,6 @@ async def test_a_backend_that_reads_no_session_is_not_refused() -> None:
             _require(fragment in message, f"the refusal never names {fragment!r}: {message}")
     else:
         raise AssertionError("SessionPolicy was compiled onto a middleware tape")
-
-
-# --- 2. a password reset that enumerated the wrong session key ----------------
 
 
 class _KeyedSessionStore:
@@ -263,8 +206,7 @@ class _KeyedSessionStore:
         key = self._session_key if session_key is None else session_key
         self.enumerated.append(key)
         gone = [
-            sid for sid, data in self.rows.items()
-            if (data.get(key) or {}).get("sub") == subject
+            sid for sid, data in self.rows.items() if (data.get(key) or {}).get("sub") == subject
         ]
         for sid in gone:
             del self.rows[sid]
@@ -280,7 +222,7 @@ class _LegacySessionStore(_KeyedSessionStore):
     wiring never hands it an argument it cannot take.
     """
 
-    async def delete_for(self, subject: str) -> int:      # type: ignore[override]
+    async def delete_for(self, subject: str) -> int:  # type: ignore[override]
         return await super().delete_for(subject)
 
 
@@ -292,9 +234,7 @@ def _reset_app(store: Any, *, session_key: str) -> tuple[Wreath, Any]:
     app.configure_http_policy(
         HttpPolicy(session=SessionPolicy(secret=SECRET, secure=False, store=store))
     )
-    app.include_router(
-        user_router(users, secret=SECRET, session_key=session_key, sessions=store)
-    )
+    app.include_router(user_router(users, secret=SECRET, session_key=session_key, sessions=store))
     return app, users
 
 
@@ -302,9 +242,7 @@ async def _reset_token(users: Any, email: str) -> str:
     from wreath._userkit import fingerprint, sign_token
 
     user = await users.get_by_email(email)
-    return sign_token(
-        SECRET, "reset", user.id, ttl=3600, bound=fingerprint(user.hashed_password)
-    )
+    return sign_token(SECRET, "reset", user.id, ttl=3600, bound=fingerprint(user.hashed_password))
 
 
 async def _sign_in_then_reset(store: Any, *, session_key: str) -> dict[str, Any]:
@@ -330,14 +268,6 @@ async def _sign_in_then_reset(store: Any, *, session_key: str) -> dict[str, Any]
 
 
 async def test_a_reset_under_a_renamed_session_key_actually_ends_the_session() -> None:
-    """The attack: rename the session key and watch the reset end nothing.
-
-    A user resets a password *because* somebody else is holding a session. The
-    reset answered `password_reset`, and the intruder's row was still there --
-    the control reported success while providing none. The router is the half
-    that has to pass the key: a store that can be told and never is would be the
-    same defect wearing a parameter.
-    """
     store = _KeyedSessionStore(session_key="principal")
 
     result = await _sign_in_then_reset(store, session_key="account")
@@ -351,11 +281,6 @@ async def test_a_reset_under_a_renamed_session_key_actually_ends_the_session() -
 
 
 async def test_a_reset_on_the_default_key_still_ends_the_session() -> None:
-    """Control: the default wiring is unchanged.
-
-    Passes in both trees, and is the reason "everything is red" is not evidence
-    for the test above.
-    """
     store = _KeyedSessionStore()
 
     result = await _sign_in_then_reset(store, session_key="principal")
@@ -365,12 +290,6 @@ async def test_a_reset_on_the_default_key_still_ends_the_session() -> None:
 
 
 async def test_a_store_from_before_the_second_parameter_still_works() -> None:
-    """Control: the default key never hands `delete_for` an argument it lacks.
-
-    Passes in both trees. `delete_for` is discovered with `getattr` rather than
-    declared on the `SessionStore` protocol, so anybody may have written one --
-    and always passing the key would turn every such reset into a 500.
-    """
     store = _LegacySessionStore()
 
     result = await _sign_in_then_reset(store, session_key="principal")
@@ -380,10 +299,6 @@ async def test_a_store_from_before_the_second_parameter_still_works() -> None:
 
 
 async def test_a_store_that_cannot_enumerate_at_all_still_resets() -> None:
-    """Control: an optional capability stays optional.
-
-    Passes in both trees.
-    """
     from wreath.users import InMemoryUserStore, hash_password, reset_password_endpoint
 
     users = InMemoryUserStore()
@@ -409,9 +324,6 @@ async def test_a_store_that_cannot_enumerate_at_all_still_resets() -> None:
     _require(done is True, "a store with no delete_for failed the reset")
 
 
-# --- 2b. the shipped PostgreSQL store ----------------------------------------
-
-
 class _FakeStatement:
     def __init__(self) -> None:
         self.calls: list[tuple[Any, ...]] = []
@@ -432,12 +344,6 @@ class _FakeDatabase:
 
 
 async def test_the_postgres_store_binds_the_session_key_it_was_given() -> None:
-    """The attack, one layer down: read the SQL and the parameters.
-
-    The key must not be interpolated into the statement text either -- one
-    prepared statement has to serve every key, and an application-supplied
-    string must never reach SQL.
-    """
     from wreath.session_store import PostgresSessionStore
 
     database = _FakeDatabase()
@@ -457,13 +363,6 @@ async def test_the_postgres_store_binds_the_session_key_it_was_given() -> None:
 
 
 async def test_the_postgres_store_defaults_to_principal() -> None:
-    """The default is `principal`, so an existing deployment is untouched.
-
-    Not a both-trees control -- it reads the new parameter list, so it is red in
-    the shadow for the trivial reason. It is here because "tell the store the
-    key" is one keystroke away from "make every deployment name the key", and
-    that would be a silent revocation of every live session at upgrade.
-    """
     from wreath.session_store import PostgresSessionStore
 
     database = _FakeDatabase()
@@ -498,15 +397,6 @@ def _table() -> str:
 @requires_db
 @pytest.mark.network
 async def test_a_real_postgres_deletes_by_the_bound_session_key() -> None:
-    """The same statement against a real server, because a fake cannot type it.
-
-    `data -> $2` is ambiguous between the text and the integer operator until
-    something resolves it, and parameter type inference is precisely what a
-    double models badly -- a double is never more capable than the real thing.
-    This is also the assertion that
-    the *rows* go: a fake that returns "DELETE 2" proves the parsing and nothing
-    about the predicate.
-    """
     from wreath.postgres import Database
     from wreath.session_store import PostgresSessionStore
 
@@ -568,9 +458,6 @@ async def test_a_real_postgres_deletes_by_the_bound_session_key() -> None:
         await database.stop()
 
 
-# --- 3. the OIDC endpoint that was not origin-pinned --------------------------
-
-
 class _Response:
     __slots__ = ("body", "status")
 
@@ -619,9 +506,7 @@ def _document(**overrides: Any) -> dict[str, Any]:
 def _provider(document: dict[str, Any]) -> Any:
     from wreath._auth.oidc import OidcProvider
 
-    return OidcProvider(
-        "idp", issuer=_ISSUER, audience=None, http_client=_FakeIdp(document)
-    )
+    return OidcProvider("idp", issuer=_ISSUER, audience=None, http_client=_FakeIdp(document))
 
 
 async def _discover(provider: Any) -> str | None:
@@ -632,16 +517,7 @@ async def _discover(provider: Any) -> str | None:
     return None
 
 
-async def test_a_hostile_discovery_document_cannot_move_the_authorization_endpoint(
-) -> None:
-    """The attack: name someone else's host as the place to send the browser.
-
-    `jwks_uri` and `token_endpoint` are both pinned to the issuer origin; this
-    one was copied out of the document and handed to `RedirectResponse`, so a
-    tampered or compromised discovery document pointed every sign-in at an
-    attacker's authorization page -- with this application's `client_id`,
-    `state` and `nonce` on the query string.
-    """
+async def test_a_hostile_discovery_document_cannot_move_the_authorization_endpoint() -> None:
     provider = _provider(_document(authorization_endpoint="https://evil.test/authorize"))
 
     refusal = await _discover(provider)
@@ -655,14 +531,6 @@ async def test_a_hostile_discovery_document_cannot_move_the_authorization_endpoi
 
 
 async def test_a_same_origin_authorization_endpoint_stays_an_absolute_url() -> None:
-    """Control, and the guard on the fix: the pin must not reduce it to a path.
-
-    Passes in both trees. `authorization_endpoint` is a browser redirect target,
-    not something this process fetches, so running it through
-    `_same_origin_path` the way the other two go would have sent every caller to
-    *this* application's `/authorize`. That mistake also satisfies the attack
-    above, which is why this control exists.
-    """
     provider = _provider(_document())
 
     _require(await _discover(provider) is None, "a well-formed document was refused")
@@ -673,11 +541,6 @@ async def test_a_same_origin_authorization_endpoint_stays_an_absolute_url() -> N
 
 
 async def test_a_provider_that_publishes_no_authorization_endpoint_discovers() -> None:
-    """Control: the endpoint is optional and a resource server has none.
-
-    Passes in both trees. A pin that refused `None` would break every
-    provider used only for bearer verification.
-    """
     document = _document()
     del document["authorization_endpoint"]
     provider = _provider(document)
@@ -690,12 +553,6 @@ async def test_a_provider_that_publishes_no_authorization_endpoint_discovers() -
 
 
 async def test_the_other_two_endpoints_are_still_pinned() -> None:
-    """Control: widening the pin did not lose the cases it started from.
-
-    Passes in both trees. `_same_origin_path` was refactored onto the same
-    origin comparison, and a refactor that dropped the check would leave the
-    attack above green while reopening the two holes that were already closed.
-    """
     refusal = await _discover(_provider(_document(jwks_uri="https://evil.test/jwks")))
     _require(refusal is not None, "an off-origin jwks_uri was accepted")
 

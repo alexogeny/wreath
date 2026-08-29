@@ -83,7 +83,7 @@ def _integer(value: Any, name: str, minimum: int, maximum: int | None = None) ->
         raise ValueError(f"query parameter {name!r} must be an integer")
     try:
         parsed = int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         raise ValueError(f"query parameter {name!r} must be an integer") from None
     if parsed < minimum or (maximum is not None and parsed > maximum):
         upper = f" and <= {maximum}" if maximum is not None else ""
@@ -115,10 +115,7 @@ async def _dashboard(
         raise ValueError("request Origin is not allowed")
     if _required_header(headers, "Authorization") != "Bearer holistic-user":
         raise ValueError("request bearer credential is invalid")
-    if (
-        is_authorized(_CEDAR_REQUEST, _CEDAR_POLICY, _CEDAR_ENTITIES).decision
-        != Decision.Allow
-    ):
+    if is_authorized(_CEDAR_REQUEST, _CEDAR_POLICY, _CEDAR_ENTITIES).decision != Decision.Allow:
         raise ValueError("request is forbidden by Cedar")
 
     payload = msgspec.json.decode(body, type=HolisticPayload)
@@ -152,9 +149,7 @@ async def _dashboard(
     occupied_cells, trail_speed = _geospatial_summary()
 
     vector_index = np.arange(128, dtype=np.float64)
-    embedding = np.sin((vector_index + account_id) / 17.0) * np.cos(
-        (vector_index + item_id) / 29.0
-    )
+    embedding = np.sin((vector_index + account_id) / 17.0) * np.cos((vector_index + item_id) / 29.0)
     scores = np.abs(embedding[:48])
     order = np.argsort(scores)
     if sort == "-score":
@@ -256,9 +251,7 @@ else:
     app = Application(show_error_details=os.environ.get("WREATH_BENCH_DEBUG") == "1")
 
     @app.router.post("/v1/holistic/{item_id}")
-    async def blacksheep_holistic(
-        request: Request, item_id: int
-    ) -> Response:
+    async def blacksheep_holistic(request: Request, item_id: int) -> Response:
         content = request.content
         if content is None:
             raise ValueError("request body is required")

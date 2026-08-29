@@ -22,10 +22,8 @@ References for constant factors:
 The point is not "wheels beat heaps" (they do); it is *which design is lowest
 CPU and memory pressure for the traffic our users and agents actually generate.*
 
-REFERENCE ONLY -- not in the default `wreath-bench` battery. This is the full
-five-way exploration behind the shipping decision; the production line is the
-focused `benchmarks/bench_timing_wheel.py`, and the narrative is the essay at
-docs/explorations/the-timer-that-wouldnt-settle.md. Run this by hand to
+REFERENCE ONLY -- not in the default `wreath-bench` battery. The production line is the
+focused `benchmarks/bench_timing_wheel.py`. Run this by hand to
 reproduce the shootout (`--lang native` for the fair field, `--lang python` for
 the algorithm-only view).
 """
@@ -189,8 +187,7 @@ class SizedWheel(HashedWheel):
     # (rounds==0): removes the per-rotation revisit cost of the hashed wheel.
 
     def __init__(self, resolution=0.001, max_delay=600.0):
-        super().__init__(resolution=resolution,
-                         slots=int(max_delay / resolution) + 2)
+        super().__init__(resolution=resolution, slots=int(max_delay / resolution) + 2)
 
 
 # =========================================================================
@@ -411,7 +408,7 @@ def native_arms():
     """All five designs, implemented natively in C (apples-to-apples)."""
     return {
         "n_heap": lambda: _NativeStore(_native.HeapStore()),
-        "n_hashed": lambda: _wheel(4096),   # the ship default: sized for the timeout range
+        "n_hashed": lambda: _wheel(4096),  # the ship default: sized for the timeout range
         "n_sized": lambda: _wheel(600_002),
         "n_hier": lambda: _NativeStore(_native.HierStore(resolution=0.001)),
         "n_fifo": lambda: _NativeStore(_native.FifoStore(quantum=0.001)),
@@ -459,6 +456,7 @@ def _median_ns(fn: Callable[[], int], work_units: int, trials: int) -> float:
 def w_fast_api(make, iters, trials):
     """Fast API: each request resets keep-alive(5s) + arms request(30s), then
     both are cancelled on completion. 2 durations, tiny pending set."""
+
     def run():
         arm = make()
         for _ in range(iters):
@@ -466,12 +464,14 @@ def w_fast_api(make, iters, trials):
             rq = arm.schedule(30.0)
             arm.cancel(rq)
             arm.cancel(ka)
+
     return _median_ns(run, iters, trials)  # ns per request (2 sched + 2 cancel)
 
 
 def w_idle_pool(make, k, iters, trials):
     """Idle connection pool: K conns each hold a keep-alive(5s) timer; each op a
     request lands on a random conn -> cancel+reschedule its timer (reset)."""
+
     def run():
         arm = make()
         pinned = [arm.schedule(5.0) for _ in range(k)]
@@ -481,12 +481,14 @@ def w_idle_pool(make, k, iters, trials):
             arm.cancel(pinned[i])
             pinned[i] = arm.schedule(5.0)
         del pinned
+
     return _median_ns(run, iters, trials)
 
 
 def w_agents_longpoll(make, iters, trials):
     """Agents / SSE / long-poll: far-future request timeouts (300s) + keepalive
     (60s); schedule then cancel. Stresses far-future handling (wheel rounds)."""
+
     def run():
         arm = make()
         for _ in range(iters):
@@ -494,6 +496,7 @@ def w_agents_longpoll(make, iters, trials):
             k = arm.schedule(60.0)
             arm.cancel(t)
             arm.cancel(k)
+
     return _median_ns(run, iters, trials)
 
 
@@ -510,16 +513,19 @@ def w_diverse_delays(make, iters, trials):
             h = arm.schedule(delays[j % len(delays)])
             arm.cancel(h)
             j += 1
+
     return _median_ns(run, iters, trials)
 
 
 def w_expiry_heavy(make, n, trials):
     """Timeouts actually fire: schedule N over a horizon, advance to expire all."""
+
     def run():
         arm = make()
         for i in range(n):
             arm.schedule((i % 500 + 1) * 0.001)
         arm.advance(1.0)
+
     return _median_ns(run, n, trials)
 
 
@@ -549,6 +555,7 @@ def w_mixed_realistic(make, iters, trials):
                 arm.schedule(0.002)
                 now += 0.001
                 arm.advance(now)
+
     return _median_ns(run, iters, trials)
 
 
@@ -568,27 +575,27 @@ def w_ultra_mixed(make, iters, trials):
         j = 0
         for _ in range(iters):
             r = rng.random()
-            if r < 0.40:                       # fast request: arm + cancel both
+            if r < 0.40:  # fast request: arm + cancel both
                 ka = arm.schedule(5.0)
                 rq = arm.schedule(30.0)
                 arm.cancel(rq)
                 arm.cancel(ka)
-            elif r < 0.60:                     # idle keep-alive reset
+            elif r < 0.60:  # idle keep-alive reset
                 if live:
                     idx = rng.randrange(len(live))
                     arm.cancel(live[idx])
                     live[idx] = arm.schedule(5.0)
                 else:
                     live.append(arm.schedule(5.0))
-            elif r < 0.75:                     # agent long-poll (far future)
+            elif r < 0.75:  # agent long-poll (far future)
                 live.append(arm.schedule(rng.uniform(60.0, 600.0)))
-            elif r < 0.90:                     # arbitrary app call_later
+            elif r < 0.90:  # arbitrary app call_later
                 live.append(arm.schedule(app_delays[j % len(app_delays)]))
                 j += 1
-            else:                              # clock tick: advance + fire
+            else:  # clock tick: advance + fire
                 now += rng.uniform(0.001, 0.05)
                 arm.advance(now)
-            if len(live) > 20_000:             # bound the working set
+            if len(live) > 20_000:  # bound the working set
                 arm.cancel(live.pop(0))
 
     return _median_ns(run, iters, trials)
@@ -599,8 +606,12 @@ def main():
     parser.add_argument("--iterations", type=int, default=60_000)
     parser.add_argument("--trials", type=int, default=7)
     parser.add_argument("--label", default="unlabelled")
-    parser.add_argument("--lang", choices=["native", "python"], default="native",
-                        help="native = all five designs in C (fair); python = pure algorithms")
+    parser.add_argument(
+        "--lang",
+        choices=["native", "python"],
+        default="native",
+        help="native = all five designs in C (fair); python = pure algorithms",
+    )
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
     if _native is None:
@@ -629,8 +640,7 @@ def main():
     # idle_pool across pool sizes, up to a million live connections.
     idle = {}
     for k in (1_000, 10_000, 100_000, 1_000_000):
-        idle[k] = {name: w_idle_pool(make, k, it // 2, tr)
-                   for name, make in all_arms.items()}
+        idle[k] = {name: w_idle_pool(make, k, it // 2, tr) for name, make in all_arms.items()}
     results["idle_pool"] = idle
 
     # Real event-loop API (bounded set, per-call overhead incl. allocation).
@@ -648,6 +658,7 @@ def main():
     if uvloop is not None:
         api_arms["uvloop"] = _uvloop
     for name, make in api_arms.items():
+
         def run(make=make):
             done = 0
             while done < it // 2:
@@ -660,6 +671,7 @@ def main():
                 if hasattr(s, "close"):
                     s.close()
                 del pinned
+
         api[name] = _median_ns(run, it // 2, tr)
     results["api_overhead"] = api
 
@@ -698,8 +710,14 @@ def main():
 
 def _print_summary(results, memory):
     arms = list(results["fast_api"].keys())
-    simple = ["fast_api", "agents_longpoll", "diverse_delays", "expiry_heavy",
-              "mixed_realistic", "ultra_mixed"]
+    simple = [
+        "fast_api",
+        "agents_longpoll",
+        "diverse_delays",
+        "expiry_heavy",
+        "mixed_realistic",
+        "ultra_mixed",
+    ]
     lang = results.get("_lang", "?")
     print(f"\n[{lang}] ns per work-unit (median; lower is better). winner starred.")
     print("  workload".ljust(20) + "".join(a.ljust(12) for a in arms))

@@ -1,21 +1,3 @@
-"""The cursor must survive the ledger exactly, in value *and* in order.
-
-A pass resumes by reading its cursor back out of a ``jsonb`` column and asking
-for the next rows after it. So the round trip
-
-    values -> encode_cursor -> json dumps -> jsonb -> json loads -> decode_cursor
-
-has to be an exact inverse, and it has to preserve ordering, because the value
-is used in a row comparison. A cursor that decodes to a *different* value
-resumes in the wrong place; a cursor that decodes to a value that *sorts*
-differently does the same thing while looking correct.
-
-These are property sweeps rather than examples on purpose. The equivalent sweep
-over ``format_duration``/``parse_duration`` found 19254 failures in 20012
-samples, having survived because its one round-trip test used the single shape
-that happened to work.
-"""
-
 from __future__ import annotations
 
 import datetime as dt
@@ -80,9 +62,14 @@ def _timestamps(rng: random.Random, count: int) -> list[dt.datetime]:
     for _ in range(count):
         out.append(
             dt.datetime(
-                rng.randint(1, 9999), rng.randint(1, 12), rng.randint(1, 28),
-                rng.randint(0, 23), rng.randint(0, 59), rng.randint(0, 59),
-                rng.randint(0, 999999), tzinfo=UTC,
+                rng.randint(1, 9999),
+                rng.randint(1, 12),
+                rng.randint(1, 28),
+                rng.randint(0, 23),
+                rng.randint(0, 59),
+                rng.randint(0, 59),
+                rng.randint(0, 999999),
+                tzinfo=UTC,
             )
         )
     return out
@@ -112,8 +99,26 @@ def _domain(name: str, rng: random.Random, scale: int) -> list[object]:
         edges = [0, 1, -1, 2**31 - 1, -(2**31), 2**63 - 1, -(2**63), 2**15 - 1, -(2**15)]
         return edges + [rng.randint(-(2**63), 2**63 - 1) for _ in range(scale)]
     if name == "text":
-        fixed = ["", "a", "z", "Z", "0", "~", "é", "\U0001f999", '"', "\\", "{}",
-                 "[]", ":", ",", "\n", "\t", "a" * 1000, "퟿"]
+        fixed = [
+            "",
+            "a",
+            "z",
+            "Z",
+            "0",
+            "~",
+            "é",
+            "\U0001f999",
+            '"',
+            "\\",
+            "{}",
+            "[]",
+            ":",
+            ",",
+            "\n",
+            "\t",
+            "a" * 1000,
+            "퟿",
+        ]
         return fixed + [
             "".join(chr(rng.randint(1, 0x2FFF)) for _ in range(rng.randint(0, 12)))
             for _ in range(scale)
@@ -129,8 +134,7 @@ def _domain(name: str, rng: random.Random, scale: int) -> list[object]:
     raise AssertionError(name)
 
 
-TYPES = ("timestamptz", "timestamp", "date", "uuid", "bigint", "integer", "text",
-         "float8", "bytea")
+TYPES = ("timestamptz", "timestamp", "date", "uuid", "bigint", "integer", "text", "float8", "bytea")
 
 
 def _sweep(pg_type: str, scale: int, pairs: int) -> None:
@@ -141,9 +145,7 @@ def _sweep(pg_type: str, scale: int, pairs: int) -> None:
     survived = []
     for value in values:
         decoded = through_ledger(key, (value,))[0]
-        assert instant(decoded) == instant(value), (
-            f"{pg_type}: {value!r} came back as {decoded!r}"
-        )
+        assert instant(decoded) == instant(value), f"{pg_type}: {value!r} came back as {decoded!r}"
         survived.append((value, decoded))
 
     checked = 0
@@ -162,25 +164,19 @@ def _sweep(pg_type: str, scale: int, pairs: int) -> None:
 
 @pytest.mark.parametrize("pg_type", TYPES)
 def test_a_cursor_survives_the_ledger_in_value_and_in_order(pg_type: str) -> None:
-    """A fast representative sample, so the default suite still runs in seconds."""
     _sweep(pg_type, scale=12, pairs=30)
 
 
 @pytest.mark.fuzz
 @pytest.mark.parametrize("pg_type", TYPES)
 def test_the_full_cursor_sweep(pg_type: str) -> None:
-    """The thorough version: ~200 values and ~7000 ordered pairs per type."""
     _sweep(pg_type, scale=200, pairs=120)
 
 
 def test_a_composite_cursor_keeps_its_lexicographic_order() -> None:
     rng = random.Random(20260727)
     keys = (Key("t", "timestamptz", indexed=True), Key("u", "uuid", unique=True))
-    pairs = [
-        (t, u)
-        for t in _timestamps(rng, 8)[:24]
-        for u in _uuids(rng, 4)[:5]
-    ]
+    pairs = [(t, u) for t in _timestamps(rng, 8)[:24] for u in _uuids(rng, 4)[:5]]
     survived = []
     for pair in pairs:
         decoded = through_ledger(keys, pair)
@@ -198,21 +194,12 @@ def test_a_composite_cursor_keeps_its_lexicographic_order() -> None:
 
 
 def test_a_decimal_key_is_refused_rather_than_silently_collapsed() -> None:
-    """Two boundaries a decimal place apart must not become one number.
-
-    ``float()`` is lossy by construction and there is no decimal codec to read a
-    cursor back with, so this is refused where it is declared -- the same answer
-    a non-unique boundary gets, and for the same reason.
-    """
     for pg_type in ("numeric", "decimal", "NUMERIC"):
         with pytest.raises(PassDeclarationError, match="skips every row between them"):
-            refuse_unsound_key(
-                (Key("amount", pg_type, indexed=True, unique=True),), table="ledger"
-            )
+            refuse_unsound_key((Key("amount", pg_type, indexed=True, unique=True),), table="ledger")
 
 
 def test_the_collapse_the_decimal_refusal_prevents() -> None:
-    """The defect itself, so the refusal is not mistaken for caution."""
     key = (Key("n", "float8", indexed=True, unique=True),)
     low, high = Decimal("1.0000000000000000001"), Decimal("1.0000000000000000002")
     assert low < high
@@ -221,7 +208,6 @@ def test_the_collapse_the_decimal_refusal_prevents() -> None:
 
 
 def test_a_timestamp_comes_back_on_a_fixed_offset_naming_the_same_instant() -> None:
-    """Pinned because it looks like a defect and is not -- see decode_cursor."""
     key = (Key("t", "timestamptz", indexed=True, unique=True),)
     original = dt.datetime(2026, 4, 5, 2, 0, fold=1, tzinfo=AKL)
     decoded = through_ledger(key, (original,))[0]

@@ -1,17 +1,3 @@
-"""`wreath privacy`: what it prints, what it exits with, and what it refuses.
-
-The command is the reading half of the module, so its exit code is the product:
-a blocked plan must fail a CI step rather than print a warning nobody reads.
-The other half of this file is `_load`, which resolves `module:attribute` — a
-refusal there is somebody's first five minutes with the command, and an
-`AttributeError` three frames down is a worse answer than a sentence saying
-where to point it.
-
-There is deliberately no `erase` action, and that absence is asserted: a
-production delete button reachable from a shell with an application target and
-no other context is exactly what this module argues against.
-"""
-
 from __future__ import annotations
 
 import json
@@ -46,9 +32,7 @@ class Orphaned(Model, table="cli_orphaned"):
 
 
 def _build(*, blocked: bool) -> Privacy:
-    registry = Registry(
-        FakeDatabase(), [Person, Photo, Orphaned], validate_schema="off"
-    )
+    registry = Registry(FakeDatabase(), [Person, Photo, Orphaned], validate_schema="off")
     privacy = Privacy(registry)
     privacy.subject(Person, key="id")
     privacy.classify(Photo, subject="owner_id", personal={"caption": Erase.REDACT})
@@ -87,7 +71,6 @@ def test_a_clean_plan_prints_the_traversal_and_exits_zero(capsys) -> None:
 
 
 def test_a_blocked_plan_exits_one_so_a_ci_step_fails_on_it(capsys) -> None:
-    """The point of the command: a finding is a failure, not a note."""
     global target
     target = _build(blocked=True)
     assert execute(_namespace("plan", subject="4711")) == 1
@@ -132,7 +115,6 @@ def test_the_retention_action_prints_every_window_and_every_absence(capsys) -> N
 
 
 def test_there_is_no_erase_action(capsys) -> None:
-    """An irreversible delete belongs to the place that knows why it is issued."""
     with pytest.raises(SystemExit):
         _namespace("erase", subject="4711")
 
@@ -145,17 +127,12 @@ def test_there_is_no_erase_action(capsys) -> None:
         ("a.module:", "must be spelled module:attribute"),
     ],
 )
-def test_a_target_that_is_not_module_colon_attribute_is_refused(
-    spec: str, message: str
-) -> None:
-    """Each half of the spelling check, because each half is a different typo."""
+def test_a_target_that_is_not_module_colon_attribute_is_refused(spec: str, message: str) -> None:
     import argparse
 
     from wreath._privacy.cli import execute as run
 
-    namespace = argparse.Namespace(
-        target=spec, privacy_action="retention", subject="4711"
-    )
+    namespace = argparse.Namespace(target=spec, privacy_action="retention", subject="4711")
     with pytest.raises(ValueError, match=message):
         run(namespace)
 
@@ -163,9 +140,7 @@ def test_a_target_that_is_not_module_colon_attribute_is_refused(
 def test_a_module_that_cannot_be_imported_says_so() -> None:
     import argparse
 
-    namespace = argparse.Namespace(
-        target="wreath.no_such_module:thing", privacy_action="retention"
-    )
+    namespace = argparse.Namespace(target="wreath.no_such_module:thing", privacy_action="retention")
     with pytest.raises(ValueError, match="could not import"):
         execute(namespace)
 
@@ -173,19 +148,14 @@ def test_a_module_that_cannot_be_imported_says_so() -> None:
 def test_a_module_without_that_attribute_says_so() -> None:
     import argparse
 
-    namespace = argparse.Namespace(
-        target=f"{__name__}:nothing_here", privacy_action="retention"
-    )
+    namespace = argparse.Namespace(target=f"{__name__}:nothing_here", privacy_action="retention")
     with pytest.raises(ValueError, match="has no attribute"):
         execute(namespace)
 
 
 def test_a_target_that_is_not_a_privacy_object_says_where_to_point_instead() -> None:
-    """Refused by type: duck-typing this produces an error three frames down."""
     import argparse
 
-    namespace = argparse.Namespace(
-        target=f"{__name__}:not_a_privacy", privacy_action="retention"
-    )
+    namespace = argparse.Namespace(target=f"{__name__}:not_a_privacy", privacy_action="retention")
     with pytest.raises(ValueError, match="not a wreath.privacy.Privacy"):
         execute(namespace)

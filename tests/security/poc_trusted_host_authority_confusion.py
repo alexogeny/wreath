@@ -1,16 +1,3 @@
-"""PoC: bypass TrustedHostPolicy with a user-info-shaped Host value.
-
-Run from the repository root::
-
-    uv run python tests/security/poc_trusted_host_authority_confusion.py
-
-The script binds only to loopback and drives Wreath through the metal event
-loop and native HTTP/1 parser.  The application models a password-reset link
-builder which relies on TrustedHostPolicy before interpolating the Host
-header.  A vulnerable build accepts ``good.example:@evil.example`` and emits a
-link whose browser destination is ``evil.example``.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -61,11 +48,7 @@ async def _drive(server: Server, port: int) -> bytes:
 
 
 def main() -> int:
-    app = Wreath(
-        http_policy=HttpPolicy(
-            trusted_host=TrustedHostPolicy(("good.example",))
-        )
-    )
+    app = Wreath(http_policy=HttpPolicy(trusted_host=TrustedHostPolicy(("good.example",))))
 
     @app.get("/reset-link")
     async def reset_link(request) -> str:

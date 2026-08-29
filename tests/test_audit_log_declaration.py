@@ -1,13 +1,3 @@
-"""What `wreath.audit_log` emits and refuses, without a database.
-
-The live half -- completeness by construction, atomicity with the write,
-the append-only trigger doing its job on a real server -- is
-`tests/test_audit_log_live.py`. What is here is everything decided before a
-connection exists: the DDL text, the redaction, the attribution refusal, and the
-batching that turns a flush's records into one statement per rung rather than
-one per instance.
-"""
-
 from __future__ import annotations
 
 import json
@@ -60,9 +50,6 @@ def _trail() -> tuple[AuditTrail, _Recording]:
     return AuditTrail(PostgresLog(_Database(), declaration())), _Recording()
 
 
-# -- the declaration -------------------------------------------------------
-
-
 def test_the_trail_is_declared_to_keep_its_rows_forever():
     # A compliance decision rather than a disk-space one, and the reason
     # `retention_pass` refuses it: nothing ages an audit record out by accident.
@@ -92,9 +79,6 @@ def test_a_records_stream_is_one_per_audited_row():
     # names.
     change = Change(table="public.photos", key="41", operation="update", actor="user:1", fields={})
     assert change.subject == "public.photos:41"
-
-
-# -- the append-only DDL ---------------------------------------------------
 
 
 def test_the_append_only_ddl_qualifies_the_table_with_its_schema():
@@ -141,9 +125,6 @@ def test_the_trigger_body_is_one_line_so_a_naive_splitter_cannot_cut_it():
     assert ";\n" not in body
 
 
-# -- redaction -------------------------------------------------------------
-
-
 def test_a_redaction_naming_nothing_is_still_a_valid_declaration():
     assert audited().redact == frozenset()
 
@@ -177,9 +158,6 @@ def test_a_redaction_that_is_not_a_column_name_is_refused(name):
         audited(redact=[name])
 
 
-# -- attribution -----------------------------------------------------------
-
-
 def test_an_unattributed_write_names_what_an_actor_is_for():
     trail, _ = _trail()
     # Not merely that a refusal happened: every refusal here mentions the actor.
@@ -190,13 +168,6 @@ def test_an_unattributed_write_names_what_an_actor_is_for():
 
 @pytest.mark.parametrize("name", ["", "   ", "\t\n", 7, None, b"user:41"])
 def test_an_actor_that_is_not_a_usable_name_is_refused_where_it_is_bound(name):
-    """Both halves of the guard, and the second one is not decoration.
-
-    `b"user:41"` looks like a name and is not one: `bytes` has no `.strip()`
-    returning a truthy `str`, and without the `isinstance` clause it would bind
-    an actor whose recorded value is `b'user:41'` -- a record that reads right
-    in a test and wrong in an export.
-    """
     with pytest.raises(ValueError, match="non-empty name"):
         with actor(name):
             pass
@@ -208,9 +179,6 @@ def test_an_actor_is_read_from_the_task_that_bound_it():
     with actor("job:nightly"):
         assert trail.attribute() == "job:nightly"
     assert trail.refused == 0
-
-
-# -- batched recording -----------------------------------------------------
 
 
 def test_a_flushs_records_are_one_statement_per_rung_not_one_each():

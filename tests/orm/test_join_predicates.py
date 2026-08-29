@@ -1,9 +1,3 @@
-"""Filtering by a related model's column: `Post.select().where(Post.author.email == x)`.
-
-Filtering is not loading. These assert both halves: the join constrains rows,
-and it leaves the relation unloaded unless the query also includes it.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -26,9 +20,7 @@ async def test_traversing_a_relationship_yields_a_related_column() -> None:
 
 
 async def test_a_related_predicate_emits_an_inner_join(registry: Registry) -> None:
-    compiled = compile_select(
-        registry, Post.select().where(Post.author.email == "a@b.c")
-    )
+    compiled = compile_select(registry, Post.select().where(Post.author.email == "a@b.c"))
     assert 'INNER JOIN "public"."users"' in compiled.sql
     assert '"w1"."email" = $1' in compiled.sql
     assert compiled.bind_values == ("a@b.c",)
@@ -120,9 +112,7 @@ async def test_comparison_operators_survive_the_traversal(registry: Registry) ->
 
 
 async def test_in_survives_the_traversal(registry: Registry) -> None:
-    compiled = compile_select(
-        registry, Post.select().where(Post.author.name.in_(["A", "B"]))
-    )
+    compiled = compile_select(registry, Post.select().where(Post.author.name.in_(["A", "B"])))
     assert '"w1"."name" IN (' in compiled.sql
     assert compiled.bind_values == ("A", "B")
 
@@ -165,8 +155,6 @@ async def test_fetching_through_a_join_returns_models(
 
     database.connection.script("posts", [post_row(1, 7, "t")])
     session = Session(registry, "read")
-    posts = await session.fetch(
-        Post.select().where(Post.author.email == "a@b.c").order_by(Post.id)
-    )
+    posts = await session.fetch(Post.select().where(Post.author.email == "a@b.c").order_by(Post.id))
     assert [item.id for item in posts] == [1]
     assert database.connection.calls[0][1] == ("a@b.c",)

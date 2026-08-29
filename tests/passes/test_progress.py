@@ -1,12 +1,3 @@
-"""Stage two: a percentage with a provenance, a rate, and an honestly absent ETA.
-
-The rules under test are the ones that make a status line worth reading at three
-in the morning. A percentage always carries where its denominator came from. An
-ETA is absent rather than invented. And the three states that need three
-different responses -- slow, stalled, blocked -- are told apart rather than
-lumped into "still going".
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -54,14 +45,32 @@ def purge_pass(**overrides):
 
 def _row(**overrides):
     body = {
-        "name": "purge_replays", "tenant": "", "phase": "walking",
-        "cursor": None, "ceiling": None, "keyspace_from": None, "pending": [],
-        "units_done": 0, "rows_done": 0, "denominator": None,
-        "denominator_kind": None, "chunk_limit": 1000, "paced_reason": None,
-        "window_started": None, "window_rows": 0, "window_units": 0,
-        "started_at": NOW, "last_advance": None, "cycle_started": None,
-        "driven_at": NOW, "last_drive_error": None, "verified_at": None,
-        "verified_fact": None, "last_error": None, "now": NOW, "holes_open": 0,
+        "name": "purge_replays",
+        "tenant": "",
+        "phase": "walking",
+        "cursor": None,
+        "ceiling": None,
+        "keyspace_from": None,
+        "pending": [],
+        "units_done": 0,
+        "rows_done": 0,
+        "denominator": None,
+        "denominator_kind": None,
+        "chunk_limit": 1000,
+        "paced_reason": None,
+        "window_started": None,
+        "window_rows": 0,
+        "window_units": 0,
+        "started_at": NOW,
+        "last_advance": None,
+        "cycle_started": None,
+        "driven_at": NOW,
+        "last_drive_error": None,
+        "verified_at": None,
+        "verified_fact": None,
+        "last_error": None,
+        "now": NOW,
+        "holes_open": 0,
     }
     body.update(overrides)
     return LedgerRow(**body)
@@ -83,9 +92,6 @@ def world():
 @pytest.fixture
 def database(world):
     return FakeDatabase(world)
-
-
-# --- the denominator and its provenance ---------------------------------------
 
 
 async def test_the_default_denominator_is_the_free_one(database, world):
@@ -114,7 +120,8 @@ async def test_an_exact_denominator_counts_and_says_that_it_counted(database, wo
 
 
 async def test_a_keyspace_denominator_records_the_floor_it_measures_from(
-    database, world,
+    database,
+    world,
 ):
     walk = purge_pass(progress=Keyspace())
     expected = min(row["expires"] for row in world.rows)
@@ -203,13 +210,13 @@ def test_a_denominator_kind_that_is_not_one_is_refused():
     assert "Estimated(), Exact() or Keyspace()" in str(caught.value)
 
 
-# --- rate, and refusing to guess ----------------------------------------------
-
-
 def test_the_rate_is_measured_over_the_trailing_window_not_since_launch():
     row = _row(
-        started_at=_ago(3600), rows_done=1_000_000,
-        window_started=_ago(20), window_rows=100, window_units=5,
+        started_at=_ago(3600),
+        rows_done=1_000_000,
+        window_started=_ago(20),
+        window_rows=100,
+        window_units=5,
         last_advance=NOW,
     )
 
@@ -226,8 +233,12 @@ def test_an_empty_rate_window_has_no_rate_rather_than_a_rate_of_zero():
 
 def test_no_rate_means_no_eta_and_the_row_says_which_input_was_missing():
     row = _row(
-        denominator=1000, denominator_kind="estimated", rows_done=100,
-        window_started=None, window_units=0, last_advance=None,
+        denominator=1000,
+        denominator_kind="estimated",
+        rows_done=100,
+        window_started=None,
+        window_units=0,
+        last_advance=None,
     )
 
     reported = _progress.describe(row, (), now=NOW)
@@ -240,8 +251,11 @@ def test_no_rate_means_no_eta_and_the_row_says_which_input_was_missing():
 
 def test_no_denominator_means_no_eta_and_says_so():
     row = _row(
-        denominator=None, window_started=_ago(10), window_rows=100,
-        window_units=2, last_advance=NOW,
+        denominator=None,
+        window_started=_ago(10),
+        window_rows=100,
+        window_units=2,
+        last_advance=NOW,
     )
 
     reported = _progress.describe(row, (), now=NOW)
@@ -252,8 +266,14 @@ def test_no_denominator_means_no_eta_and_says_so():
 
 def test_a_keyspace_pass_refuses_an_eta_because_the_units_do_not_match():
     row = _row(
-        denominator_kind="keyspace", keyspace_from=[0], ceiling=[1000], cursor=[250],
-        window_started=_ago(10), window_rows=100, window_units=2, last_advance=NOW,
+        denominator_kind="keyspace",
+        keyspace_from=[0],
+        ceiling=[1000],
+        cursor=[250],
+        window_started=_ago(10),
+        window_rows=100,
+        window_units=2,
+        last_advance=NOW,
     )
 
     reported = _progress.describe(row, (), now=NOW)
@@ -265,17 +285,19 @@ def test_a_keyspace_pass_refuses_an_eta_because_the_units_do_not_match():
 
 def test_an_eta_is_remaining_over_the_trailing_rate():
     row = _row(
-        denominator=1000, denominator_kind="exact", rows_done=500,
-        window_started=_ago(10), window_rows=100, window_units=4, last_advance=NOW,
+        denominator=1000,
+        denominator_kind="exact",
+        rows_done=500,
+        window_started=_ago(10),
+        window_rows=100,
+        window_units=4,
+        last_advance=NOW,
     )
 
     reported = _progress.describe(row, (), now=NOW)
 
     assert reported.rows_per_second == pytest.approx(10.0)
     assert reported.eta_seconds == pytest.approx(50.0)
-
-
-# --- slow, stalled, blocked ---------------------------------------------------
 
 
 def test_a_paced_pass_reports_slow_and_names_the_policy():
@@ -291,8 +313,11 @@ def test_a_paced_pass_reports_slow_and_names_the_policy():
 
 def test_a_cursor_that_has_stopped_moving_is_stalled_not_slow():
     row = _row(
-        paced_reason="duty cycle 0.25", driven_at=_ago(1),
-        window_started=_ago(40), window_rows=10, window_units=10,
+        paced_reason="duty cycle 0.25",
+        driven_at=_ago(1),
+        window_started=_ago(40),
+        window_rows=10,
+        window_units=10,
         last_advance=_ago(600),
     )
 
@@ -313,9 +338,7 @@ def test_the_stall_threshold_scales_with_the_passs_own_chunk_time():
 
     # Chunks taking a tenth of a second: the floor applies instead, so a pass
     # that has only just started is not called stalled for pausing to breathe.
-    fast_chunks = _row(
-        window_started=_ago(1), window_rows=100, window_units=10, last_advance=NOW
-    )
+    fast_chunks = _row(window_started=_ago(1), window_rows=100, window_units=10, last_advance=NOW)
     assert _progress.stall_after(fast_chunks) == _progress.STALL_FLOOR_SECONDS
 
 
@@ -358,9 +381,7 @@ def test_a_finished_pass_is_done_and_wants_no_eta():
     assert reported.eta_absent is None
 
 
-async def test_the_clock_the_states_are_judged_against_comes_from_the_database(
-    database, world
-):
+async def test_the_clock_the_states_are_judged_against_comes_from_the_database(database, world):
     # Not from the reader's own clock. A host whose clock runs ten minutes fast
     # would otherwise invent a stall on a perfectly healthy pass -- and the
     # timestamps it is comparing against were all written by the database.
@@ -376,19 +397,6 @@ async def test_the_clock_the_states_are_judged_against_comes_from_the_database(
 
 
 def test_the_estimated_denominator_never_casts_its_parameter_to_regclass() -> None:
-    """A shape guard for a defect only a live server could surface.
-
-    `WHERE oid = $1::regclass` makes PostgreSQL infer the *parameter* as
-    `regclass` (OID 2205), and no binary encoder here can write one. The first
-    execution survived it, every later one raised -- so a pass measured once and
-    then failed forever, and a recurring pass re-measures every cycle.
-
-    A fake driver does not infer parameter types, so this cannot be caught by
-    behaviour here; the live check is
-    `tests/postgres/test_passes_integration.py::test_the_denominator_can_be_measured_more_than_once`.
-    What this pins is the spelling, in the suite that actually runs on every
-    change, because the DSN-gated one had never run at all before today.
-    """
     import inspect
 
     # Code only -- the comment above the statement names the broken spelling in

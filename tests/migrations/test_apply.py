@@ -1,5 +1,3 @@
-"""Locked transactional application of one authoritative migration artifact."""
-
 from __future__ import annotations
 
 import importlib
@@ -84,8 +82,7 @@ async def test_apply_locks_checks_source_runs_one_block_verifies_and_commits(
     statements = [call[0] for call in connection.executed]
     assert statements[0] == "BEGIN"
     assert any(
-        isinstance(sql, str) and sql.startswith("DO $wreath_migration_")
-        for sql in statements
+        isinstance(sql, str) and sql.startswith("DO $wreath_migration_") for sql in statements
     )
     assert statements[-1] == "COMMIT"
     assert "ROLLBACK" not in statements

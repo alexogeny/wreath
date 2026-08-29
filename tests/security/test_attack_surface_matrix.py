@@ -1,11 +1,3 @@
-"""Cross-stack attacker corpora for Wreath's externally controlled boundaries.
-
-The narrower subsystem suites prove individual contracts.  This file keeps the
-release-level threat matrix executable: wire PoCs that used to be standalone
-scripts, plus compact corpora for the parser, identity, egress, and filesystem
-boundaries an Internet-facing application composes.
-"""
-
 from __future__ import annotations
 
 import gzip
@@ -35,7 +27,6 @@ _ROOT = Path(__file__).parents[2]
 )
 @requires_metal
 def test_standalone_proof_of_concept_is_a_collected_regression(script: Path) -> None:
-    """A PoC must reach its explicit safe outcome, not merely exit non-zero."""
     environment = os.environ.copy()
     completed = subprocess.run(
         [sys.executable, str(script)],

@@ -1,4 +1,3 @@
-"""IdempotencyPolicy: first response is stored and replayed for the same key."""
 from __future__ import annotations
 
 import pytest
@@ -33,13 +32,17 @@ def _request(
     headers = [(b"host", b"x")]
     if key is not None:
         headers.append((b"idempotency-key", key.encode()))
-    scope = {"type": "http", "method": method, "path": path,
-             "raw_path": path.encode(), "query_string": b"", "headers": headers}
+    scope = {
+        "type": "http",
+        "method": method,
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": headers,
+    }
     request = Request(scope, _receive)
     if principal is not None:
-        request._set_identity(
-            Identity(id=principal, type=principal_type, roles=frozenset())
-        )
+        request._set_identity(Identity(id=principal, type=principal_type, roles=frozenset()))
     return request
 
 
@@ -47,10 +50,10 @@ async def test_first_call_passes_through_then_replays() -> None:
     mw = IdempotencyPolicy()
 
     first = _request()
-    assert await mw.action(first) is None            # not seen -> proceed
+    assert await mw.action(first) is None  # not seen -> proceed
     await mw.after(first, Response(b"created", status=201))
 
-    second = _request()                              # same key
+    second = _request()  # same key
     replay = await mw.action(second)
     assert replay is not None
     assert replay.status == 201 and replay.body == b"created"
@@ -60,7 +63,7 @@ async def test_first_call_passes_through_then_replays() -> None:
 async def test_concurrent_duplicate_gets_409() -> None:
     mw = IdempotencyPolicy()
     first = _request()
-    assert await mw.action(first) is None            # reserves the key (in-flight)
+    assert await mw.action(first) is None  # reserves the key (in-flight)
     # A second identical request arrives before the first's `after` runs.
     conflict = await mw.action(_request())
     assert conflict is not None and conflict.status == 409
@@ -90,7 +93,7 @@ async def test_key_is_scoped_by_principal() -> None:
     await mw.action(alice)
     await mw.after(alice, Response(b"alice-order", status=201))
 
-    bob = _request(principal="bob")                  # same key value, different user
+    bob = _request(principal="bob")  # same key value, different user
     # Bob must NOT get alice's stored response.
     assert await mw.action(bob) is None
 
@@ -116,22 +119,14 @@ async def test_same_id_in_different_principal_types_has_a_distinct_scope() -> No
 
 
 async def test_anonymous_requests_are_not_guarded_and_never_replay_each_other() -> None:
-    """No principal, no scope: sharing one keyspace would be cross-user disclosure.
-
-    An unauthenticated `POST /signup` responds with something caller-specific --
-    a new id, a token, an email. If every anonymous caller shared the keyspace
-    for a method+path, picking the same `Idempotency-Key` value would be enough
-    to be handed back someone else's response. So an anonymous request is simply
-    not idempotency-guarded: the handler runs, exactly as without the middleware.
-    """
     mw = IdempotencyPolicy()
 
     first = _request(path="/signup", principal=None)
     assert await mw.action(first) is None
     await mw.after(first, Response(b'{"token":"alice-secret"}', status=201))
 
-    second = _request(path="/signup", principal=None)   # same key, other caller
-    assert await mw.action(second) is None              # reaches the handler...
+    second = _request(path="/signup", principal=None)  # same key, other caller
+    assert await mw.action(second) is None  # reaches the handler...
     # ... and nothing of the first caller's response came back.
     assert not hasattr(second.state, "idempotency_key")
 
@@ -146,8 +141,6 @@ async def test_anonymous_requests_are_not_guarded_and_never_replay_each_other() 
     assert await mw.action(_request(path="/signup", principal=None)) is None
 
 
-# --- sharing the store across workers ----------------------------------------
-#
 # The in-process store only covers retries that land on the worker that served
 # the original. A shared store covers the rest, which is the difference between
 # "usually replays" and a guarantee. These pin the store contract against a fake
@@ -155,7 +148,6 @@ async def test_anonymous_requests_are_not_guarded_and_never_replay_each_other() 
 
 
 async def test_a_shared_store_replays_across_workers() -> None:
-    """Two middlewares, one store: worker B replays what worker A stored."""
     from wreath.policy import MemoryIdempotencyStore
 
     store = MemoryIdempotencyStore()
@@ -171,7 +163,6 @@ async def test_a_shared_store_replays_across_workers() -> None:
 
 
 async def test_the_memory_store_reclaims_an_expired_key() -> None:
-    """Expiry reclaims a key in memory exactly as it does in Postgres."""
     import asyncio
 
     from wreath.policy import MemoryIdempotencyStore
@@ -186,13 +177,6 @@ async def test_the_memory_store_reclaims_an_expired_key() -> None:
 
 
 async def test_the_memory_store_measures_the_window_from_the_first_attempt() -> None:
-    """Storing the response must not extend the key, exactly as in Postgres.
-
-    `PostgresIdempotencyStore` leaves `expires` out of its `DO UPDATE` so a slow
-    handler cannot extend its own key. If the memory half restarted the clock on
-    `store()`, one middleware would honour a key for two different lengths of
-    time depending on which store was configured.
-    """
     from wreath.policy import MemoryIdempotencyStore
     from wreath.store import MemoryStore
 
@@ -203,11 +187,11 @@ async def test_the_memory_store_measures_the_window_from_the_first_attempt() -> 
     store._store = MemoryStore(ttl=10.0, clock=lambda: clock[0])
 
     assert await store.reserve("k") == ("fresh", None)
-    clock[0] += 6.0                                  # a slow handler
+    clock[0] += 6.0  # a slow handler
     await store.store("k", (201, (), b"created"))
     assert (await store.reserve("k"))[0] == "done"
 
-    clock[0] += 4.0            # 10s after the first attempt, 4s after the write
+    clock[0] += 4.0  # 10s after the first attempt, 4s after the write
     assert await store.reserve("k") == ("fresh", None)
 
 
@@ -268,8 +252,7 @@ def _statements(connection: _FakeConnection, prefix: str) -> list:
 
 
 async def test_the_postgres_store_claims_a_key_in_one_statement(monkeypatch) -> None:
-    """A read-then-write would let two workers both think they were first."""
-    store, connection = await _pg_store(monkeypatch, [(0,)])   # a row: we won
+    store, connection = await _pg_store(monkeypatch, [(0,)])  # a row: we won
 
     assert await store.reserve("k") == ("fresh", None)
 
@@ -306,7 +289,6 @@ async def test_the_postgres_store_returns_a_stored_response(monkeypatch) -> None
 async def test_the_postgres_store_writes_the_response_without_moving_expiry(
     monkeypatch,
 ) -> None:
-    """The window is measured from the first attempt, not from when it finished."""
     store, connection = await _pg_store(monkeypatch, [])
     await store.store("k", (201, ((b"x", b"y"),), b"body"))
 

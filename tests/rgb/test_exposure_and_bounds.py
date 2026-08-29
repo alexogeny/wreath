@@ -1,6 +1,3 @@
-"""Bounds and information exposure (report 23: R-06, R-21, R-31, R-32, R-36,
-R-67, R-69, R-78, G-81)."""
-
 from __future__ import annotations
 
 import pytest
@@ -17,7 +14,7 @@ class TestPermissionsBatchBounds:
         app = Wreath()
 
         @app.get("/llamas/{llama_id}")
-        @authorize(action="Llama::read", resource=lambda r: "Llama::\"x\"")
+        @authorize(action="Llama::read", resource=lambda r: 'Llama::"x"')
         async def read(request):  # pragma: no cover
             return {}
 
@@ -207,8 +204,11 @@ class TestWebhookSignatureFraming:
 
         with pytest.raises(ValueError):
             WebhookEnvelope(
-                id="a\nb", type="thing", version="1",
-                timestamp=datetime.now(UTC), content_type="application/json",
+                id="a\nb",
+                type="thing",
+                version="1",
+                timestamp=datetime.now(UTC),
+                content_type="application/json",
                 body=b"{}",
             )
 
@@ -219,8 +219,11 @@ class TestWebhookSignatureFraming:
 
         with pytest.raises(ValueError):
             WebhookEnvelope(
-                id="a", type="thing\nmore", version="1",
-                timestamp=datetime.now(UTC), content_type="application/json",
+                id="a",
+                type="thing\nmore",
+                version="1",
+                timestamp=datetime.now(UTC),
+                content_type="application/json",
                 body=b"{}",
             )
 
@@ -252,8 +255,12 @@ class TestWebhookSignatureFraming:
 
         keys = {"k1": b"secret" * 8}
         envelope = WebhookEnvelope(
-            id="evt_1", type="thing.created", version="1",
-            timestamp=datetime.now(UTC), content_type="application/json", body=b"{}",
+            id="evt_1",
+            type="thing.created",
+            version="1",
+            timestamp=datetime.now(UTC),
+            content_type="application/json",
+            body=b"{}",
         )
         headers = dict(HMACWebhookSigner(keys, key_id="k1").headers(envelope))
         verified = HMACWebhookVerifier(keys).verify(body=b"{}", headers=headers)

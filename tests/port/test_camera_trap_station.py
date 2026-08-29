@@ -1,5 +1,3 @@
-"""First-party migration contracts exercised by the camera-trap station."""
-
 from pathlib import Path
 
 import pytest
@@ -14,20 +12,13 @@ def station_root() -> Path:
 
 def _rules(station_root: Path, name: str) -> list[str]:
     report = port.analyze(station_root)
-    return [
-        finding.rule_id
-        for finding in report.findings
-        if finding.file == name
-    ]
+    return [finding.rule_id for finding in report.findings if finding.file == name]
 
 
 def _ported(station_root: Path, tmp_path: Path) -> dict[str, str]:
     output = tmp_path / "ported"
     port.port_tree(station_root, output, opinionated=True)
-    return {
-        path.name: path.read_text(encoding="utf-8")
-        for path in output.rglob("*.py")
-    }
+    return {path.name: path.read_text(encoding="utf-8") for path in output.rglob("*.py")}
 
 
 def test_manager_ownership_and_manager_patches_name_the_session_seam(
@@ -72,9 +63,7 @@ def test_projection_and_redundant_literal_validator_use_dataclasses(
     assert "confidence: " in source and " = 0" in source
 
 
-def test_an_ordered_first_query_is_fully_emitted(
-    station_root: Path, tmp_path: Path
-) -> None:
+def test_an_ordered_first_query_is_fully_emitted(station_root: Path, tmp_path: Path) -> None:
     assert "orm.query.filter_exact" in _rules(station_root, "repository.py")
     source = _ported(station_root, tmp_path)["repository.py"]
     assert ".order_by(StationReading.id.desc()).limit(1)" in source
@@ -173,9 +162,7 @@ def test_literal_values_projection_preserves_dictionary_keys(
         ".values()",
     ],
 )
-def test_unresolved_projection_after_fields_stays_visible(
-    tmp_path: Path, tail: str
-) -> None:
+def test_unresolved_projection_after_fields_stays_visible(tmp_path: Path, tail: str) -> None:
     source = (
         "from fastapi import APIRouter\n"
         "router = APIRouter()\n"
@@ -223,7 +210,8 @@ def test_explicit_model_order_expression_stays_explicit(tmp_path: Path) -> None:
 
 
 def test_outbound_http_and_manual_oidc_name_managed_first_party_targets(
-    station_root: Path, tmp_path: Path,
+    station_root: Path,
+    tmp_path: Path,
 ) -> None:
     assert "ext.httpx" in _rules(station_root, "outbound.py")
     outbound = _ported(station_root, tmp_path)["outbound.py"]
@@ -270,9 +258,7 @@ def test_external_scheduler_points_at_durable_jobs(station_root: Path) -> None:
     assert "ext.boto3_scheduler" in _rules(station_root, "scheduler.py")
 
 
-def test_http_controls_drop_the_wildcard_host_noop(
-    station_root: Path, tmp_path: Path
-) -> None:
+def test_http_controls_drop_the_wildcard_host_noop(station_root: Path, tmp_path: Path) -> None:
     rules = _rules(station_root, "middleware.py")
     assert "mw.cors" in rules
     assert "mw.trustedhost_noop" in rules
@@ -298,9 +284,7 @@ def test_authentication_override_points_at_test_client_identity(
     "client",
     ["cloudwatch", "logs"],
 )
-def test_observability_clients_are_not_generic_aws_findings(
-    tmp_path: Path, client: str
-) -> None:
+def test_observability_clients_are_not_generic_aws_findings(tmp_path: Path, client: str) -> None:
     source = tmp_path / "telemetry.py"
     source.write_text(
         f'import boto3\nclient = boto3.client("{client}")\n',
@@ -312,17 +296,13 @@ def test_observability_clients_are_not_generic_aws_findings(
 
 
 @pytest.mark.parametrize("client", ["cognito-idp", "cognito-identity"])
-def test_identity_clients_are_not_generic_aws_findings(
-    tmp_path: Path, client: str
-) -> None:
+def test_identity_clients_are_not_generic_aws_findings(tmp_path: Path, client: str) -> None:
     source = tmp_path / "identity.py"
     source.write_text(
         f'import boto3\nclient = boto3.client("{client}")\n',
         encoding="utf-8",
     )
-    assert [finding.rule_id for finding in port.analyze(source).findings] == [
-        "ext.boto3_identity"
-    ]
+    assert [finding.rule_id for finding in port.analyze(source).findings] == ["ext.boto3_identity"]
 
 
 def test_plain_jwt_decode_stays_distinct_from_oidc(tmp_path: Path) -> None:
@@ -405,9 +385,7 @@ def test_only_the_single_literal_wildcard_host_policy_is_a_noop(
         f"app.add_middleware(TrustedHostMiddleware, allowed_hosts={allowed_hosts})\n",
         encoding="utf-8",
     )
-    assert "mw.trustedhost" in [
-        finding.rule_id for finding in port.analyze(source).findings
-    ]
+    assert "mw.trustedhost" in [finding.rule_id for finding in port.analyze(source).findings]
     emitted = port.emit_module(source)
     assert "TrustedHostPolicy" in emitted
     assert f"allowed_hosts={allowed_hosts}" in emitted
@@ -477,16 +455,13 @@ def test_custom_middleware_is_split_by_its_actual_job(
         ),
     ],
 )
-def test_only_a_literal_membership_restatement_is_deleted(
-    tmp_path: Path, validator: str
-) -> None:
+def test_only_a_literal_membership_restatement_is_deleted(tmp_path: Path, validator: str) -> None:
     source = tmp_path / "units.py"
     source.write_text(
         "from typing import Literal\n"
         "from pydantic import BaseModel, field_validator\n"
         "class Units(BaseModel):\n"
-        "    distance: Literal['m', 'km'] = 'm'\n"
-        + validator,
+        "    distance: Literal['m', 'km'] = 'm'\n" + validator,
         encoding="utf-8",
     )
     rules = [finding.rule_id for finding in port.analyze(source).findings]
@@ -581,14 +556,10 @@ def test_pydantic_v1_regex_uses_wreath_pattern_metadata(tmp_path: Path) -> None:
         "value: int = Field(default=0, ge=0, strict=True)",
     ],
 )
-def test_ambiguous_field_calls_keep_their_review(
-    tmp_path: Path, declaration: str
-) -> None:
+def test_ambiguous_field_calls_keep_their_review(tmp_path: Path, declaration: str) -> None:
     source = tmp_path / "reading.py"
     source.write_text(
-        "from pydantic import BaseModel, Field\n"
-        "class Reading(BaseModel):\n"
-        f"    {declaration}\n",
+        f"from pydantic import BaseModel, Field\nclass Reading(BaseModel):\n    {declaration}\n",
         encoding="utf-8",
     )
     rules = [finding.rule_id for finding in port.analyze(source).findings]
@@ -754,9 +725,7 @@ def test_legacy_model_mixins_jsonb_and_meta_indexes_move_together(
     root = tmp_path / "station"
     root.mkdir()
     (root / "shared.py").write_text(
-        "import ormar\n"
-        "class CameraIdentity:\n"
-        "    id: int = ormar.Integer(primary_key=True)\n",
+        "import ormar\nclass CameraIdentity:\n    id: int = ormar.Integer(primary_key=True)\n",
         encoding="utf-8",
     )
     (root / "models.py").write_text(
@@ -899,9 +868,7 @@ def test_directly_appended_tasks_are_joined(tmp_path: Path) -> None:
         "    await asyncio.gather(*tasks)\n",
         encoding="utf-8",
     )
-    assert "bg.asyncio_joined" in [
-        finding.rule_id for finding in port.analyze(source).findings
-    ]
+    assert "bg.asyncio_joined" in [finding.rule_id for finding in port.analyze(source).findings]
 
 
 @pytest.mark.parametrize(
@@ -912,9 +879,7 @@ def test_directly_appended_tasks_are_joined(tmp_path: Path) -> None:
         "holder.tasks.append(asyncio.create_task(read(camera)))",
     ],
 )
-def test_only_a_plain_single_argument_append_is_followed(
-    tmp_path: Path, append: str
-) -> None:
+def test_only_a_plain_single_argument_append_is_followed(tmp_path: Path, append: str) -> None:
     source = tmp_path / "camera_tasks.py"
     source.write_text(
         "import asyncio\n"
@@ -924,9 +889,7 @@ def test_only_a_plain_single_argument_append_is_followed(
         "    await asyncio.gather(*tasks)\n",
         encoding="utf-8",
     )
-    assert "bg.asyncio_loop" in [
-        finding.rule_id for finding in port.analyze(source).findings
-    ]
+    assert "bg.asyncio_loop" in [finding.rule_id for finding in port.analyze(source).findings]
 
 
 def test_a_multi_argument_append_cannot_transfer_task_ownership(tmp_path: Path) -> None:
@@ -941,9 +904,7 @@ def test_a_multi_argument_append_cannot_transfer_task_ownership(tmp_path: Path) 
         encoding="utf-8",
     )
 
-    assert "bg.asyncio_loop" in [
-        finding.rule_id for finding in port.analyze(source).findings
-    ]
+    assert "bg.asyncio_loop" in [finding.rule_id for finding in port.analyze(source).findings]
 
 
 def test_include_router_is_classified_as_a_static_route_composition(
@@ -951,15 +912,11 @@ def test_include_router_is_classified_as_a_static_route_composition(
 ) -> None:
     source = tmp_path / "routes.py"
     source.write_text(
-        "from fastapi import FastAPI\n"
-        "app = FastAPI()\n"
-        "app.include_router(router)\n",
+        "from fastapi import FastAPI\napp = FastAPI()\napp.include_router(router)\n",
         encoding="utf-8",
     )
 
-    assert "route.include_static" in [
-        finding.rule_id for finding in port.analyze(source).findings
-    ]
+    assert "route.include_static" in [finding.rule_id for finding in port.analyze(source).findings]
 
 
 def test_a_task_gathered_before_it_is_created_is_not_claimed(tmp_path: Path) -> None:
@@ -972,9 +929,7 @@ def test_a_task_gathered_before_it_is_created_is_not_claimed(tmp_path: Path) -> 
         "    tasks.append(asyncio.create_task(read(cameras)))\n",
         encoding="utf-8",
     )
-    assert "bg.asyncio_loop" in [
-        finding.rule_id for finding in port.analyze(source).findings
-    ]
+    assert "bg.asyncio_loop" in [finding.rule_id for finding in port.analyze(source).findings]
 
 
 @pytest.mark.parametrize(

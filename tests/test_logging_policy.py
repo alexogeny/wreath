@@ -1,23 +1,3 @@
-"""Stage 4 of first-class logging: promotion and per-call-site sampling.
-
-These two are where the *signal* argument lives. A logger that is faster at
-emitting noise has improved nothing.
-
-- **Promotion.** TRACE and DEBUG accumulate in a per-request buffer and are
-  published only if that request failed or ran slow. Verbose instrumentation
-  everywhere, near-zero steady-state output, and a full history of exactly the
-  requests that went wrong. The pattern is Marick's 2000 ring-buffer logging;
-  the recorder's existing error/slow promotion flags are the trigger.
-
-- **Sampling.** A runaway call site cannot flood the pipeline and evict
-  everything else. First N per tick, then every Mth, per site -- Zap's rule,
-  made cheap by the site id already being a dense integer.
-
-Both drop records on purpose, so both must account for what they dropped. A
-record that vanishes without a number attached is the failure an observability
-system exists to prevent.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -38,9 +18,6 @@ class FakeClock:
 
     def advance(self, seconds: float) -> None:
         self.now += seconds
-
-
-# --- per-call-site sampling -------------------------------------------------
 
 
 def test_first_n_pass_then_every_mth() -> None:
@@ -69,15 +46,11 @@ def test_sites_have_independent_budgets() -> None:
 
 @pytest.mark.parametrize("severity", [fs.Severity.WARN, fs.Severity.ERROR, fs.Severity.FATAL])
 def test_warn_and_above_are_never_sampled(severity: fs.Severity) -> None:
-    """An error you never see is the worst failure mode in an observability
-    system, even when it is counted."""
     limiter = SiteLimiter(LogSamplingPolicy(first=1, thereafter=1000), clock=FakeClock())
     assert all(limiter.allow(site_id=1, severity=severity) for _ in range(50))
 
 
 def test_drops_are_carried_on_the_next_record_that_passes() -> None:
-    """`dropped_siblings` is why the cell has the field: an operator reading one
-    line learns how many like it were suppressed."""
     limiter = SiteLimiter(LogSamplingPolicy(first=1, thereafter=3), clock=FakeClock())
     limiter.allow(site_id=1, severity=fs.Severity.INFO)  # passes, 0 dropped
     assert limiter.take_dropped(1) == 0
@@ -89,8 +62,6 @@ def test_drops_are_carried_on_the_next_record_that_passes() -> None:
 
 
 def test_an_uninterned_site_is_never_sampled() -> None:
-    """Site 0 has no slot to count against; refusing to limit it is honest,
-    and the site-table overflow that produced it is already counted."""
     limiter = SiteLimiter(LogSamplingPolicy(first=1, thereafter=1000), clock=FakeClock())
     assert all(limiter.allow(site_id=0, severity=fs.Severity.INFO) for _ in range(20))
 
@@ -107,9 +78,6 @@ def test_the_limiter_table_is_bounded() -> None:
     # Sites beyond the table are passed rather than silently suppressed.
     assert limiter.allow(site_id=99, severity=fs.Severity.INFO)
     assert limiter.allow(site_id=99, severity=fs.Severity.INFO)
-
-
-# --- per-request buffering and promotion ------------------------------------
 
 
 def _cell(severity: fs.Severity = fs.Severity.DEBUG, site_id: int = 1) -> fs.LogCell:
@@ -145,7 +113,6 @@ def test_buffered_records_are_stamped_with_their_request() -> None:
 
 
 def test_an_explicit_promote_publishes_the_buffer() -> None:
-    """For an anomaly the framework cannot see: the request looked fine."""
     emitted: list[fs.LogCell] = []
     buffer = RequestLogBuffer(request_id=1, budget=8)
     buffer.add(_cell())
@@ -165,17 +132,12 @@ def test_exhausting_the_buffer_budget_is_counted() -> None:
 
 
 def test_a_buffer_keeps_the_oldest_records() -> None:
-    """Failure-triggered logging exists to show what led *up to* the failure, so
-    the head of the request is what must survive a full buffer."""
     buffer = RequestLogBuffer(request_id=1, budget=2)
     for site_id in (1, 2, 3, 4):
         buffer.add(_cell(site_id=site_id))
     emitted: list[fs.LogCell] = []
     buffer.finish(promoted=True, emit=emitted.append)
     assert [c.site_id for c in emitted] == [1, 2]
-
-
-# --- the emitter honours both ----------------------------------------------
 
 
 def test_debug_inside_a_request_is_buffered_not_emitted() -> None:
@@ -203,7 +165,9 @@ def test_begin_request_honours_an_explicit_scratch_budget() -> None:
     scope_token = log._SCOPE.set(None)
     try:
         with log.testing_runtime(
-            level=log.INFO, capture_level=log.TRACE, scratch_budget=8,
+            level=log.INFO,
+            capture_level=log.TRACE,
+            scratch_budget=8,
         ):
             scope = log.begin_request(5, budget=1)
             assert scope is not None
@@ -218,7 +182,7 @@ def test_begin_request_honours_an_explicit_scratch_budget() -> None:
 
 
 def test_prepared_debug_record_is_held_for_request_promotion() -> None:
-    fields = ((('message', str, log.RAW), "from stdlib"),)
+    fields = ((("message", str, log.RAW), "from stdlib"),)
     with log.testing_runtime(level=log.INFO, capture_level=log.TRACE) as records:
         with log.request_scope(request_id=5) as scope:
             log._emit_prepared(log.DEBUG, "bridge: {message}", fields)
@@ -229,7 +193,7 @@ def test_prepared_debug_record_is_held_for_request_promotion() -> None:
 
 
 def test_prepared_info_record_is_emitted_without_a_request_buffer() -> None:
-    fields = ((('message', str, log.RAW), "from stdlib"),)
+    fields = ((("message", str, log.RAW), "from stdlib"),)
     with log.testing_runtime(level=log.INFO) as records:
         log._emit_prepared(log.INFO, "bridge: {message}", fields)
     assert len(records) == 1
@@ -254,8 +218,6 @@ def test_records_inside_a_request_carry_its_id() -> None:
 
 
 def test_a_single_threshold_publishes_everything_above_it() -> None:
-    """`capture_level` defaults to `level`, so a caller who never asks for
-    buffering gets the one threshold they expect."""
     with log.testing_runtime(level=log.TRACE) as records:
         log.debug("boot {v}", v=1)
     assert len(records) == 1
@@ -263,9 +225,6 @@ def test_a_single_threshold_publishes_everything_above_it() -> None:
 
 
 def test_a_verbose_record_outside_a_request_is_dropped() -> None:
-    """Between the two thresholds a record needs a request to be promoted with.
-    At startup there is none, and publishing it anyway would contradict the
-    `level` the operator set."""
     with log.testing_runtime(level=log.INFO, capture_level=log.TRACE) as records:
         log.debug("boot {v}", v=1)
         log.info("booted {v}", v=1)
@@ -274,22 +233,19 @@ def test_a_verbose_record_outside_a_request_is_dropped() -> None:
 
 def test_a_site_below_the_floor_is_falsey() -> None:
     with log.testing_runtime(level=log.INFO, capture_level=log.INFO):
-        quiet = log.event("floor.debug", "x {v}", level=log.DEBUG,
-                          fields=(log.field("v", int),))
+        quiet = log.event("floor.debug", "x {v}", level=log.DEBUG, fields=(log.field("v", int),))
         assert not quiet
 
 
 def test_a_site_between_the_thresholds_is_truthy() -> None:
-    """It buffers rather than publishes, which is still doing something -- a
-    guard that called it disabled would silently switch off promotion."""
     with log.testing_runtime(level=log.INFO, capture_level=log.DEBUG):
-        buffered = log.event("floor.buffered", "x {v}", level=log.DEBUG,
-                             fields=(log.field("v", int),))
+        buffered = log.event(
+            "floor.buffered", "x {v}", level=log.DEBUG, fields=(log.field("v", int),)
+        )
         assert buffered
 
 
 def test_leaving_a_scope_without_finishing_discards_rather_than_leaks() -> None:
-    """An escaped scope must not hold records alive or emit them later."""
     with log.testing_runtime(level=log.INFO, capture_level=log.TRACE) as records:
         with log.request_scope(request_id=5):
             log.debug("orphaned {v}", v=1)

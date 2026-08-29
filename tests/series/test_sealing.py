@@ -1,14 +1,3 @@
-"""Stage 7: a bucket stops being a question and becomes an answer.
-
-The watermark, what a settled bucket costs to read a second time, and the one
-that matters — a row that lands behind the watermark is neither ignored nor
-allowed to silently rewrite a settled number.
-
-What only a live PostgreSQL can settle — that a settled bucket boundary and a
-freshly computed one land on the same instant across a DST change — lives in
-``tests/postgres/test_series_integration.py``.
-"""
-
 from __future__ import annotations
 
 import json
@@ -46,51 +35,32 @@ def sealed(after="2h", **kwargs):
     return view(**kwargs).measure(n=count()).seal(after=after)
 
 
-# -- the watermark ------------------------------------------------------------
-
-
 class TestWatermark:
     def test_a_bucket_is_open_until_its_end_plus_the_allowance(self):
-        """The 3rd closes at midnight on the 4th; two hours later it is sealed."""
-        edge = watermark(
-            parse("2026-03-04T01:59:00Z"), bucket=Day, zone_name="UTC", after=7200
-        )
+        edge = watermark(parse("2026-03-04T01:59:00Z"), bucket=Day, zone_name="UTC", after=7200)
         assert edge == utc(2026, 3, 3), "the 3rd is still open at 01:59 on the 4th"
 
     def test_and_sealed_once_the_allowance_has_passed(self):
-        edge = watermark(
-            parse("2026-03-04T02:00:00Z"), bucket=Day, zone_name="UTC", after=7200
-        )
+        edge = watermark(parse("2026-03-04T02:00:00Z"), bucket=Day, zone_name="UTC", after=7200)
         assert edge == utc(2026, 3, 4), "the 3rd sealed; the 4th is now the open one"
 
     def test_the_allowance_is_elapsed_time_not_wall_clock(self):
-        """A fixed offset, subtracted as one.
-
-        Two hours of lateness means two hours of elapsed time. The calendar only
-        enters at the bucket boundary, which `Bucket.floor` already owns — the
-        series agents found twice that mixing the two gives an answer correct on
-        every day but one.
-        """
         assert Seal(after=7200).after == 7200
 
     def test_a_zone_decides_when_the_day_closed(self):
-        """An Auckland day closes at Auckland midnight, not UTC midnight."""
         auckland = watermark(
-            parse("2026-03-04T00:00:00Z"), bucket=Day, zone_name="Pacific/Auckland",
+            parse("2026-03-04T00:00:00Z"),
+            bucket=Day,
+            zone_name="Pacific/Auckland",
             after=0,
         )
-        utc_edge = watermark(
-            parse("2026-03-04T00:00:00Z"), bucket=Day, zone_name="UTC", after=0
-        )
+        utc_edge = watermark(parse("2026-03-04T00:00:00Z"), bucket=Day, zone_name="UTC", after=0)
         assert auckland != utc_edge
 
     def test_an_hourly_view_seals_far_more_often_than_a_daily_one(self):
         at = parse("2026-03-04T05:30:00Z")
         assert watermark(at, bucket=Hour, zone_name="UTC", after=0) == utc(2026, 3, 4, 5)
         assert watermark(at, bucket=Day, zone_name="UTC", after=0) == utc(2026, 3, 4)
-
-
-# -- the declaration ----------------------------------------------------------
 
 
 class TestDeclaration:
@@ -125,13 +95,6 @@ class TestDeclaration:
 
 class TestWhatCannotBeSealed:
     def test_a_grouped_view_is_refused_because_the_fold_moves(self):
-        """The top-N survivors are ranked over the whole range.
-
-        So which series survive — and what lands in the remainder — depends on
-        the range being asked for, and a bucket settled for one range would be
-        wrong for the next. Refusing beats storing something only valid for the
-        range that happened to materialise it.
-        """
         declared = view().measure(n=count()).by(Trek.paddock_id)
         with pytest.raises(SeriesError, match="ranked over the whole range"):
             declared.seal(after="2h")
@@ -148,9 +111,6 @@ class TestWhatCannotBeSealed:
             Aggregate(Trek).measure(n=count()).seal(after="2h")
 
 
-# -- reopen, and the rows it recomputes from ----------------------------------
-
-
 class TestReopenNeedsTheRowsItRecomputesFrom:
     """§7.2: ``on_late="reopen"`` against a raw window that cannot outlive the seal.
 
@@ -162,9 +122,9 @@ class TestReopenNeedsTheRowsItRecomputesFrom:
     """
 
     def reopening(self, *, bucket=Day, after="2h", **windows):
-        declared = Series(
-            Trek, at=Trek.started_at, bucket=bucket, stored_in=tz("UTC")
-        ).measure(n=count())
+        declared = Series(Trek, at=Trek.started_at, bucket=bucket, stored_in=tz("UTC")).measure(
+            n=count()
+        )
         return declared.seal(after=after, on_late="reopen").retain(**windows)
 
     def test_a_raw_window_shorter_than_the_seal_is_refused(self):
@@ -186,54 +146,29 @@ class TestReopenNeedsTheRowsItRecomputesFrom:
         assert self.reopening(raw="30 days").sealed_after == 7200
 
     def test_the_default_on_late_is_not_refused(self):
-        """``correct`` records a delta beside an immutable settled value.
-
-        Recomputing from vanished rows would still produce a wrong delta — but
-        the settled number survives it, the envelope reports which buckets carry
-        a correction, and dropping a bad correction recovers. Destroying the
-        value outright does not, which is the whole reason only ``reopen`` is
-        refused here.
-        """
-        declared = Series(
-            Trek, at=Trek.started_at, bucket=Day, stored_in=tz("UTC")
-        ).measure(n=count())
+        declared = Series(Trek, at=Trek.started_at, bucket=Day, stored_in=tz("UTC")).measure(
+            n=count()
+        )
         assert declared.seal(after="2h").retain(raw="1 day").sealed_after == 7200
 
     def test_the_check_does_not_depend_on_clause_order(self):
-        declared = Series(
-            Trek, at=Trek.started_at, bucket=Day, stored_in=tz("UTC")
-        ).measure(n=count())
+        declared = Series(Trek, at=Trek.started_at, bucket=Day, stored_in=tz("UTC")).measure(
+            n=count()
+        )
         with pytest.raises(SeriesError, match="outlive the seal window"):
             declared.retain(raw="1 day").seal(after="2h", on_late="reopen")
 
     def test_the_bucket_width_is_part_of_the_requirement(self):
-        """Raw outlasting the *seal* is not enough — it must outlast the bucket too.
-
-        The design phrases the rule as "raw retention shorter than the seal
-        window", which understates it by one bucket. A day bucket sealing two
-        hours after it closes is not fully recomputable until 26 hours after it
-        closes, because its oldest row is a day older than its end. Three hours
-        of raw comfortably exceeds the two-hour seal and is still wrong.
-        """
         with pytest.raises(SeriesError, match="outlive the seal window"):
             self.reopening(bucket=Day, after="2h", raw="3 hours")
         # The same numbers against an hour bucket need only 3h, and are fine.
         assert self.reopening(bucket=Hour, after="2h", raw="3 hours").sealed_after == 7200
 
     def test_equality_is_accepted_because_coverage_is_inclusive(self):
-        """``Tier.covers`` tests ``instant >= now - keep``.
-
-        A row sitting exactly on the retention edge is still covered, so
-        refusing at equality would put this check and the coverage predicate one
-        module over into disagreement about the same boundary.
-        """
         exact = 7200.0 + 86400.0
         assert self.reopening(raw=exact).sealed_after == 7200
         with pytest.raises(SeriesError, match="outlive the seal window"):
             self.reopening(raw=exact - 1)
-
-
-# -- identity -----------------------------------------------------------------
 
 
 class TestWhatASettledRowIsFiledUnder:
@@ -243,33 +178,27 @@ class TestWhatASettledRowIsFiledUnder:
         assert one == two
 
     def test_changing_what_is_measured_mints_a_new_key(self):
-        """A changed declaration must not read values computed under the old one."""
         one = view().measure(n=count()).seal(after="2h")._identity("UTC", {})
-        two = (
-            view().measure(n=count(), km=sum_(Trek.distance_km)).seal(after="2h")
-        )._identity("UTC", {})
+        two = (view().measure(n=count(), km=sum_(Trek.distance_km)).seal(after="2h"))._identity(
+            "UTC", {}
+        )
         assert one[0] != two[0]
 
     def test_so_does_changing_the_zone(self):
-        """An Auckland day cannot be re-cut into a London day after the fact."""
-        assert sealed()._identity("UTC", {})[0] != sealed()._identity(
-            "Pacific/Auckland", {}
-        )[0]
+        assert sealed()._identity("UTC", {})[0] != sealed()._identity("Pacific/Auckland", {})[0]
 
     def test_so_does_changing_a_filter(self):
         one = sealed()._identity("UTC", {})
-        two = (
-            view().measure(n=count()).where(Trek.distance_km > 5).seal(after="2h")
-        )._identity("UTC", {})
+        two = (view().measure(n=count()).where(Trek.distance_km > 5).seal(after="2h"))._identity(
+            "UTC", {}
+        )
         assert one[0] != two[0]
 
     def test_bound_parameters_are_part_of_the_key(self):
-        """One herd's activity is not another's, and they share a declaration."""
         assert params_key({"herd": 1}) != params_key({"herd": 2})
         assert params_key({}) == ""
 
     def test_the_key_is_stable_across_processes(self):
-        """Content-derived, so a restart reads back what it settled."""
         assert view_key(
             model=Trek,
             at_column="started_at",
@@ -289,15 +218,11 @@ class TestWhatASettledRowIsFiledUnder:
         )
 
 
-# -- folding and differencing -------------------------------------------------
-
-
 class TestCorrectionArithmetic:
     def test_an_additive_measure_folds_by_adding(self):
         assert fold({"n": 10}, {"n": 3}) == {"n": 13}
 
     def test_a_non_additive_measure_carries_the_replacement(self):
-        """An average cannot be corrected by adding anything to it."""
         assert fold({"mean": 4.0}, {"mean": {"set": 4.5}}) == {"mean": 4.5}
 
     def test_no_correction_reads_as_the_settled_value(self):
@@ -320,9 +245,6 @@ class TestCorrectionArithmetic:
         assert fold({"mean": 4.0}, delta) == {"mean": 4.5}
 
 
-# -- the DDL ------------------------------------------------------------------
-
-
 class TestSchema:
     def test_both_tables_are_emitted_for_a_migration_to_apply(self):
         sql = schema_sql()
@@ -332,36 +254,17 @@ class TestSchema:
         assert "PRIMARY KEY (view, params, bucket)" in schema_sql()
 
     def test_the_view_itself_never_applies_it(self):
-        """The same rule the job ledger and the pass ledger follow.
-
-        A chart declaration is a poor place to acquire DDL rights, so nothing in
-        the read or settle path runs this. What *does* apply it is the schema
-        lifespan, through `app.series(database=...)` — see
-        `test_app_schema_components.py`. Before that registrar existed the
-        answer was "nothing at all", and an application had to reach into
-        `wreath._series.settle` past a leading underscore.
-        """
         import wreath.series as module
 
-        source = (module.__file__ or "")
+        source = module.__file__ or ""
         assert source, "expected a real module file"
         text = open(source).read()
         assert "schema_sql" not in text, "series.py must not execute the DDL"
 
     def test_a_settled_row_never_expires(self):
-        """No expiry column, because a settled bucket is not a cache.
-
-        ``settled_at`` records when it was computed; nothing reads it to decide
-        the row has gone off. A cache has a TTL and may be evicted; this is
-        final, and recomputing it would be redoing the same arithmetic over the
-        same rows to reach the same number.
-        """
         columns = schema_sql().lower()
         for expiry in ("expires", "expires_at", " ttl ", "valid_until"):
             assert expiry not in columns, f"{expiry!r} would make this a cache"
-
-
-# -- reading a sealed view ----------------------------------------------------
 
 
 def _rows(*pairs):
@@ -384,15 +287,6 @@ class TestReadingASealedView:
     async def test_the_first_read_computes_the_sealed_part_and_writes_nothing(
         self, declared, session, database
     ):
-        """Reading is a read. It used to settle as a side effect.
-
-        The number is the same either way; what the write cost was a `GET` that
-        could only run on a write-workload session. On a read session -- which
-        is what this fixture gives, and what a chart route should use -- the
-        `INSERT` answered `cannot execute INSERT in a read-only transaction`
-        from inside the series machinery, on a route that wrote nothing the
-        application can see. `settle()` is the write half now.
-        """
         database.connection.script("generate_series", _rows((utc(2026, 3, 1), 5)))
         result = await declared.run(
             session,
@@ -401,13 +295,13 @@ class TestReadingASealedView:
         )
         statements = [sql for sql, _args in database.connection.calls]
         assert not any(
-            keyword in sql.upper() for sql in statements
+            keyword in sql.upper()
+            for sql in statements
             for keyword in ("INSERT", "UPDATE", "DELETE")
         ), statements
         assert result.series[0].values == (5,), "the value is unchanged by not storing it"
 
     async def test_settling_is_what_stores_it(self, declared, session, database):
-        """The other half of the pair above, so "no write" is not "no feature"."""
         database.connection.script("generate_series", _rows((utc(2026, 3, 1), 5)))
         written = await declared.settle(
             session,
@@ -418,13 +312,8 @@ class TestReadingASealedView:
         assert any("INSERT INTO" in sql and "series_buckets" in sql for sql in statements)
         assert written == (utc(2026, 3, 1),)
 
-    async def test_settling_the_same_range_twice_writes_once(
-        self, declared, session, database
-    ):
-        """Idempotent, so a job that runs late and a job that reruns are equal."""
-        database.connection.script(
-            "series_buckets", [(utc(2026, 3, 1), {"n": 5}, None)]
-        )
+    async def test_settling_the_same_range_twice_writes_once(self, declared, session, database):
+        database.connection.script("series_buckets", [(utc(2026, 3, 1), {"n": 5}, None)])
         written = await declared.settle(
             session,
             range=Range(utc(2026, 3, 1), utc(2026, 3, 2)),
@@ -443,10 +332,7 @@ class TestReadingASealedView:
     async def test_a_settled_bucket_is_read_rather_than_recomputed(
         self, declared, session, database
     ):
-        """The second read does not go near the source rows."""
-        database.connection.script(
-            "series_buckets", [(utc(2026, 3, 1), {"n": 5}, None)]
-        )
+        database.connection.script("series_buckets", [(utc(2026, 3, 1), {"n": 5}, None)])
         result = await declared.run(
             session,
             range=Range(utc(2026, 3, 1), utc(2026, 3, 2)),
@@ -458,10 +344,7 @@ class TestReadingASealedView:
         )
         assert result.series[0].values == (5,)
 
-    async def test_the_open_tail_is_always_recomputed(
-        self, declared, session, database
-    ):
-        """Everything past the watermark can still change, so it is not stored."""
+    async def test_the_open_tail_is_always_recomputed(self, declared, session, database):
         database.connection.script("generate_series", _rows((utc(2026, 3, 4), 2)))
         await declared.run(
             session,
@@ -474,12 +357,8 @@ class TestReadingASealedView:
             "an open bucket must never be settled"
         )
 
-    async def test_the_envelope_says_where_the_watermark_fell(
-        self, declared, session, database
-    ):
-        database.connection.script(
-            "series_buckets", [(utc(2026, 3, 1), {"n": 5}, None)]
-        )
+    async def test_the_envelope_says_where_the_watermark_fell(self, declared, session, database):
+        database.connection.script("series_buckets", [(utc(2026, 3, 1), {"n": 5}, None)])
         result = await declared.run(
             session,
             range=Range(utc(2026, 3, 1), utc(2026, 3, 2)),
@@ -491,8 +370,10 @@ class TestReadingASealedView:
 
     async def test_a_view_with_no_seal_carries_no_state(self, session, database):
         database.connection.script("generate_series", _rows((utc(2026, 3, 1), 5)))
-        result = await view(stored_in=tz("UTC")).measure(n=count()).run(
-            session, range=Range(utc(2026, 3, 1), utc(2026, 3, 2))
+        result = (
+            await view(stored_in=tz("UTC"))
+            .measure(n=count())
+            .run(session, range=Range(utc(2026, 3, 1), utc(2026, 3, 2)))
         )
         assert result.state is None, "a caller who never seals never has to check"
 
@@ -504,12 +385,8 @@ class TestTheWriteThatArrivesLate:
     def declared(self):
         return sealed(after="0s")
 
-    async def test_a_reconcile_records_the_difference(
-        self, declared, session, database
-    ):
-        database.connection.script(
-            "series_buckets", [(utc(2026, 3, 1), {"n": 5}, None)]
-        )
+    async def test_a_reconcile_records_the_difference(self, declared, session, database):
+        database.connection.script("series_buckets", [(utc(2026, 3, 1), {"n": 5}, None)])
         database.connection.script("generate_series", _rows((utc(2026, 3, 1), 7)))
         moved = await declared.reconcile(
             session,
@@ -529,12 +406,8 @@ class TestTheWriteThatArrivesLate:
         # the fake accepted a parameter PostgreSQL never would.
         assert json.loads(written[0][3]) == {"n": 2}, "the delta, not the new total"
 
-    async def test_the_settled_value_itself_is_never_rewritten(
-        self, declared, session, database
-    ):
-        database.connection.script(
-            "series_buckets", [(utc(2026, 3, 1), {"n": 5}, None)]
-        )
+    async def test_the_settled_value_itself_is_never_rewritten(self, declared, session, database):
+        database.connection.script("series_buckets", [(utc(2026, 3, 1), {"n": 5}, None)])
         database.connection.script("generate_series", _rows((utc(2026, 3, 1), 7)))
         await declared.reconcile(
             session,
@@ -551,9 +424,7 @@ class TestTheWriteThatArrivesLate:
     async def test_a_correction_is_folded_in_when_the_series_is_read(
         self, declared, session, database
     ):
-        database.connection.script(
-            "series_buckets", [(utc(2026, 3, 1), {"n": 5}, {"n": 2})]
-        )
+        database.connection.script("series_buckets", [(utc(2026, 3, 1), {"n": 5}, {"n": 2})])
         result = await declared.run(
             session,
             range=Range(utc(2026, 3, 1), utc(2026, 3, 2)),
@@ -561,12 +432,8 @@ class TestTheWriteThatArrivesLate:
         )
         assert result.series[0].values == (7,), "5 settled plus a 2 that arrived late"
 
-    async def test_and_the_envelope_says_which_buckets_carry_one(
-        self, declared, session, database
-    ):
-        database.connection.script(
-            "series_buckets", [(utc(2026, 3, 1), {"n": 5}, {"n": 2})]
-        )
+    async def test_and_the_envelope_says_which_buckets_carry_one(self, declared, session, database):
+        database.connection.script("series_buckets", [(utc(2026, 3, 1), {"n": 5}, {"n": 2})])
         result = await declared.run(
             session,
             range=Range(utc(2026, 3, 1), utc(2026, 3, 2)),
@@ -576,15 +443,9 @@ class TestTheWriteThatArrivesLate:
             "late data arriving should look like late data arriving"
         )
 
-    async def test_reopen_replaces_the_settled_value_instead(
-        self, session, database
-    ):
-        declared = view(stored_in=tz("UTC")).measure(n=count()).seal(
-            after="0s", on_late="reopen"
-        )
-        database.connection.script(
-            "series_buckets", [(utc(2026, 3, 1), {"n": 5}, None)]
-        )
+    async def test_reopen_replaces_the_settled_value_instead(self, session, database):
+        declared = view(stored_in=tz("UTC")).measure(n=count()).seal(after="0s", on_late="reopen")
+        database.connection.script("series_buckets", [(utc(2026, 3, 1), {"n": 5}, None)])
         database.connection.script("generate_series", _rows((utc(2026, 3, 1), 7)))
         await declared.reconcile(
             session,
@@ -597,12 +458,8 @@ class TestTheWriteThatArrivesLate:
             "reopening must drop a correction that is no longer true"
         )
 
-    async def test_a_quiet_reconcile_writes_nothing(
-        self, declared, session, database
-    ):
-        database.connection.script(
-            "series_buckets", [(utc(2026, 3, 1), {"n": 5}, None)]
-        )
+    async def test_a_quiet_reconcile_writes_nothing(self, declared, session, database):
+        database.connection.script("series_buckets", [(utc(2026, 3, 1), {"n": 5}, None)])
         database.connection.script("generate_series", _rows((utc(2026, 3, 1), 5)))
         moved = await declared.reconcile(
             session,
@@ -611,20 +468,20 @@ class TestTheWriteThatArrivesLate:
         )
         assert moved == ()
         assert not [
-            sql for sql, _a in database.connection.calls if "series_corrections" in sql
-            and "INSERT" in sql
+            sql
+            for sql, _a in database.connection.calls
+            if "series_corrections" in sql and "INSERT" in sql
         ]
 
     async def test_reconcile_needs_a_seal_to_compare_against(self, session):
         with pytest.raises(SeriesError, match="needs a seal"):
-            await view(stored_in=tz("UTC")).measure(n=count()).reconcile(
-                session, range=Range(utc(2026, 3, 1), utc(2026, 3, 2))
+            await (
+                view(stored_in=tz("UTC"))
+                .measure(n=count())
+                .reconcile(session, range=Range(utc(2026, 3, 1), utc(2026, 3, 2)))
             )
 
-    async def test_reconcile_leaves_the_open_part_alone(
-        self, declared, session, database
-    ):
-        """There is nothing to correct in a bucket that can still change."""
+    async def test_reconcile_leaves_the_open_part_alone(self, declared, session, database):
         moved = await declared.reconcile(
             session,
             range=Range(utc(2026, 3, 4), utc(2026, 3, 5)),

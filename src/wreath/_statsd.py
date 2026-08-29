@@ -57,8 +57,16 @@ class StatsDBridge:
     """
 
     __slots__ = (
-        "_source", "_addr", "_prefix", "_dogstatsd", "_tags", "_route_labels",
-        "_sock", "_deltas", "_app", "_counter_sources",
+        "_source",
+        "_addr",
+        "_prefix",
+        "_dogstatsd",
+        "_tags",
+        "_route_labels",
+        "_sock",
+        "_deltas",
+        "_app",
+        "_counter_sources",
     )
 
     def __init__(
@@ -91,9 +99,9 @@ class StatsDBridge:
         self._sock.setblocking(False)
         self._deltas = _core.metric_delta_state()
 
-    # -- line building (pure; testable without a socket) ---------------------
-    def _emit(self, out: list[str], name: str, value: float, kind: str,
-              labels: dict[str, str]) -> None:
+    def _emit(
+        self, out: list[str], name: str, value: float, kind: str, labels: dict[str, str]
+    ) -> None:
         metric = f"{self._prefix}.{name}"
         if self._dogstatsd:
             merged = {**self._tags, **labels}
@@ -119,7 +127,6 @@ class StatsDBridge:
             self._deltas,
         )
 
-    # -- sending -------------------------------------------------------------
     def _counter_lines(self, out: list[str]) -> None:
         """Every registered subsystem's counters, as gauges.
 
@@ -135,7 +142,10 @@ class StatsDBridge:
         for reading in collect(self._app, self._counter_sources):
             for name, value in reading.values.items():
                 self._emit(
-                    out, f"{reading.subsystem}.{name}", int(value), "g",
+                    out,
+                    f"{reading.subsystem}.{name}",
+                    int(value),
+                    "g",
                     {"instance": str(reading.instance)},
                 )
 
@@ -182,11 +192,7 @@ class StatsDBridge:
             pass  # telemetry never breaks the app
 
     async def run_periodic(self, interval: float = 10.0) -> None:
-        """Flush on a fixed cadence. Drive from a supervised task.
-
-        TODO(app-wiring): an `app.statsd(...)` factory that owns this loop in
-        the lifespan would mirror `app.http_client`/`app.objects`.
-        """
+        """Flush on a fixed cadence."""
         import asyncio
 
         while True:
@@ -211,7 +217,13 @@ def activate_statsd(
 ) -> StatsDBridge:
     """Wrap a snapshot source in a StatsD/DogStatsD push bridge (see module doc)."""
     return StatsDBridge(
-        source, host=host, port=port, prefix=prefix,
-        dogstatsd=dogstatsd, tags=tags, route_labels=route_labels,
-        app=app, counter_sources=counter_sources,
+        source,
+        host=host,
+        port=port,
+        prefix=prefix,
+        dogstatsd=dogstatsd,
+        tags=tags,
+        route_labels=route_labels,
+        app=app,
+        counter_sources=counter_sources,
     )

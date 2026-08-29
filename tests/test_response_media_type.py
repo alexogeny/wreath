@@ -1,20 +1,3 @@
-"""`media_type=` is bytes, and a `str` is refused where it is passed.
-
-The defect this pins was found by the tracking example, which followed the
-protobuf recipe verbatim: the recipe showed `media_type="application/x-protobuf"`
-and `Response` accepted it, so the application emitted
-
-    (b"content-type", "application/x-protobuf")
-
-onto the wire -- a bytes header name beside a `str` value, which is not a valid
-ASGI header. Nothing raised at the call site. What surfaced was a `TypeError`
-from whatever read the header afterwards, arbitrarily far from the `media_type=`
-that caused it, which is the shape `AGENTS.md` calls a guard worth having.
-
-The parameter has always been annotated `bytes | None`; this enforces that
-rather than widening it.
-"""
-
 from __future__ import annotations
 
 import pytest

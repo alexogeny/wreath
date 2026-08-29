@@ -60,13 +60,10 @@ FOREIGN_TRANSLATED: dict[str, tuple[str, str, str, str]] = {
 }
 
 FOREIGN: dict[str, tuple[str, str, str, str]] = {
-    # -- foreign frameworks ---------------------------------------------------
-    #
     # Recognized, never translated. Without these a Tornado application reports
     # `0 translated, 0 needs-review, 0 unsupported` -- the numbers an empty
     # directory produces -- and the size of the job stays invisible. Counting
     # them is how "I cannot port this" becomes a quantity instead of a silence.
-    #
     # Each fires only where its framework is imported: `@app.route(...)` is
     # spelled the same in Flask and Bottle, and aiohttp's `@routes.get` is
     # FastAPI's exactly.

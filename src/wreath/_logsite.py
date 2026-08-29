@@ -105,9 +105,7 @@ class LogField:
     disposition: CaptureDisposition
 
 
-def declare(
-    name: str, type_: type, disposition: CaptureDisposition | None = None
-) -> LogField:
+def declare(name: str, type_: type, disposition: CaptureDisposition | None = None) -> LogField:
     """Declare a field, defaulting its disposition by type.
 
     Scalars default to RAW because an integer is not a secret-bearing shape;
@@ -159,9 +157,7 @@ def spec_blob(fields: tuple[LogField, ...]) -> bytes:
     is the whole point of interning a call site: the static half is decided at
     import and the request path only carries values.
     """
-    return bytes(
-        (_SPEC_TYPES[field.type] << 4) | int(field.disposition) for field in fields
-    )
+    return bytes((_SPEC_TYPES[field.type] << 4) | int(field.disposition) for field in fields)
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,8 +221,7 @@ def validate(event_name: str, template: str, fields: tuple[LogField, ...]) -> No
     missing = used.difference(declared)
     if missing:
         raise LogSiteError(
-            f"site {event_name!r} has a template naming {sorted(missing)}, which no "
-            f"field declares"
+            f"site {event_name!r} has a template naming {sorted(missing)}, which no field declares"
         )
     unused = [name for name in declared if name not in used]
     if unused:
@@ -395,18 +390,13 @@ class SiteRegistry:
         return siphash24(raw, *self._key)
 
 
-# --- packing ----------------------------------------------------------------
-
-
 def _as_bytes(value: object) -> bytes:
     if isinstance(value, bytes):
         return value
     return str(value).encode("utf-8", "replace")
 
 
-def pack_value(
-    registry: SiteRegistry, value: object, spec: LogField
-) -> tuple[LogArg, bool]:
+def pack_value(registry: SiteRegistry, value: object, spec: LogField) -> tuple[LogArg, bool]:
     """Convert one Python value into a packed argument.
 
     This is half of the Python packing; the other half is `LogCell.encode`.
@@ -484,9 +474,6 @@ def infer_field(name: str, value: object) -> LogField:
     return LogField(name, str, CaptureDisposition.HASHED)
 
 
-# --- reading a record back --------------------------------------------------
-
-
 def _display(arg: LogArg, spec: LogField | None) -> Any:
     """One argument as a Python value for rendering or structured output."""
     if arg.type is LogArgType.STR:
@@ -510,8 +497,7 @@ def attributes(registry: SiteRegistry, cell: LogCell) -> dict[str, Any]:
     if site is None:
         return {f"arg{i}": _display(arg, None) for i, arg in enumerate(cell.args)}
     return {
-        spec.name: _display(arg, spec)
-        for spec, arg in zip(site.fields, cell.args, strict=False)
+        spec.name: _display(arg, spec) for spec, arg in zip(site.fields, cell.args, strict=False)
     }
 
 
@@ -530,7 +516,7 @@ def render(registry: SiteRegistry, cell: LogCell) -> str:
         values.setdefault(spec.name, "?")
     try:
         return site.template.format(**values)
-    except (IndexError, KeyError, ValueError):
+    except IndexError, KeyError, ValueError:
         # A template that cannot render is still worth reading. Falling back
         # keeps a malformed site from silencing the record entirely.
         return f"{site.event_name} {values}"

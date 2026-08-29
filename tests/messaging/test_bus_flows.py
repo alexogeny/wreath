@@ -1,11 +1,3 @@
-"""MessageBus publish + consumer-disposition coverage over a fake driver.
-
-Drives publish (ephemeral vs durable outbox) and _claim/_deliver (ack -> done,
-reject -> dead, handler error/nack -> retry) directly against a recording
-connection, so the fencing + disposition branches are covered without Postgres.
-Real SKIP-LOCKED delivery stays DSN-gated.
-"""
-
 from __future__ import annotations
 
 import json

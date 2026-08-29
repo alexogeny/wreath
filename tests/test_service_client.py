@@ -1,4 +1,3 @@
-"""ServiceClient: base-path prefixing + auto-injected refreshing bearer token."""
 from __future__ import annotations
 
 import pytest
@@ -13,8 +12,15 @@ class _FakeClient:
         self.calls: list[dict] = []
 
     async def request(self, method, target, *, headers=(), body=b"", idempotency_key=None):
-        self.calls.append({"method": method, "target": target, "headers": headers,
-                            "body": body, "idempotency_key": idempotency_key})
+        self.calls.append(
+            {
+                "method": method,
+                "target": target,
+                "headers": headers,
+                "body": body,
+                "idempotency_key": idempotency_key,
+            }
+        )
         return "response"
 
 
@@ -27,7 +33,7 @@ async def test_base_path_is_prefixed() -> None:
     svc = ServiceClient(client, base_path="/billing/v1")
     await svc.get("/invoices/7")
     assert client.calls[-1]["target"] == "/billing/v1/invoices/7"
-    await svc.get("invoices/8")               # missing leading slash still joins cleanly
+    await svc.get("invoices/8")  # missing leading slash still joins cleanly
     assert client.calls[-1]["target"] == "/billing/v1/invoices/8"
 
 
@@ -52,7 +58,7 @@ async def test_client_credentials_style_token_is_awaited() -> None:
     await svc.get("/a")
     await svc.get("/b")
     assert _auth(client.calls[0]["headers"]) == b"Bearer tok-1"
-    assert _auth(client.calls[1]["headers"]) == b"Bearer tok-2"   # re-asked each call
+    assert _auth(client.calls[1]["headers"]) == b"Bearer tok-2"  # re-asked each call
 
 
 async def test_async_callable_token() -> None:
@@ -88,8 +94,6 @@ async def test_verb_helpers_route_to_the_right_method() -> None:
     assert [c["method"] for c in client.calls] == ["PUT", "PATCH", "DELETE"]
 
 
-# --- token refusals -----------------------------------------------------------
-#
 # `f"Bearer {value}".encode("latin-1")` had three distinct wrong answers, and
 # the docstring named none of them: CRLF spliced a second header into the
 # request, U+0080-U+00FF encoded to bytes no peer decodes back, and anything
@@ -98,7 +102,6 @@ async def test_verb_helpers_route_to_the_right_method() -> None:
 
 
 async def test_a_token_carrying_crlf_is_refused_not_spliced() -> None:
-    """The one that matters: header injection through the token source."""
     client = _FakeClient()
     svc = ServiceClient(client, token="abc\r\nX-Admin: true")
     with pytest.raises(ValueError, match=r"splice a second header"):
@@ -109,10 +112,10 @@ async def test_a_token_carrying_crlf_is_refused_not_spliced() -> None:
 @pytest.mark.parametrize(
     ("token", "shown"),
     [
-        ("tökén", "'ö'"),          # latin-1 encoded this silently, and wrongly
-        ("токен", "'т'"),          # this raised UnicodeEncodeError from `encode`
-        ("abc\tdef", "'\\t'"),     # a tab is ASCII but not printable
-        ("abc\x7f", "'\\x7f'"),    # DEL
+        ("tökén", "'ö'"),  # latin-1 encoded this silently, and wrongly
+        ("токен", "'т'"),  # this raised UnicodeEncodeError from `encode`
+        ("abc\tdef", "'\\t'"),  # a tab is ASCII but not printable
+        ("abc\x7f", "'\\x7f'"),  # DEL
     ],
 )
 async def test_a_non_ascii_or_unprintable_token_is_refused(token, shown) -> None:
@@ -126,7 +129,6 @@ async def test_a_non_ascii_or_unprintable_token_is_refused(token, shown) -> None
 
 
 async def test_the_refusal_names_a_refreshing_provider_as_the_source() -> None:
-    """A provider's token has no other traceable origin, so the message carries it."""
     class _Creds:
         async def token(self) -> str:
             return "bad\nvalue"
@@ -137,7 +139,6 @@ async def test_the_refusal_names_a_refreshing_provider_as_the_source() -> None:
 
 
 async def test_an_ordinary_token_is_unaffected() -> None:
-    """The control: the guard must not reject what bearer tokens actually look like."""
     client = _FakeClient()
     jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.-_~+/=abcDEF123"
     svc = ServiceClient(client, token=jwt)

@@ -1,5 +1,3 @@
-"""Focused objections for webhook replay and inbox storage boundaries."""
-
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -48,16 +46,23 @@ class _Session:
 
 def _envelope() -> WebhookEnvelope:
     return WebhookEnvelope(
-        "evt", "created", "1", datetime(2026, 8, 25, tzinfo=UTC),
-        "application/json", b"{}"
+        "evt", "created", "1", datetime(2026, 8, 25, tzinfo=UTC), "application/json", b"{}"
     )
 
 
 def _delivery() -> OutboxDelivery:
     return OutboxDelivery(
-        "delivery", "evt", "receiver", "created",
-        datetime(2026, 8, 25, tzinfo=UTC), "1", b"{}", "application/json",
-        "key", 1, 2,
+        "delivery",
+        "evt",
+        "receiver",
+        "created",
+        datetime(2026, 8, 25, tzinfo=UTC),
+        "1",
+        b"{}",
+        "application/json",
+        "key",
+        1,
+        2,
     )
 
 
@@ -89,9 +94,7 @@ def test_retention_pass_builds_a_default_duty_cycle() -> None:
 def test_retention_pass_preserves_an_explicit_duty_cycle() -> None:
     pace = DutyCycle(0.25)
 
-    declaration = _retention_purge_pass(
-        table="events", key=("event_id",), pace=pace
-    )
+    declaration = _retention_purge_pass(table="events", key=("event_id",), pace=pace)
 
     assert declaration.pace is pace
 
@@ -176,9 +179,7 @@ async def test_outbox_claim_refuses_nonpositive_lease_before_querying() -> None:
     session = _Session()
 
     with pytest.raises(ValueError, match="lease_seconds must be positive"):
-        await PostgresWebhookOutbox().claim_due(
-            session, lease_owner="worker", lease_seconds=0
-        )
+        await PostgresWebhookOutbox().claim_due(session, lease_owner="worker", lease_seconds=0)
 
     assert session.calls == []
 
@@ -188,9 +189,7 @@ async def test_outbox_renew_refuses_nonpositive_lease_before_querying() -> None:
     session = _Session()
 
     with pytest.raises(ValueError, match="lease_seconds must be positive"):
-        await PostgresWebhookOutbox().renew_lease(
-            session, _delivery(), lease_seconds=0
-        )
+        await PostgresWebhookOutbox().renew_lease(session, _delivery(), lease_seconds=0)
 
     assert session.calls == []
 

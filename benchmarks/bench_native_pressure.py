@@ -1,7 +1,6 @@
 """Native CPU and memory-pressure benchmarks for the accelerated server paths.
 
-Each scenario isolates one superlinear or unbounded operation identified in
-``docs/plans/native-c-hotspots.md``:
+Each scenario isolates one superlinear or unbounded operation:
 
 * ``h2-blocked-send``    an ASGI app producing a large awaited response while the
                          peer send window is zero. Proves whether backpressure
@@ -64,9 +63,7 @@ def peak_rss_bytes() -> int | None:
     return int(raw) if sys.platform == "darwin" else int(raw) * 1024
 
 
-# --------------------------------------------------------------------------
 # environment metadata
-# --------------------------------------------------------------------------
 
 
 def wreath_version() -> str:
@@ -142,9 +139,7 @@ def unavailable_record(scenario: str, reason: str, parameters: dict[str, Any]) -
     return record
 
 
-# --------------------------------------------------------------------------
 # HTTP/2 in-process driver (fake transport, no TLS, no sockets)
-# --------------------------------------------------------------------------
 
 
 class CountingTransport(asyncio.Transport):
@@ -221,9 +216,7 @@ async def h2_preface(proto: Any, settings: dict[int, int]) -> None:
     await settle()
 
 
-# --------------------------------------------------------------------------
 # scenario: h2-blocked-send
-# --------------------------------------------------------------------------
 
 
 async def _h2_blocked_send_once(total_bytes: int, chunk_size: int) -> dict[str, Any]:
@@ -250,9 +243,7 @@ async def _h2_blocked_send_once(total_bytes: int, chunk_size: int) -> dict[str, 
     proto, transport = make_h2(app, config)
     # A zero initial window means the peer grants no stream send credit at all.
     await h2_preface(proto, {support.SETTINGS_INITIAL_WINDOW_SIZE: 0})
-    proto.data_received(
-        support.build_headers_frame(1, support.request_headers(b"GET", b"/"))
-    )
+    proto.data_received(support.build_headers_frame(1, support.request_headers(b"GET", b"/")))
     await settle(100)
     reached = progress["chunks_reached"]
     written = transport.bytes_written
@@ -302,9 +293,7 @@ def scenario_h2_blocked_send(warmup: int, trials: int) -> dict[str, Any]:
     )
 
 
-# --------------------------------------------------------------------------
 # scenario: h2-flush-scaling
-# --------------------------------------------------------------------------
 
 
 async def _h2_flush_once(size: int, increment: int) -> tuple[float, int]:
@@ -324,9 +313,7 @@ async def _h2_flush_once(size: int, increment: int) -> tuple[float, int]:
     config = ServerConfig(protocols=("h2",), lifespan="off")
     proto, transport = make_h2(app, config)
     await h2_preface(proto, {support.SETTINGS_INITIAL_WINDOW_SIZE: 0})
-    proto.data_received(
-        support.build_headers_frame(1, support.request_headers(b"GET", b"/"))
-    )
+    proto.data_received(support.build_headers_frame(1, support.request_headers(b"GET", b"/")))
     await settle(100)
 
     # The whole body is now blocked on flow control. Time only the release.
@@ -382,9 +369,7 @@ def scenario_h2_flush_scaling(warmup: int, trials: int) -> dict[str, Any]:
             # timing above measures nothing and must not be read as a win.
             "bytes_written": written,
             "body_fully_sent": written >= size,
-            "nanoseconds_per_byte": (
-                statistics.median(seconds) * 1e9 / size if seconds else 0.0
-            ),
+            "nanoseconds_per_byte": (statistics.median(seconds) * 1e9 / size if seconds else 0.0),
         }
         all_seconds.extend(seconds)
 
@@ -422,9 +407,7 @@ def scenario_h2_flush_scaling(warmup: int, trials: int) -> dict[str, Any]:
     )
 
 
-# --------------------------------------------------------------------------
 # scenario: h2-request-queue
-# --------------------------------------------------------------------------
 
 
 async def _h2_queue_once(count: int, chunk: int) -> dict[str, Any]:
@@ -464,9 +447,7 @@ async def _h2_queue_once(count: int, chunk: int) -> dict[str, Any]:
     proto, _transport = make_h2(app, config)
     await h2_preface(proto, {})
     proto.data_received(
-        support.build_headers_frame(
-            1, support.request_headers(b"POST", b"/"), end_stream=False
-        )
+        support.build_headers_frame(1, support.request_headers(b"POST", b"/"), end_stream=False)
     )
     await settle()
 
@@ -515,9 +496,7 @@ def scenario_h2_request_queue(warmup: int, trials: int) -> dict[str, Any]:
         all_seconds.extend(seconds)
     small, large = per_count[str(counts[0])], per_count[str(counts[1])]
     ratio = (
-        large["median_seconds"] / small["median_seconds"]
-        if small["median_seconds"] > 0
-        else 0.0
+        large["median_seconds"] / small["median_seconds"] if small["median_seconds"] > 0 else 0.0
     )
     return make_record(
         "h2-request-queue",
@@ -531,9 +510,7 @@ def scenario_h2_request_queue(warmup: int, trials: int) -> dict[str, Any]:
     )
 
 
-# --------------------------------------------------------------------------
 # scenario: h3-request-limit
-# --------------------------------------------------------------------------
 
 
 def h3_available() -> bool:
@@ -552,10 +529,8 @@ def curl_h3_available() -> bool:
     if curl is None:
         return False
     try:
-        out = subprocess.run(
-            [curl, "--version"], capture_output=True, text=True, timeout=5
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
+        out = subprocess.run([curl, "--version"], capture_output=True, text=True, timeout=5).stdout
+    except OSError, subprocess.SubprocessError:
         return False
     return "HTTP3" in out or "http3" in out
 
@@ -582,7 +557,10 @@ async def _h3_limit_once(limit: int, upload: int) -> dict[str, Any]:
     server = await serve(
         app,
         ServerConfig(
-            host="127.0.0.1", port=0, lifespan="off", protocols=("h3",),
+            host="127.0.0.1",
+            port=0,
+            lifespan="off",
+            protocols=("h3",),
             max_body_bytes=limit,
         ),
         tls=TLSConfig(cert, key),
@@ -626,9 +604,7 @@ def scenario_h3_request_limit(warmup: int, trials: int) -> dict[str, Any]:
             "h3-request-limit", "wreath._native._http3 not built (WREATH_BUILD_HTTP3=1)", params
         )
     if not curl_h3_available():
-        return unavailable_record(
-            "h3-request-limit", "no HTTP/3-capable curl on PATH", params
-        )
+        return unavailable_record("h3-request-limit", "no HTTP/3-capable curl on PATH", params)
     raw_seconds: list[float] = []
     raw_rss: list[int] = []
     errors: list[str] = []
@@ -656,9 +632,7 @@ def scenario_h3_request_limit(warmup: int, trials: int) -> dict[str, Any]:
     )
 
 
-# --------------------------------------------------------------------------
 # scenario: router-compile
-# --------------------------------------------------------------------------
 
 
 def build_router_app(routes: int) -> Any:
@@ -680,9 +654,7 @@ def build_router_app(routes: int) -> Any:
     for branch in range(branches):
         tenant = Router(prefix=f"/tenant-{branch}", permissions=(f"tenant:{branch}:read",))
         for leaf in range(leaves):
-            tenant.get(
-                f"/services/group-{leaf % 10}/resource-{leaf}/{{item_id}}"
-            )(endpoint)
+            tenant.get(f"/services/group-{leaf % 10}/resource-{leaf}/{{item_id}}")(endpoint)
         protected.include_router(tenant)
     app = Wreath(routing="policy")
     app.include_router(protected)
@@ -721,9 +693,7 @@ def scenario_router_compile(warmup: int, trials: int) -> dict[str, Any]:
         all_seconds.extend(seconds)
     small, large = per_count[str(counts[0])], per_count[str(counts[1])]
     ratio = (
-        large["median_seconds"] / small["median_seconds"]
-        if small["median_seconds"] > 0
-        else 0.0
+        large["median_seconds"] / small["median_seconds"] if small["median_seconds"] > 0 else 0.0
     )
     return make_record(
         "router-compile",
@@ -746,9 +716,7 @@ RUNNERS = {
 }
 
 
-# --------------------------------------------------------------------------
 # parent / child plumbing
-# --------------------------------------------------------------------------
 
 
 def run_child(scenario: str, warmup: int, trials: int) -> dict[str, Any]:

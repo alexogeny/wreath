@@ -1,12 +1,3 @@
-"""The a01 handler written the way `wreath.sql` says to write it.
-
-The fix is one character at each call site -- `f` becomes `t` -- plus deleting
-the sanitiser, which was never doing anything. The schema name cannot be a bind
-parameter, so it goes through `Identifier`, which quotes it.
-
-Nothing here may produce a finding. If a rule starts firing on this file, the
-rule is wrong: this is the spelling the documentation tells people to use.
-"""
 from __future__ import annotations
 
 from typing import Annotated

@@ -1,5 +1,3 @@
-"""First-class metal downgrade: reverse plan, hazard scan, and locked revert."""
-
 from __future__ import annotations
 
 import importlib
@@ -52,15 +50,12 @@ def _forward_plan() -> bytes:
     return native._migration_plan_descriptors(descriptor, empty)
 
 
-# --- reverse plan (pure metal) --------------------------------------------
-
-
 def test_reverse_plan_round_trips_to_the_forward_operation_tape() -> None:
     plan = _forward_plan()
     twice = native._migration_reverse_plan(native._migration_reverse_plan(plan))
-    assert native._migration_operations_from_plan(
-        twice
-    ) == native._migration_operations_from_plan(plan)
+    assert native._migration_operations_from_plan(twice) == native._migration_operations_from_plan(
+        plan
+    )
 
 
 def test_reverse_sql_drops_what_forward_added_inner_to_outer_and_is_destructive() -> None:
@@ -84,9 +79,6 @@ def test_forward_and_reverse_name_the_primary_key_identically() -> None:
     assert name in dropped and name.startswith("wreath_")
 
 
-# --- hazard scan (pure metal) ---------------------------------------------
-
-
 def test_hazards_flag_every_object_the_live_orm_still_maps() -> None:
     reverse = native._migration_reverse_plan(_forward_plan())
     image = migrations._compile_registry_image(_registry())
@@ -99,9 +91,7 @@ def test_hazards_flag_every_object_the_live_orm_still_maps() -> None:
 
 def test_no_hazards_when_the_code_was_rolled_back_with_the_schema() -> None:
     reverse = native._migration_reverse_plan(_forward_plan())
-    rolled_back = native._migration_compile_desired(
-        b"WMD1\x01\x00\x00\x00\x00\x00\x00\x00"
-    )
+    rolled_back = native._migration_compile_desired(b"WMD1\x01\x00\x00\x00\x00\x00\x00\x00")
     assert native._migration_downgrade_hazards(reverse, rolled_back) == []
 
 
@@ -123,9 +113,6 @@ def test_retyped_column_is_a_hazard_only_while_code_expects_the_new_type() -> No
         for *_x, reason in native._migration_downgrade_hazards(reverse, code_wants_new)
     )
     assert native._migration_downgrade_hazards(reverse, code_wants_old) == []
-
-
-# --- locked transactional revert ------------------------------------------
 
 
 def _forward_artifact() -> tuple[bytes, NativeCatalogSnapshot, NativeCatalogSnapshot]:
@@ -194,12 +181,9 @@ async def test_revert_verifies_target_runs_reverse_deletes_tip_and_commits(
     statements = [call[0] for call in connection.executed]
     assert statements[0] == "BEGIN"
     assert any(
-        isinstance(sql, str) and sql.startswith("DO $wreath_migration_")
-        for sql in statements
+        isinstance(sql, str) and sql.startswith("DO $wreath_migration_") for sql in statements
     )
-    assert any(
-        isinstance(sql, str) and sql.startswith("DELETE FROM") for sql in statements
-    )
+    assert any(isinstance(sql, str) and sql.startswith("DELETE FROM") for sql in statements)
     assert statements[-1] == "COMMIT"
     assert "ROLLBACK" not in statements
     assert result.migration_id == MIGRATION_ID and result.destructive_approved

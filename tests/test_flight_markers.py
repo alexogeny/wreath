@@ -1,8 +1,3 @@
-"""Stage 3 slice 2b (dependency seams): phase markers at the PostgreSQL and
-HTTP-client seams, driven through the ContextVar propagation without a live
-server. The marker is bound the way dispatch binds it for an armed request;
-each seam then records its phase with the dependency's metadata-image ID."""
-
 from __future__ import annotations
 
 import pytest
@@ -258,9 +253,7 @@ async def test_http_client_request_records_http_client_phase(
         fm.phase_marker.reset(token)
 
     assert response.status == 204
-    assert [(p[0], p[1], p[2]) for p in phases] == [
-        (fm.PH_HTTP_CLIENT, 3, fm.COV_EXTERNAL)
-    ]
+    assert [(p[0], p[1], p[2]) for p in phases] == [(fm.PH_HTTP_CLIENT, 3, fm.COV_EXTERNAL)]
 
 
 @pytest.mark.asyncio
@@ -308,27 +301,6 @@ def test_flight_route_ids_stamp_dependency_ids() -> None:
 
 
 def test_the_lazy_metadata_join_is_idempotent_under_concurrent_builders() -> None:
-    """Design 22 item 14, checked as far as this interpreter allows.
-
-    The hypothesis was a torn dict from two concurrent armed requests racing
-    `_build_flight_route_ids`. Two corrections came out of checking it:
-
-    * `_build_flight_route_ids` is a plain sync function with **zero** await
-      points, so two coroutines on one event loop cannot interleave inside it.
-      The stated scenario is not a race at all; only genuine OS threads
-      sharing one `Wreath` can reach it concurrently.
-    * Every write it makes is idempotent -- the same value derived from the
-      same immutable image -- so the worst outcome of a real thread overlap
-      is duplicated work, plus a window in which a reader sees a partially
-      populated `_flight_model_ids` and misses one ORM_HYDRATE attribution.
-      That degrades telemetry transiently; it does not corrupt anything.
-
-    This runs the builder from several threads and asserts the stamps agree.
-    Under the GIL that is a logic check, not a free-threading proof: no
-    free-threaded interpreter is available here (`Py_GIL_DISABLED` is false),
-    so the free-threaded mode `AGENTS.md` requires remains untested for this
-    path and is recorded as such rather than assumed.
-    """
     import threading
 
     from wreath import Wreath
@@ -373,20 +345,6 @@ def test_the_lazy_metadata_join_is_idempotent_under_concurrent_builders() -> Non
 
 
 def test_the_metadata_image_names_each_route_s_auth_policy() -> None:
-    """The recorder's answer to "what was guarding this route", interned once.
-
-    A policy name is built by joining the parts of the requirement, and the
-    `authenticated` part had never been asserted -- every existing image test
-    builds routes with no auth at all, so the whole naming function ran on
-    nothing. Dropping that part renames `@roles("admin")` from
-    `auth|role:all:admin` to `role:all:admin` and, worse, renames a plain
-    `@authenticated()` route to the empty string, which the caller reads as
-    *no policy*: a forensic image would then say an authenticated route was
-    open, which is the one thing an operator reads it to find out.
-
-    Interning is asserted too -- two ids for two distinct policies, and the
-    unguarded route at `ID_NONE`.
-    """
     from typing import Any
 
     from wreath import Wreath

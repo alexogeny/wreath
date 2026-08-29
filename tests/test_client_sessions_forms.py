@@ -1,5 +1,3 @@
-"""TestClient, SessionPolicy, and form parsing tests."""
-
 from __future__ import annotations
 
 from typing import Any
@@ -13,8 +11,6 @@ from wreath.policy.sessions import SessionPolicy
 from wreath.response import TextResponse
 from wreath.testing import TestClient
 from wreath.websocket import WebSocket
-
-# --- TestClient: HTTP -------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -96,9 +92,6 @@ async def test_client_websocket_rejection() -> None:
             pass
 
 
-# --- sessions ----------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_session_roundtrip_and_tamper_resistance() -> None:
     app = Wreath()
@@ -161,14 +154,6 @@ async def test_session_cleared_deletes_cookie() -> None:
 
 @pytest.mark.asyncio
 async def test_session_read_only_request_writes_no_cookie_for_a_populated_session() -> None:
-    """The change detector diffs against the decoded payload, not a re-dump.
-
-    `before` used to serialize the freshly decoded session purely to have
-    something for `after` to compare against -- two JSON passes per request
-    where one will do. The bytes it decoded *are* that serialization, so the
-    contract this pins is that a request which only reads a non-empty session
-    still emits no Set-Cookie.
-    """
     app = Wreath()
     middleware = SessionPolicy(secret="s" * 32)
     app.configure_http_policy(HttpPolicy(session=middleware))
@@ -206,13 +191,6 @@ async def test_session_mutation_still_reissues_the_cookie() -> None:
 
 @pytest.mark.asyncio
 async def test_session_payload_that_does_not_round_trip_is_reissued() -> None:
-    """A foreign encoding is reissued, never misread.
-
-    Diffing against the decoded bytes assumes they are what `_json_dumps`
-    would produce. A validly signed cookie carrying differently-formatted JSON
-    (whitespace here) breaks that assumption; the safe outcome is a reissued
-    cookie with identical content, not a dropped write.
-    """
     app = Wreath()
     middleware = SessionPolicy(secret="s" * 32)
     app.configure_http_policy(HttpPolicy(session=middleware))
@@ -221,7 +199,7 @@ async def test_session_payload_that_does_not_round_trip_is_reissued() -> None:
     async def read(request: Any) -> Any:
         return {"user": request.state.session.get("user")}
 
-    token = middleware._sign(b'{"user": "ada"}', 2_000_000_000)   # note the space
+    token = middleware._sign(b'{"user": "ada"}', 2_000_000_000)  # note the space
 
     client = TestClient(app)
     response = await client.get("/read", headers={"cookie": f"wreath_session={token}"})
@@ -250,9 +228,6 @@ async def test_absent_and_rejected_sessions_both_write_nothing() -> None:
     forged = await client.get("/read", headers={"cookie": "wreath_session=a.b.c"})
     assert forged.json() == {"empty": True}
     assert forged.header("set-cookie") is None
-
-
-# --- forms ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio

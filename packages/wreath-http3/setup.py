@@ -37,8 +37,7 @@ def _quic_flags() -> tuple[list[str], list[str]]:
         return subprocess.run([pkg_config, "--exists", name], check=False).returncode == 0
 
     crypto = next(
-        (name for name in ("libngtcp2_crypto_ossl", "libngtcp2_crypto_quictls")
-         if have(name)),
+        (name for name in ("libngtcp2_crypto_ossl", "libngtcp2_crypto_quictls") if have(name)),
         None,
     )
     required = ["libngtcp2", "libnghttp3"]
@@ -47,8 +46,7 @@ def _quic_flags() -> tuple[list[str], list[str]]:
         missing.append("libngtcp2_crypto_ossl|libngtcp2_crypto_quictls")
     if missing:
         raise SystemExit(
-            "wreath-http3 needs these QUIC libraries via pkg-config: "
-            + ", ".join(missing)
+            "wreath-http3 needs these QUIC libraries via pkg-config: " + ", ".join(missing)
         )
     required.append(crypto)
 
@@ -64,13 +62,16 @@ def _quic_flags() -> tuple[list[str], list[str]]:
 
 
 cflags, libs = _quic_flags()
-sources = [str(NATIVE / name) for name in (
-    "_http3module.c",
-    "http3_connection.c",
-    "http3_asgi.c",
-    "server_policy.c",
-    "http3_header_block.c",
-)]
+sources = [
+    str(NATIVE / name)
+    for name in (
+        "_http3module.c",
+        "http3_connection.c",
+        "http3_asgi.c",
+        "server_policy.c",
+        "http3_header_block.c",
+    )
+]
 
 setup(
     packages=[],

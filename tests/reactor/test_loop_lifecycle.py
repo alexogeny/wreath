@@ -1,7 +1,3 @@
-"""Loop lifecycle: run_until_complete / run_forever / stop / close / is_running.
-
-RED until wreath.reactor.new_event_loop() exists. Oracle: stock asyncio.
-"""
 from __future__ import annotations
 
 import asyncio

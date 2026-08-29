@@ -1,5 +1,3 @@
-"""Deterministic fragmentation fuzzing for the HTTP/1 protocol."""
-
 from __future__ import annotations
 
 import asyncio
@@ -118,17 +116,6 @@ def corpus() -> list[bytes]:
 @pytest.mark.skipif(_server is None, reason="native server extension unavailable")
 @pytest.mark.asyncio
 async def test_the_answer_does_not_depend_on_where_the_reads_split() -> None:
-    """The whole payload delivered at once is the oracle for every fragmentation.
-
-    A resumable parser cannot care where a TCP boundary landed, so for each
-    input the single-`data_received` outcome is the answer every split must
-    reproduce -- and the same holds with the peer disconnecting afterwards,
-    which is a separate resumption path.
-
-    This is stronger than it looks: the splits include *every* byte position for
-    inputs short enough to enumerate, so a parser that mis-resumes at one offset
-    in one state is caught by exactly one of them.
-    """
     config = ServerConfig(
         max_request_line=96,
         max_header_count=12,
@@ -145,9 +132,7 @@ async def test_the_answer_does_not_depend_on_where_the_reads_split() -> None:
             indexes = sorted({0, len(value), *(rng.randrange(len(value) + 1) for _ in range(5))})
             split_sets.append([value[a:b] for a, b in zip(indexes, indexes[1:], strict=False)])
         for disconnect in (False, True):
-            whole = await drive(
-                _server.HttpProtocol, [value], disconnect=disconnect, config=config
-            )
+            whole = await drive(_server.HttpProtocol, [value], disconnect=disconnect, config=config)
             for pieces in split_sets:
                 split = await drive(
                     _server.HttpProtocol, pieces, disconnect=disconnect, config=config
@@ -184,10 +169,7 @@ async def test_native_6000_request_pipelined_stress() -> None:
     protocol = _server.HttpProtocol(echo_app, ServerConfig(), loop, set())
     protocol.connection_made(transport)
     get = b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"
-    post = (
-        b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
-        b"4\r\ndata\r\n0\r\n\r\n"
-    )
+    post = b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ndata\r\n0\r\n\r\n"
     feed(protocol, (get + post) * 3000)
     for _ in range(12000):
         if bytes(transport.buffer).count(b"HTTP/1.1 204") == 6000:

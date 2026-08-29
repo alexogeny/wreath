@@ -31,7 +31,7 @@ class Page:
     """One documentation page: a nav title and a source markdown file."""
 
     title: str
-    source: str          # path relative to Site.source, e.g. "guides/routing.md"
+    source: str  # path relative to Site.source, e.g. "guides/routing.md"
 
     def __post_init__(self) -> None:
         if not self.title:
@@ -125,7 +125,8 @@ class Repo:
         if self.stats and self.host() not in ("github", "gitlab"):
             raise ValueError(
                 "Repo(stats=True) needs a github.com or gitlab.com URL; "
-                f"{self.url!r} is neither. Drop `stats` to keep the plain link.")
+                f"{self.url!r} is neither. Drop `stats` to keep the plain link."
+            )
 
     def host(self) -> str:
         """`"github"`, `"gitlab"`, or `""` for a repository hosted elsewhere."""
@@ -146,7 +147,8 @@ class Repo:
 #: Built-in header marks. A closed registry, like the figure set: a name that is
 #: not here is a build error, not a blank box or a request to a CDN.
 ICONS: frozenset[str] = frozenset(
-    {"link", "home", "github", "gitlab", "package", "chat", "mail", "rss", "book"})
+    {"link", "home", "github", "gitlab", "package", "chat", "mail", "rss", "book"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,7 +168,7 @@ class Palette:
     fg: str = "#151a14"
     muted: str = "#5a6560"
     border: str = "#dde0d6"
-    surface: str = "#edf0e8"       # code blocks / sidebar
+    surface: str = "#edf0e8"  # code blocks / sidebar
     #: Dark-mode surfaces.
     dark_bg: str = "#0e1310"
     dark_fg: str = "#e4eae2"
@@ -204,46 +206,123 @@ THEMES: dict[str, Palette] = {
     # focus ring, and nothing else. The engraving carries two flowers on an
     # otherwise monochrome ring, and the accent is used about that often.
     "wreath": Palette(
-        primary="#12140f", accent="#1d5b4a",
-        bg="#f6f5ef", fg="#12140f", muted="#5c635a",
-        border="#d8d9cd", surface="#eeede4",
-        dark_bg="#0b0d0a", dark_fg="#e8ebe4", dark_muted="#8b948a",
-        dark_border="#232a24", dark_surface="#12160f",
-        link="#1d5b4a", dark_link="#6fd3b0",
-        dark_primary="#e8ebe4", dark_accent="#6fd3b0"),
+        primary="#12140f",
+        accent="#1d5b4a",
+        bg="#f6f5ef",
+        fg="#12140f",
+        muted="#5c635a",
+        border="#d8d9cd",
+        surface="#eeede4",
+        dark_bg="#0b0d0a",
+        dark_fg="#e8ebe4",
+        dark_muted="#8b948a",
+        dark_border="#232a24",
+        dark_surface="#12160f",
+        link="#1d5b4a",
+        dark_link="#6fd3b0",
+        dark_primary="#e8ebe4",
+        dark_accent="#6fd3b0",
+    ),
     "slate": Palette(
-        primary="#4f46e5", accent="#0ea5e9", fg="#0f172a", muted="#64748b",
-        bg="#ffffff", border="#e2e8f0", surface="#f1f5f9",
-        dark_bg="#0f172a", dark_fg="#e2e8f0", dark_muted="#94a3b8",
-        dark_border="#1e293b", dark_surface="#1e293b",
-        link="#4f46e5", dark_link="#a5b4fc", dark_primary="#8b83f5",
-        display="sans"),
+        primary="#4f46e5",
+        accent="#0ea5e9",
+        fg="#0f172a",
+        muted="#64748b",
+        bg="#ffffff",
+        border="#e2e8f0",
+        surface="#f1f5f9",
+        dark_bg="#0f172a",
+        dark_fg="#e2e8f0",
+        dark_muted="#94a3b8",
+        dark_border="#1e293b",
+        dark_surface="#1e293b",
+        link="#4f46e5",
+        dark_link="#a5b4fc",
+        dark_primary="#8b83f5",
+        display="sans",
+    ),
     "sepia": Palette(
-        primary="#a3451b", accent="#b7791f", bg="#faf6ee", fg="#43382a",
-        muted="#7c6f5f", border="#e4d8c4", surface="#f2e9d8",
-        dark_bg="#211c16", dark_fg="#e8ddc9", dark_muted="#a8987f",
-        dark_border="#3a3226", dark_surface="#2a241c", font="serif",
-        link="#b5561f", dark_link="#e0a878",
-        dark_primary="#d9793f", dark_accent="#dfa845"),
+        primary="#a3451b",
+        accent="#b7791f",
+        bg="#faf6ee",
+        fg="#43382a",
+        muted="#7c6f5f",
+        border="#e4d8c4",
+        surface="#f2e9d8",
+        dark_bg="#211c16",
+        dark_fg="#e8ddc9",
+        dark_muted="#a8987f",
+        dark_border="#3a3226",
+        dark_surface="#2a241c",
+        font="serif",
+        link="#b5561f",
+        dark_link="#e0a878",
+        dark_primary="#d9793f",
+        dark_accent="#dfa845",
+    ),
     "nord": Palette(
-        primary="#5e81ac", accent="#88c0d0", bg="#eceff4", fg="#2e3440",
-        muted="#5b6472", border="#d8dee9", surface="#e5e9f0",
-        dark_bg="#2e3440", dark_fg="#eceff4", dark_muted="#a6accd",
-        dark_border="#3b4252", dark_surface="#3b4252",
+        primary="#5e81ac",
+        accent="#88c0d0",
+        bg="#eceff4",
+        fg="#2e3440",
+        muted="#5b6472",
+        border="#d8dee9",
+        surface="#e5e9f0",
+        dark_bg="#2e3440",
+        dark_fg="#eceff4",
+        dark_muted="#a6accd",
+        dark_border="#3b4252",
+        dark_surface="#3b4252",
         # Nord's `primary` is a mid-tone blue that reads at 3.5:1 on the light
         # surface -- below AA for body text. The link is darkened two steps down
         # the same ramp (5.3:1) and keeps the hue; `primary` stays the brand fill.
-        link="#456485", dark_link="#8fbcbb", dark_primary="#81a1c1",
-        display="sans"),
+        link="#456485",
+        dark_link="#8fbcbb",
+        dark_primary="#81a1c1",
+        display="sans",
+    ),
     "terminal": Palette(
-        primary="#16a34a", accent="#0891b2", bg="#ffffff", fg="#111827",
-        muted="#6b7280", border="#e5e7eb", surface="#f3f4f6",
-        dark_bg="#0a0a0a", dark_fg="#e5e5e5", dark_muted="#a3a3a3",
-        dark_border="#262626", dark_surface="#171717", radius="4px",
+        primary="#16a34a",
+        accent="#0891b2",
+        bg="#ffffff",
+        fg="#111827",
+        muted="#6b7280",
+        border="#e5e7eb",
+        surface="#f3f4f6",
+        dark_bg="#0a0a0a",
+        dark_fg="#e5e5e5",
+        dark_muted="#a3a3a3",
+        dark_border="#262626",
+        dark_surface="#171717",
+        radius="4px",
         # Same problem as nord, worse: a saturated green on white is 3.5:1.
         # Deepened to 6.2:1, which also stops it vibrating against the surface.
-        link="#08703c", dark_link="#4ade80", dark_primary="#34d399",
-        dark_accent="#22d3ee", display="mono"),
+        link="#08703c",
+        dark_link="#4ade80",
+        dark_primary="#34d399",
+        dark_accent="#22d3ee",
+        display="mono",
+    ),
+    "signal": Palette(
+        primary="#7c3aed",
+        accent="#db2777",
+        bg="#fbf9ff",
+        fg="#1f1a29",
+        muted="#665f73",
+        border="#ded7e8",
+        surface="#f3eff9",
+        dark_bg="#0f0a16",
+        dark_fg="#f7f1ff",
+        dark_muted="#b4a9c3",
+        dark_border="#33263f",
+        dark_surface="#191020",
+        link="#6d28d9",
+        dark_link="#d8b4fe",
+        dark_primary="#a78bfa",
+        dark_accent="#f472b6",
+        radius="18px",
+        display="sans",
+    ),
 }
 
 
@@ -293,7 +372,8 @@ class Site:
     strict: bool = True
     base_url: str = ""
     description: str = ""
-    #: Surface treatment: "flat", "elevated", "papery", "hardcore", or "orby".
+    #: Surface treatment: "flat", "elevated", "papery", "hardcore", "orby",
+    #: or "luminous".
     feel: str = "flat"
     #: Source-relative globs to exempt from the orphan check (never published).
     exclude: tuple[str, ...] = ()
@@ -323,11 +403,13 @@ class Site:
                 f"{self.map_page!r}) so Browse cannot point at an unpublished page"
             )
         if self.palette.font not in _FACES:
-            raise ValueError(f"unknown Palette.font {self.palette.font!r}; "
-                             f"choose from {sorted(_FACES)}")
+            raise ValueError(
+                f"unknown Palette.font {self.palette.font!r}; choose from {sorted(_FACES)}"
+            )
         if self.palette.display not in _FACES:
-            raise ValueError(f"unknown Palette.display {self.palette.display!r}; "
-                             f"choose from {sorted(_FACES)}")
+            raise ValueError(
+                f"unknown Palette.display {self.palette.display!r}; choose from {sorted(_FACES)}"
+            )
 
     def use_tabs(self) -> bool:
         """Should the top level of the nav render as header tabs?"""
@@ -335,7 +417,7 @@ class Site:
 
 
 #: Feel names, mirrored from theme.FEELS so config can validate without importing it.
-_FEELS = frozenset({"flat", "elevated", "papery", "hardcore", "orby"})
+_FEELS = frozenset({"flat", "elevated", "papery", "hardcore", "orby", "luminous"})
 
 #: The three type roles a palette can point `font` and `display` at.
 _FACES = frozenset({"system", "sans", "serif", "mono"})

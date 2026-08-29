@@ -1,18 +1,3 @@
-"""Metal's loop-driven cycle collector.
-
-CPython triggers collection off an allocation counter, so on a request-serving
-loop it fires wherever the Nth container allocation happens to land -- inside a
-request batch. That is invisible in a throughput average and is most of what a
-p99 is made of. Metal takes the heap over: it freezes what startup built, raises
-the automatic trigger so it stops firing mid-batch, and runs the collector in the
-loop's own idle gaps.
-
-Each of the three is separately switchable, because each is separately
-measurable: `gc_mode="stock"` gives the heap back entirely, `gc_freeze=False`
-keeps the startup heap traceable. These tests pin the contracts that make an
-ablation mean anything -- above all the two that pull in opposite directions:
-a loop with slack **must** collect in it, and a saturated loop **must not**.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -31,7 +16,6 @@ from wreath.server import Server, ServerConfig
 
 #: Every test here drives the metal loop, so the whole module goes.
 pytestmark = requires_metal
-
 
 
 def _metal_loop(**kwargs):
@@ -61,11 +45,17 @@ def test_a_gc_mode_other_than_stock_or_idle_is_refused(
     ],
 )
 def test_gc_mode_accounts_for_process_wide_free_threaded_collection(
-    configured: str | None, gil_enabled: bool, expected: str,
+    configured: str | None,
+    gil_enabled: bool,
+    expected: str,
 ) -> None:
-    assert reactor._metal_gc_mode(
-        configured, gil_enabled=gil_enabled,
-    ) == expected
+    assert (
+        reactor._metal_gc_mode(
+            configured,
+            gil_enabled=gil_enabled,
+        )
+        == expected
+    )
 
 
 class _Harness:
@@ -88,14 +78,11 @@ class _Harness:
             # does.
             cycle: dict[str, object] = {}
             cycle["self"] = cycle
-            await send({"type": "http.response.start", "status": 200,
-                        "headers": []})
+            await send({"type": "http.response.start", "status": 200, "headers": []})
             await send({"type": "http.response.body", "body": self.body})
 
         asyncio.set_event_loop(self.loop)
-        self.server = Server(
-            app, ServerConfig(host="127.0.0.1", port=0, lifespan="off"),
-            self.loop)
+        self.server = Server(app, ServerConfig(host="127.0.0.1", port=0, lifespan="off"), self.loop)
         self.loop.run_until_complete(self.server._start(ssl=None))
         self.port = self.server.sockets[0].getsockname()[1]
         return self
@@ -132,8 +119,6 @@ class _Harness:
         self.loop.run_until_complete(done)
 
 
-# --- policy installation ---------------------------------------------------
-
 def test_idle_mode_gives_metal_ownership_of_the_collector() -> None:
     stock_threshold = gc.get_threshold()
     loop = _metal_loop()
@@ -166,15 +151,23 @@ def test_idle_gc_mode_requires_the_native_run_loop() -> None:
     # silent no-op.
     with pytest.raises(ValueError, match="native_loop"):
         reactor.EventLoop(
-            selectors.EpollSelector(), backend="epoll", timers="wheel",
-            native_loop=False, gc_mode="idle")
+            selectors.EpollSelector(),
+            backend="epoll",
+            timers="wheel",
+            native_loop=False,
+            gc_mode="idle",
+        )
 
 
 def test_unknown_gc_mode_is_rejected() -> None:
     with pytest.raises(ValueError, match="gc_mode"):
         reactor.EventLoop(
-            selectors.EpollSelector(), backend="epoll", timers="wheel",
-            native_loop=True, gc_mode="deferred")
+            selectors.EpollSelector(),
+            backend="epoll",
+            timers="wheel",
+            native_loop=True,
+            gc_mode="deferred",
+        )
 
 
 def test_closing_the_loop_restores_the_heap_policy() -> None:
@@ -188,8 +181,6 @@ def test_closing_the_loop_restores_the_heap_policy() -> None:
     assert gc.get_threshold() == stock_threshold
     assert gc.get_freeze_count() == 0
 
-
-# --- freezing --------------------------------------------------------------
 
 def test_startup_freezes_what_the_server_built() -> None:
     assert gc.get_freeze_count() == 0
@@ -230,8 +221,6 @@ def test_freeze_collects_before_it_freezes() -> None:
         loop.close()
 
 
-# --- the two halves of the idle contract -----------------------------------
-
 def test_a_loop_with_slack_collects_in_it() -> None:
     loop = _metal_loop()
     with _Harness(loop) as harness:
@@ -239,8 +228,7 @@ def test_a_loop_with_slack_collects_in_it() -> None:
         # 1ms stays below the slow-test tail and keeps this a load-stable proof.
         harness.drive(requests=200, gap=0.001)
         stats = loop.gc_stats()
-    collections = (stats["idle_young_collections"]
-                   + stats["idle_full_collections"])
+    collections = stats["idle_young_collections"] + stats["idle_full_collections"]
     assert collections > 0, "a loop with 1ms of slack per request never collected"
     assert stats["idle_collect_nanoseconds"] > 0
 
@@ -255,20 +243,11 @@ def test_a_saturated_loop_does_not_collect_in_the_batch() -> None:
     with _Harness(loop) as harness:
         harness.drive(requests=4000, gap=0.0)
         stats = loop.gc_stats()
-    collections = (stats["idle_young_collections"]
-                   + stats["idle_full_collections"])
-    assert collections <= 2, (
-        f"a saturated loop spent {collections} collections it had no slack for")
+    collections = stats["idle_young_collections"] + stats["idle_full_collections"]
+    assert collections <= 2, f"a saturated loop spent {collections} collections it had no slack for"
 
 
 def test_every_collection_under_load_is_one_the_loop_chose() -> None:
-    """The point of the whole policy, stated as one assertion.
-
-    With slack available, collection should be something the loop *decides* to
-    do in a gap -- not something the allocator does to it mid-request. Counting
-    every collection the process runs and subtracting the ones the poller ran
-    leaves the automatic ones, and those are the ones that land on a request.
-    """
     automatic: list[int] = []
 
     def watch(phase, info):
@@ -290,13 +269,13 @@ def test_every_collection_under_load_is_one_the_loop_chose() -> None:
             gc.callbacks.remove(watch)
         stats = loop.gc_stats()
 
-    loop_driven = (stats["idle_young_collections"]
-                   + stats["idle_full_collections"])
+    loop_driven = stats["idle_young_collections"] + stats["idle_full_collections"]
     assert loop_driven > 0
     # `watch` sees loop-driven and automatic collections alike, so anything left
     # over after subtracting the poller's own count fired on the request path.
     assert len(automatic) - loop_driven <= 1, (
-        f"{len(automatic) - loop_driven} collections fired outside an idle gap")
+        f"{len(automatic) - loop_driven} collections fired outside an idle gap"
+    )
 
 
 def test_the_collection_floor_bounds_idle_churn() -> None:
@@ -312,14 +291,12 @@ def test_the_collection_floor_bounds_idle_churn() -> None:
         harness.drive(requests=100, gap=0.005)
         elapsed = time.monotonic() - started
         stats = loop.gc_stats()
-    collections = (stats["idle_young_collections"]
-                   + stats["idle_full_collections"])
+    collections = stats["idle_young_collections"] + stats["idle_full_collections"]
     ceiling = int(elapsed / 0.050) + 2
     assert collections <= ceiling, (
-        f"{collections} collections in {elapsed:.3f}s exceeds the 50ms floor")
+        f"{collections} collections in {elapsed:.3f}s exceeds the 50ms floor"
+    )
 
-
-# --- what a collection must never reap -------------------------------------
 
 class _Echo(asyncio.Protocol):
     """A plain asyncio protocol: no wreath `Server` holding it up."""
@@ -350,22 +327,6 @@ def _echo_accepted_on(port: int) -> _Echo:
 
 
 def test_a_collection_does_not_reap_a_live_connection() -> None:
-    """The ownership contract the idle policy depends on, stated directly.
-
-    A stock asyncio loop keeps an accepted transport alive through the bound
-    `_read_ready` it stored in `_add_reader`. Metal drives ingress from an
-    io_uring multishot receive and registers no reader, so the poller's
-    connection slab is the only thing that can hold it -- and while that slab
-    held a borrowed pointer, an accepted connection was a transport<->protocol
-    cycle reachable from no root. Any collection reaped it out from under a live
-    socket, and the peer waited forever.
-
-    Wreath's own `Server` tracks its protocols, so the HTTP path happened to be
-    safe and hid this. Everything else on the loop -- `wreath.postgres`,
-    `wreath.http_client`, any third-party `loop.create_server` -- was not, which
-    is what made the `e2e` benchmark scenario hang: its in-process upstreams are
-    exactly this shape.
-    """
     async def main() -> None:
         loop = asyncio.get_running_loop()
         server = await loop.create_server(_Echo, "127.0.0.1", 0)
@@ -393,16 +354,10 @@ def test_a_collection_does_not_reap_a_live_connection() -> None:
 
     # `gc_mode="stock"` on purpose: this is not a property of the idle policy,
     # it is the ownership rule the policy merely made it impossible to ignore.
-    asyncio.run(main(),
-                loop_factory=lambda: reactor.metal_event_loop(gc_mode="stock"))
+    asyncio.run(main(), loop_factory=lambda: reactor.metal_event_loop(gc_mode="stock"))
 
 
 def test_a_closed_connection_is_given_back() -> None:
-    """The other side of the contract: an owning poller must not pin the dead.
-
-    A reference the poller never released would turn every finished connection
-    into a leak -- the failure this fix could plausibly trade for.
-    """
     async def main() -> weakref.ref:
         loop = asyncio.get_running_loop()
         server = await loop.create_server(_Echo, "127.0.0.1", 0)
@@ -424,20 +379,12 @@ def test_a_closed_connection_is_given_back() -> None:
         await asyncio.wait_for(lost.wait(), timeout=5.0)
         return witness
 
-    witness = asyncio.run(
-        main(), loop_factory=lambda: reactor.metal_event_loop(gc_mode="stock"))
+    witness = asyncio.run(main(), loop_factory=lambda: reactor.metal_event_loop(gc_mode="stock"))
     gc.collect()
     assert witness() is None, "the poller kept a closed connection alive"
 
 
 def test_the_poller_releases_connections_it_still_owns_at_close() -> None:
-    """A loop closed with connections still up must not leak them.
-
-    The owning reference has to be given back by `close()` rather than waiting
-    for the poller object itself to be collected -- otherwise every closed loop
-    strands its connections, and a process that builds loops in a row (a test
-    suite, a worker respawn) accumulates them.
-    """
     loop = reactor.metal_event_loop(gc_mode="stock")
     asyncio.set_event_loop(loop)
 
@@ -461,8 +408,6 @@ def test_the_poller_releases_connections_it_still_owns_at_close() -> None:
     gc.collect()
     assert witness() is None, "a closed poller still pinned its connections"
 
-
-# --- the C boundary --------------------------------------------------------
 
 def test_collector_installation_validates_its_arguments() -> None:
     loop = _metal_loop()

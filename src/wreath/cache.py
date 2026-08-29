@@ -29,29 +29,7 @@ from ._orm_events import (
     subscribe_writes,
     unsubscribe_writes,
 )
-
-# A port to C was measured and declined; the numbers are in `_snapshot`'s
-# docstring.
 from ._snapshot import SnapshotCache as SnapshotCache
-
-# A small bounded LRU/TTL store for hot request-path caching (response cache,
-# idempotency replay), now a shell over `wreath.kv.KV`.
-#
-# This comment used to say a C implementation was not worth building. That reasoning
-# was sound for what it measured and wrong about what to measure: the ~0.11us it
-# priced is indeed three orders of magnitude below what a *response* cache
-# saves, but `BoundedCache` had by then become the engine under the session
-# table, the idempotency ledger, the JWKS cache, the login-attempt counter and
-# `store.MemoryStore` -- places where the lookup is not skipping a rendered
-# response, it *is* the request's work. The old note also asked for an
-# end-to-end benchmark before reopening, and the number that actually reopened
-# it was a simpler one: `_core.TokenBucket`, a native table that does strictly
-# more per call (float refill arithmetic), answered in 0.15us where this
-# answered in 0.20us and `MemoryStore.read` in 0.27us. A native table was not
-# 0.11us of theoretical headroom; it was already running next door, faster.
-#
-# What survives from that note is its discipline, so: measured 2026-08-01,
-# interleaved against an A/A control, in `docs/reference/kv.md`.
 from .kv import KV, stats
 from .kv import Stats as CacheStats
 
@@ -65,10 +43,9 @@ class BoundedCache(KV):
     it is no longer a second implementation, or a second set of semantics, or a
     second thing to learn. Everything it does, `KV` does.
 
-    It used to be a hundred lines of forwarding: `get`, `set`, `delete`,
-    `clear`, `snapshot`, `__contains__`, `__len__`, `ttl`, `max_entries`, each
-    restating a method one line below it. All of that is inherited now, and the
-    `clock` it exists to inject is `KV`'s own parameter.
+    `get`, `set`, `delete`, `clear`, `snapshot`, `__contains__`, `__len__`,
+    `ttl` and `max_entries` are inherited from `KV`. The convenience adds only
+    `as_dict`; `clock` is `KV`'s own parameter.
 
     Args:
         max_entries: hard ceiling; the least-recently-used entry is evicted once
@@ -197,7 +174,6 @@ def refresh_on(
             # nothing else in the system degrades to signal it. The count is
             # what makes that visible; the exception is what makes it
             # diagnosable without reproducing it.
-            #
             # `CancelledError` is a `BaseException` and still propagates, so a
             # reload cancelled at shutdown is not recorded as a loader fault.
             watch.refresh_errors += 1

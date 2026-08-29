@@ -1,5 +1,3 @@
-"""Contract tests for the pytest-compatible native execution slice."""
-
 from __future__ import annotations
 
 import json
@@ -277,9 +275,7 @@ def test_facade_raises_checks_type_text_and_missing_exception() -> None:
 
 
 def test_facade_parametrize_records_cases_without_wrapping_function() -> None:
-    @facade.mark.parametrize(
-        "left,right", [(1, 2), facade.param(3, 4, id="large")]
-    )
+    @facade.mark.parametrize("left,right", [(1, 2), facade.param(3, 4, id="large")])
     def test_add(left: int, right: int) -> None:
         assert left < right
 
@@ -377,13 +373,13 @@ def test_native_loads_conftest_autouse_fixtures_before_importing_tests(
 ) -> None:
     marker = tmp_path / "autouse-ran"
     (tmp_path / "conftest.py").write_text(
-        f'''\
+        f"""\
 import pytest
 
 @pytest.fixture(autouse=True)
 def audit():
     open({str(marker)!r}, "w").close()
-''',
+""",
         encoding="utf-8",
     )
     nested = tmp_path / "nested"
@@ -401,7 +397,7 @@ def test_native_fixture_cycle_is_refused_before_any_body_runs(tmp_path: Path) ->
     marker = tmp_path / "body-ran"
     test_file = tmp_path / "test_cycle.py"
     test_file.write_text(
-        f'''\
+        f"""\
 import pytest
 
 @pytest.fixture
@@ -412,7 +408,7 @@ def right(left): return left
 
 def test_cycle(left):
     open({str(marker)!r}, "w").close()
-''',
+""",
         encoding="utf-8",
     )
 
@@ -428,7 +424,7 @@ def test_native_module_fixture_is_shared_and_torn_down_after_last_case(
     events = tmp_path / "module-events"
     test_file = tmp_path / "test_module_scope.py"
     test_file.write_text(
-        f'''\
+        f"""\
 import pytest
 
 @pytest.fixture(scope="module")
@@ -442,7 +438,7 @@ def test_first(shared):
 
 def test_second(shared):
     assert shared is not None
-''',
+""",
         encoding="utf-8",
     )
 
@@ -455,7 +451,7 @@ def test_second(shared):
 def test_native_runs_an_async_test_body(tmp_path: Path, capsys: Any) -> None:
     test_file = tmp_path / "test_async.py"
     test_file.write_text(
-        '''\
+        """\
 import asyncio
 import pytest
 
@@ -463,7 +459,7 @@ import pytest
 async def test_async_contract():
     await asyncio.sleep(0)
     assert True
-''',
+""",
         encoding="utf-8",
     )
 
@@ -477,7 +473,7 @@ def test_native_async_fixture_tears_down_in_the_test_event_loop(
     events = tmp_path / "async-events"
     test_file = tmp_path / "test_async_fixture.py"
     test_file.write_text(
-        f'''\
+        f"""\
 import asyncio
 import pytest
 
@@ -492,7 +488,7 @@ async def resource():
 @pytest.mark.asyncio
 async def test_resource(resource):
     assert asyncio.get_running_loop() is resource
-''',
+""",
         encoding="utf-8",
     )
 
@@ -501,12 +497,10 @@ async def test_resource(resource):
     assert events.read_text(encoding="utf-8").splitlines() == ["setup", "teardown"]
 
 
-def test_native_collects_a_fresh_test_class_instance_per_case(
-    tmp_path: Path, capsys: Any
-) -> None:
+def test_native_collects_a_fresh_test_class_instance_per_case(tmp_path: Path, capsys: Any) -> None:
     test_file = tmp_path / "test_class.py"
     test_file.write_text(
-        '''\
+        """\
 import pytest
 
 class TestContract:
@@ -515,7 +509,7 @@ class TestContract:
         assert value > 0
         assert tmp_path.is_dir()
         self.seen = value
-''',
+""",
         encoding="utf-8",
     )
 
@@ -525,12 +519,10 @@ class TestContract:
     assert "2 passed" in output
 
 
-def test_native_capsys_returns_and_resets_captured_streams(
-    tmp_path: Path, capsys: Any
-) -> None:
+def test_native_capsys_returns_and_resets_captured_streams(tmp_path: Path, capsys: Any) -> None:
     test_file = tmp_path / "test_capture.py"
     test_file.write_text(
-        '''\
+        """\
 import sys
 
 def test_capture(capsys):
@@ -540,7 +532,7 @@ def test_capture(capsys):
     assert first.out == "first\\n"
     assert first.err == "problem\\n"
     assert capsys.readouterr().out == ""
-''',
+""",
         encoding="utf-8",
     )
 
@@ -553,7 +545,7 @@ def test_native_parametrized_fixture_exposes_request_param_and_ids(
 ) -> None:
     test_file = tmp_path / "test_fixture_params.py"
     test_file.write_text(
-        '''\
+        """\
 import pytest
 
 @pytest.fixture(params=[1, 2], ids=lambda value: f"value-{value}")
@@ -562,7 +554,7 @@ def number(request):
 
 def test_number(number):
     assert number > 0
-''',
+""",
         encoding="utf-8",
     )
 
@@ -593,9 +585,7 @@ def test_native_arguments_refuse_unknown_pytest_options(tmp_path: Path) -> None:
         native_runner.execute(_namespace("--durations=5", str(test_file)))
 
 
-def test_native_module_mark_participates_in_marker_selection(
-    tmp_path: Path, capsys: Any
-) -> None:
+def test_native_module_mark_participates_in_marker_selection(tmp_path: Path, capsys: Any) -> None:
     test_file = tmp_path / "test_marked.py"
     test_file.write_text(
         """\
@@ -635,9 +625,7 @@ def test_native_reports_a_syntax_error_as_a_collection_error(tmp_path: Path) -> 
     test_file = tmp_path / "test_broken.py"
     test_file.write_text("def test_broken(:\n", encoding="utf-8")
 
-    with pytest.raises(
-        ValueError, match=r"test_broken.py could not be imported: SyntaxError"
-    ):
+    with pytest.raises(ValueError, match=r"test_broken.py could not be imported: SyntaxError"):
         native_runner.execute(_namespace(str(test_file)))
 
 
@@ -645,9 +633,7 @@ def test_native_honours_conftest_collect_ignore_glob(tmp_path: Path) -> None:
     tests = tmp_path / "tests"
     ignored = tests / "corpus"
     ignored.mkdir(parents=True)
-    (tests / "conftest.py").write_text(
-        'collect_ignore_glob = ["corpus/*"]\n', encoding="utf-8"
-    )
+    (tests / "conftest.py").write_text('collect_ignore_glob = ["corpus/*"]\n', encoding="utf-8")
     (tests / "test_kept.py").write_text("def test_kept(): pass\n", encoding="utf-8")
     (ignored / "test_foreign.py").write_text(
         "import dependency_that_must_not_be_imported\n", encoding="utf-8"
@@ -689,16 +675,14 @@ def test_native_reads_the_default_marker_expression_from_pyproject(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "pyproject.toml").write_text(
-        '''\
+        """\
 [tool.pytest.ini_options]
 addopts = "-q -m 'not network and not performance'"
-''',
+""",
         encoding="utf-8",
     )
 
-    assert native_runner._configured_markers(tmp_path) == (
-        "not network and not performance"
-    )
+    assert native_runner._configured_markers(tmp_path) == ("not network and not performance")
 
 
 def test_native_compiles_marker_selection_for_direct_mark_membership() -> None:
@@ -756,9 +740,7 @@ def test_native_worker_payload_round_trips_compact_results_and_trace_hits() -> N
             "LookupError: broken\n",
         ],
     ]
-    assert decoded_hits == [
-        ["src/wreath/example.py:9", ["tests/test_ipc.py::test_pass"]]
-    ]
+    assert decoded_hits == [["src/wreath/example.py:9", ["tests/test_ipc.py::test_pass"]]]
     assert error is None
 
 
@@ -796,9 +778,7 @@ def test_dual_refuses_outcome_drift_after_identical_collection(
     monkeypatch.setattr(
         native_runner,
         "_run",
-        lambda collection, max_failures: [
-            native_runner.Result(node_id, "passed", 1, None)
-        ],
+        lambda collection, max_failures: [native_runner.Result(node_id, "passed", 1, None)],
     )
     monkeypatch.setattr(
         native_runner,
@@ -829,9 +809,7 @@ def test_dual_accepts_identical_outcomes_after_identical_collection(
     monkeypatch.setattr(
         native_runner,
         "_run",
-        lambda collection, max_failures: [
-            native_runner.Result(node_id, "passed", 1, None)
-        ],
+        lambda collection, max_failures: [native_runner.Result(node_id, "passed", 1, None)],
     )
     monkeypatch.setattr(
         native_runner,

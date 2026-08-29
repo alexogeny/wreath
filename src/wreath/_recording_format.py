@@ -121,12 +121,9 @@ def _chunk(tag: bytes, payload: bytes) -> bytes:
     return _CHUNK.pack(tag, len(payload), zlib.crc32(payload) & 0xFFFFFFFF) + payload
 
 
-# --- the job-attempt record kind ---------------------------------------------
-#
 # A job attempt is a *record kind inside `WFR1`*, not a second container: one
 # decoder, one reader, one set of forensics tooling. What it holds is identity,
-# cause, boundaries, and outcome -- see `docs/reference/recording.md`.
-#
+# cause, boundaries, and outcome.
 # What it deliberately does not hold is the job's **arguments**. `args jsonb` is
 # a positional array and `RedactionPolicy` is entirely name-keyed, so
 # deny-by-default has no name to deny; only the *count* is recorded, so a reader
@@ -260,13 +257,10 @@ class AttemptRecord:
         return _core.attempt_decode(payload, SchemaError, BoundaryEvent, cls)
 
 
-# --- the workflow-step record kind -------------------------------------------
-#
 # A **second record kind inside `WFR1`, beside `ATMP`** -- one container, one
 # decoder, one set of forensics tooling. It is a distinct kind rather than an
 # `AttemptRecord` with different field names because the unit genuinely differs
 # in all three of the things a recording is for:
-#
 # * **identity** is `(workflow instance, step)`, not `(job, attempt)`. There is
 #   no fence, because nothing claims a step under a lease; there is a
 #   *position*, because a saga is ordered and "step 4" is meaningless without it.
@@ -278,7 +272,6 @@ class AttemptRecord:
 #   roadmap called this the highest-value unbuilt record kind: the money left
 #   the account, the courier was not booked, and whether the refund ran is the
 #   whole question.
-#
 # What it does *not* hold, on the same argument the attempt record gives: the
 # step's arguments and its return value. A step's result is threaded through
 # `StepContext.results` and is arbitrary application data; a recording that kept
@@ -490,8 +483,13 @@ class WFR1Writer:
     """
 
     __slots__ = (
-        "_file", "_chunk_count", "_capture_slabs", "_event_cells", "_attempts",
-        "_steps", "_closed",
+        "_file",
+        "_chunk_count",
+        "_capture_slabs",
+        "_event_cells",
+        "_attempts",
+        "_steps",
+        "_closed",
     )
 
     def __init__(self, file: Any, image: MetadataImage) -> None:
@@ -713,9 +711,6 @@ def _split_slabs(payload: bytes, out: list[CaptureSlab]) -> None:
         offset += used
 
 
-# --- async recording sink ---------------------------------------------------
-
-
 class RecordingSink:
     """Drains committed capture slabs to a `WFR1` file on a background thread.
 
@@ -784,9 +779,7 @@ class RecordingSink:
             self._degraded = True
             self._close_file()
         self._stop.clear()
-        thread = threading.Thread(
-            target=self._run, name="wreath-flight-recording", daemon=True
-        )
+        thread = threading.Thread(target=self._run, name="wreath-flight-recording", daemon=True)
         self._thread = thread
         thread.start()
 
@@ -855,7 +848,7 @@ class RecordingSink:
             try:
                 self._writer.write_events(cells)
                 self._fh.flush()
-            except (OSError, ValueError):
+            except OSError, ValueError:
                 # ValueError: a partial cell, which means the drain handed over
                 # something that is not a whole number of cells -- a bug worth
                 # degrading on rather than writing a chunk no reader can split.

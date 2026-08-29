@@ -1,31 +1,3 @@
-"""Which database a subsystem's tables belong to, and whether they get created.
-
-Two defects lived here, and both had the same shape: a declaration was made,
-the framework did not read it, and nothing said so at the point of failure.
-
-* `app.jobs(database=)` names a database. The attribution walk looked for a
-  `_database` or a `database` attribute on the runner; `JobRunner` calls its
-  own `_db`. So a two-database application that had said which one was refused
-  at **lifespan startup** with "cannot tell which database the 'jobs' tables
-  belong to".
-* `RateLimitPolicy`, `IdempotencyPolicy` and `SessionPolicy` hold a
-  store that owns tables and exposed neither `component()` nor `schema_owners`,
-  so `schema_components()` walked them and found nothing: `wreath_rate_limit`,
-  `wreath_idempotency` and `wreath_session` were emitted by
-  `wreath schema sql` and created by nothing at all.
-
-Both are asserted **through a real lifespan against a real PostgreSQL**, and
-by looking the relations up in `pg_class` afterwards. A unit test of the
-attribution helper would pass while the tables stayed absent, which is exactly
-the failure mode -- "emitted and applied by nothing" is invisible to every test
-that stops at the collection call.
-
-The two-database test needs a genuine second database rather than the same DSN
-registered twice, because "the tables went to the one that was named" is not
-observable when both names point at the same server. It creates one per xdist
-worker, for the reason `AGENTS.md` gives about shared schemas.
-"""
-
 from __future__ import annotations
 
 import os
@@ -84,9 +56,7 @@ async def _database(suffix: str, *schemas: str) -> str:
     await admin.start()
     connection = await admin.acquire("write")
     try:
-        rows = await connection.fetch(
-            "SELECT 1 FROM pg_database WHERE datname = $1::text", name
-        )
+        rows = await connection.fetch("SELECT 1 FROM pg_database WHERE datname = $1::text", name)
         if not rows:
             await connection.execute(f'CREATE DATABASE "{name}"')
     finally:
@@ -141,9 +111,7 @@ async def _resolves(dsn: str, table: str) -> str | None:
     await database.start()
     connection = await database.acquire("read")
     try:
-        rows = await connection.fetch(
-            "SELECT to_regclass($1::text)::text", table
-        )
+        rows = await connection.fetch("SELECT to_regclass($1::text)::text", table)
     finally:
         await database.release("read", connection)
     await database.stop()
@@ -176,23 +144,8 @@ async def _relations(dsn: str, schema: str) -> set[str]:
     return {str(row[0]) for row in rows}
 
 
-# --- defect 1: the declaration the attribution walk did not read -------------
-
-
 @requires_db
 async def test_a_two_database_application_with_a_queue_starts_and_lands_its_tables() -> None:
-    """`app.jobs(database="analytics")` is read, so lifespan startup succeeds.
-
-    This is the exact shape that used to refuse. Two registered databases and a
-    job runner that named one of them: the walk could not find a database on
-    the runner, fell through to "more than one registered, refuse", and the
-    application never started. The declaration had answered the question the
-    refusal asked.
-
-    Both halves are asserted. Starting is not enough on its own -- an
-    attribution that picked the wrong database would also start -- so the
-    queue's relations must be present in `analytics` and absent from `main`.
-    """
     schema = _schema("jobs")
     main = await _database("main", schema)
     analytics = await _database("alt", schema)
@@ -213,9 +166,6 @@ async def test_a_two_database_application_with_a_queue_starts_and_lands_its_tabl
 
 @requires_db
 async def test_a_two_database_application_with_a_bus_lands_its_tables_too() -> None:
-    """`MessageBus` names its database `_db` for the same reason, and was missed
-    for the same reason. Asserted separately because one subsystem passing does
-    not establish the other -- they are two objects with two declarations."""
     schema = _schema("bus")
     main = await _database("main", schema)
     analytics = await _database("alt", schema)
@@ -232,13 +182,6 @@ async def test_a_two_database_application_with_a_bus_lands_its_tables_too() -> N
 
 
 async def test_a_subsystem_that_names_no_database_still_refuses_when_two_exist() -> None:
-    """The refusal is not gone, only no longer reached by a made declaration.
-
-    A webhook hub is handed a session per call and never sees a database, so
-    with two registered there is genuinely nothing to read and guessing would
-    create its tables beside a subsystem reading the other one. Without this,
-    fixing the queue could have been done by deleting the refusal.
-    """
     import contextlib
     from collections.abc import AsyncIterator
 
@@ -265,11 +208,6 @@ async def test_a_subsystem_that_names_no_database_still_refuses_when_two_exist()
 
 
 async def test_the_declared_database_is_recorded_against_the_object_it_built() -> None:
-    """Two runners on two databases keep their own attribution.
-
-    A single shared record, or one keyed on the subsystem's name, would pass a
-    test with one runner in it and put both queues in one database here.
-    """
     app = Wreath()
     app.postgres("main", dsn="postgresql://u@one.invalid:5432/a")
     app.postgres("archive", dsn="postgresql://u@two.invalid:5432/b")
@@ -288,18 +226,8 @@ async def test_the_declared_database_is_recorded_against_the_object_it_built() -
     assert claim.schema == "wreath_a"
 
 
-# --- defect 2: tables emitted by the store and applied by nothing ------------
-
-
 @requires_db
 async def test_a_rate_limit_table_is_created_by_lifespan_startup() -> None:
-    """The DDL is *applied*, not merely collected.
-
-    Asserting that `RateLimitPolicy` now answers `schema_owners` would pass
-    with the table still absent, which is the whole failure: the claim existed
-    and was emitted by `wreath schema sql` all along. So the relation is looked
-    up in `pg_class` after a real startup.
-    """
     from wreath.policy import HttpPolicy
     from wreath.policy.ratelimit import PostgresRateLimitStore, RateLimitPolicy
 
@@ -332,9 +260,7 @@ async def test_an_idempotency_table_is_created_by_lifespan_startup() -> None:
     database = app.postgres("main", dsn=dsn)
     app.configure_http_policy(
         HttpPolicy(
-            idempotency=IdempotencyPolicy(
-                store=PostgresIdempotencyStore(database, table=table)
-            )
+            idempotency=IdempotencyPolicy(store=PostgresIdempotencyStore(database, table=table))
         )
     )
 
@@ -356,9 +282,7 @@ async def test_a_session_table_is_created_by_lifespan_startup() -> None:
     database = app.postgres("main", dsn=dsn)
     app.configure_http_policy(
         HttpPolicy(
-            session=SessionPolicy(
-                "s" * 32, store=PostgresSessionStore(database, table=table)
-            )
+            session=SessionPolicy("s" * 32, store=PostgresSessionStore(database, table=table))
         )
     )
 
@@ -370,12 +294,6 @@ async def test_a_session_table_is_created_by_lifespan_startup() -> None:
 
 @requires_db
 async def test_a_middleware_owned_table_goes_to_the_database_its_store_holds() -> None:
-    """The store says which database, so two of them is not ambiguous.
-
-    Collecting the claim without attributing it would have moved the defect
-    rather than fixed it: the walk would find the table and then refuse at
-    startup, in an application that had never had a problem before.
-    """
     from wreath.policy import HttpPolicy
     from wreath.policy.ratelimit import PostgresRateLimitStore, RateLimitPolicy
 
@@ -397,8 +315,6 @@ async def test_a_middleware_owned_table_goes_to_the_database_its_store_holds() -
 
 
 async def test_a_cookie_only_session_middleware_claims_nothing() -> None:
-    """No store means no tables, which must stay distinct from an unattributable
-    claim: answering with `(None,)` would send `None` into the walk."""
     from wreath.policy import HttpPolicy
     from wreath.policy.sessions import SessionPolicy
 
@@ -410,9 +326,6 @@ async def test_a_cookie_only_session_middleware_claims_nothing() -> None:
 
 
 async def test_every_tier_of_a_tiered_limiter_is_walked() -> None:
-    """`TieredRateLimitPolicy` builds one whole limiter per tier, and its
-    stores were unreachable for the same reason. Every tier shares the table
-    name a `store_factory` gives it, so the claims deduplicate to one."""
     from wreath.policy import HttpPolicy
     from wreath.policy.ratelimit import (
         PostgresRateLimitStore,
@@ -422,26 +335,25 @@ async def test_every_tier_of_a_tiered_limiter_is_walked() -> None:
     app = Wreath()
     database = app.postgres("main", dsn="postgresql://u@one.invalid:5432/a")
     app.configure_http_policy(
-        HttpPolicy(principal_rate_limit=TieredRateLimitPolicy(
-            tiers={"pro": (600, 60.0), "enterprise": (10_000, 60.0)},
-            default=(60, 60.0),
-            store_factory=lambda: PostgresRateLimitStore(database),
-        ))
+        HttpPolicy(
+            principal_rate_limit=TieredRateLimitPolicy(
+                tiers={"pro": (600, 60.0), "enterprise": (10_000, 60.0)},
+                default=(60, 60.0),
+                store_factory=lambda: PostgresRateLimitStore(database),
+            )
+        )
     )
     assert [claim.name for claim in app.schema_components()] == ["ratelimit"]
     assert list(app._components_by_database(app.schema_components())) == [database]
 
 
-# --- defect 3: a sealed Series' tables, claimed by nobody --------------------
-#
 # A `Series` is a declaration built where it is used, so the application never
 # holds one and there was nothing for `schema_components()` to ask. The result
 # was the same shape as defect 2 one level worse: `wreath.series_buckets` and
 # `wreath.series_corrections` were printed by `wreath schema sql`, created by
 # nothing at all -- not even by a lifespan -- and an application declaring
 # `.seal()` had to import `wreath._series.settle` past a leading underscore and
-# run the DDL itself. `docs/tracking/ingest.md` documented that as a rough edge
-# rather than a defect. `app.series(database=...)` gives the claim an owner.
+# run the DDL itself. `app.series(database=...)` gives the claim an owner.
 
 
 async def test_a_sealed_series_claims_its_tables() -> None:
@@ -454,17 +366,12 @@ async def test_a_sealed_series_claims_its_tables() -> None:
 
 
 async def test_an_application_with_no_sealed_view_claims_nothing() -> None:
-    """An open `Series` stores nothing, so the tables are not implied by the
-    module being importable. Claiming them for every application would create
-    two tables nobody uses in every deployment that draws a chart."""
     app = Wreath()
     app.postgres("main", dsn="postgresql://u@one.invalid:5432/a")
     assert app.schema_components() == ()
 
 
 async def test_the_store_is_attributed_to_the_database_it_named() -> None:
-    """Through `_declared_databases`, the same record `app.jobs(database=)`
-    uses -- so a two-database application is not ambiguous."""
     app = Wreath()
     app.postgres("main", dsn="postgresql://u@one.invalid:5432/a")
     analytics = app.postgres("analytics", dsn="postgresql://u@two.invalid:5432/b")
@@ -489,9 +396,6 @@ async def test_naming_an_unknown_database_is_refused() -> None:
 
 @requires_db
 async def test_the_settled_bucket_tables_are_created_by_lifespan_startup() -> None:
-    """Applied, not merely collected -- and idempotent, because a second startup
-    is the ordinary case and `CREATE TABLE IF NOT EXISTS` is only half of that:
-    `bootstrap` also has to be happy to find the component already recorded."""
     schema = _schema("series")
     dsn = await _database("series", schema)
     app = Wreath()

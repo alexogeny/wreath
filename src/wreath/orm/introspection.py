@@ -425,7 +425,10 @@ async def _validate_model(
     if not rows:
         return [
             SchemaIssue(
-                spec.schema, spec.table, "", "missing_table",
+                spec.schema,
+                spec.table,
+                "",
+                "missing_table",
                 f"{spec.model_type.__name__} maps {spec.qualified_name}, which does "
                 "not exist or has no readable columns",
             )
@@ -440,7 +443,10 @@ async def _validate_model(
         if row is None:
             issues.append(
                 SchemaIssue(
-                    spec.schema, spec.table, column.database_name, "missing_column",
+                    spec.schema,
+                    spec.table,
+                    column.database_name,
+                    "missing_column",
                     f"{spec.model_type.__name__}.{column.python_name} has no matching "
                     "database column",
                 )
@@ -450,7 +456,10 @@ async def _validate_model(
         if type_oid != column.oid:
             issues.append(
                 SchemaIssue(
-                    spec.schema, spec.table, column.database_name, "type_mismatch",
+                    spec.schema,
+                    spec.table,
+                    column.database_name,
+                    "type_mismatch",
                     f"declared {column.pg_type.name} (OID {column.oid}) but the "
                     f"database has OID {type_oid}",
                 )
@@ -459,19 +468,22 @@ async def _validate_model(
         if not_null == column.nullable:
             issues.append(
                 SchemaIssue(
-                    spec.schema, spec.table, column.database_name, "nullability_mismatch",
+                    spec.schema,
+                    spec.table,
+                    column.database_name,
+                    "nullability_mismatch",
                     f"declared {'nullable' if column.nullable else 'not null'} but the "
                     f"database is {'not null' if not_null else 'nullable'}",
                 )
             )
         if column.server_default is not None:
             database_default = str(row[7])
-            if _normalize_default(database_default) != _normalize_default(
-                column.server_default
-            ):
+            if _normalize_default(database_default) != _normalize_default(column.server_default):
                 issues.append(
                     SchemaIssue(
-                        spec.schema, spec.table, column.database_name,
+                        spec.schema,
+                        spec.table,
+                        column.database_name,
                         "server_default_mismatch",
                         f"declared server_default {column.server_default!r} but the "
                         f"database has {database_default!r}",
@@ -545,7 +557,10 @@ async def _validate_constraints(
     if primary != declared_primary:
         issues.append(
             SchemaIssue(
-                spec.schema, spec.table, "", "primary_key_mismatch",
+                spec.schema,
+                spec.table,
+                "",
+                "primary_key_mismatch",
                 f"declared primary key ({', '.join(declared_primary)}) but the "
                 f"database has ({', '.join(primary) or 'none'})",
             )
@@ -554,9 +569,11 @@ async def _validate_constraints(
         if column.unique and (column.database_name,) not in unique:
             issues.append(
                 SchemaIssue(
-                    spec.schema, spec.table, column.database_name, "missing_unique",
-                    "declared unique=True but the database has no unique constraint "
-                    "or index on it",
+                    spec.schema,
+                    spec.table,
+                    column.database_name,
+                    "missing_unique",
+                    "declared unique=True but the database has no unique constraint or index on it",
                 )
             )
     # Index corresponding local/remote column pairs so each declared reference
@@ -579,7 +596,10 @@ async def _validate_constraints(
         ) not in foreign_keys:
             issues.append(
                 SchemaIssue(
-                    spec.schema, spec.table, column.database_name, "missing_foreign_key",
+                    spec.schema,
+                    spec.table,
+                    column.database_name,
+                    "missing_foreign_key",
                     f"declared references {reference.schema}.{reference.table}."
                     f"{reference.column} but the database has no such foreign key",
                 )
@@ -616,9 +636,7 @@ def _positions(value: Any) -> list[int]:
 
 
 def _names(value: Any, by_position: dict[int, str]) -> tuple[str, ...]:
-    return tuple(
-        by_position[item] for item in _positions(value) if item in by_position
-    )
+    return tuple(by_position[item] for item in _positions(value) if item in by_position)
 
 
 def _pairs(

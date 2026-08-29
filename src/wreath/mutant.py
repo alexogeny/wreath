@@ -28,8 +28,7 @@ Typical use, from a project root:
     wreath mutant --path src/myapp/policies.py --format json
 
 **It is a report, not a gate.** A surviving mutant is a question -- *would you
-want a test to catch this?* -- and sometimes the answer is no. See
-`docs/guides/mutant.md` for what it cannot see and what a run costs.
+want a test to catch this?* -- and sometimes the answer is no.
 """
 
 from __future__ import annotations

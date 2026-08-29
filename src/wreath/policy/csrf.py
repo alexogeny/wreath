@@ -417,9 +417,7 @@ class CsrfPolicy:
             # Application code controls a security decision. Fail closed and
             # retain an observable counter so a broken predicate is diagnosable.
             self.exempt_errors += 1
-            return ProblemResponse(
-                status=403, title="Forbidden", detail="CSRF validation failed"
-            )
+            return ProblemResponse(status=403, title="Forbidden", detail="CSRF validation failed")
 
     def _validate_submission(
         self,
@@ -439,9 +437,7 @@ class CsrfPolicy:
         ):
             valid, issued = self._validate(cookie, now)
         if not valid or not self._origin_valid(request, headers):
-            return ProblemResponse(
-                status=403, title="Forbidden", detail="CSRF validation failed"
-            )
+            return ProblemResponse(status=403, title="Forbidden", detail="CSRF validation failed")
         renew = now - issued >= self._max_age * 3 // 4
         request.state.__setattr__(_STATE_TOKEN, self._new_token(now) if renew else cookie)
         request.state.__setattr__(_STATE_ISSUE, renew)

@@ -13,6 +13,7 @@ published scalars from fixed-shape operations on secret scalars.
 Correctness is pinned against RFC 8032 and NIST CAVP/Wycheproof known-answer
 vectors, plus the independent `cryptography` test dependency.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -21,8 +22,6 @@ from .._curves import p256_on_curve
 from .._native import _core
 
 __all__ = ["on_p256_curve", "verify_ed25519", "verify_es256"]
-
-# --- NIST P-256 (secp256r1) -------------------------------------------------
 
 
 def on_p256_curve(x: int, y: int) -> bool:
@@ -45,9 +44,6 @@ def verify_es256(x: int, y: int, signing_input: bytes, signature: bytes) -> bool
         return False
     digest = hashlib.sha256(signing_input).digest()
     return _core.curve_p256_verify(x, y, digest, signature)
-
-
-# --- Ed25519 (edwards25519) -- RFC 8032 §5.1 --------------------------------
 
 
 def verify_ed25519(public: bytes, message: bytes, signature: bytes) -> bool:

@@ -66,26 +66,39 @@ def _exit_status(report: Any, *, fail_on_survivor: bool) -> int:
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--path", action="append", metavar="PATH", default=[],
+        "--path",
+        action="append",
+        metavar="PATH",
+        default=[],
         help="file or directory of sources to mutate (repeatable; "
-             "default: this project's own package)",
+        "default: this project's own package)",
     )
     parser.add_argument(
-        "--tests", action="append", metavar="PATH", default=[],
+        "--tests",
+        action="append",
+        metavar="PATH",
+        default=[],
         help="test path passed to the selected engine (repeatable; default: tests/)",
     )
     parser.add_argument(
-        "--operators", action="append", metavar="PREFIX", default=[],
-        help=f"only operators starting with PREFIX (repeatable). "
-             f"Available: {', '.join(OPERATORS)}",
+        "--operators",
+        action="append",
+        metavar="PREFIX",
+        default=[],
+        help=f"only operators starting with PREFIX (repeatable). Available: {', '.join(OPERATORS)}",
     )
     parser.add_argument(
-        "--only", action="append", metavar="TEXT", default=[],
-        help="only mutants whose id contains TEXT (repeatable); "
-             "an id is `operator@path:line`",
+        "--only",
+        action="append",
+        metavar="TEXT",
+        default=[],
+        help="only mutants whose id contains TEXT (repeatable); an id is `operator@path:line`",
     )
     parser.add_argument(
-        "--pytest-arg", action="append", metavar="ARG", default=[],
+        "--pytest-arg",
+        action="append",
+        metavar="ARG",
+        default=[],
         help="extra argument for every pytest invocation (repeatable)",
     )
     parser.add_argument(
@@ -96,77 +109,102 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "engine (default: native, including the PEP 669 reachability baseline)",
     )
     parser.add_argument(
-        "--timeout", type=float, default=DEFAULT_TIMEOUT, metavar="SECONDS",
-        help=f"per-mutant deadline; an overrun is reported undecided "
-             f"(default {DEFAULT_TIMEOUT:g})",
+        "--timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT,
+        metavar="SECONDS",
+        help=f"per-mutant deadline; an overrun is reported undecided (default {DEFAULT_TIMEOUT:g})",
     )
     parser.add_argument(
-        "--max-candidates", type=int, default=DEFAULT_MAX_CANDIDATES, metavar="N",
+        "--max-candidates",
+        type=int,
+        default=DEFAULT_MAX_CANDIDATES,
+        metavar="N",
         help=f"decline a mutant that would run more than N tests "
-             f"(default {DEFAULT_MAX_CANDIDATES})",
+        f"(default {DEFAULT_MAX_CANDIDATES})",
     )
     parser.add_argument(
-        "--maxfail", type=int, default=DEFAULT_MAXFAIL, metavar="N",
+        "--maxfail",
+        type=int,
+        default=DEFAULT_MAXFAIL,
+        metavar="N",
         help=f"stop a mutant's tests after N failures (default {DEFAULT_MAXFAIL}); "
-             f"0 runs every candidate test. A mutant is KILLED by the *first* "
-             f"baseline-passing test that fails, so the rest decide nothing -- "
-             f"measured on wreath.cache_control, 330 test executions become 73 "
-             f"for identical verdicts. Raise it only to collect more killers in "
-             f"--format json; the text report shows the first either way",
+        f"0 runs every candidate test. A mutant is KILLED by the *first* "
+        f"baseline-passing test that fails, so the rest decide nothing -- "
+        f"measured on wreath.cache_control, 330 test executions become 73 "
+        f"for identical verdicts. Raise it only to collect more killers in "
+        f"--format json; the text report shows the first either way",
     )
     parser.add_argument(
-        "--budget", type=float, default=0.0, metavar="SECONDS",
+        "--budget",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
         help="total mutant-execution ceiling; controls left when it expires are "
-             "reported undecided and do not fail the command (default: unlimited)",
+        "reported undecided and do not fail the command (default: unlimited)",
     )
     parser.add_argument(
-        "--jobs", type=int, default=DEFAULT_JOBS, metavar="N",
+        "--jobs",
+        type=int,
+        default=DEFAULT_JOBS,
+        metavar="N",
         help="mutant children to execute concurrently (default: 1). Each child "
-             "inherits one warmed interpreter, preserving pytest compatibility",
+        "inherits one warmed interpreter, preserving pytest compatibility",
     )
     parser.add_argument(
-        "--reclaim-workers", action="store_true", help=argparse.SUPPRESS,
+        "--reclaim-workers",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
-        "--suite-workers", type=int, default=0, help=argparse.SUPPRESS,
+        "--suite-workers",
+        type=int,
+        default=0,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
-        "--limit", type=int, default=0, metavar="N",
+        "--limit",
+        type=int,
+        default=0,
+        metavar="N",
         help="stop after the first N mutants, in line order (a smoke test of "
-             "the setup; to bound a pass onto code you just wrote, reach for "
-             "--changed instead)",
+        "the setup; to bound a pass onto code you just wrote, reach for "
+        "--changed instead)",
     )
     parser.add_argument(
-        "--sample", type=int, default=0, metavar="N",
+        "--sample",
+        type=int,
+        default=0,
+        metavar="N",
         help="run a deterministic N-mutant sample drawn across every eligible "
-             "source line; unlike --limit, this is a confidence sample rather "
-             "than a file-head setup smoke test",
+        "source line; unlike --limit, this is a confidence sample rather "
+        "than a file-head setup smoke test",
     )
     parser.add_argument(
-        "--changed", metavar="REF", default=None,
+        "--changed",
+        metavar="REF",
+        default=None,
         help="only mutants on lines that differ from REF (e.g. HEAD, main). "
-             "Untracked files count entirely. Composes with --limit.",
+        "Untracked files count entirely. Composes with --limit.",
     )
     parser.add_argument("--baseline", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--baseline-wait", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--baseline-stream", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--selection", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--activity-file", default=None, help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--background-priority", action="store_true", help=argparse.SUPPRESS
-    )
+    parser.add_argument("--background-priority", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--format", choices=("text", "json"), default="text")
     parser.add_argument(
-        "--verbose", action="store_true",
+        "--verbose",
+        action="store_true",
         help="also list the mutants the suite caught, and what caught each",
     )
+    parser.add_argument("--quiet", action="store_true", help="no per-mutant progress on stderr")
     parser.add_argument(
-        "--quiet", action="store_true", help="no per-mutant progress on stderr"
-    )
-    parser.add_argument(
-        "--fail-on-survivor", action="store_true",
+        "--fail-on-survivor",
+        action="store_true",
         help="exit 1 when anything survived. Off by default: this is a report, "
-             "not a gate, and a survivor is a question rather than a verdict.",
+        "not a gate, and a survivor is a question rather than a verdict.",
     )
 
 
@@ -222,9 +260,7 @@ def execute_mutant(namespace: Any) -> int:
                     else None
                 ),
                 baseline_wait=(
-                    Path(namespace.baseline_wait)
-                    if namespace.baseline_wait is not None
-                    else None
+                    Path(namespace.baseline_wait) if namespace.baseline_wait is not None else None
                 ),
                 baseline_stream=(
                     Path(namespace.baseline_stream)
@@ -241,9 +277,7 @@ def execute_mutant(namespace: Any) -> int:
                     else None
                 ),
                 activity_file=(
-                    Path(namespace.activity_file)
-                    if namespace.activity_file is not None
-                    else None
+                    Path(namespace.activity_file) if namespace.activity_file is not None else None
                 ),
                 test_engine=namespace.test_engine,
             )
@@ -295,7 +329,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="wreath-mutant",
         description="Remove one declared control at a time and see whether the "
-                    "tests notice. A report, not a gate.",
+        "tests notice. A report, not a gate.",
     )
     add_arguments(parser)
     os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")

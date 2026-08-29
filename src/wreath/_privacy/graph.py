@@ -116,9 +116,7 @@ def build_graph(registry: Any) -> Graph:
             schema=str(spec.schema),
             table=str(spec.table),
             primary_key=tuple(column.database_name for column in spec.primary_key),
-            nullable={
-                column.database_name: bool(column.nullable) for column in spec.columns
-            },
+            nullable={column.database_name: bool(column.nullable) for column in spec.columns},
         )
     outbound: dict[type, list[tuple[Edge, type]]] = {}
     inbound: dict[type, list[tuple[Edge, type]]] = {}
@@ -229,7 +227,6 @@ def _cycles(graph: Graph, members: set[type]) -> list[tuple[type, ...]]:
             # skipped anyway -- a second copy of that question here would only
             # keep the stack shorter, and two spellings of one condition is how
             # they drift apart later.
-            #
             # Both directions are walked, and only one of them is ever taken by
             # a test. A residue member is stuck because of a *child* it depends
             # on, so following outbound edges from the alphabetically-first
@@ -254,9 +251,7 @@ def _cycles(graph: Graph, members: set[type]) -> list[tuple[type, ...]]:
         # Every component is therefore a genuine loop of two or more. A
         # mutation run found both clauses unreachable, and an unreachable
         # clause in a finding is a claim nobody can check.
-        components.append(
-            tuple(sorted(component, key=lambda model: graph.nodes[model].qualified))
-        )
+        components.append(tuple(sorted(component, key=lambda model: graph.nodes[model].qualified)))
     return components
 
 
@@ -287,9 +282,7 @@ def catalog_edge_rows(rows: Any, schema: str) -> set[tuple[str, str, str, str]]:
     found: set[tuple[str, str, str, str]] = set()
     for row in rows:
         child, child_column, parent, parent_column = (str(item) for item in tuple(row)[:4])
-        found.add(
-            (f"{schema}.{child}", child_column, f"{schema}.{parent}", parent_column)
-        )
+        found.add((f"{schema}.{child}", child_column, f"{schema}.{parent}", parent_column))
     return found
 
 

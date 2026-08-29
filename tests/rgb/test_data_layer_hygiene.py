@@ -1,6 +1,3 @@
-"""ORM, CRUD, GraphQL, and session details (report 23: G-32, G-36, G-59, G-66,
-G-67, G-69, G-70, G-72, G-78, G-79, G-82)."""
-
 from __future__ import annotations
 
 import pytest
@@ -43,7 +40,7 @@ class TestStaleWriteDetection:
 
         session = self._session("UPDATE 0")
         widget = Widget(id=1, name="a")
-        widget._orm_state = 2           # PERSISTENT
+        widget._orm_state = 2  # PERSISTENT
         widget._orm_owner = session
         widget.name = "b"
         with pytest.raises(StaleDataError):
@@ -58,8 +55,6 @@ class TestStaleWriteDetection:
         await session._update(widget)
 
     async def test_an_unparseable_status_is_not_treated_as_stale(self):
-        """A test double or a driver that reports nothing must not start
-        raising -- absence of evidence is not evidence of a lost write."""
         session = self._session("OK")
         widget = Widget(id=1, name="a")
         widget._orm_state = 2
@@ -153,9 +148,7 @@ class TestGraphQLSessionAndErrors:
             async def release(self, workload, connection):  # pragma: no cover
                 pass
 
-        return GraphQL(
-            Registry(_Database(), [Widget], validate_schema="off"), models=[Widget]
-        )
+        return GraphQL(Registry(_Database(), [Widget], validate_schema="off"), models=[Widget])
 
     async def test_a_mutation_gets_a_write_session(self):
         api = self._api()

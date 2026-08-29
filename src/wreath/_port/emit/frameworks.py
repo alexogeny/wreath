@@ -73,15 +73,11 @@ class _ForeignRewrite(_EmitterState):
             return True
         if name == "Blueprint":
             return self._rewrite_blueprint(node)
-        if name in ("register_blueprint", "add_routes") and isinstance(
-            node.func, ast.Attribute
-        ):
+        if name in ("register_blueprint", "add_routes") and isinstance(node.func, ast.Attribute):
             owner = self._seg(node.func.value)
             if len(node.args) != 1 or node.keywords:
                 return False
-            self._replace_all_of(
-                node, f"{owner}.include_router({self._seg(node.args[0])})"
-            )
+            self._replace_all_of(node, f"{owner}.include_router({self._seg(node.args[0])})")
             self._resolve(node.lineno, "port.router.include")
             return True
         status = _redirect_status(name, node)

@@ -1,5 +1,3 @@
-"""Small porting boundaries whose two sides must stay observably different."""
-
 from __future__ import annotations
 
 import ast
@@ -22,9 +20,7 @@ from wreath._port.emit.queries import _QueryPlan
 
 def _parent_map(tree: ast.AST) -> dict[int, ast.AST]:
     return {
-        id(child): parent
-        for parent in ast.walk(tree)
-        for child in ast.iter_child_nodes(parent)
+        id(child): parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)
     }
 
 
@@ -54,9 +50,7 @@ def test_relative_local_pydantic_module_is_not_rewritten_as_the_dependency(
 ) -> None:
     source = tmp_path / "model.py"
     source.write_text(
-        "from .pydantic import BaseModel\n"
-        "class Reading(BaseModel):\n"
-        "    value: int\n",
+        "from .pydantic import BaseModel\nclass Reading(BaseModel):\n    value: int\n",
         encoding="utf-8",
     )
 
@@ -142,8 +136,7 @@ def test_query_plan_refuses_delete_arguments_directly(source) -> None:
 def test_only_an_empty_called_delete_is_emitted(tmp_path, tail) -> None:
     source = tmp_path / "queries.py"
     source.write_text(
-        "async def remove():\n"
-        f"    return await Llama.objects.filter(id=1).{tail}\n",
+        f"async def remove():\n    return await Llama.objects.filter(id=1).{tail}\n",
         encoding="utf-8",
     )
 
@@ -231,9 +224,7 @@ def test_orm_index_reports_a_file_it_cannot_parse(tmp_path) -> None:
 def test_orm_index_ignores_a_relation_constructor_without_a_target(tmp_path) -> None:
     source = tmp_path / "models.py"
     source.write_text(
-        "import ormar\n"
-        "class Reading(ormar.Model):\n"
-        "    owner: int = ormar.ForeignKey()\n",
+        "import ormar\nclass Reading(ormar.Model):\n    owner: int = ormar.ForeignKey()\n",
         encoding="utf-8",
     )
 
@@ -244,9 +235,7 @@ def test_orm_index_ignores_a_relation_constructor_without_a_target(tmp_path) -> 
 
 def test_named_mapping_argument_is_not_a_double_star_filter_mapping() -> None:
     tree = ast.parse(
-        "def readings():\n"
-        "    filters = {'grade': 'A'}\n"
-        "    return query(filters=filters)\n"
+        "def readings():\n    filters = {'grade': 'A'}\n    return query(filters=filters)\n"
     )
     function = tree.body[0]
     assert isinstance(function, ast.FunctionDef)
@@ -262,21 +251,22 @@ def test_get_or_create_refuses_a_field_outside_the_declared_model() -> None:
     call = ast.parse("get_or_create(unknown=1)").body[0].value
     assert isinstance(call, ast.Call)
 
-    assert query_rule(
-        "get_or_create",
-        call,
-        model="Reading",
-        columns={"Reading": {"id", "grade"}},
-    ) == "orm.query.get_or_create"
+    assert (
+        query_rule(
+            "get_or_create",
+            call,
+            model="Reading",
+            columns={"Reading": {"id", "grade"}},
+        )
+        == "orm.query.get_or_create"
+    )
 
 
 def test_get_or_create_accepts_keywords_when_model_columns_are_unknown() -> None:
     call = ast.parse("get_or_create(grade='A')").body[0].value
     assert isinstance(call, ast.Call)
 
-    assert query_rule(
-        "get_or_create", call, model="Reading"
-    ) == "orm.query.get_or_create_exact"
+    assert query_rule("get_or_create", call, model="Reading") == "orm.query.get_or_create_exact"
 
 
 def test_json_response_default_is_not_deleted_for_an_arbitrary_call() -> None:
@@ -290,40 +280,30 @@ def test_json_response_default_is_not_deleted_for_an_arbitrary_call() -> None:
     response = ast.parse("JSONResponse").body[0].value
     assert isinstance(response, ast.expr)
 
-    assert response_class_rule(
-        _Imports().visit(tree), response, function
-    ) == "route.response_class"
+    assert response_class_rule(_Imports().visit(tree), response, function) == "route.response_class"
 
 
 def test_a_foreign_type_decorator_is_not_a_strawberry_type(tmp_path) -> None:
     source = tmp_path / "schema.py"
     source.write_text(
-        "import custom\n"
-        "@custom.type\n"
-        "class Reading:\n"
-        "    value: int\n",
+        "import custom\n@custom.type\nclass Reading:\n    value: int\n",
         encoding="utf-8",
     )
 
     assert not any(
-        finding.rule_id.startswith("graphql.")
-        for finding in port.analyze(source).findings
+        finding.rule_id.startswith("graphql.") for finding in port.analyze(source).findings
     )
 
 
 def test_an_unknown_strawberry_decorator_is_not_a_graphql_type(tmp_path) -> None:
     source = tmp_path / "schema.py"
     source.write_text(
-        "import strawberry\n"
-        "@strawberry.experimental\n"
-        "class Reading:\n"
-        "    value: int\n",
+        "import strawberry\n@strawberry.experimental\nclass Reading:\n    value: int\n",
         encoding="utf-8",
     )
 
     assert not any(
-        finding.rule_id.startswith("graphql.")
-        for finding in port.analyze(source).findings
+        finding.rule_id.startswith("graphql.") for finding in port.analyze(source).findings
     )
 
 
@@ -337,30 +317,23 @@ def test_an_extension_array_field_is_still_an_orm_column(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    assert "orm.column" in {
-        finding.rule_id for finding in port.analyze(source).findings
-    }
+    assert "orm.column" in {finding.rule_id for finding in port.analyze(source).findings}
 
 
 def test_an_ormar_scalar_field_is_still_an_orm_column(tmp_path) -> None:
     source = tmp_path / "models.py"
     source.write_text(
-        "import ormar\n"
-        "class Reading(ormar.Model):\n"
-        "    grade: str = ormar.String(max_length=1)\n",
+        "import ormar\nclass Reading(ormar.Model):\n    grade: str = ormar.String(max_length=1)\n",
         encoding="utf-8",
     )
 
-    assert "orm.column" in {
-        finding.rule_id for finding in port.analyze(source).findings
-    }
+    assert "orm.column" in {finding.rule_id for finding in port.analyze(source).findings}
 
 
 def test_httpx_timeout_with_more_than_one_keyword_is_not_flattened(tmp_path) -> None:
     source = tmp_path / "client.py"
     source.write_text(
-        "import httpx\n"
-        "timeout = httpx.Timeout(timeout=5, connect=1)\n",
+        "import httpx\ntimeout = httpx.Timeout(timeout=5, connect=1)\n",
         encoding="utf-8",
     )
 
@@ -390,8 +363,7 @@ def test_non_total_httpx_timeout_shapes_are_not_flattened(tmp_path, call) -> Non
 def test_plain_httpx_timeout_is_flattened_to_one_total_deadline(tmp_path) -> None:
     source = tmp_path / "client.py"
     source.write_text(
-        "import httpx\n"
-        "timeout = httpx.Timeout(5)\n",
+        "import httpx\ntimeout = httpx.Timeout(5)\n",
         encoding="utf-8",
     )
 
@@ -403,8 +375,7 @@ def test_plain_httpx_timeout_is_flattened_to_one_total_deadline(tmp_path) -> Non
 def test_a_retained_pydantic_settings_alias_stays_imported(tmp_path) -> None:
     source = tmp_path / "settings.py"
     source.write_text(
-        "from pydantic_settings import BaseSettings as SettingsBase\n"
-        "runtime_base = SettingsBase\n",
+        "from pydantic_settings import BaseSettings as SettingsBase\nruntime_base = SettingsBase\n",
         encoding="utf-8",
     )
 
@@ -419,8 +390,7 @@ def test_a_retained_unaliased_pydantic_settings_name_stays_imported(
 ) -> None:
     source = tmp_path / "settings.py"
     source.write_text(
-        "from pydantic_settings import BaseSettings\n"
-        "runtime_base = BaseSettings\n",
+        "from pydantic_settings import BaseSettings\nruntime_base = BaseSettings\n",
         encoding="utf-8",
     )
 
@@ -444,8 +414,7 @@ def test_a_plain_response_module_import_is_not_treated_as_from_import(
 def test_a_response_class_from_import_is_rewritten(tmp_path) -> None:
     source = tmp_path / "responses.py"
     source.write_text(
-        "from starlette.responses import PlainTextResponse\n"
-        "response = PlainTextResponse('ok')\n",
+        "from starlette.responses import PlainTextResponse\nresponse = PlainTextResponse('ok')\n",
         encoding="utf-8",
     )
 
@@ -533,9 +502,7 @@ def test_non_string_ormar_constraint_is_reported_instead_of_emitted(tmp_path) ->
 def test_ormar_min_length_without_a_maximum_keeps_its_check(tmp_path) -> None:
     source = tmp_path / "models.py"
     source.write_text(
-        "import ormar\n"
-        "class Reading(ormar.Model):\n"
-        "    code: str = ormar.String(min_length=2)\n",
+        "import ormar\nclass Reading(ormar.Model):\n    code: str = ormar.String(min_length=2)\n",
         encoding="utf-8",
     )
 

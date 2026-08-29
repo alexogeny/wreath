@@ -1,15 +1,3 @@
-"""Deterministic fuzzing of the XML parser.
-
-A C parser on a security boundary has to answer arbitrary input without
-crashing the interpreter, and its canonical output has to be stable under
-re-canonicalization -- a signature covers the canonical form, so verification
-must not depend on how many round trips a document has been through. Both are
-checked here over a seeded corpus, so a failure reproduces from the seed printed
-in the assertion rather than from a saved artifact.
-
-Marked ``fuzz`` so the default marker expression skips it; ``-m ''`` runs it.
-"""
-
 from __future__ import annotations
 
 import random
@@ -81,7 +69,6 @@ def _corpus(seed: int, count: int) -> list[bytes]:
 
 @pytest.mark.parametrize("seed", [1, 2, 3, 4, 5, 6, 7, 8])
 def test_arbitrary_input_either_parses_or_is_refused(seed: int) -> None:
-    """No input produces anything other than a tree or an XMLRefusal."""
     limits = Limits()
     for payload in _corpus(seed, 400):
         try:
@@ -94,12 +81,6 @@ def test_arbitrary_input_either_parses_or_is_refused(seed: int) -> None:
 
 @pytest.mark.parametrize("seed", [21, 22, 23])
 def test_canonicalizing_a_parsed_document_is_idempotent(seed: int) -> None:
-    """Canonical output must itself parse to the same canonical bytes.
-
-    A signature is computed over the canonical form, so a canonicalizer whose
-    output canonicalizes differently would make verification depend on how many
-    times the document had been round-tripped.
-    """
     limits = Limits()
     for payload in _corpus(seed, 300):
         try:
@@ -112,7 +93,6 @@ def test_canonicalizing_a_parsed_document_is_idempotent(seed: int) -> None:
 
 @pytest.mark.parametrize("seed", [31, 32])
 def test_every_span_indexes_the_source(seed: int) -> None:
-    """A byte range that does not address the source is a provenance bug."""
     limits = Limits()
     for payload in _corpus(seed, 300):
         try:
@@ -130,7 +110,6 @@ def test_every_span_indexes_the_source(seed: int) -> None:
 
 
 def test_deeply_nested_input_is_refused_rather_than_recursing() -> None:
-    """Depth is bounded in the parser, so no input can exhaust the C stack."""
     limits = Limits()
     payload = b"<a>" * 50_000
     with pytest.raises(XMLRefusal) as caught:

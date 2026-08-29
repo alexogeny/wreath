@@ -1,14 +1,16 @@
 """Dataclass projections over mapped models.
 
 Request and response models often repeat a subset of an ORM model's columns.
-``model_dataclass`` makes that subset explicit while keeping the result an
-ordinary dataclass understood by Wreath's binding, OpenAPI, and typegen layers::
+`model_dataclass` makes that subset explicit while keeping the result an
+ordinary dataclass understood by Wreath's binding, OpenAPI, and typegen layers:
 
+```python
     LlamaCreate = model_dataclass(
         Llama,
         include={"name", "birth_date"},
         name="LlamaCreate",
     )
+```
 
 The projection is compiled when the declaration executes, never while binding a
 request. Its cache belongs to the mapped model itself, so two declarations of
@@ -42,7 +44,7 @@ def _names(value: Iterable[str] | None, label: str) -> frozenset[str] | None:
 def _column_annotations(model: type[Model]) -> dict[str, Any]:
     try:
         annotations = typing.get_type_hints(model, include_extras=True)
-    except (NameError, TypeError):
+    except NameError, TypeError:
         annotations = {}
         for base in reversed(model.__mro__):
             annotations.update(getattr(base, "__annotations__", {}))
@@ -83,11 +85,11 @@ def model_dataclass(
 ) -> type:
     """Compile an ordinary dataclass from selected mapped columns.
 
-    ``include`` and ``exclude`` are mutually exclusive. Unknown names are
+    `include` and `exclude` are mutually exclusive. Unknown names are
     refused rather than ignored, because a stale projection silently omitting a
     renamed field changes the wire schema. Fields retain model order and Python
     defaults; nullable, generated, primary-key, and server-default columns may
-    be omitted and default to ``None``. All fields are keyword-only, matching
+    be omitted and default to `None`. All fields are keyword-only, matching
     Wreath's request binder and avoiding declaration-order restrictions.
     """
     if not isinstance(model, type) or not issubclass(model, Model):
@@ -104,18 +106,14 @@ def model_dataclass(
     requested = included if included is not None else available - excluded
     unknown = requested - available
     if unknown:
-        raise ValueError(
-            f"{model.__name__} has no column(s) {', '.join(sorted(unknown))}"
-        )
+        raise ValueError(f"{model.__name__} has no column(s) {', '.join(sorted(unknown))}")
     if not requested:
         raise ValueError("a model dataclass must contain at least one column")
     type_name = name or f"{model.__name__}Data"
     if not isinstance(type_name, str) or not type_name.isidentifier():
         raise ValueError(f"name={type_name!r} is not a Python identifier")
     selected = tuple(
-        column.python_name
-        for column in model.__wreath_columns__
-        if column.python_name in requested
+        column.python_name for column in model.__wreath_columns__ if column.python_name in requested
     )
     cache = model.__dict__.get(_CACHE_ATTRIBUTE)
     if cache is None:

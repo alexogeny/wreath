@@ -4,6 +4,7 @@ Reconstructs the exact HTML Wreath generates (the API-docs surface) and, optiona
 walks static HTML trees, then applies the a11y + performance rules. Introspects the
 loaded application for the middleware/OpenAPI performance checks.
 """
+
 from __future__ import annotations
 
 import json

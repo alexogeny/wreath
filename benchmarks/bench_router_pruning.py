@@ -34,9 +34,7 @@ def build_routers(branches: int, leaves: int) -> tuple[Wreath, str]:
             permissions=(f"tenant:{branch}:read",),
         )
         for leaf in range(leaves):
-            tenant.get(f"/services/group-{leaf % 10}/resource-{leaf}/{{item_id}}")(
-                endpoint
-            )
+            tenant.get(f"/services/group-{leaf % 10}/resource-{leaf}/{{item_id}}")(endpoint)
         protected.include_router(tenant)
 
     app = Wreath(routing="policy")
@@ -95,8 +93,9 @@ def main() -> None:
     parser.add_argument("--iterations", type=int, default=100_000)
     parser.add_argument("--trials", type=int, default=7)
     parser.add_argument("--compile-trials", type=int, default=5)
-    parser.add_argument("--output", type=Path, default=None,
-                        help="write the JSON document here instead of stdout")
+    parser.add_argument(
+        "--output", type=Path, default=None, help="write the JSON document here instead of stdout"
+    )
     args = parser.parse_args()
 
     compile_raw = compile_trials(args.branches, args.leaves, args.compile_trials)

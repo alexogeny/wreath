@@ -1,23 +1,3 @@
-"""Every arm of the dispatched byte scanners answers what the scalar one does.
-
-The dispatcher in `src/wreath/_native/simd.h` picks the widest arm the CPU
-offers, which means the narrower ones stop executing the moment a machine is
-new enough -- and the widest one never executes on a machine that is older.
-Neither gap is visible from behaviour: a scan that stops in the wrong place
-still returns *a* number, and the JSON, template, and header suites pass while
-one arm is wrong for inputs they happen not to contain.
-
-So the arms are named and crossed here. Two live defects were caught this way
-while the header was being written, both in SWAR: a `seen_high` accumulator
-that was dropped on an early return, and a mask built from a SWAR equality
-test, whose set bits mark *that* a byte matched and not *which* -- it cleared
-the flag for a neighbouring 0x08, and a control byte that must be refused
-walked through the header-value scan.
-
-An arm the build cannot reach reports `None` and is skipped; that is a real
-capability of the machine, not of Wreath.
-"""
-
 from __future__ import annotations
 
 import random
@@ -31,8 +11,28 @@ from wreath._native import _core
 # not be mistaken for one.
 INTERESTING = bytes(
     [
-        0x00, 0x08, 0x09, 0x0A, 0x0D, 0x1F, 0x20, 0x21, 0x22, 0x25, 0x26,
-        0x27, 0x2F, 0x3C, 0x3E, 0x5C, 0x61, 0x7E, 0x7F, 0x80, 0xC3, 0xA9,
+        0x00,
+        0x08,
+        0x09,
+        0x0A,
+        0x0D,
+        0x1F,
+        0x20,
+        0x21,
+        0x22,
+        0x25,
+        0x26,
+        0x27,
+        0x2F,
+        0x3C,
+        0x3E,
+        0x5C,
+        0x61,
+        0x7E,
+        0x7F,
+        0x80,
+        0xC3,
+        0xA9,
         0xFF,
     ]
 )
@@ -96,7 +96,6 @@ def test_mask_arms_agree_with_scalar(arms: tuple[str, ...]) -> None:
 
 
 def test_masking_is_its_own_inverse(arms: tuple[str, ...]) -> None:
-    """The property the arms exist to preserve, stated without a reference."""
     rng = random.Random(5)
     for arm in arms:
         for n in (0, 1, 7, 8, 15, 16, 31, 32, 33, 1000):
@@ -110,12 +109,6 @@ def test_masking_is_its_own_inverse(arms: tuple[str, ...]) -> None:
 
 @pytest.mark.parametrize("kind", KINDS)
 def test_run_never_passes_a_stop(kind: str, arms: tuple[str, ...]) -> None:
-    """A run stops *at* the first byte of interest, never past it.
-
-    Stated against the definition of each scan rather than against the scalar
-    arm, so a scalar arm that was wrong in the same direction could not hide
-    behind agreement.
-    """
     def is_stop(byte: int) -> bool:
         if kind == "json":
             return byte < 0x20 or byte in (0x22, 0x5C)
@@ -137,13 +130,6 @@ def test_run_never_passes_a_stop(kind: str, arms: tuple[str, ...]) -> None:
 
 
 def test_b64url_arms_agree_with_scalar(arms: tuple[str, ...]) -> None:
-    """Every base64url arm decodes, and rejects, exactly what scalar does.
-
-    Both halves matter. A vector arm that accepts a byte outside the alphabet
-    would let a malformed JWT segment through to the JSON parser, and one that
-    rejects a legal character would refuse valid tokens; only crossing accept
-    *and* reject against the definition covers both.
-    """
     import base64
 
     rng = random.Random(31337)
@@ -168,11 +154,6 @@ def test_b64url_arms_agree_with_scalar(arms: tuple[str, ...]) -> None:
 
 
 def test_b64url_matches_the_standard_library(arms: tuple[str, ...]) -> None:
-    """The scalar definition is itself checked, against an outside reference.
-
-    Agreement between arms only proves they are the same; it does not prove
-    they are right. `base64` decides that.
-    """
     import base64
 
     rng = random.Random(4242)
@@ -189,14 +170,6 @@ def test_b64url_matches_the_standard_library(arms: tuple[str, ...]) -> None:
 def test_b64_encode_arms_agree_and_match_the_standard_library(
     arms: tuple[str, ...],
 ) -> None:
-    """The encoder's arms, against each other and against `base64`.
-
-    The vector arm builds each character by adding an offset chosen from a
-    sixteen-entry table indexed by an arithmetic bucket, not by the six-bit
-    value. Writing that table in value order instead produced 736,000
-    differential failures on its first run -- which is the whole argument for
-    having this test rather than trusting the transcription.
-    """
     import base64
 
     rng = random.Random(90210)
@@ -214,7 +187,6 @@ def test_b64_encode_arms_agree_and_match_the_standard_library(
 
 
 def test_b64encode_entry_point_matches_the_standard_library() -> None:
-    """The public shape: both alphabets, padded and not, returning `str`."""
     import base64
 
     rng = random.Random(5150)
@@ -229,13 +201,6 @@ def test_b64encode_entry_point_matches_the_standard_library() -> None:
 
 
 def test_hex_arms_agree_and_match_the_standard_library(arms: tuple[str, ...]) -> None:
-    """Hex decoding, arm against arm and against `bytes.fromhex`.
-
-    This is the path every `bytea` column takes: PostgreSQL sends binary in
-    text format as two characters per byte, so the scan is as long as the
-    value. Rejection matters as much as the decode -- an arm that accepted a
-    non-hex byte would hand silently wrong bytes to the application.
-    """
     rng = random.Random(6180)
     cases: list[bytes] = [b"", b"0", b"00", b"ff", b"FF", b"0g", b"g0", b"abcdef"]
     for _ in range(3000):
@@ -256,7 +221,7 @@ def test_hex_arms_agree_and_match_the_standard_library(arms: tuple[str, ...]) ->
         # and the scalar definition itself, against an outside reference
         try:
             reference = bytes.fromhex(data.decode("ascii"))
-        except (UnicodeDecodeError, ValueError):
+        except UnicodeDecodeError, ValueError:
             reference = False
         if isinstance(reference, bytes) and b" " not in data:
             assert expected == reference
@@ -265,13 +230,6 @@ def test_hex_arms_agree_and_match_the_standard_library(arms: tuple[str, ...]) ->
 def test_json_run_reports_non_ascii_only_from_bytes_it_passed(
     arms: tuple[str, ...],
 ) -> None:
-    """`seen_high` decides between a one-byte str and a UTF-8 decode.
-
-    A byte at or beyond the stop has not been consumed, so counting it would
-    send an all-ASCII string down the decoding path -- correct, but slower --
-    and, read the other way, a dropped high bit would build a one-byte str from
-    bytes that are not ASCII. The second is the one that corrupts.
-    """
     for data in CASES:
         for arm in arms:
             probe = _core.simd_probe("json", arm, data)
@@ -282,8 +240,6 @@ def test_json_run_reports_non_ascii_only_from_bytes_it_passed(
             assert bool(seen) == expected, f"json/{arm} seen_high wrong on {data[:48]!r}"
 
 
-# --- hash-table control bytes ----------------------------------------------
-#
 # The group scan behind `wreath.kv`. It answers two questions -- which lanes
 # carry this tag, and which lanes are free -- and both answers must be *exact*
 # rather than merely conservative, which is what separates it from the run
@@ -303,17 +259,15 @@ CTRL_INTERESTING = (0x80, 0xFE, 0x00, 0x01, 0x7F, 0x7E, 0x40)
 def _ctrl_groups() -> list[bytes]:
     rng = random.Random(4242)
     groups = [
-        bytes([0x80]) * CTRL_GROUP,          # a wholly empty group
-        bytes([0xFE]) * CTRL_GROUP,          # a wholly tombstoned group
-        bytes(range(CTRL_GROUP)),            # every lane a distinct low tag
-        bytes([0x7F]) * CTRL_GROUP,          # every lane the same tag
+        bytes([0x80]) * CTRL_GROUP,  # a wholly empty group
+        bytes([0xFE]) * CTRL_GROUP,  # a wholly tombstoned group
+        bytes(range(CTRL_GROUP)),  # every lane a distinct low tag
+        bytes([0x7F]) * CTRL_GROUP,  # every lane the same tag
     ]
     for _ in range(400):
         groups.append(
             bytes(
-                rng.choice(CTRL_INTERESTING)
-                if rng.random() < 0.7
-                else rng.randrange(256)
+                rng.choice(CTRL_INTERESTING) if rng.random() < 0.7 else rng.randrange(256)
                 for _ in range(CTRL_GROUP)
             )
         )
@@ -347,7 +301,6 @@ def test_ctrl_free_scan_arms_agree_with_scalar(arms: tuple[str, ...]) -> None:
 
 
 def test_ctrl_scans_are_exact_against_a_plain_byte_loop(arms: tuple[str, ...]) -> None:
-    """Stated without reference to the scalar arm, which could itself be wrong."""
     for group in CTRL_GROUPS:
         free = sum(1 << i for i, byte in enumerate(group) if byte & 0x80)
         for needle in (0x80, 0xFE, 0x13):
@@ -362,12 +315,6 @@ def test_ctrl_scans_are_exact_against_a_plain_byte_loop(arms: tuple[str, ...]) -
 
 
 def test_a_tag_scan_can_never_match_a_free_lane(arms: tuple[str, ...]) -> None:
-    """The invariant that lets one kernel answer both questions.
-
-    A stored tag is the low seven bits of a hash, so its high bit is clear;
-    empty (0x80) and deleted (0xFE) both have it set. If that ever stopped
-    holding, a probe would confirm a key against an entry that is not there.
-    """
     for group in CTRL_GROUPS:
         free = _core.simd_probe("ctrl", "scalar", group)
         for tag in (0x00, 0x01, 0x40, 0x7F):
@@ -383,8 +330,6 @@ def test_a_group_of_the_wrong_size_is_refused() -> None:
         _core.simd_probe("ctrl", "scalar", b"\x80" * 16, b"\x00")
 
 
-# --- substring search ------------------------------------------------------
-#
 # The one kernel that answers "where" rather than "which bytes". An arm that
 # reported a *later* match than the scalar one would still look like a match to
 # its caller, and would split a multipart body at the wrong offset -- so these
@@ -397,17 +342,17 @@ FIND_ALPHABET = b"ab\r\n-"
 def _find_cases() -> list[tuple[bytes, bytes]]:
     rng = random.Random(0x5EA4C)
     cases: list[tuple[bytes, bytes]] = [
-        (b"", b"x"),                       # empty haystack
-        (b"abc", b""),                     # empty needle
-        (b"abc", b"abcd"),                 # needle longer than haystack
-        (b"abc", b"abc"),                  # exact
-        (b"\r\n\r\n", b"\r\n\r\n"),        # the HTTP head terminator, exactly
+        (b"", b"x"),  # empty haystack
+        (b"abc", b""),  # empty needle
+        (b"abc", b"abcd"),  # needle longer than haystack
+        (b"abc", b"abc"),  # exact
+        (b"\r\n\r\n", b"\r\n\r\n"),  # the HTTP head terminator, exactly
         (b"x" * 64 + b"\r\n\r\n", b"\r\n\r\n"),
         (b"\r\n\r\n" + b"x" * 64, b"\r\n\r\n"),
-        (b"\r" * 200, b"\r\n"),            # first byte matches everywhere, never the pair
-        (b"a" * 100, b"aa"),               # overlapping matches
-        (b"x" * 31 + b"ab" + b"x" * 31, b"ab"),   # straddles a 32-byte stride
-        (b"x" * 63 + b"ab", b"ab"),               # in the tail after the last stride
+        (b"\r" * 200, b"\r\n"),  # first byte matches everywhere, never the pair
+        (b"a" * 100, b"aa"),  # overlapping matches
+        (b"x" * 31 + b"ab" + b"x" * 31, b"ab"),  # straddles a 32-byte stride
+        (b"x" * 63 + b"ab", b"ab"),  # in the tail after the last stride
     ]
     for _ in range(600):
         hay = bytes(rng.choice(FIND_ALPHABET) for _ in range(rng.randrange(0, 300)))
@@ -434,17 +379,11 @@ def test_find_arms_agree_with_the_standard_library(arms: tuple[str, ...]) -> Non
             if got is None:
                 continue
             assert got == expected, (
-                f"find/{arm} said {got}, bytes.find said {expected}, "
-                f"for {needle!r} in {hay[:64]!r}"
+                f"find/{arm} said {got}, bytes.find said {expected}, for {needle!r} in {hay[:64]!r}"
             )
 
 
 def test_find_never_reports_a_later_match_than_the_first(arms: tuple[str, ...]) -> None:
-    """Stated as a property, so it holds even if `bytes.find` were wrong.
-
-    A search that finds *a* match rather than the *first* one passes every
-    round-trip test and still cuts a multipart body in the wrong place.
-    """
     for hay, needle in FIND_CASES:
         if not needle:
             continue
@@ -469,12 +408,6 @@ def test_a_needle_that_is_absent_is_reported_absent(arms: tuple[str, ...]) -> No
 def test_the_dispatched_search_agrees_with_the_arms_on_both_sides_of_the_threshold(
     arms: tuple[str, ...],
 ) -> None:
-    """`wreath_memmem` routes short needles to the kernel and long ones to libc.
-
-    The threshold is a performance decision, so the two sides must be
-    indistinguishable in behaviour -- otherwise a boundary one byte longer
-    would parse differently.
-    """
     body = (b"x" * 63 + b"\r") * 40
     for length in (2, 4, 8, 15, 16, 17, 24, 48, 70):
         needle = (b"\r\n--" + bytes(range(97, 123)) * 4)[:length]
@@ -482,24 +415,7 @@ def test_the_dispatched_search_agrees_with_the_arms_on_both_sides_of_the_thresho
             assert _core.simd_probe("memmem", "scalar", hay, needle) == hay.find(needle)
 
 
-# --- declaration order, for the arms this machine cannot compile -----------
-
-
 def test_no_arm_calls_a_helper_defined_below_it() -> None:
-    """`simd.h` must compile on every target, including ones absent here.
-
-    Each architecture's arms live behind an `#if`, so a NEON-only mistake is
-    preprocessed away on x86 and an x86-only mistake is preprocessed away on
-    ARM. That is not a warning-level problem: C assumes an undeclared function
-    returns `int`, which then *conflicts* with the real `static inline
-    ptrdiff_t` definition further down, and the translation unit fails to
-    compile outright.
-
-    This found three of them -- `wreath_html_run_neon`, `wreath_value_run_neon`
-    and `wreath_xor_mask_neon` each calling their SWAR tail about 150 lines
-    before it was declared. The extension would not have built on aarch64 at
-    all, and nothing on an x86 machine would have said so.
-    """
     import pathlib
     import re
 
@@ -511,10 +427,7 @@ def test_no_arm_calls_a_helper_defined_below_it() -> None:
 
     #: A definition starts at column zero with the name, because the file puts
     #: the return type on its own line throughout.
-    definitions = {
-        m.group(1): m.start()
-        for m in re.finditer(r"^(wreath_\w+)\s*\(", text, re.M)
-    }
+    definitions = {m.group(1): m.start() for m in re.finditer(r"^(wreath_\w+)\s*\(", text, re.M)}
     #: A forward declaration is a whole `static inline ... ;` statement at the
     #: start of a line. Anchoring on that is what distinguishes it from a call:
     #: an earlier version matched any `wreath_x(...);`, which is also the shape

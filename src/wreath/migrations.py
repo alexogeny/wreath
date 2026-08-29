@@ -628,16 +628,9 @@ class RecodedColumnHazard:
 class DowngradeWouldStrandRecodedData(RuntimeError):
     """A downgrade was refused because a re-encode has changed the values under it.
 
-    The counterpart to `DowngradeWouldStrandCode`, one layer down: that
-    one refuses when the *code* would be stranded by the reverse DDL, this one
-    when the *data* already has been.
-
-    The reason it has to exist is that nothing else notices. A re-encode changes
-    values in place and touches no schema, so the reverse DDL applies cleanly and
-    the catalog fingerprint returns to the artifact's source exactly as it
-    should -- every check `revert_single_artifact` already performs passes
-    while the column holds values the reverted schema was never written for. It
-    reports success. That is the whole defect.
+    Reverse DDL can verify cleanly while leaving values encoded for the newer
+    schema. This refusal requires the values to be converted back before the
+    schema definition is reverted.
     """
 
     def __init__(self, schema: str, hazards: tuple[RecodedColumnHazard, ...]) -> None:
@@ -710,9 +703,8 @@ def scan_transitional_reads(
 
     Returns the report. With *strict*, raises
     `TransitionalContractUnproven` when anything is unproven -- including
-    when nothing was scanned at all, because a scan that reports "clean" after
-    looking at nothing is the empty-denominator bug doc 19 found in
-    `coverage_overall()`, and it must not come back here.
+    when nothing was scanned at all. An empty scan is absence of evidence, not
+    proof that reads remain valid during the transition.
     """
     report = declaration.scan(registry=registry, queries=queries, views=views)
     if strict and (report.blocking or report.scanned_nothing):
@@ -827,7 +819,6 @@ def _registry_descriptor(registry: Any, *, fleet: bool = False) -> bytes:
             # An extension type spells itself; a built-in leaves the slot empty
             # so its signature is unchanged. See `_SINGLE_CATALOG_SQL`, which
             # has to produce the identical string from `format_type`.
-            #
             # An *unresolved* extension type is refused rather than described.
             # Its OID is 0, which fails the `>= 16384` test and so blanks the
             # spelling: the column would be described as a built-in of type 0,
@@ -1815,9 +1806,7 @@ async def _pending_pass_hazards(
     `to_regclass` rather than by catching a failure, so a real error from the
     read is still a real error.
     """
-    resolved = await _pass_hazard_facts(
-        connection, _narrowed_columns(named_plan), ledger_schema
-    )
+    resolved = await _pass_hazard_facts(connection, _narrowed_columns(named_plan), ledger_schema)
     if resolved is None:
         return ()
     _pass_ledger, facts = resolved
@@ -1869,9 +1858,7 @@ async def _recoded_column_hazards(
     original value survives, so it is the more dangerous state rather than the
     settled one.
     """
-    resolved = await _pass_hazard_facts(
-        connection, _touched_columns(reverse_plan), ledger_schema
-    )
+    resolved = await _pass_hazard_facts(connection, _touched_columns(reverse_plan), ledger_schema)
     if resolved is None:
         return ()
     _pass_ledger, facts = resolved

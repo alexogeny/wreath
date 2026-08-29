@@ -1,17 +1,3 @@
-"""The collar that lost the sky, and the day that changed after it ended.
-
-One test carries this file. A day is sealed; a buffered position for that day
-arrives afterwards; and the settled number **does not move**. The difference is
-recorded beside it, folded in on read, and named in the envelope -- so late data
-reads as late data arriving rather than as a figure somebody quoted on Wednesday
-that says something else on Friday.
-
-The sharpest assertion here is the one on the stored row: not that the read
-changed, but that the *settled value in the table* did not. A view that
-rewrote the settled value would satisfy every other assertion in this file while
-destroying the only property sealing exists to provide.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -58,8 +44,10 @@ def local_day(offset: int) -> Range:
     day before it.
     """
     here = tz(CONSERVANCY_ZONE)
-    midnight = (EPOCH + datetime.timedelta(days=offset)).astimezone(here).replace(
-        hour=0, minute=0, second=0, microsecond=0
+    midnight = (
+        (EPOCH + datetime.timedelta(days=offset))
+        .astimezone(here)
+        .replace(hour=0, minute=0, second=0, microsecond=0)
     )
     return Range(midnight, midnight + datetime.timedelta(days=1))
 
@@ -126,18 +114,8 @@ async def stored_bucket(database, view, params: dict, bucket) -> dict | None:
     return json.loads(measures) if isinstance(measures, str) else measures
 
 
-# -- the seed's own late data -------------------------------------------------
-
-
 @skip_without_database
 async def test_the_seed_really_contains_a_buffered_dump(world) -> None:
-    """The story is in the data, not only in the prose.
-
-    Nkoteiya's collar is quiet for two days and then uploads everything at once,
-    so `received_at` is identical across two days of `recorded_at`. Without this
-    the late-data chapter would be a paragraph about a case the example does not
-    have.
-    """
     _database, session = world
     rows = await session.raw(
         f'SELECT recorded_at, received_at FROM "{SCHEMA}"."fixes" '
@@ -153,20 +131,10 @@ async def test_the_seed_really_contains_a_buffered_dump(world) -> None:
     )
 
 
-# -- the sealing horizon ------------------------------------------------------
-
-
 @skip_without_database
 async def test_a_day_behind_the_horizon_is_settled_and_a_recent_one_is_not(
     world,
 ) -> None:
-    """36 hours after a day closes, its distance stops being recomputed.
-
-    Asserted from both sides: a day a year old is settled, and the day the
-    clock is currently in is not. A view that settled everything would make the
-    correction story untestable, and one that settled nothing would make the
-    seal decorative.
-    """
     from _tracking import clear_settled
 
     database, session = world
@@ -188,20 +156,6 @@ async def test_a_day_behind_the_horizon_is_settled_and_a_recent_one_is_not(
 async def test_a_late_position_corrects_a_sealed_day_without_rewriting_it(
     world,
 ) -> None:
-    """**The whole of stage five, and the assertion that carries it.**
-
-    A day is settled. A collar's buffer then delivers a position that belongs to
-    it. Three things must be true afterwards and the third is the one that
-    matters:
-
-    1. The read reflects the new data -- the correction is folded in.
-    2. The envelope *names* the day as carrying a correction, so late data is
-       distinguishable from a number that changed on its own.
-    3. The settled row in `wreath.series_buckets` is **byte-for-byte what it
-       was**. If a settled number can change under you, it was never settled,
-       and the weekly report that quoted it can no longer be reconciled against
-       the system that produced it.
-    """
     from _tracking import clear_settled
 
     database, session = world
@@ -246,13 +200,6 @@ async def test_a_late_position_corrects_a_sealed_day_without_rewriting_it(
 async def test_the_distance_a_correction_carries_is_the_distance_that_changed(
     world,
 ) -> None:
-    """A correction is a delta, and the delta has to be the right number.
-
-    Adding a position inside a day does not merely add a leg: it *splits* one,
-    so the day's total moves by the difference between two legs and the one they
-    replaced. `repair_legs` is what makes that arithmetic come out, and this is
-    where its answer meets the chart.
-    """
     from _tracking import clear_settled
 
     database, session = world
@@ -291,12 +238,6 @@ async def test_the_distance_a_correction_carries_is_the_distance_that_changed(
 async def test_a_day_with_no_fixes_is_present_with_zero_rather_than_missing(
     world,
 ) -> None:
-    """Every bucket in the range exists, which is why this is a `Series`.
-
-    A hand-written `GROUP BY` returns no row for a silent day, and then every
-    caller reinvents the same interpolation slightly differently. Here a day the
-    collar said nothing is `fixes = 0`, which is a fact.
-    """
     database, session = world
     view = daily_distance(CONSERVANCY_ZONE)
     # A window entirely after the seed ends.
@@ -307,14 +248,6 @@ async def test_a_day_with_no_fixes_is_present_with_zero_rather_than_missing(
 
 
 def test_the_lateness_allowance_is_a_field_claim_and_not_a_default() -> None:
-    """36 hours, declared here, because it is a statement about these collars.
-
-    A programme on open grassland with hourly uplinks would seal in two hours
-    and see corrections almost never. Pinning the constant stops it from drifting
-    into a number nobody can justify, and pinning `on_late` stops somebody
-    reaching for `reopen` -- which overwrites the settled value and clears the
-    correction that would have shown anything was wrong.
-    """
     assert BUFFER_LATENESS == "36h"
     view = daily_distance(CONSERVANCY_ZONE)
     assert view._seal.on_late == "correct"

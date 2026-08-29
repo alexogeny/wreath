@@ -1,17 +1,3 @@
-"""Rate limits keyed on the caller, with an allowance per plan.
-
-Keying on the client address is right at ingress and wrong for an authenticated
-API: behind a proxy or a carrier NAT it lumps unrelated callers into one bucket,
-and it hands one caller a fresh allowance per device. The right key is who they
-are — and the right *limit* is usually a function of what they pay for.
-
-The constraint that shapes the design: `request.identity` is set during route
-authorization, so a limiter that keys on the principal cannot be a global hook.
-Global hooks run at ingress, before anybody has been identified. These tests pin
-that, because getting it wrong yields a limiter that silently keys every request
-the same way.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -41,9 +27,6 @@ def _app(middleware) -> Wreath:
     return app
 
 
-# --- the key ------------------------------------------------------------------
-
-
 async def test_each_principal_gets_its_own_allowance() -> None:
     app = _app(TieredRateLimitPolicy(tiers={"pro": (9, 60.0)}, default=(1, 60.0)))
     async with TestClient(app) as client:
@@ -52,18 +35,15 @@ async def test_each_principal_gets_its_own_allowance() -> None:
 
         assert (await ada.get("/llamas")).status == 200
         assert (await ada.get("/llamas")).status == 429
-        assert (await bo.get("/llamas")).status == 200      # a separate allowance
+        assert (await bo.get("/llamas")).status == 200  # a separate allowance
 
 
 async def test_the_global_limiter_refuses_to_key_on_the_principal() -> None:
-    """The trap: it runs before authentication, so it would bucket everyone
-    together and look like it worked. A startup error beats that discovery."""
     with pytest.raises(ValueError, match="before authentication"):
         RateLimitPolicy(limit=1, window=60.0, key=principal_key)
 
 
 async def test_a_principal_id_cannot_collide_with_an_address() -> None:
-    """`ip:` prefixed, so a user called `testclient` is not the anonymous bucket."""
     class _Anonymous:
         identity = None
         client = ("testclient", 5000)
@@ -77,7 +57,6 @@ async def test_a_principal_id_cannot_collide_with_an_address() -> None:
 
 
 async def test_an_anonymous_caller_falls_back_to_its_address() -> None:
-    """One shared anonymous bucket would be a denial of service on yourself."""
     class _Anonymous:
         identity = None
         client = ("203.0.113.7", 5000)
@@ -85,13 +64,8 @@ async def test_an_anonymous_caller_falls_back_to_its_address() -> None:
     assert principal_key(_Anonymous()) == "ip:203.0.113.7"
 
 
-# --- the tier -------------------------------------------------------------------
-
-
 async def test_a_tier_gets_the_allowance_its_role_names() -> None:
-    app = _app(TieredRateLimitPolicy(
-        tiers={"pro": (3, 60.0)}, default=(1, 60.0)
-    ))
+    app = _app(TieredRateLimitPolicy(tiers={"pro": (3, 60.0)}, default=(1, 60.0)))
     async with TestClient(app) as client:
         free = client.acting_as("bo")
         pro = client.acting_as("ada", roles=["pro"])
@@ -105,10 +79,9 @@ async def test_a_tier_gets_the_allowance_its_role_names() -> None:
 
 
 async def test_the_most_generous_matching_tier_wins() -> None:
-    """Holding two plans must not be worse than holding the better one."""
-    app = _app(TieredRateLimitPolicy(
-        tiers={"pro": (3, 60.0), "enterprise": (8, 60.0)}, default=(1, 60.0)
-    ))
+    app = _app(
+        TieredRateLimitPolicy(tiers={"pro": (3, 60.0), "enterprise": (8, 60.0)}, default=(1, 60.0))
+    )
     async with TestClient(app) as client:
         both = client.acting_as("ada", roles=["pro", "enterprise"])
 
@@ -118,9 +91,7 @@ async def test_the_most_generous_matching_tier_wins() -> None:
 
 
 async def test_an_unrecognised_role_gets_the_default() -> None:
-    app = _app(TieredRateLimitPolicy(
-        tiers={"pro": (5, 60.0)}, default=(1, 60.0)
-    ))
+    app = _app(TieredRateLimitPolicy(tiers={"pro": (5, 60.0)}, default=(1, 60.0)))
     async with TestClient(app) as client:
         other = client.acting_as("bo", roles=["llama-walker"])
 
@@ -129,10 +100,7 @@ async def test_an_unrecognised_role_gets_the_default() -> None:
 
 
 async def test_tiers_do_not_share_a_bucket() -> None:
-    """A promotion arrives with a full allowance, not the old plan's remainder."""
-    app = _app(TieredRateLimitPolicy(
-        tiers={"pro": (2, 60.0)}, default=(1, 60.0)
-    ))
+    app = _app(TieredRateLimitPolicy(tiers={"pro": (2, 60.0)}, default=(1, 60.0)))
     async with TestClient(app) as client:
         free = client.acting_as("ada")
         promoted = client.acting_as("ada", roles=["pro"])
@@ -144,13 +112,13 @@ async def test_tiers_do_not_share_a_bucket() -> None:
 
 
 async def test_a_custom_tier_function_can_read_anything() -> None:
-    app = _app(TieredRateLimitPolicy(
-        tiers={"enterprise": (4, 60.0)},
-        default=(1, 60.0),
-        tier=lambda request: (
-            "enterprise" if request.header("x-plan") == "enterprise" else None
-        ),
-    ))
+    app = _app(
+        TieredRateLimitPolicy(
+            tiers={"enterprise": (4, 60.0)},
+            default=(1, 60.0),
+            tier=lambda request: "enterprise" if request.header("x-plan") == "enterprise" else None,
+        )
+    )
     async with TestClient(app) as client:
         caller = client.acting_as("ada").with_headers(**{"x-plan": "enterprise"})
 
@@ -171,7 +139,6 @@ async def test_a_limited_response_says_when_to_come_back() -> None:
 
 
 async def test_the_tiered_limiter_is_first_class_post_auth_policy() -> None:
-    """Its identity-dependent placement is fixed by HttpPolicy, not hook metadata."""
     limiter = TieredRateLimitPolicy(tiers={"pro": (5, 60.0)}, default=(1, 60.0))
     policy = HttpPolicy(principal_rate_limit=limiter)
     assert policy.principal_rate_limit is limiter
@@ -191,8 +158,6 @@ async def test_at_least_one_tier_is_required() -> None:
         TieredRateLimitPolicy(tiers={}, default=(1, 60.0))
 
 
-# --- what the tier actually hands to its limiter ------------------------------
-#
 # `TieredRateLimitPolicy` builds one `RateLimitPolicy` per tier.
 # `wreath mutant` dropped `window=`, `cost=` and `exempt=` from that call and
 # every test stayed green: every test above uses `window=60.0`, which is also
@@ -202,14 +167,12 @@ async def test_at_least_one_tier_is_required() -> None:
 
 
 async def test_a_tier_window_is_not_quietly_replaced_by_the_default() -> None:
-    """`Retry-After` is the observable that distinguishes one window from another.
-
-    60.0 is `RateLimitPolicy`'s own default, so a window equal to it proves
-    nothing about whether the tier's value was passed at all.
-    """
-    app = _app(TieredRateLimitPolicy(
-        tiers={"pro": (1, 3600.0)}, default=(1, 1800.0),
-    ))
+    app = _app(
+        TieredRateLimitPolicy(
+            tiers={"pro": (1, 3600.0)},
+            default=(1, 1800.0),
+        )
+    )
     async with TestClient(app) as client:
         pro = client.acting_as("ada", roles=["pro"])
         assert (await pro.get("/llamas")).status == 200
@@ -228,10 +191,13 @@ async def test_a_tier_window_is_not_quietly_replaced_by_the_default() -> None:
 
 
 async def test_the_cost_a_request_spends_reaches_every_tier() -> None:
-    """`cost=2` against an allowance of 4 is two requests, not four."""
-    app = _app(TieredRateLimitPolicy(
-        tiers={"pro": (4, 60.0)}, default=(4, 60.0), cost=2.0,
-    ))
+    app = _app(
+        TieredRateLimitPolicy(
+            tiers={"pro": (4, 60.0)},
+            default=(4, 60.0),
+            cost=2.0,
+        )
+    )
     async with TestClient(app) as client:
         for who in (client.acting_as("ada", roles=["pro"]), client.acting_as("bo")):
             assert (await who.get("/llamas")).status == 200
@@ -240,11 +206,13 @@ async def test_the_cost_a_request_spends_reaches_every_tier() -> None:
 
 
 async def test_an_exempt_request_is_not_limited_in_any_tier() -> None:
-    """The exemption has to reach the per-tier limiter, not just the wrapper."""
-    app = _app(TieredRateLimitPolicy(
-        tiers={"pro": (1, 60.0)}, default=(1, 60.0),
-        exempt=lambda request: request.header("x-internal") == "yes",
-    ))
+    app = _app(
+        TieredRateLimitPolicy(
+            tiers={"pro": (1, 60.0)},
+            default=(1, 60.0),
+            exempt=lambda request: request.header("x-internal") == "yes",
+        )
+    )
     async with TestClient(app) as client:
         for who in (client.acting_as("ada", roles=["pro"]), client.acting_as("bo")):
             for _ in range(5):
@@ -256,19 +224,9 @@ async def test_an_exempt_request_is_not_limited_in_any_tier() -> None:
 
 
 async def test_an_anonymous_caller_on_a_public_route_gets_the_default_tier() -> None:
-    """`_tier_from_roles` reads `identity.roles`, and there may be no identity.
-
-    Every test above puts the limiter on a route behind `@add_authenticated`, so
-    `request.identity` was never None and the guard never ran -- `wreath mutant`
-    deleted it and nothing objected. On a route with no auth requirement the
-    unguarded version reaches `None.roles` and answers 500, turning a rate
-    limiter into an outage for exactly the traffic it exists to bound.
-    """
     app = Wreath(
         http_policy=HttpPolicy(
-            principal_rate_limit=TieredRateLimitPolicy(
-                tiers={"pro": (9, 60.0)}, default=(1, 60.0)
-            )
+            principal_rate_limit=TieredRateLimitPolicy(tiers={"pro": (9, 60.0)}, default=(1, 60.0))
         )
     )
 
@@ -279,4 +237,4 @@ async def test_an_anonymous_caller_on_a_public_route_gets_the_default_tier() -> 
     async with TestClient(app) as client:
         assert (await client.get("/public")).status == 200
         refused = await client.get("/public")
-        assert refused.status == 429          # the default tier, not a crash
+        assert refused.status == 429  # the default tier, not a crash

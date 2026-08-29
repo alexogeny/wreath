@@ -1,19 +1,3 @@
-"""The ring as a file, and what survives a process that dies badly.
-
-The claim this whole feature rests on is one sentence: *the records are still
-there after the process is gone*. That is not a claim a mock can support, so
-the tests below start a fresh interpreter, let it publish into a mapped ring,
-and then kill it in the two ways that actually happen -- a `SIGSEGV` from inside
-its own work, and a `SIGKILL` from outside -- before decoding the file from the
-parent. No atexit handler runs, no `msync` happens, nothing is flushed on the
-way out.
-
-The rest of the file covers the reader, which is written for the case where
-something has already gone wrong and so has to report rather than raise: a
-window clamped from a torn header, a slot whose bytes do not decode, a ring that
-refused records because it was full.
-"""
-
 from __future__ import annotations
 
 import os
@@ -68,8 +52,6 @@ def _serve(recorder, count: int = 1) -> None:
         request.finish(1_000, 200, 0, 0, 0, 12)
 
 
-# --- the crash cases --------------------------------------------------------
-#
 # A subprocess rather than `os.fork`: xdist's worker has live threads, and
 # CPython 3.14 correctly warns that running Python after forking such a process
 # can deadlock on a lock a vanished thread held. The child uses this exact
@@ -150,12 +132,6 @@ _SANITIZED = "ASAN_OPTIONS" in os.environ
 @pytest.mark.skipif(os.name != "posix", reason="needs POSIX signals")
 @pytest.mark.skipif(_SANITIZED, reason="ASan intercepts SIGSEGV; the SIGKILL case covers it")
 def test_records_survive_a_child_that_segfaults(ring_path) -> None:
-    """The load-bearing case: the process dies mid-work, the records remain.
-
-    A real `SIGSEGV`, raised from inside the child, is the failure this feature
-    exists for -- nothing is flushed, no handler runs, the process simply stops
-    existing. The pages are the kernel's, so the file is intact anyway.
-    """
     child = _run_crash_child(ring_path, "publish-segv")
     assert child.returncode == -signal.SIGSEGV, child.stderr
 
@@ -176,7 +152,6 @@ def test_records_survive_a_child_that_segfaults(ring_path) -> None:
 
 @pytest.mark.skipif(os.name != "posix", reason="needs POSIX signals")
 def test_records_survive_a_child_that_is_killed(ring_path) -> None:
-    """SIGKILL: no signal handler could have run even in principle."""
     child = _run_crash_child(ring_path, "publish-kill")
     assert child.returncode == -signal.SIGKILL, child.stderr
     assert read_ring_file(ring_path).live == 6
@@ -186,20 +161,24 @@ def test_native_in_flight_index_matches_the_independent_definition(ring_path) ->
     recorder = _recorder(ring_path, records=16)
     completed = recorder.begin(1, 1, 0)
     completed.route(7, 3)
-    recorder.publish_log(LogCell(
-        request_id=completed.request_id,
-        site_id=3,
-        severity=Severity.INFO,
-    ).encode())
+    recorder.publish_log(
+        LogCell(
+            request_id=completed.request_id,
+            site_id=3,
+            severity=Severity.INFO,
+        ).encode()
+    )
     completed.finish(1_000, 200, 0, 0, 0, 12)
     first = recorder.begin(1, 1, 0)
     second = recorder.begin(1, 1, 0)
     for request_id in (first.request_id, first.request_id, second.request_id, 0):
-        recorder.publish_log(LogCell(
-            request_id=request_id,
-            site_id=3,
-            severity=Severity.INFO,
-        ).encode())
+        recorder.publish_log(
+            LogCell(
+                request_id=request_id,
+                site_id=3,
+                severity=Severity.INFO,
+            ).encode()
+        )
     del recorder
 
     ring = read_ring_file(ring_path)
@@ -214,32 +193,18 @@ def test_native_in_flight_index_matches_the_independent_definition(ring_path) ->
 def test_the_request_in_flight_when_it_died_is_the_one_with_no_completion(
     ring_path,
 ) -> None:
-    """What was it doing when it died?
-
-    A completion cell is written when a request *finishes*, so the request that
-    killed the process is precisely the one that has no completion. Its log
-    records are on the ring and carry its id, which is what makes the gap
-    legible rather than merely present.
-    """
     child = _run_crash_child(ring_path, "in-flight")
     assert child.returncode == -signal.SIGSEGV, child.stderr
 
     ring = read_ring_file(ring_path)
-    completed = {
-        record.decode().request_id for record in ring.of_kind(EventKind.COMPLETION)
-    }
+    completed = {record.decode().request_id for record in ring.of_kind(EventKind.COMPLETION)}
     logged = {record.decode().request_id for record in ring.of_kind(EventKind.LOG)}
     in_flight = logged - completed
     assert completed == {1, 2}
     assert in_flight == {3}, "the doomed request should be the one without a completion"
 
-    record = next(
-        r for r in ring.of_kind(EventKind.LOG) if r.decode().request_id == 3
-    )
+    record = next(r for r in ring.of_kind(EventKind.LOG) if r.decode().request_id == 3)
     assert record.decode().args[0].text_value == "charging card"
-
-
-# --- the file, read back ----------------------------------------------------
 
 
 def test_the_file_is_exactly_its_own_geometry(ring_path) -> None:
@@ -255,7 +220,6 @@ def test_the_file_is_exactly_its_own_geometry(ring_path) -> None:
 
 
 def test_a_drained_ring_reports_what_the_projector_already_took(ring_path) -> None:
-    """Drained records are not lost, and the file must not imply that they are."""
     recorder = _recorder(ring_path)
     _serve(recorder, 4)
     recorder.drain(2)
@@ -266,12 +230,6 @@ def test_a_drained_ring_reports_what_the_projector_already_took(ring_path) -> No
 
 
 def test_a_full_ring_refuses_and_the_file_says_so(ring_path) -> None:
-    """The counter that decides whether the file is the story or a sample.
-
-    The ring drops rather than overwrites, so once it is full the records
-    nearest a crash are the ones *missing*. A post-mortem that could not see
-    that count would read the file as complete.
-    """
     recorder = _recorder(ring_path, records=4)
     _serve(recorder, 10)
     ring = read_ring_file(ring_path)
@@ -281,7 +239,6 @@ def test_a_full_ring_refuses_and_the_file_says_so(ring_path) -> None:
 
 
 def test_an_unmapped_recorder_still_works_and_writes_no_file(tmp_path) -> None:
-    """The mirrors are unconditional stores; with no file they go to scratch."""
     recorder = _flight.Recorder(
         _flight.MODE_PULSE, ring_records=8, active_requests=8, ring_path=None
     )
@@ -291,7 +248,6 @@ def test_an_unmapped_recorder_still_works_and_writes_no_file(tmp_path) -> None:
 
 
 def test_a_stale_file_is_resized_rather_than_read_as_this_run(ring_path) -> None:
-    """A previous, larger run must not leave cells this run would claim."""
     big = _recorder(ring_path, records=64)
     _serve(big, 40)
     del big
@@ -301,9 +257,6 @@ def test_a_stale_file_is_resized_rather_than_read_as_this_run(ring_path) -> None
     ring = read_ring_file(ring_path)
     assert ring.header.ring_records == 8
     assert ring.live == 2
-
-
-# --- the reader, when the file is damaged -----------------------------------
 
 
 def _write_cursor(path: str, head: int, tail: int) -> None:
@@ -347,13 +300,9 @@ def test_a_cell_that_will_not_decode_costs_only_itself(ring_path) -> None:
 
 
 def _ring_reader_cell_corpus() -> tuple[bytes, ...]:
-    completion = bytearray(
-        CompletionCell(1, 0, 0, 0, 1, 200, 0, 0).encode()
-    )
+    completion = bytearray(CompletionCell(1, 0, 0, 0, 1, 200, 0, 0).encode())
     correlation = CorrelationCell(1, 2, 3).encode()
-    phase = bytearray(
-        PhaseBatchCell(1, (PhaseRecord(PhaseKind.INGRESS, 1),)).encode()
-    )
+    phase = bytearray(PhaseBatchCell(1, (PhaseRecord(PhaseKind.INGRESS, 1),)).encode())
     log = bytearray(LogCell(1, 1, Severity.INFO, args=(LogArg.text("x"),)).encode())
     facts = bytearray(ClientFactsCell(1, country="AU").encode())
     control = bytes((SCHEMA_VERSION, int(EventKind.CONTROL))) + bytes(CELL_SIZE - 2)
@@ -406,9 +355,7 @@ def _ring_reader_cell_corpus() -> tuple[bytes, ...]:
         "bad-country",
     ),
 )
-def test_native_ring_reader_matches_the_independent_cell_decoders(
-    ring_path, cell: bytes
-) -> None:
+def test_native_ring_reader_matches_the_independent_cell_decoders(ring_path, cell: bytes) -> None:
     recorder = _recorder(ring_path, records=8)
     del recorder
     with open(ring_path, "r+b") as handle:
@@ -450,13 +397,11 @@ def test_a_truncated_file_is_refused_rather_than_half_read(ring_path) -> None:
 
 
 def test_a_ring_path_that_cannot_be_opened_fails_loudly(tmp_path) -> None:
-    """A forensic ring nobody notices is missing is worth nothing at the crash."""
     with pytest.raises(OSError):
         _recorder(str(tmp_path / "no-such-directory" / "flight.wfrr"))
 
 
 def test_offsets_map_onto_a_wall_clock(ring_path) -> None:
-    """A cell carries a monotonic offset; the header is what dates it."""
     recorder = _recorder(ring_path)
     _serve(recorder, 1)
     ring = read_ring_file(ring_path)
@@ -464,8 +409,6 @@ def test_offsets_map_onto_a_wall_clock(ring_path) -> None:
     assert ring.unix_nano(1_000) == ring.header.epoch_unix_ns + 1_000_000_000
 
 
-# --- `wreath flight read` ---------------------------------------------------
-#
 # The operator-facing end. It is reached for exactly once per bad day, by
 # someone who is already having one, so the failure modes matter as much as the
 # happy path: an unreadable file has to be a message, not a traceback.
@@ -491,13 +434,6 @@ def test_the_cli_reports_the_records_and_the_provenance(ring_path, capsys) -> No
 def test_the_cli_says_what_the_worker_dropped_before_it_says_what_it_kept(
     ring_path, capsys
 ) -> None:
-    """Ordering is the point, not decoration.
-
-    A reader who sees four records and no drop count concludes those four are
-    what happened. The ring refuses when full, so the drop count is what says
-    whether the file is the story or the tail of it -- and it has to arrive
-    before the records, not after them.
-    """
     recorder = _recorder(ring_path, records=4)
     _serve(recorder, 10)
     del recorder
@@ -510,9 +446,7 @@ def test_the_cli_says_what_the_worker_dropped_before_it_says_what_it_kept(
 def test_the_cli_filters_by_kind(ring_path, capsys) -> None:
     recorder = _recorder(ring_path, records=16)
     _serve(recorder, 2)
-    recorder.publish_log(
-        LogCell(request_id=1, site_id=1, severity=Severity.INFO, args=()).encode()
-    )
+    recorder.publish_log(LogCell(request_id=1, site_id=1, severity=Severity.INFO, args=()).encode())
     del recorder
     assert _cli("read", ring_path, "--kind", "log") == 0
     out = capsys.readouterr().out
@@ -545,7 +479,6 @@ def test_the_cli_limits_output_and_says_it_did(ring_path, capsys) -> None:
 
 
 def test_the_cli_refuses_an_unreadable_file_with_a_message(tmp_path, capsys) -> None:
-    """Not a traceback. The person running this has had one crash already."""
     path = tmp_path / "not-a-ring.bin"
     path.write_bytes(b"\x00" * (RING_FILE_HEADER_BYTES + CELL_SIZE))
     assert _cli("read", str(path)) == 2
@@ -574,11 +507,6 @@ def test_the_header_round_trips_through_its_own_encoder() -> None:
 
 
 def test_the_native_header_and_the_python_one_agree(ring_path) -> None:
-    """The mirror that matters: C writes it, Python reads it.
-
-    Every other field would fail loudly if the two disagreed. `worker_id` would
-    not -- it would just be wrong -- so it is asserted explicitly.
-    """
     recorder = _flight.Recorder(
         _flight.MODE_PULSE,
         worker_id=5,
@@ -595,28 +523,26 @@ def test_the_native_header_and_the_python_one_agree(ring_path) -> None:
 
 def _header(**overrides) -> RingFileHeader:
     fields = dict(
-        ring_records=8, cell_size=CELL_SIZE, worker_id=0, epoch_mono_ns=0,
-        epoch_unix_ns=0, created_unix_nano=0, pid=0, head=0, tail=0,
+        ring_records=8,
+        cell_size=CELL_SIZE,
+        worker_id=0,
+        epoch_mono_ns=0,
+        epoch_unix_ns=0,
+        created_unix_nano=0,
+        pid=0,
+        head=0,
+        tail=0,
     )
     fields.update(overrides)
     return RingFileHeader(**fields)
 
 
 def test_a_header_declaring_no_records_is_refused() -> None:
-    """Zero is not a power of two, and `n & (n - 1)` says it is.
-
-    `0 & -1` is `0` -- falsy -- so the bit trick alone accepts an empty ring and
-    the reader then divides the cell region by nothing. The explicit `== 0` is
-    the only clause that catches it, and dropping it survived the suite: every
-    other malformed geometry in these tests is odd or non-power-of-two, which
-    the bit trick rejects on its own.
-    """
     with pytest.raises(Exception, match="declares 0 records"):
         RingFileHeader.decode(_header(ring_records=0).encode())
 
 
 def test_a_header_whose_record_count_is_not_a_power_of_two_is_refused() -> None:
-    """The other clause, so the test above cannot pass by rejecting everything."""
     with pytest.raises(Exception, match="declares 6 records"):
         RingFileHeader.decode(_header(ring_records=6).encode())
     # ... and a legal geometry still decodes, so neither refusal is a blanket one.

@@ -159,9 +159,7 @@ def _parse_native(data: bytes, limits: Limits | None = None) -> Document:
         raise TypeError("XML input must be bytes")
     payload = bytes(data)
     root = _core.xml_parse(payload, *_limit_tuple(limits or Limits()))
-    return Document(
-        root=_build(root, ()), source=payload, canonicalizer=_canonicalize_native
-    )
+    return Document(root=_build(root, ()), source=payload, canonicalizer=_canonicalize_native)
 
 
 def _canonicalize_native(

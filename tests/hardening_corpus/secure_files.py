@@ -1,10 +1,3 @@
-"""a04 and a15 written correctly. Nothing here may produce a finding.
-
-Containment is not a check the handler performs; it is a property of the API it
-reaches for. `normalize_key` refuses a traversal once, for every backend, and
-`LocalStorage` opens beneath a root descriptor so the file that was checked is
-the file that is read.
-"""
 from __future__ import annotations
 
 from pathlib import Path

@@ -37,12 +37,14 @@ def test_google_function_runs_the_same_asgi_app_and_lifespan() -> None:
 
     @app.post("/hello")
     async def hello(request):
-        return JSONResponse({
-            "query": request.query_string.decode(),
-            "body": (await request.body()).decode(),
-            "client": request.scope["client"],
-            "google": "wreath.google" in request.scope["extensions"],
-        })
+        return JSONResponse(
+            {
+                "query": request.query_string.decode(),
+                "body": (await request.body()).decode(),
+                "client": request.scope["client"],
+                "google": "wreath.google" in request.scope["extensions"],
+            }
+        )
 
     adapter = GoogleFunctionAdapter(app)
     body, status, headers = adapter(GoogleRequest())
@@ -80,8 +82,10 @@ def test_azure_uses_the_platforms_native_asgi_adapter(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "azure.functions", azure.functions)
     app = object()
     assert azure_function_app(app, http_auth_level="ANONYMOUS") == "azure-app"
-    assert calls == [{
-        "app": app,
-        "http_auth_level": "ANONYMOUS",
-        "function_name": "http_app_func",
-    }]
+    assert calls == [
+        {
+            "app": app,
+            "http_auth_level": "ANONYMOUS",
+            "function_name": "http_app_func",
+        }
+    ]

@@ -1,10 +1,3 @@
-"""Request header lookup and JSON decoding regressions.
-
-``Request.header`` serves the first lookup with a single list scan and only
-builds the header map when a second lookup proves it worthwhile; both paths
-must agree, including first-value-wins duplicate handling.
-"""
-
 from __future__ import annotations
 
 from typing import Any, cast
@@ -48,13 +41,10 @@ def _request(headers: list[tuple[bytes, bytes]] | None = HEADERS) -> Request:
 
 @pytest.mark.parametrize("scope", [{"type": "http"}, object()])
 def test_native_activation_request_matches_public_constructor(scope: Any) -> None:
-    """The private constructor may only remove the Python initializer frame."""
     params = {"item": "7"}
     app = object()
     public = Request(scope, _no_receive, params, DEFAULT_LIMITS, app=app)
-    activated = _core.request_new(
-        _REQUEST_LAYOUT, scope, _no_receive, params, DEFAULT_LIMITS, app
-    )
+    activated = _core.request_new(_REQUEST_LAYOUT, scope, _no_receive, params, DEFAULT_LIMITS, app)
 
     assert type(activated) is Request
     missing = object()
@@ -167,11 +157,10 @@ async def test_json_malformed_raises_value_error() -> None:
         await request.json()
 
 
-# --- request-local cookie cache ---------------------------------------------
-#
 # Cookies are parsed once per request and cached, matching the existing
 # `_body`/`_header_map` request-local cache conventions. The cache is per
 # request object, so it can never leak across requests.
+
 
 def test_cookies_parse_once_and_return_the_same_object() -> None:
     from wreath._codecs import parse_cookies
@@ -222,7 +211,6 @@ def test_cookie_cache_is_per_request() -> None:
 
 
 def test_cookie_cache_survives_other_request_reads() -> None:
-    """Materializing headers or the scope must not invalidate the cache."""
     request = _request([(b"host", b"x"), (b"cookie", b"a=1; b=2")])
     first = request.cookies
     assert request.header("host") == "x"
@@ -243,9 +231,6 @@ def test_split_cookie_headers_enforce_the_aggregate_limit() -> None:
 
     with pytest.raises(RequestHeaderFieldsTooLarge, match="limit is 8"):
         _ = request.cookies
-
-
-# --- buffered-body and multipart limits ---------------------------------------
 
 
 def _chunked_receive(chunks: list[bytes]) -> Any:
@@ -282,7 +267,6 @@ async def test_a_body_one_byte_over_the_limit_is_refused() -> None:
 
 @pytest.mark.asyncio
 async def test_the_body_limit_applies_across_chunk_boundaries() -> None:
-    """No single chunk is over the limit; their sum is."""
     request = _limited_request([b"a" * 40] * 3, RequestLimits(max_body_bytes=64))
     with pytest.raises(PayloadTooLarge):
         await request.body()
@@ -290,9 +274,7 @@ async def test_the_body_limit_applies_across_chunk_boundaries() -> None:
 
 @pytest.mark.asyncio
 async def test_request_stream_yields_transport_chunks_without_materialising() -> None:
-    request = _limited_request(
-        [b"first", b"-second", b"-third"], RequestLimits(max_body_bytes=64)
-    )
+    request = _limited_request([b"first", b"-second", b"-third"], RequestLimits(max_body_bytes=64))
 
     chunks = [chunk async for chunk in request.stream()]
 
@@ -358,17 +340,13 @@ def test_multipart_boundary_parameter_is_strict_and_supports_quotes() -> None:
 
 
 def test_multipart_boundary_validation_matches_the_rfc_octet_set() -> None:
-    allowed = (
-        b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-        b"'()+_,-./:=? "
-    )
+    allowed = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'()+_,-./:=? "
     for byte in range(256):
         assert _valid_boundary(b"A" + bytes((byte,)) + b"B") is (byte in allowed)
 
 
 @pytest.mark.asyncio
 async def test_an_oversized_body_is_refused_before_it_is_all_buffered() -> None:
-    """The limit must stop the stream, not filter it after the fact."""
     delivered = 0
 
     async def receive() -> Any:
@@ -388,10 +366,13 @@ async def test_an_oversized_body_is_refused_before_it_is_all_buffered() -> None:
 @pytest.mark.asyncio
 async def test_a_multipart_form_over_the_part_limit_is_refused() -> None:
     boundary = b"B"
-    body = b"".join(
-        b"--B\r\nContent-Disposition: form-data; name=\"f%d\"\r\n\r\nv\r\n" % index
-        for index in range(4)
-    ) + b"--B--\r\n"
+    body = (
+        b"".join(
+            b'--B\r\nContent-Disposition: form-data; name="f%d"\r\n\r\nv\r\n' % index
+            for index in range(4)
+        )
+        + b"--B--\r\n"
+    )
     request = _limited_request(
         [body],
         RequestLimits(max_parts=2),
@@ -405,7 +386,7 @@ async def test_a_multipart_form_over_the_part_limit_is_refused() -> None:
 @pytest.mark.asyncio
 async def test_a_multipart_part_over_the_in_memory_budget_is_refused() -> None:
     body = (
-        b"--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n"
+        b'--B\r\nContent-Disposition: form-data; name="f"; filename="a.bin"\r\n'
         b"\r\n" + b"x" * 512 + b"\r\n--B--\r\n"
     )
     request = _limited_request(
@@ -421,7 +402,7 @@ async def test_a_multipart_part_over_the_in_memory_budget_is_refused() -> None:
 @pytest.mark.asyncio
 async def test_a_multipart_part_header_block_over_the_limit_is_refused() -> None:
     body = (
-        b"--B\r\nContent-Disposition: form-data; name=\"f\"\r\n"
+        b'--B\r\nContent-Disposition: form-data; name="f"\r\n'
         b"X-Padding: " + b"p" * 256 + b"\r\n\r\nv\r\n--B--\r\n"
     )
     request = _limited_request(
@@ -461,9 +442,6 @@ async def test_multipart_content_type_requires_a_boundary() -> None:
 
 @pytest.mark.asyncio
 async def test_a_malformed_multipart_body_is_not_a_413() -> None:
-    """Only the *limits* became client refusals. A body the parser cannot read
-    is a different failure and keeps raising the documented `ValueError`, so the
-    message-prefix discrimination cannot quietly swallow one as the other."""
     request = _limited_request(
         [b"--B\r\nnot-a-header-line\r\n\r\nv\r\n--B--\r\n"],
         RequestLimits(),
@@ -478,8 +456,8 @@ async def test_a_malformed_multipart_body_is_not_a_413() -> None:
 @pytest.mark.parametrize(
     "body",
     [
-        b"--B x\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nv\r\n--B--\r\n",
-        b"--B\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nunterminated",
+        b'--B x\r\nContent-Disposition: form-data; name="f"\r\n\r\nv\r\n--B--\r\n',
+        b'--B\r\nContent-Disposition: form-data; name="f"\r\n\r\nunterminated',
     ],
 )
 async def test_multipart_rejects_bad_boundary_lines_and_unterminated_parts(
@@ -498,8 +476,8 @@ async def test_multipart_rejects_bad_boundary_lines_and_unterminated_parts(
 @pytest.mark.asyncio
 async def test_a_valid_multipart_form_still_yields_exact_bytes() -> None:
     body = (
-        b"--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n"
-        b"\r\nhello\r\n--B\r\nContent-Disposition: form-data; name=\"g\"\r\n\r\nv\r\n"
+        b'--B\r\nContent-Disposition: form-data; name="f"; filename="a.bin"\r\n'
+        b'\r\nhello\r\n--B\r\nContent-Disposition: form-data; name="g"\r\n\r\nv\r\n'
         b"--B--\r\n"
     )
     request = _limited_request(
@@ -517,10 +495,11 @@ async def test_a_valid_multipart_form_still_yields_exact_bytes() -> None:
 @pytest.mark.asyncio
 async def test_multipart_parses_incrementally_and_spools_without_buffering_body() -> None:
     body = (
-        b"--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n"
+        b'--B\r\nContent-Disposition: form-data; name="f"; filename="a.bin"\r\n'
         b"Content-Type: application/octet-stream\r\n\r\n"
-        + b"0123456789" * 20
-        + b"\r\n--B\r\nContent-Disposition: form-data; name=\"label\"\r\n\r\nwreath"
+        + b"0123456789"
+        * 20
+        + b'\r\n--B\r\nContent-Disposition: form-data; name="label"\r\n\r\nwreath'
         b"\r\n--B--\r\n"
     )
     request = _limited_request(
@@ -548,10 +527,12 @@ async def test_multipart_rejects_aggregate_retained_payload_limit() -> None:
     # Two parts, each within max_part_bytes and under max_parts, but together
     # over the aggregate in-memory cap. The second part crosses it.
     body = (
-        b"--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n\r\n"
-        + b"x" * 512 + b"\r\n"
-        b"--B\r\nContent-Disposition: form-data; name=\"g\"; filename=\"b.bin\"\r\n\r\n"
-        + b"y" * 512 + b"\r\n--B--\r\n"
+        b'--B\r\nContent-Disposition: form-data; name="f"; filename="a.bin"\r\n\r\n'
+        + b"x" * 512
+        + b"\r\n"
+        b'--B\r\nContent-Disposition: form-data; name="g"; filename="b.bin"\r\n\r\n'
+        + b"y" * 512
+        + b"\r\n--B--\r\n"
     )
     request = _limited_request(
         [body],
@@ -565,10 +546,12 @@ async def test_multipart_rejects_aggregate_retained_payload_limit() -> None:
 @pytest.mark.asyncio
 async def test_multipart_at_the_aggregate_limit_is_accepted() -> None:
     body = (
-        b"--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n\r\n"
-        + b"x" * 400 + b"\r\n"
-        b"--B\r\nContent-Disposition: form-data; name=\"g\"; filename=\"b.bin\"\r\n\r\n"
-        + b"y" * 400 + b"\r\n--B--\r\n"
+        b'--B\r\nContent-Disposition: form-data; name="f"; filename="a.bin"\r\n\r\n'
+        + b"x" * 400
+        + b"\r\n"
+        b'--B\r\nContent-Disposition: form-data; name="g"; filename="b.bin"\r\n\r\n'
+        + b"y" * 400
+        + b"\r\n--B--\r\n"
     )
     request = _limited_request(
         [body],
@@ -582,10 +565,6 @@ async def test_multipart_at_the_aggregate_limit_is_accepted() -> None:
 
 @pytest.mark.asyncio
 async def test_urlencoded_form_rejects_too_many_fields() -> None:
-    """A 413, not a bare `ValueError`. `max_form_fields` exists to refuse
-    hostile input, so it has to refuse it as a client error; the codec's
-    `ValueError` reached the boundary as an unhandled 500, reporting the
-    caller's fault as the server's."""
     request = _limited_request(
         [b"a=1&b=2&c=3&d=4"],
         RequestLimits(max_form_fields=3),
@@ -607,13 +586,8 @@ async def test_urlencoded_form_at_the_field_limit_is_accepted() -> None:
     assert form["a"] == "1" and form["b"] == "2" and form["c"] == "3"
 
 
-# --- the urlencoded field-count limit refuses as a client error --------------
-
-
 @pytest.mark.asyncio
 async def test_the_field_limit_refusal_reaches_the_client_as_413() -> None:
-    """End to end: the refusal has to survive the dispatch error boundary as a
-    413 problem document, which is the part a bare `ValueError` could not do."""
     from wreath import Wreath
     from wreath.testing import TestClient
 

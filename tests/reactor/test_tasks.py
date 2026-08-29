@@ -1,9 +1,3 @@
-"""create_task, gather, cancellation, current_task/all_tasks — generic Task
-semantics the native driver must reproduce for the ordinary (suspending) path.
-
-The native fast path (inline-drive, fusion) is specified separately in
-test_wreath_task.py; here everything must behave exactly like asyncio.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -77,8 +71,6 @@ def test_current_task_and_all_tasks(loop):
 
 
 def test_taskgroup_cancels_siblings_on_error(loop):
-    """TaskGroup (unlike gather) cancels siblings when one child fails — a deep
-    exercise of the driver's cancellation path."""
     cancelled = []
 
     async def boom():

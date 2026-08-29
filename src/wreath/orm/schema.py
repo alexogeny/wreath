@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 #: from different Wreath versions can never collide.
 FINGERPRINT_VERSION = b"wreath-orm-fingerprint-1"
 
+
 @dataclass(frozen=True, slots=True)
 class SchemaRef:
     """A logical or fixed schema reference compiled by a registry."""
@@ -55,9 +56,7 @@ class SchemaMode:
         isolation: Literal["namespace", "role"] = "namespace",
     ) -> SchemaMode:
         if isolation not in ("namespace", "role"):
-            raise DeclarationError(
-                "isolation must be 'namespace' or 'role'"
-            )
+            raise DeclarationError("isolation must be 'namespace' or 'role'")
         return cls(
             kind="isolated",
             central=_schema_identifier(central),
@@ -66,9 +65,7 @@ class SchemaMode:
 
 
 def _schema_identifier(value: str) -> str:
-    return validate_unquoted_identifier(
-        value, "schema name", error=DeclarationError
-    )
+    return validate_unquoted_identifier(value, "schema name", error=DeclarationError)
 
 
 @dataclass(frozen=True, slots=True)

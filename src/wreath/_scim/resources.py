@@ -77,9 +77,7 @@ USER_URN = "urn:ietf:params:scim:schemas:core:2.0:User"
 GROUP_URN = "urn:ietf:params:scim:schemas:core:2.0:Group"
 LIST_RESPONSE_URN = "urn:ietf:params:scim:api:messages:2.0:ListResponse"
 ERROR_URN = "urn:ietf:params:scim:api:messages:2.0:Error"
-SERVICE_PROVIDER_CONFIG_URN = (
-    "urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"
-)
+SERVICE_PROVIDER_CONFIG_URN = "urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"
 RESOURCE_TYPE_URN = "urn:ietf:params:scim:schemas:core:2.0:ResourceType"
 SCHEMA_URN = "urn:ietf:params:scim:schemas:core:2.0:Schema"
 
@@ -368,9 +366,7 @@ USER_SCHEMA = {
                 _attribute("type", "string", mutability="readOnly"),
             ],
         ),
-        _attribute(
-            "groups", "complex", multi=True, mutability="readOnly", sub=_MEMBER_SUB
-        ),
+        _attribute("groups", "complex", multi=True, mutability="readOnly", sub=_MEMBER_SUB),
     ],
 }
 

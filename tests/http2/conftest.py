@@ -1,14 +1,3 @@
-"""Shared fixtures and driver for in-process HTTP/2 protocol tests.
-
-These tests drive the native ``Http2Protocol`` directly over a fake transport
-(no TLS, no sockets), asserting on bytes on the wire, ASGI scopes/messages, and
-exact protocol error codes. The reference frame/HPACK codec in ``support.py`` is
-independent of the implementation under test.
-
-The whole suite is skipped until ``wreath._native._server`` exposes
-``Http2Protocol``; it is written test-first, so before the Step 3 implementation
-lands these tests fail at collection-parametrize time with a clear skip reason.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -85,9 +74,13 @@ async def _settle() -> None:
 class H2Driver:
     """Drives one native Http2Protocol connection for tests."""
 
-    def __init__(self, app: Any, config: ServerConfig | None = None,
-                 extra: dict[str, Any] | None = None,
-                 metal_scheduler: bool = False) -> None:
+    def __init__(
+        self,
+        app: Any,
+        config: ServerConfig | None = None,
+        extra: dict[str, Any] | None = None,
+        metal_scheduler: bool = False,
+    ) -> None:
         assert Http2Protocol is not None
         self.loop = asyncio.get_event_loop()
         self.registry: set[Any] = set()
@@ -127,7 +120,7 @@ class H2Driver:
     def frames(self) -> list[support.Frame]:
         """Return all frames the server has emitted so far."""
         data = bytes(self.transport.buffer)
-        fresh = data[self._consumed:]
+        fresh = data[self._consumed :]
         self._consumed = len(data)
         self.parser.feed(fresh)
         return self.parser.frames()
@@ -148,9 +141,12 @@ class H2Driver:
 def make_driver():
     drivers: list[H2Driver] = []
 
-    def _make(app: Any, config: ServerConfig | None = None,
-              extra: dict[str, Any] | None = None,
-              metal_scheduler: bool = False) -> H2Driver:
+    def _make(
+        app: Any,
+        config: ServerConfig | None = None,
+        extra: dict[str, Any] | None = None,
+        metal_scheduler: bool = False,
+    ) -> H2Driver:
         d = H2Driver(app, config, extra, metal_scheduler)
         drivers.append(d)
         return d
@@ -165,8 +161,6 @@ def make_driver():
             pass
 
 
-# --- reusable ASGI apps ----------------------------------------------------
-
 async def ok_app(scope: dict, receive: Any, send: Any) -> None:
     assert scope["type"] == "http"
     body = b""
@@ -177,8 +171,13 @@ async def ok_app(scope: dict, receive: Any, send: Any) -> None:
         body += msg.get("body", b"")
         if not msg.get("more_body", False):
             break
-    await send({"type": "http.response.start", "status": 200,
-                "headers": [(b"content-type", b"text/plain")]})
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"content-type", b"text/plain")],
+        }
+    )
     await send({"type": "http.response.body", "body": b"hello"})
 
 

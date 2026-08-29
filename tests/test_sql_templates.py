@@ -1,10 +1,3 @@
-"""`wreath.sql` turns a t-string into text plus bind parameters.
-
-The property under test is the one the whole module exists for: **a value that
-was interpolated never reaches the SQL text.** Every case below feeds a hostile
-string through an interpolation and asserts it came out as a parameter, not as
-syntax.
-"""
 from __future__ import annotations
 
 import pytest
@@ -37,9 +30,7 @@ def test_parameters_are_numbered_in_order() -> None:
     statement = Statement(
         t"SELECT id FROM shipments WHERE org_id = {org} AND status = {status} LIMIT {limit}"
     )
-    assert statement.text == (
-        "SELECT id FROM shipments WHERE org_id = $1 AND status = $2 LIMIT $3"
-    )
+    assert statement.text == ("SELECT id FROM shipments WHERE org_id = $1 AND status = $2 LIMIT $3")
     assert statement.args == (7, "booked", 25)
 
 
@@ -52,14 +43,8 @@ def test_adjacent_interpolations_stay_separate_parameters() -> None:
 
 def test_implicit_concatenation_spans_one_statement() -> None:
     org = 3
-    statement = Statement(
-        t"SELECT id, reference FROM shipments "
-        t"WHERE org_id = {org} "
-        t"ORDER BY id"
-    )
-    assert statement.text == (
-        "SELECT id, reference FROM shipments WHERE org_id = $1 ORDER BY id"
-    )
+    statement = Statement(t"SELECT id, reference FROM shipments WHERE org_id = {org} ORDER BY id")
+    assert statement.text == ("SELECT id, reference FROM shipments WHERE org_id = $1 ORDER BY id")
     assert statement.args == (3,)
 
 
@@ -80,8 +65,6 @@ def test_an_fstring_is_refused_because_it_is_a_plain_string() -> None:
         Statement(f"SELECT id FROM shipments WHERE reference ILIKE '%{needle}%'")  # type: ignore[arg-type]
 
 
-# -- identifiers ------------------------------------------------------------
-#
 # A schema or table name cannot be a bind parameter -- PostgreSQL resolves those
 # at parse time -- so the module needs one other way to interpolate, and it
 # quotes rather than trusting.
@@ -131,12 +114,9 @@ def test_an_injection_through_an_identifier_stays_inside_the_quotes() -> None:
     statement = Statement(t"SELECT * FROM {Identifier(INJECTION)}")
     # Quoted, so it names a (nonexistent) table rather than closing one string
     # and opening a second statement.
-    assert statement.text.startswith('SELECT * FROM "zz%\') UNION')
+    assert statement.text.startswith("SELECT * FROM \"zz%') UNION")
     assert statement.text.endswith('--"')
     assert statement.args == ()
-
-
-# -- composition ------------------------------------------------------------
 
 
 def test_a_nested_template_splices_and_renumbers() -> None:
@@ -144,9 +124,7 @@ def test_a_nested_template_splices_and_renumbers() -> None:
     org = 4
     clause = t"AND status = {status}"
     statement = Statement(t"SELECT id FROM shipments WHERE org_id = {org} {clause}")
-    assert statement.text == (
-        "SELECT id FROM shipments WHERE org_id = $1 AND status = $2"
-    )
+    assert statement.text == ("SELECT id FROM shipments WHERE org_id = $1 AND status = $2")
     assert statement.args == (4, "booked")
 
 
@@ -168,9 +146,6 @@ def test_a_nested_statement_splices_and_renumbers() -> None:
     assert statement.args == (4, "booked")
 
 
-# -- the escape hatch -------------------------------------------------------
-
-
 def test_fragment_splices_verbatim() -> None:
     statement = Statement(t"SELECT id FROM s ORDER BY id {Fragment('DESC')}")
     assert statement.text == "SELECT id FROM s ORDER BY id DESC"
@@ -180,9 +155,6 @@ def test_fragment_splices_verbatim() -> None:
 def test_fragment_refuses_a_non_string() -> None:
     with pytest.raises(TypeError, match="str"):
         Fragment(7)  # type: ignore[arg-type]
-
-
-# -- refusals that keep the mapping honest ----------------------------------
 
 
 def test_a_conversion_on_a_bound_value_is_refused() -> None:

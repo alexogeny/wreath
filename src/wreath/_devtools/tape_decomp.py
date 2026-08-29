@@ -98,16 +98,11 @@ class Arm:
         return ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))]
 
 
-
-
-
-
 def _configure(app: Any, components: list[Any]) -> Any:
     app._http_policy = policy_from_components(components) if components else None
     app._dirty = True
     app._compile_routes()
     return app
-
 
 
 class _FrameMiddleware:
@@ -125,9 +120,7 @@ class _FrameMiddleware:
         return None
 
 
-async def _calibrate(
-    template: dict[str, Any], rounds: int, iterations: int, warmup: int
-) -> int:
+async def _calibrate(template: dict[str, Any], rounds: int, iterations: int, warmup: int) -> int:
     """Measure nanoseconds per Python frame, by slope.
 
     A single frame-removing fix is usually too small for one A/B to resolve --
@@ -227,7 +220,6 @@ def _build_arms(
     return arms
 
 
-
 async def _verify(arms: list[Arm], template: dict[str, Any], when: str) -> None:
     """Every arm must still serve the request it claims to be measuring.
 
@@ -291,10 +283,7 @@ def _report(arms: list[Arm], mode: str, floor: float, bare: float) -> dict[str, 
             }
         )
         verdict = "yes" if resolved else "BELOW NOISE"
-        print(
-            f"{arm.label:30s} {arm.median:7.2f}u {arm.p95:7.2f}u "
-            f"{delta:+8.2f}u   {verdict:>9s}"
-        )
+        print(f"{arm.label:30s} {arm.median:7.2f}u {arm.p95:7.2f}u {delta:+8.2f}u   {verdict:>9s}")
 
     summary: dict[str, Any] = {}
     full = next((arm for arm in arms if arm.label == "full stack"), None)

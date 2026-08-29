@@ -40,6 +40,7 @@ DEFAULT_ROOTS = ("src/wreath/_native",)
 
 _native_tape: Any = extension("_lint")
 
+
 def waiver_pattern(tool: str, prefix: str) -> re.Pattern[str]:
     """The `<tool>: allow <CODE> -- <reason>` comment a native lint honours.
 
@@ -156,7 +157,6 @@ CONST_TABLE_FROMSTRING = re.compile(
 # Functions where a one-off import is fine: module setup, not a per-item path.
 # Matched on underscore-separated tokens -- `\binit\b` never fires inside
 # `wreath_pg_codec_init`, because `_` is a word character.
-#
 # `static` is here for `build_static_table`/`free_static_table` -- the HPACK
 # constant-header cache, built once for the life of the process and already
 # carrying `native-lint: allow NC007` waivers saying so. The obvious token to add
@@ -167,8 +167,21 @@ CONST_TABLE_FROMSTRING = re.compile(
 # costs more than the finding it silences.
 INIT_TOKENS = frozenset(
     {
-        "init", "ready", "setup", "module", "exec", "new", "main", "register",
-        "fini", "make", "create", "type", "types", "import", "static",
+        "init",
+        "ready",
+        "setup",
+        "module",
+        "exec",
+        "new",
+        "main",
+        "register",
+        "fini",
+        "make",
+        "create",
+        "type",
+        "types",
+        "import",
+        "static",
     }
 )
 
@@ -344,7 +357,9 @@ def scan_text(path: str, text: str) -> list[Finding]:
         if WAIVER_BARE.search(line) and not WAIVER.search(line):
             findings.append(
                 Finding(
-                    path, number, "NC000",
+                    path,
+                    number,
+                    "NC000",
                     "waiver without a rule code and reason",
                     "Write: native-lint: allow NC001 -- why this one is bounded.",
                 )
@@ -402,13 +417,6 @@ def repo_root() -> Path:
 
 
 def report_findings(prog: str, findings: list[Any]) -> int:
-    """Print `findings`, then the summary line, and return the exit code.
-
-    The reporting tail every repository-scanning lint shares. Kept separate
-    from `run_root_lint` because `sql-lint` has an argument of its own and so
-    cannot use the whole body -- only this part, which is the part that was
-    actually identical.
-    """
     for finding in findings:
         print(finding.render())
     print(f"{prog}: {len(findings)} finding(s).")
@@ -422,15 +430,6 @@ def run_root_lint(
     description: str,
     scan: Callable[[Path], list[Any]],
 ) -> int:
-    """The command body for a lint that scans the repository rather than C sources.
-
-    `build-lint` and `roadmap-lint` were byte-identical here, down to the help
-    text of `--root`. `run_lint` below does not fit them: it iterates C sources
-    and takes a per-file scanner, where these take the root itself.
-
-    Lives in this module because `repo_root` does and both callers already
-    import it from here -- not because either is a native lint.
-    """
     parser = argparse.ArgumentParser(prog=prog, description=description)
     parser.add_argument("--root", default=None, help="repository root (default: detected)")
     args = parser.parse_args(argv)
@@ -526,6 +525,7 @@ def lint_entrypoint(
     default_roots: tuple[str, ...],
 ) -> _LintEntrypoint:
     """Bind one native lint's declarations to the shared command body."""
+
     def main(argv: list[str] | None = None) -> int:
         return run_lint(
             argv,
@@ -544,11 +544,11 @@ def main(argv: list[str] | None = None) -> int:
         prog="wreath-native-lint",
         description="Scan Wreath's C for known CPU and memory complexity patterns.",
     )
-    parser.add_argument("paths", nargs="*", type=Path,
-                        help="files or directories (default: src/wreath/_native)")
+    parser.add_argument(
+        "paths", nargs="*", type=Path, help="files or directories (default: src/wreath/_native)"
+    )
     parser.add_argument("--format", choices=("text", "json"), default="text")
-    parser.add_argument("--list-rules", action="store_true",
-                        help="print the rules and exit")
+    parser.add_argument("--list-rules", action="store_true", help="print the rules and exit")
     args = parser.parse_args(argv)
 
     if args.list_rules:
@@ -559,8 +559,9 @@ def main(argv: list[str] | None = None) -> int:
     roots = args.paths or [repo_root() / r for r in DEFAULT_ROOTS]
     sources = iter_sources([Path(p) for p in roots])
     if not sources:
-        print(f"wreath-native-lint: no C sources found in {[str(r) for r in roots]}",
-              file=sys.stderr)
+        print(
+            f"wreath-native-lint: no C sources found in {[str(r) for r in roots]}", file=sys.stderr
+        )
         return 1
 
     findings: list[Finding] = []
@@ -578,19 +579,20 @@ def main(argv: list[str] | None = None) -> int:
         findings.extend(scan_text(display, text))
 
     if args.format == "json":
-        print(json.dumps(
-            {"scanned": len(sources),
-             "findings": [f.__dict__ for f in findings]}, indent=2))
+        print(
+            json.dumps(
+                {"scanned": len(sources), "findings": [f.__dict__ for f in findings]}, indent=2
+            )
+        )
     else:
         for finding in findings:
             print(finding.render())
-        print(
-            f"\nwreath-native-lint: {len(findings)} finding(s) across "
-            f"{len(sources)} file(s)."
-        )
+        print(f"\nwreath-native-lint: {len(findings)} finding(s) across {len(sources)} file(s).")
         if not findings:
-            print("Waive an intentional match in place, e.g.\n"
-                  "    /* native-lint: allow NC001 -- bounded by pipeline depth */")
+            print(
+                "Waive an intentional match in place, e.g.\n"
+                "    /* native-lint: allow NC001 -- bounded by pipeline depth */"
+            )
     return 1 if findings else 0
 
 

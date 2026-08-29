@@ -1,5 +1,3 @@
-"""SSE framing against direct `text/event-stream` wire vectors."""
-
 from __future__ import annotations
 
 import pytest
@@ -84,9 +82,7 @@ def test_public_entry_frames_each_input_shape() -> None:
     assert _encode_sse(event) == b"event: progress\nid: 7\nretry: 100\ndata: payload\n\n"
     assert _encode_sse("bare") == b"data: bare\n\n"
     assert _encode_sse(b"bytes") == b"data: bytes\n\n"
-    assert _encode_sse({"data": "m", "event": "e", "id": "1"}) == (
-        b"event: e\nid: 1\ndata: m\n\n"
-    )
+    assert _encode_sse({"data": "m", "event": "e", "id": "1"}) == (b"event: e\nid: 1\ndata: m\n\n")
 
 
 def test_bytes_data_is_decoded_as_utf8() -> None:

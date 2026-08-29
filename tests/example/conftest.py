@@ -1,30 +1,3 @@
-"""Put the example package on the import path, in its own PostgreSQL schema.
-
-``example/`` is a top-level directory rather than part of ``src/wreath`` -- it
-is an application built *on* wreath, not part of it, and it must never ship to
-users who ``pip install wreath``. That choice is right and it costs this: the
-package is not installed, so the tests add it to ``sys.path``.
-
-The alternative is a ``pyproject.toml`` entry making it a workspace member,
-which would remove that half of this file. That decision is open; see the
-example's design notes.
-
-**The schema name is per worker, and that is not a nicety.** Every fixture in
-this directory does ``DROP SCHEMA ... CASCADE`` then ``CREATE SCHEMA``, so six
-xdist workers sharing one name delete each other's tables mid-test. What comes
-back is not a recognisable isolation failure: PostgreSQL reports the losing
-side as ``duplicate key value violates unique constraint
-"pg_namespace_nspname_index"``, or the test simply finds an empty table and
-fails an assertion about seeded rows. Measured before this was added: green
-serially, six errors under ``-n 6``, and one intermittent 8-failure run
-serially while another process was using the same database.
-
-``CAMERA_TRAP_SCHEMA`` must be set *before* ``camera_trap.models`` is imported,
-because ``schema=`` is fixed when each model class is built. Setting it here
-works because pytest imports a directory's ``conftest.py`` before the test
-modules that sit beside it.
-"""
-
 from __future__ import annotations
 
 import os
@@ -81,7 +54,5 @@ os.environ["CAMERA_TRAP_MEDIA_SECRET"] = "camera-trap-test-presign-secret-012345
 #: Guarded rather than ``setdefault`` because ``CAMERA_TRAP_DSN`` wins over
 #: ``WREATH_TEST_POSTGRES_DSN`` in ``Settings.from_env``: writing it
 #: unconditionally would point a real database-backed run at this dead address.
-if not os.environ.get("CAMERA_TRAP_DSN") and not os.environ.get(
-    "WREATH_TEST_POSTGRES_DSN"
-):
+if not os.environ.get("CAMERA_TRAP_DSN") and not os.environ.get("WREATH_TEST_POSTGRES_DSN"):
     os.environ["CAMERA_TRAP_DSN"] = "postgresql://camera-trap@127.0.0.1:1/unused"

@@ -1,6 +1,3 @@
-"""Credential handling: hashing cost, token parsing, SSO session (report 23:
-R-59, R-60, R-61, R-65, R-68, R-70, R-71, R-72, G-73, G-74)."""
-
 from __future__ import annotations
 
 import asyncio
@@ -31,8 +28,11 @@ class TestPasswordHashingIsOffTheLoop:
         beat = asyncio.create_task(heartbeat())
         try:
             await register(
-                InMemoryUserStore(), CapturingEmailSender(), secret="s" * 32,
-                email="a@example.com", password="hunter2hunter2",
+                InMemoryUserStore(),
+                CapturingEmailSender(),
+                secret="s" * 32,
+                email="a@example.com",
+                password="hunter2hunter2",
                 link_builder=lambda purpose, token: f"/{purpose}/{token}",
             )
         finally:
@@ -45,9 +45,9 @@ class TestPasswordHashingIsOffTheLoop:
         from wreath._userkit import InMemoryUserStore, authenticate, hash_password
 
         store = InMemoryUserStore()
-        await store.create("a@example.com", await asyncio.to_thread(
-            hash_password, "hunter2hunter2"
-        ))
+        await store.create(
+            "a@example.com", await asyncio.to_thread(hash_password, "hunter2hunter2")
+        )
 
         ticks = 0
 
@@ -107,7 +107,8 @@ class TestRegistrationTiming:
         store = InMemoryUserStore()
         mail = CapturingEmailSender()
         kwargs = dict(
-            secret="s" * 32, password="hunter2hunter2",
+            secret="s" * 32,
+            password="hunter2hunter2",
             link_builder=lambda purpose, token: f"/{purpose}/{token}",
         )
 
@@ -141,12 +142,13 @@ class TestResetPasswordEdges:
         store = InMemoryUserStore()
         user = await store.create("a@example.com", hash_password("hunter2hunter2"))
         token = sign_token(
-            "s" * 32, "reset", user.id, ttl=3600,
+            "s" * 32,
+            "reset",
+            user.id,
+            ttl=3600,
             bound=_fingerprint(user.hashed_password),
         )
-        assert await reset_password(
-            store, secret="s" * 32, token=token, new_password=""
-        ) is False
+        assert await reset_password(store, secret="s" * 32, token=token, new_password="") is False
 
 
 class TestJwtHostileTokens:
@@ -169,24 +171,27 @@ class TestJwtHostileTokens:
         from wreath._auth.jwt import default_identity, verify_jwt
 
         def segment(payload):
-            return base64.urlsafe_b64encode(
-                json.dumps(payload).encode()
-            ).rstrip(b"=").decode("ascii")
+            return (
+                base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode("ascii")
+            )
 
         nested: object = "x"
         for _ in range(2000):
             nested = [nested]
         token = f"{segment({'alg': 'HS256'})}.{segment({'sub': 'a', 'deep': nested})}.AAAA"
-        assert verify_jwt(
-            token,
-            key_resolver=lambda header: None,
-            algorithms=frozenset({"HS256"}),
-            issuer=None,
-            audiences=(),
-            leeway=60,
-            required=(),
-            identity=default_identity,
-        ) is None
+        assert (
+            verify_jwt(
+                token,
+                key_resolver=lambda header: None,
+                algorithms=frozenset({"HS256"}),
+                issuer=None,
+                audiences=(),
+                leeway=60,
+                required=(),
+                identity=default_identity,
+            )
+            is None
+        )
 
 
 class TestJwksKeyQuality:
@@ -211,9 +216,7 @@ class TestJwksKeyQuality:
         from wreath._auth.jwt import JwtError, key_from_jwk
 
         def b64(value: int) -> str:
-            return base64.urlsafe_b64encode(
-                value.to_bytes(32, "big")
-            ).rstrip(b"=").decode("ascii")
+            return base64.urlsafe_b64encode(value.to_bytes(32, "big")).rstrip(b"=").decode("ascii")
 
         with pytest.raises(JwtError, match="curve"):
             key_from_jwk({"kty": "EC", "crv": "P-256", "x": b64(1), "y": b64(1)})
@@ -242,23 +245,15 @@ class TestSsoSession:
         assert "bearer_verifier(audience=client_id)" in source
 
     async def test_both_login_routes_refuse_an_app_with_no_session_middleware(self):
-        """The login flow writes `state`, `nonce` and the PKCE verifier to the
-        session, and the callback compares against them. Without the session
-        middleware there is nowhere to put them -- and the failure that guard
-        replaces is a `TypeError` on `None[...]` inside the redirect, i.e. a 500
-        with a traceback rather than a 500 that names the missing middleware.
-
-        Neither guard had ever been executed: every test above reads the source
-        or drives the pieces directly, and nothing had asked the routes
-        themselves for a response.
-        """
         from wreath import Wreath
         from wreath._auth.oauth2 import register_oauth2_login
         from wreath._auth.oidc import OidcProvider
         from wreath.testing import TestClient
 
         provider = OidcProvider(
-            "idp", issuer="https://idp.example", audience="client",
+            "idp",
+            issuer="https://idp.example",
+            audience="client",
             http_client=object(),
         )
         # Discovered, so `provider_not_discovered` cannot answer for either route.
@@ -267,8 +262,12 @@ class TestSsoSession:
 
         app = Wreath()
         register_oauth2_login(
-            app, "idp", provider=provider, client_id="client",
-            client_secret="secret", redirect_uri="https://app.example/auth/callback",
+            app,
+            "idp",
+            provider=provider,
+            client_id="client",
+            client_secret="secret",
+            redirect_uri="https://app.example/auth/callback",
         )
         async with TestClient(app) as client:
             for path in ("/auth/login", "/auth/callback?code=c&state=s"):
@@ -277,14 +276,6 @@ class TestSsoSession:
                 assert response.json() == {"error": "session_middleware_required"}
 
     async def test_the_callback_refuses_a_state_the_session_never_issued(self):
-        """The same routes *with* the middleware, so the guard above is not a ban.
-
-        A callback arriving on a session that holds no `state` is the CSRF-shaped
-        attack the parameter exists for -- somebody else's authorization code
-        replayed into this browser -- and it must be `invalid_state`, not the
-        500 that means "this app is misconfigured". Without a case that gets
-        past the middleware check, "always answer 500" passed the test above.
-        """
         from wreath import Wreath
         from wreath._auth.oauth2 import register_oauth2_login
         from wreath._auth.oidc import OidcProvider
@@ -292,7 +283,9 @@ class TestSsoSession:
         from wreath.testing import TestClient
 
         provider = OidcProvider(
-            "idp", issuer="https://idp.example", audience="client",
+            "idp",
+            issuer="https://idp.example",
+            audience="client",
             http_client=object(),
         )
         provider.authorization_endpoint = "https://idp.example/authorize"
@@ -301,8 +294,12 @@ class TestSsoSession:
         app = Wreath()
         app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
         register_oauth2_login(
-            app, "idp", provider=provider, client_id="client",
-            client_secret="secret", redirect_uri="https://app.example/auth/callback",
+            app,
+            "idp",
+            provider=provider,
+            client_id="client",
+            client_secret="secret",
+            redirect_uri="https://app.example/auth/callback",
         )
         async with TestClient(app) as client:
             response = await client.get("/auth/callback?code=c&state=forged")
@@ -311,9 +308,7 @@ class TestSsoSession:
             # And the login route reaches its redirect rather than the refusal.
             started = await client.get("/auth/login")
             assert started.status == 302
-            assert started.header("location").startswith(
-                "https://idp.example/authorize?"
-            )
+            assert started.header("location").startswith("https://idp.example/authorize?")
 
     async def test_the_session_backend_carries_permissions(self):
         from wreath._auth.session_backend import SessionIdentityBackend

@@ -1,16 +1,3 @@
-"""Stage 4a hardening -- the projector's reassembly invariant and thread safety.
-
-Two behaviors that were previously asserted by construction rather than
-exercised:
-
-* **Reassembly is exact.** Over random interleavings of {completion, correlation,
-  phase, drop} for many request ids, the projector emits exactly the completions
-  that had a completion cell, joins every trailing cell that arrived, and
-  categorizes the rest as orphans -- nothing invented, nothing silently lost.
-* **Snapshots are safe under contention.** The drain thread mutating state while
-  another thread hammers ``snapshot()`` never tears a read or deadlocks.
-"""
-
 from __future__ import annotations
 
 import random
@@ -54,8 +41,14 @@ class ChunkRecorder:
 
 def _completion(rid: int) -> bytes:
     return CompletionCell(
-        request_id=rid, connection_id=1, route_id=rid % 4, plan_id=0,
-        duration_us=100, status=200, bytes_in=0, bytes_out=0,
+        request_id=rid,
+        connection_id=1,
+        route_id=rid % 4,
+        plan_id=0,
+        duration_us=100,
+        status=200,
+        bytes_in=0,
+        bytes_out=0,
     ).encode()
 
 
@@ -65,8 +58,7 @@ def _correlation(rid: int) -> bytes:
 
 def _phase_batch(rid: int, n: int, seq0: int) -> bytes:
     records = tuple(
-        PhaseRecord(phase_id=PhaseKind.HANDLER, duration_us=1, sequence=seq0 + i)
-        for i in range(n)
+        PhaseRecord(phase_id=PhaseKind.HANDLER, duration_us=1, sequence=seq0 + i) for i in range(n)
     )
     return PhaseBatchCell(request_id=rid, records=records).encode()
 
@@ -144,7 +136,8 @@ def test_reassembly_is_exact_over_random_interleavings() -> None:
         # Every assembled trace carries exactly the phases fed for its id.
         for trace in snap.recent:
             assert len(trace.phases) == expected_phase_counts[trace.request_id], (
-                seed, trace.request_id
+                seed,
+                trace.request_id,
             )
 
 

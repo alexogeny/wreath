@@ -74,9 +74,7 @@ async def run(args: argparse.Namespace) -> int:
         compiled = compile_select(registry, Entity.select().order_by(Entity.id))
 
         async def fetch(session: Session) -> Any:
-            return await session._fetch_objects(
-                connection, compiled, compiled.sql, ()
-            )
+            return await session._fetch_objects(connection, compiled, compiled.sql, ())
 
         # Miss: a new session each time, so every row allocates.
         miss: list[float] = []
@@ -123,9 +121,7 @@ async def run(args: argparse.Namespace) -> int:
                 "identity_miss_allocates": _summary(miss, args.rows),
                 "identity_hit_reuses": _summary(hit, args.rows),
             },
-            "hit_over_miss_speedup": (
-                statistics.median(miss) / statistics.median(hit)
-            ),
+            "hit_over_miss_speedup": (statistics.median(miss) / statistics.median(hit)),
         }
         print(json.dumps(document, indent=2))
         return 0

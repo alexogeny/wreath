@@ -1,16 +1,3 @@
-"""SCIM 2.0 over `wreath.organizations`: the protocol, and the two things it must not become.
-
-The two are the whole point of the suite:
-
-* **No second membership model.** Every assertion about who is provisioned is
-  made against `wreath.organizations` -- and the keystone test checks that a
-  user SCIM provisioned is permitted by a *Cedar policy* reading
-  `context.organizations`, with no SCIM code in the path at all.
-* **No second authorization path.** Every route is refused or permitted by the
-  application's own authorizer. There is a test for a principal the policy
-  denies, and one for the router refusing to be built without an authorizer.
-"""
-
 from __future__ import annotations
 
 import json
@@ -120,12 +107,8 @@ async def provision(client: TestClient, user_name: str, **extra: Any) -> Any:
     return response
 
 
-# --- discovery --------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_the_content_type_is_scim_json() -> None:
-    """RFC 7644 section 3.1. A directory content-negotiates on it."""
     async with directory().client() as client:
         response = await client.get("/scim/v2/ServiceProviderConfig", headers=AUTH)
     assert response.status == 200
@@ -161,7 +144,6 @@ async def test_the_service_provider_config_describes_this_implementation() -> No
 async def test_the_authentication_scheme_follows_the_application_backend(
     challenge: Any, expected: str
 ) -> None:
-    """Reported off the backend's own challenge, so it cannot contradict it."""
 
     class Backend:
         async def authenticate(self, request: Any) -> Identity:
@@ -200,7 +182,6 @@ async def test_the_resource_types_are_user_and_group() -> None:
 
 @pytest.mark.asyncio
 async def test_the_published_schema_advertises_only_what_is_stored() -> None:
-    """A schema promising `externalId` is a promise the next GET breaks."""
     async with directory().client() as client:
         body = (await client.get("/scim/v2/Schemas", headers=AUTH)).json()
         one = await client.get(
@@ -218,7 +199,6 @@ async def test_the_published_schema_advertises_only_what_is_stored() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", ["User", "Group"])
 async def test_a_schema_is_served_by_its_own_urn(name: str) -> None:
-    """Each urn returns *its* schema, not whichever document came first."""
     urn = f"urn:ietf:params:scim:schemas:core:2.0:{name}"
     async with directory().client() as client:
         found = await client.get(f"/scim/v2/Schemas/{urn}", headers=AUTH)
@@ -228,12 +208,8 @@ async def test_a_schema_is_served_by_its_own_urn(name: str) -> None:
     assert missing.status == 404
 
 
-# --- the single authorization path ------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_principal_the_policy_does_not_permit_is_refused() -> None:
-    """No bespoke allow/deny: the policy set is the whole decision."""
     fixture = Provisioned(Identity("intruder"))
     async with fixture.client() as client:
         read = await client.get("/scim/v2/Users", headers=AUTH)
@@ -252,7 +228,6 @@ async def test_an_unauthenticated_caller_is_challenged() -> None:
 
 @pytest.mark.asyncio
 async def test_the_router_refuses_to_build_without_an_authorizer() -> None:
-    """Half-wired, this would serve the directory to any authenticated caller."""
     app = Wreath()
     app.configure_auth(BearerTokenBackend(lambda token: Identity("x")))
     with pytest.raises(ValueError, match="refuses to build without an authorizer"):
@@ -295,12 +270,8 @@ async def test_an_organization_id_that_would_break_the_entity_reference_is_refus
         )
 
 
-# --- provisioning writes the organisation, and nothing else -----------------
-
-
 @pytest.mark.asyncio
 async def test_provisioning_a_user_makes_cedar_permit_them() -> None:
-    """The keystone. No SCIM code runs on the request that is finally permitted."""
     fixture = directory()
     async with fixture.client() as client:
         before = await client.get("/doc", headers=AS_ALICE)
@@ -329,9 +300,7 @@ async def test_a_created_user_carries_a_location_and_the_created_status() -> Non
     assert body["schemas"] == ["urn:ietf:params:scim:schemas:core:2.0:User"]
     assert body["userName"] == "alice@example.com"
     assert body["active"] is True
-    assert body["emails"] == [
-        {"value": "alice@example.com", "primary": True, "type": "work"}
-    ]
+    assert body["emails"] == [{"value": "alice@example.com", "primary": True, "type": "work"}]
     assert body["groups"] == []
     location = dict(response.headers)[b"location"].decode()
     assert location == "http://scim.example/scim/v2/Users/1"
@@ -348,9 +317,7 @@ async def test_a_request_without_host_gets_a_relative_location() -> None:
         organization="acme",
     )
     handler = next(
-        route.endpoint
-        for route in router.routes
-        if route.path == "/scim/v2/ServiceProviderConfig"
+        route.endpoint for route in router.routes if route.path == "/scim/v2/ServiceProviderConfig"
     )
 
     class Request:
@@ -391,7 +358,6 @@ async def test_provisioning_the_same_user_twice_is_a_conflict() -> None:
 
 @pytest.mark.asyncio
 async def test_an_account_that_already_exists_is_adopted_rather_than_duplicated() -> None:
-    """Somebody who signed up before the directory ever knew about them."""
     fixture = directory()
     existing = await fixture.users.create("alice@example.com", "scrypt$1$1$1$a$b")
     async with fixture.client() as client:
@@ -403,11 +369,6 @@ async def test_an_account_that_already_exists_is_adopted_rather_than_duplicated(
 
 @pytest.mark.asyncio
 async def test_an_address_a_renamed_account_no_longer_carries_is_free() -> None:
-    """A store's address index may answer for an address a record has dropped.
-
-    `InMemoryUserStore` documents exactly that, and trusting the hit would make
-    this `POST` adopt somebody else's account under a name they no longer have.
-    """
     fixture = directory()
     async with fixture.client() as client:
         await provision(client, "alice@example.com")
@@ -439,7 +400,6 @@ async def test_a_body_with_no_user_name_is_refused() -> None:
 
 @pytest.mark.asyncio
 async def test_a_refused_create_leaves_the_organisation_untouched() -> None:
-    """The membership is written after every refusal this body can draw."""
     fixture = directory()
     async with fixture.client() as client:
         response = await provision(client, "alice@example.com", active="yes")
@@ -451,12 +411,6 @@ async def test_a_refused_create_leaves_the_organisation_untouched() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("verb", ["post", "put", "patch"])
 async def test_a_body_that_is_not_json_is_a_400_rather_than_a_500(verb: str) -> None:
-    """Distinguished from a body that parses and is not an object.
-
-    Both are 400 `invalidSyntax`, so asserting the code alone would pass on
-    either branch -- and the branch that fired is the difference between "your
-    JSON is broken" and "your JSON is fine and the wrong shape".
-    """
     async with directory().client() as client:
         await provision(client, "alice@example.com")
         broken = await getattr(client, verb)(
@@ -484,9 +438,6 @@ async def test_a_password_sent_on_creation_is_hashed_and_usable() -> None:
     assert verify_password("correct horse", record.hashed_password)
 
 
-# --- listing ----------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_list_is_a_list_response_with_one_based_paging() -> None:
     async with directory().client() as client:
@@ -506,7 +457,6 @@ async def test_a_list_is_a_list_response_with_one_based_paging() -> None:
 
 @pytest.mark.asyncio
 async def test_the_page_size_defaults_and_its_ceiling_both_bound_a_list() -> None:
-    """Both are bounds rather than formalities: one caps an unasked page, one caps a greedy ask."""
     from wreath._scim.router import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 
     fixture = directory()
@@ -546,7 +496,6 @@ async def test_a_record_with_no_timestamps_omits_them_rather_than_dating_them_to
 
 @pytest.mark.asyncio
 async def test_a_count_of_zero_returns_the_total_and_no_resources() -> None:
-    """Section 3.4.2.4 spells this one out, and directories use it to count."""
     async with directory().client() as client:
         await provision(client, "alice@example.com")
         body = (await client.get("/scim/v2/Users?count=0", headers=AUTH)).json()
@@ -558,9 +507,7 @@ async def test_a_count_of_zero_returns_the_total_and_no_resources() -> None:
 async def test_a_negative_count_and_a_zero_start_index_are_clamped_not_refused() -> None:
     async with directory().client() as client:
         await provision(client, "alice@example.com")
-        body = (
-            await client.get("/scim/v2/Users?count=-4&startIndex=0", headers=AUTH)
-        ).json()
+        body = (await client.get("/scim/v2/Users?count=-4&startIndex=0", headers=AUTH)).json()
     assert body["startIndex"] == 1
     assert body["Resources"] == []
 
@@ -624,12 +571,9 @@ async def test_filter_caches_do_not_cross_resource_attribute_vocabularies() -> N
 
 @pytest.mark.asyncio
 async def test_a_filter_on_an_attribute_this_provider_lacks_is_refused() -> None:
-    """The alternative is an empty page, which reads as "create them again"."""
     async with directory().client() as client:
         await provision(client, "alice@example.com")
-        response = await client.get(
-            '/scim/v2/Users?filter=externalId eq "abc"', headers=AUTH
-        )
+        response = await client.get('/scim/v2/Users?filter=externalId eq "abc"', headers=AUTH)
     assert response.status == 400
     assert response.json()["scimType"] == "invalidFilter"
     assert "externalid" in response.json()["detail"]
@@ -663,9 +607,7 @@ async def test_users_are_sorted_before_the_page_is_selected() -> None:
             headers=AUTH,
         )
     assert response.status == 200
-    assert [row["userName"] for row in response.json()["Resources"]] == [
-        "bob@example.com"
-    ]
+    assert [row["userName"] for row in response.json()["Resources"]] == ["bob@example.com"]
 
 
 @pytest.mark.asyncio
@@ -678,18 +620,14 @@ async def test_sorting_handles_scalar_list_boolean_and_missing_values() -> None:
             "/scim/v2/Users/2",
             json={
                 "schemas": [PATCH_BODY],
-                "Operations": [
-                    {"op": "replace", "path": "active", "value": False}
-                ],
+                "Operations": [{"op": "replace", "path": "active", "value": False}],
             },
             headers=AUTH,
         )
         await fixture.organizations.add_member("acme", "1", roles={"admin"})
         names = await client.get("/scim/v2/Users?sortBy=userName", headers=AUTH)
         active = await client.get("/scim/v2/Users?sortBy=active", headers=AUTH)
-        groups = await client.get(
-            "/scim/v2/Users?sortBy=groups&sortOrder=descending", headers=AUTH
-        )
+        groups = await client.get("/scim/v2/Users?sortBy=groups&sortOrder=descending", headers=AUTH)
 
     assert [row["userName"] for row in names.json()["Resources"]] == [
         "amy@example.com",
@@ -715,15 +653,9 @@ async def test_groups_can_be_sorted_by_display_name() -> None:
 
 async def test_sorting_refuses_an_unknown_attribute_and_order() -> None:
     async with directory().client() as client:
-        attribute = await client.get(
-            "/scim/v2/Users?sortBy=displayName", headers=AUTH
-        )
-        order = await client.get(
-            "/scim/v2/Users?sortBy=userName&sortOrder=sideways", headers=AUTH
-        )
-        sub_attribute = await client.get(
-            "/scim/v2/Users?sortBy=meta.location", headers=AUTH
-        )
+        attribute = await client.get("/scim/v2/Users?sortBy=displayName", headers=AUTH)
+        order = await client.get("/scim/v2/Users?sortBy=userName&sortOrder=sideways", headers=AUTH)
+        sub_attribute = await client.get("/scim/v2/Users?sortBy=meta.location", headers=AUTH)
     assert attribute.status == 400
     assert attribute.json()["scimType"] == "invalidValue"
     assert order.status == 400
@@ -734,16 +666,12 @@ async def test_sorting_refuses_an_unknown_attribute_and_order() -> None:
 
 @pytest.mark.asyncio
 async def test_a_user_outside_this_organisation_is_not_found_rather_than_forbidden() -> None:
-    """A directory for one tenant may not learn that an account exists in another."""
     fixture = directory()
     other = await fixture.users.create("bob@example.com", "scrypt$1$1$1$a$b")
     await fixture.organizations.add_member("globex", other.id)
     async with fixture.client() as client:
         response = await client.get(f"/scim/v2/Users/{other.id}", headers=AUTH)
     assert response.status == 404
-
-
-# --- updating ---------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -777,9 +705,7 @@ async def test_a_rename_onto_another_account_is_a_conflict() -> None:
             "/scim/v2/Users/1",
             json={
                 "schemas": [PATCH_BODY],
-                "Operations": [
-                    {"op": "replace", "path": "userName", "value": "bob@example.com"}
-                ],
+                "Operations": [{"op": "replace", "path": "userName", "value": "bob@example.com"}],
             },
             headers=AUTH,
         )
@@ -809,7 +735,6 @@ async def test_deactivating_a_user_disables_the_account() -> None:
 
 @pytest.mark.asyncio
 async def test_deactivating_a_user_who_belongs_elsewhere_is_refused() -> None:
-    """`is_active` is the account, not the membership. One tenant does not own it."""
     fixture = directory()
     async with fixture.client() as client:
         await provision(client, "alice@example.com")
@@ -863,17 +788,12 @@ async def test_patching_a_read_only_attribute_is_refused() -> None:
             "/scim/v2/Users/1",
             json={
                 "schemas": [PATCH_BODY],
-                "Operations": [
-                    {"op": "add", "path": "groups", "value": [{"value": "admin"}]}
-                ],
+                "Operations": [{"op": "add", "path": "groups", "value": [{"value": "admin"}]}],
             },
             headers=AUTH,
         )
     assert response.status == 400
     assert response.json()["scimType"] == "mutability"
-
-
-# --- de-provisioning --------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -906,9 +826,6 @@ async def test_de_provisioning_takes_a_users_access_away_through_cedar() -> None
     assert after.status == 403
 
 
-# --- groups are roles -------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_the_groups_are_the_declared_role_vocabulary() -> None:
     async with directory().client() as client:
@@ -936,9 +853,7 @@ async def test_adding_a_member_to_a_group_grants_the_role_through_cedar() -> Non
             "/scim/v2/Groups/admin",
             json={
                 "schemas": [PATCH_BODY],
-                "Operations": [
-                    {"op": "add", "path": "members", "value": [{"value": "1"}]}
-                ],
+                "Operations": [{"op": "add", "path": "members", "value": [{"value": "1"}]}],
             },
             headers=AUTH,
         )
@@ -981,7 +896,6 @@ async def test_removing_a_member_from_a_group_revokes_only_that_role() -> None:
 
 @pytest.mark.asyncio
 async def test_a_group_member_who_is_not_in_the_organisation_is_refused() -> None:
-    """A role is a grant inside a tenant; it cannot be given to an outsider."""
     fixture = directory()
     stranger = await fixture.users.create("bob@example.com", "scrypt$1$1$1$a$b")
     async with fixture.client() as client:
@@ -989,9 +903,7 @@ async def test_a_group_member_who_is_not_in_the_organisation_is_refused() -> Non
             "/scim/v2/Groups/admin",
             json={
                 "schemas": [PATCH_BODY],
-                "Operations": [
-                    {"op": "add", "path": "members", "value": [{"value": stranger.id}]}
-                ],
+                "Operations": [{"op": "add", "path": "members", "value": [{"value": stranger.id}]}],
             },
             headers=AUTH,
         )
@@ -1041,12 +953,6 @@ async def test_one_group_is_served_by_its_role_name() -> None:
 
 @pytest.mark.asyncio
 async def test_a_group_patch_reads_the_role_it_names_rather_than_every_member() -> None:
-    """Removing one member must not hand the role to everybody else in the tenant.
-
-    It would, if the document the patch is applied to listed the organisation's
-    members instead of the role's: `remove` would then compute a `members` list
-    containing every other member, and the writer would grant it to them.
-    """
     fixture = directory()
     async with fixture.client() as client:
         await provision(client, "alice@example.com")
@@ -1080,9 +986,6 @@ async def test_writing_a_user_outside_this_organisation_is_not_found(verb: str) 
         )
     assert response.status == 404
     assert await fixture.organizations.members("acme") == ()
-
-
-# --- the shapes a client can send -------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -1150,9 +1053,7 @@ async def test_a_group_member_without_a_string_value_is_refused(
 @pytest.mark.asyncio
 async def test_a_group_body_that_is_not_json_and_an_unknown_group_are_refused() -> None:
     async with directory().client() as client:
-        broken = await client.patch(
-            "/scim/v2/Groups/admin", content=b"{not json", headers=AUTH
-        )
+        broken = await client.patch("/scim/v2/Groups/admin", content=b"{not json", headers=AUTH)
         unknown = await client.patch(
             "/scim/v2/Groups/nonesuch",
             json={"schemas": [PATCH_BODY], "Operations": []},
@@ -1165,7 +1066,6 @@ async def test_a_group_body_that_is_not_json_and_an_unknown_group_are_refused() 
 
 @pytest.mark.asyncio
 async def test_a_membership_whose_account_is_gone_is_skipped_rather_than_served() -> None:
-    """A dangling membership is not a user, and must not become half of one."""
     fixture = directory()
     async with fixture.client() as client:
         await provision(client, "alice@example.com")
@@ -1196,7 +1096,6 @@ async def test_a_user_appears_only_under_the_roles_they_hold() -> None:
 
 @pytest.mark.asyncio
 async def test_a_write_that_changes_nothing_touches_neither_store() -> None:
-    """Idempotency, at the level below the protocol: a replay writes nothing."""
 
     class CountingOrganizations(InMemoryOrganizationStore):
         writes = 0
@@ -1217,9 +1116,7 @@ async def test_a_write_that_changes_nothing_touches_neither_store() -> None:
         )
     )
     async with fixture.client() as client:
-        await client.post(
-            "/scim/v3/Users", json={"userName": "alice@example.com"}, headers=AUTH
-        )
+        await client.post("/scim/v3/Users", json={"userName": "alice@example.com"}, headers=AUTH)
         await client.patch(
             "/scim/v3/Groups/admin",
             json={
@@ -1253,9 +1150,6 @@ async def test_a_write_that_changes_nothing_touches_neither_store() -> None:
     record = await fixture.users.get_by_id("1")
     assert record is not None
     assert record.updated_at == stamped, "a no-op user write touched the account"
-
-
-# --- build-time refusals ----------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -1315,26 +1209,14 @@ def test_scim_sort_value_keeps_boolean_order_distinct_from_text() -> None:
     assert _sortable_value(False) == (False, "0")
 
 
-# --- more than one tenant ---------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_one_mount_can_serve_a_tenant_per_path_segment() -> None:
-    """The organisation resolved from the request is the one Cedar is asked about.
-
-    Both come from the same function, so the data scope and the policy decision
-    cannot disagree about which tenant is meant -- which is the whole reason
-    `organization` accepts a callable rather than the router reading a path
-    parameter on its own.
-    """
     users = InMemoryUserStore()
     organizations = InMemoryOrganizationStore(roles=ROLES)
     app = Wreath()
     app.configure_auth(
         BearerTokenBackend(lambda token: Identity("directory")),
-        CedarAuthorizer(
-            engine=CedarPolicies(POLICY), organizations=Memberships(organizations)
-        ),
+        CedarAuthorizer(engine=CedarPolicies(POLICY), organizations=Memberships(organizations)),
     )
     app.include_router(
         scim_router(
@@ -1363,7 +1245,6 @@ async def test_one_mount_can_serve_a_tenant_per_path_segment() -> None:
 
 @pytest.mark.asyncio
 async def test_the_member_directory_lists_one_organisation_in_user_id_order() -> None:
-    """`members()` is the seam the authorization path never needs and SCIM does."""
     store = InMemoryOrganizationStore(roles=ROLES)
     await store.add_member("acme", "b", roles={"admin"})
     await store.add_member("acme", "a")
@@ -1376,7 +1257,6 @@ async def test_the_member_directory_lists_one_organisation_in_user_id_order() ->
 
 @pytest.mark.asyncio
 async def test_creating_or_deleting_a_group_is_not_implemented_and_says_why() -> None:
-    """The vocabulary is configuration a Cedar policy names by string."""
     async with directory().client() as client:
         created = await client.post(
             "/scim/v2/Groups", json={"displayName": "auditor"}, headers=AUTH

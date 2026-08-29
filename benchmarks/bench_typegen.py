@@ -105,9 +105,7 @@ def run_shape(shape: str, warmup: int, trials: int) -> dict[str, Any]:
     # Phase: canonical model construction (includes route/type inspection).
     for _ in range(warmup):
         build_api_model(app, allow_unknown=True)
-    model_median, model_p95, _ = _time(
-        lambda: build_api_model(app, allow_unknown=True), trials
-    )
+    model_median, model_p95, _ = _time(lambda: build_api_model(app, allow_unknown=True), trials)
     api = build_api_model(app, allow_unknown=True)
 
     # Phase: target planning (normalization into renderer tuples).

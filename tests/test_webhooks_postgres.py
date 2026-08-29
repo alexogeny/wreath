@@ -161,9 +161,10 @@ async def test_multi_replica_skip_locked_claims_each_intent_once() -> None:
         await asyncio.gather(*(worker(f"replica-{index}") for index in range(4)))
         assert len(observed) == 24
         assert len(set(observed)) == 24
-        assert await seed.fetchval(
-            f"SELECT count(*) FROM {outbox.table} WHERE state='delivered'"
-        ) == 24
+        assert (
+            await seed.fetchval(f"SELECT count(*) FROM {outbox.table} WHERE state='delivered'")
+            == 24
+        )
     finally:
         await seed.execute(f"DROP TABLE IF EXISTS {outbox.table}")
         await seed.close()
@@ -204,10 +205,13 @@ async def test_process_loss_and_ack_rollback_reclaim_with_new_fence() -> None:
         await observer.execute("BEGIN")
         await outbox.mark_delivered(_Session(observer), recovered, status=204)
         await observer.execute("ROLLBACK")
-        assert await observer.fetchval(
-            f"SELECT state FROM {outbox.table} WHERE delivery_id=$1",
-            recovered.delivery_id,
-        ) == "sending"
+        assert (
+            await observer.fetchval(
+                f"SELECT state FROM {outbox.table} WHERE delivery_id=$1",
+                recovered.delivery_id,
+            )
+            == "sending"
+        )
     finally:
         await observer.execute(f"DROP TABLE IF EXISTS {outbox.table}")
         if not getattr(first, "closed", False):
@@ -216,12 +220,6 @@ async def test_process_loss_and_ack_rollback_reclaim_with_new_fence() -> None:
 
 
 async def test_outbox_purge_pass_runs_against_a_real_database() -> None:
-    """`purge_pass()` builds and drives with no database argument.
-
-    The builder used to take one positionally and discard it, which read as a
-    wiring step that existed. A pass is handed the database when it is *driven*,
-    and this is that, end to end on PostgreSQL.
-    """
     if _DSN is None:
         pytest.skip("set WREATH_TEST_POSTGRES_DSN for real PostgreSQL webhook tests")
 
@@ -255,9 +253,7 @@ async def test_outbox_purge_pass_runs_against_a_real_database() -> None:
         result = await walk.run(database, sleep=lambda _s: asyncio.sleep(0))
 
         assert result.rows == 5
-        assert await connection.fetchval(
-            f"SELECT count(*) FROM {outbox.table}"
-        ) == 0
+        assert await connection.fetchval(f"SELECT count(*) FROM {outbox.table}") == 0
     finally:
         await connection.execute(f"DROP TABLE IF EXISTS {outbox.table}")
         await connection.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
@@ -266,27 +262,6 @@ async def test_outbox_purge_pass_runs_against_a_real_database() -> None:
 
 
 async def test_inbox_purge_keeps_its_chunk_bounded_across_sources() -> None:
-    """One inbox serves every source, so `message_id` alone is not a row.
-
-    The pass once walked `(retention_until, message_id)` and declared
-    `message_id` unique. It is not -- the primary key is `(source,
-    message_id)` -- and two senders using the same event id put two rows on one
-    boundary.
-
-    Nothing is *skipped*: a chunk is the half-open range `(from, to]`, so ties
-    at the top are swept in by `<=` and ties at the bottom excluded by `>`.
-    What breaks is the bound. `cursor_to` is the key of the limit-th row, and
-    every row sharing that key joins the same chunk however many there are.
-    Measured against PostgreSQL, 60 rows sharing a retention stamp and a
-    message id with `chunk=5`: **one chunk of 60** before, twelve chunks of
-    five after. An unbounded DELETE in a single transaction is the exact thing
-    `ChunkedPass` exists to prevent, so the declaration was buying nothing and
-    costing the guarantee.
-
-    A shared stamp is ordinary rather than contrived -- one `UPDATE ... SET
-    retention_until` stamps every row it touches with the same transaction
-    timestamp.
-    """
     if _DSN is None:
         pytest.skip("set WREATH_TEST_POSTGRES_DSN for real PostgreSQL webhook tests")
 
@@ -324,9 +299,7 @@ async def test_inbox_purge_keeps_its_chunk_bounded_across_sources() -> None:
             f"{result.rows} rows purged in {result.chunks} chunk(s) at chunk=5; "
             "a non-unique boundary collapses the whole tie group into one"
         )
-        assert await connection.fetchval(
-            f"SELECT count(*) FROM {inbox.table}"
-        ) == 0
+        assert await connection.fetchval(f"SELECT count(*) FROM {inbox.table}") == 0
     finally:
         await connection.execute(f"DROP TABLE IF EXISTS {inbox.table}")
         await connection.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')

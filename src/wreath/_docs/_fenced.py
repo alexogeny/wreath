@@ -24,7 +24,10 @@ _FENCE = re.compile(r"^(`{3,}|~{3,})")
 
 
 def extract(
-    text: str, opener: str, render: Callable[[list[str]], str], label: str,
+    text: str,
+    opener: str,
+    render: Callable[[list[str]], str],
+    label: str,
 ) -> tuple[str, dict[str, str]]:
     """Replace each `opener` block with a token; return (text, {token: html}).
 
@@ -45,7 +48,7 @@ def extract(
             while index < len(lines) and lines[index].strip() != "```":
                 body.append(lines[index])
                 index += 1
-            index += 1                              # consume the closing fence
+            index += 1  # consume the closing fence
             token = f"\x00{label}{len(tokens)}\x00"
             tokens[token] = render(body)
             out.append(token)
@@ -63,10 +66,12 @@ def extract(
             out.append(lines[index])
             closing = _FENCE.match(lines[index].strip())
             index += 1
-            if (closing is not None
-                    and closing.group(1)[0] == marker[0]
-                    and len(closing.group(1)) >= len(marker)
-                    and not lines[index - 1].strip()[len(closing.group(1)):].strip()):
+            if (
+                closing is not None
+                and closing.group(1)[0] == marker[0]
+                and len(closing.group(1)) >= len(marker)
+                and not lines[index - 1].strip()[len(closing.group(1)) :].strip()
+            ):
                 break
     return "\n".join(out), tokens
 
@@ -79,8 +84,9 @@ def restore(html: str, tokens: dict[str, str]) -> str:
 
 
 def _unescape(text: str) -> str:
-    return (text.replace("&quot;", '"').replace("&gt;", ">")
-            .replace("&lt;", "<").replace("&amp;", "&"))
+    return (
+        text.replace("&quot;", '"').replace("&gt;", ">").replace("&lt;", "<").replace("&amp;", "&")
+    )
 
 
 def title_of(tokens: dict[str, str], css_class: str) -> str:
@@ -99,5 +105,5 @@ def title_of(tokens: dict[str, str], css_class: str) -> str:
         opened = markup.find(">", start)
         closed = markup.find("</h1>", opened)
         if opened > 0 and closed > opened:
-            return _unescape(markup[opened + 1:closed])
+            return _unescape(markup[opened + 1 : closed])
     return ""

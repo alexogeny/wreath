@@ -253,7 +253,9 @@ class JobRunner:
         # before claiming, so a wake that lands mid-claim is still remembered.
         self._waiters: list[asyncio.Event] = []
         self._doorbell = Doorbell(
-            database=database, workload=workload, pump=self._pump,
+            database=database,
+            workload=workload,
+            pump=self._pump,
             channels=(self._channel,),
         )
         self._inflight: set[asyncio.Future[Any]] = set()
@@ -365,8 +367,6 @@ class JobRunner:
     def progress(self) -> Any:
         """The registry this runner reports to, for the status/stream endpoints."""
         return self._progress
-
-    # -- registration --------------------------------------------------------
 
     def task(
         self,
@@ -484,8 +484,9 @@ class JobRunner:
         else:
             raise ValueError(_both + "carries its own zone); neither was given")
         self._schedules.append(
-            _Schedule(task=task, recurrence=resolved, args=tuple(args), tenant=tenant,
-                      misfire=misfire)
+            _Schedule(
+                task=task, recurrence=resolved, args=tuple(args), tenant=tenant, misfire=misfire
+            )
         )
 
     def drive(self, walk: Any, *, cron: str | None = None) -> str:
@@ -553,7 +554,6 @@ class JobRunner:
         # Retries are the runner's ordinary backoff. A shift is safe to re-run
         # from wherever the ledger says it got to, so there is nothing special
         # to arrange here.
-        #
         # The deadline is the shift itself, not the runner's default: a pass has
         # already declared how long a chunk may take and that declaration was
         # checked against the lease above. Taking the default instead would
@@ -625,8 +625,6 @@ class JobRunner:
                 )
             finally:
                 await self._db.release(walk.workload, connection)
-
-    # -- enqueue -------------------------------------------------------------
 
     async def _carries(self, column: str) -> bool:
         """Whether this database's `jobs` table has `column`. Cached per runner.
@@ -764,7 +762,14 @@ class JobRunner:
                 f"{conflict} RETURNING id"
             )
             params = (
-                self._name, task, payload, tenant, run_at, max_att, dk, parent,
+                self._name,
+                task,
+                payload,
+                tenant,
+                run_at,
+                max_att,
+                dk,
+                parent,
                 *((priority,) if has_priority else ()),
             )
             return await self._insert(sql, params, tx)
@@ -778,7 +783,13 @@ class JobRunner:
             f"{conflict} RETURNING id"
         )
         params = (
-            self._name, task, payload, tenant, run_at, max_att, dk,
+            self._name,
+            task,
+            payload,
+            tenant,
+            run_at,
+            max_att,
+            dk,
             *((priority,) if has_priority else ()),
         )
         return await self._insert(sql, params, tx)
@@ -834,7 +845,12 @@ class JobRunner:
         string `"None"`.
         """
         job_id = await self.enqueue(
-            task, *args, tx=tx, run_at=run_at, key=key, tenant=tenant,
+            task,
+            *args,
+            tx=tx,
+            run_at=run_at,
+            key=key,
+            tenant=tenant,
             max_attempts=max_attempts,
         )
         if job_id is not None:
@@ -861,7 +877,10 @@ class JobRunner:
         # watching client would see the import start over.
         if self._progress is not None and self._progress.get(task_id) is None:
             self._progress.report(
-                task_id, 0, "already in flight on another worker", state="running",
+                task_id,
+                0,
+                "already in flight on another worker",
+                state="running",
             )
         return TaskHandle(task_id=task_id, state="running")
 
@@ -875,8 +894,6 @@ class JobRunner:
             return await connection.fetchval(sql, *params)
         finally:
             await self._db.release(self._workload, connection)
-
-    # -- schema --------------------------------------------------------------
 
     def component(self) -> Any:
         """This runner's claim on the wreath schema.
@@ -937,13 +954,11 @@ class JobRunner:
                         # defaulted-absent, which is what makes the step safe for
                         # the previous release to keep running against: an older
                         # build never writes it and never reads it.
-                        #
                         # One text column rather than three integers. 55 bytes is
                         # the interchange format, it is what a tracing UI accepts
                         # pasted in, and splitting it would mean reassembling it
                         # at every read for no gain.
-                        f"ALTER TABLE {t} "
-                        "ADD COLUMN IF NOT EXISTS trace_context text",
+                        f"ALTER TABLE {t} ADD COLUMN IF NOT EXISTS trace_context text",
                     ),
                 ),
                 Step(
@@ -954,12 +969,10 @@ class JobRunner:
                         # first among ready jobs -- and a starved low-priority
                         # job stays the caller's problem to size for, because a
                         # strict priority queue starves by definition.
-                        #
                         # Defaulted rather than nullable: `ORDER BY ... DESC`
                         # sorts NULL first, so an older build's rows would
                         # outrank everything the moment this landed.
-                        f"ALTER TABLE {t} "
-                        "ADD COLUMN IF NOT EXISTS priority int NOT NULL DEFAULT 0",
+                        f"ALTER TABLE {t} ADD COLUMN IF NOT EXISTS priority int NOT NULL DEFAULT 0",
                         # Replaced rather than added to: a scan ordered by
                         # (priority DESC, run_at) cannot use an index keyed on
                         # (queue, run_at), so leaving the old one would keep the
@@ -983,15 +996,12 @@ class JobRunner:
         """
         return self.component().sql()
 
-    # -- supervised service protocol ----------------------------------------
-
     async def start(self, supervisor: Any) -> None:
         self._supervisor = supervisor
         # Establish the schema shape once, here, so `_claim` never pays for it
         # in the worker loop. A producer that only ever enqueues resolves it on
         # its first enqueue instead; between them every process that needs the
         # answer has it before it needs it.
-        #
         # Caught narrowly and counted, never raised: this runs on the startup
         # path, and a database that is down at boot must not stop the runner
         # coming up -- that exact failure once left a process with no doorbell
@@ -1003,7 +1013,7 @@ class JobRunner:
         try:
             await self._carries_trace()
             await self._carries_priority()
-        except (PostgresError, OSError):
+        except PostgresError, OSError:
             self.trace_probe_errors += 1
         # A dedicated held connection for the NOTIFY doorbell (never leased back
         # while listening — design 01 §5). Correctness does not depend on it, so
@@ -1016,7 +1026,8 @@ class JobRunner:
         # down at boot left the process with no doorbell for its entire life.
         await self._doorbell.open()
         supervisor.spawn(
-            f"jobs:{self._name}:doorbell", self._doorbell.run(supervisor.stopping),
+            f"jobs:{self._name}:doorbell",
+            self._doorbell.run(supervisor.stopping),
         )
         for index in range(self._concurrency):
             supervisor.spawn(f"jobs:{self._name}:worker:{index}", self._worker())
@@ -1059,7 +1070,8 @@ class JobRunner:
             f"DELETE FROM {self._table} WHERE queue=$1 "
             "AND state IN ('done', 'dead') "
             "AND updated_at < now() - ($2 || ' seconds')::interval",
-            self._name, f"{float(older_than):.3f}",
+            self._name,
+            f"{float(older_than):.3f}",
         )
 
     async def cancel(
@@ -1108,7 +1120,9 @@ class JobRunner:
             "last_error=$3, owner=NULL, lease_expiry=NULL, updated_at=now() "
             f"WHERE queue=$1 AND {selector} AND state IN ('ready', 'leased') "
             "RETURNING id",
-            self._name, value, reason[:2000],
+            self._name,
+            value,
+            reason[:2000],
         )
         if not rows:
             return False
@@ -1120,12 +1134,13 @@ class JobRunner:
             # whatever percentage the last report left, forever.
             for row in rows:
                 self._progress.report(
-                    str(row["id"]), self._last_percent(row["id"]), reason,
-                    state="failed", error=reason,
+                    str(row["id"]),
+                    self._last_percent(row["id"]),
+                    reason,
+                    state="failed",
+                    error=reason,
                 )
         return True
-
-    # -- loops ---------------------------------------------------------------
 
     async def _pump(self, connection: Any) -> None:
         """Wake parked workers until the connection's stream ends.
@@ -1210,14 +1225,20 @@ class JobRunner:
                     f"UPDATE {self._table} SET state='ready', owner=NULL, "
                     "lease_expiry=NULL, updated_at=now() "
                     "WHERE id=$1 AND fence=$2 AND state='leased'",
-                    job.id, job.fence,
+                    job.id,
+                    job.fence,
                 )
 
     async def _run(self, job: _Claimed) -> None:
         handler = self._tasks.get(job.task)
         ctx = JobContext(
-            job_id=job.id, task=job.task, attempt=job.attempts + 1, fence=job.fence,
-            tenant=job.tenant, key=job.key, progress=self._progress,
+            job_id=job.id,
+            task=job.task,
+            attempt=job.attempts + 1,
+            fence=job.fence,
+            tenant=job.tenant,
+            key=job.key,
+            progress=self._progress,
             trace_context=job.trace_context,
         )
         if handler is None:
@@ -1463,8 +1484,12 @@ class JobRunner:
         return declared if declared is not None else self._lease * self.DEADLINE_FRACTION
 
     async def _fail(
-        self, job: _Claimed, error: str, handler: _Task | None = None,
-        *, permanent: bool = False,
+        self,
+        job: _Claimed,
+        error: str,
+        handler: _Task | None = None,
+        *,
+        permanent: bool = False,
     ) -> None:
         """Record a failed attempt, retrying unless the failure cannot succeed.
 
@@ -1480,7 +1505,10 @@ class JobRunner:
             await self._exec(
                 f"UPDATE {self._table} SET state='dead', attempts=$3, last_error=$4, "
                 "updated_at=now() WHERE id=$1 AND fence=$2",
-                job.id, job.fence, attempts, error[:2000],
+                job.id,
+                job.fence,
+                attempts,
+                error[:2000],
             )
             self.dead_lettered += 1
             self._report_terminal(job, "failed", error)
@@ -1490,8 +1518,11 @@ class JobRunner:
         delay = 0.0
         if handler is not None:
             delay = compute_backoff(
-                attempts, kind=handler.backoff_kind, base=handler.backoff_base,
-                factor=handler.backoff_factor, cap=handler.backoff_cap,
+                attempts,
+                kind=handler.backoff_kind,
+                base=handler.backoff_base,
+                factor=handler.backoff_factor,
+                cap=handler.backoff_cap,
                 jitter=handler.backoff_jitter,
             )
         await self._exec(
@@ -1499,7 +1530,11 @@ class JobRunner:
             "run_at = now() + ($5 || ' seconds')::interval, last_error=$4, "
             "owner=NULL, lease_expiry=NULL, updated_at=now() "
             "WHERE id=$1 AND fence=$2",
-            job.id, job.fence, attempts, error[:2000], f"{delay:.3f}",
+            job.id,
+            job.fence,
+            attempts,
+            error[:2000],
+            f"{delay:.3f}",
         )
 
     async def _complete(self, job: _Claimed) -> None:
@@ -1507,7 +1542,8 @@ class JobRunner:
         # cannot mark someone else's re-claim done.
         await self._exec(
             fenced_update_sql(self._table, "state='done', updated_at=now()"),
-            job.id, job.fence,
+            job.id,
+            job.fence,
         )
         self._report_terminal(job, "done", None)
 
@@ -1544,9 +1580,7 @@ class JobRunner:
         trace = ", j.trace_context" if self._columns.get("trace_context") else ""
         # A schema without the version-3 column cannot be ordered by it, and
         # a claim that named it would stop the queue rather than degrade it.
-        order = (
-            "priority DESC, run_at" if self._columns.get("priority") else "run_at"
-        )
+        order = "priority DESC, run_at" if self._columns.get("priority") else "run_at"
         sql = claim_sql(
             self._table,
             key="id",
@@ -1583,12 +1617,18 @@ class JobRunner:
         # presence keeps both shapes readable by one function.
         try:
             trace = row["trace_context"]
-        except (KeyError, IndexError):
+        except KeyError, IndexError:
             trace = None
         return _Claimed(
-            id=row["id"], task=row["task"], args=list(args or []), tenant=row["tenant"],
-            attempts=row["attempts"], max_attempts=row["max_attempts"], fence=row["fence"],
-            key=row["dedup_key"], trace_context=trace,
+            id=row["id"],
+            task=row["task"],
+            args=list(args or []),
+            tenant=row["tenant"],
+            attempts=row["attempts"],
+            max_attempts=row["max_attempts"],
+            fence=row["fence"],
+            key=row["dedup_key"],
+            trace_context=trace,
         )
 
     async def _sweeper(self) -> None:
@@ -1667,7 +1707,9 @@ class JobRunner:
         for sched in self._schedules:
             if sched.recurrence.matches_at(now):
                 await self.enqueue(
-                    sched.task, *sched.args, tenant=sched.tenant,
+                    sched.task,
+                    *sched.args,
+                    tenant=sched.tenant,
                     # The bucket is the recurrence's *local* minute, so the hour
                     # that repeats on a fall-back day enqueues once rather than
                     # twice. For a UTC recurrence this is the same string it has
@@ -1763,9 +1805,6 @@ def _pass_task_name(name: str, tenant: str) -> str:
     return _validate_identifier(f"pass_{slug}"[:63], "pass task name")
 
 
-# --- reading the queue from outside a runner ---------------------------------
-
-
 @dataclass(frozen=True, slots=True)
 class JobRow:
     """One queue row as an operator reads it. No handler, no runner, no lease."""
@@ -1812,8 +1851,7 @@ class JobRow:
 
 
 _JOB_COLUMNS = (
-    "id, queue, task, tenant, state, attempts, max_attempts, run_at, "
-    "updated_at, last_error"
+    "id, queue, task, tenant, state, attempts, max_attempts, run_at, updated_at, last_error"
 )
 
 
@@ -1889,6 +1927,4 @@ async def _has_trace_column(connection: Any, *, schema: str) -> bool:
     a CLI's one read against a database it has just connected to, so there is no
     steady state to keep a catalog lookup out of.
     """
-    return await column_exists(
-        connection, schema=schema, table="jobs", column="trace_context"
-    )
+    return await column_exists(connection, schema=schema, table="jobs", column="trace_context")

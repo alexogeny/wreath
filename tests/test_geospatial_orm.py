@@ -1,11 +1,3 @@
-"""The ORM/query half of `wreath.geospatial`.
-
-Lane G built the library half (`Coordinate`, `distance`, `bounding_boxes`) and
-stopped before the database reached it. These tests drive the column type, the
-`within()`/`nearest()` query surface, and the claim the whole tier rests on:
-that it needs no extension.
-"""
-
 from __future__ import annotations
 
 import pytest

@@ -1,5 +1,3 @@
-"""Health checks: probe aggregation and the readiness router."""
-
 from __future__ import annotations
 
 import asyncio
@@ -40,28 +38,20 @@ async def test_evaluate_one_fail():
 
 
 def test_health_router_registers_both_endpoints():
-    """Was `assert router is not None`, which a `Router()` returning nothing at
-    all would still have satisfied. Assert the routes instead."""
     router = health_router([callable_check("db", _ok)])
     paths = {getattr(route, "path", None) for route in router.routes}
     assert {"/health", "/ready"} <= paths, paths
 
 
 def test_health_router_mounts_alerts_only_when_asked():
-    """`alerts=` is a separate path on purpose: a stalled backfill needs a
-    person, and putting it on `/ready` would let a load balancer drain the very
-    workers that would finish the pass."""
     without = {getattr(r, "path", None) for r in health_router([]).routes}
     withal = {
         getattr(r, "path", None)
         for r in health_router([], alerts=[callable_check("passes", _ok)]).routes
     }
     assert "/health/alerts" in withal
-    assert "/health/alerts" in without   # the path exists either way...
-    assert withal == without             # ...only the probe list differs
-
-
-# --- E5: criticality, timeouts, and per-check timing ------------------------
+    assert "/health/alerts" in without  # the path exists either way...
+    assert withal == without  # ...only the probe list differs
 
 
 async def _hang() -> None:
@@ -73,7 +63,7 @@ async def test_a_failed_non_critical_check_degrades_without_dropping_traffic():
     serving, detail = await evaluate(
         [callable_check("db", _ok), callable_check("cache", _bad, critical=False)]
     )
-    assert serving is True                       # still take traffic
+    assert serving is True  # still take traffic
     assert readiness_status(detail) == "degraded"
     assert detail["cache"]["status"] == "fail"
     assert detail["cache"]["critical"] is False
@@ -97,8 +87,6 @@ async def test_all_passing_is_ready():
 
 @pytest.mark.asyncio
 async def test_a_hung_probe_times_out_instead_of_hanging_the_endpoint():
-    """The failure mode that matters: an unreachable dependency hangs, it does
-    not raise. Readiness must still answer."""
     started = time.perf_counter()
     serving, detail = await evaluate([callable_check("db", _hang, timeout=0.05)])
     elapsed = time.perf_counter() - started
@@ -106,7 +94,7 @@ async def test_a_hung_probe_times_out_instead_of_hanging_the_endpoint():
     assert serving is False
     assert detail["db"]["status"] == "timeout"
     assert detail["db"]["timeout_s"] == 0.05
-    assert elapsed < 1.0, elapsed          # nowhere near the probe's 10s sleep
+    assert elapsed < 1.0, elapsed  # nowhere near the probe's 10s sleep
 
 
 @pytest.mark.asyncio
@@ -120,9 +108,7 @@ async def test_a_hung_non_critical_probe_only_degrades():
 
 @pytest.mark.asyncio
 async def test_every_check_reports_its_duration():
-    _serving, detail = await evaluate(
-        [callable_check("a", _ok), callable_check("b", _bad)]
-    )
+    _serving, detail = await evaluate([callable_check("a", _ok), callable_check("b", _bad)])
     for body in detail.values():
         assert isinstance(body["duration_ms"], float)
         assert body["duration_ms"] >= 0.0
@@ -157,9 +143,6 @@ async def test_a_probe_may_return_extra_detail():
     assert detail["bus"]["status"] == "pass"
 
 
-# --- postgres_check ----------------------------------------------------------
-
-
 class FakeConnection:
     def __init__(self, fail: bool = False) -> None:
         self.fail = fail
@@ -187,7 +170,6 @@ class FakeDatabase:
 
 @pytest.mark.asyncio
 async def test_postgres_check_probes_the_reserved_pool_not_an_app_pool():
-    """Probing an app pool would report unready for a merely busy instance."""
     database = FakeDatabase()
     serving, detail = await evaluate([postgres_check(database)])
 
@@ -204,14 +186,12 @@ async def test_postgres_check_returns_the_connection_even_when_the_probe_fails()
 
     assert serving is False
     assert detail["postgres"]["status"] == "fail"
-    assert database.released == ["security_read"]      # never leaked
+    assert database.released == ["security_read"]  # never leaked
 
 
 @pytest.mark.asyncio
 async def test_postgres_check_can_be_non_critical():
     database = FakeDatabase(fail=True)
-    serving, detail = await evaluate(
-        [postgres_check(database, name="replica", critical=False)]
-    )
+    serving, detail = await evaluate([postgres_check(database, name="replica", critical=False)])
     assert serving is True
     assert readiness_status(detail) == "degraded"

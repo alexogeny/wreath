@@ -5,8 +5,7 @@ Every pair below is one construct written twice: once in the form that carries
 across on its own, and once in the form that does not. The pairs are the
 specification — a rewrite that fires on both is a rewrite that has guessed.
 
-* `response_class=` — `docs/reference/port-gaps.md` puts this at 3 sites under
-  "not a gap, just unwritten": delete the keyword, return the type.
+* `response_class=` — delete the keyword and return the type.
 * `status_code=` on a route whose handler returns a plain value is
   `JSONResponse(value, status=n)`; on a route that already returns a response
   object, the route-level value was doing nothing.

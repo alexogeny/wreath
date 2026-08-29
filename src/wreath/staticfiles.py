@@ -159,16 +159,16 @@ class StaticFiles:
         if window is UNSATISFIABLE:
             os.close(fd)
             refused = Response(b"", status=416, headers=list(headers))
-            refused.headers.append(
-                (b"content-range", f"bytes */{stat.st_size}".encode("ascii"))
-            )
+            refused.headers.append((b"content-range", f"bytes */{stat.st_size}".encode("ascii")))
             return refused
         if window is not None:
             first, last = window
-            headers.append((
-                b"content-range",
-                f"bytes {first}-{last}/{stat.st_size}".encode("ascii"),
-            ))
+            headers.append(
+                (
+                    b"content-range",
+                    f"bytes {first}-{last}/{stat.st_size}".encode("ascii"),
+                )
+            )
             return FileResponse.from_descriptor(
                 fd, stat, name, headers=headers, range=(first, last)
             )
@@ -222,7 +222,7 @@ class StaticFiles:
         """
         try:
             fd, stat = open_beneath(self._root_fd, rest)
-        except (ContainmentError, OSError):
+        except ContainmentError, OSError:
             return None
         if not _stat.S_ISDIR(stat.st_mode):
             return fd, stat, rest
@@ -237,7 +237,7 @@ class StaticFiles:
         index = (rest.rstrip("/") + "/index.html").lstrip("/")
         try:
             fd, stat = open_beneath(self._root_fd, index)
-        except (ContainmentError, OSError):
+        except ContainmentError, OSError:
             return None
         if _stat.S_ISDIR(stat.st_mode):
             os.close(fd)

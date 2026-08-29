@@ -60,9 +60,7 @@ def form_schema(form: type) -> tuple[dict[str, Any], BindingSpec | None]:
             "are what the client renders as a form and what the answer is "
             "validated against, so there has to be a declaration to read."
         )
-    parameters = [
-        inspect.Parameter("request", inspect.Parameter.POSITIONAL_OR_KEYWORD)
-    ]
+    parameters = [inspect.Parameter("request", inspect.Parameter.POSITIONAL_OR_KEYWORD)]
     annotations: dict[str, Any] = {}
     for name, annotation, required in _dataclass_spec(form):
         annotations[name] = annotation
@@ -75,11 +73,7 @@ def form_schema(form: type) -> tuple[dict[str, Any], BindingSpec | None]:
                 # schema for a non-None one, and an argument the client omits is
                 # left out of the kwargs entirely, which is what lets the
                 # dataclass apply its own factory.
-                default=(
-                    inspect.Parameter.empty
-                    if required
-                    else getattr(form, name, None)
-                ),
+                default=(inspect.Parameter.empty if required else getattr(form, name, None)),
                 annotation=annotation,
             )
         )
@@ -91,9 +85,7 @@ def form_schema(form: type) -> tuple[dict[str, Any], BindingSpec | None]:
     return derived
 
 
-def _synthetic(
-    form: type, parameters: list[inspect.Parameter], annotations: dict[str, Any]
-) -> Any:
+def _synthetic(form: type, parameters: list[inspect.Parameter], annotations: dict[str, Any]) -> Any:
     """A callable whose signature *is* the form, for the derivation to read.
 
     Nothing calls it. It exists because the derivation's input is a signature
@@ -133,8 +125,7 @@ def _is_primitive(schema: Any) -> bool:
         return False
     if isinstance(schema.get("enum"), list):
         return all(
-            value is None or isinstance(value, (str, int, float, bool))
-            for value in schema["enum"]
+            value is None or isinstance(value, (str, int, float, bool)) for value in schema["enum"]
         )
     kind = schema.get("type")
     if isinstance(kind, str):

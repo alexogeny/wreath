@@ -1,11 +1,3 @@
-"""The metal tier, end to end.
-
-`--loop metal` runs the real native server on the reactor loop with wheel-backed
-timers. These drive the actual `wreath.server.Server` over real loopback sockets
-and assert it serves HTTP/1.1, HTTP/2 (TLS+ALPN), and HTTP/3 (QUIC) with the
-hashed wheel as the timer backend. Unlike the exploratory reactor.serve() specs
-these replaced, everything here is the shipped path and passes.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -58,7 +50,7 @@ def _metal_component_loop(*, adaptive_polling: bool = True):
 
 
 def test_wreath_execution_tier_process_memory_comparison() -> None:
-    script = r'''
+    script = r"""
 import asyncio
 import gc
 import json
@@ -100,7 +92,7 @@ print(json.dumps({
 }))
 loop.close()
 del app
-'''
+"""
     rows = []
     for mode in ("wreath", "wreath-native", "wreath-metal"):
         completed = subprocess.run(
@@ -125,8 +117,7 @@ del app
 
 
 def test_wreath_execution_tier_request_work_comparison() -> None:
-    """Count interpreter work for one equivalent request; this is not a timer."""
-    script = r'''
+    script = r"""
 import asyncio
 import collections
 import json
@@ -307,7 +298,7 @@ thread.join()
 loop.run_until_complete(server.close())
 print(json.dumps(phase_rows))
 loop.close()
-'''
+"""
     rows = []
     for mode in ("wreath", "wreath-native", "wreath-metal"):
         completed = subprocess.run(
@@ -319,30 +310,37 @@ loop.close()
         rows.extend(json.loads(completed.stdout))
 
     print(json.dumps(rows, indent=2, sort_keys=True))
-    print("FLOW_SUMMARY " + json.dumps([
-        {
-            "mode": row["mode"],
-            "scenario": row["scenario"],
-            "python": row["python_calls"],
-            "asyncio": row["asyncio_calls"],
-            "wreath": row["wreath_calls"],
-            "accept": row["accept_handoff_calls"],
-            "native_accept": row["ring_accept_native_activations"],
-            "handles": row["handle_run_calls"],
-            "futures": row["future_calls"],
-            "tasks": row["task_calls"],
-            "sqes": row["ring_submitted_sqes"],
-            "enters": row["ring_enter_calls"],
-            "blocking_enters": row["ring_blocking_enters"],
-            "receives": row["ring_receive_completions"],
-            "sends": row["ring_send_completions"],
-        }
-        for row in rows
-    ], sort_keys=True))
+    print(
+        "FLOW_SUMMARY "
+        + json.dumps(
+            [
+                {
+                    "mode": row["mode"],
+                    "scenario": row["scenario"],
+                    "python": row["python_calls"],
+                    "asyncio": row["asyncio_calls"],
+                    "wreath": row["wreath_calls"],
+                    "accept": row["accept_handoff_calls"],
+                    "native_accept": row["ring_accept_native_activations"],
+                    "handles": row["handle_run_calls"],
+                    "futures": row["future_calls"],
+                    "tasks": row["task_calls"],
+                    "sqes": row["ring_submitted_sqes"],
+                    "enters": row["ring_enter_calls"],
+                    "blocking_enters": row["ring_blocking_enters"],
+                    "receives": row["ring_receive_completions"],
+                    "sends": row["ring_send_completions"],
+                }
+                for row in rows
+            ],
+            sort_keys=True,
+        )
+    )
     by_mode = {(row["mode"], row["scenario"]): row for row in rows}
     assert all(row["app_calls"] == 1 for row in rows)
-    assert len({row["response_bytes"] for row in rows
-                if row["scenario"] == "fresh_connection"}) == 1
+    assert (
+        len({row["response_bytes"] for row in rows if row["scenario"] == "fresh_connection"}) == 1
+    )
     for scenario in ("fresh_connection", "keepalive_increment"):
         assert (
             by_mode["wreath-metal", scenario]["python_calls"]
@@ -530,11 +528,7 @@ def test_metal_signal_wake_is_an_io_uring_completion() -> None:
         assert loop._poller.signal_completions >= 1
         # multishot signal poll: one arm covers every delivery unless the
         # kernel downgraded it to one-shot rearms
-        assert (
-            1
-            <= loop._poller.signal_submissions
-            <= loop._poller.signal_completions + 1
-        )
+        assert 1 <= loop._poller.signal_submissions <= loop._poller.signal_completions + 1
     finally:
         loop.remove_signal_handler(signal.SIGUSR1)
         loop.close()
@@ -571,6 +565,7 @@ def test_metal_directly_dispatches_c_task_steps_with_their_context(monkeypatch):
     value: contextvars.ContextVar[str] = contextvars.ContextVar("value", default="outside")
     loop = _metal_loop()
     try:
+
         async def resumed():
             value.set("captured")
             await asyncio.sleep(0)
@@ -601,8 +596,11 @@ def _dev_cert() -> tuple[str, str]:
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
     now = datetime.datetime.now(datetime.UTC)
     cert = (
-        x509.CertificateBuilder().subject_name(name).issuer_name(name)
-        .public_key(key.public_key()).serial_number(x509.random_serial_number())
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
         .not_valid_before(now - datetime.timedelta(days=1))
         .not_valid_after(now + datetime.timedelta(days=1))
         .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
@@ -612,8 +610,14 @@ def _dev_cert() -> tuple[str, str]:
     kf, kp = tempfile.mkstemp(suffix=".pem")
     os.write(cf, cert.public_bytes(serialization.Encoding.PEM))
     os.close(cf)
-    os.write(kf, key.private_bytes(serialization.Encoding.PEM,
-             serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()))
+    os.write(
+        kf,
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        ),
+    )
     os.close(kf)
     return cp, kp
 
@@ -625,8 +629,13 @@ async def _echo(scope, receive, send):
             return
         if not m.get("more_body"):
             break
-    await send({"type": "http.response.start", "status": 200,
-                "headers": [(b"content-type", b"text/plain")]})
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"content-type", b"text/plain")],
+        }
+    )
     await send({"type": "http.response.body", "body": b"metal-" + scope["type"].encode()})
 
 
@@ -640,7 +649,6 @@ def _serve(loop, protocols, *, ssl_ctx=None, tls=None):
 
 
 def test_native_transport_fuses_http1_ingress_without_python_buffer_callbacks():
-    """The metal transport and native HTTP/1 protocol meet through their C API."""
     Http1Protocol = importlib.import_module("wreath._native._server").Http1Protocol
     ServerConfig = importlib.import_module("wreath.server").ServerConfig
     callbacks: list[str] = []
@@ -658,9 +666,7 @@ def test_native_transport_fuses_http1_ingress_without_python_buffer_callbacks():
     client, server = socket.socketpair()
     client.setblocking(False)
     try:
-        protocol = ObservedProtocol(
-            _echo, ServerConfig(lifespan="off"), loop, set()
-        )
+        protocol = ObservedProtocol(_echo, ServerConfig(lifespan="off"), loop, set())
         transport = loop._make_socket_transport(server, protocol)
         loop.run_until_complete(asyncio.sleep(0))
         assert transport._fused_http1 is True
@@ -689,7 +695,6 @@ def test_native_transport_fuses_http1_ingress_without_python_buffer_callbacks():
 
 
 def test_native_transport_fuses_http2_ingress_without_python_data_received():
-    """Provided-buffer H2 ingress must stay inside the transport/protocol C seam."""
     from http2 import support
 
     Http2Protocol = importlib.import_module("wreath._native._server").Http2Protocol
@@ -744,7 +749,6 @@ def test_native_transport_fuses_http2_ingress_without_python_data_received():
 def test_metal_rejects_websocket_upgrade_confusion(
     connection: bytes, framing: bytes, expected_status: bytes
 ) -> None:
-    """The fused metal ingress must enforce the HTTP/1 upgrade boundary."""
     from wreath import Wreath
     from wreath.server import ServerConfig
     from wreath.websocket import WebSocket
@@ -764,9 +768,7 @@ def test_metal_rejects_websocket_upgrade_confusion(
         b"GET /ws HTTP/1.1\r\nHost: test\r\nUpgrade: websocket\r\nConnection: "
         + connection
         + b"\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
-        b"Sec-WebSocket-Version: 13\r\n"
-        + framing
-        + b"\r\n"
+        b"Sec-WebSocket-Version: 13\r\n" + framing + b"\r\n"
     )
     loop = _metal_loop()
     client, server = socket.socketpair()
@@ -791,18 +793,13 @@ def test_metal_rejects_websocket_upgrade_confusion(
 
 
 def test_metal_trusted_host_rejects_userinfo_shaped_authority() -> None:
-    """The fused metal path must not truncate an attacker-controlled Host."""
     from wreath import Wreath
     from wreath.policy import HttpPolicy, TrustedHostPolicy
     from wreath.server import ServerConfig
 
     Http1Protocol = importlib.import_module("wreath._native._server").Http1Protocol
     called = False
-    app = Wreath(
-        http_policy=HttpPolicy(
-            trusted_host=TrustedHostPolicy(("good.example",))
-        )
-    )
+    app = Wreath(http_policy=HttpPolicy(trusted_host=TrustedHostPolicy(("good.example",))))
 
     @app.get("/")
     async def index(request) -> str:
@@ -820,8 +817,7 @@ def test_metal_trusted_host_rejects_userinfo_shaped_authority() -> None:
         assert transport._fused_http1 is True
 
         client.sendall(
-            b"GET / HTTP/1.1\r\nHost: good.example:@evil.example\r\n"
-            b"Connection: close\r\n\r\n"
+            b"GET / HTTP/1.1\r\nHost: good.example:@evil.example\r\nConnection: close\r\n\r\n"
         )
         loop.run_until_complete(asyncio.sleep(0.01))
         response = client.recv(4096)
@@ -855,9 +851,7 @@ def test_external_buffer_ingress_preserves_fragmented_request_body():
     client.setblocking(False)
     body = b"external-buffer-body"
     try:
-        protocol = Http1Protocol(
-            echo_body, ServerConfig(lifespan="off"), loop, set()
-        )
+        protocol = Http1Protocol(echo_body, ServerConfig(lifespan="off"), loop, set())
         loop._make_socket_transport(server, protocol)
         loop.run_until_complete(asyncio.sleep(0))
         head = (
@@ -929,13 +923,11 @@ def test_metal_io_uring_owns_listener_accept_and_drains_cqes():
         await server._start(ssl=None)
         try:
             port = server.sockets[0].getsockname()[1]
-            clients = await asyncio.gather(*(
-                asyncio.open_connection("127.0.0.1", port) for _ in range(4)
-            ))
+            clients = await asyncio.gather(
+                *(asyncio.open_connection("127.0.0.1", port) for _ in range(4))
+            )
             for _reader, writer in clients:
-                writer.write(
-                    b"GET / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n"
-                )
+                writer.write(b"GET / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n")
             wake_seen = []
             wake_thread = threading.Thread(
                 target=lambda: loop.call_soon_threadsafe(wake_seen.append, True)
@@ -1005,9 +997,7 @@ def test_metal_direct_send_emits_large_immutable_body() -> None:
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1", server.sockets[0].getsockname()[1]
             )
-            writer.write(
-                b"GET / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n"
-            )
+            writer.write(b"GET / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n")
             await writer.drain()
             response = await reader.read()
             writer.close()
@@ -1036,9 +1026,7 @@ def test_io_uring_http1_completion_trace_accounts_for_request_ingress(
     client, server = socket.socketpair()
     client.setblocking(False)
     try:
-        protocol = Http1Protocol(
-            _echo, ServerConfig(lifespan="off"), loop, set()
-        )
+        protocol = Http1Protocol(_echo, ServerConfig(lifespan="off"), loop, set())
         loop._make_socket_transport(server, protocol)
         loop.run_until_complete(asyncio.sleep(0))
         request = b"GET /trace HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n"
@@ -1047,14 +1035,12 @@ def test_io_uring_http1_completion_trace_accounts_for_request_ingress(
         response = client.recv(4096)
         rows = [
             (kind, result, flags)
-            for _seq, _token, result, kind, _backend, flags
-            in loop._poller.completion_trace()
+            for _seq, _token, result, kind, _backend, flags in loop._poller.completion_trace()
             if kind in (1, 2) and result >= 0
         ]
         kinds = [kind for kind, _result, _flags in rows]
         totals = {
-            kind: sum(result for row_kind, result, _flags in rows
-                      if row_kind == kind)
+            kind: sum(result for row_kind, result, _flags in rows if row_kind == kind)
             for kind in (1, 2)
         }
         assert b"200 OK" in response
@@ -1108,7 +1094,6 @@ def test_adaptive_polling_component_can_be_disabled_for_differential_coverage():
 
 
 def test_adaptive_polling_records_arrival_samples() -> None:
-    """A blocked wait woken by a completion feeds the spin predictor's EWMA."""
     loop = _metal_loop()
     try:
         assert loop._poller.adaptive_polling is True
@@ -1165,7 +1150,6 @@ def test_metal_async_send_kill_switch(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_native_accept_resolves_lazy_peer_addresses() -> None:
-    """sockname/peername defer out of the accept path but still resolve."""
     from wreath.server import Server, ServerConfig
 
     captured = {}
@@ -1180,9 +1164,7 @@ def test_native_accept_resolves_lazy_peer_addresses() -> None:
     loop = _metal_loop()
 
     async def exercise():
-        server = Server(
-            app, ServerConfig(host="127.0.0.1", port=0, lifespan="off"), loop
-        )
+        server = Server(app, ServerConfig(host="127.0.0.1", port=0, lifespan="off"), loop)
         await server._start(ssl=None)
         try:
             reader, writer = await asyncio.open_connection(
@@ -1215,9 +1197,10 @@ def test_metal_completion_trace_records_timer_wait_timeout(
         fired = loop.create_future()
         loop.call_later(0.002, fired.set_result, None)
         loop.run_until_complete(fired)
-        assert any(kind == 6 and result == 0
-                   for _seq, _token, result, kind, _backend, _flags
-                   in loop._poller.completion_trace())
+        assert any(
+            kind == 6 and result == 0
+            for _seq, _token, result, kind, _backend, _flags in loop._poller.completion_trace()
+        )
     finally:
         loop.close()
 
@@ -1249,10 +1232,13 @@ def test_metal_completion_trace_records_receive_cancellation_and_eof(
         loop.run_until_complete(asyncio.sleep(0.01))
 
         trace = loop._poller.completion_trace()
-        assert any(kind == 4 and result >= 0
-                   for _seq, _token, result, kind, _backend, _flags in trace)
-        assert any(kind == 1 and result == 0 and flags & 0x1
-                   for _seq, _token, result, kind, _backend, flags in trace)
+        assert any(
+            kind == 4 and result >= 0 for _seq, _token, result, kind, _backend, _flags in trace
+        )
+        assert any(
+            kind == 1 and result == 0 and flags & 0x1
+            for _seq, _token, result, kind, _backend, flags in trace
+        )
         assert protocol.eof is True
     finally:
         client.close()
@@ -1472,15 +1458,12 @@ def test_native_transport_uses_vectored_io_for_large_writelines():
 
 
 def test_native_transport_is_collected_after_close():
-    """The native SocketTransport must not leak: its self-referential bound
-    methods have to be visited by GC so a closed connection is collected."""
     import gc
 
     loop = _metal_loop()
 
     def live():
-        return sum(1 for o in gc.get_objects()
-                   if type(o).__name__ == "SocketTransport")
+        return sum(1 for o in gc.get_objects() if type(o).__name__ == "SocketTransport")
 
     class P(asyncio.Protocol):
         def connection_made(self, t):
@@ -1521,8 +1504,9 @@ def test_metal_serves_http1_on_the_wheel():
 
         def client():
             s = socket.create_connection(("127.0.0.1", port), timeout=5)
-            s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n"
-                      b"Connection: close\r\n\r\n")
+            s.sendall(
+                b"GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
             data = b""
             while True:
                 c = s.recv(4096)
@@ -1566,8 +1550,10 @@ def test_metal_serves_http2_over_tls():
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
             ctx.set_alpn_protocols(["h2"])
-            s = ctx.wrap_socket(socket.create_connection(("127.0.0.1", port), timeout=5),
-                                server_hostname="localhost")
+            s = ctx.wrap_socket(
+                socket.create_connection(("127.0.0.1", port), timeout=5),
+                server_hostname="localhost",
+            )
             out["alpn"] = s.selected_alpn_protocol()
             s.sendall(h2.PREFACE + h2.encode_settings({}))
             s.sendall(h2.build_headers_frame(1, h2.request_headers(), end_stream=True))
@@ -1608,7 +1594,7 @@ def _curl_has_http3() -> bool:
         return False
     try:
         out = subprocess.run([curl, "--version"], capture_output=True, text=True, timeout=5)
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return False
     return "http3" in out.stdout.lower()
 
@@ -1638,7 +1624,9 @@ def test_metal_serves_http3_over_quic():
         def client():
             out["proc"] = subprocess.run(
                 ["curl", "--http3-only", "-sk", f"https://127.0.0.1:{udp_port}/"],
-                capture_output=True, timeout=15)
+                capture_output=True,
+                timeout=15,
+            )
 
         async def drive():
             t = threading.Thread(target=client)
@@ -1658,26 +1646,6 @@ def test_metal_serves_http3_over_quic():
 
 
 def test_a_burst_of_datagrams_reaches_a_reader_that_takes_one_at_a_time() -> None:
-    """`add_reader` is level-triggered, and every asyncio protocol depends on it.
-
-    A stock reader consumes one message per call and trusts the loop to call it
-    again while the fd stays readable -- `_SelectorDatagramTransport._read_ready`
-    does exactly one `recvfrom`. An io_uring *multishot* poll reports once per
-    readiness *edge* instead, so a burst arriving in a single wakeup delivers
-    its first datagram and strands the rest in the socket queue until some
-    later packet happens to produce another edge.
-
-    Six at once rather than one, because one datagram cannot tell the two
-    contracts apart: both deliver it. The gap only opens when a second arrives
-    before the callback has run.
-
-    This is how HTTP/3 died on this tier while every other protocol looked
-    fine. The native transport drains to EAGAIN in C, so it never noticed;
-    QUIC, which answers one datagram per callback through asyncio's datagram
-    transport, saw packet one and never saw packets two through six. The
-    handshake stalled and curl timed out against a server that was up and
-    replying -- silent, and only on the tier that serves production.
-    """
     loop = _metal_loop()
     server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server.bind(("127.0.0.1", 0))
@@ -1712,8 +1680,6 @@ def test_a_burst_of_datagrams_reaches_a_reader_that_takes_one_at_a_time() -> Non
 
 
 def test_metal_call_soon_fast_path_semantics() -> None:
-    """The rebound C call_soon: FIFO order (threadsafe Handles interleaved),
-    cancellation, context propagation, exception routing, closed-loop error."""
     import contextvars
 
     loop = _metal_loop()
@@ -1758,6 +1724,7 @@ def test_metal_call_soon_threadsafe_interleaves_with_fast_handles() -> None:
     loop = _metal_loop()
     ran: list = []
     try:
+
         async def exercise():
             done = loop.create_future()
             loop.call_soon(ran.append, "fast-1")
@@ -1780,17 +1747,6 @@ def test_metal_call_soon_threadsafe_interleaves_with_fast_handles() -> None:
 
 
 def test_metal_accept_gives_the_socket_the_listener_family_type_and_proto():
-    """An accepted connection inherits all three; it must not re-ask the kernel.
-
-    `socket(fileno=fd)` with family/type/proto left at -1 makes CPython issue
-    `getsockopt(SO_TYPE)` and `getsockopt(SO_PROTOCOL)` per accepted connection
-    -- two syscalls answering a question settled at bind time. Metal carries the
-    listener's three into the accept path instead, so what is pinned here is
-    that the carried values are the ones the kernel would have reported, and
-    that the accepted socket is still the non-blocking one the transport
-    requires (`metal_recv`/`metal_send` issue recv/send holding the GIL, so a
-    blocking descriptor would stall the whole loop instead of returning EAGAIN).
-    """
     loop = _metal_loop()
     accepted: list = []
 

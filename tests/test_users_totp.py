@@ -1,14 +1,3 @@
-"""Second factors, stage one: TOTP, recovery codes, and pending sessions.
-
-One test per bullet of the plan's "Security requirements, stated as
-requirements" section, deliberately not merged: a single test that exercises
-replay, skew and throttling together passes with any one of the three checks
-missing, which is exactly how a second factor ships broken.
-
-Run under `python -O` as well as normally -- that is the interpreter mode where
-a check written as an `assert` would silently not exist.
-"""
-
 from __future__ import annotations
 
 import os
@@ -106,29 +95,18 @@ def _factor(**overrides: Any) -> SecondFactor:
     return SecondFactor(**fields)
 
 
-# --- RFC 6238 ---------------------------------------------------------------
-
-
 @pytest.mark.parametrize(("moment", "expected"), RFC6238_SHA1_VECTORS)
 def test_rfc6238_sha1_test_vectors(moment: int, expected: str) -> None:
-    """The standard's own table, including the vector past a 32-bit time_t."""
     assert totp_code(RFC_SECRET, totp_counter(moment), digits=8) == expected
 
 
 def test_rfc6238_vectors_verify_as_well_as_generate() -> None:
-    """Verification agrees with generation at the same instants."""
     for moment, expected in RFC6238_SHA1_VECTORS:
-        matched = verify_totp(
-            RFC_SECRET, expected, at=moment, digits=8, skew=0
-        )
+        matched = verify_totp(RFC_SECRET, expected, at=moment, digits=8, skew=0)
         assert matched == totp_counter(moment)
 
 
-# --- replay -----------------------------------------------------------------
-
-
 async def test_a_code_that_verified_once_never_verifies_again() -> None:
-    """The single most-botched requirement: one accepted code, one use."""
     store = InMemorySecondFactorStore()
     await store.add(_factor())
     moment = 1_700_000_000.0
@@ -154,7 +132,6 @@ async def test_verification_records_the_supplied_time() -> None:
 
 
 async def test_a_recovery_row_cannot_answer_as_totp() -> None:
-    """Credential kinds remain domains even when their material is usable elsewhere."""
     store = InMemorySecondFactorStore()
     moment = 1_700_000_000.0
     await store.add(_factor(id="rec-1", kind="recovery", material=SECRET))
@@ -163,12 +140,6 @@ async def test_a_recovery_row_cannot_answer_as_totp() -> None:
 
 
 async def test_replay_survives_the_skew_window_of_a_later_step() -> None:
-    """Skew must not re-open a step that has already been spent.
-
-    A code accepted at step N is inside the -1 skew window of step N+1, so an
-    implementation that stores the counter but forgets to compare against it
-    when skew widens the search accepts it a second time thirty seconds later.
-    """
     store = InMemorySecondFactorStore()
     await store.add(_factor())
     moment = 1_700_000_000.0
@@ -178,7 +149,6 @@ async def test_replay_survives_the_skew_window_of_a_later_step() -> None:
 
 
 def test_verify_totp_requires_a_strictly_greater_counter() -> None:
-    """The primitive refuses its own last-accepted step, not just earlier ones."""
     moment = 1_700_000_000.0
     counter = totp_counter(moment)
     code = totp_code(SECRET, counter)
@@ -188,13 +158,16 @@ def test_verify_totp_requires_a_strictly_greater_counter() -> None:
 
 
 async def test_the_confirming_code_cannot_also_sign_in() -> None:
-    """Enrolment consumes the step it confirmed with, so it is spent already."""
     store = InMemorySecondFactorStore()
     moment = 1_700_000_000.0
     enrolment = begin_totp_enrolment(account="a@b.co", secret=SECRET)
     code = totp_code(enrolment.secret, totp_counter(moment))
     confirmed = await confirm_totp_enrolment(
-        store, "user-1", secret=enrolment.secret, code=code, at=moment,
+        store,
+        "user-1",
+        secret=enrolment.secret,
+        code=code,
+        at=moment,
         recovery_codes=1,
     )
     assert confirmed is not None
@@ -202,7 +175,6 @@ async def test_the_confirming_code_cannot_also_sign_in() -> None:
 
 
 async def test_a_store_refuses_to_move_a_counter_backwards() -> None:
-    """The replay defence is only as good as the counter's monotonicity."""
     store = InMemorySecondFactorStore()
     await store.add(_factor(counter=100))
     assert await store.touch("cred-1", counter=99, at=datetime.now(UTC)) is False
@@ -210,13 +182,6 @@ async def test_a_store_refuses_to_move_a_counter_backwards() -> None:
 
 
 async def test_a_store_advance_is_conditional_and_says_whether_it_won() -> None:
-    """`touch` is a compare-and-set: the same step twice wins exactly once.
-
-    The return value is the whole protocol change. A caller that reads the
-    counter, checks a code, and then writes cannot tell a first use from a
-    second one by looking -- both read the same number -- so the store has to
-    answer it.
-    """
     store = InMemorySecondFactorStore()
     at = datetime.now(UTC)
     await store.add(_factor(counter=100))
@@ -262,14 +227,6 @@ class _Interleaved:
 
 
 async def test_two_concurrent_verifications_of_one_code_admit_one() -> None:
-    """The race the counter exists to lose, run rather than described.
-
-    Two tasks verify the same code against the same credential and both finish
-    reading before either writes. Exactly one may be admitted: the loser is a
-    replay that happened to arrive at the same moment rather than a moment
-    later, and an attacker racing the legitimate user with an observed code is
-    the reason the single-use guarantee exists.
-    """
     import asyncio
 
     store = InMemorySecondFactorStore()
@@ -286,18 +243,8 @@ async def test_two_concurrent_verifications_of_one_code_admit_one() -> None:
     assert (await store.credentials("user-1"))[0].counter == totp_counter(moment)
 
 
-# --- skew -------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("code", ["١٢٣٤٥٦", "²²²²²²", "12345٦"])
 def test_a_non_ascii_digit_is_refused_rather_than_compared(code: str) -> None:
-    """`str.isdigit()` is true of these, and `compare_digest` raises on them.
-
-    Six Arabic-Indic digits are six digits as far as `isdigit` is concerned, and
-    `hmac.compare_digest` refuses a `str` with a non-ASCII character in it by
-    raising `TypeError` -- so a length-and-digits gate written without
-    `isascii()` hands the comparison something it cannot compare.
-    """
     assert len(code) == 6 and code.isdigit()
     assert verify_totp(SECRET, code, at=1_700_000_000.0) is None
 
@@ -316,7 +263,6 @@ def test_skew_rejects_two_steps_either_side_by_default() -> None:
 
 
 def test_skew_is_configurable_within_a_stop() -> None:
-    """Configurable, but not unboundedly: a huge skew is a long-lived password."""
     moment = 1_700_000_000.0
     assert verify_totp(SECRET, _at(moment - 60), at=moment, skew=2) is not None
     assert verify_totp(SECRET, _at(moment - 60), at=moment, skew=0) is None
@@ -326,11 +272,7 @@ def test_skew_is_configurable_within_a_stop() -> None:
         verify_totp(SECRET, _at(moment), at=moment, skew=MAX_SKEW + 1)
 
 
-# --- constant-time comparison ----------------------------------------------
-
-
 def test_codes_are_compared_with_hmac_compare_digest(monkeypatch) -> None:
-    """A `==` on a code leaks its correct prefix through timing."""
     import wreath._secondfactor as module
 
     seen: list[tuple[str, str]] = []
@@ -347,13 +289,13 @@ def test_codes_are_compared_with_hmac_compare_digest(monkeypatch) -> None:
 
 
 async def test_recovery_codes_are_compared_with_compare_digest(monkeypatch) -> None:
-    """A `==` on a stored digest leaks how much of a guess was right."""
     import wreath._secondfactor as module
 
     store = InMemorySecondFactorStore()
     await store.add(
         _factor(
-            id="rec-1", kind="recovery",
+            id="rec-1",
+            kind="recovery",
             # Stored against the normalized form: hyphens and case are how a
             # human copies one off paper, not part of the secret.
             material=hash_recovery_code("abcdefgh").encode("utf-8"),
@@ -373,16 +315,11 @@ async def test_recovery_codes_are_compared_with_compare_digest(monkeypatch) -> N
 
 
 async def test_a_stage_one_scrypt_recovery_code_still_verifies() -> None:
-    """Moving off the password hasher must not invalidate issued codes.
-
-    Nothing mints one of these any more; a deployment that ran stage one has a
-    table full of them, and an upgrade that silently stopped honouring them
-    would take away the safety net at the moment somebody reaches for it.
-    """
     store = InMemorySecondFactorStore()
     await store.add(
         _factor(
-            id="rec-1", kind="recovery",
+            id="rec-1",
+            kind="recovery",
             material=hash_password("abcdefgh").encode("utf-8"),
         )
     )
@@ -452,11 +389,7 @@ async def test_an_empty_code_does_not_schedule_legacy_hash_work(monkeypatch) -> 
     assert calls == 0
 
 
-# --- two-phase enrolment ----------------------------------------------------
-
-
 async def test_begin_enrols_nothing() -> None:
-    """A secret shown but never confirmed must never become a factor."""
     store = InMemorySecondFactorStore()
     enrolment = begin_totp_enrolment(account="a@b.co", issuer="Wreath")
     assert enrolment.uri.startswith("otpauth://totp/")
@@ -467,7 +400,11 @@ async def test_a_wrong_code_at_confirm_enrols_nothing() -> None:
     store = InMemorySecondFactorStore()
     enrolment = begin_totp_enrolment(account="a@b.co", secret=SECRET)
     confirmed = await confirm_totp_enrolment(
-        store, "user-1", secret=enrolment.secret, code="000000", at=1_700_000_000.0,
+        store,
+        "user-1",
+        secret=enrolment.secret,
+        code="000000",
+        at=1_700_000_000.0,
     )
     assert confirmed is None
     assert await store.credentials("user-1") == []
@@ -483,9 +420,12 @@ async def test_confirm_enrols_and_issues_recovery_codes_once() -> None:
     moment = 1_700_000_000.0
     enrolment = begin_totp_enrolment(account="a@b.co", secret=SECRET)
     confirmed = await confirm_totp_enrolment(
-        store, "user-1", secret=enrolment.secret,
+        store,
+        "user-1",
+        secret=enrolment.secret,
         code=totp_code(enrolment.secret, totp_counter(moment)),
-        at=moment, recovery_codes=3,
+        at=moment,
+        recovery_codes=3,
     )
     assert confirmed is not None
     credential, codes = confirmed
@@ -501,40 +441,38 @@ async def test_enrolling_twice_is_refused() -> None:
     store = InMemorySecondFactorStore()
     moment = 1_700_000_000.0
     await confirm_totp_enrolment(
-        store, "user-1", secret=SECRET,
-        code=totp_code(SECRET, totp_counter(moment)), at=moment, recovery_codes=1,
+        store,
+        "user-1",
+        secret=SECRET,
+        code=totp_code(SECRET, totp_counter(moment)),
+        at=moment,
+        recovery_codes=1,
     )
     with pytest.raises(ValueError):
         await confirm_totp_enrolment(
-            store, "user-1", secret=SECRET,
+            store,
+            "user-1",
+            secret=SECRET,
             code=totp_code(SECRET, totp_counter(moment + 30)),
-            at=moment + 30, recovery_codes=1,
+            at=moment + 30,
+            recovery_codes=1,
         )
 
 
-# --- recovery codes ---------------------------------------------------------
-
-
 async def test_recovery_codes_are_hashed_never_stored_in_plaintext() -> None:
-    """Hashed, and with the hash the entropy warrants: one SHA-256 pass.
-
-    A recovery code carries ~78 bits, so there is no guessing list a slow KDF
-    would be defending against -- and stage one's scrypt cost ~0.4s of a worker
-    thread per enrolment and a ten-hash walk per wrong code. What must not
-    change is that the plaintext is nowhere in the row.
-    """
     store = InMemorySecondFactorStore()
     moment = 1_700_000_000.0
     confirmed = await confirm_totp_enrolment(
-        store, "user-1", secret=SECRET,
-        code=totp_code(SECRET, totp_counter(moment)), at=moment, recovery_codes=2,
+        store,
+        "user-1",
+        secret=SECRET,
+        code=totp_code(SECRET, totp_counter(moment)),
+        at=moment,
+        recovery_codes=2,
     )
     assert confirmed is not None
     _, codes = confirmed
-    stored = [
-        row.material for row in await store.credentials("user-1")
-        if row.kind == "recovery"
-    ]
+    stored = [row.material for row in await store.credentials("user-1") if row.kind == "recovery"]
     for material in stored:
         assert material.decode("utf-8").startswith("sha256$")
     for code in codes:
@@ -547,8 +485,12 @@ async def test_a_recovery_code_works_once_and_then_never() -> None:
     store = InMemorySecondFactorStore()
     moment = 1_700_000_000.0
     confirmed = await confirm_totp_enrolment(
-        store, "user-1", secret=SECRET,
-        code=totp_code(SECRET, totp_counter(moment)), at=moment, recovery_codes=2,
+        store,
+        "user-1",
+        secret=SECRET,
+        code=totp_code(SECRET, totp_counter(moment)),
+        at=moment,
+        recovery_codes=2,
     )
     assert confirmed is not None
     _, codes = confirmed
@@ -564,19 +506,19 @@ async def test_a_recovery_code_is_scoped_to_its_own_user() -> None:
     store = InMemorySecondFactorStore()
     moment = 1_700_000_000.0
     confirmed = await confirm_totp_enrolment(
-        store, "user-1", secret=SECRET,
-        code=totp_code(SECRET, totp_counter(moment)), at=moment, recovery_codes=1,
+        store,
+        "user-1",
+        secret=SECRET,
+        code=totp_code(SECRET, totp_counter(moment)),
+        at=moment,
+        recovery_codes=1,
     )
     assert confirmed is not None
     _, codes = confirmed
     assert await verify_second_factor(store, "user-2", codes[0], at=moment) is None
 
 
-# --- material never leaves ---------------------------------------------------
-
-
 def test_a_credential_repr_does_not_carry_its_material() -> None:
-    """A dataclass repr reaches tracebacks and log lines nobody wrote."""
     text = repr(_factor(material=b"the-shared-secret-value"))
     assert "the-shared-secret-value" not in text
     assert "cred-1" in text
@@ -629,9 +571,6 @@ async def test_confirm_totp_uses_the_current_time_when_none_is_supplied() -> Non
     assert abs(credential.created_at.timestamp() - moment) < 5
 
 
-# --- no invariant depends on assert -----------------------------------------
-
-
 @pytest.mark.parametrize(
     "module_name",
     # Every module a second factor's refusals live in, not just the one this
@@ -642,7 +581,6 @@ async def test_confirm_totp_uses_the_current_time_when_none_is_supplied() -> Non
     ["wreath._secondfactor", "wreath._webauthn", "wreath.users"],
 )
 def test_the_second_factor_modules_contain_no_assert_statements(module_name: str) -> None:
-    """`python -O` deletes `assert`; every check in these must be a `raise`."""
     import ast
     import importlib
 
@@ -650,9 +588,6 @@ def test_the_second_factor_modules_contain_no_assert_statements(module_name: str
     source = Path(module.__file__).read_text(encoding="utf-8")
     tree = ast.parse(source)
     assert [node for node in ast.walk(tree) if isinstance(node, ast.Assert)] == []
-
-
-# --- the router: throttling, pending sessions, promotion --------------------
 
 
 class _Clock:
@@ -681,14 +616,10 @@ def _app(
 ) -> Wreath:
     app = Wreath()
     app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
-    app.include_router(
-        user_router(users, secret="u" * 32, second_factors=factors, clock=clock)
-    )
+    app.include_router(user_router(users, secret="u" * 32, second_factors=factors, clock=clock))
     # No `pytest.warns` wrapper: building without `enrolments=` no longer warns,
     # because it no longer degrades. See `test_users_webauthn.py`.
-    router = second_factor_router(
-        users, factors, issuer="Wreath", clock=clock, **options
-    )
+    router = second_factor_router(users, factors, issuer="Wreath", clock=clock, **options)
     app.include_router(router)
 
     @app.get("/session")
@@ -706,17 +637,13 @@ def _app(
         therefore the only one on which the enrolment's user binding is what
         refuses it, rather than the absence of anything to refuse.
         """
-        request.state.session["principal"] = {
-            "sub": user_id, "type": "User", "roles": []
-        }
+        request.state.session["principal"] = {"sub": user_id, "type": "User", "roles": []}
         return {"status": "adopted"}
 
     return app
 
 
-async def _login(
-    client: Any, email: str = "ann@example.test", cookie: str = ""
-) -> Any:
+async def _login(client: Any, email: str = "ann@example.test", cookie: str = "") -> Any:
     """Sign in, optionally *on an existing session*.
 
     Passing the cookie is what makes a session change hands rather than a fresh
@@ -756,7 +683,6 @@ async def _enrol(client: Any, clock: _Clock, cookie: str) -> tuple[str, list[str
 
 
 async def test_login_leaves_a_pending_session_that_is_not_an_identity() -> None:
-    """The whole point: password accepted, but nobody is signed in yet."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     app = _app(users, factors, clock)
     async with TestClient(app) as client:
@@ -780,7 +706,6 @@ async def test_login_leaves_a_pending_session_that_is_not_an_identity() -> None:
 
 
 async def test_the_identity_backend_refuses_a_pending_principal() -> None:
-    """Second line of defence, in case a pending payload reaches the principal."""
     backend = SessionIdentityBackend()
 
     class _Request:
@@ -849,7 +774,6 @@ async def test_a_pending_login_expires() -> None:
 
 
 async def test_verification_is_throttled_per_user() -> None:
-    """A six-digit code is a million guesses; unthrottled it is a brute force."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     from wreath._secondfactor import base32_to_secret
 
@@ -882,8 +806,6 @@ async def test_verification_is_throttled_per_user() -> None:
 
 
 async def test_a_non_ascii_code_is_a_refusal_over_http_not_a_500() -> None:
-    """The same input where it lands: an unhandled `TypeError` was a 500 that
-    the throttle never counted, because the failure never returned to it."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock)) as client:
         await _seed(users)
@@ -977,7 +899,6 @@ async def test_the_router_mounts_the_stage_one_routes() -> None:
 
 
 def test_the_router_refuses_impossible_parameters() -> None:
-    """At build time, not on the first person trying to sign in."""
     users, factors = InMemoryUserStore(), InMemorySecondFactorStore()
     with pytest.raises(ValueError):
         second_factor_router(users, factors, skew=MAX_SKEW + 1)
@@ -985,9 +906,6 @@ def test_the_router_refuses_impossible_parameters() -> None:
         second_factor_router(users, factors, period=0)
     with pytest.raises(ValueError):
         second_factor_router(users, factors, digits=4)
-
-
-# --- the ORM-backed store ---------------------------------------------------
 
 
 class _RawStatement:
@@ -1075,7 +993,6 @@ async def test_orm_store_round_trips_a_credential() -> None:
 
 
 async def test_orm_store_remove_is_scoped_to_the_owner() -> None:
-    """The id is the only thing an HTTP caller supplies."""
     store, session, _ = _orm_store()
     await store.add(_factor())
     await store.remove("user-2", "cred-1")
@@ -1087,14 +1004,6 @@ async def test_orm_store_remove_is_scoped_to_the_owner() -> None:
 
 
 async def test_orm_store_touch_sends_one_conditional_statement() -> None:
-    """The comparison travels with the write, and reads no row first.
-
-    A read, a check in Python, and an unconditional `UPDATE` is the shape that
-    lets two requests carrying one code both through -- both read the same
-    counter while the other is still checking its code. So what is asserted here
-    is the statement itself: one round trip, the guard in its `WHERE`, and a
-    `RETURNING` to say whether it matched anything.
-    """
     store, session, model = _orm_store()
     await store.add(_factor(counter=100))
     session.statements.clear()
@@ -1113,12 +1022,6 @@ async def test_orm_store_touch_sends_one_conditional_statement() -> None:
 
 
 async def test_orm_store_touch_reports_losing_the_advance() -> None:
-    """No row updated is not "nothing to do"; it is a replay.
-
-    PostgreSQL answers a conditional `UPDATE` that matched nothing with no row
-    at all, and this is the translation of that answer into the one word the
-    caller acts on.
-    """
     store, session, _ = _orm_store()
     await store.add(_factor(counter=100))
     session.raw_result = None
@@ -1133,8 +1036,6 @@ async def test_orm_store_satisfies_the_protocol() -> None:
     assert isinstance(InMemorySecondFactorStore(), SecondFactorStore)
 
 
-# --- the race, against a real PostgreSQL ------------------------------------
-#
 # This is the one that could not be faked. The defect it covers is that two
 # requests carrying the same TOTP code both verified, because the counter was
 # read on one connection, checked in Python, and written back unconditionally
@@ -1181,7 +1082,6 @@ class _OneConnectionEach:
 
 @pytest.mark.database
 async def test_postgres_admits_one_of_two_concurrent_verifications() -> None:
-    """Two connections, one code, one admission. The rest is a replay."""
     import asyncio
     import uuid
 
@@ -1199,9 +1099,7 @@ async def test_postgres_admits_one_of_two_concurrent_verifications() -> None:
     try:
         await first.execute(_FACTOR_TABLE_SQL.format(table=table))
         model = default_second_factor_model(table=table)
-        registry = Registry(
-            _OneConnectionEach([second, first]), [model], validate_schema="off"
-        )
+        registry = Registry(_OneConnectionEach([second, first]), [model], validate_schema="off")
         sessions = [Session(registry, "write"), Session(registry, "write")]
         stores = [OrmSecondFactorStore(session, model) for session in sessions]
         moment = 1_700_000_000.0
@@ -1222,10 +1120,7 @@ async def test_postgres_admits_one_of_two_concurrent_verifications() -> None:
         raced = [_Interleaved(store, barrier) for store in stores]
         outcomes = await asyncio.wait_for(
             asyncio.gather(
-                *(
-                    verify_second_factor(store, "user-1", code, at=moment)
-                    for store in raced
-                )
+                *(verify_second_factor(store, "user-1", code, at=moment) for store in raced)
             ),
             timeout=30,
         )
@@ -1238,9 +1133,6 @@ async def test_postgres_admits_one_of_two_concurrent_verifications() -> None:
         await first.execute(f"DROP TABLE IF EXISTS public.{table}")
         await first.close()
         await second.close()
-
-
-# --- the unconfirmed enrolment, held server-side ----------------------------
 
 
 class _MemorySessionStore:
@@ -1265,7 +1157,6 @@ class _MemorySessionStore:
 
 
 async def test_a_stored_enrolment_keeps_the_secret_out_of_the_session() -> None:
-    """A response body is transient; a cookie is written down."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     store = _MemorySessionStore()
     async with TestClient(_app(users, factors, clock, enrolments=store)) as client:
@@ -1296,7 +1187,6 @@ async def test_a_stored_enrolment_round_trips_and_is_then_dropped() -> None:
 
 
 async def test_a_stored_enrolment_that_is_gone_cannot_be_confirmed() -> None:
-    """Deleting the row revokes the enrolment, cookie or no cookie."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     store = _MemorySessionStore()
     from wreath._secondfactor import base32_to_secret
@@ -1320,13 +1210,6 @@ async def test_a_stored_enrolment_that_is_gone_cannot_be_confirmed() -> None:
 
 
 async def test_an_enrolment_is_bound_to_the_user_who_began_it() -> None:
-    """A session that changes hands must not confirm somebody else's secret.
-
-    Through `/adopt` rather than through logout-and-login: those clear the
-    enrolment outright now, so a version of this test that went that way would
-    watch the confirmation fail because there was nothing there -- and would
-    stay green with the binding deleted. It did, and this is that test fixed.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     from wreath._secondfactor import base32_to_secret
 
@@ -1353,17 +1236,7 @@ async def test_an_enrolment_is_bound_to_the_user_who_began_it() -> None:
         assert await factors.credentials(bob.id) == []
 
 
-# --- state that outlives its ceremony ---------------------------------------
-
-
 async def test_a_begun_enrolment_does_not_survive_a_logout() -> None:
-    """An unconfirmed secret belongs to the sitting a user began it in.
-
-    Both halves matter: the marker leaves the session, and the row behind it
-    leaves the store. Clearing only the cookie key would leave the secret
-    server-side until its TTL, which is the half a later holder of the handle
-    could still reach.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     store = _MemorySessionStore()
     async with TestClient(_app(users, factors, clock, enrolments=store)) as client:
@@ -1381,14 +1254,6 @@ async def test_a_begun_enrolment_does_not_survive_a_logout() -> None:
 
 
 async def test_a_begun_enrolment_does_not_survive_a_login() -> None:
-    """Signing in ends anything half-done, even without a sign-out first.
-
-    A shared browser is the case: the next person types their password on a
-    session that still holds the previous one's unconfirmed secret. It is not
-    cross-account exploitable -- the record names its user and every consumer
-    checks -- but state that outlives the ceremony it belonged to is the shape
-    the account takeover came in.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     store = _MemorySessionStore()
     async with TestClient(_app(users, factors, clock, enrolments=store)) as client:
@@ -1406,15 +1271,6 @@ async def test_a_begun_enrolment_does_not_survive_a_login() -> None:
 
 
 async def test_an_unconfirmed_secret_never_rides_in_the_session() -> None:
-    """The half of the old warning that was about privacy, now simply untrue.
-
-    This test used to assert the opposite -- that without an `enrolments=` store
-    the secret rides in the session, so a fix that only knew how to delete rows
-    would miss it. There is no such deployment any more: with no store named,
-    the enrolment goes to the `ChallengeStore` instead of the session, so the
-    cookie carries an opaque handle and never the secret. What the session holds
-    is a marker; what logout clears is the marker *and* the row behind it.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock)) as client:
         await _seed(users)
@@ -1432,9 +1288,6 @@ async def test_an_unconfirmed_secret_never_rides_in_the_session() -> None:
         session = (await client.get("/session", headers={"cookie": cookie})).json()
         assert "pending_totp_enrolment" not in session
         assert secret not in str(session)
-
-
-# --- a login that cannot check the factor the account has -------------------
 
 
 def _unwired_app(
@@ -1460,14 +1313,6 @@ def _unwired_app(
 
 
 async def test_a_login_that_cannot_check_an_enrolled_factor_is_refused() -> None:
-    """Fail closed: a password alone must not complete a login with MFA on it.
-
-    Wired this way the user enrols a factor, sees it listed, and is then signed
-    in by the password alone -- every signal saying protected, nothing being so.
-    Refusing locks out a misconfigured deployment, which is the trade
-    the refuse-rather-than-half-wire rule makes: a door that names its own misconfiguration beats
-    one that opens quietly.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_unwired_app(users, factors, clock)) as client:
         user = await _seed(users)
@@ -1492,11 +1337,6 @@ async def test_a_login_that_cannot_check_an_enrolled_factor_is_refused() -> None
 
 
 async def test_the_unwired_refusal_is_scoped_to_users_who_have_a_factor() -> None:
-    """It answers about the account in hand, not about the deployment.
-
-    A user with nothing enrolled has nothing that needs checking, so refusing
-    their login would be an outage in exchange for no security at all.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_unwired_app(users, factors, clock)) as client:
         await _seed(users)
@@ -1510,12 +1350,6 @@ async def test_the_unwired_refusal_is_scoped_to_users_who_have_a_factor() -> Non
 
 
 async def test_recovery_codes_alone_do_not_refuse_a_login() -> None:
-    """They are the residue of a factor, not a factor: no code prompt exists.
-
-    A user whose last real factor was removed keeps nothing that a login could
-    have asked for, so refusing them would lock out an account that is not
-    protected by anything.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_unwired_app(users, factors, clock)) as client:
         user = await _seed(users)
@@ -1535,12 +1369,6 @@ async def test_recovery_codes_alone_do_not_refuse_a_login() -> None:
 
 
 async def test_a_login_wired_to_its_own_store_never_asks_the_registry() -> None:
-    """The refusal is for the unwired case only, and costs a wired one nothing.
-
-    A `user_router` that was given `second_factors=` answers from that store and
-    reaches none of the machinery above -- which is also why an application with
-    two of these, one with MFA and one without, is unaffected by the other.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock)) as client:
         await _seed(users)
@@ -1561,8 +1389,6 @@ async def test_a_second_enrolment_is_refused_over_http() -> None:
         assert again.status == 409
 
 
-# --- the refusals nothing had ever made fire ---------------------------------
-#
 # `wreath mutant --operators guard.remove-raise` reported every one of these
 # UNREACHED across all 213 tests of the second-factor suite: the refusal could
 # be deleted outright and nothing would execute the line, let alone object.
@@ -1572,12 +1398,6 @@ async def test_a_second_enrolment_is_refused_over_http() -> None:
 
 
 def test_a_secret_below_the_rfc_4226_floor_is_refused() -> None:
-    """`MIN_SECRET_BYTES` is 128 bits, and it is a security bound, not a hint.
-
-    All three doors are checked, because a short secret let in through any one
-    of them is the same weak secret: minting one, decoding one a user typed,
-    and computing a code from one.
-    """
     from wreath._secondfactor import (
         MIN_SECRET_BYTES,
         base32_to_secret,
@@ -1597,20 +1417,18 @@ def test_a_secret_below_the_rfc_4226_floor_is_refused() -> None:
 
 
 def test_an_unsupported_totp_algorithm_is_refused_by_name() -> None:
-    """Not silently downgraded to SHA-1, which is the failure worth refusing."""
     with pytest.raises(ValueError, match="unsupported TOTP algorithm"):
         totp_code(b"\x01" * 20, 1, algorithm="md5")
 
 
 def test_totp_counter_refuses_a_period_or_a_timestamp_it_cannot_count() -> None:
-    """A zero period divides by zero; a pre-epoch stamp counts backwards."""
     with pytest.raises(ValueError, match="period must be positive"):
         totp_counter(0, period=0)
     with pytest.raises(ValueError, match="period must be positive"):
         totp_counter(0, period=-30)
     with pytest.raises(ValueError, match="precedes the Unix epoch"):
         totp_counter(-1)
-    assert totp_counter(0) == 0            # the epoch itself is countable
+    assert totp_counter(0) == 0  # the epoch itself is countable
 
     # And the counter `totp_code` is handed is bounded the same way, because a
     # negative step is a `struct.pack` away from a code for some other moment.
@@ -1620,7 +1438,6 @@ def test_totp_counter_refuses_a_period_or_a_timestamp_it_cannot_count() -> None:
 
 
 def test_a_totp_uri_refuses_a_label_it_cannot_delimit() -> None:
-    """The `issuer:account` label has one separator, so neither half may carry one."""
     secret = b"\x01" * 20
     with pytest.raises(ValueError, match="account must not be empty"):
         totp_uri(secret, account="")
@@ -1631,7 +1448,6 @@ def test_a_totp_uri_refuses_a_label_it_cannot_delimit() -> None:
 
 
 def test_recovery_code_counts_are_bounded_at_both_ends() -> None:
-    """Zero codes is a lockout; fifty thousand is a response nobody reads."""
     from wreath._secondfactor import generate_recovery_codes
 
     with pytest.raises(ValueError, match="at least 1"):
@@ -1643,7 +1459,6 @@ def test_recovery_code_counts_are_bounded_at_both_ends() -> None:
 
 
 async def test_a_store_refuses_a_duplicate_second_factor_id() -> None:
-    """Two credentials under one id would make removal ambiguous."""
     def factor(user_id: str, material: bytes) -> SecondFactor:
         return SecondFactor(
             id="f1",
@@ -1661,14 +1476,11 @@ async def test_a_store_refuses_a_duplicate_second_factor_id() -> None:
         await store.add(factor("u2", b"\x02" * 20))
 
 
-# --- every second-factor endpoint, with nothing signed in -------------------------
-#
 # `second_factor_router` opens every handler with the same two refusals -- no session
 # at all, then no signed-in user -- and a mutation sweep reported almost all of them
 # `survived`: the suite reaches them only through the happy path, where a session
 # exists and somebody is signed in. Both guards were therefore deletable on nearly
 # every route, and `_signed_in` returning `None` would have been read as a user.
-#
 # These are the two cheapest requests an attacker makes, so each endpoint gets both.
 
 _RP = "example.test"
@@ -1737,14 +1549,11 @@ async def _request(client: Any, method: str, path: str, body: Any) -> Any:
 
 @pytest.mark.parametrize(("method", "path", "body", "anonymous_error"), _SECOND_FACTOR_ROUTES)
 async def test_a_router_mounted_without_session_middleware_refuses_every_route(
-    method: str, path: str, body: Any, anonymous_error: str,
+    method: str,
+    path: str,
+    body: Any,
+    anonymous_error: str,
 ) -> None:
-    """500 `session_middleware_required`, on every route, not just the first.
-
-    Parametrised per route rather than looped in one test so that a route which
-    stops answering is named by the failure -- and so adding a route without this
-    refusal shows up here.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     app = _router_only_app(users, factors, clock, sessions=False)
     async with TestClient(app) as client:
@@ -1755,23 +1564,17 @@ async def test_a_router_mounted_without_session_middleware_refuses_every_route(
 
 @pytest.mark.parametrize(("method", "path", "body", "anonymous_error"), _SECOND_FACTOR_ROUTES)
 async def test_every_second_factor_route_refuses_an_anonymous_session(
-    method: str, path: str, body: Any, anonymous_error: str,
+    method: str,
+    path: str,
+    body: Any,
+    anonymous_error: str,
 ) -> None:
-    """401 on every route — a session exists, nobody is signed in.
-
-    The expected error is in the table rather than asserted uniformly, because the
-    two `verify` routes genuinely answer a different one and flattening that to
-    "some 401" would let either guard be deleted in favour of the other.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     app = _router_only_app(users, factors, clock, sessions=True)
     async with TestClient(app) as client:
         response = await _request(client, method, path, body)
     assert response.status == 401, (path, response.status, response.json())
     assert response.json() == {"error": anonymous_error}
-
-
-# --- _principal: the four ways a session fails to name a signed-in user -----------
 
 
 @pytest.mark.parametrize(
@@ -1785,30 +1588,9 @@ async def test_every_second_factor_route_refuses_an_anonymous_session(
     ids=["not-a-mapping", "still-pending", "non-string-subject", "empty-subject"],
 )
 async def test_a_malformed_principal_is_not_signed_in(
-    principal: Any, signed_in_if_unguarded: bool,
+    principal: Any,
+    signed_in_if_unguarded: bool,
 ) -> None:
-    """Each clause of `_principal` needs a session that isolates it.
-
-    The subject has to be a **real** user id, which is the part that makes this
-    test work at all: with a made-up id, deleting a guard still ends in
-    `users.get_by_id` returning `None` and the same 401, so every clause stayed
-    deletable. The seeded store hands out `"1"`.
-
-    That is also what makes `{"sub": 1}` the sharp case rather than a contrived
-    one. `_signed_in` calls `users.get_by_id(str(principal["sub"]))`, so an integer
-    id — what most databases hand an application that writes the principal itself,
-    the way `wreath._auth.oauth2` does — becomes `"1"` and signs in as a real user
-    if `not isinstance(subject, str)` is dropped.
-
-    `pending` is the clause that matters most: that principal has proved a password
-    and *not* a second factor, and treating it as signed in is the bypass this
-    router exists to prevent.
-
-    `{"sub": ""}` is marked as *not* signed in even unguarded, and is here as a
-    recorded non-finding: `not subject` is defence in depth, because an empty id
-    matches no row either way. It stays because the guard reads better as the
-    complete statement of what a subject must be.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     user = await _seed(users)
     assert user.id == "1", "the fixture ids changed; the principals below hard-code one"
@@ -1825,14 +1607,9 @@ async def test_a_malformed_principal_is_not_signed_in(
 
     async with TestClient(app) as client:
         cookie = _cookie(await client.post("/plant"))
-        response = await client.post(
-            "/auth/2fa/totp/begin", headers={"cookie": cookie}
-        )
+        response = await client.post("/auth/2fa/totp/begin", headers={"cookie": cookie})
     assert response.status == 401, (principal, response.status, response.json())
     assert response.json() == {"error": "not_authenticated"}
-
-
-# --- totp/confirm: the four states a begun enrolment can be in --------------------
 
 
 async def _signed_in_client(client: Any, users: InMemoryUserStore) -> str:
@@ -1841,10 +1618,6 @@ async def _signed_in_client(client: Any, users: InMemoryUserStore) -> str:
 
 
 async def test_confirming_with_no_enrolment_in_progress_is_refused() -> None:
-    """`if not isinstance(marker, dict)` — a confirm that was never begun.
-
-    Signed in, so the two guards above cannot answer for this one.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock)) as client:
         cookie = await _signed_in_client(client, users)
@@ -1856,12 +1629,6 @@ async def test_confirming_with_no_enrolment_in_progress_is_refused() -> None:
 
 
 async def test_confirming_an_enrolment_begun_too_long_ago_is_refused() -> None:
-    """`clock() - started > enrolment_ttl`, and the unconfirmed secret is dropped.
-
-    The secret is the reason the second assertion is here: an expired enrolment
-    that stayed in the session would let the same code be confirmed later, which
-    is the whole point of parking it with a TTL.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock, enrolment_ttl=600.0)) as client:
         cookie = await _signed_in_client(client, users)
@@ -1881,12 +1648,6 @@ async def test_confirming_an_enrolment_begun_too_long_ago_is_refused() -> None:
 
 
 async def test_beginning_a_second_totp_enrolment_is_refused() -> None:
-    """`if any(row.kind == "totp" for row in enrolled)`.
-
-    Enrolling twice mints a second secret and a second set of recovery codes and
-    invalidates neither, so the user ends up with two of everything and no way to
-    tell which is live.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock)) as client:
         cookie = await _signed_in_client(client, users)
@@ -1896,8 +1657,6 @@ async def test_beginning_a_second_totp_enrolment_is_refused() -> None:
     assert response.json() == {"error": "already_enrolled"}
 
 
-# --- totp/confirm: a marker that is present but not usable ------------------------
-#
 # The three checks below all answer *after* `no_enrolment_in_progress` has been ruled
 # out, so each needs a session carrying a marker that is malformed in one specific
 # way. Nothing planted one, so every check was deletable while the suite stayed green
@@ -1935,7 +1694,8 @@ def _app_with_planting(
             ttl=600.0,
         )
         request.state.session["pending_totp_enrolment"] = {
-            "id": handle, "at": planted["at"],
+            "id": handle,
+            "at": planted["at"],
         }
         return {"status": "planted"}
 
@@ -1961,23 +1721,13 @@ def _app_with_planting(
     ids=["non-numeric-timestamp", "non-string-secret", "undecodable-secret"],
 )
 async def test_a_malformed_enrolment_marker_is_refused_and_dropped(
-    marker: dict[str, Any], expected: str,
+    marker: dict[str, Any],
+    expected: str,
 ) -> None:
-    """A timestamp that is not a number, a secret that is not a string, and a
-    string that is not base32.
-
-    The first is the interesting one: `not isinstance(started, (int, float))` shares
-    its `if` with the TTL comparison, and without it `clock() - "recently"` raises
-    `TypeError` and the endpoint answers 500 instead of asking the user to start
-    again. The third is reachable only from a session written by a different build
-    of the router, which is exactly why nothing had ever produced it.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app_with_planting(users, factors, clock)) as client:
         cookie = await _signed_in_client(client, users)
-        planted = await client.post(
-            "/plant-enrolment", json=marker, headers={"cookie": cookie}
-        )
+        planted = await client.post("/plant-enrolment", json=marker, headers={"cookie": cookie})
         cookie = _cookie(planted) or cookie
         response = await client.post(
             "/auth/2fa/totp/confirm", json={"code": "000000"}, headers={"cookie": cookie}
@@ -1985,21 +1735,11 @@ async def test_a_malformed_enrolment_marker_is_refused_and_dropped(
         assert response.status == 400, (marker, response.json())
         assert response.json() == {"error": expected}
 
-        session = await client.get(
-            "/session", headers={"cookie": _cookie(response) or cookie}
-        )
+        session = await client.get("/session", headers={"cookie": _cookie(response) or cookie})
         assert "pending_totp_enrolment" not in session.json()
 
 
 async def test_confirming_after_another_session_already_enrolled_is_refused() -> None:
-    """The race `begin` cannot see: two enrolments begun, one confirmed first.
-
-    `begin` refuses a second enrolment, so the only way to reach the *same* check
-    inside `confirm` is for the factor to appear between this session's `begin` and
-    its `confirm`. Without the check the second confirm mints a second secret and a
-    second set of recovery codes, invalidating neither — the exact outcome `begin`'s
-    refusal exists to prevent, reached by going around it.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock)) as client:
         cookie = await _signed_in_client(client, users)
@@ -2019,8 +1759,6 @@ async def test_confirming_after_another_session_already_enrolled_is_refused() ->
     assert response.json() == {"error": "already_enrolled"}
 
 
-# --- DELETE /auth/2fa/{factor_id} -------------------------------------------
-#
 # The whole endpoint had never been called. A mutation sweep reported its
 # step-up guard UNREACHED, which is the worse of the two findings: not "the
 # tests would not notice", but "nothing has ever watched this refusal work" --
@@ -2029,7 +1767,9 @@ async def test_confirming_after_another_session_already_enrolled_is_refused() ->
 
 
 async def _stepped_up(
-    client: Any, users: InMemoryUserStore, factors: InMemorySecondFactorStore,
+    client: Any,
+    users: InMemoryUserStore,
+    factors: InMemorySecondFactorStore,
     clock: _Clock,
 ) -> str:
     """Enrol, sign back in through the second factor, and return that cookie.
@@ -2066,7 +1806,6 @@ async def _only_factor_id(client: Any, cookie: str) -> str:
 
 
 async def test_a_recently_proved_factor_may_be_removed() -> None:
-    """The permitting arm, and the one that keeps the guard from being a ban."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock)) as client:
         await _seed(users)
@@ -2082,14 +1821,6 @@ async def test_a_recently_proved_factor_may_be_removed() -> None:
 
 
 async def test_removing_a_factor_without_a_recent_second_factor_is_refused() -> None:
-    """A session signed in by something that never proved a factor.
-
-    `/adopt` is how an application that is not `user_router` signs somebody in --
-    an OAuth2 callback, an SSO bridge -- and it writes no `second_factor_at`. A
-    session obtained that way (or stolen from a browser that had one) must not be
-    able to switch the second factor off, which is precisely what the caller who
-    stole it wants.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock)) as client:
         await _seed(users)
@@ -2108,12 +1839,6 @@ async def test_removing_a_factor_without_a_recent_second_factor_is_refused() -> 
 
 
 async def test_a_second_factor_proved_too_long_ago_no_longer_authorises_removal() -> None:
-    """`step_up_ttl` is what makes this *recent* rather than *ever*.
-
-    Without the age clause a session that proved a factor once at sign-in could
-    remove it a week later, which is the same standing authority the step-up was
-    introduced to replace.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock, step_up_ttl=300.0)) as client:
         await _seed(users)
@@ -2121,32 +1846,23 @@ async def test_a_second_factor_proved_too_long_ago_no_longer_authorises_removal(
         factor_id = await _only_factor_id(client, cookie)
 
         clock.now += 301
-        response = await client.delete(
-            f"/auth/2fa/{factor_id}", headers={"cookie": cookie}
-        )
+        response = await client.delete(f"/auth/2fa/{factor_id}", headers={"cookie": cookie})
 
         assert response.status == 403
         assert response.json() == {"error": "second_factor_required"}
 
 
 async def test_a_boolean_second_factor_stamp_does_not_authorise_removal() -> None:
-    """`True` is an `int` in Python, and `clock() - True` is a number.
-
-    So a principal carrying `second_factor_at: True` -- from a store that
-    round-tripped the field through something JSON-ish, or an application
-    writing a flag where a time belongs -- would otherwise read as a factor
-    proved one second after the epoch, which on a test clock and on a machine
-    whose clock is anything but enormous is *recent*. The `isinstance(stamp,
-    bool)` clause is the only thing between that and a permitted removal, and
-    nothing had ever run it.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     app = _app(users, factors, clock)
 
     @app.post("/forge/{user_id}")
     async def forge(request: Any, user_id: str) -> dict[str, Any]:
         request.state.session["principal"] = {
-            "sub": user_id, "type": "User", "roles": [], "second_factor_at": True,
+            "sub": user_id,
+            "type": "User",
+            "roles": [],
+            "second_factor_at": True,
         }
         return {"status": "forged"}
 
@@ -2165,7 +1881,6 @@ async def test_a_boolean_second_factor_stamp_does_not_authorise_removal() -> Non
 
 
 async def test_removing_a_factor_id_that_is_not_yours_is_a_404() -> None:
-    """One answer for "no such id" and "not yours", so neither can be probed."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock)) as client:
         await _seed(users)
@@ -2181,11 +1896,10 @@ async def test_removing_a_factor_id_that_is_not_yours_is_a_404() -> None:
         assert [row.id for row in await factors.credentials("somebody-else")] == ["not-mine"]
 
 
-# --- the account behind a pending login can change under it ------------------
-
-
 async def _pending_cookie(
-    client: Any, users: InMemoryUserStore, factors: InMemorySecondFactorStore,
+    client: Any,
+    users: InMemoryUserStore,
+    factors: InMemorySecondFactorStore,
     clock: _Clock,
 ) -> tuple[str, str]:
     """Enrol, log out, log back in, and stop at the pending marker.
@@ -2203,15 +1917,6 @@ async def _pending_cookie(
 
 
 async def test_a_correct_code_for_an_account_that_has_gone_is_refused() -> None:
-    """`user is None` after the code verified, which is the awkward ordering.
-
-    The factor is checked against the *subject on the pending marker*, so a
-    deleted account still has credentials that verify -- the store row outlives
-    the user row, and in a real deployment so does the window between the two
-    deletes. Without this clause the endpoint would go on to read `.is_active`
-    off `None` and answer 500, or, one line further, mint a principal for an
-    account that no longer exists.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock)) as client:
         user = await _seed(users)
@@ -2233,12 +1938,6 @@ async def test_a_correct_code_for_an_account_that_has_gone_is_refused() -> None:
 
 
 async def test_a_correct_code_for_a_deactivated_account_is_refused() -> None:
-    """Deactivation has to bite between the password and the code, too.
-
-    Login checks `is_active`; a pending login has already passed that check, so
-    an account deactivated during the seconds somebody spends reading their
-    phone would otherwise complete and be signed in.
-    """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock)) as client:
         user = await _seed(users)

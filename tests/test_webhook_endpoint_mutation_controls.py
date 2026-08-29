@@ -1,5 +1,3 @@
-"""Focused objections for webhook source and destination boundaries."""
-
 from __future__ import annotations
 
 import asyncio
@@ -56,9 +54,7 @@ class _Request:
         return self._body
 
 
-def _request(
-    body: bytes, headers: tuple[tuple[bytes, bytes], ...] = ()
-) -> Request:
+def _request(body: bytes, headers: tuple[tuple[bytes, bytes], ...] = ()) -> Request:
     return cast(Request, _Request(body, headers))
 
 
@@ -266,9 +262,7 @@ async def test_source_refuses_too_many_headers_before_verification() -> None:
     verifier = _Verifier(_envelope())
     source = _source(verifier=verifier, limits=WebhookLimits(max_headers=1))
 
-    response = await source._receive(
-        _request(b"{}", ((b"one", b"1"), (b"two", b"2")))
-    )
+    response = await source._receive(_request(b"{}", ((b"one", b"1"), (b"two", b"2"))))
 
     assert response.status == 413
     assert verifier.calls == 0
@@ -423,9 +417,7 @@ def test_next_relay_path_refuses_a_direct_loop() -> None:
 @pytest.mark.asyncio
 async def test_enqueue_preserves_bytes_and_explicit_timestamp() -> None:
     outbox = _Outbox()
-    destination, _client = _destination(
-        outbox=cast(PostgresWebhookOutbox, outbox)
-    )
+    destination, _client = _destination(outbox=cast(PostgresWebhookOutbox, outbox))
 
     result = await destination.enqueue(
         object(), "created", bytearray(b"opaque"), event_id="evt", timestamp=NOW
@@ -439,9 +431,7 @@ async def test_enqueue_preserves_bytes_and_explicit_timestamp() -> None:
 @pytest.mark.asyncio
 async def test_enqueue_relay_preserves_existing_correlation() -> None:
     outbox = _Outbox()
-    destination, _client = _destination(
-        outbox=cast(PostgresWebhookOutbox, outbox)
-    )
+    destination, _client = _destination(outbox=cast(PostgresWebhookOutbox, outbox))
 
     await destination.enqueue_relay(
         object(), _envelope(correlation_id="correlation"), "forwarded", {}
@@ -484,9 +474,9 @@ async def test_dispatcher_refuses_nonpositive_idle_delay_before_opening_session(
         yield _Session()
 
     with pytest.raises(ValueError, match="idle_delay must be positive"):
-        await WebhookDispatcher(
-            PostgresWebhookOutbox(), {}, worker_id="worker"
-        ).run(session_factory, asyncio.Event(), idle_delay=0)
+        await WebhookDispatcher(PostgresWebhookOutbox(), {}, worker_id="worker").run(
+            session_factory, asyncio.Event(), idle_delay=0
+        )
 
     assert not opened
 
@@ -518,9 +508,7 @@ def test_hub_schema_owners_include_only_configured_durable_stores() -> None:
 
 def test_hub_csrf_exemption_requires_post_and_registered_path() -> None:
     hub = WebhookHub(_RouteApp(), "hub")
-    hub.source(
-        "source", path="/hooks", verifier=_Verifier(_envelope())
-    )
+    hub.source("source", path="/hooks", verifier=_Verifier(_envelope()))
     request = _Request(b"")
 
     assert hub.csrf_exempt(cast(Request, request))
@@ -548,9 +536,7 @@ def test_hub_preserves_custom_relay_id_and_defaults_to_name() -> None:
     hub = WebhookHub(_RouteApp(), "hub")
     client = _Client()
     signer = HMACWebhookSigner(KEYS, key_id="key")
-    defaulted = hub.destination(
-        "defaulted", client=client, path="/target", signer=signer
-    )
+    defaulted = hub.destination("defaulted", client=client, path="/target", signer=signer)
     custom = hub.destination(
         "custom",
         client=client,
@@ -606,9 +592,7 @@ async def test_dispatcher_attempt_limit_prevents_retry() -> None:
 @pytest.mark.asyncio
 async def test_dispatcher_only_retries_configured_statuses() -> None:
     outbox = _DispatchOutbox(_dispatch_delivery(attempts=1))
-    dispatcher = _dispatcher(
-        outbox, WebhookDeliveryResult("failed", "evt", status=400)
-    )
+    dispatcher = _dispatcher(outbox, WebhookDeliveryResult("failed", "evt", status=400))
 
     await dispatcher.run_once(object())
 
@@ -630,8 +614,7 @@ async def test_dispatcher_cancels_renewal_task_after_send() -> None:
     await asyncio.sleep(0)
 
     assert not any(
-        task.get_name() == "wreath-webhook-lease-delivery"
-        for task in asyncio.all_tasks()
+        task.get_name() == "wreath-webhook-lease-delivery" for task in asyncio.all_tasks()
     )
 
 
@@ -661,9 +644,7 @@ class _LoopOutbox(_DispatchOutbox):
 async def test_dispatcher_does_not_idle_after_delivery_or_after_stop() -> None:
     stopping = _TrackingEvent()
     outbox = _LoopOutbox(stopping, first_delivery=True)
-    dispatcher = _dispatcher(
-        outbox, WebhookDeliveryResult("delivered", "evt", status=202)
-    )
+    dispatcher = _dispatcher(outbox, WebhookDeliveryResult("delivered", "evt", status=202))
 
     @asynccontextmanager
     async def session_factory():
@@ -676,9 +657,7 @@ async def test_dispatcher_does_not_idle_after_delivery_or_after_stop() -> None:
 
 @pytest.mark.asyncio
 async def test_dispatcher_service_propagates_immediate_start_failure() -> None:
-    dispatcher = WebhookDispatcher(
-        PostgresWebhookOutbox(), {}, worker_id="worker"
-    )
+    dispatcher = WebhookDispatcher(PostgresWebhookOutbox(), {}, worker_id="worker")
 
     @asynccontextmanager
     async def failing_factory():

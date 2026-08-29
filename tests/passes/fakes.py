@@ -1,21 +1,3 @@
-"""A tiny PostgreSQL stand-in that really evaluates what a pass emits.
-
-A fake that records statements and hands back canned answers proves that a pass
-called something, not that what it called was correct -- and every rule in the
-chunked-pass design is about the *shape* of a statement. So this evaluates the
-small grammar the driver actually emits: row comparisons, a scalar frontier, an
-``ORDER BY`` in one direction, ``OFFSET``/``LIMIT``, ``DELETE`` and ``UPDATE``
-over that predicate, and the ledger's compare-and-swaps.
-
-It is deliberately strict. A predicate it cannot parse raises rather than
-matching everything, because "the fake quietly matched all the rows" is exactly
-the failure a hand-rolled backfill has.
-
-Transactions are real enough to matter: ``BEGIN`` snapshots the world and
-``ROLLBACK`` restores it, which is what makes cursor-and-work atomicity
-something a test can assert rather than something a comment claims.
-"""
-
 from __future__ import annotations
 
 import copy
@@ -34,9 +16,7 @@ _ROW_COMPARISON = re.compile(r"^\(([\w, ]+)\)\s*(>=|<=|>|<)\s*\(([\s$\d,]+)\)$")
 #: The ORM's compiler qualifies and quotes -- ``"replays"."tries" = $4`` -- while
 #: the keyset emits bare column names. Both are real shapes the driver sends, so
 #: the fake reads both and resolves them to the same column.
-_SCALAR = re.compile(
-    r'^(?:"?\w+"?\.)?"?(\w+)"?\s*(>=|<=|<>|!=|>|<|=)\s*(\$\d+)$'
-)
+_SCALAR = re.compile(r'^(?:"?\w+"?\.)?"?(\w+)"?\s*(>=|<=|<>|!=|>|<|=)\s*(\$\d+)$')
 #: A verification predicate is a caller's sentence rather than the driver's
 #: emission, so the fake reads the two shapes people actually write.
 _NULL_TEST = re.compile(r'^"?(\w+)"?\s+(IS NOT NULL|IS NULL)$', re.IGNORECASE)
@@ -69,9 +49,6 @@ class UndefinedObject(PostgresError):
     """``42704``, for an object the statement names and the database does not have."""
 
     sqlstate = "42704"
-
-
-# --- predicate evaluation ----------------------------------------------------
 
 
 def split_conjuncts(text: str) -> list[str]:
@@ -107,9 +84,13 @@ def _compare(left: Any, operator: str, right: Any) -> bool:
     if left is None or right is None:
         return False
     return {
-        ">": left > right, "<": left < right,
-        ">=": left >= right, "<=": left <= right, "=": left == right,
-        "<>": left != right, "!=": left != right,
+        ">": left > right,
+        "<": left < right,
+        ">=": left >= right,
+        "<=": left <= right,
+        "=": left == right,
+        "<>": left != right,
+        "!=": left != right,
     }[operator]
 
 
@@ -163,9 +144,6 @@ def order_rows(rows: list[dict[str, Any]], clause: str) -> list[dict[str, Any]]:
         name, _, direction = term.partition(" ")
         ordered.sort(key=lambda row, n=name: row[n], reverse=direction.strip() == "DESC")
     return ordered
-
-
-# --- the world ---------------------------------------------------------------
 
 
 class World:
@@ -298,8 +276,6 @@ class FakeDatabase:
         self.released += 1
 
 
-# --- the interpreter ---------------------------------------------------------
-
 _LEDGER = '"wreath".passes'
 _HOLES = '"wreath".pass_holes'
 
@@ -358,13 +334,29 @@ def _new_ledger_row(world: World, args: tuple[Any, ...]) -> dict[str, Any]:
     trace = {"trace_context": args[5] if len(args) > 5 else None}
     return {
         **(trace if world.trace_column else {}),
-        "name": args[0], "tenant": args[1], "phase": "walking", "cursor": None,
-        "ceiling": None, "keyspace_from": None, "pending": [], "units_done": 0,
-        "rows_done": 0, "denominator": None, "denominator_kind": None,
-        "chunk_limit": args[2], "paced_reason": None, "window_started": None,
-        "window_rows": 0, "window_units": 0, "started_at": world.now,
-        "last_advance": None, "cycle_started": None, "driven_at": None,
-        "last_drive_error": None, "verified_at": None, "verified_fact": None,
+        "name": args[0],
+        "tenant": args[1],
+        "phase": "walking",
+        "cursor": None,
+        "ceiling": None,
+        "keyspace_from": None,
+        "pending": [],
+        "units_done": 0,
+        "rows_done": 0,
+        "denominator": None,
+        "denominator_kind": None,
+        "chunk_limit": args[2],
+        "paced_reason": None,
+        "window_started": None,
+        "window_rows": 0,
+        "window_units": 0,
+        "started_at": world.now,
+        "last_advance": None,
+        "cycle_started": None,
+        "driven_at": None,
+        "last_drive_error": None,
+        "verified_at": None,
+        "verified_fact": None,
         "last_error": None,
     }
 
@@ -524,9 +516,14 @@ def _holes_statement(world: World, text: str, args: tuple[Any, ...]) -> Any:
         existing = world.holes.get(key)
         if existing is None:
             world.holes[key] = {
-                "name": args[0], "tenant": args[1], "cursor_from": _json(args[2]),
-                "cursor_to": cursor_to, "attempts": args[4], "error": args[5],
-                "predicate": args[6], "failed_at": world.now,
+                "name": args[0],
+                "tenant": args[1],
+                "cursor_from": _json(args[2]),
+                "cursor_to": cursor_to,
+                "attempts": args[4],
+                "error": args[5],
+                "predicate": args[6],
+                "failed_at": world.now,
             }
         else:
             existing["attempts"] += args[4]
@@ -537,16 +534,17 @@ def _holes_statement(world: World, text: str, args: tuple[Any, ...]) -> Any:
         key = _hole_key(args, _json(args[2]))
         return f"DELETE {1 if world.holes.pop(key, None) is not None else 0}"
     if text.startswith("SELECT count(*)"):
-        return [{"count": sum(
-            1 for key in world.holes if key[0] == str(args[0]) and key[1] == str(args[1])
-        )}]
+        return [
+            {
+                "count": sum(
+                    1 for key in world.holes if key[0] == str(args[0]) and key[1] == str(args[1])
+                )
+            }
+        ]
     if text.startswith("SELECT"):
         rows = list(world.holes.values())
         if "WHERE name = $1 AND tenant = $2" in text:
-            rows = [
-                row for row in rows
-                if row["name"] == args[0] and row["tenant"] == args[1]
-            ]
+            rows = [row for row in rows if row["name"] == args[0] and row["tenant"] == args[1]]
         elif "WHERE name = $1" in text:
             rows = [row for row in rows if row["name"] == args[0]]
         return [dict(row) for row in rows]

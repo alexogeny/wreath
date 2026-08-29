@@ -1,18 +1,3 @@
-"""Per-route middleware compartments: what a route declines, and what it cannot.
-
-A global middleware may expose `applies_to(method, path)`, consulted once per
-route at compile time. Routes it declines dispatch through a program compiled
-without it, so declining costs nothing per request -- there is no gate to
-evaluate, the hook is simply absent from the tape that route runs.
-
-That reordering is the whole risk. `_handle_http` runs the global tape *before*
-routing, deliberately: `ProxyPolicy` rewrites a forwarded Host that
-host-routing then matches on, and a rate limiter is documented to count a flood
-of 404s. `_handle_http_compartment` routes first, so every request shape where
-that would change an answer has to fall back -- and the tests that matter here
-are the fallbacks, not the fast path.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -115,7 +100,6 @@ async def test_a_declined_middleware_does_not_run_on_that_route() -> None:
 
 @pytest.mark.asyncio
 async def test_declining_nothing_leaves_the_application_unchanged() -> None:
-    """No `applies_to` anywhere means no per-route programs and no new branch."""
     events: list[str] = []
     app = Wreath()
     app.add_middleware(Recorder("a", events))
@@ -137,7 +121,6 @@ async def test_the_compartment_dispatcher_is_selected_only_when_it_is_safe() -> 
 
 @pytest.mark.asyncio
 async def test_a_host_routed_application_keeps_the_general_dispatcher() -> None:
-    """Host routing matches on a Host `ProxyPolicy` may rewrite."""
     events: list[str] = []
     app = Wreath()
     app.add_middleware(Recorder("cold-only", events, only="/cold"))
@@ -153,7 +136,6 @@ async def test_a_host_routed_application_keeps_the_general_dispatcher() -> None:
 
 @pytest.mark.asyncio
 async def test_a_miss_still_runs_the_whole_tape() -> None:
-    """A rate limiter counts 404s, so a miss must not be compartmentalized."""
     events: list[str] = []
     app = build(events)
 
@@ -163,7 +145,6 @@ async def test_a_miss_still_runs_the_whole_tape() -> None:
 
 @pytest.mark.asyncio
 async def test_an_authenticated_route_falls_back_and_runs_the_whole_tape() -> None:
-    """The route behind a ticket is not known until authentication has run."""
     events: list[str] = []
 
     async def verify(token: str) -> Identity | None:
@@ -211,9 +192,6 @@ class Refuser:
 
 @pytest.mark.asyncio
 async def test_partial_unwind_is_preserved_inside_a_compartment() -> None:
-    """A refusing hook keeps its own egress; hooks after it never ran, so theirs
-    must not run either -- with indices from the compartment's own program, not
-    the global one."""
     events: list[str] = []
     app = Wreath()
     app.add_middleware(Recorder("first", events))
@@ -299,7 +277,6 @@ async def test_a_handler_error_still_unwinds_the_compartment() -> None:
 
 @pytest.mark.asyncio
 async def test_path_parameters_are_published_after_the_hooks_as_before() -> None:
-    """`_handle_http` routes after the tape, so a hook has never seen these."""
     seen: list[dict[str, str]] = []
     events: list[str] = []
 
@@ -330,7 +307,6 @@ async def test_path_parameters_are_published_after_the_hooks_as_before() -> None
 
 @pytest.mark.asyncio
 async def test_a_declining_predicate_that_raises_fails_the_compile() -> None:
-    """Boot is where loud belongs: swallowing this would silently drop policy."""
 
     class Broken:
         global_scope = True
@@ -354,7 +330,6 @@ async def test_a_declining_predicate_that_raises_fails_the_compile() -> None:
 
 @pytest.mark.asyncio
 async def test_compartments_answer_what_a_truncated_stack_answers() -> None:
-    """The saving has to reach the same response the short stack would."""
     events: list[str] = []
     compartmented = build(events)
     truncated = Wreath()
@@ -377,14 +352,11 @@ async def test_compartments_answer_what_a_truncated_stack_answers() -> None:
             for message in sent
         ]
 
-    assert shape(await invoke(compartmented, "/hot")) == shape(
-        await invoke(truncated, "/hot")
-    )
+    assert shape(await invoke(compartmented, "/hot")) == shape(await invoke(truncated, "/hot"))
 
 
 @pytest.mark.asyncio
 async def test_methods_of_one_route_can_differ() -> None:
-    """`applies_to` takes the method too, so POST and GET need not agree."""
     events: list[str] = []
 
     class PostOnly(Recorder):

@@ -1,9 +1,3 @@
-"""S3ObjectStore over a fake in-process transport (no network) + app.objects wiring.
-
-Real S3/MinIO integration is gated on an env DSN and lives elsewhere; here we pin
-the S3 REST + SigV4 signing behaviour against canned responses.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -168,15 +162,6 @@ def _list_page(*, keys=(), truncated=False, token=None, trailing="", sizes=None)
 
 
 def test_list_sends_the_prefix_the_delimiter_and_the_token_it_was_handed():
-    """Each page's request, and the bound that stops the walk.
-
-    The handler refuses a third page instead of serving the first one again,
-    because that is the difference these guards make: a listing that drops the
-    continuation token, or never breaks on the last page, asks for page one
-    forever. Against a real bucket that is an unbounded spend, and against a
-    lenient fake it is a hang -- which a mutation report can only call
-    "undecided", so the bound is what turns it into a failure.
-    """
     seen: list[str] = []
 
     def handler(method, target, body):
@@ -217,7 +202,6 @@ def test_list_sends_the_prefix_the_delimiter_and_the_token_it_was_handed():
 
 
 def test_list_omits_a_prefix_and_delimiter_it_was_not_given():
-    """An empty prefix is not `prefix=`: S3 treats the parameter's presence as meaning something."""
     calls = []
 
     def handler(method, target, body):
@@ -236,12 +220,6 @@ def test_list_omits_a_prefix_and_delimiter_it_was_not_given():
 
 
 def test_list_reads_the_defaults_for_elements_a_bucket_left_empty():
-    """`<Size></Size>`, `<ETag></ETag>` and `<IsTruncated></IsTruncated>` have `el.text is None`.
-
-    An empty element is not a malformed response, and the `or ""` on every element's
-    text is what keeps one from raising `AttributeError` from `.strip('"')` or
-    `ValueError` from `int("")` out of a listing.
-    """
     page = (
         b'<?xml version="1.0"?><ListBucketResult'
         b' xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
@@ -266,12 +244,6 @@ def test_list_reads_the_defaults_for_elements_a_bucket_left_empty():
 
 
 def test_list_refuses_a_contents_element_that_names_no_object():
-    """Refused, not yielded as the empty key -- and refused as *empty*, not as a non-string.
-
-    Both an absent `<Key>` and an empty one arrive as a key of `""`, which is the
-    refusal the message has to name; `None` reaching `normalize_key` instead is a
-    different message about a type, from a response that is not wrong about types.
-    """
 
     def page(contents):
         return (
@@ -290,13 +262,6 @@ def test_list_refuses_a_contents_element_that_names_no_object():
 
 
 def test_list_stops_when_a_page_is_truncated_but_names_no_token():
-    """Both halves of the pagination bound, against servers that set only one.
-
-    S3 itself sets them together, and S3-compatible implementations do not always:
-    a page marked truncated with no token to continue from, and a page marked
-    complete that carries one anyway. Either half alone leaves a walk that asks for
-    the same page forever, so each is pinned separately.
-    """
 
     def one_page(truncated, token):
         calls = []
@@ -325,9 +290,7 @@ def test_list_stops_when_a_page_is_truncated_but_names_no_token():
     one_page(False, "TOK")  # complete, carrying a token anyway
 
 
-# -- `stat`, whose headers S3 need not send -----------------------------------
 def test_stat_of_a_response_without_the_headers_it_reads():
-    """A `HEAD` that omits `content-length`/`etag` is metadata, not a crash."""
     store, _ = _store(lambda *a: FakeResp(200, [(b"content-type", b"text/plain")]))
     st = asyncio.run(store.stat("a.txt"))
     assert st.size == 0 and st.etag == "" and st.content_type == "text/plain"
@@ -335,7 +298,6 @@ def test_stat_of_a_response_without_the_headers_it_reads():
 
 
 def test_stat_of_a_response_whose_headers_are_present_but_empty():
-    """An empty content-length header is treated like an omitted one."""
     store, _ = _store(lambda *a: FakeResp(200, [(b"content-length", b""), (b"etag", b"")]))
     st = asyncio.run(store.stat("a.txt"))
     assert st.size == 0 and st.etag == ""
@@ -429,7 +391,6 @@ def test_path_ergonomics():
     assert isinstance(p, ObjectPath) and p.key == "org/acme/state.json"
 
 
-# -- app.objects wiring -------------------------------------------------------
 def test_app_objects_local_roundtrip(tmp_path):
     from wreath import Wreath
     from wreath.objects import LocalObjectStore
@@ -499,14 +460,6 @@ def test_app_objects_missing_creds_raises(monkeypatch):
 
 
 def test_a_failed_abort_is_counted_not_swallowed():
-    """A multipart upload that can neither complete nor abort leaves orphans.
-
-    `_abort` runs while a more interesting exception is propagating, so it must
-    not raise -- but it used to `pass`, which meant parts already stored in S3
-    stopped belonging to any object and nothing recorded that it had happened.
-    They accrue storage charges until a lifecycle rule reaps them, and the only
-    signal was the bill.
-    """
     from wreath.http_client import ConnectError
 
     def handler(method, target, body):
@@ -533,7 +486,6 @@ def test_a_failed_abort_is_counted_not_swallowed():
 
 
 def test_a_bug_in_abort_is_not_hidden_behind_a_transport_failure():
-    """Only transport errors are absorbed; a programming error still surfaces."""
 
     def handler(method, target, body):
         if method == "POST" and "uploads" in target:
@@ -557,7 +509,6 @@ def test_a_bug_in_abort_is_not_hidden_behind_a_transport_failure():
     assert store.orphaned_uploads == 0
 
 
-# -- multipart failure handling ----------------------------------------------
 def _multipart_body():
     """5 MiB + a tail: enough to force an initiate, a part, and a final part."""
 
@@ -569,13 +520,6 @@ def _multipart_body():
 
 
 def test_a_failed_part_aborts_the_upload():
-    """A part S3 rejects leaves an open upload unless the abort covers the whole window.
-
-    Only `_complete` used to be wrapped, so a `_put_part` failure propagated with
-    the upload still open in the bucket -- billable parts belonging to no object,
-    and `orphaned_uploads` not incremented either, so the only signal was the
-    invoice.
-    """
     seen = {"aborted": False}
 
     def handler(method, target, body):
@@ -619,7 +563,6 @@ def test_a_failed_part_whose_abort_also_fails_is_counted():
 
 
 def test_a_chunk_iterator_that_raises_aborts_the_upload():
-    """The bytes can fail before S3 does; the upload is open either way."""
     seen = {"aborted": False}
 
     def handler(method, target, body):
@@ -644,7 +587,6 @@ def test_a_chunk_iterator_that_raises_aborts_the_upload():
 
 
 def test_an_abort_s3_refuses_is_counted_too():
-    """A 403 on the abort orphans exactly as much as a dropped connection does."""
 
     def handler(method, target, body):
         if method == "POST" and "uploads" in target:
@@ -663,9 +605,7 @@ def test_an_abort_s3_refuses_is_counted_too():
     assert store.orphaned_uploads == 1
 
 
-# -- content type -------------------------------------------------------------
 def test_write_sends_and_signs_the_content_type():
-    """The stat used to claim a media type the bucket was never told about."""
     store, client = _store(lambda *a: FakeResp(200, [(b"etag", b'"abc"')]))
     stat = asyncio.run(store.write("a.csv", b"x,y", content_type="text/csv"))
     assert stat.content_type == "text/csv"
@@ -709,15 +649,12 @@ def test_stat_survives_a_non_ascii_content_type():
     assert st.content_type is not None and "caf" in st.content_type
 
 
-# -- constructor --------------------------------------------------------------
 def test_url_secret_is_refused_rather_than_ignored():
-    """It was accepted and never assigned: configuration that silently did nothing."""
     with pytest.raises(TypeError, match="url_secret"):
         _store(lambda *a: FakeResp(200), url_secret=b"x" * 32)
 
 
 def test_the_host_is_derived_from_the_bucket_and_region_when_none_is_given():
-    """...and an explicit one is used instead, which is what points this at MinIO."""
 
     def handler(method, target, body):
         return FakeResp(200, [(b"content-length", b"0"), (b"etag", b'"e"')])
@@ -748,7 +685,6 @@ def test_the_host_is_derived_from_the_bucket_and_region_when_none_is_given():
     assert "host" in client.calls[0][2]["authorization"]
 
 
-# -- the payload hash, which S3 compares against the bytes it receives --------
 def test_a_body_is_signed_under_its_own_hash():
     store, client = _store(lambda *a: FakeResp(200, [(b"etag", b'"e"')]))
     asyncio.run(store.write("k.bin", b"hello llamas"))
@@ -763,13 +699,6 @@ def test_a_bodiless_request_is_signed_under_the_empty_hash():
 
 
 def test_a_part_keeps_the_unsigned_payload_hash_it_was_given():
-    """A part is signed `UNSIGNED-PAYLOAD` so its 5 MiB is not hashed twice.
-
-    Recomputing it here would be correct-looking and wrong: the hash would then
-    cover the part body, which is not what the caller asked to be signed, and the
-    reason for the exception -- not hashing 5 MiB a second time -- would be gone
-    with the tests still green.
-    """
 
     def handler(method, target, body):
         if method == "POST" and "uploads=" in target and "uploadId" not in target:
@@ -789,11 +718,6 @@ def test_a_part_keeps_the_unsigned_payload_hash_it_was_given():
 
 
 def test_a_part_etag_is_carried_into_the_completion_body():
-    """The completion names each part by the ETag S3 gave for it; a wrong one is a 400.
-
-    And a part answered without an ETag has to reach the completion as an empty
-    one rather than as an `AttributeError` from inside `write_stream`.
-    """
 
     def handler(method, target, body):
         if method == "POST" and "uploads=" in target and "uploadId" not in target:
@@ -818,7 +742,6 @@ def test_a_part_etag_is_carried_into_the_completion_body():
 
 
 def test_exists_reports_an_unexpected_status_rather_than_absence():
-    """403 and 404 are absence; a 500 is not, and swallowing it reads as an empty bucket."""
     store, _ = _store(lambda *a: FakeResp(500, [], b"internal error"))
     with pytest.raises(ObjectError, match="S3 500"):
         asyncio.run(store.exists("k"))
@@ -834,7 +757,6 @@ def test_exists_uses_the_status_instead_of_response_truthiness():
 
 
 def test_an_abort_answered_404_is_not_an_orphan():
-    """`NoSuchUpload` means there is nothing left to reclaim, so nothing to alarm about."""
 
     def handler(method, target, body):
         if method == "POST" and "uploads" in target:

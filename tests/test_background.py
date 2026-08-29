@@ -1,11 +1,3 @@
-"""Response-bound background task behaviour.
-
-Covers the task primitives themselves (classification, argument binding,
-thread-offload) and their lifecycle contract through the ASGI application:
-tasks run after the complete response is emitted, in order, and never after a
-failed emission.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -65,9 +57,6 @@ async def invoke(
     return sent
 
 
-# --- Task primitives -------------------------------------------------------
-
-
 async def test_async_callable_receives_arguments() -> None:
     seen: list[Any] = []
 
@@ -86,7 +75,7 @@ async def test_sync_callable_receives_arguments_off_the_loop_thread() -> None:
         seen.append((a, b, threading.get_ident()))
 
     await BackgroundTask(work, 1, b=2)()
-    (a, b, thread), = seen
+    ((a, b, thread),) = seen
     assert (a, b) == (1, 2)
     assert thread != loop_thread  # ran via asyncio.to_thread
 
@@ -152,9 +141,6 @@ async def test_group_stops_on_first_failure() -> None:
     with pytest.raises(RuntimeError, match="boom"):
         await tasks()
     assert order == [0]  # task after the failure never ran
-
-
-# --- Lifecycle through the application -------------------------------------
 
 
 async def test_task_runs_after_final_body_message() -> None:
@@ -339,7 +325,6 @@ async def test_cancellation_is_not_shielded() -> None:
         await task
 
 
-# --- runtime bounds ----------------------------------------------------------
 # A background task runs inside the ASGI invocation, after the response is sent.
 # The server cannot read the next request on that connection until the whole
 # invocation returns -- measured at 1002ms for a 1s task over HTTP/1.1 keep-alive
@@ -368,11 +353,10 @@ async def test_a_runaway_background_task_is_cancelled_at_the_deadline() -> None:
         await asyncio.wait_for(invoke(app), timeout=2.0)
     assert cancelled.is_set(), "the task outlived the invocation that owned it"
     assert app.background_timeouts == 1
-    assert app.background_errors == 0      # a deadline is not a handler bug
+    assert app.background_errors == 0  # a deadline is not a handler bug
 
 
 async def test_the_response_still_goes_out_before_the_deadline_bites() -> None:
-    """The client is not made to wait for work it was told had finished."""
     app = Wreath(background_timeout=0.05)
     record: list[Any] = []
 
@@ -403,20 +387,6 @@ async def test_a_background_task_may_be_left_unbounded_deliberately() -> None:
 
 
 async def test_a_blocking_sync_task_does_not_starve_the_rest_of_the_process() -> None:
-    """Sync background callables must not share the request path's thread pool.
-
-    `BackgroundTask` offloads a synchronous callable so it cannot block the
-    event loop. Sent to the *default* executor it lands in the same pool
-    `wreath.objects` uses for every read, write and fsync -- so background work
-    queued by one route starves file serving for unrelated users, at
-    `min(32, cpu + 4)` blocked callables.
-
-    Proven before this was fixed: with a two-thread pool, two blocked background
-    tasks left an unrelated `to_thread` unable to start at all. The deadline
-    added alongside this does not help -- cancelling the coroutine that awaits
-    `to_thread` does not interrupt the worker, so it bounds the connection stall
-    and not the occupancy.
-    """
     from concurrent.futures import ThreadPoolExecutor
 
     loop = asyncio.get_running_loop()
@@ -455,5 +425,5 @@ async def test_a_blocking_sync_task_does_not_starve_the_rest_of_the_process() ->
         if previous is not None:
             loop.set_default_executor(previous)
         else:
-            loop._default_executor = None      # restoring "no executor chosen yet"
+            loop._default_executor = None  # restoring "no executor chosen yet"
         pool.shutdown(wait=False)

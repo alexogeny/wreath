@@ -5,7 +5,6 @@ from __future__ import annotations
 from ..ir import NEEDS_REVIEW, TRANSLATED
 
 TESTS: dict[str, tuple[str, str, str, str]] = {
-    # -- the test suite -------------------------------------------------------
     "test.client": (
         "test",
         "other",

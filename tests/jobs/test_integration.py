@@ -1,10 +1,3 @@
-"""Live-PostgreSQL integration tests for the durable jobs runner.
-
-Skipped unless ``WREATH_TEST_POSTGRES_DSN`` points at a throwaway database. These
-exercise the real claim/complete/retry/fencing SQL against Postgres; the fake-DB
-unit tests cover the Python paths.
-"""
-
 from __future__ import annotations
 
 import os
@@ -120,18 +113,7 @@ async def test_fencing_blocks_stale_completion(runner):
 
 
 async def test_the_sweeper_reclaims_only_its_own_queue(runner):
-    """Every queue in a schema shares one `jobs` table, partitioned by `queue`.
-
-    The sweep was not partitioned with it. A queue whose own workers are down
-    keeps its in-flight rows `leased` until it comes back -- unless some other
-    queue in the same schema sweeps them, bumping `attempts` on its own lease
-    interval until they exhaust `max_attempts` and dead-letter. Jobs destroyed
-    by the deploy of a service that does not own them, and neither queue's
-    counters record it.
-    """
-    other = JobRunner(
-        runner._db, name="other", schema=_SCHEMA, concurrency=1, lease=1.0
-    )
+    other = JobRunner(runner._db, name="other", schema=_SCHEMA, concurrency=1, lease=1.0)
 
     @runner.task("noop")
     async def noop(ctx):
@@ -149,7 +131,7 @@ async def test_the_sweeper_reclaims_only_its_own_queue(runner):
     connection = await runner._db.acquire("write")
     try:
         await connection.execute(
-            f'UPDATE "{_SCHEMA}".jobs SET lease_expiry = now() - interval \'1 hour\''
+            f"UPDATE \"{_SCHEMA}\".jobs SET lease_expiry = now() - interval '1 hour'"
             " WHERE queue = $1",
             "other",
         )

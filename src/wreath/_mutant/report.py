@@ -41,9 +41,7 @@ def render(report: Report, *, verbose: bool = False) -> str:
             lines.append(f"  {path}")
             for verdict in sorted(verdicts, key=lambda v: v.mutation.site.line):
                 mutation = verdict.mutation
-                lines.append(
-                    f"    :{mutation.site.line:<5} {mutation.control}"
-                )
+                lines.append(f"    :{mutation.site.line:<5} {mutation.control}")
                 detail = f"{mutation.operator} in {mutation.site.scope or '<module>'}"
                 if outcome is Outcome.SURVIVED:
                     detail += f"; {len(verdict.candidates)} test(s) ran it and none objected"

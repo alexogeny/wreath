@@ -1,10 +1,3 @@
-"""Stage 6: a declaration reaches the client as a type, not as `number[][]`.
-
-The point of the whole stage is that the measure names a declaration was
-written with survive all the way into a component. These tests assert that
-journey end to end -- discovery off the routes, into the IR, out as TypeScript.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -27,9 +20,7 @@ activity = (
     .events(Deploy, at=Deploy.happened_at, label=Deploy.version)
 )
 
-by_paddock = Aggregate(Trek).measure(treks=count(), km=sum_(Trek.distance_km)).by(
-    Trek.paddock_id
-)
+by_paddock = Aggregate(Trek).measure(treks=count(), km=sum_(Trek.distance_km)).by(Trek.paddock_id)
 
 _private = Series(Trek, at=Trek.started_at, bucket=Day).measure(started=count())
 
@@ -64,11 +55,6 @@ def test_an_underscored_declaration_is_not_part_of_the_api(api):
 
 
 def test_a_declaration_the_handler_does_not_use_is_not_emitted():
-    """Visible to the module is not the same as used by the route.
-
-    Module scope alone was the first cut of this and it swept in any
-    declaration a routed module happened to import.
-    """
     app = Wreath()
 
     @app.get("/unrelated")
@@ -98,14 +84,12 @@ def test_an_aggregate_has_no_time_axis(api):
 
 
 def test_fill_behaviour_reaches_the_ir(api):
-    """A count fills with zero; an average of no rows stays undefined."""
     shape = next(item for item in api.series if item.name == "activity")
     fills = {measure.name: measure.fills for measure in shape.measures}
     assert fills == {"started": True, "mean_distance": False}
 
 
 def test_an_explicit_fill_makes_a_measure_dense(api):
-    """`.fill(mean=0)` is a decision, and it changes the generated type."""
     declaration = (
         Series(Trek, at=Trek.started_at, bucket=Day)
         .measure(mean=avg(Trek.distance_km))
@@ -115,9 +99,6 @@ def test_an_explicit_fill_makes_a_measure_dense(api):
 
     shape = _series_shape("filled", declaration)
     assert shape.measures[0].fills is True
-
-
-# -- emission ---------------------------------------------------------------
 
 
 def test_measure_names_become_field_names(api):
@@ -158,12 +139,6 @@ def test_the_module_ships_and_is_exported_when_they_exist(api):
 
 
 def test_the_envelope_field_names_match_as_dict():
-    """The generated interface and the wire body are one contract.
-
-    They are written in two places -- a TypeScript string here and a dict in
-    `series.py` -- so this asserts they still agree. A renamed field that only
-    moved on one side is exactly the drift the type exists to prevent.
-    """
     from wreath.series import Range, SeriesData, SeriesResult
     from wreath.temporal import parse
 

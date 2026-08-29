@@ -1,11 +1,3 @@
-"""The Python typegen target: a typed `ServiceClient` for a sibling service.
-
-The point of generating this rather than hand-writing it is that the spec, the
-validator, the scalar vocabulary and the client are one codebase. "The client
-and the server disagree about what a timestamp is" stops being a category of
-bug -- so these tests check the *joins*, not the string formatting.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -51,15 +43,10 @@ def _rendered(app: Wreath | None = None) -> dict[str, str]:
     )
 
 
-# --- the target is reachable, and the other one is untouched ----------------
-
-
 def test_the_cli_selects_the_python_target(tmp_path) -> None:
     from wreath.typegen.cli import TypegenOptions, run
 
-    options = TypegenOptions(
-        target="python", output=str(tmp_path), class_name="LlamaClient"
-    )
+    options = TypegenOptions(target="python", output=str(tmp_path), class_name="LlamaClient")
     assert run(_app(), options) == 0
     written = {path.name for path in tmp_path.iterdir()}
     assert written >= {"models.py", "client.py", "__init__.py"}
@@ -74,12 +61,6 @@ def test_an_unknown_target_is_refused_naming_the_known_ones(tmp_path) -> None:
 
 
 def test_adding_the_python_target_left_typescript_byte_identical() -> None:
-    """A new target must not perturb the existing one.
-
-    `Operation` grew a `behaviours` field for plan 02; this asserts the
-    TypeScript emitted for an app that declares no behaviour is exactly what
-    it was, so the two targets cannot drift into each other.
-    """
     from wreath.typegen.targets.typescript import render_typescript
 
     app = _app()
@@ -90,33 +71,17 @@ def test_adding_the_python_target_left_typescript_byte_identical() -> None:
     assert set(files) == {"models.ts", "client.ts", "index.ts", "wreath-typegen.json"}
 
 
-# --- what it emits ----------------------------------------------------------
-
-
 def test_the_target_emits_a_module_set() -> None:
-    """`spec.json` joined the set when the contract gate landed.
-
-    It is the document the package was generated from, kept so
-    `--check-contract` has a baseline: `SPEC_DIGEST` can only say *changed*,
-    and telling breaking from compatible needs the document itself.
-    """
     files = _rendered()
     assert set(files) == {"models.py", "client.py", "__init__.py", "spec.json"}
 
 
 def test_no_document_means_no_pinned_spec() -> None:
-    """Rendering without a document must not emit an empty or fabricated pin.
-
-    A `spec.json` that did not come from a provider would give the gate a
-    baseline it could compare against and be wrong about.
-    """
     files = render_python(build_api_model(_app()), class_name="LlamaClient")
     assert "spec.json" not in files
 
 
 def test_generated_modules_are_valid_python() -> None:
-    """Compiled, not merely produced. A generator that emits a syntax error is
-    a generator whose tests only checked for substrings."""
     for name, source in _rendered().items():
         compile(source, name, "exec")
 
@@ -131,10 +96,15 @@ def test_the_client_subclasses_service_client_and_adds_no_transport() -> None:
 
 
 def test_the_generated_code_imports_only_wreath_and_the_stdlib() -> None:
-    """No third-party package may reach a consumer through a generated file."""
     allowed_roots = {
-        "__future__", "json", "uuid", "dataclasses", "typing", "urllib",
-        "wreath", "hashlib",
+        "__future__",
+        "json",
+        "uuid",
+        "dataclasses",
+        "typing",
+        "urllib",
+        "wreath",
+        "hashlib",
     }
     for name, source in _rendered().items():
         for line in source.splitlines():
@@ -148,7 +118,6 @@ def test_the_generated_code_imports_only_wreath_and_the_stdlib() -> None:
 
 
 def test_one_typed_method_per_operation() -> None:
-    """Every operation in the model gets a method, named from its operation id."""
     import ast
 
     from wreath.typegen.targets.python import _snake
@@ -185,18 +154,13 @@ def test_models_become_dataclasses_with_optional_fields_last() -> None:
     compile(source, "models.py", "exec")
 
 
-# --- the joins that make generating it worthwhile ---------------------------
-
-
 def test_responses_bind_through_the_servers_own_validator() -> None:
-    """Not a second decoder: the same `binding.validate` the provider runs."""
     source = _rendered()["client.py"]
     assert "from wreath.binding import validate as _validate" in source
     assert "_validate(annotation, decoded)" in source
 
 
 def test_an_extra_field_on_the_wire_is_refused() -> None:
-    """Client strictness equals server strictness, because it is the same code."""
     from wreath.binding import ValidationError, validate
 
     with pytest.raises(ValidationError):
@@ -204,7 +168,6 @@ def test_an_extra_field_on_the_wire_is_refused() -> None:
 
 
 def test_a_declared_idempotency_key_reaches_the_generated_method() -> None:
-    """The behaviour the tape declared is what makes the client send a key."""
     from wreath.policy import IdempotencyPolicy
 
     app = _app()
@@ -216,11 +179,7 @@ def test_a_declared_idempotency_key_reaches_the_generated_method() -> None:
 
 
 def test_no_idempotency_key_without_the_declaration() -> None:
-    """A client must not invent a guarantee the server never offered."""
     assert "idempotency_key=" not in _rendered()["client.py"]
-
-
-# --- every parameter location ------------------------------------------------
 
 
 @dataclass
@@ -275,7 +234,6 @@ def test_an_optional_query_parameter_defaults_to_none_and_is_skipped() -> None:
 
 
 def test_a_header_parameter_uses_its_wire_name_lowercased() -> None:
-    """The alias is the wire name; the Python name is the ergonomic one."""
     source = _rich_source()
     assert "trace: str | None = None" in source
     assert 'b"x-trace-id"' in source
@@ -293,14 +251,6 @@ def test_the_rich_client_is_valid_python() -> None:
 
 
 def test_an_idempotency_key_coexists_with_keyword_parameters() -> None:
-    """The regression the mutation pass found.
-
-    Splicing the parameter into the rendered signature declined whenever the
-    operation already had a `*`, while the emitted call still referenced
-    `idempotency_key` -- generated code that raises `NameError` the first time
-    anyone calls it. An operation with both a query parameter and a declared
-    idempotency behaviour is exactly that case.
-    """
     import ast
 
     from wreath.policy import IdempotencyPolicy
@@ -322,29 +272,18 @@ def test_an_idempotency_key_coexists_with_keyword_parameters() -> None:
             body_source = ast.unparse(node)
             if "idempotency_key=idempotency_key" not in body_source:
                 continue
-            declared = {a.arg for a in node.args.kwonlyargs} | {
-                a.arg for a in node.args.args
-            }
+            declared = {a.arg for a in node.args.kwonlyargs} | {a.arg for a in node.args.args}
             assert "idempotency_key" in declared, (
                 f"{node.name} uses idempotency_key without declaring it"
             )
 
 
 def test_an_operation_without_them_emits_no_query_or_header_machinery() -> None:
-    """Negative space: absent parameters must emit nothing, not empty scaffolding.
-
-    A generator that always emitted the query block would still compile and
-    still pass every positive test, while shipping dead code into every
-    consumer's repository.
-    """
     source = _rendered()["client.py"]  # the simple app: one path param, no query
     assert "query: list[tuple[str, str]] = []" not in source
     assert "_urlencode(query)" not in source
     assert "headers: list[tuple[bytes, bytes]] = []" not in source
     assert "headers=tuple(headers)" not in source
-
-
-# --- degenerate shapes -------------------------------------------------------
 
 
 def test_an_app_with_no_models_emits_no_sibling_import() -> None:
@@ -373,12 +312,6 @@ def test_rendering_without_a_document_emits_an_empty_digest() -> None:
 
 
 def test_every_generated_method_has_a_docstring_naming_its_route() -> None:
-    """A route with no `summary=` falls back to naming the verb and path.
-
-    The handler's own docstring is `operation.description`, not `summary` --
-    `summary` is the route's `summary=` keyword. The fallback is what most
-    operations get, so it is the branch worth pinning.
-    """
     import ast
 
     source = _rich_source()
@@ -391,9 +324,6 @@ def test_every_generated_method_has_a_docstring_naming_its_route() -> None:
         for node in klass.body:
             if isinstance(node, ast.AsyncFunctionDef):
                 assert ast.get_docstring(node), f"{node.name} has no docstring"
-
-
-# --- the pin ----------------------------------------------------------------
 
 
 def test_the_digest_is_emitted_and_is_order_independent() -> None:
@@ -410,13 +340,6 @@ def test_a_changed_document_changes_the_digest() -> None:
 
 
 def test_the_runtime_does_not_verify_the_digest() -> None:
-    """A client refusing to start over a compatible change is an outage generator.
-
-    The pin is a CI gate. Nothing in the generated module may *read*
-    `SPEC_DIGEST` at import or call time -- so it must appear as an assignment
-    target and never as a loaded name. Parsed rather than grepped, because the
-    module docstring legitimately talks about it.
-    """
     import ast
 
     tree = ast.parse(_rendered()["client.py"])
@@ -430,19 +353,7 @@ def test_the_runtime_does_not_verify_the_digest() -> None:
     assert loads == [], "SPEC_DIGEST is read at runtime; the pin is a CI gate"
 
 
-# --- the generated client actually works ------------------------------------
-
-
-async def test_the_generated_client_round_trips_against_the_real_app(
-    tmp_path, monkeypatch
-) -> None:
-    """Write the package, import it for real, and drive it against the app.
-
-    Imported rather than `exec`'d, so the generated `from .models import ...`
-    is exercised as a package the way a consumer would actually have it -- the
-    sibling import is part of what is being tested, and faking it would leave
-    the one thing most likely to be wrong unverified.
-    """
+async def test_the_generated_client_round_trips_against_the_real_app(tmp_path, monkeypatch) -> None:
     import importlib
     import sys
 
@@ -453,9 +364,10 @@ async def test_the_generated_client_round_trips_against_the_real_app(
     app = _app()
     package = tmp_path / "llama_api"
     package.mkdir()
-    assert run(app, TypegenOptions(
-        target="python", output=str(package), class_name="LlamaClient"
-    )) == 0
+    assert (
+        run(app, TypegenOptions(target="python", output=str(package), class_name="LlamaClient"))
+        == 0
+    )
 
     monkeypatch.syspath_prepend(str(tmp_path))
     for name in [n for n in sys.modules if n.startswith("llama_api")]:
@@ -493,8 +405,6 @@ async def test_the_generated_client_round_trips_against_the_real_app(
     assert isinstance(result, models_module.Llama)
 
 
-# --- the scalar vocabulary: a timestamp survives the hop --------------------
-#
 # This file's own docstring claims that "the client and the server disagree
 # about what a timestamp is" stops being a category of bug. Nothing asserted
 # it: no test app declared a temporal type, so the mapping went unexercised and
@@ -543,9 +453,6 @@ def test_an_optional_instant_keeps_its_scalar() -> None:
     assert "ended: Instant | None" in models, models
 
 
-# --- Page[T] is wreath's own, not a generated near-copy ---------------------
-
-
 @dataclass
 class Herd:
     id: int
@@ -570,11 +477,6 @@ def _paged_rendered() -> dict[str, str]:
 
 
 def test_a_paginated_route_reuses_wreaths_own_page() -> None:
-    """`Page[T]` must *be* `wreath.pagination.Page`, not a lookalike.
-
-    A generated near-copy type-checks and behaves identically right up until
-    someone passes one to a function annotated with the real thing.
-    """
     rendered = _paged_rendered()
     source = rendered["client.py"] + rendered["models.py"]
     assert "from wreath.pagination import Page" in source, source
@@ -587,13 +489,6 @@ def test_the_paginated_return_is_annotated_with_the_element_type() -> None:
 
 
 def test_an_instant_round_trips_zone_aware_through_the_binder() -> None:
-    """The annotation has to be load-bearing, not decorative.
-
-    Asserting the generated source says `Instant` proves the mapping; it does
-    not prove the value survives. The client binds through
-    `wreath.binding.validate` -- the server's own validator -- so this is what
-    turns the wire string back into an aware instant.
-    """
     from wreath.binding import validate
 
     bound = validate(Sighting, {"id": 1, "at": "2026-07-31T09:30:00+10:00"})
@@ -604,7 +499,6 @@ def test_an_instant_round_trips_zone_aware_through_the_binder() -> None:
 
 
 def test_a_naive_instant_from_the_wire_is_refused() -> None:
-    """Never assumed UTC -- that assumption is the bug the type exists to stop."""
     from wreath.binding import ValidationError, validate
 
     with pytest.raises(ValidationError):
@@ -612,20 +506,11 @@ def test_a_naive_instant_from_the_wire_is_refused() -> None:
 
 
 def test_the_typescript_target_emits_no_undeclared_page_type() -> None:
-    """The other target must not reference a `Page` nothing declares.
-
-    A TypeScript client is standalone -- there is no `wreath.pagination` to
-    import from -- so the page renders structurally. Naming it would emit a
-    client that references an undeclared type and still reports success.
-    """
     from wreath.typegen.targets.typescript import render_typescript
 
     source = "\n".join(render_typescript(build_api_model(_paged_app())).values())
     assert "items: readonly Herd[]" in source, source
     assert "Page<" not in source, "named a type the generated module never declares"
-
-
-# --- an opaque response is a declaration, not a missing one ------------------
 
 
 class NotAModel:
@@ -636,14 +521,6 @@ class NotAModel:
 
 
 def test_a_handler_returning_response_is_generated_rather_than_refused() -> None:
-    """One fatal diagnostic refuses the *whole* application, and this was one.
-
-    Found by pointing the generator at the camera-trap example, where fourteen
-    routes -- every `crud_router` route, the media `PUT`, the progress stream --
-    are annotated `-> Response`. `build_api_model` raised `TypegenError` and the
-    example generated nothing at all. `-> Response` says "I am producing the
-    bytes myself", which is an opaque body and not an absent declaration.
-    """
     # `request: Any`, not `request: Request`. This file has
     # `from __future__ import annotations`, so every annotation is a string and
     # `typing.get_type_hints` resolves it against the *module's* globals -- a
@@ -670,15 +547,11 @@ def test_a_handler_returning_response_is_generated_rather_than_refused() -> None
         raise NotImplementedError  # pragma: no cover - never called
 
     api = build_api_model(app)
-    assert {operation.path for operation in api.operations} == {
-        "/raw", "/stream", "/file"
-    }
+    assert {operation.path for operation in api.operations} == {"/raw", "/stream", "/file"}
     assert {operation.response_body.kind for operation in api.operations} == {"unknown"}
 
 
 def test_a_genuinely_unsupported_annotation_is_still_fatal() -> None:
-    """The other half. Widening the closed set into "anything we cannot name is
-    unknown" would silence the diagnostic this exists to give."""
     from wreath.typegen.model import TypegenError
 
     app = Wreath()

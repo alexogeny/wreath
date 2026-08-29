@@ -1,15 +1,3 @@
-"""Stage 6: the envelope survives the trip to a client.
-
-Two things are pinned here. The result has to encode at all -- returning the
-dataclass raised `TypeError` on the first request before `as_dict` existed --
-and the keys have to be the ones the generated TypeScript declares, because the
-two are written in separate files and nothing else keeps them in step.
-
-Also the reconciliation with design 24: a declaration exposes the columns it
-aggregates and groups by, so a future deferred-migration scan can read a value
-instead of parsing a handler.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -68,28 +56,14 @@ def test_instants_encode_as_iso_strings():
 
 
 def test_a_response_can_carry_the_result():
-    """The guide's own example returns this from a handler."""
     assert JSONResponse(_full().as_dict()).body
 
 
 def test_the_result_can_be_returned_directly():
-    """Stage 7 added the hook this test was left here to notice.
-
-    `temporal.jsonable` now asks an object for `__jsonable__` before giving up,
-    so a handler can `return await view.run(...)` with no `.as_dict()`. The
-    explicit form still works and is what the wire contract is written in.
-    """
     assert loads(dumps(_full())) == loads(dumps(_full().as_dict()))
 
 
 def test_an_ordinary_dataclass_is_still_refused():
-    """The hook is opt-in, and that is the whole of its safety.
-
-    A blanket "serialize any dataclass" rule would quietly put every field of
-    every model a handler happened to return on the wire, including the ones a
-    sensitive-field guard exists to keep off it. Only a type that says it knows
-    how to become JSON gets rewritten.
-    """
     from dataclasses import dataclass as plain
 
     @plain
@@ -101,7 +75,6 @@ def test_an_ordinary_dataclass_is_still_refused():
 
 
 def test_absent_comparison_and_events_are_present_and_empty():
-    """A client should not have to distinguish absent from missing."""
     span = _span()
     body = SeriesResult(
         range=span, zone="UTC", bucket="day", buckets=(span.start,), series=()
@@ -125,7 +98,6 @@ def test_an_aggregate_encodes_too():
 
 
 def test_the_folded_remainder_keeps_its_flag_through_json():
-    """`other` is what tells the remainder apart from a genuinely null key."""
     span = _span()
     body = SeriesResult(
         range=span,
@@ -136,9 +108,6 @@ def test_the_folded_remainder_keeps_its_flag_through_json():
     ).as_dict()
     assert body["series"][0]["other"] is True
     assert body["series"][0]["key"] is None
-
-
-# -- the design 24 reconciliation -------------------------------------------
 
 
 def test_a_declaration_exposes_the_columns_it_aggregates_and_groups_by():
@@ -165,11 +134,6 @@ def test_an_aggregate_exposes_its_group_and_has_no_time_column():
 
 
 def test_filters_are_exposed_as_predicates_not_as_bare_columns():
-    """For a filter the operator decides whether it is safe.
-
-    Design 24 refuses `>=` on a converting column but permits `==`, so handing
-    a scan a bare column name would throw away the half that matters.
-    """
     view = Series(Trek, at=Trek.started_at, bucket=Day).where(Trek.distance_km > 5)
     assert len(view.predicates) == 1
     assert "distance_km" not in [

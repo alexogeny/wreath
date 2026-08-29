@@ -81,7 +81,6 @@ class AdapterFault(StrEnum):
     CONNECT_ERROR = "connect_error"  # DNS/connect/TLS failure
     READ_TIMEOUT = "read_timeout"  # response read times out
     # LISTEN/NOTIFY doorbell seam
-    #
     # STREAM_END and STREAM_ERROR are deliberately distinct. `Connection.
     # notifications()` *returns* when the connection closes rather than raising
     # (`wreath._pgdriver`), so a supervisor written around `except` sees
@@ -174,8 +173,6 @@ def _object_error(fault: AdapterFault, key: str) -> Exception:
     return ObjectError(f"write of {key!r} failed part-way through")
 
 
-# --- what a real connection refuses, before any fault is considered ----------
-#
 # A double that accepts SQL the driver rejects is not a faithful boundary, and
 # three defects shipped this session because of exactly that. Each rule below
 # was measured against PostgreSQL 17.10 and is pinned by
@@ -315,8 +312,6 @@ def refuse_what_postgres_refuses(sql: object, args: tuple[Any, ...], seen: set[s
     refuse_uninferable_cast(sql, args, seen)
 
 
-# --- what a real connection hands *back* -------------------------------------
-#
 # The refusals above model what the driver rejects on the way in. A double is
 # equally able to lie on the way out, and that lie is the one that shipped: a
 # fake scripted with `str` and `int` rows modelled a driver with catalog codecs,
@@ -484,8 +479,6 @@ class _ConnectionDouble:
         results = double.results
         return results[index] if index < len(results) else default
 
-    # --- LISTEN/NOTIFY doorbell seam -----------------------------------------
-
     async def listen(self, channel: str) -> None:
         # The coordinate counts on the *double*, not this connection: a doorbell
         # fault is addressed to "the Nth LISTEN this bus attempts", and the
@@ -528,8 +521,6 @@ class _ConnectionDouble:
             # wakes on a timer would model a connection that keeps dropping.
             await asyncio.Event().wait()
         return  # NOTIFY_STREAM_END lands here
-
-    # --- transaction seam -----------------------------------------------------
 
     def transaction(self) -> _TransactionDouble:
         index = self._txn
@@ -1005,14 +996,11 @@ class FaultyHttpClient(HTTPClient):
         return ClientResponse(status=200, headers=(), body=b"", http_version="1.1")
 
 
-# --- the other direction: watching a real boundary instead of replacing it ----
-#
 # A double answers *for* a boundary so a replay is deterministic. An observer
 # wraps a boundary that is really there and writes down what crossed it, so an
 # attempt that has already happened can be replayed later. They are the same
 # shape on purpose: an observer records a `(seam, target, coordinate)` triple,
 # which is exactly the coordinate a `FaultSchedule` addresses a double with.
-#
 # **A `Statement` registered before the observer was installed is not seen.**
 # `postgres.Statement` holds its own reference to the `Database` it was
 # registered on, so swapping the registry entry does not reach it. That is the

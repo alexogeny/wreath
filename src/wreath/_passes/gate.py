@@ -144,9 +144,7 @@ class Reconcile:
     def __post_init__(self) -> None:
         for value, name in ((self.source, "source"), (self.against, "against")):
             if not isinstance(value, str) or not value.strip():
-                raise PassDeclarationError(
-                    f"Reconcile({name}=...) needs a scalar SQL query"
-                )
+                raise PassDeclarationError(f"Reconcile({name}=...) needs a scalar SQL query")
 
     @property
     def signature(self) -> str:
@@ -190,9 +188,7 @@ class Constraint:
     check_: str
 
     def __post_init__(self) -> None:
-        validate_unquoted_identifier(
-            self.name, "constraint name", error=PassDeclarationError
-        )
+        validate_unquoted_identifier(self.name, "constraint name", error=PassDeclarationError)
         if not isinstance(self.check_, str) or not self.check_.strip():
             raise PassDeclarationError("Constraint(...) needs a CHECK expression")
 
@@ -207,8 +203,7 @@ class Constraint:
         if scope is not None:
             return Verification(
                 False,
-                "Constraint verifies a whole table, so it cannot be used with "
-                "Gate(scope='unit')",
+                "Constraint verifies a whole table, so it cannot be used with Gate(scope='unit')",
             )
         try:
             await executor.execute(
@@ -219,13 +214,9 @@ class Constraint:
             # Already there from an earlier attempt is the ordinary case on a
             # re-verify, and re-validating it is exactly what should happen.
             if "already exists" not in str(error).lower():
-                return Verification(
-                    False, f"could not add {self.name}: {error!r}", transient=True
-                )
+                return Verification(False, f"could not add {self.name}: {error!r}", transient=True)
         try:
-            await executor.execute(
-                f"ALTER TABLE {walk.table} VALIDATE CONSTRAINT {self.name}"
-            )
+            await executor.execute(f"ALTER TABLE {walk.table} VALIDATE CONSTRAINT {self.name}")
         except PostgresError as error:
             if _violation(error):
                 return Verification(False, f"{self.name} does not hold: {error}")

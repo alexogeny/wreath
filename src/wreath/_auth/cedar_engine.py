@@ -250,9 +250,6 @@ class CedarParseError(ValueError):
         self.column = column
 
 
-# -- public value types -------------------------------------------------------
-
-
 @dataclass(frozen=True, slots=True)
 class EntityUid:
     """A Cedar entity reference: a type path and an id, `User::"alice"`."""
@@ -294,15 +291,10 @@ class CedarEntity:
     parents: tuple[EntityUid, ...] = ()
 
 
-# -- value conversion into the compiled model ---------------------------------
-
-
 def _to_cedar_value(value: object, *, where: str) -> Any:
     """Convert one complete value graph into the evaluator's value model."""
     return _core.cedar_to_value(value, EntityUid, Mapping, where)
 
-
-# -- lexer --------------------------------------------------------------------
 
 _KEYWORDS = frozenset(
     {
@@ -476,8 +468,6 @@ def _pattern_segments(pattern: str) -> tuple[str, ...]:
     segments.append("".join(current))
     return tuple(segments)
 
-
-# -- parser: source text straight to the compiled program ---------------------
 
 _METHODS = frozenset(_METHOD_IDS)
 _EXTENSIONS = frozenset({"ip", "decimal", "datetime", "duration", "offset"})
@@ -801,9 +791,6 @@ class _Parser:
         return (key, self._expression())
 
 
-# -- the entity store ---------------------------------------------------------
-
-
 #: One entry of the evaluator's store: converted attributes and direct parents.
 #: Native evaluation owns graph traversal, so construction materializes each
 #: edge once instead of a separate transitive frozenset for every entity.
@@ -880,9 +867,6 @@ def _layer_store(
     for uid, values in attrs.items():
         store[uid] = (values, parents.get(uid, ()))
     return store
-
-
-# -- the engine ---------------------------------------------------------------
 
 
 class CedarPolicies:
@@ -1201,6 +1185,16 @@ class CedarPolicies:
             store = _layer_store(self._store, self._dangling, self._entities, request_entities)
         else:
             store = self._store
+        denial = _core.cedar_route_denial_prepared(
+            self._plan,
+            principal,
+            action,
+            resource,
+            context,
+            store,
+        )
+        if denial is not NotImplemented:
+            return denial
         return _core.cedar_route_denial(
             self._plan,
             principal,

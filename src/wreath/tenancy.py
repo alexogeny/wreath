@@ -1,102 +1,31 @@
-"""Tenant isolation the database enforces, and the seam that reaches it.
+"""Tenant resolution and PostgreSQL-enforced isolation.
 
-Wreath already had the careful half. `wreath.orm.TenantContext` binds a schema
-and a role transaction-locally, validates both as identifiers, and `RawQuery`
-refuses to run unbound. What it had no way to answer was *which* tenant, and its
-own docstring says why that matters -- "a context must be resolved from an
-application-owned tenant directory, never from a request host, path, header, or
-token" -- while supplying no directory to resolve from. This module is that
-directory, the resolution in front of it, and the provisioning behind it.
+A `TenantDirectory` is the application-owned authority that maps a trusted
+tenant id to its schema, role and lifecycle state. `TenantHostLabel` and
+`TenantHeader` extract a candidate id; `TenancyMiddleware` resolves it through
+the directory, refuses unknown, suspended or unready tenants, and binds the
+result for the request. Request host, path, header and token values never become
+schema or role names directly.
 
-## `search_path` is a convenience; the role is the boundary
+`SchemaMode.isolated(isolation="role")` combines transaction-local
+`search_path` selection with `SET LOCAL ROLE`. The tenant role owns privileges
+on its schema and read access to the central schema. The application login role
+is `NOINHERIT`, so it has no ambient tenant-table privilege outside a bound
+transaction.
 
-A schema search path is isolation by **naming**. `SET LOCAL search_path =
-tenant_acme` decides where an *unqualified* name resolves, and one qualified
-identifier -- in a hand-written `RawQuery`, in a migration helper, in a
-copy-pasted debug query -- walks straight past it. Nothing about that is
-auditable, because the thing you would have to audit is every query anyone ever
-writes.
+The boundary has explicit limits:
 
-A PostgreSQL role is a boundary the server enforces. A tenant's role holds
-privileges on its own schema and `SELECT` on the central schema, and holds
-nothing at all on any other tenant's. A cross-tenant read is then `permission
-denied` whatever the query said, and the audit is a catalog query rather than a
-code review -- `isolation_report` is that query.
+- a deliberate `SET ROLE` to another role of which the login is a member can
+  cross tenants; source hardening and `isolation_report` expose that residual;
+- a superuser or schema owner bypasses grants and is refused by
+  `verify_isolation`;
+- PostgreSQL catalog rows reveal object names even when grants prevent access to
+  their data; confidential tenant names require a database-per-tenant design.
 
-So `SchemaMode.isolated(isolation="role")` stops being a word this codebase
-accepts and never reads. Both halves ship: the search path for ergonomics, so
-tenant-local SQL stays unqualified and readable, and the grants for safety.
-
-## What the boundary does and does not stop
-
-Stated precisely, because a security claim that is nearly true is worse than
-none:
-
-* **Ambient cross-tenant access is impossible.** The application's login role is
-  `NOINHERIT` and is a member of each tenant role without inheriting it, so
-  outside a `SET LOCAL ROLE` it holds no privilege on any tenant schema. That is
-  what makes `RESET ROLE` a dead end rather than an escape hatch, and what makes
-  a leaked binding fail closed.
-* **A deliberate `SET ROLE other_tenant` still crosses.** Membership is what
-  lets the pool switch roles at all, and PostgreSQL has no "switch once" mode.
-  Nothing wreath emits does this, `hardening`'s `tenant-schema-literal` rule
-  finds the source-level shape of it, and `isolation_report` shows the
-  membership -- but it is a residual, and it is written down here rather than
-  papered over. A deployment that cannot accept it needs a connection whose
-  login role *is* the tenant's, and `connection_budget` prices that from
-  measured numbers rather than from the guess this sentence used to end on: the
-  cost is server memory and `max_connections`, not application memory, and it is
-  affordable for tens of tenants and not for thousands.
-* **A superuser bypasses everything**, and so does the owner of a tenant schema.
-  `verify_isolation` refuses both at startup rather than letting a deployment
-  discover it as a breach.
-* **Table names leak; data does not.** `pg_catalog` is readable by every role,
-  and revoking `USAGE` on a schema stops a peer *reaching* its objects rather
-  than *seeing* that they exist -- there is no grant that hides a row of
-  `pg_class`. This design claim was made the other way round first and was
-  wrong. If the names themselves are confidential (a schema named after the
-  customer is the usual way this bites) the answer is a database per tenant, not
-  a grant. `tests/tenancy/test_isolation.py` asserts the leak, so nobody
-  rediscovers it as a surprise.
-
-## What this costs per request, and why none of it is in C
-
-Resolution runs on every request, so it was measured before anything was written
-about it. Three arms, best-of-7 over 200,000 iterations, three warm runs, 500
-tenants in the directory, against the ~2.0us request `wreath.binding`'s own
-comment measures:
-
-    resolve_request (host source)     1378 ns  ->  815-835 ns
-    host source alone                 1059 ns  ->  556-595 ns
-    directory lookup alone             126 ns
-    status check alone                 119 ns
-
-The improvement is one deleted allocation, not a rewrite: `TenantHostLabel` built
-`f".{suffix}"` on **every call** to compare a host against a constant, and
-precomputing it in `__post_init__` is the whole change. Deleting work beat making
-work faster, which is the order this repository asks for.
-
-**Nothing here belongs in C, and the numbers are why.** Roughly 350 ns of the
-figures above is the benchmark's own `header()` stand-in rather than wreath --
-a real `Request.header` is already native -- so the resolution itself is about
-480 ns. The directory lookup is a `dict` get and the status check is an enum
-identity compare and a branch; neither has anything to move. What remains is
-`partition`/`lower`/`endswith`/slice over a **~20-byte hostname**, and those are
-already C calls: a native rewrite would replace four C calls with one and save
-the Python call overhead, while AVX2 over twenty bytes is not a thing worth
-having. The vector arms in `simd.h` exist for buffers that are genuinely large,
-and a hostname is not one.
-
-## The central schema
-
-The case that makes this worth building rather than avoiding: an application has
-tables every tenant reads and none may write -- an immutable role vocabulary, a
-country list, a plan catalogue. `CENTRAL_SCHEMA` already existed as a
-`SchemaRef`; here it becomes a grant. Central tables are `SELECT`-only to every
-tenant role, they stay in the search path behind the tenant's own schema, and a
-join across the two is one statement. If a central reference cost a second round
-trip nobody would use it and the vocabulary would be copied per tenant, which is
-the outcome the shared schema exists to prevent.
+`connection_budget` prices database-per-tenant alternatives from server memory
+and `max_connections`. Central models remain read-only to tenant roles and stay
+behind the tenant schema in the search path, so tenant-local and shared data can
+be joined in one statement.
 """
 
 from __future__ import annotations
@@ -302,9 +231,6 @@ class InMemoryTenantDirectory:
         self._by_key[tenant.key] = tenant
 
 
-# --- where the name comes from ----------------------------------------------
-
-
 @runtime_checkable
 class TenantSource(Protocol):
     """How a request names a tenant. Never how it *chooses* one."""
@@ -476,14 +402,10 @@ class Tenancy:
         """
         name = self._source.name_for(request)
         if not name:
-            raise UnknownTenant(
-                f"this request names no tenant in {self._source.describe()}"
-            )
+            raise UnknownTenant(f"this request names no tenant in {self._source.describe()}")
         return self.resolve_name(name)
 
 
-# --- the ambient binding ----------------------------------------------------
-#
 # A ContextVar rather than a parameter threaded through every call, for the same
 # reason `wreath.telemetry` binds a span: the propagation targets are a job
 # enqueue, a Cedar context and a log record, and threading a tenant through all
@@ -511,7 +433,9 @@ def current_tenant_or_none() -> Tenant | None:
 
 @contextmanager
 def tenant_scope(
-    tenant: Tenant | str, *, directory: TenantDirectory | None = None,
+    tenant: Tenant | str,
+    *,
+    directory: TenantDirectory | None = None,
 ) -> Iterator[Tenant]:
     """Bind one tenant for the duration of the block.
 
@@ -521,9 +445,7 @@ def tenant_scope(
     """
     if isinstance(tenant, str):
         if directory is None:
-            raise TenancyError(
-                "tenant_scope was given a name and no directory to resolve it in"
-            )
+            raise TenancyError("tenant_scope was given a name and no directory to resolve it in")
         tenant = directory.resolve(tenant)
     tenant.require_bindable()
     token = _CURRENT.set(tenant)
@@ -578,26 +500,20 @@ def check_enqueue_tenant(explicit: str | None) -> str:
     return tenant.key
 
 
-# --- how much isolation, and what it costs ----------------------------------
-#
 # The residual above -- a *deliberate* `SET ROLE other_tenant` -- exists because
 # one connection can switch between every tenant role. Removing it means a
 # connection that cannot: one whose login role is the tenant's own, holding
 # membership of nothing.
-#
 # That was described as "expensive" before it was measured, which was a guess.
 # Measured against PostgreSQL 17 on this machine, 100 connections opened and
 # each made to run a statement so its backend allocates a real working set:
-#
 #     client memory      162 KiB per connection
 #     connection setup  4.19 ms per connection
 #     server memory      ~15 MiB per backend   <-- 93x the client side
-#
 # So the cost is not in the application at all, which is where the guess put it.
 # It is server RAM and the `max_connections` ceiling, and both are multiplied by
 # the number of workers: 200 tenants across 4 workers is 800 backends, roughly
 # 12 GiB of database server, against a default `max_connections` of 100.
-#
 # That is affordable for tens of tenants and not for thousands, which makes it a
 # **configuration** rather than a verdict -- and makes the arithmetic something
 # wreath should do for you rather than leave you to discover in production.
@@ -644,7 +560,7 @@ class ConnectionBudget:
         return self.required * BACKEND_MEMORY_BYTES
 
     def explain(self) -> str:
-        gib = self.server_memory_bytes / (1024 ** 3)
+        gib = self.server_memory_bytes / (1024**3)
         return (
             f"{self.tenants} tenants x {self.workers} workers x "
             f"{self.per_tenant_connections} connections = {self.required} backends "
@@ -668,8 +584,10 @@ def connection_budget(
     most likely to surprise.
     """
     return ConnectionBudget(
-        tenants=tenants, workers=workers,
-        per_tenant_connections=per_tenant_connections, max_connections=max_connections,
+        tenants=tenants,
+        workers=workers,
+        per_tenant_connections=per_tenant_connections,
+        max_connections=max_connections,
     )
 
 
@@ -689,9 +607,6 @@ def require_connection_budget(budget: ConnectionBudget) -> None:
         "shares one pool and defends every accidental crossing, leaving only a "
         "deliberate SET ROLE."
     )
-
-
-# --- the request seam -------------------------------------------------------
 
 
 class TenancyMiddleware:
@@ -714,8 +629,7 @@ class TenancyMiddleware:
     #: Where the reset token rides. On `request.state`, never in a dict on the
     #: middleware: an instance-level map keyed by request would be unbounded
     #: in-process memory that grows by one entry for every request whose `after`
-    #: hook never ran, and `docs/reference/memory-budgets.md` would have to
-    #: carry it. The state object dies with the request.
+    #: hook never ran. The state object dies with the request.
     _TOKEN_KEY = "_wreath_tenant_token"
 
     def __init__(self, tenancy: Tenancy, *, optional: bool = False) -> None:
@@ -744,8 +658,6 @@ class TenancyMiddleware:
         return response
 
 
-# --- provisioning -----------------------------------------------------------
-#
 # Three steps that are each wrong on their own: a schema with no role is
 # unreachable, a role with no grants is useless, and a grant set maintained by
 # hand drifts the first time somebody adds a table. `ALTER DEFAULT PRIVILEGES`
@@ -808,7 +720,6 @@ def _tenant_ddl(schema: str, role: str, central: str, login_role: str) -> tuple[
         f"GRANT SELECT ON ALL TABLES IN SCHEMA {c} TO {r}",
         f"ALTER DEFAULT PRIVILEGES IN SCHEMA {c} GRANT SELECT ON TABLES TO {r}",
         # Membership is what lets the pool `SET LOCAL ROLE` at all.
-        #
         # It is also what would hand the login role every tenant's privileges
         # ambiently -- if that role inherits. `WITH INHERIT FALSE` says so per
         # grant and needs PostgreSQL 16; requiring it here would make this
@@ -852,8 +763,7 @@ async def provision_tenant(
     `migrations.apply` has run against it.
     """
     resolved_role = role or f"tenant_{key}"
-    tenant = Tenant(key=key, schema=schema or f"tenant_{key}", role=resolved_role,
-                    status=status)
+    tenant = Tenant(key=key, schema=schema or f"tenant_{key}", role=resolved_role, status=status)
     validate_identifier(central, "central schema")
     validate_identifier(login_role, "login role")
     for statement in _tenant_ddl(tenant.schema, resolved_role, central, login_role):
@@ -862,7 +772,10 @@ async def provision_tenant(
 
 
 async def deprovision_tenant(
-    connection: Any, tenant: Tenant, *, force: bool = False,
+    connection: Any,
+    tenant: Tenant,
+    *,
+    force: bool = False,
 ) -> None:
     """Drop a tenant's schema and role. Irreversible, so it asks first.
 
@@ -872,7 +785,8 @@ async def deprovision_tenant(
     """
     if not force:
         rows = await connection.fetch(
-            "SELECT tablename FROM pg_tables WHERE schemaname = $1::text LIMIT 1", tenant.schema)
+            "SELECT tablename FROM pg_tables WHERE schemaname = $1::text LIMIT 1", tenant.schema
+        )
         if rows:
             raise TenancyError(
                 f"schema {tenant.schema!r} is not empty; deprovisioning is irreversible. "
@@ -961,7 +875,8 @@ async def verify_isolation(connection: Any, *, schemas: Iterable[str] = ()) -> N
     """
     rows = await connection.fetch(
         "SELECT current_user AS name, r.rolsuper AS super, r.rolinherit AS inherits "
-        "FROM pg_roles r WHERE r.rolname = current_user")
+        "FROM pg_roles r WHERE r.rolname = current_user"
+    )
     row = rows[0]
     name = _text(row["name"] if isinstance(row, Mapping) else row[0])
     is_super = row["super"] if isinstance(row, Mapping) else row[1]
@@ -1004,8 +919,6 @@ async def verify_isolation(connection: Any, *, schemas: Iterable[str] = ()) -> N
             "the request path never connects as."
         )
 
-
-# --- the source-level half --------------------------------------------------
 
 #: A schema-qualified reference to a tenant schema, written out in application
 #: source. The grants make it fail closed; this makes it fail *early*, where the

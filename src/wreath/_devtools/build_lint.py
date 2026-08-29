@@ -141,9 +141,13 @@ def scan(root: Path) -> list[Finding]:
         missing = [name for name in listed if not (root / name).exists()]
         if missing:
             findings.append(
-                Finding("BUILD002", "setup.py", f"{extension} names {len(missing)} source(s)"
-                        f" that do not exist, starting with {missing[0]!r}; the build flag"
-                        " that would compile it fails instead")
+                Finding(
+                    "BUILD002",
+                    "setup.py",
+                    f"{extension} names {len(missing)} source(s)"
+                    f" that do not exist, starting with {missing[0]!r}; the build flag"
+                    " that would compile it fails instead",
+                )
             )
             continue
         # Not built is not stale, so an extension with no artifact contributes
@@ -151,17 +155,23 @@ def scan(root: Path) -> list[Finding]:
         # because rebuilding the default interpreter's does not touch the others.
         for artifact in _artifacts(root, extension):
             built = artifact.stat().st_mtime
-            newer = [(name, (root / name).stat().st_mtime) for name in listed
-                     if (root / name).stat().st_mtime > built]
+            newer = [
+                (name, (root / name).stat().st_mtime)
+                for name in listed
+                if (root / name).stat().st_mtime > built
+            ]
             if not newer:
                 continue
             name, changed = max(newer, key=lambda pair: pair[1])
             findings.append(
-                Finding("BUILD001", artifact.relative_to(root).as_posix(),
-                        f"built {_describe(changed - built)} before {name}"
-                        f" ({len(newer)} source(s) newer than the artifact); it is importable"
-                        " and does not contain them -- rebuild, and prove the rebuild landed"
-                        " with a sentinel")
+                Finding(
+                    "BUILD001",
+                    artifact.relative_to(root).as_posix(),
+                    f"built {_describe(changed - built)} before {name}"
+                    f" ({len(newer)} source(s) newer than the artifact); it is importable"
+                    " and does not contain them -- rebuild, and prove the rebuild landed"
+                    " with a sentinel",
+                )
             )
     return findings
 

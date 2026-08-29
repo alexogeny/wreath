@@ -69,9 +69,7 @@ class Animal(Model, table="animals", schema=SCHEMA):
     #: the question is one question -- "is this animal's position withheld from
     #: anybody?" The camera trap indexes `Species.protection` the same way, for
     #: the same reason.
-    _withheld = index(
-        "protection", "id", where=one_of("protection", ["sensitive", "restricted"])
-    )
+    _withheld = index("protection", "id", where=one_of("protection", ["sensitive", "restricted"]))
 
 
 class Collar(Model, table="collars", schema=SCHEMA):

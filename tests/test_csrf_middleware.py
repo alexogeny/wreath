@@ -27,9 +27,7 @@ def _request(method: str, headers: list[tuple[bytes, bytes]] | None = None) -> R
     )
 
 
-def _request_with_body(
-    method: str, body: bytes, headers: list[tuple[bytes, bytes]]
-) -> Request:
+def _request_with_body(method: str, body: bytes, headers: list[tuple[bytes, bytes]]) -> Request:
     sent = False
 
     async def receive() -> dict[str, Any]:
@@ -181,12 +179,6 @@ async def test_valid_unsafe_request_indexes_headers_once() -> None:
 
 @pytest.mark.asyncio
 async def test_an_exempt_predicate_that_raises_refuses_and_is_counted() -> None:
-    """Failing closed is right; failing closed *silently* is not.
-
-    A broken predicate refuses every unsafe request forever, and a wall of 403s
-    reads exactly like a site under attack rather than one that is misconfigured.
-    The count is what tells those two apart.
-    """
     def explode(request: Request) -> bool:
         raise AttributeError("typo in the exempt predicate")
 
@@ -204,7 +196,6 @@ async def test_an_exempt_predicate_that_raises_refuses_and_is_counted() -> None:
 
 @pytest.mark.asyncio
 async def test_a_working_exempt_predicate_counts_nothing() -> None:
-    """Guard against 'fixed it by counting every refusal'."""
     middleware = CsrfPolicy("s" * 32, exempt=lambda request: True)
     assert await middleware._ingress(_request("POST")) is None
     assert middleware.exempt_errors == 0
@@ -225,8 +216,6 @@ def test_csrf_configuration_validation() -> None:
         CsrfPolicy("s" * 32, form_field="")
 
 
-# --- trusted origins, and the config refusals -------------------------------
-#
 # `wreath mutant` reported every branch of the origin normaliser and every one
 # of these refusals UNREACHED across each file that exercises CSRF: no test ever
 # passed `trusted_origins=`, so the whole cross-origin allowlist -- the thing
@@ -236,8 +225,11 @@ def test_csrf_configuration_validation() -> None:
 
 
 async def _admits(
-    middleware: CsrfPolicy, *, origin: bytes | None = None,
-    referer: bytes | None = None, host: bytes | None = b"example.test",
+    middleware: CsrfPolicy,
+    *,
+    origin: bytes | None = None,
+    referer: bytes | None = None,
+    host: bytes | None = b"example.test",
 ) -> bool:
     """Whether a POST carrying a *valid token* is admitted.
 
@@ -263,7 +255,6 @@ async def _admits(
 
 
 async def test_a_trusted_origin_passes_the_origin_check_and_others_do_not() -> None:
-    """The allowlist is what lets a separate front-end origin POST here at all."""
     middleware = CsrfPolicy("s" * 32, trusted_origins=["https://app.example"])
 
     assert await _admits(middleware, origin=b"https://app.example")
@@ -280,9 +271,9 @@ async def test_a_trusted_origin_passes_the_origin_check_and_others_do_not() -> N
 
 
 async def test_a_trusted_origin_is_matched_after_normalisation() -> None:
-    """Comparison is exact bytes, so normalisation is the whole correctness story."""
     middleware = CsrfPolicy(
-        "s" * 32, trusted_origins=["https://App.Example:443", "http://other.example:8080"],
+        "s" * 32,
+        trusted_origins=["https://App.Example:443", "http://other.example:8080"],
     )
     assert await _admits(middleware, origin=b"https://app.example")
     assert await _admits(middleware, origin=b"http://other.example:8080")
@@ -291,7 +282,6 @@ async def test_a_trusted_origin_is_matched_after_normalisation() -> None:
 
 
 async def test_a_trusted_origin_also_covers_the_referer_fallback() -> None:
-    """A browser that sends `Referer` and no `Origin` gets the same allowlist."""
     middleware = CsrfPolicy("s" * 32, trusted_origins=["https://app.example"])
     assert await _admits(middleware, referer=b"https://app.example/page?x=1")
     assert not await _admits(middleware, referer=b"https://evil.example/page")
@@ -300,27 +290,28 @@ async def test_a_trusted_origin_also_covers_the_referer_fallback() -> None:
 @pytest.mark.parametrize(
     "origin",
     [
-        "ftp://app.example", "app.example", "https://", "https://u@app.example",
-        "https://u:p@app.example", "https://app.example/path",
-        "https://app.example?q=1", "https://app.example#f",
+        "ftp://app.example",
+        "app.example",
+        "https://",
+        "https://u@app.example",
+        "https://u:p@app.example",
+        "https://app.example/path",
+        "https://app.example?q=1",
+        "https://app.example#f",
         "https://app.example:notaport",
     ],
 )
 def test_a_trusted_origin_that_is_not_an_origin_is_refused_at_construction(
     origin: str,
 ) -> None:
-    """A value no browser can send would sit in the list matching nothing."""
     with pytest.raises(ValueError, match="invalid trusted origin"):
         CsrfPolicy("s" * 32, trusted_origins=[origin])
 
 
 def test_the_shared_normaliser_names_the_setting_each_caller_configured() -> None:
-    """One implementation, two nouns: the message still points at the right knob."""
     from wreath._webpolicy import normalize_origin
 
-    assert normalize_origin("https://App.Example:443", label="trusted") == (
-        b"https://app.example"
-    )
+    assert normalize_origin("https://App.Example:443", label="trusted") == (b"https://app.example")
     assert normalize_origin("https://[2001:DB8::1]:443", label="trusted") == (
         b"https://[2001:db8::1]"
     )
@@ -341,32 +332,19 @@ def test_the_shared_normaliser_names_the_setting_each_caller_configured() -> Non
     ],
 )
 def test_csrf_settings_that_cannot_work_are_refused(kwargs: dict, match: str) -> None:
-    """The cookie-prefix ones are the sharp pair.
-
-    A browser enforces `__Host-` and `__Secure-` by *dropping* the cookie, so a
-    prefix without `secure=True` is a CSRF cookie that silently never arrives --
-    which looks exactly like a working deployment until a POST is refused.
-    """
     with pytest.raises(ValueError, match=match):
         CsrfPolicy("s" * 32, **kwargs)
 
 
 async def test_trusted_hosts_constrains_the_host_the_expected_origin_is_built_from() -> None:
-    """Without this, the attacker supplies both sides of the comparison.
-
-    The expected origin is derived from the request's own `Host` header, which
-    the client sends. An attacker who can set `Host: evil.test` and
-    `Origin: https://evil.test` therefore matches themselves -- the check
-    compares two values they control. `trusted_hosts` is what closes that, and
-    it had no test: `wreath mutant` could delete the whole branch and nothing
-    noticed.
-    """
     middleware = CsrfPolicy("s" * 32, trusted_hosts=["example.test"])
 
     assert await _admits(middleware, origin=b"https://example.test")
     # Both sides forged, and both agree with each other. Refused on the Host.
     assert not await _admits(
-        middleware, host=b"evil.test", origin=b"https://evil.test",
+        middleware,
+        host=b"evil.test",
+        origin=b"https://evil.test",
     )
     # A Host is required once the list is non-empty -- absent is not "any".
     assert not await _admits(middleware, host=None, origin=b"https://example.test")
@@ -374,27 +352,18 @@ async def test_trusted_hosts_constrains_the_host_the_expected_origin_is_built_fr
     assert await _admits(middleware, host=b"Example.Test", origin=b"https://example.test")
     # And a non-ASCII Host cannot slip through the decode.
     assert not await _admits(
-        middleware, host=b"ex\xffample.test", origin=b"https://example.test",
+        middleware,
+        host=b"ex\xffample.test",
+        origin=b"https://example.test",
     )
 
 
 async def test_with_no_trusted_hosts_the_host_check_defers_to_other_middleware() -> None:
-    """Empty means "TrustedHostPolicy is mounted", not "nothing is checked".
-
-    Pinned because the two configurations differ only in whether one branch
-    runs, and the permissive one is the default.
-    """
     middleware = CsrfPolicy("s" * 32)
     assert await _admits(middleware, host=b"evil.test", origin=b"https://evil.test")
 
 
 def test_csrf_token_says_so_when_no_middleware_prepared_one() -> None:
-    """A `RuntimeError` naming the cause, not a `None` that renders as a blank field.
-
-    The template that calls this is building a form. Returning nothing would
-    ship a form with an empty token that fails on submit; the refusal names the
-    two ways it happens -- middleware not installed, or `exempt` excused it.
-    """
     from wreath.policy import csrf_token
 
     with pytest.raises(RuntimeError, match="has not prepared a token"):
@@ -412,23 +381,12 @@ def test_csrf_token_says_so_when_no_middleware_prepared_one() -> None:
     ],
 )
 def test_cookie_and_header_names_must_be_http_tokens(kwargs: dict) -> None:
-    """A name with a separator in it is a header-splitting or cookie-parsing bug."""
     with pytest.raises(ValueError, match="valid HTTP tokens"):
         CsrfPolicy("s" * 32, **kwargs)
 
 
 @pytest.mark.asyncio
 async def test_a_submitted_token_that_does_not_match_the_cookie_is_refused() -> None:
-    """Double submit, and the comparison that makes it a defence.
-
-    An attacker's page cannot read the cookie, but the browser sends it anyway;
-    what they cannot do is put its value in a header. So the whole control is
-    `compare_digest(cookie, submitted)` -- and every test above sends the *same*
-    value in both places, which passes whether or not that comparison happens.
-
-    Both tokens here are individually valid and signed by this middleware. Only
-    their being different is what must refuse the request.
-    """
     middleware = CsrfPolicy("s" * 32)
 
     first, second = _request("GET"), _request("GET")
@@ -452,12 +410,6 @@ async def test_a_submitted_token_that_does_not_match_the_cookie_is_refused() -> 
 
 @pytest.mark.asyncio
 async def test_an_unsafe_request_with_a_cookie_and_no_submitted_token_is_refused() -> None:
-    """The other half of the same `and`: the browser sends the cookie by itself.
-
-    That is precisely the cross-site request -- cookie present because cookies
-    are attached automatically, header absent because the attacker's page could
-    not add one.
-    """
     middleware = CsrfPolicy("s" * 32)
     safe = _request("GET")
     assert await middleware._ingress(safe) is None

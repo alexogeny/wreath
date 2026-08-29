@@ -1,14 +1,3 @@
-"""`wreath mcp stdio`: the same endpoint, behind a pipe.
-
-The thing worth testing here is not that JSON goes in and JSON comes out. It is
-that **nothing was reimplemented**: the relay drives the application's own ASGI
-callable, so the session, the schema, the record and the server-to-client
-requests are the HTTP endpoint's, reached over stdin and stdout. The sampling
-test is the one that proves it -- a request the server *initiates* has to travel
-out over stdout and its answer back in over stdin, which only works if the
-transport is the real one.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -136,7 +125,6 @@ async def test_a_tool_can_be_called_over_the_pipe() -> None:
 
 
 async def test_a_schema_rejection_is_the_same_one_the_http_endpoint_gives() -> None:
-    """Same validator, same error shape -- because it is the same endpoint."""
     pipe = Pipe()
     sink = Sink()
     relay = asyncio.ensure_future(serve(build(), stdin=pipe.reader, stdout=sink))
@@ -167,7 +155,6 @@ async def test_a_schema_rejection_is_the_same_one_the_http_endpoint_gives() -> N
 
 
 async def test_a_server_to_client_request_travels_out_and_its_answer_comes_back() -> None:
-    """The half a byte relay is easy to get wrong, and the reason to test at all."""
     pipe = Pipe()
     sink = Sink()
     relay = asyncio.ensure_future(serve(build(), stdin=pipe.reader, stdout=sink))
@@ -214,7 +201,6 @@ async def test_a_server_to_client_request_travels_out_and_its_answer_comes_back(
 
 
 async def test_the_subcommand_is_wired_to_the_relay() -> None:
-    """A parser entry nothing dispatches is a command that exits 2 in the field."""
     from wreath._cli import build_parser
 
     namespace = build_parser().parse_args(["mcp", "stdio", "app:app", "--path", "/rpc"])

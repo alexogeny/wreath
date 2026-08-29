@@ -115,7 +115,6 @@ BOUNDED_ORDER_OPERATORS = frozenset({GEO_DISTANCE, GEO_KNN})
 # "= ANY" names a quantifier. The compiler's allowlist therefore still decides
 # every byte that reaches SQL, and the choice of parser is a declaration rather
 # than an operand.
-#
 # `websearch_to_tsquery` is the default because it is the one that does not
 # raise on user input: quotes, `&`, `!` and a lone `:` are all just characters
 # to it. `to_tsquery` accepts operator syntax and raises on a syntax error,
@@ -197,16 +196,12 @@ class ColumnExpr(Expression):
 
     def __eq__(self, other: Any) -> BinaryExpr:  # ty: ignore[invalid-method-override]
         if other is None:
-            raise TypeError(
-                "comparing a column to None is ambiguous in SQL; use .is_null()"
-            )
+            raise TypeError("comparing a column to None is ambiguous in SQL; use .is_null()")
         return self._compare(EQ, other)
 
     def __ne__(self, other: Any) -> BinaryExpr:  # ty: ignore[invalid-method-override]
         if other is None:
-            raise TypeError(
-                "comparing a column to None is ambiguous in SQL; use .is_not_null()"
-            )
+            raise TypeError("comparing a column to None is ambiguous in SQL; use .is_not_null()")
         return self._compare(NE, other)
 
     def __lt__(self, other: Any) -> BinaryExpr:
@@ -295,8 +290,6 @@ class ColumnExpr(Expression):
             return InSubqueryExpr(NOT_IN, self, checked)
         return InExpr(NOT_IN, self, _bind_many(self.column, values))
 
-    # -- JSONB and array operators ----------------------------------------
-    #
     # `contains`/`contained_by` work on both jsonb and array columns (the
     # operand takes the column's own type); the jsonb key operators require a
     # `Jsonb` column and the array operators require an `Array` column, both
@@ -355,8 +348,6 @@ class ColumnExpr(Expression):
         element = self._require_array("all_eq")
         return BinaryExpr(ALL_EQ, _bind_as(value, element), self)
 
-    # -- pgvector distance operators --------------------------------------
-    #
     # Each renders `column <op> $n` and evaluates to a number, so it is used as
     # an ORDER BY key (the similarity search) or compared against a threshold
     # (`.cosine_distance(q) < 0.3`). Named for what they compute rather than for
@@ -428,8 +419,6 @@ class ColumnExpr(Expression):
             )
         return BinaryExpr(operator, self, _bind(self.column, other))
 
-    # -- full-text search --------------------------------------------------
-    #
     # `matches` is the predicate and `rank` is the score, and they are separate
     # calls on purpose: PostgreSQL evaluates `ts_rank` per surviving row and it
     # cannot use the index, so a search filters with `@@` and *then* orders by
@@ -462,9 +451,7 @@ class ColumnExpr(Expression):
                 not one of the two.
         """
         self._require_tsvector("matches")
-        return BinaryExpr(
-            _ts_operator("@@", parser, "matches"), self, _bind_as(terms, Text)
-        )
+        return BinaryExpr(_ts_operator("@@", parser, "matches"), self, _bind_as(terms, Text))
 
     def rank(self, terms: Any, *, parser: str = "websearch_to_tsquery") -> BinaryExpr:
         """`ts_rank(self, websearch_to_tsquery('<config>', terms))` -- a relevance score.
@@ -479,17 +466,14 @@ class ColumnExpr(Expression):
         a bug that looks like bad relevance.
         """
         self._require_tsvector("rank")
-        return BinaryExpr(
-            _ts_operator("ts_rank", parser, "rank"), self, _bind_as(terms, Text)
-        )
+        return BinaryExpr(_ts_operator("ts_rank", parser, "rank"), self, _bind_as(terms, Text))
 
     def _require_tsvector(self, method: str) -> None:
         from .types import TsVectorType
 
         if not isinstance(self.column.pg_type, TsVectorType):
             raise DeclarationError(
-                f".{method}() requires a TsVector column, not "
-                f"{self.column.pg_type.name}"
+                f".{method}() requires a TsVector column, not {self.column.pg_type.name}"
             )
 
     def _require_jsonb(self, method: str) -> None:
@@ -501,9 +485,7 @@ class ColumnExpr(Expression):
     def _require_array(self, method: str) -> Any:
         pg_type = self.column.pg_type
         if not isinstance(pg_type, _ArrayType):
-            raise DeclarationError(
-                f".{method}() requires an Array column, not {pg_type.name}"
-            )
+            raise DeclarationError(f".{method}() requires an Array column, not {pg_type.name}")
         return pg_type.element
 
     def _require_point(self, method: str) -> None:
@@ -630,10 +612,12 @@ class ColumnExpr(Expression):
                 self,
                 BinaryExpr(
                     GEO_BOX,
-                    BinaryExpr(GEO_POINT, _bind_as(box.lon_min, Float64),
-                               _bind_as(box.lat_min, Float64)),
-                    BinaryExpr(GEO_POINT, _bind_as(box.lon_max, Float64),
-                               _bind_as(box.lat_max, Float64)),
+                    BinaryExpr(
+                        GEO_POINT, _bind_as(box.lon_min, Float64), _bind_as(box.lat_min, Float64)
+                    ),
+                    BinaryExpr(
+                        GEO_POINT, _bind_as(box.lon_max, Float64), _bind_as(box.lat_max, Float64)
+                    ),
                 ),
             )
             for box in boxes
@@ -642,9 +626,7 @@ class ColumnExpr(Expression):
         # no branch of its own. A mutant that always took `or_` survived, which
         # is the tool reporting a redundant condition rather than a missing test.
         box_test = or_(*contained)
-        exact = BinaryExpr(
-            "<=", self._distance_to(centre), _bind_as(float(metres), Float64)
-        )
+        exact = BinaryExpr("<=", self._distance_to(centre), _bind_as(float(metres), Float64))
         return and_(box_test, exact)
 
     def nearest(self, centre: Any) -> BinaryExpr:
@@ -820,9 +802,7 @@ class BinaryExpr(Predicate):
         from .types import Float64
 
         if not (self.is_distance or self.is_rank):
-            raise TypeError(
-                f"cannot compare a {self.operator!r} predicate against a value"
-            )
+            raise TypeError(f"cannot compare a {self.operator!r} predicate against a value")
         return BinaryExpr(operator, self, _bind_as(other, Float64))
 
     def __repr__(self) -> str:
@@ -947,9 +927,7 @@ def _bind_many(column: Any, values: Any) -> tuple[ValueExpr, ...]:
 
 def _bind_element(column: Any, value: Any) -> ValueExpr:
     if isinstance(value, Expression):
-        raise TypeError(
-            "column-to-column comparison is not supported; compare against a value"
-        )
+        raise TypeError("column-to-column comparison is not supported; compare against a value")
     return ValueExpr(column.pg_type.coerce(value), column.pg_type)
 
 
@@ -1110,9 +1088,7 @@ def _placeholder_or_refuse(value: Any, pg_type: Any) -> Any:
     """
     maker = getattr(value, "_as_placeholder", None)
     if maker is None:
-        raise TypeError(
-            "column-to-column comparison is not supported; compare against a value"
-        )
+        raise TypeError("column-to-column comparison is not supported; compare against a value")
     return maker(pg_type)
 
 

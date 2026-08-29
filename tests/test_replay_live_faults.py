@@ -1,25 +1,3 @@
-"""Fault injection at seams only a real PostgreSQL can reach.
-
-Three of the corpus regions perturb `connection.transaction()`, and
-`_passes/driver.py::_run_chunk` is the only owned consumer of it. Getting a walk
-as far as a chunk transaction needs a real ledger row, a real keyset, and a real
-table -- a `DatabaseDouble` would have to be handed a scripted ledger record, and
-that record's column list changed twice in one day. So the transaction seam is
-covered here, against a server, rather than pretended at in-process.
-
-What is under test is not the fault. It is the invariant the fault exists to
-attack: **the cursor advances inside the chunk transaction**, so an interrupted
-chunk leaves neither a skipped row nor a doubly-processed one. That is a
-compare-and-swap whose failure mode is silent data loss -- a backfill that
-reports 100% having missed a range, or a purge that counts rows it rolled back.
-Nothing about a green run would say so.
-
-The injection is a thin proxy over a *real* `Database`: the SQL genuinely runs,
-the transaction genuinely opens, and the fault is raised where the modeled
-failure would have been raised. Skipped unless `WREATH_TEST_POSTGRES_DSN` points
-at a throwaway database.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -285,12 +263,8 @@ def _walk() -> ChunkedPass:
 async def _counts(database: Any) -> tuple[int, int]:
     connection = await database.acquire("write")
     try:
-        expired = await connection.fetchval(
-            f"SELECT count(*) FROM {_TABLE} WHERE key LIKE 'e%'"
-        )
-        live = await connection.fetchval(
-            f"SELECT count(*) FROM {_TABLE} WHERE key LIKE 'l%'"
-        )
+        expired = await connection.fetchval(f"SELECT count(*) FROM {_TABLE} WHERE key LIKE 'e%'")
+        live = await connection.fetchval(f"SELECT count(*) FROM {_TABLE} WHERE key LIKE 'l%'")
     finally:
         await database.release("write", connection)
     return int(expired), int(live)
@@ -306,16 +280,12 @@ async def _ledger(database: Any) -> tuple[int, int, str]:
     connection = await database.acquire("write")
     try:
         row = await connection.fetchrow(
-            f'SELECT units_done, rows_done, phase FROM "{_SCHEMA}".passes '
-            "WHERE name = $1",
+            f'SELECT units_done, rows_done, phase FROM "{_SCHEMA}".passes WHERE name = $1',
             "purge_expired",
         )
     finally:
         await database.release("write", connection)
     return int(row[0]), int(row[1]), str(row[2])
-
-
-# --- the invariant --------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -331,19 +301,6 @@ async def _ledger(database: Any) -> tuple[int, int, str]:
 async def test_an_interrupted_chunk_skips_nothing_and_repeats_nothing(
     database: Any, name: str, fault: AdapterFault, at: int
 ) -> None:
-    """The compare-and-swap, attacked at each of its three moments.
-
-    A chunk moves the cursor and does its work in one transaction, so the two
-    can only ever agree. The way to prove that is to break the transaction after
-    the swap has run and check the arithmetic still closes: the pass's own
-    `units_done` counter and the rows actually gone from the table must agree at
-    every point, and the walk must still finish having deleted every expired
-    row and no live one.
-
-    Counted rather than eyeballed, because both failure modes are silent. A
-    cursor that advanced past a rolled-back chunk leaves rows behind and reports
-    complete; a chunk counted before it committed reports more work than it did.
-    """
     assert name in TRANSACTION_SCHEDULES
     await _seed(database, expired=45, live=7)
     walk = _walk()
@@ -401,13 +358,6 @@ async def test_an_interrupted_chunk_skips_nothing_and_repeats_nothing(
 
 @pytest.mark.asyncio
 async def test_the_unfaulted_control_walk_finishes_cleanly(database: Any) -> None:
-    """The control the three above need.
-
-    Without it, every assertion in this file is satisfied by a walk that deletes
-    everything under all conditions -- including a `Purge` whose frontier does
-    nothing. This pins that the same walk, unfaulted, deletes exactly the
-    expired rows and leaves the live ones alone.
-    """
     await _seed(database, expired=45, live=7)
     async with asyncio.timeout(30):
         result = await _walk().run(database, sleep=lambda _s: asyncio.sleep(0))
@@ -418,13 +368,6 @@ async def test_the_unfaulted_control_walk_finishes_cleanly(database: Any) -> Non
 
 @pytest.mark.asyncio
 async def test_a_faulted_chunk_still_gives_its_connection_back(database: Any) -> None:
-    """The lease, at a real pool.
-
-    A chunk that dies inside its transaction is exactly where a lease can be
-    stranded, and a stranded lease against a `max_size=4` pool takes the whole
-    pass down on its fourth failure -- silently, because a pass parked in
-    `acquire()` looks like a pass with nothing to do.
-    """
     await _seed(database, expired=45, live=0)
     walk = _walk()
     for round_ in range(6):

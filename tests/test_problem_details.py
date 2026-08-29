@@ -32,9 +32,7 @@ def test_unauthorized_challenge_header_is_explicitly_optional() -> None:
 
 
 def test_method_not_allowed_only_emits_allow_for_declared_methods() -> None:
-    assert MethodNotAllowed(allow=("GET", "HEAD")).headers == (
-        (b"allow", b"GET, HEAD"),
-    )
+    assert MethodNotAllowed(allow=("GET", "HEAD")).headers == ((b"allow", b"GET, HEAD"),)
     assert MethodNotAllowed().headers == ()
 
 

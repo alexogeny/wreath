@@ -10,12 +10,12 @@ from pathlib import Path
 # What a real tree throws at a reader, and the stable code each is reported under.
 # Order matters: UnicodeDecodeError is a ValueError, so it must be tested first.
 _SKIP_REASONS: tuple[tuple[type[BaseException], str], ...] = (
-    (RecursionError, "too-deep"),          # nesting past the parser's stack budget
-    (MemoryError, "out-of-memory"),        # a generated or pathological module
-    (SyntaxError, "syntax-error"),         # py2, a template, a partial checkout
-    (UnicodeDecodeError, "undecodable"),   # not UTF-8 (latin-1 source, or binary)
-    (OSError, "unreadable"),               # broken symlink, permissions, deleted mid-walk
-    (ValueError, "invalid-source"),        # e.g. embedded NUL bytes
+    (RecursionError, "too-deep"),  # nesting past the parser's stack budget
+    (MemoryError, "out-of-memory"),  # a generated or pathological module
+    (SyntaxError, "syntax-error"),  # py2, a template, a partial checkout
+    (UnicodeDecodeError, "undecodable"),  # not UTF-8 (latin-1 source, or binary)
+    (OSError, "unreadable"),  # broken symlink, permissions, deleted mid-walk
+    (ValueError, "invalid-source"),  # e.g. embedded NUL bytes
 )
 # Everything above, as one except-clause. Deliberately *not* BaseException:
 # KeyboardInterrupt and SystemExit must end the run.
@@ -48,14 +48,16 @@ def _relative_to(path: Path, root: Path) -> str:
 # already use — which is what removes `.git`, `.tox`, `.nox`, `.venv`, `.eggs`,
 # `.mypy_cache`, `.ruff_cache`, `.pytest_cache`, `.direnv` and `.idea` without
 # enumerating them. So this list only carries the undotted names.
-_PRUNED_DIRS = frozenset({
-    "__pycache__",     # compiled bytecode; never source
-    "node_modules",    # a JS dependency tree, frequently vendored beside a Python app
-    "site-packages",   # installed third-party code, venv marker present or not
-    "venv",            # the undotted spelling of the convention below
-    "build",           # a *copy* of the source tree; counting it double-counts
-    "dist",            # unpacked sdists/wheels, same problem
-})
+_PRUNED_DIRS = frozenset(
+    {
+        "__pycache__",  # compiled bytecode; never source
+        "node_modules",  # a JS dependency tree, frequently vendored beside a Python app
+        "site-packages",  # installed third-party code, venv marker present or not
+        "venv",  # the undotted spelling of the convention below
+        "build",  # a *copy* of the source tree; counting it double-counts
+        "dist",  # unpacked sdists/wheels, same problem
+    }
+)
 _PRUNED_SUFFIXES = (".egg-info",)
 
 

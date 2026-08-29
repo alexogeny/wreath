@@ -165,10 +165,7 @@ class CorsPolicy:
         # normalized compare is the fallback, which is what makes
         # `HTTPS://App.Example` the same origin as `https://app.example`
         # (RFC 9110 §4.2.3 -- scheme and authority are case-insensitive).
-        if (
-            origin in self._allow_origins
-            or _normalize_origin(origin) in self._allow_origins
-        ):
+        if origin in self._allow_origins or _normalize_origin(origin) in self._allow_origins:
             # Echoed as the client sent it, which is what it will compare against.
             return (b"access-control-allow-origin", origin.encode("latin-1"))
         return None
@@ -279,6 +276,7 @@ class CorsPolicy:
             headers.extend(self._simple_headers)
             if not self._allow_all_origins:
                 append_vary(headers, b"origin")
+
     def _egress_sync(self, request: Request, response: Any) -> Any:
         """Reference executor transformer; compiled policy mutates in place."""
         self._egress_inplace(request, response)

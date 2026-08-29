@@ -44,14 +44,22 @@ ORDER = ("c-dt", "c-trie", "c-bitset")
 
 def _small_api() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
     routes = [
-        ("GET", "/"), ("GET", "/users"), ("GET", "/users/{id}"),
-        ("GET", "/users/{id}/posts"), ("POST", "/users/{id}/posts"),
-        ("GET", "/health"), ("GET", "/static/{path}"),
+        ("GET", "/"),
+        ("GET", "/users"),
+        ("GET", "/users/{id}"),
+        ("GET", "/users/{id}/posts"),
+        ("POST", "/users/{id}/posts"),
+        ("GET", "/health"),
+        ("GET", "/static/{path}"),
     ]
     rng = random.Random(7)
     choices = [
-        ("GET", "/users/42"), ("GET", "/health"), ("POST", "/users/9/posts"),
-        ("GET", "/static/x"), ("GET", "/nope"), ("GET", "/users/1/posts"),
+        ("GET", "/users/42"),
+        ("GET", "/health"),
+        ("POST", "/users/9/posts"),
+        ("GET", "/static/x"),
+        ("GET", "/nope"),
+        ("GET", "/users/1/posts"),
     ]
     return routes, [rng.choice(choices) for _ in range(20_000)]
 
@@ -59,8 +67,7 @@ def _small_api() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
 def _large_shared() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
     routes = [("GET", f"/api/{{a}}/{{b}}/thing{i}/{{c}}") for i in range(800)]
     queries = [
-        ("GET", f"/api/1/2/thing{random.Random(i).randint(0, 799)}/3")
-        for i in range(20_000)
+        ("GET", f"/api/1/2/thing{random.Random(i).randint(0, 799)}/3") for i in range(20_000)
     ]
     return routes, queries
 
@@ -108,17 +115,22 @@ def main() -> None:
                 "median_seconds": statistics.median(samples),
                 "ns_per_match": statistics.median(samples) / len(queries) * 1e9,
             }
-        tables.append({
-            "name": name,
-            "description": description,
-            "routes": len(routes),
-            "queries": len(queries),
-            "backends": backends,
-        })
-        print(f"{name}: " + "  ".join(
-            f"{impl} {values['median_seconds'] * 1e3:.2f}ms"
-            for impl, values in backends.items()
-        ))
+        tables.append(
+            {
+                "name": name,
+                "description": description,
+                "routes": len(routes),
+                "queries": len(queries),
+                "backends": backends,
+            }
+        )
+        print(
+            f"{name}: "
+            + "  ".join(
+                f"{impl} {values['median_seconds'] * 1e3:.2f}ms"
+                for impl, values in backends.items()
+            )
+        )
 
     document = {
         "tool": "benchmarks.bench_routing_backends",

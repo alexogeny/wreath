@@ -1,18 +1,3 @@
-"""The log's cursor, against a real PostgreSQL and a real interleaving.
-
-This suite exists for one bug, and it is a bug no fake can model: two writers
-whose transactions **overlap**, committing in the opposite order to the one they
-allocated their sequence numbers in. A reader that remembers `max(seq)` skips
-the row that commits second. Nothing errors, and the loss is load-dependent.
-
-`test_a_sequence_cursor_would_have_skipped_a_row` drives the naive query
-directly and asserts that it *does* lose the row -- so this suite falsifies its
-own premise on the PostgreSQL it is running against, rather than asserting the
-correct implementation is correct and calling that proof.
-
-See `wreath.log`'s cursor contract.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -29,7 +14,6 @@ pytestmark = [
     # `pyproject.toml` says a DSN-gated suite should be `database` so it runs in
     # the default gate, and that is right for every suite it applies to. It does
     # not apply here, and the reason is the design rather than the test:
-    #
     # `PostgresLog.read` stops at `pg_snapshot_xmin(pg_current_snapshot())`,
     # which is a **cluster-wide** horizon. Any open transaction anywhere on the
     # server -- another xdist worker's session, another suite's `session.begin()`
@@ -38,14 +22,12 @@ pytestmark = [
     # two overlapping transactions open* (`_Overlap`, `_Decoupled`), which is the
     # only way to drive the interleaving it exists to falsify. So it both suffers
     # from and causes the interference.
-    #
     # Measured rather than assumed: `pytest tests/test_log_cursor_live.py -n 6`
     # fails 6 of 15 and then hangs, because a test that fails inside the overlap
     # skips its `COMMIT` and the pooled connection carries an open transaction
     # into the fixture's `DROP SCHEMA ... CASCADE`. `network` keeps the suite out
     # of the parallel default gate; `-m ''` still runs it, and `-p no:randomly`
     # with no `-n` is the way to run it deliberately.
-    #
     # Fixing this properly needs a database of its own for the suite, which is a
     # decision about the test estate rather than about this module.
     pytest.mark.network,
@@ -154,21 +136,12 @@ class _Overlap:
 
 
 async def test_a_sequence_cursor_would_have_skipped_a_row(log, database):
-    """The premise, falsified on this database rather than assumed.
-
-    Runs the naive reader -- order by `seq`, remember `max(seq)` -- across the
-    overlap and asserts it loses the early row. If PostgreSQL ever stopped
-    allocating identity values before commit, this test would fail and the whole
-    design would be unnecessary.
-    """
     table = _DECLARATION.qualified_table
     reader = await database.acquire("write")
     try:
         async with _Overlap(database) as overlap:
             await overlap.run()
-            naive = await reader.fetch(
-                f"SELECT seq, body FROM {table} WHERE seq > 0 ORDER BY seq"
-            )
+            naive = await reader.fetch(f"SELECT seq, body FROM {table} WHERE seq > 0 ORDER BY seq")
             # Only the late-allocated row is visible; the early one is still in
             # flight. A `seq`-remembering reader records 2 here.
             assert [row[1] for row in naive] == ["late"]
@@ -229,13 +202,6 @@ class _Decoupled:
 
 
 async def test_a_horizon_gated_sequence_cursor_would_still_have_skipped_a_row(log, database):
-    """The *second* wrong answer, falsified: gating alone does not fix ordering.
-
-    Reading only settled rows but still remembering `max(seq)` looks correct and
-    is not. Sequence order and transaction order are independent, so a row can
-    settle later *and* carry a lower sequence number -- and then it sits behind
-    the cursor forever. This is the failure mode that would survive review.
-    """
     table = _DECLARATION.qualified_table
     gated = (
         f"SELECT seq, body FROM {table} "
@@ -260,7 +226,6 @@ async def test_a_horizon_gated_sequence_cursor_would_still_have_skipped_a_row(lo
 
 
 async def test_the_log_delivers_the_row_a_gated_sequence_cursor_would_lose(log, database):
-    """The same decoupled interleaving, through `PostgresLog`. Nothing is lost."""
     cursor = Cursor.start()
     async with _Decoupled(database) as overlap:
         await overlap.run()
@@ -277,7 +242,6 @@ async def test_the_log_delivers_the_row_a_gated_sequence_cursor_would_lose(log, 
 
 
 async def test_the_log_delivers_both_rows_across_the_same_overlap(log, database):
-    """The same interleaving, through `PostgresLog`. Nothing is lost."""
     cursor = Cursor.start()
     async with _Overlap(database) as overlap:
         await overlap.run()
@@ -345,13 +309,6 @@ async def test_append_returns_the_position_the_row_landed_at(log, database):
 
 
 async def test_an_append_on_a_caller_connection_shares_that_transaction(log, database):
-    """`connection=` is what makes an append atomic with the caller's write.
-
-    Without it the statement takes its own pooled connection and its own
-    transaction, which commits whether or not the caller's does -- so a change
-    feed built that way describes writes that rolled back. Asserted by rolling
-    one back.
-    """
     connection = await database.acquire("write")
     try:
         await connection.execute("BEGIN")
@@ -369,12 +326,6 @@ async def test_an_append_on_a_caller_connection_shares_that_transaction(log, dat
 
 
 async def test_an_append_without_a_connection_survives_the_callers_rollback(log, database):
-    """The other half of the same contract, so the difference is asserted.
-
-    A buffered producer *wants* this: its rows are delivery, not evidence, and
-    tying them to a caller's transaction would lose a whole stream to one failed
-    request.
-    """
     connection = await database.acquire("write")
     try:
         await connection.execute("BEGIN")
@@ -393,7 +344,6 @@ async def test_the_horizon_lag_is_zero_on_a_quiet_log(log, database):
 
 
 async def test_an_open_transaction_pins_the_horizon_and_stalls_readers(log, database):
-    """The honest cost of the design, asserted rather than only documented."""
     holder = await database.acquire("write")
     try:
         await holder.execute("BEGIN")
@@ -412,7 +362,6 @@ async def test_an_open_transaction_pins_the_horizon_and_stalls_readers(log, data
 
 
 async def test_concurrent_appenders_are_all_delivered_exactly_once(log, database):
-    """The property under load, rather than under a hand-built interleaving."""
     await asyncio.gather(*(log.append("s", body=f"row-{index}") for index in range(50)))
 
     seen: list[str] = []

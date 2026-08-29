@@ -135,9 +135,7 @@ class Key:
     descending: bool = False
 
     def __post_init__(self) -> None:
-        validate_unquoted_identifier(
-            self.name, "key column", error=PassDeclarationError
-        )
+        validate_unquoted_identifier(self.name, "key column", error=PassDeclarationError)
         if not _SQL_TYPE.fullmatch(self.type):
             raise PassDeclarationError(
                 f"key column {self.name!r} has type {self.type!r}, which is not a "

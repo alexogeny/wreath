@@ -1,8 +1,3 @@
-"""Fake-transport WebSocket tests for the Wreath servers.
-
-Comparing only wire bytes, ASGI messages, and closure behavior.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -43,8 +38,11 @@ MASK = b"\x01\x02\x03\x04"
 def upgrade(path: bytes = b"/ws", extra: bytes = b"") -> bytes:
     return (
         b"GET " + path + b" HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
-        b"Connection: Upgrade\r\nSec-WebSocket-Key: " + RFC_KEY +
-        b"\r\nSec-WebSocket-Version: 13\r\n" + extra + b"\r\n"
+        b"Connection: Upgrade\r\nSec-WebSocket-Key: "
+        + RFC_KEY
+        + b"\r\nSec-WebSocket-Version: 13\r\n"
+        + extra
+        + b"\r\n"
     )
 
 
@@ -141,8 +139,6 @@ async def echo_app(scope: dict, receive: Any, send: Any) -> None:
             await send({"type": "websocket.send", "bytes": message["bytes"]})
 
 
-# --- handshake ----------------------------------------------------------------
-
 @impl
 @pytest.mark.asyncio
 async def test_handshake_known_answer(protocol_cls: type) -> None:
@@ -196,8 +192,9 @@ async def test_missing_key_is_400(protocol_cls: type) -> None:
 async def test_wrong_version_is_426(protocol_cls: type) -> None:
     request = (
         b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
-        b"Connection: Upgrade\r\nSec-WebSocket-Key: " + RFC_KEY +
-        b"\r\nSec-WebSocket-Version: 8\r\n\r\n"
+        b"Connection: Upgrade\r\nSec-WebSocket-Key: "
+        + RFC_KEY
+        + b"\r\nSec-WebSocket-Version: 8\r\n\r\n"
     )
     _, transport = await start(protocol_cls, echo_app, [request])
     assert bytes(transport.buffer).startswith(b"HTTP/1.1 426")
@@ -280,8 +277,6 @@ async def test_subprotocol_negotiation(protocol_cls: type) -> None:
     head, _ = split_head(bytes(transport.buffer))
     assert b"sec-websocket-protocol: chat\r\n" in head
 
-
-# --- data flow ------------------------------------------------------------------
 
 @impl
 @pytest.mark.asyncio
@@ -395,8 +390,6 @@ async def test_app_return_closes_1000(protocol_cls: type) -> None:
     assert transport.closed
 
 
-# --- rejection and errors -------------------------------------------------------
-
 @impl
 @pytest.mark.asyncio
 async def test_close_before_accept_is_403(protocol_cls: type) -> None:
@@ -442,9 +435,7 @@ async def test_app_exception_after_accept_is_1011(protocol_cls: type) -> None:
         assert message["type"] == "websocket.receive"
         raise RuntimeError("boom")
 
-    _, transport = await start(
-        protocol_cls, app, [upgrade(), build_frame(1, b"x", True, MASK)]
-    )
+    _, transport = await start(protocol_cls, app, [upgrade(), build_frame(1, b"x", True, MASK)])
     _, rest = split_head(bytes(transport.buffer))
     assert frames(rest) == [(True, 8, (1011).to_bytes(2))]
     assert transport.closed
@@ -453,9 +444,7 @@ async def test_app_exception_after_accept_is_1011(protocol_cls: type) -> None:
 @impl
 @pytest.mark.asyncio
 async def test_unmasked_client_frame_fails_1002(protocol_cls: type) -> None:
-    _, transport = await start(
-        protocol_cls, echo_app, [upgrade(), build_frame(1, b"nope")]
-    )
+    _, transport = await start(protocol_cls, echo_app, [upgrade(), build_frame(1, b"nope")])
     _, rest = split_head(bytes(transport.buffer))
     assert frames(rest) == [(True, 8, (1002).to_bytes(2))]
     assert transport.closed
@@ -500,8 +489,6 @@ async def test_transport_loss_delivers_1006(protocol_cls: type) -> None:
     assert codes == [1006]
 
 
-# --- framework layer ------------------------------------------------------------
-
 @impl
 @pytest.mark.asyncio
 async def test_wreath_app_websocket_route(protocol_cls: type) -> None:
@@ -540,11 +527,10 @@ async def test_wreath_app_unknown_ws_route_is_403(protocol_cls: type) -> None:
     assert bytes(transport.buffer).startswith(b"HTTP/1.1 403")
 
 
-# --- receive-queue watermarks ----------------------------------------------
-#
 # A WebSocket message may carry zero payload bytes, so the byte watermark alone
 # cannot bound the queue: an empty-message flood keeps queued_bytes at zero
 # forever. Both bounds apply, and resuming needs both to fall.
+
 
 def _empty_text_frame() -> bytes:
     return build_frame(1, b"", True, MASK)
@@ -575,7 +561,6 @@ async def test_empty_messages_pause_reading_by_count(protocol_cls: type) -> None
 @impl
 @pytest.mark.asyncio
 async def test_byte_watermark_still_pauses_on_large_payloads(protocol_cls: type) -> None:
-    """The count bound must not have replaced the byte bound."""
     gate = asyncio.Event()
 
     async def app(scope: dict, receive: Any, send: Any) -> None:
@@ -597,7 +582,6 @@ async def test_byte_watermark_still_pauses_on_large_payloads(protocol_cls: type)
 @impl
 @pytest.mark.asyncio
 async def test_resume_requires_both_low_water_conditions(protocol_cls: type) -> None:
-    """Draining bytes alone must not resume while the count is still high."""
     drained: dict = {"count": 0}
     release = asyncio.Event()
     seen_paused = asyncio.Event()
@@ -628,7 +612,6 @@ async def test_resume_requires_both_low_water_conditions(protocol_cls: type) -> 
 @impl
 @pytest.mark.asyncio
 async def test_queue_drains_in_order_across_compaction(protocol_cls: type) -> None:
-    """FIFO order must survive the head-index compaction."""
     received: list[bytes] = []
     done = asyncio.Event()
     gate = asyncio.Event()
@@ -659,7 +642,6 @@ async def test_queue_drains_in_order_across_compaction(protocol_cls: type) -> No
 @impl
 @pytest.mark.asyncio
 async def test_disconnect_is_delivered_even_when_paused(protocol_cls: type) -> None:
-    """A watermark must never make a disconnect undeliverable."""
     saw_disconnect = asyncio.Event()
     gate = asyncio.Event()
 
@@ -684,12 +666,11 @@ async def test_disconnect_is_delivered_even_when_paused(protocol_cls: type) -> N
     await asyncio.wait_for(saw_disconnect.wait(), timeout=5)
 
 
-# --- fragmented message accumulator ----------------------------------------
-#
 # Fragments accumulate into one bytearray rather than a list of per-fragment
 # objects: an empty continuation allocates nothing, and what is retained is
 # bounded by max_body_bytes rather than by frame count. The limit is checked
 # before the accumulator grows.
+
 
 @impl
 @pytest.mark.asyncio
@@ -797,7 +778,6 @@ async def test_invalid_utf8_spanning_fragments_closes_1007(protocol_cls: type) -
 @impl
 @pytest.mark.asyncio
 async def test_valid_utf8_split_across_fragments_is_accepted(protocol_cls: type) -> None:
-    """The accumulator must join before decoding, not decode per fragment."""
     received: list = []
     done = asyncio.Event()
 
@@ -864,7 +844,6 @@ async def test_transport_loss_during_fragmentation_cleans_up(protocol_cls: type)
 async def test_empty_fragments_count_toward_the_fragment_limit(
     protocol_cls: type,
 ) -> None:
-    """Empty fragments carry no bytes, so only a count limit can bound them."""
     protocol, transport = await start(
         protocol_cls, echo_app, [upgrade()], ServerConfig(max_ws_fragments=8)
     )
@@ -947,9 +926,6 @@ async def test_the_fragment_count_resets_between_messages(protocol_cls: type) ->
     assert [item["text"] for item in received] == ["xyz", "xyz"]
 
 
-# --- close-code validation, and the default path_params -------------------------------
-
-
 def test_a_socket_without_path_params_gets_an_empty_mapping() -> None:
     # `path_params or {}`: a route with no captures passes None, and every
     # reader expects a mapping rather than having to guard for one.
@@ -961,11 +937,6 @@ def test_a_socket_without_path_params_gets_an_empty_mapping() -> None:
 
 @pytest.mark.parametrize("code", [1004, 1005, 1006, 1015, 999, 2999, 5000])
 def test_a_close_code_an_endpoint_may_not_send_is_refused(code: int) -> None:
-    """RFC 6455 7.4.1 reserves several codes for the protocol itself.
-
-    Sending one is a protocol error the peer is entitled to fail the connection
-    over, so it is refused here rather than put on the wire.
-    """
     import asyncio
 
     from wreath.websocket import WebSocket
@@ -983,11 +954,6 @@ def test_a_sendable_close_code_is_accepted(code: int) -> None:
 
 
 async def test_a_sendable_close_code_reaches_the_transport() -> None:
-    """The refusal must not fire for a code an endpoint may send.
-
-    Asserting only that an invalid code raises leaves "always raise" a passing
-    implementation, which is what `wreath mutant` reported.
-    """
     from wreath.websocket import WebSocket
 
     sent: list[dict] = []

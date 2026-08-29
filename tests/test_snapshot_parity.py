@@ -1,10 +1,3 @@
-"""SnapshotCache behaviour: atomic publication, single-flight refresh, misses.
-
-The pure implementation defines behaviour; the facade selects a native backend
-only if one is measured in. Tests target whichever the facade exposes plus the
-pure reference directly.
-"""
-
 from __future__ import annotations
 
 import asyncio

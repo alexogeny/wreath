@@ -54,8 +54,6 @@ class Finding:
         return f"{self.where}: {self.code} {self.message}"
 
 
-# --- attribution --------------------------------------------------------------
-
 #: Trailers that assign credit to somebody other than the author. Matched only
 #: at the start of a line, which is what makes them trailers -- prose that
 #: happens to discuss co-authorship is not a claim of it, and a linter that
@@ -87,11 +85,14 @@ def check_message(text: str, *, where: str, code_prefix: str = "HYG") -> list[Fi
     trailer = _TRAILER.search(text)
     if trailer:
         line = text[: trailer.start()].count("\n") + 1
-        findings.append(Finding(
-            f"{code_prefix}001", f"{where}:{line}",
-            f"co-authorship trailer {trailer.group(1).lower()!r} — you own this "
-            "change; remove the trailer",
-        ))
+        findings.append(
+            Finding(
+                f"{code_prefix}001",
+                f"{where}:{line}",
+                f"co-authorship trailer {trailer.group(1).lower()!r} — you own this "
+                "change; remove the trailer",
+            )
+        )
     for pattern, why in (
         (_GENERATED, "generation notice"),
         (_ROBOT, "generation notice"),
@@ -100,21 +101,23 @@ def check_message(text: str, *, where: str, code_prefix: str = "HYG") -> list[Fi
         match = pattern.search(text)
         if match:
             line = text[: match.start()].count("\n") + 1
-            findings.append(Finding(
-                f"{code_prefix}002", f"{where}:{line}",
-                f"{why}: {match.group(0)!r} — describe the change, not what wrote it",
-            ))
+            findings.append(
+                Finding(
+                    f"{code_prefix}002",
+                    f"{where}:{line}",
+                    f"{why}: {match.group(0)!r} — describe the change, not what wrote it",
+                )
+            )
             break  # one finding per message; three spellings of it is noise
     return findings
 
 
 def scan_commits(messages: dict[str, str]) -> list[Finding]:
     """Attribution findings across `{sha: message}`."""
-    return [f for sha, text in messages.items()
-            for f in check_message(text, where=f"commit {sha[:8]}")]
+    return [
+        f for sha, text in messages.items() for f in check_message(text, where=f"commit {sha[:8]}")
+    ]
 
-
-# --- stray paths --------------------------------------------------------------
 
 #: Each entry is (regex, why). Anchored on a path segment so `scratch/` matches
 #: `scratch/x` and `a/scratch/x` but not `scratchpad.py`.
@@ -150,12 +153,13 @@ def check_paths(paths: list[str]) -> list[Finding]:
     return findings
 
 
-# --- git ----------------------------------------------------------------------
-
-
 def _git(root: Path, *args: str) -> str:
     return subprocess.run(
-        ["git", *args], cwd=root, capture_output=True, text=True, check=True,
+        ["git", *args],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout
 
 
@@ -187,21 +191,27 @@ def _repo_root(start: Path) -> Path:
     return start
 
 
-# --- CLI ----------------------------------------------------------------------
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="wreath-hygiene",
         description="Refuse borrowed credit and committed debris.",
     )
-    parser.add_argument("--range", dest="revision_range", metavar="A..B",
-                        help="check the commit messages in this range")
-    parser.add_argument("--message-file", metavar="PATH",
-                        help="check this file as one message (a PR title and body)")
-    parser.add_argument("--paths", action="store_true",
-                        help="check every tracked path (the default when no "
-                             "other selector is given)")
+    parser.add_argument(
+        "--range",
+        dest="revision_range",
+        metavar="A..B",
+        help="check the commit messages in this range",
+    )
+    parser.add_argument(
+        "--message-file",
+        metavar="PATH",
+        help="check this file as one message (a PR title and body)",
+    )
+    parser.add_argument(
+        "--paths",
+        action="store_true",
+        help="check every tracked path (the default when no other selector is given)",
+    )
     parser.add_argument("--root", default=None, help="repository root")
     parser.add_argument("--format", choices=("text", "json"), default="text")
     args = parser.parse_args(argv)
@@ -219,12 +229,18 @@ def main(argv: list[str] | None = None) -> int:
         findings += check_message(text, where="pull request")
         # A PR body carries HYG003 rather than 001/002, because the remedy is
         # editing a description rather than rewriting history.
-        findings = [Finding("HYG003", f.where, f.message)
-                    if f.where.startswith("pull request") else f for f in findings]
+        findings = [
+            Finding("HYG003", f.where, f.message) if f.where.startswith("pull request") else f
+            for f in findings
+        ]
 
     if args.format == "json":
-        print(json.dumps([{"code": f.code, "where": f.where, "message": f.message}
-                          for f in findings], indent=2))
+        print(
+            json.dumps(
+                [{"code": f.code, "where": f.where, "message": f.message} for f in findings],
+                indent=2,
+            )
+        )
     else:
         for finding in findings:
             print(finding.render())

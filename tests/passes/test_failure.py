@@ -1,17 +1,3 @@
-"""Stage three: failure that neither blocks forever nor silently skips.
-
-The hand-rolled backfill's ``except: continue`` turns a failed chunk into a
-silent hole, and its absence turns one bad row into a walk that stops at 3am and
-is noticed on Monday. Both are refused here, and the rule that makes refusing
-both possible is the one worth reading twice:
-
-    Skipping is allowed for throughput. It cannot buy the irreversible step.
-
-So a skipped chunk is recorded, the recording bars the terminal gate, and the
-only way to un-bar it is to clear the hole -- which happens when the chunk
-*succeeds*, not when somebody queues it.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -69,9 +55,6 @@ def database(world):
     return FakeDatabase(world)
 
 
-# --- the declaration ----------------------------------------------------------
-
-
 def test_a_failure_policy_that_is_neither_halt_nor_skip_is_refused():
     with pytest.raises(PassDeclarationError) as caught:
         purge_pass(on_chunk_failure="continue")
@@ -110,12 +93,7 @@ def test_a_store_purge_opts_into_skip_because_it_has_no_terminal_step():
     assert walk.on_chunk_failure == "skip"
 
 
-# --- the hole -----------------------------------------------------------------
-
-
-async def test_a_chunk_that_keeps_failing_is_recorded_with_its_position(
-    database, world
-):
+async def test_a_chunk_that_keeps_failing_is_recorded_with_its_position(database, world):
     walk = purge_pass()
     world.before = _boom_on_delete
 
@@ -130,9 +108,7 @@ async def test_a_chunk_that_keeps_failing_is_recorded_with_its_position(
     assert hole.cursor_to is not None
 
 
-async def test_a_hole_carries_a_statement_an_operator_can_actually_run(
-    database, world
-):
+async def test_a_hole_carries_a_statement_an_operator_can_actually_run(database, world):
     walk = purge_pass()
     world.before = _boom_on_delete
 
@@ -152,9 +128,6 @@ def _boom_on_delete(sql, args):
         raise RuntimeError("boom")
 
 
-# --- halt ---------------------------------------------------------------------
-
-
 async def test_halt_stops_at_the_hole_and_runs_nothing_after_it(database, world):
     walk = purge_pass(on_chunk_failure="halt")
     world.before = _boom_on_delete
@@ -171,15 +144,6 @@ async def test_halt_stops_at_the_hole_and_runs_nothing_after_it(database, world)
 
 
 async def test_retry_can_clear_a_hole_on_a_halted_pass(database, world):
-    """The default failure policy has to have a way out of it.
-
-    ``halt`` parks the cursor *before* its hole and stops the pass. Every later
-    shift then sees a phase that is not ``walking`` and declines to run -- so
-    without a way to lift that, the chunk is never re-attempted, the hole is
-    never cleared, and the terminal gate it bars is unreachable for the life of
-    the pass. ``halt`` would be a trap rather than a policy, and it is the
-    default.
-    """
     walk = purge_pass(on_chunk_failure="halt")
     world.before = _boom_on_delete
     await walk.run(database, sleep=_nap)
@@ -210,9 +174,6 @@ async def test_a_blocked_pass_is_not_retried_by_the_next_shift(database, world):
     # extra steps. Someone has to clear the hole.
     assert again.stopped == "blocked"
     assert len(world.rows) == 9
-
-
-# --- skip ---------------------------------------------------------------------
 
 
 async def test_skip_moves_past_the_hole_and_keeps_going(database, world):
@@ -251,9 +212,7 @@ async def test_a_skipped_chunk_bars_the_terminal_gate(database, world):
     assert status.gate_barred is True
 
 
-async def test_a_skipped_chunk_does_not_count_as_a_unit_of_work_done(
-    database, world
-):
+async def test_a_skipped_chunk_does_not_count_as_a_unit_of_work_done(database, world):
     walk = purge_pass(on_chunk_failure="skip")
     failures = {"left": 2}
 
@@ -284,9 +243,7 @@ async def test_a_later_skip_compares_against_the_cursor_it_followed(database, wo
     world.before = poison_second_chunk
     result = await walk.run(database, sleep=_nap)
     skips = [
-        args
-        for sql, args in world.statements
-        if "SET cursor = $3::jsonb, last_advance" in sql
+        args for sql, args in world.statements if "SET cursor = $3::jsonb, last_advance" in sql
     ]
     assert result.complete is True
     assert len(skips) == 1
@@ -314,9 +271,6 @@ async def test_a_skip_that_loses_its_cursor_swap_stops_as_lost(database, world):
     assert result.stopped == "lost"
     assert result.chunks == 0
     assert result.holes == 0
-
-
-# --- requeue and retry --------------------------------------------------------
 
 
 async def test_retry_clears_the_hole_only_when_the_chunk_succeeds(database, world):
@@ -364,7 +318,8 @@ async def test_a_requeued_unit_is_walked_without_rewinding_the_cursor(database, 
     world.rows.append({"key": "late", "expires": NOW - datetime.timedelta(hours=5)})
 
     queued = await walk.requeue(
-        database, (NOW - datetime.timedelta(hours=5), "late"),
+        database,
+        (NOW - datetime.timedelta(hours=5), "late"),
         after=(NOW - datetime.timedelta(hours=6), "k000"),
     )
     assert queued is True
@@ -383,9 +338,7 @@ async def test_a_requeued_unit_is_walked_without_rewinding_the_cursor(database, 
 
 
 async def test_a_requeued_unit_failure_is_counted_as_a_hole(database, world):
-    walk = purge_pass(
-        frontier=Ceiling.at_launch(monotone="expiry stamps are assigned by now()")
-    )
+    walk = purge_pass(frontier=Ceiling.at_launch(monotone="expiry stamps are assigned by now()"))
     await walk.run(database, sleep=_nap)
     world.rows.append({"key": "late", "expires": NOW - datetime.timedelta(hours=5)})
     assert await walk.requeue(
@@ -447,22 +400,7 @@ async def test_a_requeued_unit_that_still_fails_stops_being_pending(database, wo
     assert status.holes_open >= 1
 
 
-# --- the hole recording is itself load-bearing ---------------------------------
-
-
 async def test_a_hole_that_cannot_be_recorded_stops_the_walk(database, world):
-    """If the hole cannot be written, the pass must not carry on regardless.
-
-    `gate_barred` is `holes_open > 0`, so the hole *is* the fact the terminal
-    gate reads. Recording it under `suppress(Exception)` meant a failed insert
-    left no hole, an unbarred gate, and a `skip` that had bought exactly the
-    irreversible step design 20 §11.2 says it never can -- the suppression sat
-    directly on the fact a safety mechanism reads.
-
-    Propagating is safe because the cursor has not moved and every ledger write
-    here is idempotent (`record_hole` is `ON CONFLICT DO UPDATE`), so the
-    runner's retry re-runs them cleanly.
-    """
     walk = purge_pass(on_chunk_failure="skip")
 
     def poison_the_chunk_and_its_hole(sql, args):

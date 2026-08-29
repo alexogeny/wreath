@@ -198,9 +198,7 @@ class FakePostgres:
                 if describes_portal:
                     await self._send(writer, _row_description() if returns_rows else _message(b"n"))
                 if returns_rows:
-                    series = re.search(
-                        r"generate_series\((-?\d+),\s*(-?\d+)\)", sql, re.IGNORECASE
-                    )
+                    series = re.search(r"generate_series\((-?\d+),\s*(-?\d+)\)", sql, re.IGNORECASE)
                     match = re.match(r"\s*select\s+(-?\d+)", sql, re.IGNORECASE)
                     if series is not None:
                         values = range(int(series.group(1)), int(series.group(2)) + 1)
@@ -239,9 +237,7 @@ async def database() -> AsyncIterator[tuple[FakePostgres, str]]:
 
 
 @pytest.mark.asyncio
-async def test_connect_and_close(
-    postgres: Any, database: tuple[FakePostgres, str]
-) -> None:
+async def test_connect_and_close(postgres: Any, database: tuple[FakePostgres, str]) -> None:
     _, dsn = database
     conn = await postgres.connect(dsn)
     assert not conn.closed
@@ -295,7 +291,6 @@ async def test_result_modes_and_record_access(
 async def test_cached_execute_without_result_columns(
     postgres: Any, database: tuple[FakePostgres, str]
 ) -> None:
-    """Re-executing a statement that returns no rows must use the cached plan."""
     server, dsn = database
     conn = await postgres.connect(dsn)
     try:
@@ -320,7 +315,6 @@ async def test_cached_execute_without_result_columns(
 async def test_cached_fetchval_completes_from_native_receive_slab(
     postgres: Any, database: tuple[FakePostgres, str]
 ) -> None:
-    """The hot scalar path materializes only its value, not a Z message."""
     _, dsn = database
     conn = await postgres.connect(dsn)
     try:
@@ -402,18 +396,6 @@ async def test_error_is_consumed_through_ready_for_query_and_connection_reused(
 
 
 def test_a_declared_sqlstate_survives_construction(postgres: Any) -> None:
-    """A subclass that names its condition keeps it.
-
-    `PostgresError.__init__` used to assign `self.sqlstate` unconditionally, so
-    a class-level declaration was overwritten with `None` by the very
-    constructor that was supposed to leave it alone -- and a caller classifying
-    by sqlstate, which is the correct way to tell a lock timeout from a
-    deadlock, read `None` for exactly the classes that had bothered to say.
-    Both spellings are pinned here because both are in use: the fakes in
-    `tests/passes/fakes.py` pass it up through `super().__init__` (the
-    workaround, which had to stay working) and the declaration is what should
-    have worked all along.
-    """
 
     class Declared(postgres.PostgresError):
         sqlstate = "23514"
@@ -434,11 +416,6 @@ def test_a_declared_sqlstate_survives_construction(postgres: Any) -> None:
 
 
 def test_the_error_classes_are_one_set_across_both_backends() -> None:
-    """The native backend re-exports these classes rather than redefining them.
-
-    Which is why the fix above needs no C counterpart: there is no second
-    constructor to keep in step. If that ever changes, this fails.
-    """
     if native_postgres is None:
         pytest.skip("the native PostgreSQL extension is not built")
     for name in (
@@ -500,14 +477,14 @@ async def test_connection_plan_cache_evicts_oldest_and_closes_statement(
     server, dsn = database
     conn = await pure_postgres.connect(dsn, statement_cache_size=2)
     try:
-        await conn.fetchval("select $1::int4", 1)     # shape A: cold
+        await conn.fetchval("select $1::int4", 1)  # shape A: cold
         await conn.execute("update t set a = $1", 2)  # shape B: cold
         await conn.execute("update t set b = $1", 3)  # shape C: cold -> evicts A
         assert conn.prepared_plan_count == 2
         # A cache hit now carries the Close of evicted statement A on the wire.
         await conn.execute("update t set a = $1", 4)  # shape B: hit
         # The evicted shape is cold again (its plan was dropped).
-        await conn.fetchval("select $1::int4", 5)     # shape A: cold again
+        await conn.fetchval("select $1::int4", 5)  # shape A: cold again
     finally:
         await conn.close()
 
@@ -519,7 +496,8 @@ async def test_connection_plan_cache_evicts_oldest_and_closes_statement(
 @pytest.mark.parametrize("backend", POSTGRES_BACKENDS)
 @pytest.mark.asyncio
 async def test_connection_plan_cache_evicts_to_its_byte_budget(
-    database: tuple[FakePostgres, str], backend: Any,
+    database: tuple[FakePostgres, str],
+    backend: Any,
 ) -> None:
     _, dsn = database
     conn = await backend.connect(dsn, statement_cache_bytes=1)

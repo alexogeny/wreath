@@ -1,5 +1,3 @@
-"""Contracts shared by synchronous warm-host ASGI adapters."""
-
 import pytest
 
 from wreath._asgi_driver import WarmASGIDriver

@@ -110,25 +110,13 @@ async def _trial(count: int, trial: int) -> dict[str, float]:
         "optimized_b",
     )
     apps = {
-        "optimized_a": _app(
-            legacy=False, generic_validation=False, entries=count + 1
-        ),
-        "generic_validation": _app(
-            legacy=False, generic_validation=True, entries=count + 1
-        ),
-        "legacy_copy": _app(
-            legacy=True, generic_validation=False, entries=count + 1
-        ),
-        "legacy_pipeline": _app(
-            legacy=True, generic_validation=True, entries=count + 1
-        ),
-        "optimized_b": _app(
-            legacy=False, generic_validation=False, entries=count + 1
-        ),
+        "optimized_a": _app(legacy=False, generic_validation=False, entries=count + 1),
+        "generic_validation": _app(legacy=False, generic_validation=True, entries=count + 1),
+        "legacy_copy": _app(legacy=True, generic_validation=False, entries=count + 1),
+        "legacy_pipeline": _app(legacy=True, generic_validation=True, entries=count + 1),
+        "optimized_b": _app(legacy=False, generic_validation=False, entries=count + 1),
     }
-    headers = {
-        name: _headers(f"trial-{trial}-{name}", count) for name in names
-    }
+    headers = {name: _headers(f"trial-{trial}-{name}", count) for name in names}
     totals = dict.fromkeys(names, 0)
     async with (
         TestClient(apps["optimized_a"]) as optimized_a,
@@ -173,15 +161,11 @@ async def run(count: int, trials: int) -> dict[str, Any]:
             samples[name].append(value)
     noise = [
         abs(left - right)
-        for left, right in zip(
-            samples["optimized_a"], samples["optimized_b"], strict=True
-        )
+        for left, right in zip(samples["optimized_a"], samples["optimized_b"], strict=True)
     ]
     optimized = [
         (left + right) / 2
-        for left, right in zip(
-            samples["optimized_a"], samples["optimized_b"], strict=True
-        )
+        for left, right in zip(samples["optimized_a"], samples["optimized_b"], strict=True)
     ]
     normalization_deltas = [
         legacy - selected
@@ -189,19 +173,14 @@ async def run(count: int, trials: int) -> dict[str, Any]:
     ]
     validation_deltas = [
         generic - selected
-        for generic, selected in zip(
-            samples["generic_validation"], optimized, strict=True
-        )
+        for generic, selected in zip(samples["generic_validation"], optimized, strict=True)
     ]
     pipeline_deltas = [
         legacy - selected
-        for legacy, selected in zip(
-            samples["legacy_pipeline"], optimized, strict=True
-        )
+        for legacy, selected in zip(samples["legacy_pipeline"], optimized, strict=True)
     ]
     noise_floor = abs(
-        statistics.median(samples["optimized_a"])
-        - statistics.median(samples["optimized_b"])
+        statistics.median(samples["optimized_a"]) - statistics.median(samples["optimized_b"])
     )
     resolution = 2 * noise_floor
     return {
@@ -228,12 +207,8 @@ async def run(count: int, trials: int) -> dict[str, Any]:
             "normalization_saved_ns": _summary(normalization_deltas),
             "validation_saved_ns": _summary(validation_deltas),
             "pipeline_saved_ns": _summary(pipeline_deltas),
-            "normalization_resolved": (
-                statistics.median(normalization_deltas) > resolution
-            ),
-            "validation_resolved": (
-                statistics.median(validation_deltas) > resolution
-            ),
+            "normalization_resolved": (statistics.median(normalization_deltas) > resolution),
+            "validation_resolved": (statistics.median(validation_deltas) > resolution),
             "pipeline_resolved": statistics.median(pipeline_deltas) > resolution,
         },
     }

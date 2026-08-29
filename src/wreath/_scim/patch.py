@@ -141,18 +141,14 @@ def _operations(payload: Any) -> Sequence[Any]:
     if not isinstance(payload, Mapping):
         raise PatchError("invalidSyntax", "a patch body must be a JSON object")
     schemas = payload.get("schemas")
-    if schemas is not None and (
-        not isinstance(schemas, list) or PATCH_OP_URN not in schemas
-    ):
+    if schemas is not None and (not isinstance(schemas, list) or PATCH_OP_URN not in schemas):
         raise PatchError(
             "invalidSyntax",
             f"a patch body's schemas must contain {PATCH_OP_URN!r}",
         )
     operations = payload.get("Operations", payload.get("operations"))
     if not isinstance(operations, list) or not operations:
-        raise PatchError(
-            "invalidSyntax", "a patch body must carry a non-empty Operations list"
-        )
+        raise PatchError("invalidSyntax", "a patch body must carry a non-empty Operations list")
     if len(operations) > MAX_OPERATIONS:
         raise PatchError(
             "invalidValue",
@@ -162,9 +158,7 @@ def _operations(payload: Any) -> Sequence[Any]:
     return operations
 
 
-def apply(
-    document: Mapping[str, Any], payload: Any, *, shape: Shape
-) -> dict[str, Any]:
+def apply(document: Mapping[str, Any], payload: Any, *, shape: Shape) -> dict[str, Any]:
     """`document` after every operation in `payload`, or nothing at all.
 
     The operations are applied to a copy and the copy is returned, so a refusal
@@ -199,14 +193,11 @@ def apply(
         value = operation.get("value")
         if raw_path is None:
             if op == "remove":
-                raise PatchError(
-                    "noTarget", "a remove operation must name a path to remove"
-                )
+                raise PatchError("noTarget", "a remove operation must name a path to remove")
             if not isinstance(value, Mapping):
                 raise PatchError(
                     "invalidValue",
-                    f"a pathless {op} operation's value must be an object of "
-                    "attributes to set",
+                    f"a pathless {op} operation's value must be an object of attributes to set",
                 )
             for name, sub_value in value.items():
                 _one(draft, op, parse_path(str(name), shape=shape), sub_value, True, shape)
@@ -274,9 +265,7 @@ def _elements(value: Any) -> list[dict[str, Any]]:
     return out
 
 
-def _multi_valued(
-    draft: dict[str, Any], op: str, path: Path, value: Any, shape: Shape
-) -> None:
+def _multi_valued(draft: dict[str, Any], op: str, path: Path, value: Any, shape: Shape) -> None:
     key = shape.key(path.attribute)
     existing: list[Any] = list(draft.get(key) or [])
     if op == "add":
@@ -358,7 +347,5 @@ def replace(document: Mapping[str, Any], body: Any, *, shape: Shape) -> dict[str
         attribute = name.rpartition(":")[2].lower()
         if attribute not in shape.writable:
             continue
-        draft[shape.key(attribute)] = (
-            _elements(value) if attribute in shape.multi_valued else value
-        )
+        draft[shape.key(attribute)] = _elements(value) if attribute in shape.multi_valued else value
     return draft

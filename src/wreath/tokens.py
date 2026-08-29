@@ -156,8 +156,16 @@ class ActionTokens:
             if not ledger.register(token_id, ttl=policy.ttl, now=float(issued)):
                 raise RuntimeError("Action token ledger is full; no token was issued")
         payload = _json.dumps(
-            {"v": 1, "k": self._current, "p": purpose, "s": subject,
-             "iat": issued, "exp": expires, "b": bound, "j": token_id}
+            {
+                "v": 1,
+                "k": self._current,
+                "p": purpose,
+                "s": subject,
+                "iat": issued,
+                "exp": expires,
+                "b": bound,
+                "j": token_id,
+            }
         )
         body = b64url_encode(payload)
         mac = b64url_encode(hmac.digest(self._keys[self._current], body.encode("ascii"), "sha256"))
@@ -223,7 +231,7 @@ class ActionTokens:
                 or not isinstance(token_id, str)
             ):
                 return None
-        except (TypeError, ValueError, UnicodeError):
+        except TypeError, ValueError, UnicodeError:
             return None
         if policy.single_use:
             ledger = self._ledger
@@ -236,7 +244,7 @@ class ActionTokens:
     def _purpose(self, name: str) -> TokenPurpose:
         try:
             return self._purposes[name]
-        except (KeyError, TypeError):
+        except KeyError, TypeError:
             raise ValueError(
                 f"ActionTokens purpose {name!r} is not declared; declare it with TokenPurpose"
             ) from None

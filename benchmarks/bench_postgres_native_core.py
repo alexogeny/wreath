@@ -117,9 +117,7 @@ def main() -> int:
             "median_us": median,
             "samples_us": samples,
             "counters": (
-                _counted(name, args.operations, args.trials, args.warmup)
-                if args.measure
-                else None
+                _counted(name, args.operations, args.trials, args.warmup) if args.measure else None
             ),
         }
     for name, row in results.items():

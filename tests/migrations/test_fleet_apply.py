@@ -1,33 +1,3 @@
-"""One artifact across many tenant schemas, against a real server.
-
-`resolve_fleet` classified a fleet's readiness and `apply_single_artifact`
-migrated one schema; nothing joined them, and the roadmap carried the gap as
-"applying one artifact across many tenant schemas under fleet locking".
-
-The reason it was a gap turns out not to be the loop or the lock. **A catalog
-fingerprint embeds the schema name** -- `nspname` is the first column of every
-branch of the catalog query -- so two byte-identical tenants fingerprint
-differently, and an artifact generated against `t_alice` could never satisfy the
-source-fingerprint refusal on `t_bob`. `_FLEET_CATALOG_SQL` blanks tenant-local
-names so structurally identical tenants agree, while keeping a foreign key into
-a *shared* schema named, because that is a real structural fact every tenant has
-in common rather than a difference between them.
-
-These run against PostgreSQL because every property here is one a fake would
-have to assume: that the neutral fingerprint really does match across schemas,
-that it still discriminates a tenant whose structure differs, and that the
-advisory lock actually excludes a second runner.
-
-## What is proven here
-
-`apply_fleet` locks, loops, skips a tenant already at the target, reports per
-tenant, and refuses a bad fleet at declaration time. `generate_single_plan`
-with `fleet=True` supplies the other half: a schema-neutral desired image and
-unqualified DDL for the `search_path`-bound tenant. The tests below generate
-that real artifact and apply it across structurally identical schemas rather
-than fabricating the format they intend to prove.
-"""
-
 from __future__ import annotations
 
 import os
@@ -139,23 +109,13 @@ async def fleet():
             await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
         placeholders = ", ".join(f"${index + 1}" for index in range(len(names)))
         await admin.execute(
-            'DELETE FROM "wreath_migrations"."history" '
-            f"WHERE target_schema IN ({placeholders})",
+            f'DELETE FROM "wreath_migrations"."history" WHERE target_schema IN ({placeholders})',
             *names,
         )
 
 
-# --- the enabler ----------------------------------------------------------------------
-
-
 @_live
 async def test_a_named_fingerprint_differs_between_identical_tenants(fleet) -> None:
-    """The reason a fleet could not exist, stated as a test.
-
-    If this ever starts passing as equality, `_FLEET_CATALOG_SQL` is redundant
-    and should go -- so it is written as the *current* fact rather than as a
-    complaint about it.
-    """
     _db, admin, names = fleet
     first, second = names[0], names[1]
     for schema in (first, second):
@@ -189,18 +149,13 @@ async def test_a_neutral_fingerprint_still_separates_different_structures(fleet)
     _db, admin, names = fleet
     same, different = names[0], names[1]
     await admin.execute(f'CREATE TABLE "{same}".widgets (id bigint PRIMARY KEY)')
-    await admin.execute(
-        f'CREATE TABLE "{different}".widgets (id bigint PRIMARY KEY, extra int)'
-    )
+    await admin.execute(f'CREATE TABLE "{different}".widgets (id bigint PRIMARY KEY, extra int)')
 
     async def neutral(schema: str) -> bytes:
         snap = await _decode_catalog_snapshot(admin, _FLEET_CATALOG_SQL, (schema,))
         return _fingerprint_image(snap.image)
 
     assert await neutral(same) != await neutral(different)
-
-
-# --- the runner -----------------------------------------------------------------------
 
 
 @_live
@@ -215,17 +170,8 @@ async def test_a_failure_names_the_tenant_and_the_reason(fleet) -> None:
     assert "fingerprint" in result.failed[0].error
 
 
-# --- the fleet lock -------------------------------------------------------------------
-
-
 @_live
 async def test_a_second_concurrent_runner_is_refused(fleet) -> None:
-    """Refused immediately, not queued.
-
-    Two runs interleaving per-tenant transactions would leave a fleet in a
-    state neither artifact describes, and queueing behind a run that may take
-    an hour is not a better answer than saying so.
-    """
     db, admin, names = fleet
     artifact = await _artifact(admin, names[0])
 
@@ -276,12 +222,8 @@ async def test_a_schema_that_is_not_an_identifier_is_refused(fleet) -> None:
         await apply_fleet(db, artifact.data, ['t"; DROP SCHEMA public; --'])
 
 
-# --- end to end -----------------------------------------------------------------------
-
-
 @_live
 async def test_one_artifact_migrates_every_tenant(fleet) -> None:
-    """The whole point: generated once, applied to all of them."""
     db, admin, names = fleet
     artifact = await _artifact(admin, names[0])
 
@@ -293,7 +235,8 @@ async def test_one_artifact_migrates_every_tenant(fleet) -> None:
         recorded = await admin.fetchval(
             'SELECT count(*) FROM "wreath_migrations"."history" '
             "WHERE target_schema = $1 AND checksum = $2",
-            schema, artifact.checksum,
+            schema,
+            artifact.checksum,
         )
         assert recorded == 1, schema
         # Each tenant got its *own* table, not the reference tenant's again.
@@ -310,12 +253,6 @@ async def test_one_artifact_migrates_every_tenant(fleet) -> None:
 
 @_live
 async def test_a_second_run_skips_rather_than_refusing(fleet) -> None:
-    """Resumability, which is what makes a stopped fleet run finishable.
-
-    Without it the parent-checksum refusal rejects every tenant that already
-    succeeded, so resuming a run that stopped at tenant 400 of 1000 produces
-    399 errors that all mean "this one is fine".
-    """
     db, admin, names = fleet
     artifact = await _artifact(admin, names[0])
 
@@ -369,11 +306,6 @@ async def test_the_lock_is_released_so_the_next_run_proceeds(fleet) -> None:
 
 @_live
 async def test_the_rendered_ddl_names_no_tenant(fleet) -> None:
-    """The property that lets one artifact cross a fleet, asserted directly.
-
-    A qualified statement would recreate the reference tenant's objects on
-    every other tenant, which is exactly the failure this replaced.
-    """
     _db, admin, names = fleet
 
     class _Db:

@@ -3,6 +3,7 @@
 2 on usage). `static` audits generated + static HTML; `runtime` audits a live server;
 `--fix` applies the safe remediation subset.
 """
+
 from __future__ import annotations
 
 import json
@@ -78,8 +79,10 @@ def _run_fix(namespace: Any, app: Any) -> int:
 def _run_runtime(namespace: Any) -> int:
     url = getattr(namespace, "url", None)
     if not url:
-        print("wreath audit runtime: a base URL is required (e.g. http://localhost:8000)",
-              file=sys.stderr)
+        print(
+            "wreath audit runtime: a base URL is required (e.g. http://localhost:8000)",
+            file=sys.stderr,
+        )
         return 2
     from .runtime import run_runtime_audit
 

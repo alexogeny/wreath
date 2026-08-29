@@ -1,5 +1,3 @@
-"""Model declaration, inheritance, constructors, field state, and fingerprints."""
-
 from __future__ import annotations
 
 import datetime
@@ -24,9 +22,6 @@ from .conftest import FakeDatabase, Post, User
 
 def compile_models(*models: type) -> Registry:
     return Registry(FakeDatabase(), list(models), validate_schema="off")
-
-
-# -- declaration order and layout ---------------------------------------------
 
 
 def test_columns_keep_class_body_order() -> None:
@@ -86,9 +81,6 @@ def test_class_access_yields_an_expression_and_instance_access_a_value() -> None
     assert User.id.column is User.__wreath_column_map__["id"]
     instance = User(id=1, email="a@b.c", name="A")
     assert instance.id == 1
-
-
-# -- invalid declarations ------------------------------------------------------
 
 
 def test_a_model_without_a_primary_key_is_rejected() -> None:
@@ -173,9 +165,6 @@ def test_two_models_mapping_one_table_are_rejected() -> None:
         compile_models(User, Shadow)
 
 
-# -- constructors --------------------------------------------------------------
-
-
 def test_constructor_takes_keywords_only() -> None:
     with pytest.raises(TypeError):
         User(1, "a@b.c")  # type: ignore[misc]
@@ -226,9 +215,6 @@ def test_an_omitted_primary_key_stays_unloaded_for_returning() -> None:
 def test_a_nullable_field_may_be_omitted() -> None:
     instance = User(id=1, email="a@b.c", name="A")
     assert not instance._orm_is_loaded(3)
-
-
-# -- field state ---------------------------------------------------------------
 
 
 def test_reading_an_unloaded_column_raises() -> None:
@@ -317,9 +303,6 @@ def test_an_unencodable_json_value_is_rejected_on_assignment() -> None:
         Document(id=1, body=object())
 
 
-# -- fingerprints --------------------------------------------------------------
-
-
 def test_fingerprints_are_stable_across_registries() -> None:
     first = compile_models(User, Post)
     second = compile_models(User, Post)
@@ -347,8 +330,7 @@ def test_a_changed_column_type_changes_the_fingerprint() -> None:
         value: Mapped[int] = column(Int64)
 
     assert (
-        compile_models(V1).spec_for(V1).fingerprint
-        != compile_models(V2).spec_for(V2).fingerprint
+        compile_models(V1).spec_for(V1).fingerprint != compile_models(V2).spec_for(V2).fingerprint
     )
 
 
@@ -379,8 +361,7 @@ def test_registry_fingerprint_covers_every_model() -> None:
     from .conftest import Membership
 
     assert (
-        compile_models(User, Post).fingerprint
-        != compile_models(User, Post, Membership).fingerprint
+        compile_models(User, Post).fingerprint != compile_models(User, Post, Membership).fingerprint
     )
 
 
@@ -390,18 +371,7 @@ def test_a_relationship_target_outside_the_registry_is_rejected() -> None:
         compile_models(User)
 
 
-# -- what a relationship's foreign key is allowed to point at -------------------
-
-
 def test_a_foreign_key_pointing_at_a_third_table_is_refused() -> None:
-    """`foreign_key=` and `references=` have to agree about the other side.
-
-    The relationship says "join to Owner"; the column says "this value lives in
-    Other". Without the refusal the join is built from whichever column of
-    `Owner` happens to share the referenced *name* -- or, when there is none,
-    from a `KeyError` deep inside the compiler. Nothing had ever declared the
-    two disagreeing, so the check ran on nothing.
-    """
 
     class Other(Model, table="others"):
         id: Mapped[int] = column(Int64, primary_key=True)
@@ -423,15 +393,6 @@ def test_a_foreign_key_pointing_at_a_third_table_is_refused() -> None:
 
 
 def test_a_foreign_key_joins_the_column_it_references_not_the_primary_key() -> None:
-    """`references=` may name any column, and a natural key is the case.
-
-    A country code is unique and is not the primary key, so the join has to be
-    `ON countries.code = cities.country_code`. Falling back to the primary key
-    would emit `ON countries.id = cities.country_code` -- valid SQL over the
-    wrong column, silently returning the wrong country. Every other model in
-    the suite references a primary key, where the two paths agree and the
-    fallback is indistinguishable from the real answer.
-    """
     from wreath.orm.compiler import compile_select
 
     class Country(Model, table="countries"):
@@ -450,15 +411,6 @@ def test_a_foreign_key_joins_the_column_it_references_not_the_primary_key() -> N
 
 
 def test_a_foreign_key_with_no_reference_falls_back_to_the_primary_key() -> None:
-    """The other arm: an undeclared `references=` is not an error.
-
-    `relationship(Owner, foreign_key=owner_id)` over a plain column is the
-    shortest legal spelling, and the join columns then come from `Owner`'s
-    primary key. Nothing asserted the SQL for that shape, so returning an empty
-    join -- which is what taking the collected-references branch unconditionally
-    produces -- went unnoticed: the reference list is empty here precisely
-    because there is nothing to collect.
-    """
     from wreath.orm.compiler import compile_select
 
     class Owner(Model, table="owners"):
@@ -475,20 +427,6 @@ def test_a_foreign_key_with_no_reference_falls_back_to_the_primary_key() -> None
 
 
 def test_a_json_column_serializes_the_value_it_holds_at_the_wire_not_at_assignment() -> None:
-    """Mutating a stored JSON value in place changes what is written.
-
-    `_check_json` serializes on assignment to refuse an unencodable value where
-    the offending line is, and `_json_to_wire` serializes again at the wire.
-    That looks like the same work done twice and it is tempting to cache the
-    first result against the second -- this is why that is wrong. The cell holds
-    the caller's own object, so `document.body["a"].append(3)` changes what the
-    column contains without going through the descriptor again, and a cached
-    encoding would write the value the caller *had* rather than the one it has.
-
-    Dirty tracking is per assignment, so a column mutated in place is only
-    flushed when something else already marked it dirty -- but when it is
-    flushed, this is the value that goes.
-    """
     class Document(Model, table="documents_mutated"):
         id: Mapped[int] = column(Int64, primary_key=True)
         body: Mapped[object] = column(Json)

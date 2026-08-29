@@ -190,13 +190,8 @@ def _resolve_flags(
             else _NO_FLAGS
         )
     if type(provider) is FeatureFlags:
-        return frozenset(
-            name for name in vocabulary if provider.enabled(name, context)
-        )
-    return frozenset(
-        name for name in vocabulary
-        if provider.resolve(Flag(name, False), context)
-    )
+        return frozenset(name for name in vocabulary if provider.enabled(name, context))
+    return frozenset(name for name in vocabulary if provider.resolve(Flag(name, False), context))
 
 
 def _default_location(request: Request) -> object:
@@ -391,16 +386,13 @@ def _default_context(request: Request) -> Mapping[str, object]:
 
     context["client_class"] = traffic_class(request)
     # Step-up, expressed where a policy can read it:
-    #
     #     permit(principal, action == Action::"delete", resource)
     #     when { context has second_factor_age && context.second_factor_age <= 300 };
-    #
     # The key is **absent** rather than a sentinel when the identity has never
     # proved a factor, which is what makes both shapes of policy fail closed: a
     # `when` clause guarded by `has` is false, and an `unless` clause guarded by
     # `has` leaves the forbid standing. A large number would work for the first
     # and quietly invert the second.
-    #
     # Seconds as an integer because Cedar has i64 longs and no floats, and *age*
     # rather than the timestamp so a policy is a comparison against a duration
     # the author chose rather than arithmetic against a clock they cannot see.
@@ -669,8 +661,6 @@ class CedarAuthorizer:
         """Stores delegated through the organisation fact provider."""
         return self._schema_owners
 
-    # --- policy identity, delegated from the engine -------------------------
-    #
     # A cached permission manifest is tagged by the policy set behind the
     # authorizer, and the tag is found by probing `fingerprint`, `source`, then
     # `policies` (`_auth/permissions.py::_policy_fingerprint`). Those live on
@@ -679,13 +669,11 @@ class CedarAuthorizer:
     # and read from another one, where a rename would not raise but would
     # quietly drop every ETag to a per-instance token and stop cross-worker
     # revalidation with no error at all.
-    #
     # Delegating keeps the private name in the file that owns it, so a rename
     # moves the readers with it, and hands out only the *value*. Deliberately
     # not a public `engine` accessor: the five mappers above are the work this
     # class exists to do, and a caller holding the engine could call
     # `is_authorized` straight past all of them.
-    #
     # Absence stays absent. An engine offering none of these lets `AttributeError`
     # out of the property, which `getattr(..., None)` reports as missing, so the
     # probe falls through to a per-instance token exactly as it does for a bare
@@ -800,9 +788,7 @@ class CedarAuthorizer:
             action_attributes = getattr(self._engine, "context_attributes_for_action", None)
             needed = action_attributes(action) if callable(action_attributes) else None
             principal_entity = getattr(self._engine, "principal_entity_for_action", None)
-            needs_principal_entity = (
-                not callable(principal_entity) or principal_entity(action)
-            )
+            needs_principal_entity = not callable(principal_entity) or principal_entity(action)
         else:
             needed = compiled.context_attributes
             needs_principal_entity = compiled.principal_entity

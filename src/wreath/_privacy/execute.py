@@ -322,7 +322,6 @@ def _pass_for(
         # already be closed to new writes when this runs. An application still
         # inserting rows for an erased subject has a bug this cannot paper over,
         # and a recurring frontier would hide it by sweeping forever.
-        #
         # `at_launch()` refuses a key it cannot prove is assigned in increasing
         # order, which is the right refusal: a row landing behind the cursor is
         # a row the erasure never sees, and silently missing rows is the whole

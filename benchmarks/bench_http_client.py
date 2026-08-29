@@ -29,6 +29,7 @@ core_parse_response_head = _core.http_parse_response
 def core_serialize_request(method, target, host, *, headers=(), body=b""):
     return _core.http_serialize_request(method, target, host, tuple(headers), body)
 
+
 _RESPONSE = (
     b"HTTP/1.1 200 OK\r\n"
     b"content-type: application/json\r\n"
@@ -115,10 +116,7 @@ async def run(iterations: int, trials: int, loopback_iterations: int) -> dict[st
     framing = lambda: response_framing(  # noqa: E731
         "GET", 200, framing_headers
     )
-    loopback_samples = [
-        await _loopback(loopback_iterations)
-        for _ in range(trials)
-    ]
+    loopback_samples = [await _loopback(loopback_iterations) for _ in range(trials)]
     # Identical answers are the precondition: two tiers producing different
     # bytes would make the faster one a measurement of a different job.
     if core_parse_response_head(_RESPONSE) != selected_parse_response_head(_RESPONSE):
@@ -136,17 +134,11 @@ async def run(iterations: int, trials: int, loopback_iterations: int) -> dict[st
             "selected_parser": selected_parse_response_head.__module__,
         },
         "results": {
-            "serialize_request_core": _summary(
-                _measure(core_request, iterations, trials)
-            ),
-            "serialize_request_selected": _summary(
-                _measure(selected_request, iterations, trials)
-            ),
+            "serialize_request_core": _summary(_measure(core_request, iterations, trials)),
+            "serialize_request_selected": _summary(_measure(selected_request, iterations, trials)),
             "parse_response_core": _summary(_measure(core, iterations, trials)),
             "parse_response_selected": _summary(_measure(selected, iterations, trials)),
-            "response_framing_selected": _summary(
-                _measure(framing, iterations, trials)
-            ),
+            "response_framing_selected": _summary(_measure(framing, iterations, trials)),
             "managed_keepalive_loopback": _summary(loopback_samples),
         },
     }

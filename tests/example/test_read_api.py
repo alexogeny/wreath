@@ -1,20 +1,3 @@
-"""The read API: routing, binding, declared queries, pagination, and the cache.
-
-Split deliberately. The first half needs no database — the route table, the
-declared query shapes, the wire format and the configuration are all decidable
-from the code, and checking them in milliseconds means they are checked on every
-run rather than only where PostgreSQL happens to be. The second half is gated on
-``WREATH_TEST_POSTGRES_DSN`` and drives the real application through
-``TestClient``.
-
-What these assert is not "the handler returns 200". It is the handful of
-properties the example would be *wrong* without: that a station cannot be
-reached through another reserve's URL, that a date is read on the reserve's wall
-clock rather than the server's, that the declared queries do not sort (because
-sorting is the caller's), and that a committed write to the species table clears
-the cached list without anybody calling an invalidator.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -57,19 +40,8 @@ SENSITIVE_STATION = 25
 OPEN_STATION = 27
 
 
-# -- no database ---------------------------------------------------------------
-
-
 def test_the_routers_compose_the_paths_the_domain_implies() -> None:
-    """The URL hierarchy is assembled from router prefixes, not typed out.
-
-    ``stations`` carries ``/{slug}/stations`` and is included into ``reserves``,
-    so this is the one place the whole shape is visible. A route that grew a
-    hand-written prefix would show up here as a duplicated segment.
-    """
-    found = sorted(
-        (route.methods[0], route.path) for router in ROUTERS for route in router.routes
-    )
+    found = sorted((route.methods[0], route.path) for router in ROUTERS for route in router.routes)
     assert found == [
         ("DELETE", "/session"),
         ("GET", "/reserves"),
@@ -94,12 +66,6 @@ def test_the_routers_compose_the_paths_the_domain_implies() -> None:
 
 
 def test_a_declared_query_names_exactly_the_values_it_binds() -> None:
-    """The parameters are the declaration's contract, checked at import.
-
-    A caller that misspells one gets a ``TypeError`` naming it rather than a
-    query with a hole in it, and that is only true while the names here are the
-    names the handlers pass.
-    """
     assert SightingsByStation.in_window.parameters == ("station", "since", "until")
     assert RecentDeployments.for_station.parameters == ("station",)
     assert Reserves.by_slug.parameters == ("slug",)
@@ -107,13 +73,6 @@ def test_a_declared_query_names_exactly_the_values_it_binds() -> None:
 
 
 def test_the_sighting_declaration_does_not_sort() -> None:
-    """Ordering belongs to the caller, and ``order_by`` appends.
-
-    If the declaration sorted, ``wreath.pagination.apply_sort`` would append the
-    caller's ``?sort=`` *after* it — so the request's sort would be a tiebreaker
-    on a column that rarely ties, and the API would silently ignore it. The
-    handler owns the default instead. This is the assertion that keeps it so.
-    """
     bound = SightingsByStation.in_window.bind(
         station=1,
         since=datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
@@ -123,7 +82,6 @@ def test_the_sighting_declaration_does_not_sort() -> None:
 
 
 def test_a_recent_read_carries_its_own_limit() -> None:
-    """"The last few cards" is part of the query's shape, not a parameter."""
     bound = RecentDeployments.for_station.bind(station=1)
     assert bound.limit_ == 10
     assert len(bound.orderings) == 1
@@ -149,14 +107,6 @@ class _StationRow:
 
 
 def test_a_station_publishes_no_coordinates_unless_the_caller_may_locate_it() -> None:
-    """Where a rhino midden is, is the one field this API must not leak.
-
-    Asserted on the serializer rather than through a request, because that is
-    where the redaction happens. Who is allowed to see it is decided in
-    `camera_trap.policies` and asserted against the Cedar policy in
-    `test_authorization.py`; here the only question is that the serializer
-    obeys the answer it is handed — including when nobody hands it one.
-    """
     shown: Any = station_json(_StationRow(sensitive=False), locate=True)  # type: ignore[arg-type]
     withheld: Any = station_json(_StationRow(sensitive=True), locate=False)  # type: ignore[arg-type]
     assert "latitude" in shown and "longitude" in shown
@@ -173,7 +123,6 @@ def test_a_station_publishes_no_coordinates_unless_the_caller_may_locate_it() ->
 def test_configuration_has_defaults_and_refuses_a_missing_database(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two knobs default, and the one with no sensible default says so."""
     monkeypatch.delenv("CAMERA_TRAP_MAX_WINDOW_DAYS", raising=False)
     monkeypatch.delenv("CAMERA_TRAP_SPECIES_CACHE_TTL", raising=False)
     settings = Settings(
@@ -211,16 +160,12 @@ def test_configuration_has_defaults_and_refuses_a_missing_database(
 def test_a_bad_number_in_the_environment_names_the_variable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A process that will not boot should say which variable stopped it."""
     monkeypatch.setenv("CAMERA_TRAP_MAX_WINDOW_DAYS", "a fortnight")
     with pytest.raises(RuntimeError, match="CAMERA_TRAP_MAX_WINDOW_DAYS"):
         Settings.from_env()
     monkeypatch.setenv("CAMERA_TRAP_MAX_WINDOW_DAYS", "-3")
     with pytest.raises(RuntimeError, match="greater than zero"):
         Settings.from_env()
-
-
-# -- against a real database ---------------------------------------------------
 
 
 @pytest.fixture
@@ -280,12 +225,6 @@ async def test_an_unknown_slug_is_a_404_that_says_what_was_missing(client) -> No
 
 @skip_without_database
 async def test_a_station_cannot_be_reached_through_another_reserve(client) -> None:
-    """The URL hierarchy is enforced, not decorative.
-
-    Station 25 belongs to Nullarbor. Asking for it under Olkiramatian's slug has
-    to be a 404 -- otherwise the reserve segment is a comment, and the
-    reserve-scoped authorization a later stage adds would have nothing to hold.
-    """
     mine = await client.get(f"/reserves/{RESERVE}/stations/{SENSITIVE_STATION}")
     assert mine.status == 200
     theirs = await client.get(f"/reserves/olkiramatian/stations/{SENSITIVE_STATION}")
@@ -294,14 +233,6 @@ async def test_a_station_cannot_be_reached_through_another_reserve(client) -> No
 
 @skip_without_database
 async def test_a_sensitive_stations_coordinates_reach_only_a_ranger(client) -> None:
-    """The rule this endpoint had in stage 2, now that it has an identity.
-
-    Stage 2 withheld a sensitive station's coordinates from everybody, because
-    there was nobody to distinguish. Stage 3 replaced that with the real rule:
-    a ranger is told, and nobody else is. `client` here is acting as a ranger,
-    so this asserts the *permitted* side; `test_authorization.py` owns the
-    refused side and the grid behind it.
-    """
     response = await client.get(f"/reserves/{RESERVE}/stations")
     assert response.status == 200
     stations = {item["id"]: item for item in response.json()["items"]}
@@ -312,12 +243,6 @@ async def test_a_sensitive_stations_coordinates_reach_only_a_ranger(client) -> N
 
 @skip_without_database
 async def test_a_station_reports_the_devices_that_have_hung_there(client) -> None:
-    """Station 3 has had two cameras. The place outlives the hardware.
-
-    The relationship is ``load="raise"``, so this payload exists only because
-    the handler asked for it with ``session.load``. A handler that forgot would
-    fail loudly here rather than emitting a query per station somewhere else.
-    """
     response = await client.get("/reserves/olkiramatian/stations/3")
     assert response.status == 200
     cameras = response.json()["cameras"]
@@ -329,12 +254,6 @@ async def test_a_station_reports_the_devices_that_have_hung_there(client) -> Non
 
 @skip_without_database
 async def test_a_date_window_is_read_on_the_reserves_wall_clock(client) -> None:
-    """``since=2026-01-01`` at a +09:30 reserve is local midnight, not UTC's.
-
-    This is the assertion the whole temporal story rests on. Reading the date as
-    a UTC midnight would move the window by nine and a half hours and shift
-    sightings between days -- while still returning a plausible-looking page.
-    """
     response = await client.get(
         f"/reserves/{RESERVE}/stations/{OPEN_STATION}/sightings?since=2026-01-01&days=30"
     )
@@ -348,7 +267,6 @@ async def test_a_date_window_is_read_on_the_reserves_wall_clock(client) -> None:
 
 @skip_without_database
 async def test_the_window_is_bounded_before_any_sql_is_built(client) -> None:
-    """A decade of sightings is a scan; the binding layer refuses it."""
     response = await client.get(
         f"/reserves/{RESERVE}/stations/{OPEN_STATION}/sightings?since=2026-01-01&days=4000"
     )
@@ -359,7 +277,6 @@ async def test_the_window_is_bounded_before_any_sql_is_built(client) -> None:
 
 @skip_without_database
 async def test_paging_is_stable_and_the_total_matches(client) -> None:
-    """Two pages of the same window do not overlap, and cover the total."""
     url = f"/reserves/{RESERVE}/stations/{OPEN_STATION}/sightings?since=2025-06-01&days=90"
     first = (await client.get(f"{url}&size=5&page=1")).json()
     second = (await client.get(f"{url}&size=5&page=2")).json()
@@ -372,7 +289,6 @@ async def test_paging_is_stable_and_the_total_matches(client) -> None:
 
 @skip_without_database
 async def test_a_sort_outside_the_allow_list_is_refused_by_name(client) -> None:
-    """Not a 500, and not a column name reaching the SQL either."""
     url = f"/reserves/{RESERVE}/stations/{OPEN_STATION}/sightings?since=2025-06-01&days=30"
     response = await client.get(f"{url}&sort=notes")
     assert response.status == 422
@@ -390,11 +306,9 @@ async def test_an_optional_filter_narrows_without_being_declared(client) -> None
 
 @skip_without_database
 async def test_one_sighting_resolves_what_it_points_at(client) -> None:
-    """Three foreign keys become three objects, in one query, because it asked."""
     listed = (
         await client.get(
-            f"/reserves/{RESERVE}/stations/{OPEN_STATION}/sightings"
-            "?since=2025-06-01&days=90&size=1"
+            f"/reserves/{RESERVE}/stations/{OPEN_STATION}/sightings?since=2025-06-01&days=90&size=1"
         )
     ).json()
     sighting_id = listed["items"][0]["id"]
@@ -410,9 +324,7 @@ async def test_one_sighting_resolves_what_it_points_at(client) -> None:
 
 @skip_without_database
 async def test_recent_deployments_are_the_last_ten_newest_first(client) -> None:
-    response = await client.get(
-        f"/reserves/{RESERVE}/stations/{OPEN_STATION}/deployments"
-    )
+    response = await client.get(f"/reserves/{RESERVE}/stations/{OPEN_STATION}/deployments")
     assert response.status == 200
     collected = [item["collected_at"] for item in response.json()["items"]]
     assert len(collected) == 10, "twelve trips per station; the declaration takes ten"
@@ -421,13 +333,6 @@ async def test_recent_deployments_are_the_last_ten_newest_first(client) -> None:
 
 @skip_without_database
 async def test_the_species_list_is_cached_and_a_write_clears_it(client) -> None:
-    """The cache is invalidated by the ORM, not by anybody remembering to.
-
-    A committed write to ``Species`` announces the model it wrote, and the cache
-    that named that model drops its entries. Nothing in this test calls an
-    invalidator -- that is the whole point, and it is only possible because the
-    session and the cache are parts of one framework.
-    """
     from camera_trap.routers.species import list_species
 
     from wreath.orm import Session
@@ -462,7 +367,6 @@ async def test_a_species_code_is_looked_up_case_insensitively(client) -> None:
 
 @skip_without_database
 async def test_the_declared_window_is_what_the_handler_actually_ran(client) -> None:
-    """The list's own reported window matches the rows it returned."""
     url = f"/reserves/{RESERVE}/stations/{OPEN_STATION}/sightings?since=2025-06-01&days=30"
     body = (await client.get(f"{url}&size=50")).json()
     assert body["items"], "the window is empty; the fixture's sample is too small"

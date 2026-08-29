@@ -70,8 +70,7 @@ def render_generation(pg_type: GeneratedType, spec_columns: dict, model: str) ->
             "wreath cannot render an expression for"
         )
     terms = [
-        f"COALESCE({quote_identifier(_source(pg_type, name, spec_columns, model))}, "
-        "''::text)"
+        f"COALESCE({quote_identifier(_source(pg_type, name, spec_columns, model))}, ''::text)"
         for name in pg_type.sources
     ]
     expression = terms[0]

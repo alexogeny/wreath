@@ -1,5 +1,3 @@
-"""Sessions: identity, loading, raw SQL, transactions, and writes."""
-
 from __future__ import annotations
 
 import asyncio
@@ -26,9 +24,6 @@ from wreath.orm.types import Int64, Text, Timestamp, TsVector
 from .conftest import FakeDatabase, Membership, Post, User, post_row, user_row
 
 pytestmark = pytest.mark.asyncio
-
-
-# -- lifecycle -----------------------------------------------------------------
 
 
 async def test_a_session_acquires_its_connection_lazily(
@@ -75,9 +70,6 @@ async def test_closing_detaches_objects_but_keeps_loaded_values_readable(
     await session.close()
     assert user._orm_state == DETACHED
     assert user.email == "a@b.c"
-
-
-# -- identity ------------------------------------------------------------------
 
 
 async def test_repeated_rows_for_one_key_produce_one_object(
@@ -140,12 +132,7 @@ async def test_sessions_do_not_share_identity_objects(
     assert (await first.fetch(User.select()))[0] is not (await second.fetch(User.select()))[0]
 
 
-# -- reads ---------------------------------------------------------------------
-
-
-async def test_get_compiles_a_primary_key_query(
-    database: FakeDatabase, session: Session
-) -> None:
+async def test_get_compiles_a_primary_key_query(database: FakeDatabase, session: Session) -> None:
     database.connection.script("users", [user_row(7)])
     user = await session.get(User, 7)
     assert user is not None and user.id == 7
@@ -184,33 +171,24 @@ async def test_fetch_one_bounds_the_query_and_rejects_two_rows(
     assert database.connection.calls[0][1] == (2,)
 
 
-async def test_fetch_one_keeps_a_stricter_limit(
-    database: FakeDatabase, session: Session
-) -> None:
+async def test_fetch_one_keeps_a_stricter_limit(database: FakeDatabase, session: Session) -> None:
     database.connection.script("users", [user_row(1)])
     await session.fetch_one(User.select().limit(1))
     assert database.connection.calls[0][1] == (1,)
-
-
-# -- relationship loading ------------------------------------------------------
 
 
 async def test_selectin_batches_a_collection_without_n_plus_one(
     database: FakeDatabase, session: Session
 ) -> None:
     database.connection.script("users", [user_row(1), user_row(2), user_row(3)])
-    database.connection.script(
-        "posts", [post_row(10, 1), post_row(11, 1), post_row(12, 3)]
-    )
+    database.connection.script("posts", [post_row(10, 1), post_row(11, 1), post_row(12, 3)])
     users = await session.fetch(User.select().include(User.posts.selectin()))
     assert len(database.connection.calls) == 2
     assert [len(item.posts) for item in users] == [2, 0, 1]
     assert users[0].posts[0].id == 10
 
 
-async def test_selectin_deduplicates_keys(
-    database: FakeDatabase, session: Session
-) -> None:
+async def test_selectin_deduplicates_keys(database: FakeDatabase, session: Session) -> None:
     database.connection.script("posts", [post_row(1, 5), post_row(2, 5)])
     database.connection.script("users", [user_row(5)])
     posts = await session.fetch(Post.select().include(Post.author.selectin()))
@@ -289,9 +267,7 @@ async def test_explicit_load_batches_across_instances(
     assert users[1].posts[0].id == 11
 
 
-async def test_load_accepts_a_single_instance(
-    database: FakeDatabase, session: Session
-) -> None:
+async def test_load_accepts_a_single_instance(database: FakeDatabase, session: Session) -> None:
     database.connection.script("users", [user_row(1)])
     user = (await session.fetch(User.select()))[0]
     database.connection.script("posts", [post_row(10, 1)])
@@ -336,13 +312,8 @@ async def test_nested_selectin_loads_the_next_level(
 ) -> None:
     database.connection.script("users", [user_row(1)])
     database.connection.script("posts", [post_row(10, 1)])
-    users = await session.fetch(
-        User.select().include(User.posts.selectin(Post.author.selectin()))
-    )
+    users = await session.fetch(User.select().include(User.posts.selectin(Post.author.selectin())))
     assert users[0].posts[0].author is users[0]
-
-
-# -- raw SQL -------------------------------------------------------------------
 
 
 async def test_raw_returns_driver_records_untouched(
@@ -360,9 +331,7 @@ async def test_raw_returns_driver_records_untouched(
     assert database.connection.calls[0] == ("SELECT 1 AS custom", ())
 
 
-async def test_raw_passes_arguments_through(
-    database: FakeDatabase, session: Session
-) -> None:
+async def test_raw_passes_arguments_through(database: FakeDatabase, session: Session) -> None:
     await session.raw("SELECT $1::int", 5).fetchval()
     assert database.connection.calls[0] == ("SELECT $1::int", (5,))
 
@@ -390,9 +359,7 @@ async def test_raw_models_rejects_a_missing_column(
         await session.raw(sql).models(User)
 
 
-async def test_raw_models_rejects_an_extra_column(
-    database: FakeDatabase, session: Session
-) -> None:
+async def test_raw_models_rejects_an_extra_column(database: FakeDatabase, session: Session) -> None:
     sql = "SELECT id, email, name, created_at, extra FROM users"
     database.connection.script("users", [[1, "a@b.c", "A", None, "x"]])
     database.connection.describe(
@@ -404,9 +371,7 @@ async def test_raw_models_rejects_an_extra_column(
         await session.raw(sql).models(User)
 
 
-async def test_raw_models_rejects_a_type_mismatch(
-    database: FakeDatabase, session: Session
-) -> None:
+async def test_raw_models_rejects_a_type_mismatch(database: FakeDatabase, session: Session) -> None:
     sql = "SELECT id, email, name, created_at FROM users"
     database.connection.script("users", [user_row(1)])
     # `checked=False`: the plan disagreeing with the model *is* the subject
@@ -423,9 +388,7 @@ async def test_raw_models_rejects_a_type_mismatch(
         await session.raw(sql).models(User)
 
 
-async def test_raw_models_rejects_duplicate_names(
-    database: FakeDatabase, session: Session
-) -> None:
+async def test_raw_models_rejects_duplicate_names(database: FakeDatabase, session: Session) -> None:
     sql = "SELECT id, id, name, created_at FROM users"
     database.connection.script("users", [[1, 1, "A", None]])
     database.connection.describe(
@@ -435,29 +398,20 @@ async def test_raw_models_rejects_duplicate_names(
         await session.raw(sql).models(User)
 
 
-# -- transactions --------------------------------------------------------------
-
-
-async def test_begin_commits_on_clean_exit(
-    database: FakeDatabase, session: Session
-) -> None:
+async def test_begin_commits_on_clean_exit(database: FakeDatabase, session: Session) -> None:
     async with session.begin():
         await session.raw("SELECT 1").execute()
     assert database.connection.statements == ["BEGIN", "SELECT 1", "COMMIT"]
 
 
-async def test_begin_rolls_back_on_error(
-    database: FakeDatabase, session: Session
-) -> None:
+async def test_begin_rolls_back_on_error(database: FakeDatabase, session: Session) -> None:
     with pytest.raises(RuntimeError):
         async with session.begin():
             raise RuntimeError("boom")
     assert database.connection.statements == ["BEGIN", "ROLLBACK"]
 
 
-async def test_begin_rolls_back_on_cancellation(
-    database: FakeDatabase, session: Session
-) -> None:
+async def test_begin_rolls_back_on_cancellation(database: FakeDatabase, session: Session) -> None:
     with pytest.raises(asyncio.CancelledError):
         async with session.begin():
             raise asyncio.CancelledError
@@ -522,9 +476,6 @@ async def test_for_update_requires_an_explicit_transaction(session: Session) -> 
         await session.fetch(User.select().for_update())
 
 
-# -- writes --------------------------------------------------------------------
-
-
 async def test_create_uses_the_model_constructor_and_flush_path(
     database: FakeDatabase, session: Session
 ) -> None:
@@ -545,10 +496,7 @@ async def test_update_where_is_predicate_bounded_and_returns_affected_rows(
     sql, args = next(
         (sql, args) for sql, args in database.connection.calls if sql.startswith("UPDATE")
     )
-    assert sql == (
-        'UPDATE "public"."users" AS "t0" SET "name" = $1 '
-        'WHERE "t0"."email" ILIKE $2'
-    )
+    assert sql == ('UPDATE "public"."users" AS "t0" SET "name" = $1 WHERE "t0"."email" ILIKE $2')
     assert args == ("Moved", "%@example.test")
 
 
@@ -557,9 +505,7 @@ async def test_delete_where_refuses_a_predicate_free_query(session: Session) -> 
         await session.delete_where(User.select())
 
 
-async def test_bulk_write_detaches_loaded_objects(
-    database: FakeDatabase, session: Session
-) -> None:
+async def test_bulk_write_detaches_loaded_objects(database: FakeDatabase, session: Session) -> None:
     database.connection.script("users", [user_row(1)])
     database.connection.script("posts", [post_row(2, 1)])
     user = await session.require(User, 1)
@@ -586,9 +532,7 @@ async def test_bulk_write_keeps_loaded_objects_when_its_commit_fails(
 
 async def test_bulk_write_refuses_read_only_query_shape(session: Session) -> None:
     with pytest.raises(ORMError, match="read semantics"):
-        await session.update_where(
-            User.select().where(User.id == 1).limit(1), name="Changed"
-        )
+        await session.update_where(User.select().where(User.id == 1).limit(1), name="Changed")
 
 
 @pytest.mark.parametrize(
@@ -601,9 +545,7 @@ async def test_bulk_write_refuses_read_only_query_shape(session: Session) -> Non
         User.select().where(User.id == 1).for_update(),
     ],
 )
-async def test_bulk_write_refuses_each_read_only_query_feature(
-    session: Session, query
-) -> None:
+async def test_bulk_write_refuses_each_read_only_query_feature(session: Session, query) -> None:
     with pytest.raises(ORMError, match="read semantics"):
         await session.delete_where(query)
 
@@ -627,9 +569,7 @@ async def test_bulk_update_refuses_generated_columns(database: FakeDatabase) -> 
     registry = Registry(database, [Document], validate_schema="off")
     session = Session(registry, "write")
     with pytest.raises(ORMError, match="generated column"):
-        await session.update_where(
-            Document.select().where(Document.id == 1), search="ignored"
-        )
+        await session.update_where(Document.select().where(Document.id == 1), search="ignored")
 
 
 async def test_bulk_write_refuses_relationship_predicates(session: Session) -> None:
@@ -708,9 +648,7 @@ async def test_an_inserted_object_enters_the_identity_map(
     assert (await session.get(User, 7)) is user
 
 
-async def test_update_writes_only_dirty_columns(
-    database: FakeDatabase, session: Session
-) -> None:
+async def test_update_writes_only_dirty_columns(database: FakeDatabase, session: Session) -> None:
     database.connection.script("SELECT", [user_row(1, "a@b.c", "A")])
     user = (await session.fetch(User.select()))[0]
     user.name = "B"
@@ -740,9 +678,7 @@ async def test_delete_uses_the_complete_primary_key(
     database.connection.calls.clear()
     await session.flush()
     sql, args = database.connection.calls[1]
-    assert sql == (
-        'DELETE FROM "public"."memberships" WHERE "org_id" = $1 AND "user_id" = $2'
-    )
+    assert sql == ('DELETE FROM "public"."memberships" WHERE "org_id" = $1 AND "user_id" = $2')
     assert args == (1, 1)
 
 
@@ -823,9 +759,6 @@ async def test_deleting_a_transient_object_just_unschedules_it(session: Session)
     assert user not in session._new
 
 
-# -- unit-of-work bookkeeping --------------------------------------------------
-
-
 async def test_interleaved_models_flush_in_model_then_insertion_order(
     database: FakeDatabase, session: Session
 ) -> None:
@@ -833,9 +766,7 @@ async def test_interleaved_models_flush_in_model_then_insertion_order(
     # in that order, and preserve add() order within each model.
     for index in range(3):
         session.add(Post(id=index, author_id=1, title=f"p{index}"))
-        session.add(
-            User(id=index, email=f"{index}@b.c", name=f"u{index}", created_at=None)
-        )
+        session.add(User(id=index, email=f"{index}@b.c", name=f"u{index}", created_at=None))
     await session.flush()
     inserts = [s for s in database.connection.statements if s.startswith("INSERT")]
     tables = ["users" if '"users"' in item else "posts" for item in inserts]
@@ -944,9 +875,6 @@ async def test_scheduling_and_ordering_work_stays_linear(session: Session) -> No
     assert probes_for(2000) == 4000
 
 
-# -- count ---------------------------------------------------------------------
-
-
 async def test_count_runs_one_aggregate_and_returns_the_scalar(
     registry: Registry, database: FakeDatabase, session: Session
 ) -> None:
@@ -967,15 +895,10 @@ async def test_count_of_no_rows_is_zero_not_none(
     assert total == 0
 
 
-async def test_count_on_a_closed_session_is_rejected(
-    registry: Registry, session: Session
-) -> None:
+async def test_count_on_a_closed_session_is_rejected(registry: Registry, session: Session) -> None:
     await session.close()
     with pytest.raises(SessionClosedError):
         await session.count(User.select())
-
-
-# -- writes refused before they can be scheduled --------------------------------
 
 
 def _persistent_post(session: Session, pk: int = 5) -> Post:
@@ -998,14 +921,6 @@ def _persistent_post(session: Session, pk: int = 5) -> Post:
 async def test_adding_an_object_already_scheduled_for_deletion_is_refused(
     session: Session,
 ) -> None:
-    """`add` after `delete` is a contradiction, and it was never stated aloud.
-
-    Both halves are already scheduled, so the flush would emit an INSERT and a
-    DELETE for one row in an order the caller did not choose -- and for a
-    *persistent* object the insert is of a primary key that already exists. The
-    refusal is the only thing that turns that into a message; nothing in the
-    suite had ever run it.
-    """
     doomed = _persistent_post(session)
     session.delete(doomed)
     with pytest.raises(SessionError, match="scheduled for deletion and cannot be added"):
@@ -1015,13 +930,6 @@ async def test_adding_an_object_already_scheduled_for_deletion_is_refused(
 async def test_deleting_through_a_closed_session_is_rejected(
     registry: Registry, database: FakeDatabase
 ) -> None:
-    """`delete` checks the session is usable before it touches bookkeeping.
-
-    Dropping that check survived the suite: a delete on a closed session then
-    appends to `_deleted` and answers normally, so the caller believes a row is
-    going away and no flush will ever run. The object is `DETACHED` by then, so
-    the failure surfaces later and somewhere else, if at all.
-    """
     session = Session(registry, "write")
     doomed = _persistent_post(session)
     await session.close()
@@ -1033,7 +941,6 @@ async def test_deleting_through_a_closed_session_is_rejected(
 async def test_adding_through_a_closed_session_is_rejected(
     registry: Registry,
 ) -> None:
-    """The same guard on the other write entry point."""
     session = Session(registry, "write")
     await session.close()
     with pytest.raises(SessionClosedError):
@@ -1043,18 +950,6 @@ async def test_adding_through_a_closed_session_is_rejected(
 async def test_native_fetch_hands_back_a_result_with_no_repeats_untouched(
     monkeypatch: pytest.MonkeyPatch, session: Session
 ) -> None:
-    """The collapse must not cost a Python pass over a result that has none.
-
-    The hydrator builds the whole list in C, in batches; walking it again in
-    Python to discover that every row is distinct undoes that batching for the
-    shape it applies to -- `_hydrate_plan` only answers for a single-model,
-    unjoined query, where a repeated identity needs the *query* to return one
-    primary key twice.
-
-    Asserted by identity rather than equality, because equality cannot tell a
-    list that was handed back from a copy of it, and being handed back is the
-    whole claim.
-    """
     rows = [object(), object(), object()]
 
     class NativeConnection:

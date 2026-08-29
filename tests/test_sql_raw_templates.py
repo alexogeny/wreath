@@ -1,9 +1,3 @@
-"""`Session.raw` takes a t-string, and binds what was interpolated.
-
-The session is not connected to anything here: `raw()` compiles and returns a
-`RawQuery` before any I/O, so the compilation is testable on its own, which is
-the part that decides whether a value can become syntax.
-"""
 from __future__ import annotations
 
 import pytest

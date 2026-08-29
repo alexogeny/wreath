@@ -14,6 +14,7 @@ tier; the static tier's app-level checks stay in `perf.app_perf`.
 References cite the governing RFC clause (or OWASP secure-header guidance) so a
 finding is actionable and traceable, not just advisory.
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -43,7 +44,7 @@ class ResponseView:
     """
 
     status: int
-    scheme: str                       # "http" | "https"
+    scheme: str  # "http" | "https"
     surface: str
     headers: dict[str, str] = field(default_factory=dict)
     set_cookies: tuple[str, ...] = ()
@@ -85,32 +86,62 @@ def cookie_flags(view: ResponseView) -> Iterator[Finding]:
         samesite = attrs.get("samesite", "").lower()
         # Browser-enforced MUSTs (RFC 6265bis): the cookie is silently dropped.
         if samesite == "none" and not secure:
-            yield _f("cookie-samesite-none-insecure", Severity.ERROR, view,
-                     f"cookie {name!r} is SameSite=None without Secure — browsers drop it",
-                     "RFC 6265bis 5.4.7", "set Secure on SameSite=None cookies")
+            yield _f(
+                "cookie-samesite-none-insecure",
+                Severity.ERROR,
+                view,
+                f"cookie {name!r} is SameSite=None without Secure — browsers drop it",
+                "RFC 6265bis 5.4.7",
+                "set Secure on SameSite=None cookies",
+            )
         if name.startswith("__Host-") and not (
             secure and attrs.get("path") == "/" and "domain" not in attrs
         ):
-            yield _f("cookie-prefix", Severity.ERROR, view,
-                     f"__Host- cookie {name!r} must be Secure, Path=/, and set no Domain",
-                     "RFC 6265bis 4.1.3", "fix the attributes or drop the __Host- prefix")
+            yield _f(
+                "cookie-prefix",
+                Severity.ERROR,
+                view,
+                f"__Host- cookie {name!r} must be Secure, Path=/, and set no Domain",
+                "RFC 6265bis 4.1.3",
+                "fix the attributes or drop the __Host- prefix",
+            )
         elif name.startswith("__Secure-") and not secure:
-            yield _f("cookie-prefix", Severity.ERROR, view,
-                     f"__Secure- cookie {name!r} must be Secure",
-                     "RFC 6265bis 4.1.3", "set Secure on __Secure- cookies")
+            yield _f(
+                "cookie-prefix",
+                Severity.ERROR,
+                view,
+                f"__Secure- cookie {name!r} must be Secure",
+                "RFC 6265bis 4.1.3",
+                "set Secure on __Secure- cookies",
+            )
         # Defense-in-depth defaults (OWASP): warn, since not every cookie needs them.
         if not samesite:
-            yield _f("cookie-samesite", Severity.WARN, view,
-                     f"cookie {name!r} has no SameSite attribute (CSRF exposure)",
-                     "OWASP:session", "set SameSite=Lax (or Strict) unless it is cross-site")
+            yield _f(
+                "cookie-samesite",
+                Severity.WARN,
+                view,
+                f"cookie {name!r} has no SameSite attribute (CSRF exposure)",
+                "OWASP:session",
+                "set SameSite=Lax (or Strict) unless it is cross-site",
+            )
         if view.is_https and not secure:
-            yield _f("cookie-secure", Severity.WARN, view,
-                     f"cookie {name!r} has no Secure flag on an HTTPS response",
-                     "OWASP:session", "set Secure so the cookie never rides plain HTTP")
+            yield _f(
+                "cookie-secure",
+                Severity.WARN,
+                view,
+                f"cookie {name!r} has no Secure flag on an HTTPS response",
+                "OWASP:session",
+                "set Secure so the cookie never rides plain HTTP",
+            )
         if "httponly" not in attrs:
-            yield _f("cookie-httponly", Severity.WARN, view,
-                     f"cookie {name!r} has no HttpOnly flag (readable from JS)",
-                     "OWASP:session", "set HttpOnly unless a script must read this cookie")
+            yield _f(
+                "cookie-httponly",
+                Severity.WARN,
+                view,
+                f"cookie {name!r} has no HttpOnly flag (readable from JS)",
+                "OWASP:session",
+                "set HttpOnly unless a script must read this cookie",
+            )
 
 
 @_rule
@@ -120,9 +151,14 @@ def hsts(view: ResponseView) -> Iterator[Finding]:
         return
     raw = view.get("strict-transport-security")
     if not raw:
-        yield _f("hsts", Severity.WARN, view,
-                 "HTTPS response has no Strict-Transport-Security header",
-                 "RFC 6797", "mount SecurityHeadersPolicy(hsts=...)")
+        yield _f(
+            "hsts",
+            Severity.WARN,
+            view,
+            "HTTPS response has no Strict-Transport-Security header",
+            "RFC 6797",
+            "mount SecurityHeadersPolicy(hsts=...)",
+        )
         return
     max_age = 0
     for segment in raw.split(";"):
@@ -133,31 +169,51 @@ def hsts(view: ResponseView) -> Iterator[Finding]:
             except ValueError:
                 max_age = 0
     if max_age < _HSTS_SOFT_MIN:
-        yield _f("hsts-max-age", Severity.INFO, view,
-                 f"HSTS max-age={max_age} is short (< {_HSTS_SOFT_MIN}s / 180d)",
-                 "RFC 6797", f"raise max-age to {_HSTS_PRELOAD_MIN} (1y) for preload eligibility")
+        yield _f(
+            "hsts-max-age",
+            Severity.INFO,
+            view,
+            f"HSTS max-age={max_age} is short (< {_HSTS_SOFT_MIN}s / 180d)",
+            "RFC 6797",
+            f"raise max-age to {_HSTS_PRELOAD_MIN} (1y) for preload eligibility",
+        )
 
 
 @_rule
 def content_type_options(view: ResponseView) -> Iterator[Finding]:
     """X-Content-Type-Options: nosniff (defends against MIME confusion)."""
     if view.get("x-content-type-options").lower() != "nosniff":
-        yield _f("content-type-options", Severity.WARN, view,
-                 "response has no 'X-Content-Type-Options: nosniff'",
-                 "OWASP:headers", "mount SecurityHeadersPolicy")
+        yield _f(
+            "content-type-options",
+            Severity.WARN,
+            view,
+            "response has no 'X-Content-Type-Options: nosniff'",
+            "OWASP:headers",
+            "mount SecurityHeadersPolicy",
+        )
 
 
 @_rule
 def status_required_headers(view: ResponseView) -> Iterator[Finding]:
     """Status-specific headers the RFC marks MUST."""
     if view.status == 401 and not view.has("www-authenticate"):
-        yield _f("www-authenticate", Severity.ERROR, view,
-                 "401 response has no WWW-Authenticate header (required)",
-                 "RFC 9110 15.5.2", "raise Unauthorized(challenge=...) with a scheme")
+        yield _f(
+            "www-authenticate",
+            Severity.ERROR,
+            view,
+            "401 response has no WWW-Authenticate header (required)",
+            "RFC 9110 15.5.2",
+            "raise Unauthorized(challenge=...) with a scheme",
+        )
     if view.status == 405 and not view.has("allow"):
-        yield _f("allow-header", Severity.ERROR, view,
-                 "405 response has no Allow header (required)",
-                 "RFC 9110 15.5.6", "raise MethodNotAllowed(allow=[...])")
+        yield _f(
+            "allow-header",
+            Severity.ERROR,
+            view,
+            "405 response has no Allow header (required)",
+            "RFC 9110 15.5.6",
+            "raise MethodNotAllowed(allow=[...])",
+        )
 
 
 @_rule
@@ -166,15 +222,25 @@ def cors_credentials(view: ResponseView) -> Iterator[Finding]:
     origin = view.get("access-control-allow-origin")
     credentials = view.get("access-control-allow-credentials").lower() == "true"
     if origin == "*" and credentials:
-        yield _f("cors-credentials", Severity.ERROR, view,
-                 "Access-Control-Allow-Origin: * with Allow-Credentials: true is invalid",
-                 "Fetch:cors", "reflect a specific allowed origin instead of '*'")
+        yield _f(
+            "cors-credentials",
+            Severity.ERROR,
+            view,
+            "Access-Control-Allow-Origin: * with Allow-Credentials: true is invalid",
+            "Fetch:cors",
+            "reflect a specific allowed origin instead of '*'",
+        )
 
 
 @_rule
 def referrer_policy(view: ResponseView) -> Iterator[Finding]:
     """Referrer-Policy limits URL leakage to third parties (OWASP)."""
     if not view.has("referrer-policy"):
-        yield _f("referrer-policy", Severity.INFO, view,
-                 "response has no Referrer-Policy header",
-                 "OWASP:headers", "mount SecurityHeadersPolicy (sets no-referrer)")
+        yield _f(
+            "referrer-policy",
+            Severity.INFO,
+            view,
+            "response has no Referrer-Policy header",
+            "OWASP:headers",
+            "mount SecurityHeadersPolicy (sets no-referrer)",
+        )

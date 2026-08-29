@@ -95,9 +95,7 @@ def ed_scalarmult_public(k: int, point: EdPoint) -> EdPoint:
     return _core.curve_ed_scalar(k, point, False)
 
 
-def ed_double_scalarmult_public(
-    k1: int, p1: EdPoint, k2: int, p2: EdPoint
-) -> EdPoint:
+def ed_double_scalarmult_public(k1: int, p1: EdPoint, k2: int, p2: EdPoint) -> EdPoint:
     """Return ``[k1]p1 + [k2]p2`` for public scalars."""
     return _core.curve_ed_double_scalar(k1, p1, k2, p2)
 
@@ -114,6 +112,8 @@ P256_N: Final = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC6325
 _P256_GX: Final = 0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296
 _P256_GY: Final = 0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5
 P256_G: Final[tuple[int, int]] = (_P256_GX, _P256_GY)
+
+
 def p256_on_curve(x: int, y: int) -> bool:
     """Return whether ``(x, y)`` is an affine P-256 point."""
     return _core.curve_p256_on_curve(x, y)
@@ -126,8 +126,6 @@ def p256_double_scalarmult_public(
     return _core.curve_p256_double_scalar(k1, p1, k2, p2)
 
 
-def p256_scalarmult_secret(
-    k: int, point: tuple[int, int]
-) -> tuple[int, int] | None:
+def p256_scalarmult_secret(k: int, point: tuple[int, int]) -> tuple[int, int] | None:
     """Multiply an affine P-256 point by a secret scalar."""
     return _core.curve_p256_scalar(k, point)

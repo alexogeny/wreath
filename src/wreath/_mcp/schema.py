@@ -95,9 +95,7 @@ def _check_supported(name: str, spec: BindingSpec, route: str | None) -> None:
             parameter = bindings[0][0]
             raise _refuse(name, f"parameter {parameter!r} binds from {description}", route)
     if spec.form_model is not None:
-        raise _refuse(
-            name, f"parameter {spec.form_model[0]!r} binds a whole multipart form", route
-        )
+        raise _refuse(name, f"parameter {spec.form_model[0]!r} binds a whole multipart form", route)
     if spec.path_params:
         raise _refuse(
             name,

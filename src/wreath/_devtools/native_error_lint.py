@@ -93,15 +93,11 @@ def _returns_pyobject(code_lines: list[str], index: int, function: str) -> bool:
         if declaration.search(code_lines[position]):
             start = max(0, position - 4)
             signature = " ".join(code_lines[start : position + 1])
-            return re.search(
-                rf"PyObject\s*\*\s*{re.escape(function)}\s*\(", signature
-            ) is not None
+            return re.search(rf"PyObject\s*\*\s*{re.escape(function)}\s*\(", signature) is not None
     return False
 
 
-def _function_contexts(
-    code_lines: list[str], functions: list[str]
-) -> tuple[list[str], list[bool]]:
+def _function_contexts(code_lines: list[str], functions: list[str]) -> tuple[list[str], list[bool]]:
     """Resolve enclosing function and return protocol once per source line.
 
     ``_enclosing_function`` deliberately searches backwards, which is useful
@@ -115,9 +111,7 @@ def _function_contexts(
     for index, function in enumerate(functions):
         if function != current:
             current = function
-            returns_pyobject = bool(function) and _returns_pyobject(
-                code_lines, index, function
-            )
+            returns_pyobject = bool(function) and _returns_pyobject(code_lines, index, function)
         pyobject_results.append(returns_pyobject)
     return functions, pyobject_results
 

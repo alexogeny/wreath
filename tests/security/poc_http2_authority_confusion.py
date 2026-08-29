@@ -1,16 +1,3 @@
-"""PoC: cross the trusted-host boundary with conflicting HTTP/2 authority.
-
-Run from the repository root::
-
-    uv run python tests/security/poc_http2_authority_confusion.py
-
-The script binds only to loopback and uses TLS+ALPN, Wreath's metal event loop,
-native HTTP/2 protocol, and an independent test HPACK encoder.  The request is
-for ``evil.example`` in HTTP/2 control data but supplies ``Host: good.example``.
-A vulnerable build lets TrustedHostPolicy validate the latter and runs the
-handler for the former.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -126,11 +113,7 @@ def _status(response: bytes) -> bytes | None:
 def main() -> int:
     cert_path, key_path = _certificate()
     seen_hosts: list[str | None] = []
-    app = Wreath(
-        http_policy=HttpPolicy(
-            trusted_host=TrustedHostPolicy(("good.example",))
-        )
-    )
+    app = Wreath(http_policy=HttpPolicy(trusted_host=TrustedHostPolicy(("good.example",))))
 
     @app.get("/")
     async def index(request) -> str:
@@ -147,9 +130,7 @@ def main() -> int:
             lifespan="off",
         )
         server = Server(app, config, loop)
-        loop.run_until_complete(
-            server._start(ssl=tls.build_ssl_context(("h2",)), tls=None)
-        )
+        loop.run_until_complete(server._start(ssl=tls.build_ssl_context(("h2",)), tls=None))
         port = server.sockets[0].getsockname()[1]
         response = loop.run_until_complete(_drive(server, port))
     finally:

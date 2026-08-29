@@ -1,16 +1,8 @@
-"""What every subsystem is counting, in one place a scrape can read.
+"""Collect bounded counters from application-owned subsystems.
 
-Two dozen objects in this tree keep counters, each added with a written reason
-an operator would want it: `jobs` counts run errors and lease expiries,
-`messaging` counts unrouted publishes and doorbell reconnects, `entity` counts
-names lost under load, `http_client` counts connection reuse, the pool counts
-how deep its wait queue ever got. Every one of them was reachable only by
-holding the object and knowing the method's name, which meant a dashboard saw
-none of it.
-
-`MessageBus.stats()` says why, for its own six counters: *"an exporter has to
-know each name and gains nothing when one is added"*. That argument is right and
-was never generalised — this module is the generalisation.
+`collect(app)` discovers application components that expose `counters()` and
+returns one reading for each. This keeps a scrape aligned with the objects the
+application actually owns without a second metric registry.
 
 ```python
 from wreath import metrics
@@ -19,14 +11,8 @@ for reading in metrics.collect(app):
     print(reading.subsystem, reading.instance, reading.values)
 ```
 
-**Collected by asking, not from a list.** Anything the application holds that
-offers `counters()` contributes one reading, exactly as `Wreath.schema_components`
-collects DDL claims. A hand-maintained registry would be one more place to
-forget a new subsystem, and forgetting is the defect this exists to remove.
-
-**Counters only, never a decision.** A reading is a number and a name. What a
-number *means* — degraded, paging, fine — is a policy question, and putting a
-threshold here would be the second place that decision lives.
+Each reading contains names and numbers only. Alert thresholds and health
+decisions belong to the operator's policy, not the collector.
 """
 
 from __future__ import annotations
@@ -80,8 +66,9 @@ class Counters:
         *not* folded in — a sink without labels cannot distinguish two queues,
         and silently summing them would be worse than the caller knowing it.
         """
-        return {f"{namespace}_{self.subsystem}_{name}": value
-                for name, value in self.values.items()}
+        return {
+            f"{namespace}_{self.subsystem}_{name}": value for name, value in self.values.items()
+        }
 
 
 @runtime_checkable
@@ -120,17 +107,13 @@ def _read_snapshot(source: SnapshotSource) -> tuple[Any, Any]:
     return snapshot, loss() if callable(loss) else None
 
 
-def _counter_sources(
-    sources: Iterable[Any], *, bridge: str
-) -> tuple[Any, ...]:
+def _counter_sources(sources: Iterable[Any], *, bridge: str) -> tuple[Any, ...]:
     """Validate explicit sources once, where a bridge is configured."""
     explicit = tuple(sources)
     for index, source in enumerate(explicit):
         report = getattr(source, "counters", None)
         if not callable(report):
-            raise TypeError(
-                f"{bridge} counter source {index} must expose counters()"
-            )
+            raise TypeError(f"{bridge} counter source {index} must expose counters()")
     return explicit
 
 
@@ -152,9 +135,7 @@ def _holders(app: Any) -> list[Any]:
     return list(registered())
 
 
-def collect(
-    app: Any = None, counter_sources: Iterable[Any] = ()
-) -> tuple[Counters, ...]:
+def collect(app: Any = None, counter_sources: Iterable[Any] = ()) -> tuple[Counters, ...]:
     """Every registered or explicit subsystem's counters, in declaration order.
 
     A holder that raises is skipped rather than failing the scrape: a metrics

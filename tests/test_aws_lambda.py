@@ -40,11 +40,13 @@ def test_lambda_payload_v2_runs_one_lifespan_across_warm_invocations() -> None:
 
     @app.post("/hello")
     async def hello(request):
-        return JSONResponse({
-            "query": request.query_string.decode(),
-            "body": (await request.body()).decode(),
-            "cookie": request.header("cookie"),
-        })
+        return JSONResponse(
+            {
+                "query": request.query_string.decode(),
+                "body": (await request.body()).decode(),
+                "cookie": request.header("cookie"),
+            }
+        )
 
     event = {
         "version": "2.0",
@@ -52,9 +54,7 @@ def test_lambda_payload_v2_runs_one_lifespan_across_warm_invocations() -> None:
         "rawQueryString": "x=1",
         "headers": {"host": "api.example", "content-type": "text/plain"},
         "cookies": ["a=1", "b=2"],
-        "requestContext": {
-            "http": {"method": "POST", "path": "/hello", "sourceIp": "203.0.113.4"}
-        },
+        "requestContext": {"http": {"method": "POST", "path": "/hello", "sourceIp": "203.0.113.4"}},
         "body": "payload",
         "isBase64Encoded": False,
     }
@@ -103,9 +103,7 @@ def test_lambda_payload_v2_separates_decoded_and_raw_paths() -> None:
         ("/%FF", None, "not valid percent-encoded UTF-8"),
     ],
 )
-def test_lambda_payload_v2_refuses_malformed_path_forms(
-    raw_path, http_path, message
-) -> None:
+def test_lambda_payload_v2_refuses_malformed_path_forms(raw_path, http_path, message) -> None:
     http = {"method": "GET"}
     if http_path is not None:
         http["path"] = http_path

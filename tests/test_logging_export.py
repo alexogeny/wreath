@@ -1,16 +1,3 @@
-"""Stage 6 of first-class logging: OTLP logs, the stdlib bridge, the doctor check.
-
-`_otlp.py` already builds trace and metric requests; logs is the third signal on
-the same transport, and the bounded queue, exporter thread and failure isolation
-around it already exist. This stage is the mapping and the interop, not new
-plumbing.
-
-The bridge is opt-in on purpose. A framework that grabs the root logger fights
-`dictConfig`, surprises anyone with existing handlers, and either double-emits or
-silently discards their configuration. Instead `wreath.doctor` grows a check that
-notices the split-stream situation and says so.
-"""
-
 from __future__ import annotations
 
 import logging as stdlib_logging
@@ -48,9 +35,6 @@ def _record(site: log.LogEvent, **kw: object) -> ProjectedLog:
     return ProjectedLog(cell=cell, observed_unix_nano=1_700_000_000_000_000_000, **kw)  # type: ignore[arg-type]
 
 
-# --- OTLP logs mapping ------------------------------------------------------
-
-
 def test_an_empty_batch_builds_an_empty_request(runtime: log.LogRuntime) -> None:
     assert build_logs_request([], registry=runtime.registry) == {"resourceLogs": []}
 
@@ -84,7 +68,6 @@ def test_declared_arguments_become_attributes(runtime: log.LogRuntime) -> None:
 
 
 def test_a_record_without_correlation_omits_the_ids(runtime: log.LogRuntime) -> None:
-    """OTLP forbids an all-zero trace id; absent is the correct encoding."""
     site = _site()
     request = build_logs_request([_record(site)], registry=runtime.registry)
     record = request["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]
@@ -107,11 +90,8 @@ def test_the_resource_carries_the_service_name(runtime: log.LogRuntime) -> None:
 
 
 def test_records_share_one_scope_entry(runtime: log.LogRuntime) -> None:
-    """OTLP groups records under a shared scope rather than repeating it."""
     site = _site()
-    request = build_logs_request(
-        [_record(site), _record(site)], registry=runtime.registry
-    )
+    request = build_logs_request([_record(site), _record(site)], registry=runtime.registry)
     (scope_logs,) = request["resourceLogs"][0]["scopeLogs"]
     assert len(scope_logs["logRecords"]) == 2
     assert scope_logs["scope"]["name"]
@@ -133,7 +113,6 @@ def test_a_redacted_argument_never_reaches_otlp(runtime: log.LogRuntime) -> None
 def test_dropped_siblings_are_exported_as_an_attribute(
     runtime: log.LogRuntime,
 ) -> None:
-    """What the limiter suppressed must be visible to the collector too."""
     site = _site()
     cell = fs.LogCell(
         request_id=0,
@@ -145,9 +124,6 @@ def test_dropped_siblings_are_exported_as_an_attribute(
     record = request["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]
     attrs = {a["key"]: a["value"] for a in record["attributes"]}
     assert attrs["wreath.dropped_siblings"] == {"intValue": "12"}
-
-
-# --- the stdlib bridge ------------------------------------------------------
 
 
 def test_the_bridge_forwards_a_stdlib_record(runtime: log.LogRuntime) -> None:
@@ -195,8 +171,6 @@ def test_the_bridge_carries_the_logger_name_as_the_event(
 def test_the_bridge_hashes_the_formatted_message_by_default(
     runtime: log.LogRuntime,
 ) -> None:
-    """A foreign library's message is an undeclared string, so it follows the
-    same deny-by-default rule as everything else -- unless asked otherwise."""
     logger = stdlib_logging.getLogger("test.bridge.redact")
     logger.propagate = False
     logger.setLevel(stdlib_logging.DEBUG)
@@ -216,8 +190,6 @@ def test_the_bridge_detaches_on_exit(runtime: log.LogRuntime) -> None:
 
 
 def test_the_bridge_records_join_the_current_request(runtime: log.LogRuntime) -> None:
-    """The reason to bridge at all: a third-party library's records land in the
-    same correlated stream as everything else."""
     logger = stdlib_logging.getLogger("test.bridge.request")
     logger.propagate = False
     logger.setLevel(stdlib_logging.DEBUG)
@@ -226,9 +198,6 @@ def test_the_bridge_records_join_the_current_request(runtime: log.LogRuntime) ->
             logger.warning("during a request")
             scope.finish(promoted=False)
     assert records[0].request_id == 77
-
-
-# --- the doctor check -------------------------------------------------------
 
 
 def test_doctor_reports_a_foreign_logger_holding_its_own_handlers() -> None:
@@ -266,9 +235,6 @@ def test_doctor_says_nothing_when_wreath_logging_is_inactive() -> None:
         assert check_logging_streams(active=False) == []
     finally:
         logger.handlers.clear()
-
-
-# --- the export tick --------------------------------------------------------
 
 
 def test_the_pipeline_exports_logs_on_its_tick(runtime: log.LogRuntime) -> None:
@@ -315,7 +281,6 @@ def test_an_empty_log_tick_does_not_probe_the_transport(
 def test_a_transport_without_export_logs_is_counted_not_crashed(
     runtime: log.LogRuntime,
 ) -> None:
-    """A transport predating the logs signal must degrade to a rising number."""
     from wreath._export import ExportPipeline
 
     class OldTransport:
@@ -345,7 +310,6 @@ def test_a_raising_log_exporter_is_isolated(runtime: log.LogRuntime) -> None:
 
 
 def test_logs_and_traces_do_not_share_a_queue(runtime: log.LogRuntime) -> None:
-    """A log burst must not evict the traces an operator came for."""
     from wreath._export import ExportPipeline
 
     class Transport:
@@ -364,15 +328,6 @@ def test_logs_and_traces_do_not_share_a_queue(runtime: log.LogRuntime) -> None:
 def test_dropped_siblings_is_exported_only_when_something_was_dropped(
     runtime: log.LogRuntime,
 ) -> None:
-    """`wreath.dropped_siblings` says how many events the limiter ate.
-
-    Every record carries the counter, and it is zero on the overwhelming
-    majority -- so exporting it unconditionally puts a `0` attribute on every
-    log line in the system, which costs a field per record on the wire and
-    tells a reader nothing. The guard that keeps it off was never exercised
-    from the other side: no test built a record with a non-zero count, so the
-    attribute could have been absent *always* and the suite stayed green.
-    """
     site = _site()
 
     def attributes(cell_kw: dict[str, object]) -> dict[str, object]:

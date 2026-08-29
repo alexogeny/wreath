@@ -1,8 +1,4 @@
-"""Prepare an isolated Wreath package containing an ASan/UBSan HTTP/3 extension.
-
-Mirrors build_server.py. See docs/plans/native-server-sanitizers.md for how to
-run the suite against the result.
-"""
+"""Prepare an isolated Wreath package containing an ASan/UBSan HTTP/3 extension."""
 
 from __future__ import annotations
 

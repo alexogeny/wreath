@@ -1,5 +1,3 @@
-"""The published distributions and native-runner matrix stay one contract."""
-
 from __future__ import annotations
 
 import tomllib
@@ -18,9 +16,7 @@ def _toml(path: str) -> dict:
 def _action_uses(value: object) -> set[str]:
     if isinstance(value, dict):
         found = {
-            action
-            for key, action in value.items()
-            if key == "uses" and isinstance(action, str)
+            action for key, action in value.items() if key == "uses" and isinstance(action, str)
         }
         return found | set().union(*map(_action_uses, value.values()))
     if isinstance(value, list):
@@ -42,8 +38,6 @@ def test_release_distributions_share_version_and_explicit_extras() -> None:
     assert base["project"]["requires-python"] == "==3.14.*"
     assert linux["project"]["requires-python"] == "==3.14.*"
     assert http3["project"]["requires-python"] == "==3.14.*"
-    assert (ROOT / "docs" / "release_notes" / f"{version}.md").is_file()
-
     expected_base_install = (
         f"pip install --no-index --find-links {{package}}/wheel-deps wreath=={version}"
     )
@@ -68,12 +62,8 @@ def test_base_wheel_smoke_is_portable_and_companions_are_linux_only() -> None:
     assert "rm -rf" not in base["before-build"]
     assert "linux" in linux["tool"]["cibuildwheel"]
     assert "linux" in http3["tool"]["cibuildwheel"]
-    assert linux["tool"]["cibuildwheel"]["test-command"].endswith(
-        "wheel_smoke.py --reactor"
-    )
-    assert http3["tool"]["cibuildwheel"]["test-command"].endswith(
-        "wheel_smoke.py --http3"
-    )
+    assert linux["tool"]["cibuildwheel"]["test-command"].endswith("wheel_smoke.py --reactor")
+    assert http3["tool"]["cibuildwheel"]["test-command"].endswith("wheel_smoke.py --http3")
 
 
 def test_release_is_regular_cpython_314_and_wheel_only() -> None:
@@ -100,18 +90,13 @@ def test_base_build_cleans_stale_capability_outputs() -> None:
     assert 'cmdclass={"build": _CleanBuild' in setup
 
 
-def test_ci_builds_linux_capabilities_and_gates_strict_docs() -> None:
+def test_ci_builds_linux_capabilities_before_tests() -> None:
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     steps = workflow["jobs"]["checks"]["steps"]
     commands = [step.get("run", "") for step in steps]
-    build_index = commands.index(
-        "WREATH_BUILD_LINUX=1 uv run python setup.py build_ext --inplace"
-    )
-    test_index = next(
-        index for index, command in enumerate(commands) if "wreath test" in command
-    )
+    build_index = commands.index("WREATH_BUILD_LINUX=1 uv run python setup.py build_ext --inplace")
+    test_index = next(index for index, command in enumerate(commands) if "wreath test" in command)
     assert build_index < test_index
-    assert "uv run --no-sync wreath docs check" in commands
 
 
 def test_windows_native_build_enables_c11_atomics_and_owns_pi() -> None:
@@ -168,33 +153,30 @@ def test_workflow_javascript_actions_use_node24_releases() -> None:
 
     assert {
         "actions/checkout@v7",
-        "actions/configure-pages@v6",
-        "actions/deploy-pages@v5",
         "actions/download-artifact@v8",
         "actions/setup-python@v7",
         "actions/upload-artifact@v7",
-        "actions/upload-pages-artifact@v5",
         "astral-sh/setup-uv@v9.0.0",
     } <= uses
-    assert not {
-        "actions/checkout@v4",
-        "actions/configure-pages@v5",
-        "actions/deploy-pages@v4",
-        "actions/download-artifact@v4",
-        "actions/setup-python@v5",
-        "actions/upload-artifact@v4",
-        "actions/upload-pages-artifact@v3",
-        "astral-sh/setup-uv@v5",
-    } & uses
+    assert (
+        not {
+            "actions/checkout@v4",
+            "actions/configure-pages@v5",
+            "actions/deploy-pages@v4",
+            "actions/download-artifact@v4",
+            "actions/setup-python@v5",
+            "actions/upload-artifact@v4",
+            "actions/upload-pages-artifact@v3",
+            "astral-sh/setup-uv@v5",
+        }
+        & uses
+    )
 
 
 def test_publish_matrix_covers_native_linux_macos_and_windows() -> None:
     workflow = yaml.safe_load((ROOT / ".github/workflows/publish.yml").read_text())
     matrix = workflow["jobs"]["wheels"]["strategy"]["matrix"]["include"]
-    targets = {
-        (entry["runner"], entry["platform"], entry["arch"])
-        for entry in matrix
-    }
+    targets = {(entry["runner"], entry["platform"], entry["arch"]) for entry in matrix}
     assert targets == {
         ("ubuntu-latest", "linux", "x86_64"),
         ("ubuntu-24.04-arm", "linux", "aarch64"),
@@ -219,9 +201,7 @@ def test_publish_matrix_covers_native_linux_macos_and_windows() -> None:
         assert required | {"release"} <= set(job["needs"])
         assert job["environment"] == environment
         download = next(
-            step
-            for step in job["steps"]
-            if step.get("uses") == "actions/download-artifact@v8"
+            step for step in job["steps"] if step.get("uses") == "actions/download-artifact@v8"
         )
         assert download["with"]["pattern"] == artifact_pattern
 

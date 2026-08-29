@@ -74,9 +74,7 @@ async def _native_context() -> Any:
     protocol = HttpProtocol(app, ServerConfig(), asyncio.get_running_loop(), set())
     protocol.connection_made(_Transport())
     protocol.data_received(
-        b"GET /items/42?q=1 HTTP/1.1\r\n"
-        b"host: example.test\r\n"
-        b"x-example: yes\r\n\r\n"
+        b"GET /items/42?q=1 HTTP/1.1\r\nhost: example.test\r\nx-example: yes\r\n\r\n"
     )
     if app.context is None:
         raise RuntimeError("native protocol did not activate the capture app")
@@ -274,9 +272,7 @@ def main() -> int:
             iterations=max(args.iterations, 20_000),
             warmup=args.warmup,
         )
-        results["request"] = measure.report(
-            arms, "wrapped Request", "control wrapped"
-        )
+        results["request"] = measure.report(arms, "wrapped Request", "control wrapped")
         measured_arms["request"] = arms
 
     if args.suite in ("after", "all"):
@@ -290,9 +286,7 @@ def main() -> int:
                 warmup=args.warmup,
             )
         )
-        results["after"] = measure.report(
-            arms, f"{args.hooks} async after hooks", "control async"
-        )
+        results["after"] = measure.report(arms, f"{args.hooks} async after hooks", "control async")
         measured_arms["after"] = arms
 
     if args.suite in ("inplace", "all"):
@@ -359,10 +353,7 @@ def main() -> int:
         "samples_us": {
             # Preserve the interleaved raw readings. Summary medians alone are
             # not enough to reproduce or audit a claimed sub-microsecond delta.
-            suite: {
-                arm.label: [round(sample, 6) for sample in arm.samples]
-                for arm in suite_arms
-            }
+            suite: {arm.label: [round(sample, 6) for sample in arm.samples] for arm in suite_arms}
             for suite, suite_arms in measured_arms.items()
         },
     }

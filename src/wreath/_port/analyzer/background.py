@@ -38,7 +38,7 @@ CELERY_TASK_KWARGS: dict[str, str | None] = {
 #: `run_at=`, an absolute instant, so a countdown is arithmetic the porter has to
 #: author rather than a keyword that moves.
 CELERY_ENQUEUE_KWARGS: dict[str, str] = {
-    "queue": "",              # named here only to be recognized, never carried
+    "queue": "",  # named here only to be recognized, never carried
     "priority": "priority",
     "task_id": "key",
 }

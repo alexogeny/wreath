@@ -1,5 +1,3 @@
-"""Packed managed-fleet classification stays inside one native invocation."""
-
 from __future__ import annotations
 
 import struct

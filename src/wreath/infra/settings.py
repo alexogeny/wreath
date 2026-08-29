@@ -77,24 +77,19 @@ def settings_keys(settings: type, *, prefix: str = "") -> tuple[SettingsKey, ...
     return tuple(_walk(settings, prefix.rstrip("_"), "", nested=False))
 
 
-def _walk(
-    settings: type, prefix: str, path: str, *, nested: bool
-) -> list[SettingsKey]:
+def _walk(settings: type, prefix: str, path: str, *, nested: bool) -> list[SettingsKey]:
     try:
         hints = typing.get_type_hints(settings, include_extras=True)
     except NameError as error:
         raise TypeError(
-            f"settings model {settings.__qualname__} has an unresolvable annotation: "
-            f"{error}"
+            f"settings model {settings.__qualname__} has an unresolvable annotation: {error}"
         ) from error
     found: list[SettingsKey] = []
     for item in dataclasses.fields(settings):
         annotation = hints.get(item.name, Any)
         base, marker = _unwrap_env(annotation)
         separator = "__" if nested else "_"
-        conventional = (
-            f"{prefix}{separator}{item.name.upper()}" if prefix else item.name.upper()
-        )
+        conventional = f"{prefix}{separator}{item.name.upper()}" if prefix else item.name.upper()
         key = marker.name if marker is not None else conventional
         dotted = f"{path}.{item.name}" if path else item.name
         if _is_dataclass_type(base):

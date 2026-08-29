@@ -94,8 +94,7 @@ def decode_recording(data: bytes) -> Recording:
         if len(event_bytes) % CELL_SIZE != 0:
             raise SchemaError("event chunk is not a whole number of cells")
         cells = tuple(
-            bytes(event_bytes[i : i + CELL_SIZE])
-            for i in range(0, len(event_bytes), CELL_SIZE)
+            bytes(event_bytes[i : i + CELL_SIZE]) for i in range(0, len(event_bytes), CELL_SIZE)
         )
         for cell in cells:
             # Validate each fixed record against the schema (kind/version).
@@ -177,8 +176,6 @@ def parse_traceparent(data: bytes) -> tuple[int, int, int, bool] | None:
     return (hi, lo, span, bool(flags & 1))
 
 
-# --- pure recorder oracle ---------------------------------------------------
-#
 # A readable, bounded model of the native worker's *observable* behavior: the
 # ring, counters, loss accounting, active table, and completion cells. It is not
 # a performance path; the differential tests drive the same sequence through this
@@ -221,8 +218,6 @@ def _mix64(x: int) -> int:
     return x ^ (x >> 31)
 
 
-
-
 class _PureRequest:
     __slots__ = ("_worker", "request_id", "active_slot", "_ctx", "_finished")
 
@@ -237,30 +232,48 @@ class _PureRequest:
         self._ctx["route_id"] = route_id
         self._ctx["plan_id"] = plan_id
 
-    def phase(self, phase_id: int, dependency_id: int = 0, coverage: int = 0,
-              start_offset_us: int = 0, duration_us: int = 0) -> None:
-        self._worker._phase(self._ctx, phase_id, dependency_id, coverage,
-                            start_offset_us, duration_us)
+    def phase(
+        self,
+        phase_id: int,
+        dependency_id: int = 0,
+        coverage: int = 0,
+        start_offset_us: int = 0,
+        duration_us: int = 0,
+    ) -> None:
+        self._worker._phase(
+            self._ctx, phase_id, dependency_id, coverage, start_offset_us, duration_us
+        )
 
     @property
     def phase_count(self) -> int:
         return len(self._ctx.get("phases", ()))
 
-    def capture(self, field_class: int, descriptor_id: int = 0,
-                disposition: int = 0, data: bytes = b"", max_bytes: int = 0) -> None:
-        self._worker._capture(self._ctx, field_class, descriptor_id, disposition,
-                              data, max_bytes)
+    def capture(
+        self,
+        field_class: int,
+        descriptor_id: int = 0,
+        disposition: int = 0,
+        data: bytes = b"",
+        max_bytes: int = 0,
+    ) -> None:
+        self._worker._capture(self._ctx, field_class, descriptor_id, disposition, data, max_bytes)
 
     @property
     def capture_slot(self) -> int:
         return self._ctx.get("capture_slot", -1)
 
-    def finish(self, now_ns: int, status: int = 0, terminal: int = 0,
-               error_class: int = 0, bytes_in: int = 0, bytes_out: int = 0) -> None:
+    def finish(
+        self,
+        now_ns: int,
+        status: int = 0,
+        terminal: int = 0,
+        error_class: int = 0,
+        bytes_in: int = 0,
+        bytes_out: int = 0,
+    ) -> None:
         if self._finished:
             raise RuntimeError("request already finished")
-        self._worker._end(self._ctx, now_ns, status, terminal, error_class,
-                          bytes_in, bytes_out)
+        self._worker._end(self._ctx, now_ns, status, terminal, error_class, bytes_in, bytes_out)
         self._finished = True
 
     def abandon(self) -> None:
@@ -272,13 +285,21 @@ class _PureRequest:
 class ReferenceRecorder:
     """A readable model of `wreath._native._flight.Recorder`'s observable behaviour."""
 
-    def __init__(self, mode: int, worker_id: int = 0, ring_records: int = 16384,
-                 active_requests: int = 2048, histogram_count: int = 1,
-                 completion_summaries: bool = True,
-                 detailed_sample_rate: float = 0.0, phase_slots: int = 256,
-                 detailed_slow_us: int = 0, capture_slabs: int = 0,
-                 slab_bytes: int = 65536,
-                 capture_hash_key: tuple[int, int] | None = None) -> None:
+    def __init__(
+        self,
+        mode: int,
+        worker_id: int = 0,
+        ring_records: int = 16384,
+        active_requests: int = 2048,
+        histogram_count: int = 1,
+        completion_summaries: bool = True,
+        detailed_sample_rate: float = 0.0,
+        phase_slots: int = 256,
+        detailed_slow_us: int = 0,
+        capture_slabs: int = 0,
+        slab_bytes: int = 65536,
+        capture_hash_key: tuple[int, int] | None = None,
+    ) -> None:
         if ring_records and (ring_records & (ring_records - 1)):
             raise ValueError("ring_records must be a power of two")
         if not 0.0 <= detailed_sample_rate <= 1.0:
@@ -408,9 +429,10 @@ class ReferenceRecorder:
         # An armed request reserves a phase-scratch slot, or counts the loss.
         flags = 0
         phase_slot = -1
-        if self.mode >= Mode.DETAILED and (
-            _mix64(request_id) & 0xFFFFFFFF
-        ) < self._detailed_sample_threshold:
+        if (
+            self.mode >= Mode.DETAILED
+            and (_mix64(request_id) & 0xFFFFFFFF) < self._detailed_sample_threshold
+        ):
             flags |= FLAG_DETAILED_ARMED
             if self.mode >= Mode.FORENSIC:
                 flags |= FLAG_FORENSIC_ARMED  # capture is a nested subset of Detailed
@@ -447,8 +469,15 @@ class ReferenceRecorder:
                 self._free.append(slot)
             ctx["slot"] = -1
 
-    def _phase(self, ctx: dict, phase_id: int, dependency_id: int = 0,
-               coverage: int = 0, start_offset_us: int = 0, duration_us: int = 0) -> None:
+    def _phase(
+        self,
+        ctx: dict,
+        phase_id: int,
+        dependency_id: int = 0,
+        coverage: int = 0,
+        start_offset_us: int = 0,
+        duration_us: int = 0,
+    ) -> None:
         if ctx.get("phase_slot", -1) < 0:
             return
         phases = ctx["phases"]
@@ -457,14 +486,16 @@ class ReferenceRecorder:
             return
         kind = PhaseKind(phase_id) if phase_id in _PHASE_KIND_SET else PhaseKind.UNKNOWN
         cov = PhaseCoverage(coverage) if coverage in _COVERAGE_SET else PhaseCoverage.UNKNOWN
-        phases.append(PhaseRecord(
-            phase_id=kind,
-            duration_us=duration_us,
-            start_offset_us=start_offset_us,
-            dependency_id=dependency_id,
-            coverage=cov,
-            sequence=len(phases),
-        ))
+        phases.append(
+            PhaseRecord(
+                phase_id=kind,
+                duration_us=duration_us,
+                start_offset_us=start_offset_us,
+                dependency_id=dependency_id,
+                coverage=cov,
+                sequence=len(phases),
+            )
+        )
 
     def _phase_release(self, ctx: dict) -> None:
         slot = ctx.get("phase_slot", -1)
@@ -495,8 +526,15 @@ class ReferenceRecorder:
         ctx["capture_flags"] = 0
         return slot
 
-    def _capture(self, ctx: dict, field_class: int, descriptor_id: int,
-                 disposition: int, data: bytes, max_bytes: int = 0) -> None:
+    def _capture(
+        self,
+        ctx: dict,
+        field_class: int,
+        descriptor_id: int,
+        disposition: int,
+        data: bytes,
+        max_bytes: int = 0,
+    ) -> None:
         # Deny-by-default: only a Forensic-armed request captures anything.
         if not (ctx.get("flags", 0) & FLAG_FORENSIC_ARMED) or self._capture_capacity == 0:
             return
@@ -534,14 +572,18 @@ class ReferenceRecorder:
             else:
                 self._losses[LossReason.CAPTURE_POOL_FULL] += 1
                 return
-        record = _CAPTURE_FIELD_HEADER.pack(
-            field_class & 0xFFFF,
-            descriptor_id & 0xFFFF,
-            disposition & 0xFF,
-            0,
-            stored & 0xFFFF,
-            original_length & 0xFFFFFFFF,
-        ) + payload + b"\x00" * (padded - stored)
+        record = (
+            _CAPTURE_FIELD_HEADER.pack(
+                field_class & 0xFFFF,
+                descriptor_id & 0xFFFF,
+                disposition & 0xFF,
+                0,
+                stored & 0xFFFF,
+                original_length & 0xFFFFFFFF,
+            )
+            + payload
+            + b"\x00" * (padded - stored)
+        )
         ctx["capture_fields"].append(record)
         ctx["capture_used"] = used + CAPTURE_FIELD_HEADER_SIZE + padded
         if disposition == CaptureDisposition.RAW and stored < original_length:
@@ -597,7 +639,7 @@ class ReferenceRecorder:
             for start in range(0, len(phases), PHASE_RECORDS_PER_BATCH):
                 batch = PhaseBatchCell(
                     request_id=ctx["request_id"],
-                    records=tuple(phases[start:start + PHASE_RECORDS_PER_BATCH]),
+                    records=tuple(phases[start : start + PHASE_RECORDS_PER_BATCH]),
                     worker_id=self._worker_id,
                 )
                 self._publish(batch.encode())
@@ -611,8 +653,16 @@ class ReferenceRecorder:
         self._capture_finish(ctx, False)
         ctx["mode"] = Mode.OFF
 
-    def _end(self, ctx: dict, now_ns: int, status: int, terminal: int,
-             error_class: int, bytes_in: int, bytes_out: int) -> None:
+    def _end(
+        self,
+        ctx: dict,
+        now_ns: int,
+        status: int,
+        terminal: int,
+        error_class: int,
+        bytes_in: int,
+        bytes_out: int,
+    ) -> None:
         if ctx.get("mode", Mode.OFF) == Mode.OFF:
             return
         duration_us = max(now_ns - ctx["start_ns"], 0) // 1000
@@ -655,9 +705,20 @@ class ReferenceRecorder:
         ctx = self._start(connection_id, protocol, start_ns)
         return _PureRequest(self, ctx.get("request_id", 0), ctx.get("slot", -1), ctx)
 
-    def record(self, start_ns: int, end_ns: int, connection_id: int = 0, protocol: int = 0,
-               route_id: int = 0, plan_id: int = 0, status: int = 0, terminal: int = 0,
-               error_class: int = 0, bytes_in: int = 0, bytes_out: int = 0) -> None:
+    def record(
+        self,
+        start_ns: int,
+        end_ns: int,
+        connection_id: int = 0,
+        protocol: int = 0,
+        route_id: int = 0,
+        plan_id: int = 0,
+        status: int = 0,
+        terminal: int = 0,
+        error_class: int = 0,
+        bytes_in: int = 0,
+        bytes_out: int = 0,
+    ) -> None:
         ctx = self._start(connection_id, protocol, start_ns)
         ctx["route_id"] = route_id
         ctx["plan_id"] = plan_id

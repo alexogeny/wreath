@@ -1,11 +1,3 @@
-"""WebSocket routes and the authentication pipeline (report 23: R-43).
-
-`_handle_websocket` matches a route and calls the handler. Nothing else in the
-request pipeline runs: no global middleware, and no route requirement. A
-`@authenticated()` WebSocket handler therefore accepts an anonymous connection,
-which is the opposite of what the decorator means on an HTTP route.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -49,7 +41,6 @@ class _Recorder:
         return None
 
 
-
 async def test_authenticated_websocket_route_refuses_an_anonymous_connection():
     app = Wreath()
     app.configure_auth(_RejectingBackend())
@@ -72,7 +63,6 @@ async def test_authenticated_websocket_route_refuses_an_anonymous_connection():
     assert opened == 0, "the handler ran despite an enforced auth requirement"
 
 
-
 async def test_authenticated_websocket_route_admits_an_authenticated_caller():
     app = Wreath()
     app.configure_auth(_AcceptingBackend())
@@ -88,7 +78,6 @@ async def test_authenticated_websocket_route_admits_an_authenticated_caller():
         async with TestClient(app) as client:
             async with client.websocket("/ws") as session:
                 assert await session.receive_text() == "hello"
-
 
 
 async def test_unenforced_websocket_route_is_unaffected():

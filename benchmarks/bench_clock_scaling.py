@@ -430,9 +430,7 @@ def _policy(tick: Any) -> tuple[Wreath, bytes]:
     )
 
     app = Wreath(
-        http_policy=policy_from_components(
-            [factory() for factory in POLICY_FACTORIES]
-        ),
+        http_policy=policy_from_components([factory() for factory in POLICY_FACTORIES]),
         ai_scraping="allow",
     )
     body = Response(_BODY)
@@ -807,9 +805,7 @@ def _prepared_policy_response(tick: Any) -> tuple[Wreath, bytes]:
     from wreath.policy import CachePolicy, HttpPolicy
 
     app = Wreath(
-        http_policy=HttpPolicy(
-            cache_control=CachePolicy(CacheControl(public=True, max_age=60))
-        )
+        http_policy=HttpPolicy(cache_control=CachePolicy(CacheControl(public=True, max_age=60)))
     )
     body = PreparedResponse(_BODY, media_type=b"application/json")
 

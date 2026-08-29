@@ -117,7 +117,8 @@ class TenantOverview:
         if not self.unavailable:
             return ""
         return (
-            "not read for this tenant: " + ", ".join(self.unavailable)
+            "not read for this tenant: "
+            + ", ".join(self.unavailable)
             + " -- these numbers are incomplete rather than low"
         )
 
@@ -146,19 +147,18 @@ def tenant_overview(
                 # source is arbitrary application-adjacent code and every way it
                 # can fail costs the same one column.
                 unavailable.append(name)
-        rows.append(TenantOverview(
-            key=getattr(tenant, "key", str(tenant)),
-            migration_state=str(values.get("migrations", "unknown")),
-            dead_letters=int(values.get("jobs", 0) or 0),
-            stalled_passes=int(values.get("passes", 0) or 0),
-            quota_used=float(values.get("quota", 0.0) or 0.0),
-            status=str(getattr(tenant, "status", "unknown")),
-            unavailable=tuple(unavailable),
-        ))
+        rows.append(
+            TenantOverview(
+                key=getattr(tenant, "key", str(tenant)),
+                migration_state=str(values.get("migrations", "unknown")),
+                dead_letters=int(values.get("jobs", 0) or 0),
+                stalled_passes=int(values.get("passes", 0) or 0),
+                quota_used=float(values.get("quota", 0.0) or 0.0),
+                status=str(getattr(tenant, "status", "unknown")),
+                unavailable=tuple(unavailable),
+            )
+        )
     return tuple(rows)
-
-
-# --- impersonation ----------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,14 +239,14 @@ def impersonate(
     # here so that no policy set can make it false.
     permitted = held & wanted
     return Impersonation(
-        operator=operator, user=user, scope=tuple(scope), ttl=float(ttl),
-        audit_entry=AuditEntry(
-            actor=operator, subject=user, scope=tuple(scope), ttl=float(ttl)),
-        permitted=permitted, of_user=held,
+        operator=operator,
+        user=user,
+        scope=tuple(scope),
+        ttl=float(ttl),
+        audit_entry=AuditEntry(actor=operator, subject=user, scope=tuple(scope), ttl=float(ttl)),
+        permitted=permitted,
+        of_user=held,
     )
-
-
-# --- operator actions -------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,15 +278,17 @@ class BulkOutcome:
 
     @property
     def applied(self) -> tuple[str, ...]:
-        return tuple(k for k, v in self.per_key.items() if v == "applied")
+        return tuple(key for key, outcome in self.per_key.items() if outcome == "applied")
 
     @property
     def skipped(self) -> tuple[str, ...]:
-        return tuple(k for k, v in self.per_key.items() if v == "skipped")
+        return tuple(key for key, outcome in self.per_key.items() if outcome == "skipped")
 
     @property
     def failed(self) -> tuple[str, ...]:
-        return tuple(k for k, v in self.per_key.items() if v not in ("applied", "skipped"))
+        return tuple(
+            key for key, outcome in self.per_key.items() if outcome not in ("applied", "skipped")
+        )
 
 
 def _require_reason(operator: str, reason: str) -> None:
@@ -316,8 +318,9 @@ def suspend_tenant(
     return SuspensionResult(tenant=tenant, requests_refused=True, jobs_paused=True)
 
 
-def deprovision_tenant(tenant: str, *, confirm: str = "", operator: str = "",
-                       reason: str = "") -> str:
+def deprovision_tenant(
+    tenant: str, *, confirm: str = "", operator: str = "", reason: str = ""
+) -> str:
     """Irreversible, so it asks for the name typed back.
 
     Typing the name is the only confirmation that survives becoming a habit --
@@ -334,7 +337,9 @@ def deprovision_tenant(tenant: str, *, confirm: str = "", operator: str = "",
 
 
 def retry_dead_letter(
-    *, job_id: str, requeue: Callable[[str], Any] | None = None,
+    *,
+    job_id: str,
+    requeue: Callable[[str], Any] | None = None,
 ) -> dict[str, Any]:
     """Put the job back on the queue rather than running it here.
 
@@ -371,9 +376,6 @@ def bulk(
             # 400th would leave 600 untouched and no record of which.
             per_key[key] = f"failed: {error}"
     return BulkOutcome(action=action, per_key=per_key)
-
-
-# --- the console ------------------------------------------------------------
 
 
 class PlatformAdmin:
@@ -431,8 +433,7 @@ class PlatformAdmin:
                 f"operations {', '.join(writes)} write, and a write needs csrf=: "
                 "pass the generated console's explicit form-token verifier"
             )
-        return {"prefix": prefix, "operations": self._operations,
-                "csp": CONTENT_SECURITY_POLICY}
+        return {"prefix": prefix, "operations": self._operations, "csp": CONTENT_SECURITY_POLICY}
 
     @contextmanager
     def inspect(self, key: str) -> Any:

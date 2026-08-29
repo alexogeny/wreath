@@ -18,13 +18,17 @@ def main() -> None:
         help="module exposing the Sanic application as `app`",
     )
     parser.add_argument(
-        "--protocol", nargs="+", default=["http/1.1"],
+        "--protocol",
+        nargs="+",
+        default=["http/1.1"],
         help="protocol set to serve; h3 requires --tls-cert/--tls-key and aioquic",
     )
     parser.add_argument("--tls-cert", default=None)
     parser.add_argument("--tls-key", default=None)
     parser.add_argument(
-        "--workers", type=int, default=1,
+        "--workers",
+        type=int,
+        default=1,
         help="server processes; the matrix gives every arm the same count",
     )
     args = parser.parse_args()
@@ -58,9 +62,7 @@ def main() -> None:
         except ImportError:
             # Without aioquic Sanic falls back to HTTP/1.1 silently, and the
             # run would be recorded as h3.
-            raise SystemExit(
-                "sanic HTTP/3 needs aioquic; it is in the benchmark group"
-            ) from None
+            raise SystemExit("sanic HTTP/3 needs aioquic; it is in the benchmark group") from None
         options["version"] = 3
 
     cast(Any, app).run(**options)

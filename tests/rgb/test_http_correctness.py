@@ -1,6 +1,3 @@
-"""HTTP conformance details (report 23: G-30, G-42, G-45, G-61, G-62, G-63,
-G-85, G-86)."""
-
 from __future__ import annotations
 
 from wreath import Wreath
@@ -61,7 +58,9 @@ class TestAcceptLanguageQuality:
 
         request = Request(
             {
-                "type": "http", "method": "GET", "path": "/",
+                "type": "http",
+                "method": "GET",
+                "path": "/",
                 "headers": [(b"accept-language", header.encode("latin-1"))],
             },
             None,
@@ -81,13 +80,6 @@ class TestAcceptLanguageQuality:
         assert self._locale(";;;") == "en"
 
     def test_a_refused_tag_is_not_returned(self):
-        """`q=0` means "not acceptable" (RFC 9110 §12.4.2), so the only tag
-        offered being refused leaves nothing to prefer and falls back.
-
-        `validation_errors.select_language` already reads `q=0` as a refusal;
-        this is the same header parsed by the same rules through the other
-        entry point, and it answered `de` -- the one language the client said
-        it did not want."""
         assert self._locale("de;q=0") == "en"
 
     def test_a_refused_tag_loses_to_an_accepted_one(self):
@@ -209,9 +201,7 @@ class TestConditionalRequests:
         app.static("/assets", str(tmp_path))
 
         async with TestClient(app) as client:
-            response = await client.get(
-                "/assets/a.txt", headers={"if-none-match": "*"}
-            )
+            response = await client.get("/assets/a.txt", headers={"if-none-match": "*"})
         assert response.status == 304
 
     async def test_a_static_file_carries_last_modified(self, tmp_path):
@@ -229,9 +219,7 @@ class TestConditionalRequests:
         app.static("/assets", str(tmp_path))
 
         async with TestClient(app) as client:
-            response = await client.get(
-                "/assets/a.txt", headers={"if-none-match": '"nope"'}
-            )
+            response = await client.get("/assets/a.txt", headers={"if-none-match": '"nope"'})
         assert response.status == 200
 
 

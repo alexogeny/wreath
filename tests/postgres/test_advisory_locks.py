@@ -1,13 +1,3 @@
-"""Advisory-lock facade: SQL emission, connection affinity, and pool accounting.
-
-These exercise the real ``Database`` pool + ``Session`` code over a fake
-connector that records emitted SQL, so no live PostgreSQL is required. The
-integration behaviours that only a real server can prove (contention blocks,
-``lock_timeout`` fires, xact locks auto-release on ROLLBACK, a killed connection
-frees the lock) belong in a DSN-gated suite alongside the other postgres
-integration tests.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -122,8 +112,7 @@ async def test_namespace_defaults_to_database_name_and_can_override() -> None:
         async with database.lock("k", namespace="tenant_acme"):
             pass
         _, args = next(
-            call for call in connector.connections[0].calls
-            if "pg_advisory_lock(" in call[0]
+            call for call in connector.connections[0].calls if "pg_advisory_lock(" in call[0]
         )
         assert args == ("tenant_acme", "k")
     finally:
@@ -240,9 +229,6 @@ async def test_run_singleton_leader_runs_work_and_releases() -> None:
         await database.stop()
 
 
-# -- Session (xact-scoped) ---------------------------------------------------
-
-
 class _SessionConn:
     def __init__(self) -> None:
         self.closed = False
@@ -299,8 +285,7 @@ async def test_session_xact_lock_rides_the_pinned_connection() -> None:
     await session.lock("account:42")
     sql, args = database.connection.calls[-1]
     assert sql == (
-        "SELECT pg_advisory_xact_lock("
-        "hashtextextended($2::text, hashtextextended($1::text, 0)))"
+        "SELECT pg_advisory_xact_lock(hashtextextended($2::text, hashtextextended($1::text, 0)))"
     )
     assert args == ("main", "account:42")
 
@@ -332,9 +317,6 @@ async def test_session_tenant_schema_is_folded_into_the_namespace() -> None:
     _, args = database.connection.calls[-1]
     # Advisory locks ignore search_path, so the tenant schema must be in the key.
     assert args == ("tenant_acme", "invoice:1")
-
-
-# -- affinity failure paths (no still-locked connection ever leased out) ------
 
 
 @pytest.mark.asyncio
@@ -400,9 +382,6 @@ async def test_singleton_follower_never_runs_work_while_lock_unavailable() -> No
         await runner.stop()
     finally:
         await database.stop()
-
-
-# -- what a broad catch used to hide ------------------------------------------
 
 
 @pytest.mark.asyncio

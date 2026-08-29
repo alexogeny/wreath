@@ -55,8 +55,7 @@ TARGETS = ("typescript", "python", "proto")
 def _generate(app: object, options: TypegenOptions) -> dict[str, str]:
     if options.target not in TARGETS:
         raise TypegenCliError(
-            f"unknown typegen target {options.target!r}; "
-            f"known targets are {', '.join(TARGETS)}",
+            f"unknown typegen target {options.target!r}; known targets are {', '.join(TARGETS)}",
             exit_code=2,
         )
     try:
@@ -75,9 +74,7 @@ def _generate(app: object, options: TypegenOptions) -> dict[str, str]:
         # The digest pins the *document*, not the model, because the document
         # is what `compare_openapi` reasons about.
         document = generate_openapi(app, title=options.title, version=options.version)
-        return render_python(
-            api, document=document, class_name=options.class_name
-        )
+        return render_python(api, document=document, class_name=options.class_name)
     if options.target == "proto":
         from .targets.proto import ProtoTargetError, render_proto
 
@@ -106,7 +103,7 @@ def _previous_owned(output_dir: Path) -> set[str]:
         return set()
     try:
         document = json.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return set()
     files = document.get("files", [])
     if not isinstance(files, list):
@@ -156,7 +153,6 @@ def check_contract(current: dict[str, Any], output_dir: Path) -> tuple[Any, ...]
 
 def write(files: dict[str, str], output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    # Remove previously-owned files that are no longer generated (only ours).
     for name in sorted(_previous_owned(output_dir) - set(files)):
         target = _safe_target(output_dir, name)
         if target.exists():

@@ -22,9 +22,15 @@ _SETTINGS_FIELD_RULE = {
 # case sensitivity only picks which spelling to look up. Anything else —
 # `env_nested_delimiter`, `secrets_dir`, `env_file_encoding` on a computed path —
 # changes where values come from, so the class waits for a human.
-_SETTINGS_CONFIG_KEYS = frozenset({
-    "env_prefix", "extra", "case_sensitive", "env_file", "populate_by_name",
-})
+_SETTINGS_CONFIG_KEYS = frozenset(
+    {
+        "env_prefix",
+        "extra",
+        "case_sensitive",
+        "env_file",
+        "populate_by_name",
+    }
+)
 # How many env names a message will spell out before it says "...".
 _MAX_NAMED_ENV = 8
 
@@ -47,15 +53,14 @@ def settings_field_shape(
     annotation = imports.origin(stmt.annotation).split(".")[-1]
     known = settings_names or set()
     value_is_group = (
-        isinstance(stmt.value, ast.Call)
-        and imports.origin(stmt.value.func).split(".")[-1] in known
+        isinstance(stmt.value, ast.Call) and imports.origin(stmt.value.func).split(".")[-1] in known
     )
     if annotation in known or value_is_group:
         return "nested"
     if annotation not in _ENV_SCALARS:
         return "complex"
     if stmt.value is None:
-        return "scalar"                       # no default: a required variable
+        return "scalar"  # no default: a required variable
     if isinstance(stmt.value, ast.Constant) and not isinstance(stmt.value.value, bytes):
         return "scalar"
     return "complex"
@@ -77,14 +82,15 @@ def settings_class_rule(
     shapes = [
         settings_field_shape(imports, stmt, settings_names)
         for stmt in node.body
-        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)
+        if isinstance(stmt, ast.AnnAssign)
+        and isinstance(stmt.target, ast.Name)
         and stmt.target.id != "model_config"
     ]
     if not shapes or any(shape != "scalar" for shape in shapes):
         return "settings.class"
     for stmt in node.body:
         if isinstance(stmt, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-            return "settings.class"           # a v1 `class Config`, or a validator
+            return "settings.class"  # a v1 `class Config`, or a validator
         config = _model_config_value(stmt)
         if config is None:
             continue

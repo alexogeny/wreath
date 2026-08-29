@@ -1,10 +1,3 @@
-"""Stage 4b -- mapping reassembled traces to OTLP/JSON request dicts.
-
-These pin the ``wreath._otlp`` mapping: server spans, phase child spans,
-synthesized IDs for unpropagated requests, failure status, the metrics request,
-and the bounded export queue. No OpenTelemetry SDK is imported anywhere.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -90,13 +83,8 @@ def _attrs(span: dict) -> dict[str, object]:
     out: dict[str, object] = {}
     for kv in span["attributes"]:
         value = kv["value"]
-        out[kv["key"]] = value.get(
-            "stringValue", value.get("intValue", value.get("boolValue"))
-        )
+        out[kv["key"]] = value.get("stringValue", value.get("intValue", value.get("boolValue")))
     return out
-
-
-# --- server span -----------------------------------------------------------
 
 
 def test_server_span_shape_and_route_attributes() -> None:
@@ -152,9 +140,7 @@ def test_compact_client_facts_enrich_server_span() -> None:
 
 
 def test_failure_sets_error_status() -> None:
-    req = build_trace_request(
-        [_trace(status=500, terminal=TerminalStatus.ERROR, error_class=7)]
-    )
+    req = build_trace_request([_trace(status=500, terminal=TerminalStatus.ERROR, error_class=7)])
     span = _only_span(req)
     assert span["status"]["code"] == 2  # ERROR
     assert span["status"]["message"] == "error"
@@ -205,9 +191,6 @@ def test_unknown_route_falls_back_without_route_attributes() -> None:
     assert "http.route" not in attrs
 
 
-# --- phase child spans -----------------------------------------------------
-
-
 def test_phases_become_child_spans_with_correct_kinds() -> None:
     trace = _trace(
         trace_id=0xAAA,
@@ -215,18 +198,25 @@ def test_phases_become_child_spans_with_correct_kinds() -> None:
         duration_us=1000,
         phases=(
             PhaseRecord(
-                phase_id=PhaseKind.HANDLER, duration_us=200, start_offset_us=10, sequence=0,
+                phase_id=PhaseKind.HANDLER,
+                duration_us=200,
+                start_offset_us=10,
+                sequence=0,
                 coverage=PhaseCoverage.PYTHON,
             ),
             PhaseRecord(
-                phase_id=PhaseKind.DB_QUERY, duration_us=50, start_offset_us=100,
-                dependency_id=5, sequence=1, coverage=PhaseCoverage.EXTERNAL,
+                phase_id=PhaseKind.DB_QUERY,
+                duration_us=50,
+                start_offset_us=100,
+                dependency_id=5,
+                sequence=1,
+                coverage=PhaseCoverage.EXTERNAL,
             ),
         ),
     )
-    spans = build_trace_request([trace], image=_image())["resourceSpans"][0][
-        "scopeSpans"
-    ][0]["spans"]
+    spans = build_trace_request([trace], image=_image())["resourceSpans"][0]["scopeSpans"][0][
+        "spans"
+    ]
     assert len(spans) == 3  # one server + two child
 
     server, handler, db = spans
@@ -247,9 +237,6 @@ def test_phases_become_child_spans_with_correct_kinds() -> None:
     assert handler["spanId"] != db["spanId"]
 
 
-# --- request envelope ------------------------------------------------------
-
-
 def test_empty_traces_produce_empty_request() -> None:
     assert build_trace_request([]) == {"resourceSpans": []}
 
@@ -265,9 +252,6 @@ def test_resource_attributes_default_and_override() -> None:
     assert keys["deployment.environment"] == "prod"
 
 
-# --- metrics ---------------------------------------------------------------
-
-
 def _snapshot(*routes: RouteMetric) -> ProjectorSnapshot:
     return ProjectorSnapshot(
         assembled=sum(r.count for r in routes),
@@ -280,21 +264,21 @@ def _snapshot(*routes: RouteMetric) -> ProjectorSnapshot:
 
 
 def test_metrics_request_counts_and_histogram() -> None:
-    metric = RouteMetric(route_id=101, count=10, errors=3, duration_us_sum=12345,
-                         duration_us_max=2000)
+    metric = RouteMetric(
+        route_id=101, count=10, errors=3, duration_us_sum=12345, duration_us_max=2000
+    )
     metric.buckets[3] = 4
     metric.buckets[7] = 6
     snap = _snapshot(metric)
 
-    req = build_metrics_request(
-        snap, image=_image(), start_unix_nano=1000, now_unix_nano=2000
-    )
+    req = build_metrics_request(snap, image=_image(), start_unix_nano=1000, now_unix_nano=2000)
     metrics = req["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
     by_name = {m["name"]: m for m in metrics}
 
     count = by_name["http.server.request.count"]["sum"]
     assert count["isMonotonic"] is True
     assert count["aggregationTemporality"] == 2
+
     def _has_outcome(point: dict) -> bool:
         return any(a["key"] == "wreath.outcome" for a in point["attributes"])
 
@@ -319,9 +303,6 @@ def test_metrics_request_empty_when_no_routes() -> None:
     snap = _snapshot()
     req = build_metrics_request(snap, start_unix_nano=1, now_unix_nano=2)
     assert req == {"resourceMetrics": []}
-
-
-# --- bounded export queue --------------------------------------------------
 
 
 def test_bounded_queue_offers_drains_and_counts_drops() -> None:
@@ -370,8 +351,6 @@ def test_capacity_must_be_positive() -> None:
         BoundedExportQueue(capacity=0)
 
 
-# --- end to end over a real recorder ---------------------------------------
-
 _flight = pytest.importorskip("wreath._native._flight")
 _TRACEPARENT = b"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 
@@ -381,41 +360,55 @@ _TRACEPARENT = b"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 #: concrete path, query value, header value, SQL, or user/tenant id.
 _ALLOWED_ATTRIBUTE_KEYS = frozenset(
     {
-        "wreath.route_id", "wreath.plan_id", "wreath.terminal",
-        "http.request.body.size", "http.response.body.size",
-        "network.protocol.name", "network.protocol.version",
-        "http.response.status_code", "http.request.method", "http.route",
-        "error.type", "wreath.phase", "wreath.coverage",
-        "wreath.dependency_id", "wreath.dependency",
-        "wreath.client.agent.claimed", "wreath.client.agent.verified",
-        "wreath.user_agent.classified", "wreath.user_agent.rule_id",
-        "user_agent.synthetic.type", "browser.mobile", "network.type",
-        "wreath.client.address_source", "geo.country.iso_code",
+        "wreath.route_id",
+        "wreath.plan_id",
+        "wreath.terminal",
+        "http.request.body.size",
+        "http.response.body.size",
+        "network.protocol.name",
+        "network.protocol.version",
+        "http.response.status_code",
+        "http.request.method",
+        "http.route",
+        "error.type",
+        "wreath.phase",
+        "wreath.coverage",
+        "wreath.dependency_id",
+        "wreath.dependency",
+        "wreath.client.agent.claimed",
+        "wreath.client.agent.verified",
+        "wreath.user_agent.classified",
+        "wreath.user_agent.rule_id",
+        "user_agent.synthetic.type",
+        "browser.mobile",
+        "network.type",
+        "wreath.client.address_source",
+        "geo.country.iso_code",
     }
 )
 
 
 def _all_spans(request: dict) -> list[dict]:
     return [
-        span
-        for rs in request["resourceSpans"]
-        for sp in rs["scopeSpans"]
-        for span in sp["spans"]
+        span for rs in request["resourceSpans"] for sp in rs["scopeSpans"] for span in sp["spans"]
     ]
 
 
 def test_span_attributes_stay_within_the_low_cardinality_allowlist() -> None:
-    """A fence: whatever traces we map, no attribute key outside the approved
-    low-cardinality set is ever emitted, and http.route is a template."""
     traces = [
-        _trace(trace_id=1, span_id=2, status=500, terminal=TerminalStatus.ERROR,
-               error_class=4),
+        _trace(trace_id=1, span_id=2, status=500, terminal=TerminalStatus.ERROR, error_class=4),
         _trace(route_id=0, protocol=Protocol.WEBSOCKET),
         _trace(
-            trace_id=9, span_id=8,
+            trace_id=9,
+            span_id=8,
             phases=(
-                PhaseRecord(phase_id=PhaseKind.DB_QUERY, duration_us=5, dependency_id=5,
-                            sequence=0, coverage=PhaseCoverage.EXTERNAL),
+                PhaseRecord(
+                    phase_id=PhaseKind.DB_QUERY,
+                    duration_us=5,
+                    dependency_id=5,
+                    sequence=0,
+                    coverage=PhaseCoverage.EXTERNAL,
+                ),
                 PhaseRecord(phase_id=PhaseKind.HANDLER, duration_us=5, sequence=1),
             ),
         ),
@@ -426,23 +419,22 @@ def test_span_attributes_stay_within_the_low_cardinality_allowlist() -> None:
             assert kv["key"] in _ALLOWED_ATTRIBUTE_KEYS, kv["key"]
         # The span name is method + route template, never a concrete path.
         assert "?" not in span["name"]  # no query string
-        route_attr = next(
-            (a for a in span["attributes"] if a["key"] == "http.route"), None
-        )
+        route_attr = next((a for a in span["attributes"] if a["key"] == "http.route"), None)
         if route_attr is not None:
             assert route_attr["value"]["stringValue"] == "/users/{id}"
 
 
 def test_real_recorder_projects_to_serializable_otlp() -> None:
-    """Drive an armed request through the real ring, reassemble it, map it to
-    OTLP, and confirm the result is valid JSON with the expected span shape."""
     import json
 
     from wreath._projector import Projector
 
     rec = _flight.Recorder(
-        _flight.MODE_DETAILED, ring_records=1024, active_requests=64,
-        detailed_sample_rate=1.0, phase_slots=8,
+        _flight.MODE_DETAILED,
+        ring_records=1024,
+        active_requests=64,
+        detailed_sample_rate=1.0,
+        phase_slots=8,
     )
     req = rec.begin(connection_id=1, protocol=_flight.PROTO_HTTP1, start_ns=0)
     req.route(101, 55)
@@ -467,7 +459,5 @@ def test_real_recorder_projects_to_serializable_otlp() -> None:
     assert child["name"] == "handler"
     assert child["parentSpanId"] == server["spanId"]
 
-    metrics = build_metrics_request(
-        snap, image=_image(), start_unix_nano=1, now_unix_nano=2
-    )
+    metrics = build_metrics_request(snap, image=_image(), start_unix_nano=1, now_unix_nano=2)
     assert json.loads(json.dumps(metrics)) == metrics

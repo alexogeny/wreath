@@ -1,5 +1,3 @@
-"""Migration benchmark documents render into the holistic latest report."""
-
 from __future__ import annotations
 
 from wreath._devtools.bench_report import classify, render

@@ -1,5 +1,3 @@
-"""Whole-boundary response validation and JSON emission."""
-
 from __future__ import annotations
 
 from typing import Annotated, Any

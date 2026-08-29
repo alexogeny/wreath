@@ -8,9 +8,7 @@ from wreath._secondfactor import totp_code, verify_totp
 SECRET = b"0123456789abcdef0123"
 
 
-@pytest.mark.parametrize(
-    "candidate", ["12345", "12x456"], ids=("wrong-length", "non-digit")
-)
+@pytest.mark.parametrize("candidate", ["12345", "12x456"], ids=("wrong-length", "non-digit"))
 def test_invalid_totp_shape_never_reaches_code_generation(
     candidate: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
