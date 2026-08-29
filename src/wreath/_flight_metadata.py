@@ -69,10 +69,7 @@ def build_metadata_image(app: Any) -> MetadataImage:
     raw_routes: list[dict[str, Any]] = []
     plan_keys: dict[tuple, dict[str, Any]] = {}
 
-    for definition, spec, requirement in zip(
-        routes, binding_specs, requirements, strict=True
-    ):
-
+    for definition, spec, requirement in zip(routes, binding_specs, requirements, strict=True):
         dep_names = sorted(
             {_callable_name(dep.fn) for dep in getattr(definition, "dependencies", ())}
             | ({_callable_name(d[1].fn) for d in getattr(spec, "depends", ())} if spec else set())
@@ -334,7 +331,7 @@ def _model_names(registry: Any) -> list[str]:
             continue
         try:
             items = container.values() if hasattr(container, "values") else container
-        except (AttributeError, TypeError):
+        except AttributeError, TypeError:
             # `hasattr` already guards absence, so this only covers a `values`
             # that exists and misbehaves -- a test double, or a container whose
             # attribute is not callable. Narrowed from a blanket catch: a
@@ -344,9 +341,7 @@ def _model_names(registry: Any) -> list[str]:
         for item in items:
             model = getattr(item, "model_type", None) or getattr(item, "model", None)
             source = model if model is not None else item
-            name = getattr(source, "__qualname__", None) or getattr(
-                source, "__name__", None
-            )
+            name = getattr(source, "__qualname__", None) or getattr(source, "__name__", None)
             if name:
                 names.add(str(name))
     return sorted(names)

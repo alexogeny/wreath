@@ -1,8 +1,3 @@
-"""Pseudo-header and header-field validation (RFC 9113 s8.3, s8.2).
-
-Malformed request headers are a stream error of type PROTOCOL_ERROR
-(RST_STREAM) and must not reach the application.
-"""
 from __future__ import annotations
 
 import pytest
@@ -35,125 +30,194 @@ def _stream_error(d, stream_id=1):
 
 
 async def test_missing_method_is_protocol_error(make_driver):
-    d, captured = await _send_raw_headers(make_driver, [
-        (b":path", b"/"), (b":scheme", b"https"), (b":authority", b"x")])
+    d, captured = await _send_raw_headers(
+        make_driver, [(b":path", b"/"), (b":scheme", b"https"), (b":authority", b"x")]
+    )
     assert _stream_error(d) == support.PROTOCOL_ERROR
     assert not captured
 
 
 async def test_missing_path_is_protocol_error(make_driver):
-    d, captured = await _send_raw_headers(make_driver, [
-        (b":method", b"GET"), (b":scheme", b"https"), (b":authority", b"x")])
+    d, captured = await _send_raw_headers(
+        make_driver, [(b":method", b"GET"), (b":scheme", b"https"), (b":authority", b"x")]
+    )
     assert _stream_error(d) == support.PROTOCOL_ERROR
     assert not captured
 
 
 async def test_missing_scheme_is_protocol_error(make_driver):
-    d, captured = await _send_raw_headers(make_driver, [
-        (b":method", b"GET"), (b":path", b"/"), (b":authority", b"x")])
+    d, captured = await _send_raw_headers(
+        make_driver, [(b":method", b"GET"), (b":path", b"/"), (b":authority", b"x")]
+    )
     assert _stream_error(d) == support.PROTOCOL_ERROR
     assert not captured
 
 
 async def test_duplicate_pseudo_header_is_protocol_error(make_driver):
-    d, captured = await _send_raw_headers(make_driver, [
-        (b":method", b"GET"), (b":method", b"POST"),
-        (b":path", b"/"), (b":scheme", b"https"), (b":authority", b"x")])
+    d, captured = await _send_raw_headers(
+        make_driver,
+        [
+            (b":method", b"GET"),
+            (b":method", b"POST"),
+            (b":path", b"/"),
+            (b":scheme", b"https"),
+            (b":authority", b"x"),
+        ],
+    )
     assert _stream_error(d) == support.PROTOCOL_ERROR
     assert not captured
 
 
 async def test_host_must_not_disagree_with_authority(make_driver):
-    """Conflicting routing authorities must not reach host-based policy."""
-    d, captured = await _send_raw_headers(make_driver, [
-        (b":method", b"GET"), (b":path", b"/"), (b":scheme", b"https"),
-        (b":authority", b"evil.example"), (b"host", b"good.example")])
+    d, captured = await _send_raw_headers(
+        make_driver,
+        [
+            (b":method", b"GET"),
+            (b":path", b"/"),
+            (b":scheme", b"https"),
+            (b":authority", b"evil.example"),
+            (b"host", b"good.example"),
+        ],
+    )
     assert _stream_error(d) == support.PROTOCOL_ERROR
     assert not captured
 
 
 async def test_authority_must_not_contain_userinfo(make_driver):
-    d, captured = await _send_raw_headers(make_driver, [
-        (b":method", b"GET"), (b":path", b"/"), (b":scheme", b"https"),
-        (b":authority", b"good.example@evil.example")])
+    d, captured = await _send_raw_headers(
+        make_driver,
+        [
+            (b":method", b"GET"),
+            (b":path", b"/"),
+            (b":scheme", b"https"),
+            (b":authority", b"good.example@evil.example"),
+        ],
+    )
     assert _stream_error(d) == support.PROTOCOL_ERROR
     assert not captured
 
 
 async def test_duplicate_host_is_protocol_error(make_driver):
-    d, captured = await _send_raw_headers(make_driver, [
-        (b":method", b"GET"), (b":path", b"/"), (b":scheme", b"https"),
-        (b":authority", b"good.example"),
-        (b"host", b"good.example"), (b"host", b"good.example")])
+    d, captured = await _send_raw_headers(
+        make_driver,
+        [
+            (b":method", b"GET"),
+            (b":path", b"/"),
+            (b":scheme", b"https"),
+            (b":authority", b"good.example"),
+            (b"host", b"good.example"),
+            (b"host", b"good.example"),
+        ],
+    )
     assert _stream_error(d) == support.PROTOCOL_ERROR
     assert not captured
 
 
 async def test_unknown_pseudo_header_is_protocol_error(make_driver):
-    d, captured = await _send_raw_headers(make_driver, [
-        (b":method", b"GET"), (b":path", b"/"), (b":scheme", b"https"),
-        (b":authority", b"x"), (b":bogus", b"1")])
+    d, captured = await _send_raw_headers(
+        make_driver,
+        [
+            (b":method", b"GET"),
+            (b":path", b"/"),
+            (b":scheme", b"https"),
+            (b":authority", b"x"),
+            (b":bogus", b"1"),
+        ],
+    )
     assert _stream_error(d) == support.PROTOCOL_ERROR
     assert not captured
 
 
 async def test_pseudo_header_after_regular_header_is_protocol_error(make_driver):
-    d, captured = await _send_raw_headers(make_driver, [
-        (b":method", b"GET"), (b":path", b"/"), (b":scheme", b"https"),
-        (b"x-regular", b"1"), (b":authority", b"x")])
+    d, captured = await _send_raw_headers(
+        make_driver,
+        [
+            (b":method", b"GET"),
+            (b":path", b"/"),
+            (b":scheme", b"https"),
+            (b"x-regular", b"1"),
+            (b":authority", b"x"),
+        ],
+    )
     assert _stream_error(d) == support.PROTOCOL_ERROR
     assert not captured
 
 
 async def test_uppercase_header_name_is_protocol_error(make_driver):
-    d, captured = await _send_raw_headers(make_driver, [
-        (b":method", b"GET"), (b":path", b"/"), (b":scheme", b"https"),
-        (b":authority", b"x"), (b"X-Uppercase", b"1")])
+    d, captured = await _send_raw_headers(
+        make_driver,
+        [
+            (b":method", b"GET"),
+            (b":path", b"/"),
+            (b":scheme", b"https"),
+            (b":authority", b"x"),
+            (b"X-Uppercase", b"1"),
+        ],
+    )
     assert _stream_error(d) == support.PROTOCOL_ERROR
     assert not captured
 
 
 async def test_connection_specific_header_is_protocol_error(make_driver):
-    d, captured = await _send_raw_headers(make_driver, [
-        (b":method", b"GET"), (b":path", b"/"), (b":scheme", b"https"),
-        (b":authority", b"x"), (b"connection", b"keep-alive")])
+    d, captured = await _send_raw_headers(
+        make_driver,
+        [
+            (b":method", b"GET"),
+            (b":path", b"/"),
+            (b":scheme", b"https"),
+            (b":authority", b"x"),
+            (b"connection", b"keep-alive"),
+        ],
+    )
     assert _stream_error(d) == support.PROTOCOL_ERROR
     assert not captured
 
 
 async def test_te_header_non_trailers_is_protocol_error(make_driver):
-    d, captured = await _send_raw_headers(make_driver, [
-        (b":method", b"GET"), (b":path", b"/"), (b":scheme", b"https"),
-        (b":authority", b"x"), (b"te", b"gzip")])
+    d, captured = await _send_raw_headers(
+        make_driver,
+        [
+            (b":method", b"GET"),
+            (b":path", b"/"),
+            (b":scheme", b"https"),
+            (b":authority", b"x"),
+            (b"te", b"gzip"),
+        ],
+    )
     assert _stream_error(d) == support.PROTOCOL_ERROR
     assert not captured
 
 
 async def test_te_trailers_is_allowed(make_driver):
-    d, captured = await _send_raw_headers(make_driver, [
-        (b":method", b"GET"), (b":path", b"/"), (b":scheme", b"https"),
-        (b":authority", b"x"), (b"te", b"trailers")])
+    d, captured = await _send_raw_headers(
+        make_driver,
+        [
+            (b":method", b"GET"),
+            (b":path", b"/"),
+            (b":scheme", b"https"),
+            (b":authority", b"x"),
+            (b"te", b"trailers"),
+        ],
+    )
     assert captured, "te: trailers is explicitly permitted"
 
 
 async def test_empty_path_is_protocol_error(make_driver):
-    d, captured = await _send_raw_headers(make_driver, [
-        (b":method", b"GET"), (b":path", b""), (b":scheme", b"https"),
-        (b":authority", b"x")])
+    d, captured = await _send_raw_headers(
+        make_driver,
+        [(b":method", b"GET"), (b":path", b""), (b":scheme", b"https"), (b":authority", b"x")],
+    )
     assert _stream_error(d) == support.PROTOCOL_ERROR
     assert not captured
 
 
 async def test_connect_without_authority_is_protocol_error(make_driver):
     # CONNECT uses :authority and omits :scheme/:path (RFC 9113 s8.5).
-    d, captured = await _send_raw_headers(make_driver, [
-        (b":method", b"CONNECT")])
+    d, captured = await _send_raw_headers(make_driver, [(b":method", b"CONNECT")])
     assert _stream_error(d) == support.PROTOCOL_ERROR
     assert not captured
 
 
-# --- field octets (RFC 9113 s8.2.1) ---------------------------------------
-#
 # HTTP/2 used to check names for uppercase only and values not at all, so the
 # same process accepted over h2 exactly the octets its HTTP/1.1 parser refuses
 # -- CR, LF and NUL included. Anything that re-serializes these headers to an
@@ -162,8 +226,7 @@ async def test_connect_without_authority_is_protocol_error(make_driver):
 # never authorized to use. Both protocols now share one octet rule
 # (wreath_field_token in server_common.c); these cases pin the h2 half of it.
 
-BASE = [(b":method", b"GET"), (b":path", b"/"), (b":scheme", b"https"),
-        (b":authority", b"x")]
+BASE = [(b":method", b"GET"), (b":path", b"/"), (b":scheme", b"https"), (b":authority", b"x")]
 
 
 @pytest.mark.parametrize(
@@ -190,9 +253,15 @@ async def test_malformed_field_octets_are_protocol_errors(make_driver, label, fi
 
 async def test_crlf_in_pseudo_header_value_is_protocol_error(make_driver):
     # A pseudo-header is a field too: :authority lands in the scope as `host`.
-    d, captured = await _send_raw_headers(make_driver, [
-        (b":method", b"GET"), (b":path", b"/"), (b":scheme", b"https"),
-        (b":authority", b"x\r\nx-injected: 1")])
+    d, captured = await _send_raw_headers(
+        make_driver,
+        [
+            (b":method", b"GET"),
+            (b":path", b"/"),
+            (b":scheme", b"https"),
+            (b":authority", b"x\r\nx-injected: 1"),
+        ],
+    )
     assert _stream_error(d) == support.PROTOCOL_ERROR
     assert not captured
 
@@ -200,56 +269,57 @@ async def test_crlf_in_pseudo_header_value_is_protocol_error(make_driver):
 async def test_ordinary_field_octets_are_still_accepted(make_driver):
     # The rule rejects control octets, not the printable range: a value may
     # carry spaces, tabs and colons inside it, just not at its edges.
-    d, captured = await _send_raw_headers(make_driver, [
-        *BASE, (b"x-note", b"a b\tc: d"), (b"x-token", b"!#$%&'*+-.^_`|~")])
+    d, captured = await _send_raw_headers(
+        make_driver, [*BASE, (b"x-note", b"a b\tc: d"), (b"x-token", b"!#$%&'*+-.^_`|~")]
+    )
     assert captured, "a well-formed field was rejected"
     assert (b"x-note", b"a b\tc: d") in captured[0]["headers"]
 
 
-# --- content-length (RFC 9113 s8.1.1) --------------------------------------
-
 @pytest.mark.parametrize(
     "value",
-    [b"100abc", b"0x10", b" 5", b"5 ", b"+5", b"-1", b"", b"1e3",
-     b"99999999999999999999999999999"],
+    [b"100abc", b"0x10", b" 5", b"5 ", b"+5", b"-1", b"", b"1e3", b"99999999999999999999999999999"],
 )
 async def test_malformed_content_length_is_protocol_error(make_driver, value):
     # A length that does not parse used to be swallowed and recorded as "no
     # declared length", which silently skipped the end-of-stream length check
     # below -- a smuggling-adjacent opt-out of the framing rule.
-    d, captured = await _send_raw_headers(
-        make_driver, [*BASE, (b"content-length", value)])
+    d, captured = await _send_raw_headers(make_driver, [*BASE, (b"content-length", value)])
     assert _stream_error(d) == support.PROTOCOL_ERROR
     assert not captured
 
 
 async def test_conflicting_duplicate_content_length_is_protocol_error(make_driver):
-    d, captured = await _send_raw_headers(make_driver, [
-        *BASE, (b"content-length", b"5"), (b"content-length", b"6")])
+    d, captured = await _send_raw_headers(
+        make_driver, [*BASE, (b"content-length", b"5"), (b"content-length", b"6")]
+    )
     assert _stream_error(d) == support.PROTOCOL_ERROR
     assert not captured
 
 
 async def test_repeated_identical_content_length_is_accepted(make_driver):
-    d, captured = await _send_raw_headers(make_driver, [
-        *BASE, (b"content-length", b"0"), (b"content-length", b"0")])
+    d, captured = await _send_raw_headers(
+        make_driver, [*BASE, (b"content-length", b"0"), (b"content-length", b"0")]
+    )
     assert captured, "identical repeated content-length is not a conflict"
 
 
 async def test_declared_content_length_is_enforced(make_driver):
-    """A body shorter than the declared length is a malformed request.
-
-    The app has to still be reading for this to be the check under test: an app
-    that answers without draining closes the stream first, and a late DATA frame
-    is then STREAM_CLOSED rather than a framing error.
-    """
     d = make_driver(conftest.ok_app)
     await d.preface()
-    block = support.HpackEncoder().encode([
-        (b":method", b"POST"), (b":path", b"/"), (b":scheme", b"https"),
-        (b":authority", b"x"), (b"content-length", b"100")])
+    block = support.HpackEncoder().encode(
+        [
+            (b":method", b"POST"),
+            (b":path", b"/"),
+            (b":scheme", b"https"),
+            (b":authority", b"x"),
+            (b"content-length", b"100"),
+        ]
+    )
     await d.feed_and_settle(
-        support.encode_frame(support.HEADERS, support.FLAG_END_HEADERS, 1, block))
+        support.encode_frame(support.HEADERS, support.FLAG_END_HEADERS, 1, block)
+    )
     await d.feed_and_settle(
-        support.encode_frame(support.DATA, support.FLAG_END_STREAM, 1, b"short"))
+        support.encode_frame(support.DATA, support.FLAG_END_STREAM, 1, b"short")
+    )
     assert _stream_error(d) == support.PROTOCOL_ERROR

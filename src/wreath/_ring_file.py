@@ -155,16 +155,11 @@ class DecodedRing:
         one that never completed -- which is why `ring_full_drops` is worth
         checking before believing this.
         """
-        return _core.ring_in_flight(
-            self.records, int(EventKind.COMPLETION), int(EventKind.LOG)
-        )
+        return _core.ring_in_flight(self.records, int(EventKind.COMPLETION), int(EventKind.LOG))
 
     def _in_flight_reference(self) -> tuple[int, ...]:
         """Independent Python definition retained for kernel parity tests."""
-        completed = {
-            record.decode().request_id
-            for record in self.of_kind(EventKind.COMPLETION)
-        }
+        completed = {record.decode().request_id for record in self.of_kind(EventKind.COMPLETION)}
         logged: list[int] = []
         seen: set[int] = set()
         for record in self.of_kind(EventKind.LOG):

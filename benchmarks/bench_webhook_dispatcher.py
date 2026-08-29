@@ -38,9 +38,7 @@ class MemoryOutbox:
     async def mark_sending(self, session: Any, delivery: OutboxDelivery) -> None:
         self.sending.append(delivery.delivery_id)
 
-    async def mark_delivered(
-        self, session: Any, delivery: OutboxDelivery, *, status: int
-    ) -> None:
+    async def mark_delivered(self, session: Any, delivery: OutboxDelivery, *, status: int) -> None:
         self.delivered.append(delivery.delivery_id)
 
     async def mark_retry(self, session: Any, delivery: OutboxDelivery, **data: Any) -> None:
@@ -62,9 +60,7 @@ class Destination:
     async def _send_envelope(self, envelope: Any, *, key_id: str) -> WebhookDeliveryResult:
         self.observed.append(envelope.id)
         failure = "Timeout" if self.outcome == "unknown" else None
-        return WebhookDeliveryResult(
-            self.outcome, envelope.id, status=self.status, failure=failure
-        )
+        return WebhookDeliveryResult(self.outcome, envelope.id, status=self.status, failure=failure)
 
 
 def _delivery(index: int) -> OutboxDelivery:
@@ -105,12 +101,7 @@ async def _drain(count: int, outcome: str, status: int | None) -> tuple[float, d
     while await dispatcher.run_once(None) is not None:
         pass
     elapsed = (perf_counter_ns() - started) / count
-    accounted = (
-        len(outbox.delivered)
-        + len(outbox.retry)
-        + len(outbox.failed)
-        + len(outbox.unknown)
-    )
+    accounted = len(outbox.delivered) + len(outbox.retry) + len(outbox.failed) + len(outbox.unknown)
     if accounted != count or len(destination.observed) != count:
         raise RuntimeError("dispatcher delivery counts do not account for committed intents")
     return elapsed, {

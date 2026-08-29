@@ -1,4 +1,3 @@
-"""Direct protocol objections for the MCP cloud survivor corpus."""
 from __future__ import annotations
 
 import asyncio
@@ -154,9 +153,7 @@ def test_challenge_uses_default_only_when_refusal_has_no_description() -> None:
     mcp = _server()
 
     defaulted = json.loads(mcp._challenge(Unauthenticated(None)).body)
-    described = json.loads(
-        mcp._challenge(Unauthenticated("invalid_token", "token expired")).body
-    )
+    described = json.loads(mcp._challenge(Unauthenticated("invalid_token", "token expired")).body)
 
     assert defaulted["error"]["message"] == "this MCP endpoint requires a bearer token"
     assert described["error"]["message"] == "token expired"
@@ -344,15 +341,11 @@ async def test_permission_authorization_uses_all_and_any_modes() -> None:
 
     all_entry = _Gate(
         "all-tool",
-        AuthRequirement(
-            permission_checks=(SetRequirement(frozenset(("read", "write")), "all"),)
-        ),
+        AuthRequirement(permission_checks=(SetRequirement(frozenset(("read", "write")), "all"),)),
     )
     any_entry = _Gate(
         "any-tool",
-        AuthRequirement(
-            permission_checks=(SetRequirement(frozenset(("read", "write")), "any"),)
-        ),
+        AuthRequirement(permission_checks=(SetRequirement(frozenset(("read", "write")), "any"),)),
     )
 
     assert "does not hold the permissions" in (
@@ -371,18 +364,14 @@ class _Authorizer:
 
 @pytest.mark.asyncio
 async def test_policy_denial_preserves_reason_and_has_a_default() -> None:
-    requirement = AuthRequirement(
-        policies=(PolicyRequirement("record:read", 'Record::"one"'),)
-    )
+    requirement = AuthRequirement(policies=(PolicyRequirement("record:read", 'Record::"one"'),))
     entry = _Gate("record", requirement)
     identity = Identity("ada")
 
     explained = await _server(authorizer=_Authorizer("outside tenant"))._authorize(
         _request(identity), entry
     )
-    defaulted = await _server(authorizer=_Authorizer(None))._authorize(
-        _request(identity), entry
-    )
+    defaulted = await _server(authorizer=_Authorizer(None))._authorize(_request(identity), entry)
 
     assert explained == "the caller may not 'record:read': outside tenant"
     assert defaulted == "the caller may not 'record:read': denied"

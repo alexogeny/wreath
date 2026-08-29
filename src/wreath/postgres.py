@@ -208,9 +208,20 @@ class Pool:
     """
 
     __slots__ = (
-        "_available", "_borrowed", "_config", "_connections",
-        "_connector", "_drained", "_dsn", "_high_water", "_read_only",
-        "_shared", "_started", "_statements", "_stopping", "_waiters",
+        "_available",
+        "_borrowed",
+        "_config",
+        "_connections",
+        "_connector",
+        "_drained",
+        "_dsn",
+        "_high_water",
+        "_read_only",
+        "_shared",
+        "_started",
+        "_statements",
+        "_stopping",
+        "_waiters",
         "_active_waiters",
     )
 
@@ -282,9 +293,7 @@ class Pool:
                 "max_size": reading.max_size,
                 "queue_high_water": reading.queue_high_water,
             },
-            gauges=frozenset(
-                {"borrowed", "available", "waiters", "max_size", "queue_high_water"}
-            ),
+            gauges=frozenset({"borrowed", "available", "waiters", "max_size", "queue_high_water"}),
         )
 
     def snapshot(self) -> PoolSnapshot:
@@ -483,7 +492,6 @@ class Pool:
         # sized so that requests *do* collide -- which is the point of sharing --
         # reaches this branch far more often than the idle one, so leaving it
         # behind would mean the fast path never ran under the load it is for.
-        #
         # The scan stops at the first connection carrying one borrower because
         # nothing can be lower, which is also what the loop below it would have
         # settled on: it takes the first strict minimum, and 1 is the minimum.
@@ -597,9 +605,7 @@ class Pool:
     def _expire(self, waiter: asyncio.Future[Any]) -> None:
         """Fail one queued caller when its own deadline passes."""
         if not waiter.done():
-            waiter.set_exception(
-                TimeoutError("timed out acquiring PostgreSQL connection")
-            )
+            waiter.set_exception(TimeoutError("timed out acquiring PostgreSQL connection"))
 
     def _unqueue(self, waiter: asyncio.Future[Any]) -> None:
         self._active_waiters.discard(waiter)
@@ -718,9 +724,7 @@ class Pool:
             waiter = self._waiters.popleft()
             if waiter in self._active_waiters:
                 self._active_waiters.discard(waiter)
-                waiter.set_exception(
-                    InterfaceError("PostgreSQL pool is shutting down")
-                )
+                waiter.set_exception(InterfaceError("PostgreSQL pool is shutting down"))
         if self._borrowed and grace_period > 0:
             self._drained = loop.create_future()
             timer = loop.call_later(deadline - loop.time(), self._settle_drain_now)
@@ -805,7 +809,6 @@ class Statement:
         # never opens a transaction, so several may share a connection and be
         # batched into one flight. At `pipeline_depth=1` this is exactly
         # `acquire()`.
-        #
         # The synchronous attempt first: an uncontended lease is a deque pop and
         # a dict store, and awaiting it through `Database` and `Pool` cost two
         # coroutines to do that. `None` means it has to be awaited after all.
@@ -846,14 +849,12 @@ class Statement:
                 if not pool.try_release_shared(connection):
                     await pool.release(connection, shared=True)
         try_acquire_shared = getattr(database, "try_acquire_shared", None)
-        connection = (
-            try_acquire_shared(self.workload) if try_acquire_shared is not None
-            else None
-        )
+        connection = try_acquire_shared(self.workload) if try_acquire_shared is not None else None
         if connection is None:
             acquire_shared = getattr(database, "acquire_shared", None)
             connection = await (
-                acquire_shared(self.workload) if acquire_shared is not None
+                acquire_shared(self.workload)
+                if acquire_shared is not None
                 else database.acquire(self.workload)
             )
         try:
@@ -881,13 +882,15 @@ class Statement:
             finally:
                 # Recorded in a finally so a failed statement still shows the
                 # time it spent at the database before raising.
-                marker(_PH_DB_QUERY, self.database._flight_dep_id,
-                       _COV_EXTERNAL, _monotonic_ns() - start)
+                marker(
+                    _PH_DB_QUERY,
+                    self.database._flight_dep_id,
+                    _COV_EXTERNAL,
+                    _monotonic_ns() - start,
+                )
         finally:
             try_release_shared = getattr(database, "try_release_shared", None)
-            if try_release_shared is None or not try_release_shared(
-                self.workload, connection
-            ):
+            if try_release_shared is None or not try_release_shared(self.workload, connection):
                 release_shared = getattr(database, "release_shared", None)
                 await (
                     release_shared(self.workload, connection)
@@ -963,11 +966,7 @@ class Statement:
             # materialized -- never drain a generator, which would change what
             # the query runs (same rule as request-body capture).
             capture = _capture_marker.get(None)
-            if (
-                capture is not None
-                and isinstance(argument_sets, (list, tuple))
-                and argument_sets
-            ):
+            if capture is not None and isinstance(argument_sets, (list, tuple)) and argument_sets:
                 capture(_CAP_DB_PARAM, _encode_db_params(argument_sets))
             start = _monotonic_ns()
             try:
@@ -980,8 +979,12 @@ class Statement:
             finally:
                 # One DB_QUERY for the whole fan-out: it is one acquisition and
                 # one Sync-delimited pipeline from the request's point of view.
-                marker(_PH_DB_QUERY, self.database._flight_dep_id,
-                       _COV_EXTERNAL, _monotonic_ns() - start)
+                marker(
+                    _PH_DB_QUERY,
+                    self.database._flight_dep_id,
+                    _COV_EXTERNAL,
+                    _monotonic_ns() - start,
+                )
         finally:
             await self.database.release(self.workload, connection)
 
@@ -990,8 +993,16 @@ class Database:
     """One logical database with independently bounded workload pools."""
 
     __slots__ = (
-        "_configs", "_connector", "_dsn", "_flight_dep_id", "_name", "_pools",
-        "_register_lock", "_statements", "_workload_dsns", "shutdown_timeout",
+        "_configs",
+        "_connector",
+        "_dsn",
+        "_flight_dep_id",
+        "_name",
+        "_pools",
+        "_register_lock",
+        "_statements",
+        "_workload_dsns",
+        "shutdown_timeout",
         "started",
     )
 
@@ -1093,7 +1104,6 @@ class Database:
         # connection per workload, so it stays open for milliseconds and a
         # concurrent registration raises `dictionary changed size during
         # iteration`. Measured: 400 of 400 trials when the two align.
-        #
         # Snapshotting rather than holding the lock across the loop is
         # deliberate: `_register_lock` is a `threading.Lock`, so holding it
         # across an `await` would block every other thread for the whole of
@@ -1176,9 +1186,7 @@ class Database:
             subsystem="pool",
             instance=self._name,
             values={**totals, "queue_high_water": high_water},
-            gauges=frozenset(
-                {"borrowed", "available", "waiters", "max_size", "queue_high_water"}
-            ),
+            gauges=frozenset({"borrowed", "available", "waiters", "max_size", "queue_high_water"}),
         )
 
     def pool(self, workload: Workload) -> Pool:
@@ -1246,8 +1254,7 @@ class Database:
             return await pool.acquire()
         start = _monotonic_ns()
         connection = await pool.acquire()
-        marker(_PH_DB_POOL_WAIT, self._flight_dep_id, _COV_PYTHON,
-               _monotonic_ns() - start)
+        marker(_PH_DB_POOL_WAIT, self._flight_dep_id, _COV_PYTHON, _monotonic_ns() - start)
         return connection
 
     async def acquire_shared(self, workload: Workload = "read") -> Any:
@@ -1271,8 +1278,7 @@ class Database:
             return await pool.acquire(shared=True)
         start = _monotonic_ns()
         connection = await pool.acquire(shared=True)
-        marker(_PH_DB_POOL_WAIT, self._flight_dep_id, _COV_PYTHON,
-               _monotonic_ns() - start)
+        marker(_PH_DB_POOL_WAIT, self._flight_dep_id, _COV_PYTHON, _monotonic_ns() - start)
         return connection
 
     def try_acquire_shared(self, workload: Workload = "read") -> Any | None:
@@ -1312,7 +1318,6 @@ class Database:
         """
         await self._resolve_pool(workload).release(connection)
 
-    # -- distributed advisory locks ----------------------------------------
     # Cluster-global mutexes built on PostgreSQL advisory locks. See
     # `wreath._locks` for the connection-affinity contract; xact-scoped locks
     # live on `wreath.orm.session.Session.lock`.
@@ -1367,7 +1372,11 @@ class Database:
         `on_shutdown`. The guarded critical section must be idempotent.
         """
         return SingletonRunner(
-            self, key, work, namespace=namespace, workload=workload,
+            self,
+            key,
+            work,
+            namespace=namespace,
+            workload=workload,
             poll_interval=poll_interval,
         )
 
@@ -1397,11 +1406,26 @@ _backend._statement_configure(Statement, Pool, PoolConfig, _phase_marker)
 
 
 __all__ = [
-    "MAX_SPARSEVEC_DIM", "MAX_SPARSEVEC_NNZ",
-    "AdvisoryLock", "AdvisoryTryLock", "Connection", "Database", "FromDatabase",
-    "InterfaceError", "OperationalError", "PipelineFullError", "Pool", "PoolConfig",
-    "PoolSnapshot", "PostgresError", "ProtocolError", "Record", "RecordBatch",
+    "MAX_SPARSEVEC_DIM",
+    "MAX_SPARSEVEC_NNZ",
+    "AdvisoryLock",
+    "AdvisoryTryLock",
+    "Connection",
+    "Database",
+    "FromDatabase",
+    "InterfaceError",
+    "OperationalError",
+    "PipelineFullError",
+    "Pool",
+    "PoolConfig",
+    "PoolSnapshot",
+    "PostgresError",
+    "ProtocolError",
+    "Record",
+    "RecordBatch",
     "SingletonRunner",
-    "SparseVector", "Statement",
-    "Workload", "connect",
+    "SparseVector",
+    "Statement",
+    "Workload",
+    "connect",
 ]

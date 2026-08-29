@@ -1,15 +1,3 @@
-"""PoC: amplify HTTP/1 body work with a flood of one-byte chunks.
-
-Run from the repository root::
-
-    uv run python tests/security/poc_http1_chunk_frame_flood.py
-
-The script binds only to loopback and drives equal-size request bodies through
-Wreath's metal event loop and native HTTP/1 parser.  A vulnerable build bounds
-payload bytes but not chunk frames, accepting hundreds of thousands of tiny
-chunks and doing disproportionate parser and ASGI receive work.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -33,9 +21,7 @@ def _request(fragmented: bool) -> bytes:
         b"POST /upload HTTP/1.1\r\n"
         b"Host: 127.0.0.1\r\n"
         b"Transfer-Encoding: chunked\r\n"
-        b"Connection: close\r\n\r\n"
-        + body
-        + b"0\r\n\r\n"
+        b"Connection: close\r\n\r\n" + body + b"0\r\n\r\n"
     )
 
 

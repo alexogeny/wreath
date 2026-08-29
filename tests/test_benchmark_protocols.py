@@ -1,4 +1,3 @@
-"""Protocol dimension for the benchmark suite (orthogonal to frameworks)."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -38,12 +37,21 @@ def test_websocket_is_http11_only() -> None:
 
 def _row(**over: object) -> dict[str, object]:
     base: dict[str, object] = {
-        "framework": "wreath-native", "scenario": "plaintext",
-        "protocol": "http/1.1", "transport": "tcp", "secure": True, "alpn": "http/1.1",
-        "connections": 4, "max_streams_per_connection": 1, "trial": 1,
-        "load_generator": "h2load", "load_generator_version": "1.0",
-        "server_tls_version": "TLSv1.3", "errors": 0,
-        "latency_ms_p95": 1.0, "latency_ms_p99": 2.0,
+        "framework": "wreath-native",
+        "scenario": "plaintext",
+        "protocol": "http/1.1",
+        "transport": "tcp",
+        "secure": True,
+        "alpn": "http/1.1",
+        "connections": 4,
+        "max_streams_per_connection": 1,
+        "trial": 1,
+        "load_generator": "h2load",
+        "load_generator_version": "1.0",
+        "server_tls_version": "TLSv1.3",
+        "errors": 0,
+        "latency_ms_p95": 1.0,
+        "latency_ms_p99": 2.0,
         "normalized_100k_seconds": 5.0,
     }
     base.update(over)
@@ -126,9 +134,16 @@ def test_report_renders_mixed_generator_warning(tmp_path: Path) -> None:
 def test_result_rows_include_protocol_metadata() -> None:
     # The runner attaches these fields to every result row.
     required = {
-        "protocol", "transport", "secure", "alpn", "connections",
-        "max_streams_per_connection", "trial", "load_generator",
-        "load_generator_version", "server_tls_version",
+        "protocol",
+        "transport",
+        "secure",
+        "alpn",
+        "connections",
+        "max_streams_per_connection",
+        "trial",
+        "load_generator",
+        "load_generator_version",
+        "server_tls_version",
     }
     assert required <= set(_row().keys())
 
@@ -147,31 +162,46 @@ def test_merged_runs_report_median_and_keep_raw_samples() -> None:
 
 
 def test_no_winner_when_run_ranges_overlap() -> None:
-    """A lead smaller than the run-to-run spread is not a win."""
-    overlapping = merge_documents([
-        {"metadata": {}, "results": [
-            _row(framework="a", latency_ms_p99=1.0),
-            _row(framework="b", latency_ms_p99=1.2),
-        ]},
-        {"metadata": {}, "results": [
-            _row(framework="a", latency_ms_p99=1.4),  # a's worst is beaten by b's best
-            _row(framework="b", latency_ms_p99=1.3),
-        ]},
-    ])
+    overlapping = merge_documents(
+        [
+            {
+                "metadata": {},
+                "results": [
+                    _row(framework="a", latency_ms_p99=1.0),
+                    _row(framework="b", latency_ms_p99=1.2),
+                ],
+            },
+            {
+                "metadata": {},
+                "results": [
+                    _row(framework="a", latency_ms_p99=1.4),  # a's worst is beaten by b's best
+                    _row(framework="b", latency_ms_p99=1.3),
+                ],
+            },
+        ]
+    )
     html = _chart(overlapping["results"], "latency_ms_p99", "t", "ms")
     assert "WINNER" not in html
     assert "smaller than the run-to-run spread" in html
 
-    separated = merge_documents([
-        {"metadata": {}, "results": [
-            _row(framework="a", latency_ms_p99=1.0),
-            _row(framework="b", latency_ms_p99=9.0),
-        ]},
-        {"metadata": {}, "results": [
-            _row(framework="a", latency_ms_p99=1.1),  # every a sample beats every b
-            _row(framework="b", latency_ms_p99=9.1),
-        ]},
-    ])
+    separated = merge_documents(
+        [
+            {
+                "metadata": {},
+                "results": [
+                    _row(framework="a", latency_ms_p99=1.0),
+                    _row(framework="b", latency_ms_p99=9.0),
+                ],
+            },
+            {
+                "metadata": {},
+                "results": [
+                    _row(framework="a", latency_ms_p99=1.1),  # every a sample beats every b
+                    _row(framework="b", latency_ms_p99=9.1),
+                ],
+            },
+        ]
+    )
     html = _chart(separated["results"], "latency_ms_p99", "t", "ms")
     assert "WINNER" in html
 
@@ -204,7 +234,6 @@ def _orm_table(html: str) -> tuple[int, list[str]]:
 
 
 def test_orm_rows_stay_aligned_when_an_orm_omits_a_scenario() -> None:
-    """An ORM that cannot do a scenario natively gets a dash, not a missing cell."""
     html = render({"metadata": {}, "results": []}, extra=[_orm_doc()])
     columns, rows = _orm_table(html)
     assert len(rows) == 2
@@ -214,7 +243,6 @@ def test_orm_rows_stay_aligned_when_an_orm_omits_a_scenario() -> None:
 
 
 def test_orm_ranking_excludes_the_synchronous_orm() -> None:
-    """Peewee beats tortoise here, but must not be ranked against async ORMs."""
     html = render({"metadata": {}, "results": []}, extra=[_orm_doc()])
     _columns, rows = _orm_table(html)
     # wreath (0.1) is the fastest async ORM and wins; peewee (0.2) is dimmed, never green.
@@ -223,7 +251,6 @@ def test_orm_ranking_excludes_the_synchronous_orm() -> None:
 
 
 def test_report_is_self_contained() -> None:
-    """No network at render time: the report must work offline, from a file://."""
     document = {"metadata": {"note": "x"}, "results": [_row(framework="a")]}
     html = render(document)
     assert "https://" not in html and "http://" not in html
@@ -233,17 +260,13 @@ def test_report_is_self_contained() -> None:
 def test_h2load_warmup_is_a_separate_unmeasured_run(monkeypatch) -> None:
     commands: list[list[str]] = []
 
-    monkeypatch.setattr(
-        h2load, "capabilities", lambda: h2load.Capabilities("h2load", True)
-    )
+    monkeypatch.setattr(h2load, "capabilities", lambda: h2load.Capabilities("h2load", True))
 
     def fake_run(command, **_kwargs):
         commands.append(command)
         for item in command:
             if item.startswith("--log-file="):
-                Path(item.partition("=")[2]).write_text(
-                    "0\t200\t10\n", encoding="utf-8"
-                )
+                Path(item.partition("=")[2]).write_text("0\t200\t10\n", encoding="utf-8")
         count = int(command[command.index("-n") + 1])
         output = (
             f"finished in 1s, {count}.00 req/s\n"
@@ -256,8 +279,14 @@ def test_h2load_warmup_is_a_separate_unmeasured_run(monkeypatch) -> None:
 
     monkeypatch.setattr(h2load.subprocess, "run", fake_run)
     result = h2load.measure(
-        "127.0.0.1", 8000, "/", "http/1.1",
-        requests=10, warmup_requests=3, connections=1, tls=False,
+        "127.0.0.1",
+        8000,
+        "/",
+        "http/1.1",
+        requests=10,
+        warmup_requests=3,
+        connections=1,
+        tls=False,
     )
 
     assert [command[command.index("-n") + 1] for command in commands] == ["3", "10"]
@@ -267,18 +296,14 @@ def test_h2load_warmup_is_a_separate_unmeasured_run(monkeypatch) -> None:
 def test_h2load_post_uses_the_exact_request_body(monkeypatch) -> None:
     observed_bodies: list[bytes] = []
     commands: list[list[str]] = []
-    monkeypatch.setattr(
-        h2load, "capabilities", lambda: h2load.Capabilities("h2load", True)
-    )
+    monkeypatch.setattr(h2load, "capabilities", lambda: h2load.Capabilities("h2load", True))
 
     def fake_run(command, **_kwargs):
         commands.append(command)
         observed_bodies.append(Path(command[command.index("--data") + 1]).read_bytes())
         for item in command:
             if item.startswith("--log-file="):
-                Path(item.partition("=")[2]).write_text(
-                    "0\t200\t10\n", encoding="utf-8"
-                )
+                Path(item.partition("=")[2]).write_text("0\t200\t10\n", encoding="utf-8")
         return SimpleNamespace(
             returncode=0,
             stdout=(
@@ -291,9 +316,15 @@ def test_h2load_post_uses_the_exact_request_body(monkeypatch) -> None:
 
     monkeypatch.setattr(h2load.subprocess, "run", fake_run)
     result = h2load.measure(
-        "127.0.0.1", 8000, "/body", "http/1.1",
-        requests=1, connections=1, tls=False,
-        method="POST", body=b"exact-body",
+        "127.0.0.1",
+        8000,
+        "/body",
+        "http/1.1",
+        requests=1,
+        connections=1,
+        tls=False,
+        method="POST",
+        body=b"exact-body",
     )
 
     assert observed_bodies == [b"exact-body"]
@@ -311,7 +342,6 @@ def test_raw_trials_are_preserved_and_aggregates_derive_from_them() -> None:
     assert len(trials) == 3  # raw rows still present
 
 
-# --- the protocol comparison table ----------------------------------------
 # A blank cell in a protocol column is ambiguous: it can mean the stack lost,
 # was not measured, or cannot enter at all. These pin the third case, which is
 # the only one the reader cannot infer.
@@ -390,8 +420,11 @@ def test_a_capable_but_unmeasured_protocol_is_not_called_unsupported() -> None:
     from wreath._devtools.bench_report import _protocol_section
 
     # wreath-native can serve h3; this run simply did not measure it.
-    rows = [r for r in _mixed_protocol_rows() if not (
-        r["framework"] == "wreath-native" and r["protocol"] == "h3")]
+    rows = [
+        r
+        for r in _mixed_protocol_rows()
+        if not (r["framework"] == "wreath-native" and r["protocol"] == "h3")
+    ]
     html = _protocol_section(rows)
     assert "not measured in this run" in html
 

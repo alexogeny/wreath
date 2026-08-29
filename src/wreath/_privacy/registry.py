@@ -108,8 +108,6 @@ class PrivacyRegistry:
     classifications: dict[type, Classification] = field(default_factory=dict)
     retentions: dict[type, Retention] = field(default_factory=dict)
 
-    # -- declaration --------------------------------------------------------
-
     def subject(self, model: type, *, key: str = "id", delete: bool = False) -> None:
         """Name the model that *is* a data subject, and its identity column.
 
@@ -182,9 +180,7 @@ class PrivacyRegistry:
             exempt=reason,
         )
 
-    def retain(
-        self, model: type, *, after: float, on: str, reason: str = ""
-    ) -> None:
+    def retain(self, model: type, *, after: float, on: str, reason: str = "") -> None:
         """Declare how long this model's rows live, measured from `on`.
 
         Enforced by a scheduled `wreath.passes` walk whose deletions are
@@ -198,8 +194,10 @@ class PrivacyRegistry:
             )
         self._require_column(model, on, what="retention column")
         column = _column(model, on)
-        if column is not None and not getattr(column, "indexed", False) and not getattr(
-            column, "primary_key", False
+        if (
+            column is not None
+            and not getattr(column, "indexed", False)
+            and not getattr(column, "primary_key", False)
         ):
             # A retention sweep runs on a schedule forever. Walking an
             # unindexed timestamp is a sequential scan every tick, which is a
@@ -209,11 +207,7 @@ class PrivacyRegistry:
                 "on a schedule forever. Declare index=True on the column, or point "
                 "on= at one that is indexed"
             )
-        self.retentions[model] = Retention(
-            model=model, after=float(after), on=on, reason=reason
-        )
-
-    # -- queries ------------------------------------------------------------
+        self.retentions[model] = Retention(model=model, after=float(after), on=on, reason=reason)
 
     def personal_names(self) -> frozenset[str]:
         """Every column name declared personal anywhere, for the log-site hook.
@@ -232,8 +226,6 @@ class PrivacyRegistry:
         if self.subject_model is not None and self.subject_key:
             names.add(self.subject_key)
         return frozenset(names)
-
-    # -- checks -------------------------------------------------------------
 
     def _check_disposition(self, model: type, column: str, disposition: Any) -> Any:
         """Resolve one column's disposition, refusing anything that lies.

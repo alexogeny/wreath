@@ -1,14 +1,3 @@
-"""What `wreath.log` refuses, and what it emits, without a database.
-
-The live half -- ordering under concurrent commits, the horizon, retention --
-is `tests/test_log_cursor_live.py`, which needs a real PostgreSQL because the
-bug it exists to catch is an interleaving no fake can model.
-
-What is here is the declaration: the DDL a `Log` offers, the guards that fire at
-description time rather than at the first append, and the cursor's own
-arithmetic-free round trip.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -35,9 +24,6 @@ def _log(**overrides: object) -> Log:
     return Log(**fields)  # type: ignore[arg-type]
 
 
-# -- the cursor ------------------------------------------------------------
-
-
 def test_cursor_round_trips_through_its_wire_form():
     cursor = Cursor(981234567890, 42)
     assert Cursor.decode(cursor.encode()) == cursor
@@ -57,8 +43,18 @@ def test_a_missing_cursor_reads_from_the_start():
     # the *head* was covered and dropping the tail's check changed nothing any
     # test noticed.
     [
-        "7", "7.", ".7", "a.b", "7.b", "-1.0", "0.-1", "7.8.9",
-        " 7.8", "+7.8", "７.8", "7.８",
+        "7",
+        "7.",
+        ".7",
+        "a.b",
+        "7.b",
+        "-1.0",
+        "0.-1",
+        "7.8.9",
+        " 7.8",
+        "+7.8",
+        "７.8",
+        "7.８",
     ],
 )
 def test_a_cursor_that_did_not_come_from_encode_is_refused(value):
@@ -75,9 +71,6 @@ def test_the_cursor_orders_by_transaction_before_sequence():
     early_allocation_late_commit = Cursor(xid=200, seq=3)
     late_allocation_early_commit = Cursor(xid=100, seq=5)
     assert late_allocation_early_commit < early_allocation_late_commit
-
-
-# -- declaration guards ----------------------------------------------------
 
 
 def test_retention_has_no_default():
@@ -138,9 +131,6 @@ def test_a_flush_policy_that_never_flushes_is_refused(kwargs, message):
         Flush(**kwargs)
 
 
-# -- the DDL ---------------------------------------------------------------
-
-
 def test_the_table_carries_both_halves_of_the_cursor():
     ddl = _log().statements()[0]
     assert "seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY" in ddl
@@ -198,9 +188,6 @@ def test_the_component_names_the_relation_it_needs():
 def test_an_unqualified_log_lands_where_search_path_points():
     assert _log(schema="").qualified_table == "audit_records"
     assert _log().qualified_table == '"wreath".audit_records'
-
-
-# -- generated statements --------------------------------------------------
 
 
 class _Database:
@@ -304,9 +291,6 @@ def test_a_read_with_a_non_positive_limit_is_refused(limit):
         asyncio.run(log.read("s", after=Cursor.start(), limit=limit))
 
 
-# -- binding ---------------------------------------------------------------
-
-
 def _bind(log: PostgresLog, stream: str, **values: object) -> list[object]:
     return log._bind(stream, dict(values))
 
@@ -355,9 +339,6 @@ def test_a_log_with_no_payload_columns_still_names_what_it_has():
         _bind(log, "s", body=1)
 
 
-# -- batches ---------------------------------------------------------------
-
-
 def test_an_empty_batch_returns_the_cursor_it_was_given():
     # Otherwise a quiet log rewinds to the start on every poll and replays its
     # whole tail.
@@ -373,9 +354,6 @@ def test_a_batch_carries_the_cursor_of_its_last_row():
     assert batch.cursor == Cursor(101, 2)
     assert [record.values["actor"] for record in batch] == ["me", "you"]
     assert batch.records[0] == Record(Cursor(100, 1), "s", {"actor": "me", "body": None})
-
-
-# -- the batched append ----------------------------------------------------
 
 
 def test_the_rungs_are_powers_of_two_down_to_one():
@@ -506,9 +484,6 @@ def test_a_batch_is_bound_in_full_before_any_statement_runs():
         asyncio.run(log.append_many(rows, connection=_Silent("INSERT 0 4")))
 
 
-# -- retention -------------------------------------------------------------
-
-
 def test_a_retention_walk_is_declared_over_the_logs_own_table():
     from wreath.log import retention_pass
 
@@ -543,9 +518,7 @@ def test_a_retention_walk_can_be_asked_for_from_the_log_itself():
 
     declaration = _log(retain=3600.0)
     log = PostgresLog(_Database(), declaration)
-    assert log.retention_pass(name="p").table == retention_pass(
-        declaration, name="p"
-    ).table
+    assert log.retention_pass(name="p").table == retention_pass(declaration, name="p").table
 
 
 def test_an_unqualified_logs_retention_walk_follows_the_search_path():

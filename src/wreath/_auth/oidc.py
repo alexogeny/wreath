@@ -61,9 +61,7 @@ def _require_same_origin(issuer: str, url: str) -> str:
         == (iss.port or _default_ports(iss.scheme))
     )
     if not same:
-        raise ValueError(
-            f"OIDC endpoint {url!r} is not on the pinned issuer origin"
-        )
+        raise ValueError(f"OIDC endpoint {url!r} is not on the pinned issuer origin")
     return url
 
 
@@ -143,16 +141,12 @@ class OidcProvider:
         )
         response = await self._client.get(config_path)
         if response.status != 200:
-            raise RuntimeError(
-                f"OIDC discovery for {self.name!r} failed: HTTP {response.status}"
-            )
+            raise RuntimeError(f"OIDC discovery for {self.name!r} failed: HTTP {response.status}")
         if len(response.body) > _MAX_DISCOVERY_BYTES:
             raise ValueError("OIDC discovery document exceeds size cap")
         document = json.loads(response.body)
         if document.get("issuer") != self.issuer:
-            raise ValueError(
-                "OIDC discovery 'issuer' does not match the configured issuer"
-            )
+            raise ValueError("OIDC discovery 'issuer' does not match the configured issuer")
         self.jwks_uri = document["jwks_uri"]
         self.token_endpoint = document.get("token_endpoint")
         # Pinned here rather than where it is used, unlike `token_endpoint`, and
@@ -174,9 +168,7 @@ class OidcProvider:
         """Return an async `Verifier` closing over this provider's JWKS cache."""
 
         audiences = (
-            self._audiences
-            if audience is _USE_PROVIDER_AUDIENCES
-            else freeze_audiences(audience)
+            self._audiences if audience is _USE_PROVIDER_AUDIENCES else freeze_audiences(audience)
         )
 
         async def verify(token: str) -> Identity | None:

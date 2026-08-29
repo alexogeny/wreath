@@ -1,5 +1,3 @@
-"""Transport-neutral contracts reuse binding's compiled validation."""
-
 from __future__ import annotations
 
 import uuid

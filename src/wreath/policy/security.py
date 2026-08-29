@@ -269,11 +269,7 @@ class SecurityHeadersPolicy:
     ) -> None:
         nonce_directives = tuple(csp_nonce_directives)
         for directive in nonce_directives:
-            if (
-                not isinstance(directive, str)
-                or not directive
-                or not _is_http_token(directive)
-            ):
+            if not isinstance(directive, str) or not directive or not _is_http_token(directive):
                 raise ValueError("CSP nonce directives must be non-empty directive names")
         if len(set(nonce_directives)) != len(nonce_directives):
             raise ValueError("CSP nonce directives must not repeat")
@@ -322,9 +318,7 @@ class SecurityHeadersPolicy:
                     addition = "'nonce-{nonce}'"
                     if directive in present:
                         segments = [
-                            f"{item} {addition}"
-                            if item.split(None, 1)[0] == directive
-                            else item
+                            f"{item} {addition}" if item.split(None, 1)[0] == directive else item
                             for item in segments
                         ]
                     else:
@@ -365,26 +359,29 @@ class SecurityHeadersPolicy:
         from .base import HeaderSpec, PolicyContract
 
         headers = tuple(
+            (
+                None,
+                HeaderSpec(
+                    name.decode("latin-1").replace("-", " ").title().replace(" ", "-"),
+                    const=value.decode("latin-1"),
+                ),
+            )
+            for name, value in self.https_headers
+        )
+        if self._has_nonce:
+            headers = (
+                *headers,
                 (
                     None,
                     HeaderSpec(
-                        name.decode("latin-1")
+                        self._csp_header_name.decode("ascii")
                         .replace("-", " ")
                         .title()
                         .replace(" ", "-"),
-                        const=value.decode("latin-1"),
+                        description="Per-response CSP carrying a fresh nonce.",
                     ),
-                )
-                for name, value in self.https_headers
+                ),
             )
-        if self._has_nonce:
-            headers = (*headers, (None, HeaderSpec(
-                self._csp_header_name.decode("ascii")
-                .replace("-", " ")
-                .title()
-                .replace(" ", "-"),
-                description="Per-response CSP carrying a fresh nonce.",
-            )))
         return PolicyContract(
             response_headers=headers,
         )

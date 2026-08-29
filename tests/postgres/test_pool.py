@@ -172,21 +172,6 @@ async def test_invalid_registered_statement_fails_startup_and_closes_connection(
 
 
 def test_the_duplicate_statement_guard_holds_across_threads(monkeypatch: Any) -> None:
-    """Two threads registering one name: exactly one wins, the other is refused.
-
-    `Database.statement` was check-then-act -- `name in self._statements` and the
-    assignment were separate steps -- so both callers could pass the check before
-    either assigned. Both then succeeded, the second overwrote the first, and the
-    loser was left holding a `Statement` that `_for_workload` never yields and no
-    pool ever prepares. A guard written to *refuse* two subsystems claiming one
-    name silently became a lost write.
-
-    The interleave is forced rather than raced for. Contention alone did not
-    reproduce it here in 3,200 thread-trials, because on a GIL build the window
-    is a handful of bytecodes; a free-threaded interpreter removes exactly that
-    accident. Parking a thread inside the window is what a second core does for
-    free, so this asserts the invariant rather than the odds.
-    """
     import threading
 
     import wreath.postgres as pg
@@ -265,14 +250,6 @@ async def test_snapshot_reports_the_pool_as_it_stands() -> None:
 
 @pytest.mark.asyncio
 async def test_the_queue_high_water_survives_the_queue_draining() -> None:
-    """The point of a watermark: a sampler polling `waiters` would miss this.
-
-    Two callers queue behind a single connection and are served the instant it
-    comes back, so by the time anything could observe the pool the queue is
-    already empty -- `waiters` reads 0 and the pressure that mattered has left
-    no trace. `queue_high_water` is what a pacer needs and what a status page
-    should show.
-    """
     connector = Connector()
     db = Database(
         "main",
@@ -350,17 +327,10 @@ def _drive_taskless(loop: asyncio.AbstractEventLoop, coroutine: Any) -> asyncio.
 
 @pytest.mark.asyncio
 async def test_contended_acquire_works_without_an_enclosing_task() -> None:
-    """A queued acquire must not require the caller to be inside a Task.
-
-    `asyncio.timeout` raises `RuntimeError("Timeout should be used inside a
-    task")` when there is none, and the pool only reaches its deadline code
-    once every connection is leased -- so this failed under load and nowhere
-    else. It cost 30,000+ 500s in a Fortunes benchmark run whose throughput
-    still read as plausible.
-    """
     connector = Connector()
     db = Database(
-        "main", "postgresql://primary/app",
+        "main",
+        "postgresql://primary/app",
         pools={"read": PoolConfig(min_size=1, max_size=1, acquire_timeout=5.0)},
         connector=connector,
     )
@@ -385,10 +355,10 @@ async def test_contended_acquire_works_without_an_enclosing_task() -> None:
 
 @pytest.mark.asyncio
 async def test_a_queued_acquire_still_times_out() -> None:
-    """Removing `asyncio.timeout` must not remove the deadline with it."""
     connector = Connector()
     db = Database(
-        "main", "postgresql://primary/app",
+        "main",
+        "postgresql://primary/app",
         pools={"read": PoolConfig(min_size=1, max_size=1, acquire_timeout=0.05)},
         connector=connector,
     )

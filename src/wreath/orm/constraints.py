@@ -66,9 +66,6 @@ class CheckViolation(ValueError):
         self.kind = kind
 
 
-# -- checks --------------------------------------------------------------------
-
-
 class Check:
     """One business rule over a single value that has already passed its type.
 
@@ -107,8 +104,7 @@ class Check:
         """Reject a check applied to a type it cannot mean anything for."""
         if self.supports is not None and pg_type.name not in self.supports:
             raise DeclarationError(
-                f"{where}: {type(self).__name__} cannot apply to a "
-                f"{pg_type.name} column"
+                f"{where}: {type(self).__name__} cannot apply to a {pg_type.name} column"
             )
 
     def __repr__(self) -> str:
@@ -179,9 +175,7 @@ class Length(Check):
             if value is not None and (type(value) is not int or value < 0):
                 raise DeclarationError(f"Length({name}=) must be a non-negative int")
         if minimum is not None and maximum is not None and minimum > maximum:
-            raise DeclarationError(
-                f"Length(minimum={minimum}, maximum={maximum}) can never hold"
-            )
+            raise DeclarationError(f"Length(minimum={minimum}, maximum={maximum}) can never hold")
         self.minimum = minimum
         self.maximum = maximum
         self.kind = "length"
@@ -245,9 +239,7 @@ class OneOf(Check):
         try:
             self.allowed = frozenset(values)
         except TypeError:
-            raise DeclarationError(
-                f"OneOf() values must be hashable; got {values!r}"
-            ) from None
+            raise DeclarationError(f"OneOf() values must be hashable; got {values!r}") from None
         self.kind = "one_of"
         self.message = f"value must be one of {', '.join(sorted(map(repr, values)))}"
 
@@ -257,8 +249,7 @@ class OneOf(Check):
                 pg_type.coerce(value)
             except (TypeError, ValueError, OverflowError) as error:
                 raise DeclarationError(
-                    f"{where}: OneOf value {value!r} is not a valid "
-                    f"{pg_type.name}: {error}"
+                    f"{where}: OneOf value {value!r} is not a valid {pg_type.name}: {error}"
                 ) from None
 
     def source(self, var: str, ns: dict[str, Any]) -> str:
@@ -290,9 +281,6 @@ class Predicate(Check):
 
     def source(self, var: str, ns: dict[str, Any]) -> str:
         return f"{_bind(ns, 'predicate', self.function)}({var})"
-
-
-# -- declarations collected by ModelMeta ---------------------------------------
 
 
 class Narrow:
@@ -394,8 +382,7 @@ def rule(
             raise DeclarationError(f"rule() takes column names, got {field!r}")
     if at is not None and at not in fields:
         raise DeclarationError(
-            f"rule(at={at!r}) must name one of the rule's own columns: "
-            f"{', '.join(fields)}"
+            f"rule(at={at!r}) must name one of the rule's own columns: {', '.join(fields)}"
         )
 
     def declare(function: Callable[..., bool]) -> Rule:
@@ -413,8 +400,6 @@ def rule(
 
     return declare
 
-
-# -- compilation ---------------------------------------------------------------
 
 _SEQUENCE = count()
 

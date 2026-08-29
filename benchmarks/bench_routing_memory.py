@@ -1,8 +1,6 @@
 """Memory cost of the application policy router over its lifecycle.
 
-Wallclock is only half the question. The historical compiled forms differed by
-orders of magnitude in size (see docs/plans/bitset-routing.md); applications now
-use the winning policy table. This measures its other half on the real
+Wallclock is only half the question. This measures memory on the real
 10,000-route benchmark application.
 
 In a *fresh subprocess* (resident memory is only meaningful in
@@ -85,8 +83,9 @@ def _param_heavy_app(mode: str, routes: int, segmax: int, param: float) -> tuple
         seen.add(key)
         path = "/" + "/".join(f"{{p{i}}}" if s is None else s for i, s in enumerate(shape))
         app.route(path, methods=["GET"])(handler)
-        specs.append(("GET", "/" + "/".join(
-            f"v{rng.randrange(100)}" if s is None else s for s in shape)))
+        specs.append(
+            ("GET", "/" + "/".join(f"v{rng.randrange(100)}" if s is None else s for s in shape))
+        )
     return app, specs
 
 
@@ -161,9 +160,12 @@ def main() -> None:
     parser.add_argument("--trials", type=int, default=5)
     parser.add_argument("--matches", type=int, default=200_000)
     parser.add_argument("--mode", nargs="+", choices=MODES, default=list(MODES))
-    parser.add_argument("--shape", choices=("app", "param-heavy"), default="app",
-                        help="the real 10k-route benchmark app, or a synthetic "
-                             "parameter-heavy table")
+    parser.add_argument(
+        "--shape",
+        choices=("app", "param-heavy"),
+        default="app",
+        help="the real 10k-route benchmark app, or a synthetic parameter-heavy table",
+    )
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--child", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -176,32 +178,48 @@ def main() -> None:
     for mode in args.mode:
         for _trial in range(args.trials):
             proc = subprocess.run(
-                [sys.executable, "-m", "benchmarks.bench_routing_memory",
-                 "--child", mode, "--matches", str(args.matches),
-                 "--shape", args.shape],
-                capture_output=True, text=True, check=True,
+                [
+                    sys.executable,
+                    "-m",
+                    "benchmarks.bench_routing_memory",
+                    "--child",
+                    mode,
+                    "--matches",
+                    str(args.matches),
+                    "--shape",
+                    args.shape,
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
             )
             rows.setdefault(mode, []).append(json.loads(proc.stdout.strip().splitlines()[-1]))
 
     def med(mode: str, key: str) -> float:
         return statistics.median([r[key] for r in rows[mode]])
 
-    print(f"shape={args.shape}  {rows[args.mode[0]][0]['routes']:,} routes  "
-          f"{args.trials} trials, medians\n")
-    print(f"{'mode':<10}{'total':>12}{'(eager':>10}{'+lazy)':>10}"
-          f"{'peak RSS':>12}{'compile':>11}")
+    print(
+        f"shape={args.shape}  {rows[args.mode[0]][0]['routes']:,} routes  "
+        f"{args.trials} trials, medians\n"
+    )
+    print(f"{'mode':<10}{'total':>12}{'(eager':>10}{'+lazy)':>10}{'peak RSS':>12}{'compile':>11}")
     for mode in args.mode:
-        print(f"{mode:<10}{_mib(med(mode, 'total_bytes')):>12}"
-              f"{_mib(med(mode, 'compiled_bytes')):>10}"
-              f"{_mib(med(mode, 'lazy_bytes')):>10}"
-              f"{_mib(med(mode, 'vmhwm_bytes')):>12}"
-              f"{med(mode, 'compile_seconds') * 1000:>9.1f} ms")
+        print(
+            f"{mode:<10}{_mib(med(mode, 'total_bytes')):>12}"
+            f"{_mib(med(mode, 'compiled_bytes')):>10}"
+            f"{_mib(med(mode, 'lazy_bytes')):>10}"
+            f"{_mib(med(mode, 'vmhwm_bytes')):>12}"
+            f"{med(mode, 'compile_seconds') * 1000:>9.1f} ms"
+        )
 
     base = args.mode[0]
     print(f"\nrelative to {base}:")
     for mode in args.mode[1:]:
-        for key, label in (("total_bytes", "total resident"), ("vmhwm_bytes", "peak RSS"),
-                           ("compile_seconds", "compile time")):
+        for key, label in (
+            ("total_bytes", "total resident"),
+            ("vmhwm_bytes", "peak RSS"),
+            ("compile_seconds", "compile time"),
+        ):
             ratio = med(base, key) / med(mode, key) if med(mode, key) else float("inf")
             print(f"  {mode:<8} {label:<13} {ratio:6.2f}x smaller/faster than {base}")
 

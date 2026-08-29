@@ -1,7 +1,3 @@
-"""HTTP/2 framing layer: preface, frame header, payloads, byte-boundary splits.
-
-RFC 9113 sections 3.4 (preface) and 4 (frames).
-"""
 from __future__ import annotations
 
 import pytest
@@ -18,8 +14,6 @@ async def _server_frames_after_preface(make_driver):
     return d
 
 
-# --- connection preface (RFC 9113 s3.4) ------------------------------------
-
 async def test_server_emits_settings_as_first_frame(make_driver):
     d = make_driver(ok_app)
     d.connection_made()
@@ -35,8 +29,9 @@ async def test_server_acks_client_settings(make_driver):
     d = make_driver(ok_app)
     await d.preface()
     frames = d.frames()
-    assert any(f.type == support.SETTINGS and f.flags & support.FLAG_ACK
-               for f in frames), "server must ACK the client SETTINGS"
+    assert any(f.type == support.SETTINGS and f.flags & support.FLAG_ACK for f in frames), (
+        "server must ACK the client SETTINGS"
+    )
 
 
 @pytest.mark.parametrize("truncate", list(range(1, len(support.PREFACE))))
@@ -61,8 +56,6 @@ async def test_wrong_preface_is_rejected(make_driver):
     await d.settle()
     assert d.transport.closed or d.transport.aborted
 
-
-# --- frame header split at every byte boundary -----------------------------
 
 @pytest.mark.parametrize("split", list(range(1, 9)))
 async def test_frame_header_split_at_every_byte(make_driver, split):
@@ -91,17 +84,15 @@ async def test_headers_payload_split_at_every_byte(make_driver, split):
     assert len(captured) == 1
 
 
-# --- reserved bit and stream-id constraints (RFC 9113 s4.1, s5.1.1) --------
-
 async def test_reserved_bit_in_stream_id_is_ignored(make_driver):
     app, captured = scope_capture_app()
     d = make_driver(app)
     await d.preface()
     block = support.HpackEncoder().encode(support.request_headers())
     # set the reserved high bit on the stream identifier
-    raw = support.encode_frame(support.HEADERS,
-                               support.FLAG_END_HEADERS | support.FLAG_END_STREAM,
-                               1, block)
+    raw = support.encode_frame(
+        support.HEADERS, support.FLAG_END_HEADERS | support.FLAG_END_STREAM, 1, block
+    )
     raw = raw[:5] + bytes([raw[5] | 0x80]) + raw[6:]
     await d.feed_and_settle(raw)
     assert len(captured) == 1
@@ -110,9 +101,7 @@ async def test_reserved_bit_in_stream_id_is_ignored(make_driver):
 async def test_even_client_stream_id_is_connection_error(make_driver):
     d = make_driver(ok_app)
     await d.preface()
-    await d.feed_and_settle(
-        support.build_headers_frame(2, support.request_headers())
-    )
+    await d.feed_and_settle(support.build_headers_frame(2, support.request_headers()))
     goaways = [f for f in d.frames() if f.type == support.GOAWAY]
     assert goaways, "even client-initiated stream id must be a connection error"
     _, code, _ = support.parse_goaway(goaways[-1].payload)
@@ -130,8 +119,6 @@ async def test_stream_ids_must_monotonically_increase(make_driver):
     assert code == support.PROTOCOL_ERROR
 
 
-# --- frame size limits (RFC 9113 s4.2) -------------------------------------
-
 async def test_oversized_frame_is_frame_size_error(make_driver):
     d = make_driver(ok_app)
     await d.preface()
@@ -144,8 +131,6 @@ async def test_oversized_frame_is_frame_size_error(make_driver):
     assert code in (support.FRAME_SIZE_ERROR, support.PROTOCOL_ERROR)
 
 
-# --- unknown frames must be ignored (RFC 9113 s4.1) ------------------------
-
 async def test_unknown_frame_type_is_ignored(make_driver):
     app, captured = scope_capture_app()
     d = make_driver(app)
@@ -154,8 +139,6 @@ async def test_unknown_frame_type_is_ignored(make_driver):
     await d.feed_and_settle(support.build_headers_frame(1, support.request_headers()))
     assert len(captured) == 1, "unknown frame must be ignored, not fatal"
 
-
-# --- PING (RFC 9113 s6.7) --------------------------------------------------
 
 async def test_ping_is_acked_with_same_payload(make_driver):
     d = make_driver(ok_app)

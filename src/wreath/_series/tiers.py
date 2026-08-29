@@ -279,9 +279,6 @@ def _window(value: Any, name: str, refuse: Any) -> float | None:
     return seconds
 
 
-# -- which tier answers, and for which zones ----------------------------------
-
-
 def serves_zone(grain: Bucket | None, stored_zone: str, read_zone: str, *, at: Any) -> bool:
     """Whether a tier cut in `stored_zone` can answer for `read_zone`.
 
@@ -426,7 +423,6 @@ def _authoritative(
     # it is the only one that can answer for buckets too recent to have been
     # materialised. A materialised tier asked for the last three days would
     # return the rows it happens to hold and silently omit today.
-    #
     # It is also cheap, because raw's window is short by construction -- if it
     # were long there would be no reason to declare a coarser tier at all.
     if ladder.raw in covering:

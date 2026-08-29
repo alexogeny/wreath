@@ -1,23 +1,3 @@
-"""The connection doubles that were written more than once, written once.
-
-Most of this suite's fakes are *not* here and should not be. A double's canned
-answers are usually its test's specification -- what `fetchrow` returns is the
-row the code under test is being asked to handle -- so a shared, configurable
-double would turn twenty-three explicit specifications into one object with
-twenty-three switches. A survey found 26 distinct connection shapes across the
-suite and 23 of them are genuinely one-of-a-kind.
-
-These three were the exceptions: byte-identical bodies in two files each, one
-pair already carrying a docstring admitting it ("the same double
-`tests/test_ratelimit_middleware.py` uses").
-
-Every statement is put through `check_for`, so these refuse what PostgreSQL
-refuses -- `= ANY($1)` with a Python list, two commands in one statement, and a
-cast on a placeholder that only bites on the second execution. All three are
-defects that reached working-looking code because a double accepted them; see
-the never-more-capable rule for doubles in `AGENTS.md`.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -98,9 +78,7 @@ class PooledConnection:
     to be asked for, in order.
     """
 
-    def __init__(
-        self, rows: list[Any], calls: list[tuple[str, tuple[Any, ...]]]
-    ) -> None:
+    def __init__(self, rows: list[Any], calls: list[tuple[str, tuple[Any, ...]]]) -> None:
         self.calls = calls
         self.rows = rows
 

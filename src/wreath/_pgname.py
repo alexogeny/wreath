@@ -36,9 +36,7 @@ def validate_unquoted_identifier(
             "and dollar signs, starting with a letter or underscore"
         )
     if len(value.encode("utf-8")) > MAX_IDENTIFIER_BYTES:
-        raise error(
-            f"{kind} {value!r} exceeds PostgreSQL's {MAX_IDENTIFIER_BYTES}-byte limit"
-        )
+        raise error(f"{kind} {value!r} exceeds PostgreSQL's {MAX_IDENTIFIER_BYTES}-byte limit")
     return value
 
 

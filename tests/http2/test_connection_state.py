@@ -1,7 +1,3 @@
-"""Connection & stream state: SETTINGS, CONTINUATION, stream lifecycle.
-
-RFC 9113 s5 (streams), s6.5 (SETTINGS), s6.10 (CONTINUATION).
-"""
 from __future__ import annotations
 
 import pytest
@@ -25,13 +21,12 @@ def _rst_code(d, stream_id):
     return int.from_bytes(rsts[-1].payload, "big")
 
 
-# --- SETTINGS (RFC 9113 s6.5) ----------------------------------------------
-
 async def test_settings_ack_flag_with_payload_is_frame_size_error(make_driver):
     d = make_driver(ok_app)
     await d.preface()
-    await d.feed_and_settle(support.encode_frame(support.SETTINGS, support.FLAG_ACK, 0,
-                                                 b"\x00\x03\x00\x00\x00\x64"))
+    await d.feed_and_settle(
+        support.encode_frame(support.SETTINGS, support.FLAG_ACK, 0, b"\x00\x03\x00\x00\x00\x64")
+    )
     assert _goaway_code(d) == support.FRAME_SIZE_ERROR
 
 
@@ -52,8 +47,7 @@ async def test_settings_on_nonzero_stream_is_protocol_error(make_driver):
 async def test_settings_enable_push_invalid_value_is_protocol_error(make_driver):
     d = make_driver(ok_app)
     await d.preface()
-    await d.feed_and_settle(
-        support.encode_settings({support.SETTINGS_ENABLE_PUSH: 2}))
+    await d.feed_and_settle(support.encode_settings({support.SETTINGS_ENABLE_PUSH: 2}))
     assert _goaway_code(d) == support.PROTOCOL_ERROR
 
 
@@ -61,15 +55,15 @@ async def test_settings_initial_window_too_large_is_flow_control_error(make_driv
     d = make_driver(ok_app)
     await d.preface()
     await d.feed_and_settle(
-        support.encode_settings({support.SETTINGS_INITIAL_WINDOW_SIZE: 1 << 31}))
+        support.encode_settings({support.SETTINGS_INITIAL_WINDOW_SIZE: 1 << 31})
+    )
     assert _goaway_code(d) == support.FLOW_CONTROL_ERROR
 
 
 async def test_settings_max_frame_size_out_of_range_is_protocol_error(make_driver):
     d = make_driver(ok_app)
     await d.preface()
-    await d.feed_and_settle(
-        support.encode_settings({support.SETTINGS_MAX_FRAME_SIZE: 100}))
+    await d.feed_and_settle(support.encode_settings({support.SETTINGS_MAX_FRAME_SIZE: 100}))
     assert _goaway_code(d) == support.PROTOCOL_ERROR
 
 
@@ -83,18 +77,16 @@ async def test_server_disables_push(make_driver):
     assert parsed.get(support.SETTINGS_ENABLE_PUSH, 0) == 0
 
 
-# --- CONTINUATION (RFC 9113 s6.10) -----------------------------------------
-
 async def test_headers_with_continuation_fragments(make_driver):
     app, captured = scope_capture_app()
     d = make_driver(app)
     await d.preface()
     block = support.HpackEncoder().encode(
-        support.request_headers(extra=[(b"x-a", b"1"), (b"x-b", b"2")]))
+        support.request_headers(extra=[(b"x-a", b"1"), (b"x-b", b"2")])
+    )
     mid = len(block) // 2
     headers = support.encode_frame(support.HEADERS, 0, 1, block[:mid])  # no END_HEADERS
-    cont = support.encode_frame(support.CONTINUATION,
-                                support.FLAG_END_HEADERS, 1, block[mid:])
+    cont = support.encode_frame(support.CONTINUATION, support.FLAG_END_HEADERS, 1, block[mid:])
     await d.feed_and_settle(headers)
     await d.feed_and_settle(cont)
     assert len(captured) == 1
@@ -118,11 +110,10 @@ async def test_continuation_on_wrong_stream_is_protocol_error(make_driver):
     mid = len(block) // 2
     await d.feed_and_settle(support.encode_frame(support.HEADERS, 0, 1, block[:mid]))
     await d.feed_and_settle(
-        support.encode_frame(support.CONTINUATION, support.FLAG_END_HEADERS, 3, block[mid:]))
+        support.encode_frame(support.CONTINUATION, support.FLAG_END_HEADERS, 3, block[mid:])
+    )
     assert _goaway_code(d) == support.PROTOCOL_ERROR
 
-
-# --- stream state transitions (RFC 9113 s5.1) ------------------------------
 
 async def test_data_on_idle_stream_is_protocol_error(make_driver):
     d = make_driver(ok_app)
@@ -173,7 +164,8 @@ async def test_client_rst_stream_cancels_request(make_driver):
     d = make_driver(slow)
     await d.preface()
     await d.feed_and_settle(
-        support.build_headers_frame(1, support.request_headers(), end_stream=False))
+        support.build_headers_frame(1, support.request_headers(), end_stream=False)
+    )
     await d.feed_and_settle(support.encode_rst_stream(1, support.CANCEL))
     assert started, "request should have started before reset"
     # No GOAWAY: a stream reset is not a connection error.

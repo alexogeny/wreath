@@ -1,12 +1,3 @@
-"""Stage 5 slice 5b — redaction policy compilation.
-
-The Stage-0 ``wreath.recording`` value types are deny-by-default; this slice
-compiles a ``RedactionPolicy`` into an immutable capture plan the request-path
-seam consults, and proves the plan composes with the native capture core from
-slice 5a (deny-by-default headers drop, allowed headers get their disposition,
-secrets never reach a slab as plaintext).
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -24,8 +15,6 @@ from wreath.recording import (
     RedactionPolicy,
     compile_redaction,
 )
-
-# --- disposition validation -------------------------------------------------
 
 
 def test_forbidden_headers_rejected_in_every_set() -> None:
@@ -53,9 +42,6 @@ def test_header_sets_are_lower_cased() -> None:
     assert policy.header_allowlist == frozenset({"x-trace"})
     assert policy.header_hash == frozenset({"x-request-id"})
     assert policy.header_mask == frozenset({"x-client"})
-
-
-# --- compilation ------------------------------------------------------------
 
 
 def test_deny_by_default_compiles_to_no_headers_and_metadata_body() -> None:
@@ -114,22 +100,22 @@ def test_body_modes_compile_to_dispositions() -> None:
 def test_dependency_is_deny_by_default_and_independent_of_body() -> None:
     # Dependency payloads (DB params, outbound bodies) are off unless opted in,
     # regardless of the request/response body knob.
-    body_only = compile_redaction(RedactionPolicy(body=BodyCapture.STRUCTURED,
-                                                  max_body_bytes=4096, max_fields=8, max_depth=4))
+    body_only = compile_redaction(
+        RedactionPolicy(body=BodyCapture.STRUCTURED, max_body_bytes=4096, max_fields=8, max_depth=4)
+    )
     assert body_only.dependency() is None
     hashed_dep = compile_redaction(RedactionPolicy(dependency=BodyCapture.HASHED))
     assert hashed_dep.dependency() == (D.HASHED, 0)
     raw_dep = compile_redaction(
-        RedactionPolicy(dependency=BodyCapture.STRUCTURED, max_body_bytes=256,
-                        max_fields=8, max_depth=4)
+        RedactionPolicy(
+            dependency=BodyCapture.STRUCTURED, max_body_bytes=256, max_fields=8, max_depth=4
+        )
     )
     assert raw_dep.dependency() == (D.RAW, 256)
 
 
 def test_query_params_compile_narrow_and_bound_like_headers() -> None:
-    policy = RedactionPolicy(
-        query_allowlist=frozenset({"user"}), query_hash=frozenset({"token"})
-    )
+    policy = RedactionPolicy(query_allowlist=frozenset({"user"}), query_hash=frozenset({"token"}))
     plan = compile_redaction(policy)
     assert plan.query("user").disposition is D.RAW
     assert plan.query("token").disposition is D.HASHED
@@ -155,12 +141,14 @@ def test_query_params_compile_narrow_and_bound_like_headers() -> None:
 
 
 def test_dependency_narrows_and_the_ceiling_bounds_it() -> None:
-    base = RedactionPolicy(dependency=BodyCapture.STRUCTURED, max_body_bytes=4096,
-                           max_fields=8, max_depth=4)
+    base = RedactionPolicy(
+        dependency=BodyCapture.STRUCTURED, max_body_bytes=4096, max_fields=8, max_depth=4
+    )
     override = RedactionPolicy(dependency=BodyCapture.HASHED)  # less revealing
     assert base.narrow(override).dependency is BodyCapture.HASHED
     ceiling = RecordingPolicy(
-        capture_slabs=8, max_capture_bytes=1 << 20,
+        capture_slabs=8,
+        max_capture_bytes=1 << 20,
         redaction=RedactionPolicy(dependency=BodyCapture.HASHED),
     )
     within = CapturePolicy(
@@ -170,14 +158,12 @@ def test_dependency_narrows_and_the_ceiling_bounds_it() -> None:
     assert ceiling.permits(within)
     # A more-revealing dependency disposition than the ceiling is refused.
     over = CapturePolicy(
-        redaction=RedactionPolicy(dependency=BodyCapture.STRUCTURED, max_body_bytes=64,
-                                  max_fields=8, max_depth=4),
+        redaction=RedactionPolicy(
+            dependency=BodyCapture.STRUCTURED, max_body_bytes=64, max_fields=8, max_depth=4
+        ),
         budget=CaptureBudget(slabs=1, slab_bytes=4096),
     )
     assert not ceiling.permits(over)
-
-
-# --- layered narrowing ------------------------------------------------------
 
 
 def test_narrow_intersects_and_takes_the_least_revealing() -> None:
@@ -225,19 +211,6 @@ def test_recording_ceiling_bounds_hashed_and_masked_arms() -> None:
 
 
 def test_hashing_and_masking_a_header_the_ceiling_drops_are_both_refused() -> None:
-    """Three clauses decide this, and only the allowlist one was ever exercised.
-
-    "The ceiling drops it" means the name appears in none of its three sets, so
-    the ceiling never observes that header at all. An arm may *reduce* what is
-    revealed about a name the ceiling reveals -- hash what it allows, mask what
-    it hashes -- but it may not introduce a name, and a hash is not a
-    non-observation: it is a stable identifier for the value, which is enough to
-    correlate one caller's requests across a recording.
-
-    Dropping the `a_hash` clause was reported as surviving the whole suite, and
-    dropping `a_mask` would have too, because every refusal above is answered by
-    the allowlist clause before either of them is reached.
-    """
     ceiling = RecordingPolicy(
         capture_slabs=8,
         max_capture_bytes=1 << 20,
@@ -265,13 +238,6 @@ def test_hashing_and_masking_a_header_the_ceiling_drops_are_both_refused() -> No
 
 
 def test_the_query_sets_are_bounded_by_the_ceiling_as_well_as_the_headers() -> None:
-    """The second `_within_sets` call, with its own three sets.
-
-    Query parameters carry as much as headers do -- a signed URL's token lives
-    there -- and the two calls are separate code paths over separate fields, so
-    a ceiling test that only ever passes headers leaves the query half deciding
-    nothing.
-    """
     ceiling = RecordingPolicy(
         capture_slabs=8,
         max_capture_bytes=1 << 20,
@@ -297,8 +263,6 @@ def test_the_query_sets_are_bounded_by_the_ceiling_as_well_as_the_headers() -> N
     assert not ceiling.permits(arm(query_allowlist=frozenset({"user"})))
 
 
-# --- composition with the native capture core (slice 5a) --------------------
-
 _flight = pytest.importorskip("wreath._native._flight")
 KEY = (0xABCDEF0123456789, 0x0F1E2D3C4B5A6978)
 
@@ -309,8 +273,7 @@ def _apply_headers(req: object, plan: CompiledRedaction, headers: dict) -> None:
     for name, value in headers.items():
         rule = plan.header(name)
         if rule is not None:
-            req.capture(int(FC.REQUEST_HEADER), rule.descriptor_id,
-                        int(rule.disposition), value)
+            req.capture(int(FC.REQUEST_HEADER), rule.descriptor_id, int(rule.disposition), value)
 
 
 def test_compiled_plan_drives_native_capture_deny_by_default() -> None:
@@ -322,8 +285,12 @@ def test_compiled_plan_drives_native_capture_deny_by_default() -> None:
         )
     )
     rec = _flight.Recorder(
-        _flight.MODE_FORENSIC, ring_records=256, active_requests=16,
-        capture_slabs=4, slab_bytes=4096, detailed_sample_rate=1.0,
+        _flight.MODE_FORENSIC,
+        ring_records=256,
+        active_requests=16,
+        capture_slabs=4,
+        slab_bytes=4096,
+        detailed_sample_rate=1.0,
         capture_hash_key=KEY,
     )
     headers = {
@@ -347,8 +314,10 @@ def test_compiled_plan_drives_native_capture_deny_by_default() -> None:
     decoded = fs.CaptureSlab.decode(slab)
     by_id = {f.descriptor_id: f for f in decoded.fields if f.field_class is FC.REQUEST_HEADER}
     # Exactly the two listed headers were captured (deny-by-default dropped 3).
-    assert set(by_id) == {plan.header("x-trace").descriptor_id,
-                          plan.header("x-request-id").descriptor_id}
+    assert set(by_id) == {
+        plan.header("x-trace").descriptor_id,
+        plan.header("x-request-id").descriptor_id,
+    }
     assert by_id[plan.header("x-trace").descriptor_id].payload == b"abc123"  # RAW
     hashed = by_id[plan.header("x-request-id").descriptor_id]
     assert hashed.disposition is D.HASHED and len(hashed.payload) == 8

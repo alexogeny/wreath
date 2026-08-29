@@ -40,9 +40,7 @@ from ._native import _core
 #: Exported because `wreath._auth.jwt` needs the same set for a *segment*
 #: charset check that this module's decoder does not perform for it, and two
 #: frozensets spelling one alphabet is how they drift apart later.
-B64URL_ALPHABET = frozenset(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-)
+B64URL_ALPHABET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
 #: `JOSE_ABS_MAX_TOKEN` in `jose.c`, restated here for callers that want to
 #: refuse an oversized value before handing it over.

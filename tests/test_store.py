@@ -1,11 +1,3 @@
-"""The keyed-store primitive: one declaration, two backends, one claim.
-
-These pin the *storage discipline* the three callers used to re-derive: a plain
-identifier for the table, a schema that is offered and never applied, statements
-prepared lazily because the store outlives none of the startup order, and a
-claim that is one statement whose returned row *is* the claim.
-"""
-
 from __future__ import annotations
 
 import threading
@@ -15,8 +7,6 @@ from typing import Any
 import pytest
 
 from wreath.store import CLAIMED, Column, Keyed, MemoryStore, PostgresStore, Sql, sql_identifier
-
-# --- fakes -------------------------------------------------------------------
 
 
 class _FakeStatement:
@@ -57,11 +47,7 @@ def _declaration(**kwargs: Any) -> Keyed:
     )
 
 
-# --- the declaration ---------------------------------------------------------
-
-
 def test_identifiers_are_checked_rather_than_quoted() -> None:
-    """Table names reach SQL by interpolation, so they must be plain."""
     assert sql_identifier("wreath_session") == "wreath_session"
     for bad in ("a; DROP TABLE users", "", "1abc", "sch.ema", "a b"):
         with pytest.raises(ValueError, match="plain SQL identifier"):
@@ -103,19 +89,14 @@ def test_a_claim_needs_a_deadline_and_a_payload_it_may_reset() -> None:
     with pytest.raises(ValueError, match="deadline"):
         _declaration(claim=True, ttl=60.0, deadline=False)
     with pytest.raises(ValueError, match="nullable"):
-        Keyed(table="t", columns=(Column("tokens", "float8", null=False),),
-              claim=True, ttl=60.0)
+        Keyed(table="t", columns=(Column("tokens", "float8", null=False),), claim=True, ttl=60.0)
     with pytest.raises(ValueError, match="ttl"):
         _declaration(claim=True)
     with pytest.raises(ValueError, match="ttl must be positive"):
         _declaration(ttl=0.0)
 
 
-# --- lazy preparation --------------------------------------------------------
-
-
 async def test_the_store_touches_no_database_until_a_statement_runs() -> None:
-    """The store is built while the app is described; the database is not up."""
     store = PostgresStore(object(), _declaration(ttl=60.0, claim=True))
     assert store.table == "things"
     assert "CREATE TABLE" in store.schema_sql()
@@ -160,11 +141,7 @@ def test_a_name_must_be_defined_before_it_can_be_used() -> None:
         store.define("acquire", "SELECT 2")
 
 
-# --- the claim ---------------------------------------------------------------
-
-
 async def test_a_returned_row_is_the_claim() -> None:
-    """One statement, one round trip, no owner column."""
     database = _FakeDatabase()
     store = PostgresStore(database, _declaration(ttl=60.0, claim=True))
 
@@ -190,9 +167,6 @@ async def test_the_claim_is_refused_when_the_declaration_did_not_ask_for_one() -
     store = PostgresStore(_FakeDatabase(), _declaration())
     with pytest.raises(ValueError, match="no SQL named 'claim'"):
         await store.claim("k")
-
-
-# --- reads, deletes, purges --------------------------------------------------
 
 
 async def test_reading_by_key_can_require_the_row_to_still_be_live() -> None:
@@ -238,13 +212,9 @@ async def test_purge_can_instead_drop_rows_untouched_for_a_while() -> None:
 
 
 async def test_a_last_touched_stamp_has_no_deadline_to_purge_by() -> None:
-    """`updated` is arithmetic, not a deadline: there is nothing it expires at."""
     store = PostgresStore(_FakeDatabase(), _declaration(stamp="updated", deadline=False))
     with pytest.raises(ValueError, match="idle_seconds"):
         await store.purge()
-
-
-# --- the upsert builder ------------------------------------------------------
 
 
 def test_the_upsert_builder_keeps_the_shape_every_caller_needs() -> None:
@@ -269,18 +239,12 @@ def test_the_upsert_builder_keeps_the_shape_every_caller_needs() -> None:
 
 def test_a_fixed_ttl_renders_as_a_literal_window() -> None:
     store = PostgresStore(object(), _declaration(ttl=86400.0))
-    assert store.window() == (
-        "clock_timestamp() + make_interval(secs => 86400.0::float8)"
-    )
+    assert store.window() == ("clock_timestamp() + make_interval(secs => 86400.0::float8)")
     with pytest.raises(ValueError, match="ttl"):
         PostgresStore(object(), _declaration()).window()
 
 
-# --- the memory half ---------------------------------------------------------
-
-
 def test_claiming_in_memory_is_synchronous_and_that_is_the_point() -> None:
-    """No await between the read and the write, so no task can interleave."""
     store = MemoryStore(ttl=60.0)
     assert store.claim("k") is True
     assert store.claim("k") is False
@@ -300,27 +264,20 @@ def test_a_memory_claim_is_released_by_deleting_it() -> None:
 
 
 def test_a_memory_write_keeps_the_deadline_the_key_was_claimed_with() -> None:
-    """The window opens at the first attempt, exactly as it does in Postgres.
-
-    `PostgresStore`'s generated `DO UPDATE` leaves the stamp alone on purpose, so
-    a slow handler cannot extend its own key. The memory half says the same, or
-    one caller gets two retention policies depending on its backend.
-    """
     clock = [1000.0]
     store = MemoryStore(ttl=10.0, clock=lambda: clock[0])
 
     assert store.claim("k") is True
-    clock[0] += 6.0                     # a slow handler runs...
-    store.set("k", "payload")           # ... and writes its answer
+    clock[0] += 6.0  # a slow handler runs...
+    store.set("k", "payload")  # ... and writes its answer
     assert store.read("k") == "payload"
 
-    clock[0] += 4.0                     # 10s after the claim, 4s after the write
+    clock[0] += 4.0  # 10s after the claim, 4s after the write
     assert store.read("k") is None
-    assert store.claim("k") is True     # so the key is reclaimable, not extended
+    assert store.claim("k") is True  # so the key is reclaimable, not extended
 
 
 def test_a_memory_write_opens_a_fresh_window_when_the_key_had_expired() -> None:
-    """Not moving a deadline is not the same as never setting one."""
     clock = [1000.0]
     store = MemoryStore(ttl=10.0, clock=lambda: clock[0])
 
@@ -328,7 +285,7 @@ def test_a_memory_write_opens_a_fresh_window_when_the_key_had_expired() -> None:
     clock[0] += 11.0
     assert store.read("k") is None
 
-    store.set("k", "second")            # the old deadline is gone, not inherited
+    store.set("k", "second")  # the old deadline is gone, not inherited
     clock[0] += 9.0
     assert store.read("k") == "second"
 
@@ -374,14 +331,6 @@ class _SlowDatabase(_FakeDatabase):
 
 
 def test_two_threads_reaching_a_statement_first_do_not_both_prepare_it() -> None:
-    """The lazy prepare is not atomic, and a duplicate is not benign.
-
-    `Database.statement` raises on a name it already holds, so without the lock
-    the losing thread gets `duplicate PostgreSQL statement` on an ordinary first
-    call. This needs no free-threaded interpreter -- the window spans a call, so
-    the GIL is released inside it. A single event loop cannot hit it, because
-    there is no `await` between the check and the assignment.
-    """
     database = _SlowDatabase()
     store = PostgresStore(database, _declaration(ttl=3600.0))
 
@@ -409,15 +358,11 @@ def test_two_threads_reaching_a_statement_first_do_not_both_prepare_it() -> None
 
 
 def test_the_settled_path_does_not_take_the_lock() -> None:
-    """Double-checked: after first use the lock is never acquired again."""
     store = PostgresStore(_FakeDatabase(), _declaration(ttl=3600.0))
     first = store.statement("purge")
 
     store._prepare_lock = None  # any acquire from here would raise
     assert store.statement("purge") is first
-
-
-# --- the command tag ------------------------------------------------------------------
 
 
 class TestRowsAffected:
@@ -436,7 +381,7 @@ class TestRowsAffected:
             ("DELETE 5", 5),
             ("UPDATE 3", 3),
             ("SELECT 12", 12),
-            ("INSERT 0 5", 5),      # the one the old split got wrong
+            ("INSERT 0 5", 5),  # the one the old split got wrong
             ("INSERT 0 0", 0),
             ("DELETE 0", 0),
         ],
@@ -456,8 +401,6 @@ class TestRowsAffected:
         assert rows_affected(given) is None
 
 
-# --- the guards that keep generated SQL safe ------------------------------------------
-#
 # Table and column names are interpolated into statement text -- they cannot be
 # bound -- so `sql_identifier` and `_expression` are the whole of the policy.
 # `wreath mutant` reported every one of these controls as removable with no test
@@ -545,12 +488,6 @@ class TestExpressionGuard:
 
 class TestPreparedStatementNames:
     def test_an_over_long_statement_name_is_refused(self) -> None:
-        """PostgreSQL *truncates* rather than refusing, which is the danger.
-
-        Two stores agreeing in their first 63 bytes would quietly share one
-        prepared statement -- the exact collision `prefix` exists to prevent,
-        and invisible until the wrong SQL runs.
-        """
         from wreath.store import Keyed, PostgresStore
 
         # At *construction*, because the store defines its own statements there
@@ -642,12 +579,6 @@ class TestStatementShape:
 
 @pytest.mark.asyncio
 async def test_read_live_is_chosen_only_when_asked() -> None:
-    """`read(live=True)` must reach the deadline-checked statement.
-
-    Asserted on the *dispatch* rather than the SQL: both statements exist and
-    both are correct, so a test that only checked their text cannot tell which
-    one a read actually used.
-    """
     from wreath.store import Column, Keyed, PostgresStore
 
     class Recording(PostgresStore):

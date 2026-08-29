@@ -1,5 +1,3 @@
-"""Registration: what the admin refuses to be, before it renders anything."""
-
 from __future__ import annotations
 
 import pytest
@@ -25,7 +23,6 @@ async def test_a_public_admin_is_refused(account_model: type) -> None:
 
 
 async def test_a_public_group_is_refused_even_when_writes_are_gated() -> None:
-    """`{"read": public}` is still a public admin, and the group must be read."""
     with pytest.raises(AdminError) as caught:
         Admin(
             lambda request: FakeSession(),
@@ -44,7 +41,6 @@ async def test_router_refuses_when_nothing_is_registered() -> None:
 async def test_write_operations_refuse_without_a_csrf_verifier(
     account_model: type,
 ) -> None:
-    """The gap this phase found, made visible in the API rather than papered over."""
     admin = Admin(lambda request: FakeSession(), authorize=Access.roles("staff"))
     admin.register(account_model)
     with pytest.raises(AdminError) as caught:
@@ -64,7 +60,6 @@ async def test_a_read_only_admin_needs_no_csrf_verifier(account_model: type) -> 
 async def test_sensitive_columns_are_absent_from_every_view(
     account_model: type,
 ) -> None:
-    """Withholding is `wreath.crud`'s decision, not a second one made here."""
     entry = _admin().register(account_model)
     assert "password_hash" not in entry.columns
     assert "password_hash" not in entry.editable
@@ -121,7 +116,6 @@ async def test_readonly_columns_are_shown_and_not_editable(account_model: type) 
 async def test_naming_a_column_that_does_not_exist_is_refused(
     account_model: type, kwargs: dict
 ) -> None:
-    """Each of these would otherwise read as protection that protects nothing."""
     with pytest.raises(AdminError):
         _admin().register(account_model, **kwargs)
 
@@ -161,7 +155,6 @@ async def test_a_composite_primary_key_is_refused() -> None:
 async def test_every_generated_route_carries_the_access_rule(
     account_model: type,
 ) -> None:
-    """A route the pipeline does not gate is the whole surface, unprotected."""
     from wreath._auth.requirements import requirement_for
 
     admin = _admin(authorize=Access.roles("staff"))

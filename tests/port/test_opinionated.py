@@ -1,19 +1,3 @@
-"""`--opinionated`: make the decision instead of writing it down.
-
-The default emit stops at the file boundary. A query needs a session to run, a
-session has to come from somewhere, and "somewhere" is the function's caller —
-so changing it changes code the emitter is not looking at. That is a decision
-about someone else's code, and a codemod should be asked before it makes one.
-
-`--opinionated` is that permission. It threads the session from the route
-handler, where wreath supplies one, down through every function that needs it,
-and updates the calls on the way — so the queries are written out rather than
-described.
-
-**The signature and the call sites move together or not at all.** Adding the
-parameter and leaving the callers is the half-port that imports cleanly and
-fails on the first request, which is worse than the note it replaced.
-"""
 from __future__ import annotations
 
 import ast
@@ -63,10 +47,9 @@ def _port(root, out, **kwargs) -> dict[str, str]:
 
 
 def test_by_default_a_query_outside_a_handler_is_described_not_moved(app_tree, tmp_path):
-    """One note on the function, not one on every query inside it."""
     ported = _port(app_tree, tmp_path / "out")
     assert "orm.query.needs_session" in ported["repo.py"]
-    assert "Llama.objects.filter" in ported["repo.py"]     # left exactly as written
+    assert "Llama.objects.filter" in ported["repo.py"]  # left exactly as written
     assert "session" not in ported["service.py"].replace("session", "", 0).split("\n")[0]
     assert "Session" not in ported["service.py"]
 
@@ -164,8 +147,7 @@ def test_a_resolved_relationship_filter_uses_the_wreath_path(tmp_path):
         encoding="utf-8",
     )
     (root / "queries.py").write_text(
-        "async def by_ranch():\n"
-        "    return await Llama.objects.filter(ranch__slug='north').all()\n",
+        "async def by_ranch():\n    return await Llama.objects.filter(ranch__slug='north').all()\n",
         encoding="utf-8",
     )
 
@@ -196,11 +178,7 @@ def test_a_plain_graphql_output_loses_the_strawberry_runtime_model(tmp_path):
     root = tmp_path / "app"
     root.mkdir()
     (root / "schema.py").write_text(
-        "import strawberry\n"
-        "@strawberry.type\n"
-        "class TrekSummary:\n"
-        "    label: str\n"
-        "    count: int\n",
+        "import strawberry\n@strawberry.type\nclass TrekSummary:\n    label: str\n    count: int\n",
         encoding="utf-8",
     )
 
@@ -213,7 +191,6 @@ def test_a_plain_graphql_output_loses_the_strawberry_runtime_model(tmp_path):
 
 
 def test_every_ported_file_imports_what_it_uses(app_tree, tmp_path):
-    """The Session annotation is worth nothing without the import beside it."""
     ported = _port(app_tree, tmp_path / "out", opinionated=True)
     for name, text in ported.items():
         if "Session" in text:
@@ -221,12 +198,6 @@ def test_every_ported_file_imports_what_it_uses(app_tree, tmp_path):
 
 
 def test_a_name_that_could_mean_something_else_is_left_alone(tmp_path):
-    """A repository with an `async def all` must not teach the tool to rewrite `all()`.
-
-    This is the risk in matching a method by name, and it bites: a repository
-    with an `async def all(self)` is ordinary, and every built-in `all(...)` in
-    that tree was handed a session.
-    """
     root = tmp_path / "app"
     root.mkdir()
     (root / "repo.py").write_text(
@@ -236,8 +207,7 @@ def test_a_name_that_could_mean_something_else_is_left_alone(tmp_path):
         encoding="utf-8",
     )
     (root / "check.py").write_text(
-        "async def every_llama_named(llamas):\n"
-        "    return all(llama.name for llama in llamas)\n",
+        "async def every_llama_named(llamas):\n    return all(llama.name for llama in llamas)\n",
         encoding="utf-8",
     )
     ported = _port(root, tmp_path / "out", opinionated=True)
@@ -246,7 +216,6 @@ def test_a_name_that_could_mean_something_else_is_left_alone(tmp_path):
 
 
 def test_a_generator_argument_gains_its_brackets_with_the_keyword(tmp_path):
-    """`f(x for x in y)` may go bare only while it is the only argument."""
     root = tmp_path / "app"
     root.mkdir()
     (root / "repo.py").write_text(
@@ -258,7 +227,7 @@ def test_a_generator_argument_gains_its_brackets_with_the_keyword(tmp_path):
         encoding="utf-8",
     )
     ported = _port(root, tmp_path / "out", opinionated=True)
-    tree = ast.parse(ported["repo.py"])        # compiled by `_port` already
+    tree = ast.parse(ported["repo.py"])  # compiled by `_port` already
     assert tree is not None
     assert "session=session" in ported["repo.py"]
 
@@ -281,7 +250,6 @@ def test_a_call_with_a_trailing_comma_does_not_get_two(tmp_path):
 
 
 def test_opinionated_drops_extra_ignore_instead_of_asking(tmp_path):
-    """Wreath always rejects unknown fields, so there is nothing to decide."""
     root = tmp_path / "app"
     root.mkdir()
     (root / "dto.py").write_text(

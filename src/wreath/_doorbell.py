@@ -62,7 +62,11 @@ def delay(attempt: int) -> float:
     """Seconds before reconnect `attempt` (1-based). Jittered so a fleet that
     lost the same database does not come back at it in lockstep."""
     return compute_backoff(
-        attempt, kind="exp", base=BACKOFF_BASE, cap=BACKOFF_CAP, jitter=0.2,
+        attempt,
+        kind="exp",
+        base=BACKOFF_BASE,
+        cap=BACKOFF_CAP,
+        jitter=0.2,
     )
 
 

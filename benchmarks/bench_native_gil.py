@@ -87,21 +87,24 @@ def run_ws(sizes: list[int], warmup: int, trials: int) -> dict[str, Any]:
         masked = _core.ws_mask(payload, key)
         if _core.ws_mask(masked, key) != payload:
             raise RuntimeError(f"ws_mask integrity check failed for {size} bytes")
+
         def kernel(data: bytes = payload) -> object:
             return _core.ws_mask(data, key)
 
         uncontended = _measure_uncontended(kernel, warmup, trials)
         measured = _measure(kernel, warmup, trials)
-        results.append({
-            "size": size,
-            "uncontended": {
-                "median_ns": statistics.median(uncontended),
-                "min_ns": min(uncontended),
-                "max_ns": max(uncontended),
-                "trials_ns": uncontended,
-            },
-            "contended": {"summary": _summary(measured), "trials": measured},
-        })
+        results.append(
+            {
+                "size": size,
+                "uncontended": {
+                    "median_ns": statistics.median(uncontended),
+                    "min_ns": min(uncontended),
+                    "max_ns": max(uncontended),
+                    "trials_ns": uncontended,
+                },
+                "contended": {"summary": _summary(measured), "trials": measured},
+            }
+        )
     return {
         "schema": 1,
         "kernel": "ws_mask",

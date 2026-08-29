@@ -114,9 +114,7 @@ class AIScrapingPolicy:
                 blocked.append(rule_id)
         blocked.sort()
         self._database = database
-        self._blocked_products = tuple(
-            product for product in AI_SCRAPERS if product not in allowed
-        )
+        self._blocked_products = tuple(product for product in AI_SCRAPERS if product not in allowed)
         self._blocked_table = b"".join(pack("<H", rule_id) for rule_id in blocked)
 
     @property
@@ -143,13 +141,9 @@ class AIScrapingPolicy:
             detail="AI scraper traffic is disabled by default",
         )
 
-    def _ingress_scope(
-        self, scope: Any, method: str, path: str
-    ) -> ProblemResponse | None:
+    def _ingress_scope(self, scope: Any, method: str, path: str) -> ProblemResponse | None:
         """Run portable ASGI ingress without materializing a Request."""
-        if not self._blocked_table or (
-            path == "/robots.txt" and method in {"GET", "HEAD"}
-        ):
+        if not self._blocked_table or (path == "/robots.txt" and method in {"GET", "HEAD"}):
             return None
         headers = scope["headers"] if isinstance(scope, dict) else scope.headers
         if not self._database._database.blocked_headers(headers, self._blocked_table):
@@ -223,10 +217,7 @@ class TrafficClass:
                 f"traffic class country {invalid_country!r} must be an uppercase "
                 "two-letter ISO code"
             )
-        if any(
-            isinstance(version, bool) or version not in (4, 6)
-            for version in self.ip_versions
-        ):
+        if any(isinstance(version, bool) or version not in (4, 6) for version in self.ip_versions):
             raise ValueError("traffic class ip_versions may contain only 4 and 6")
         invalid_source = next(
             (source for source in self.address_sources if source not in {"socket", "forwarded"}),
@@ -305,10 +296,7 @@ def _traffic_matches(rule: Any, facts: ClientFacts) -> bool:
         (not rule.countries or country in rule.countries)
         and (not rule.browsers or ua.browser in rule.browsers)
         and (not rule.ip_versions or (ip is not None and ip.version in rule.ip_versions))
-        and (
-            not rule.address_sources
-            or (ip is not None and ip.source in rule.address_sources)
-        )
+        and (not rule.address_sources or (ip is not None and ip.source in rule.address_sources))
         and (
             not rule.agent_identities
             or (agent.verified and agent.identity in rule.agent_identities)
@@ -322,11 +310,15 @@ def _traffic_matches(rule: Any, facts: ClientFacts) -> bool:
 def _compile_traffic_class(
     declaration: TrafficClass,
 ) -> TrafficClass | _CompiledTrafficClass:
-    if type(declaration) is not TrafficClass or max(
-        len(declaration.countries),
-        len(declaration.browsers),
-        len(declaration.agent_identities),
-    ) < 4:
+    if (
+        type(declaration) is not TrafficClass
+        or max(
+            len(declaration.countries),
+            len(declaration.browsers),
+            len(declaration.agent_identities),
+        )
+        < 4
+    ):
         return declaration
     return _CompiledTrafficClass.compile(declaration)
 
@@ -374,9 +366,7 @@ class TrafficPolicy:
                 "the default is only for unmatched requests"
             )
         self._provider = provider
-        self._classes = tuple(
-            _compile_traffic_class(declaration) for declaration in classes
-        )
+        self._classes = tuple(_compile_traffic_class(declaration) for declaration in classes)
         self._default = default
         self._lock = threading.Lock()
         self._counts = {"classified": 0, "matched": 0, "unmatched": 0, "denied": 0}

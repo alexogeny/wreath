@@ -1,11 +1,3 @@
-"""Shared doubles for the generated admin.
-
-Deliberately the same shape as `tests/test_crud.py`'s: the admin is a client of
-the ordinary stack, so a session double that satisfies generated CRUD should
-satisfy this too, and any place it does not is a place the admin took a
-privileged path.
-"""
-
 from __future__ import annotations
 
 from typing import Any

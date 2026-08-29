@@ -50,12 +50,6 @@ def _md5_response(user: str, password: str, salt: bytes) -> bytes:
 async def test_md5_authentication_is_refused_without_the_legacy_opt_in(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The default answer to an md5 challenge is a refusal that names md5.
-
-    Not "unsupported method 5": the number tells a reader nothing, and this is
-    the one refusal whose message has to explain that the deprecation is
-    deliberate and what the escape hatch costs.
-    """
     monkeypatch.delenv(postgres.LEGACY_MD5_ENV, raising=False)
     reader = asyncio.StreamReader()
     reader.feed_data(_md5_challenge(b"salt"))
@@ -70,12 +64,6 @@ async def test_md5_authentication_is_refused_without_the_legacy_opt_in(
 async def test_md5_authentication_is_refused_off_loopback_even_when_opted_in(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The opt-in alone is not enough; the peer must also be this machine.
-
-    An md5 hash is password-equivalent and replayable, so the exposure that
-    matters is carrying one across a network. Refusing off-loopback is what
-    makes the flag impossible to point at a production database.
-    """
     monkeypatch.setenv(postgres.LEGACY_MD5_ENV, postgres.LEGACY_MD5_VALUE)
     reader = asyncio.StreamReader()
     reader.feed_data(_md5_challenge(b"salt"))
@@ -90,7 +78,6 @@ async def test_md5_authentication_is_refused_off_loopback_even_when_opted_in(
 async def test_md5_authentication_answers_the_challenge_when_opted_in_on_loopback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With both conditions met, the wire answer is the one PostgreSQL specifies."""
     monkeypatch.setenv(postgres.LEGACY_MD5_ENV, postgres.LEGACY_MD5_VALUE)
     salt = b"\x01\x02\x03\x04"
     reader = asyncio.StreamReader()
@@ -111,7 +98,6 @@ async def test_md5_authentication_answers_the_challenge_when_opted_in_on_loopbac
 async def test_md5_authentication_needs_a_password(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A DSN with no password cannot answer an md5 challenge."""
     monkeypatch.setenv(postgres.LEGACY_MD5_ENV, postgres.LEGACY_MD5_VALUE)
     reader = asyncio.StreamReader()
     reader.feed_data(_md5_challenge(b"salt"))
@@ -126,12 +112,6 @@ async def test_md5_authentication_needs_a_password(
 async def test_md5_loopback_is_decided_by_the_peer_not_the_dsn_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A hostname that resolves to loopback is loopback.
-
-    The benchmark database is reached as `tfb-database`, which every published
-    entry hardcodes and which resolves to ::1. Judging the DSN string would
-    refuse the one case the opt-in exists for.
-    """
     monkeypatch.setenv(postgres.LEGACY_MD5_ENV, postgres.LEGACY_MD5_VALUE)
     salt = b"\x01\x02\x03\x04"
     reader = asyncio.StreamReader()
@@ -149,12 +129,6 @@ async def test_md5_loopback_is_decided_by_the_peer_not_the_dsn_host(
 async def test_md5_is_refused_when_the_peer_is_remote_however_the_dsn_reads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The DSN saying `localhost` does not make the socket local.
-
-    This is the direction that matters: a name somebody else controls must not
-    be able to talk this driver into putting a replayable password hash on the
-    wire to another machine.
-    """
     monkeypatch.setenv(postgres.LEGACY_MD5_ENV, postgres.LEGACY_MD5_VALUE)
     reader = asyncio.StreamReader()
     reader.feed_data(_md5_challenge(b"salt"))

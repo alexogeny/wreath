@@ -20,6 +20,7 @@ __all__ = ["GraphQLSyntaxError", "Limits", "parse"]
 
 DEFAULT_MAX_STEPS = 200_000
 
+
 class GraphQLSyntaxError(Exception):
     """A malformed document or one that exceeded a safety limit."""
 
@@ -33,7 +34,10 @@ class Limits:
     """Read-only safety bounds for one parse."""
 
     __slots__ = (
-        "max_aliases", "max_complexity", "max_depth", "max_document_bytes",
+        "max_aliases",
+        "max_complexity",
+        "max_depth",
+        "max_document_bytes",
         "max_steps",
     )
 

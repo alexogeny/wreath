@@ -35,7 +35,9 @@ _OPEN = "```chart"
 
 
 def extract(
-    text: str, base_dir: Path, sources: set[Path] | None = None,
+    text: str,
+    base_dir: Path,
+    sources: set[Path] | None = None,
 ) -> tuple[str, dict[str, str]]:
     """Replace each ```chart block with a token; return (text, {token: svg-html}).
 
@@ -43,7 +45,8 @@ def extract(
     so the caller can publish the raw JSON alongside the rendered chart.
     """
     return _fenced.extract(
-        text, _OPEN, lambda body: _render(_parse(body), base_dir, sources), "CHART")
+        text, _OPEN, lambda body: _render(_parse(body), base_dir, sources), "CHART"
+    )
 
 
 restore = _fenced.restore
@@ -59,8 +62,9 @@ def _parse(config: list[str]) -> dict[str, str]:
 
 
 def _esc(text: str) -> str:
-    return (text.replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;").replace('"', "&quot;"))
+    return (
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    )
 
 
 def _render(config: dict[str, str], base_dir: Path, sources: set[Path] | None = None) -> str:
@@ -69,8 +73,9 @@ def _render(config: dict[str, str], base_dir: Path, sources: set[Path] | None = 
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
-        return (f'<div class="chart-error">chart: cannot load {_esc(source)}: '
-                f"{_esc(str(error))}</div>")
+        return (
+            f'<div class="chart-error">chart: cannot load {_esc(source)}: {_esc(str(error))}</div>'
+        )
     if sources is not None:
         sources.add(path.resolve())
     node: Any = data
@@ -78,7 +83,7 @@ def _render(config: dict[str, str], base_dir: Path, sources: set[Path] | None = 
         if key:
             try:
                 node = node[key]
-            except (KeyError, TypeError, IndexError):
+            except KeyError, TypeError, IndexError:
                 return f'<div class="chart-error">chart: no data at {_esc(config["data"])}</div>'
     try:
         pairs = _pairs(node, config)
@@ -116,8 +121,10 @@ def _series_pairs(node: Any, config: dict[str, str]) -> list[tuple[str, float]] 
     if isinstance(node.get("rows"), list) and isinstance(node.get("measures"), list):
         measure = wanted or (node["measures"][0] if node["measures"] else "")
         if measure not in node["measures"]:
-            raise _ChartError(f"no measure {measure!r}; this view has "
-                              f"{', '.join(map(str, node['measures'])) or 'none'}")
+            raise _ChartError(
+                f"no measure {measure!r}; this view has "
+                f"{', '.join(map(str, node['measures'])) or 'none'}"
+            )
         pairs = []
         for row in node["rows"]:
             value = (row.get("values") or {}).get(measure)
@@ -131,10 +138,10 @@ def _series_pairs(node: Any, config: dict[str, str]) -> list[tuple[str, float]] 
     if wanted:
         lines = [item for item in lines if item.get("measure") == wanted]
         if not lines:
-            names = sorted({str(item.get("measure")) for item in node["series"]
-                            if isinstance(item, dict)})
-            raise _ChartError(f"no measure {wanted!r}; this view has "
-                              f"{', '.join(names) or 'none'}")
+            names = sorted(
+                {str(item.get("measure")) for item in node["series"] if isinstance(item, dict)}
+            )
+            raise _ChartError(f"no measure {wanted!r}; this view has {', '.join(names) or 'none'}")
     label = config.get("series", "").strip()
     if label:
         lines = [item for item in lines if str(item.get("label")) == label]
@@ -215,6 +222,7 @@ _WREATH_FILL = {
 }
 _OTHER_FILL = "#9aa4b2"
 
+
 def _hatch_defs(uid: str) -> str:
     """The `field` hatch, with an id unique to this chart.
 
@@ -228,7 +236,8 @@ def _hatch_defs(uid: str) -> str:
         'patternUnits="userSpaceOnUse" patternTransform="rotate(45)">'
         '<rect width="7" height="7" fill="#9aa4b2"/>'
         '<line x1="0" y1="0" x2="0" y2="7" stroke="#6b7280" stroke-width="2.5"/>'
-        "</pattern></defs>")
+        "</pattern></defs>"
+    )
 
 
 def _bar_fill(label: str, uid: str) -> str:
@@ -251,8 +260,7 @@ def _svg_bar(pairs: list[tuple[str, float]], title: str, unit: str) -> str:
     """
     # Derived from the chart's own content, so the id is stable across builds
     # (a counter would renumber every chart when one is inserted above it).
-    uid = sha256(
-        f"{title}\x00{unit}\x00{pairs}".encode()).hexdigest()[:8]
+    uid = sha256(f"{title}\x00{unit}\x00{pairs}".encode()).hexdigest()[:8]
     width, label_w, value_w, row_h = 720, 168, 84, 30
     bar_area = width - label_w - value_w - 12
     top = 12
@@ -261,12 +269,13 @@ def _svg_bar(pairs: list[tuple[str, float]], title: str, unit: str) -> str:
     parts = [
         '<figure class="chart">',
         f'<figcaption class="chart-title">{_esc(title)}</figcaption>' if title else "",
-        f'<svg viewBox="0 0 {width} {height}" role="img" width="100%" '
-        f'style="max-width:{width}px">', _hatch_defs(uid),
+        f'<svg viewBox="0 0 {width} {height}" role="img" width="100%" style="max-width:{width}px">',
+        _hatch_defs(uid),
         # The baseline every bar starts from. Without it the bars float and the
         # eye has nothing to judge the left edge against.
-        f'<line x1="{label_w - .5}" y1="{top - 2}" x2="{label_w - .5}" '
-        f'y2="{height - 4}" stroke="currentColor" opacity=".18"/>']
+        f'<line x1="{label_w - 0.5}" y1="{top - 2}" x2="{label_w - 0.5}" '
+        f'y2="{height - 4}" stroke="currentColor" opacity=".18"/>',
+    ]
     for index, (label, value) in enumerate(pairs):
         cy = top + index * row_h
         mid = cy + row_h / 2
@@ -281,7 +290,8 @@ def _svg_bar(pairs: list[tuple[str, float]], title: str, unit: str) -> str:
             f'rx="2" fill="{_bar_fill(label, uid)}"/>'
             f'<text class="chart-value" x="{label_w + bar_w + 8:.1f}" y="{mid + 4:.0f}" '
             f'fill="currentColor" font-weight="{weight}">'
-            f"{_fmt(value)}{_esc(unit)}</text>")
+            f"{_fmt(value)}{_esc(unit)}</text>"
+        )
     parts.append("</svg></figure>")
     return "".join(parts)
 

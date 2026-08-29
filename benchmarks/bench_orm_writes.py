@@ -65,14 +65,10 @@ def _wide_model(width: int) -> Any:
             namespace[f"f{index}"] = column(Text)
         namespace["__annotations__"] = annotations
 
-    return _types.new_class(
-        f"Wide{width}", (Model,), {"table": f"wide{width}"}, body
-    )
+    return _types.new_class(f"Wide{width}", (Model,), {"table": f"wide{width}"}, body)
 
 
-def _wide_payload(
-    session_cls: Any, model: Any, registry: Any, width: int, rows: int
-) -> Any:
+def _wide_payload(session_cls: Any, model: Any, registry: Any, width: int, rows: int) -> Any:
     """One flush of `rows` fully-loaded instances of a `width`-column model."""
     fields = {f"f{index}": "v" for index in range(width)}
 
@@ -113,9 +109,7 @@ def _update_payload(registry: Any, session_cls: Any, model: Any, rows: int) -> A
         session = session_cls(registry, "write")
         instances = []
         for index in range(rows):
-            instance = model(
-                id=index, email=f"u{index}@e.x", name=f"n{index}", created_at=_CREATED
-            )
+            instance = model(id=index, email=f"u{index}@e.x", name=f"n{index}", created_at=_CREATED)
             session.add(instance)
             instances.append(instance)
         async with session.begin():

@@ -43,11 +43,20 @@ _READ_OPERATIONS = ("list", "retrieve")
 #: what is finally accepted is the column's own validation; neither depends on
 #: this map, so a missing entry cannot widen what a form may store.
 _INPUT_TYPES = {
-    "int2": "number", "int4": "number", "int8": "number",
-    "smallint": "number", "integer": "number", "bigint": "number",
-    "float4": "number", "float8": "number", "numeric": "number",
-    "date": "date", "timestamptz": "datetime-local", "timestamp": "datetime-local",
-    "time": "time", "timetz": "time",
+    "int2": "number",
+    "int4": "number",
+    "int8": "number",
+    "smallint": "number",
+    "integer": "number",
+    "bigint": "number",
+    "float4": "number",
+    "float8": "number",
+    "numeric": "number",
+    "date": "date",
+    "timestamptz": "datetime-local",
+    "timestamp": "datetime-local",
+    "time": "time",
+    "timetz": "time",
 }
 #: What a submitted string becomes for each declared column type. A form
 #: transports text and the ORM stores typed values, and the ORM does **not**
@@ -58,9 +67,14 @@ _INPUT_TYPES = {
 #: A type absent from this map keeps its string: `text`, `varchar`, `uuid`,
 #: `bytea` and the JSON types all accept one.
 _FORM_TYPES: dict[str, Any] = {
-    "int2": int, "int4": int, "int8": int,
-    "smallint": int, "integer": int, "bigint": int,
-    "float4": float, "float8": float,
+    "int2": int,
+    "int4": int,
+    "int8": int,
+    "smallint": int,
+    "integer": int,
+    "bigint": int,
+    "float4": float,
+    "float8": float,
     "numeric": _Decimal,
     "date": _date,
     "timestamptz": _Instant,
@@ -291,26 +305,29 @@ class Admin:
         readonly_set = frozenset(readonly)
         access = dict(field_access or {})
         for role, names in (
-            ("expose", exposed), ("exclude", excluded), ("readonly", readonly_set),
+            ("expose", exposed),
+            ("exclude", excluded),
+            ("readonly", readonly_set),
             ("field_access", frozenset(access)),
         ):
             missing = sorted(name for name in names if name not in columns)
             if missing:
                 raise AdminError(
-                    f"{model.__name__} has no column(s) {', '.join(missing)}; "
-                    f"`{role}` names them"
+                    f"{model.__name__} has no column(s) {', '.join(missing)}; `{role}` names them"
                 )
 
         sensitive = sensitive_fields(model)
         withheld = sensitive | retrieval_fields(model)
         shown = tuple(
-            name for name in columns
+            name
+            for name in columns
             if name not in excluded and (name not in withheld or name in exposed)
         )
         shown_names = frozenset(shown)
         generated = frozenset(name for name, item in columns.items() if item.generated)
         editable = tuple(
-            name for name in shown
+            name
+            for name in shown
             if name != primary_key
             and name not in readonly_set
             and name not in generated
@@ -410,16 +427,19 @@ class Admin:
 
         @router.get("/")
         async def index(request: Any) -> Response:
-            return _html(INDEX_TEMPLATE, {
-                **shell,
-                "title": self._title,
-                "heading": self._title,
-                "intro": (
-                    "Every model registered on this admin. This surface is for "
-                    "operators, not for customers."
-                ),
-                "empty": not nav,
-            })
+            return _html(
+                INDEX_TEMPLATE,
+                {
+                    **shell,
+                    "title": self._title,
+                    "heading": self._title,
+                    "intro": (
+                        "Every model registered on this admin. This surface is for "
+                        "operators, not for customers."
+                    ),
+                    "empty": not nav,
+                },
+            )
 
         _apply_access(index, index_rule)
 
@@ -427,9 +447,7 @@ class Admin:
             self._mount(router, base, shell, entry)
         return router
 
-    def _mount(
-        self, router: Any, base: str, shell: dict[str, Any], entry: ModelAdmin
-    ) -> None:
+    def _mount(self, router: Any, base: str, shell: dict[str, Any], entry: ModelAdmin) -> None:
         """Register one model's views. One closure set per registration."""
         open_session = self._open_session
         rules = self._rules
@@ -444,14 +462,22 @@ class Admin:
 
         async def readable(request: Any) -> frozenset[str]:
             return await resolve_readable(
-                request, _authorizer(request), entry.field_access,
-                entry.columns, entry.resource, admin_id,
+                request,
+                _authorizer(request),
+                entry.field_access,
+                entry.columns,
+                entry.resource,
+                admin_id,
             )
 
         async def writable(request: Any) -> frozenset[str]:
             return await resolve_writable(
-                request, _authorizer(request), entry.field_access,
-                entry.editable, entry.resource, admin_id,
+                request,
+                _authorizer(request),
+                entry.field_access,
+                entry.editable,
+                entry.resource,
+                admin_id,
             )
 
         if "list" in entry.operations:
@@ -463,40 +489,48 @@ class Admin:
                 try:
                     params = _page_params(request, entry)
                     page = await paginate(
-                        session, cast("Any", entry.model).select(), params,
+                        session,
+                        cast("Any", entry.model).select(),
+                        params,
                         allow_sort=entry.sortable,
                     )
                 finally:
                     await session.close()
                 query = _query_of(request)
-                return _html(LIST_TEMPLATE, {
-                    **shell,
-                    "title": f"{entry.label} — {self._title}",
-                    "heading": entry.label,
-                    "model_label": entry.label,
-                    "caption": f"{entry.label} rows {page.total} in total",
-                    "headers": [
-                        {"label": label,
-                         "sort_url": _sort_url(root, query, name, entry)}
-                        for name, label in list_columns
-                    ],
-                    "rows": [
-                        {"url": f"{root}/{quote(str(getattr(row, entry.primary_key)), safe='')}",
-                         "label": f"{entry.label} {getattr(row, entry.primary_key)}",
-                         "cells": _cells(row, list_columns, allowed)}
-                        for row in page.items
-                    ],
-                    "empty": not page.items,
-                    "can_create": "create" in entry.operations,
-                    "create_url": f"{root}/new",
-                    "page": {
-                        "has_prev": page.has_prev,
-                        "has_next": page.has_next,
-                        "prev_url": _page_url(root, query, page.page - 1),
-                        "next_url": _page_url(root, query, page.page + 1),
-                        "summary": f"Page {page.page} of {page.pages}, {page.total} rows",
+                return _html(
+                    LIST_TEMPLATE,
+                    {
+                        **shell,
+                        "title": f"{entry.label} — {self._title}",
+                        "heading": entry.label,
+                        "model_label": entry.label,
+                        "caption": f"{entry.label} rows {page.total} in total",
+                        "headers": [
+                            {"label": label, "sort_url": _sort_url(root, query, name, entry)}
+                            for name, label in list_columns
+                        ],
+                        "rows": [
+                            {
+                                "url": (
+                                    f"{root}/{quote(str(getattr(row, entry.primary_key)), safe='')}"
+                                ),
+                                "label": f"{entry.label} {getattr(row, entry.primary_key)}",
+                                "cells": _cells(row, list_columns, allowed),
+                            }
+                            for row in page.items
+                        ],
+                        "empty": not page.items,
+                        "can_create": "create" in entry.operations,
+                        "create_url": f"{root}/new",
+                        "page": {
+                            "has_prev": page.has_prev,
+                            "has_next": page.has_next,
+                            "prev_url": _page_url(root, query, page.page - 1),
+                            "next_url": _page_url(root, query, page.page + 1),
+                            "summary": f"Page {page.page} of {page.pages}, {page.total} rows",
+                        },
                     },
-                })
+                )
 
             _apply_access(list_, rules["list"])
 
@@ -513,18 +547,21 @@ class Admin:
                 if instance is None:
                     return _missing(entry, root, shell, self._title)
                 key = getattr(instance, entry.primary_key)
-                return _html(DETAIL_TEMPLATE, {
-                    **shell,
-                    "title": f"{entry.label} {key} — {self._title}",
-                    "heading": f"{entry.label} {key}",
-                    "model_label": entry.label,
-                    "fields": _cells(instance, columns, allowed),
-                    "list_url": f"{root}/",
-                    "can_edit": "update" in entry.operations,
-                    "edit_url": f"{root}/{quote(str(key), safe='')}/edit",
-                    "can_delete": "delete" in entry.operations,
-                    "delete_url": f"{root}/{quote(str(key), safe='')}/delete",
-                })
+                return _html(
+                    DETAIL_TEMPLATE,
+                    {
+                        **shell,
+                        "title": f"{entry.label} {key} — {self._title}",
+                        "heading": f"{entry.label} {key}",
+                        "model_label": entry.label,
+                        "fields": _cells(instance, columns, allowed),
+                        "list_url": f"{root}/",
+                        "can_edit": "update" in entry.operations,
+                        "edit_url": f"{root}/{quote(str(key), safe='')}/edit",
+                        "can_delete": "delete" in entry.operations,
+                        "delete_url": f"{root}/{quote(str(key), safe='')}/delete",
+                    },
+                )
 
             _apply_access(retrieve, rules["retrieve"])
 
@@ -533,18 +570,21 @@ class Admin:
             @router.get(f"/{entry.slug}/new")
             async def create_form(request: Any) -> Response:
                 allowed = await writable(request)
-                return _html(FORM_TEMPLATE, {
-                    **shell,
-                    "title": f"New {entry.label} — {self._title}",
-                    "heading": f"New {entry.label}",
-                    "action": f"{root}/new",
-                    "fields": _form_fields(entry, None, allowed),
-                    "empty": not allowed,
-                    "submit_label": f"Create {entry.label}",
-                    "cancel_url": f"{root}/",
-                    "errors": (),
-                    "has_errors": False,
-                })
+                return _html(
+                    FORM_TEMPLATE,
+                    {
+                        **shell,
+                        "title": f"New {entry.label} — {self._title}",
+                        "heading": f"New {entry.label}",
+                        "action": f"{root}/new",
+                        "fields": _form_fields(entry, None, allowed),
+                        "empty": not allowed,
+                        "submit_label": f"Create {entry.label}",
+                        "cancel_url": f"{root}/",
+                        "errors": (),
+                        "has_errors": False,
+                    },
+                )
 
             @router.post(f"/{entry.slug}/new")
             async def create(request: Any) -> Response:
@@ -563,25 +603,27 @@ class Admin:
                                 session.add(instance)
                                 await session.flush()
                             key = getattr(instance, entry.primary_key)
-                        return RedirectResponse(
-                            f"{root}/{quote(str(key), safe='')}", status=303
-                        )
+                        return RedirectResponse(f"{root}/{quote(str(key), safe='')}", status=303)
                     except (TypeError, ValueError) as error:
                         problems = [{"message": str(error)}]
                     finally:
                         await session.close()
-                return _html(FORM_TEMPLATE, {
-                    **shell,
-                    "title": f"New {entry.label} — {self._title}",
-                    "heading": f"New {entry.label}",
-                    "action": f"{root}/new",
-                    "fields": _form_fields(entry, None, allowed, submitted.raw),
-                    "empty": not allowed,
-                    "submit_label": f"Create {entry.label}",
-                    "cancel_url": f"{root}/",
-                    "errors": problems,
-                    "has_errors": True,
-                }, status=422)
+                return _html(
+                    FORM_TEMPLATE,
+                    {
+                        **shell,
+                        "title": f"New {entry.label} — {self._title}",
+                        "heading": f"New {entry.label}",
+                        "action": f"{root}/new",
+                        "fields": _form_fields(entry, None, allowed, submitted.raw),
+                        "empty": not allowed,
+                        "submit_label": f"Create {entry.label}",
+                        "cancel_url": f"{root}/",
+                        "errors": problems,
+                        "has_errors": True,
+                    },
+                    status=422,
+                )
 
             _apply_access(create_form, rules["create"])
             _apply_access(create, rules["create"])
@@ -599,18 +641,21 @@ class Admin:
                 if instance is None:
                     return _missing(entry, root, shell, self._title)
                 key = getattr(instance, entry.primary_key)
-                return _html(FORM_TEMPLATE, {
-                    **shell,
-                    "title": f"Edit {entry.label} {key} — {self._title}",
-                    "heading": f"Edit {entry.label} {key}",
-                    "action": f"{root}/{quote(str(key), safe='')}/edit",
-                    "fields": _form_fields(entry, instance, allowed),
-                    "empty": not allowed,
-                    "submit_label": "Save changes",
-                    "cancel_url": f"{root}/{quote(str(key), safe='')}",
-                    "errors": (),
-                    "has_errors": False,
-                })
+                return _html(
+                    FORM_TEMPLATE,
+                    {
+                        **shell,
+                        "title": f"Edit {entry.label} {key} — {self._title}",
+                        "heading": f"Edit {entry.label} {key}",
+                        "action": f"{root}/{quote(str(key), safe='')}/edit",
+                        "fields": _form_fields(entry, instance, allowed),
+                        "empty": not allowed,
+                        "submit_label": "Save changes",
+                        "cancel_url": f"{root}/{quote(str(key), safe='')}",
+                        "errors": (),
+                        "has_errors": False,
+                    },
+                )
 
             @router.post(f"/{entry.slug}/{{pk}}/edit")
             async def update(request: Any) -> Response:
@@ -638,18 +683,22 @@ class Admin:
                             )
                         except (TypeError, ValueError) as error:
                             problems = [{"message": str(error)}]
-                    return _html(FORM_TEMPLATE, {
-                        **shell,
-                        "title": f"Edit {entry.label} {key} — {self._title}",
-                        "heading": f"Edit {entry.label} {key}",
-                        "action": f"{root}/{quote(str(key), safe='')}/edit",
-                        "fields": _form_fields(entry, instance, allowed, submitted.raw),
-                        "empty": not allowed,
-                        "submit_label": "Save changes",
-                        "cancel_url": f"{root}/{quote(str(key), safe='')}",
-                        "errors": problems,
-                        "has_errors": True,
-                    }, status=422)
+                    return _html(
+                        FORM_TEMPLATE,
+                        {
+                            **shell,
+                            "title": f"Edit {entry.label} {key} — {self._title}",
+                            "heading": f"Edit {entry.label} {key}",
+                            "action": f"{root}/{quote(str(key), safe='')}/edit",
+                            "fields": _form_fields(entry, instance, allowed, submitted.raw),
+                            "empty": not allowed,
+                            "submit_label": "Save changes",
+                            "cancel_url": f"{root}/{quote(str(key), safe='')}",
+                            "errors": problems,
+                            "has_errors": True,
+                        },
+                        status=422,
+                    )
                 finally:
                     await session.close()
 
@@ -669,19 +718,22 @@ class Admin:
                 if instance is None:
                     return _missing(entry, root, shell, self._title)
                 key = getattr(instance, entry.primary_key)
-                return _html(CONFIRM_TEMPLATE, {
-                    **shell,
-                    "title": f"Delete {entry.label} {key} — {self._title}",
-                    "heading": f"Delete {entry.label} {key}",
-                    "prompt": (
-                        f"This permanently deletes {entry.label} {key}. "
-                        "The audit trail keeps the record of the deletion."
-                    ),
-                    "fields": _cells(instance, columns, allowed),
-                    "action": f"{root}/{quote(str(key), safe='')}/delete",
-                    "submit_label": f"Delete {entry.label} {key}",
-                    "cancel_url": f"{root}/{quote(str(key), safe='')}",
-                })
+                return _html(
+                    CONFIRM_TEMPLATE,
+                    {
+                        **shell,
+                        "title": f"Delete {entry.label} {key} — {self._title}",
+                        "heading": f"Delete {entry.label} {key}",
+                        "prompt": (
+                            f"This permanently deletes {entry.label} {key}. "
+                            "The audit trail keeps the record of the deletion."
+                        ),
+                        "fields": _cells(instance, columns, allowed),
+                        "action": f"{root}/{quote(str(key), safe='')}/delete",
+                        "submit_label": f"Delete {entry.label} {key}",
+                        "cancel_url": f"{root}/{quote(str(key), safe='')}",
+                    },
+                )
 
             @router.post(f"/{entry.slug}/{{pk}}/delete")
             async def delete(request: Any) -> Response:
@@ -789,7 +841,7 @@ async def _csrf_refusal(csrf: Any, request: Any) -> Response | None:
     if verdict:
         return None
     return HTMLResponse(
-        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         "<title>Request refused</title></head><body><main><h1>Request refused</h1>"
         "<p>This form submission could not be verified as coming from the admin. "
         "Reload the page and try again.</p></main></body></html>",
@@ -816,15 +868,22 @@ def _coerce_pk(entry: ModelAdmin, raw: str) -> Any:
 
 
 def _missing(entry: ModelAdmin, root: str, shell: dict[str, Any], title: str) -> Response:
-    return _html(DETAIL_TEMPLATE, {
-        **shell,
-        "title": f"{entry.label} not found — {title}",
-        "heading": f"{entry.label} not found",
-        "model_label": entry.label,
-        "fields": (),
-        "list_url": f"{root}/",
-        "can_edit": False, "edit_url": "", "can_delete": False, "delete_url": "",
-    }, status=404)
+    return _html(
+        DETAIL_TEMPLATE,
+        {
+            **shell,
+            "title": f"{entry.label} not found — {title}",
+            "heading": f"{entry.label} not found",
+            "model_label": entry.label,
+            "fields": (),
+            "list_url": f"{root}/",
+            "can_edit": False,
+            "edit_url": "",
+            "can_delete": False,
+            "delete_url": "",
+        },
+        status=404,
+    )
 
 
 def _query_of(request: Any) -> dict[str, str]:
@@ -844,10 +903,7 @@ def _page_params(request: Any, entry: ModelAdmin) -> PageParams:
     from ..pagination import _page_params as parse_page_params
 
     parsed = parse_page_params(request, default_size=entry.page_size)
-    sort = tuple(
-        token for token in parsed.sort
-        if token.lstrip("-") in entry.sortable
-    )
+    sort = tuple(token for token in parsed.sort if token.lstrip("-") in entry.sortable)
     return PageParams(page=parsed.page, size=parsed.size, sort=sort)
 
 
@@ -892,21 +948,23 @@ def _form_fields(
             raw = _form_value(getattr(instance, name, None)) if instance is not None else ""
         boolean = type_name in _BOOLEAN_TYPES
         multiline = type_name in _MULTILINE_TYPES
-        fields.append({
-            "name": name,
-            "id": f"{entry.slug}-{name}",
-            "hint_id": f"{entry.slug}-{name}-hint",
-            "label": _label(name),
-            "type": _INPUT_TYPES.get(type_name, "text"),
-            "value": raw,
-            "checked": bool(raw) if boolean else False,
-            "required": not column.nullable and not boolean,
-            "numeric": type_name in _NUMERIC_TYPES,
-            "boolean": boolean,
-            "multiline": multiline,
-            "plain": not boolean and not multiline,
-            "hint": f"{type_name}{'' if column.nullable else ', required'}",
-        })
+        fields.append(
+            {
+                "name": name,
+                "id": f"{entry.slug}-{name}",
+                "hint_id": f"{entry.slug}-{name}-hint",
+                "label": _label(name),
+                "type": _INPUT_TYPES.get(type_name, "text"),
+                "value": raw,
+                "checked": bool(raw) if boolean else False,
+                "required": not column.nullable and not boolean,
+                "numeric": type_name in _NUMERIC_TYPES,
+                "boolean": boolean,
+                "multiline": multiline,
+                "plain": not boolean and not multiline,
+                "hint": f"{type_name}{'' if column.nullable else ', required'}",
+            }
+        )
     return fields
 
 
@@ -924,9 +982,7 @@ class Submission:
     problems: list[dict[str, str]]
 
 
-async def _submitted(
-    request: Any, entry: ModelAdmin, allowed: frozenset[str]
-) -> Submission:
+async def _submitted(request: Any, entry: ModelAdmin, allowed: frozenset[str]) -> Submission:
     """Read the posted form, keeping only columns this request may write.
 
     An unwritable name is dropped rather than refused, exactly as generated
@@ -1001,8 +1057,7 @@ def _convert(entry: ModelAdmin, name: str, raw: str) -> Any:
             return _Decimal(raw)
         except ArithmeticError:
             raise ValidationError(
-                [{"loc": (name,), "msg": f"{raw!r} is not a decimal number",
-                  "type": "decimal"}]
+                [{"loc": (name,), "msg": f"{raw!r} is not a decimal number", "type": "decimal"}]
             ) from None
     return _convert_scalar(target, raw, (name,))
 

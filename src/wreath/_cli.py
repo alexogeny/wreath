@@ -618,8 +618,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--mutant-engine",
         choices=("pytest", "native"),
         default="native",
-        help="execute mutation candidates with pytest or the strict native engine; "
-        "default: native",
+        help="execute mutation candidates with pytest or the strict native engine; default: native",
     )
     test_parser.add_argument(
         "--mutant-path",
@@ -2623,9 +2622,7 @@ def execute_capabilities(namespace: argparse.Namespace) -> int:
         return 0 if matches else 1
     if not matches:
         print(
-            f"wreath: nothing here answers {term!r}. Try `wreath capabilities` for "
-            "the whole list, or read docs/capabilities.md, which closes with what "
-            "wreath deliberately does not include.",
+            f"wreath: nothing here answers {term!r}. Try `wreath capabilities` for the whole list.",
             file=sys.stderr,
         )
         return 1
@@ -2641,7 +2638,6 @@ def _capability_json(capability: Any, match: Any = None) -> dict[str, Any]:
         "name": capability.name,
         "capability": capability.sentence,
         "modules": list(capability.modules),
-        "guides": list(capability.guides),
         "replaces": list(capability.replaces),
     }
     if match is not None:
@@ -2651,7 +2647,6 @@ def _capability_json(capability: Any, match: Any = None) -> dict[str, Any]:
 
 
 def _render_capability(match: Any) -> str:
-    """One capability as a paragraph: what it is, where it is, where to read."""
     import textwrap
 
     capability = match.capability
@@ -2660,8 +2655,6 @@ def _render_capability(match: Any) -> str:
         textwrap.wrap(capability.sentence, width=76, initial_indent="  ", subsequent_indent="  ")
     )
     lines.append(f"  modules  {', '.join(capability.modules) or 'built in'}")
-    if capability.guides:
-        lines.append(f"  guides   {', '.join(capability.guides)}")
     return "\n".join(lines) + "\n"
 
 

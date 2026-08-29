@@ -5,7 +5,6 @@ from __future__ import annotations
 from ..ir import NEEDS_REVIEW, TRANSLATED, UNSUPPORTED
 
 PYDANTIC: dict[str, tuple[str, str, str, str]] = {
-    # -- pydantic models ------------------------------------------------------
     "pydantic.model": ("model", "pydantic_models", TRANSLATED, "class X(BaseModel) -> @dataclass"),
     # A dataclass has one slot per field -- the default -- so a `Field(...)`
     # translates when everything it carries is a default. Documentation and
@@ -50,7 +49,6 @@ PYDANTIC: dict[str, tuple[str, str, str, str]] = {
         TRANSLATED,
         "Field aliases and validation metadata map directly to Annotated[T, wreath.binding.Field(...)]; the ordinary dataclass default remains outside Annotated.",
     ),
-    # -- pydantic extras (not floor-checked) ----------------------------------
     "pydantic.config_forbid": (
         "config",
         "other",

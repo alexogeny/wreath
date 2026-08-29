@@ -87,8 +87,7 @@ CREATE_SQL = (
     "role text not null, token text not null unique, version int4 not null)"
 )
 ADMIN_ROW_SQL = (
-    "insert into bench_users values "
-    f"(1, 'admin', 'Administrator', 'admin', '{ADMIN_TOKEN}', 0)"
+    f"insert into bench_users values (1, 'admin', 'Administrator', 'admin', '{ADMIN_TOKEN}', 0)"
 )
 SEED_SQL = (
     "insert into bench_users "
@@ -101,17 +100,29 @@ MUTATION_COUNT_SQL = "select coalesce(sum(version), 0)::int8 from bench_users"
 def _start_container(image: str, host: str, port: int, name: str) -> None:
     subprocess.run(
         [
-            "podman", "run", "--rm", "--detach", "--name", name,
-            "--publish", f"{host}:{port}:5432",
-            "--env", "POSTGRES_USER=wreath",
-            "--env", "POSTGRES_PASSWORD=secret",
-            "--env", "POSTGRES_DB=wreath",
+            "podman",
+            "run",
+            "--rm",
+            "--detach",
+            "--name",
+            name,
+            "--publish",
+            f"{host}:{port}:5432",
+            "--env",
+            "POSTGRES_USER=wreath",
+            "--env",
+            "POSTGRES_PASSWORD=secret",
+            "--env",
+            "POSTGRES_DB=wreath",
             image,
             # Identical durability tuning for every run so write scenarios
             # compare framework/driver CPU instead of host-disk fsync latency.
-            "-c", "fsync=off",
-            "-c", "synchronous_commit=off",
-            "-c", "full_page_writes=off",
+            "-c",
+            "fsync=off",
+            "-c",
+            "synchronous_commit=off",
+            "-c",
+            "full_page_writes=off",
         ],
         check=True,
         capture_output=True,
@@ -146,9 +157,7 @@ async def _wait_for_postgres(dsn: str, ready_timeout: float) -> None:
             await asyncio.sleep(0.2)
         finally:
             await connection.close()
-    raise TimeoutError(
-        f"PostgreSQL did not become ready within {ready_timeout:.0f}s: {last_error}"
-    )
+    raise TimeoutError(f"PostgreSQL did not become ready within {ready_timeout:.0f}s: {last_error}")
 
 
 async def _seed_database(dsn: str, rows: int) -> str:
@@ -216,21 +225,14 @@ async def _verify_endpoint(host: str, port: int, framework: str) -> tuple[int, i
         if headers.get(name) != expected
     }
     if wrong_headers:
-        raise RuntimeError(
-            f"{framework}: missing or incorrect security headers: {wrong_headers!r}"
-        )
+        raise RuntimeError(f"{framework}: missing or incorrect security headers: {wrong_headers!r}")
 
     denied_status, _, denied_headers = await asyncio.to_thread(
         _http_probe, host, port, NON_ADMIN_TOKEN, REQUEST_BODY
     )
     if denied_status != 403:
-        raise RuntimeError(
-            f"{framework}: non-admin token was not rejected (HTTP {denied_status})"
-        )
-    if any(
-        denied_headers.get(name) != value
-        for name, value in EXPECTED_SECURITY_HEADERS.items()
-    ):
+        raise RuntimeError(f"{framework}: non-admin token was not rejected (HTTP {denied_status})")
+    if any(denied_headers.get(name) != value for name, value in EXPECTED_SECURITY_HEADERS.items()):
         raise RuntimeError(f"{framework}: denied response omitted security headers")
     return 1, denied_status  # one authorized mutation performed, deny status
 
@@ -253,25 +255,49 @@ def _server_command(
         else:
             native_loop = loop
         command = [
-            sys.executable, "-m", "benchmarks.wreath_server",
-            "--host", host, "--port", str(port),
-            "--loop", native_loop,
-            "--app", "benchmarks.lifecycle_apps:app",
+            sys.executable,
+            "-m",
+            "benchmarks.wreath_server",
+            "--host",
+            host,
+            "--port",
+            str(port),
+            "--loop",
+            native_loop,
+            "--app",
+            "benchmarks.lifecycle_apps:app",
         ]
         label = "wreath-metal" if framework == "wreath-metal" else f"wreath-native ({native_loop})"
         return command, label
     if framework == "sanic":
         command = [
-            sys.executable, "-m", "benchmarks.sanic_server",
-            "--host", host, "--port", str(port),
-            "--app", "benchmarks.lifecycle_apps",
+            sys.executable,
+            "-m",
+            "benchmarks.sanic_server",
+            "--host",
+            host,
+            "--port",
+            str(port),
+            "--app",
+            "benchmarks.lifecycle_apps",
         ]
         return command, "sanic-native"
     command = [
-        sys.executable, "-m", "uvicorn", "benchmarks.lifecycle_apps:app",
-        "--host", host, "--port", str(port),
-        "--loop", loop, "--http", http_impl,
-        "--lifespan", "off", "--no-access-log",
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "benchmarks.lifecycle_apps:app",
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--loop",
+        loop,
+        "--http",
+        http_impl,
+        "--lifespan",
+        "off",
+        "--no-access-log",
     ]
     return command, "uvicorn"
 
@@ -304,8 +330,7 @@ async def _run_framework(args: argparse.Namespace, framework: str) -> dict[str, 
 
         probe_mutations, denied_status = await _verify_endpoint(args.host, port, framework)
         print(
-            f"[verify] {framework}: mutation 200 OK, non-admin token rejected "
-            f"with {denied_status}",
+            f"[verify] {framework}: mutation 200 OK, non-admin token rejected with {denied_status}",
             flush=True,
         )
 

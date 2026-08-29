@@ -1,5 +1,3 @@
-"""The beneath-root open primitive shared by static files and templates (#4/#8)."""
-
 from __future__ import annotations
 
 import os
@@ -64,12 +62,9 @@ def test_refuses_parent_traversal(tmp_path) -> None:
         os.close(root)
 
 
-# --- what `wreath mutant` found nothing was watching --------------------------
-#
 # Five mutants survived this file and five more were UNREACHED. Two of the
 # refusals below had never fired in any test, and one of them guards a defect
 # that actually shipped -- which is the shape a regression test is for.
-#
 # The real-filesystem result is equivalent when the `lstat` check is removed:
 # `O_NOFOLLOW` on the open below it refuses the same symlink. The two direct
 # tests pin both defences independently. The module keeps the pre-open check
@@ -78,7 +73,6 @@ def test_refuses_parent_traversal(tmp_path) -> None:
 
 
 def test_a_known_symlink_is_refused_before_open(tmp_path, monkeypatch) -> None:
-    """The deterministic first defence does not hand a known symlink to open."""
     import wreath._fsguard as guard
 
     os.symlink(tmp_path / "target.txt", tmp_path / "link.txt")
@@ -96,13 +90,6 @@ def test_a_known_symlink_is_refused_before_open(tmp_path, monkeypatch) -> None:
 
 
 def test_refuses_an_embedded_nul_byte(tmp_path) -> None:
-    """A percent-encoded `%00` in a request path decodes to exactly this.
-
-    `os.open` and `os.lstat` reject an embedded NUL with `ValueError`, which is
-    neither exception this module documents, so it escaped every caller's
-    handler and became a 500. The refusal exists to put it back in the
-    vocabulary callers already catch -- and nothing asserted that until now.
-    """
     from wreath._fsguard import _components
 
     root = open_root(tmp_path)
@@ -117,12 +104,6 @@ def test_refuses_an_embedded_nul_byte(tmp_path) -> None:
 
 
 def test_empty_and_dot_components_are_normalised_away(tmp_path) -> None:
-    """`a//b`, `./a` and a trailing slash name the same file `a/b` does.
-
-    Dropped rather than refused: they are what an ordinary URL path produces,
-    and an empty component reaches `openat` as `""`, which is a
-    `FileNotFoundError` rather than the file the caller plainly meant.
-    """
     from wreath._fsguard import _components
 
     assert _components("sub//item.txt") == ["sub", "item.txt"]
@@ -146,13 +127,6 @@ def test_empty_and_dot_components_are_normalised_away(tmp_path) -> None:
 
 
 def test_a_platform_without_dir_fd_fails_closed(tmp_path, monkeypatch) -> None:
-    """The module's central safety claim, on the one platform that cannot hold it.
-
-    Windows has no `openat`, so the walk cannot be made race-safe; the module
-    documents that it refuses rather than falling back to name-based access.
-    Nothing had ever executed that refusal, because every machine the suite runs
-    on has `dir_fd`.
-    """
     monkeypatch.setattr("wreath._fsguard._HAVE_DIR_FD", False)
     with pytest.raises(ContainmentError, match="lacks openat"):
         open_root(tmp_path)
@@ -163,18 +137,6 @@ def test_a_platform_without_dir_fd_fails_closed(tmp_path, monkeypatch) -> None:
 
 
 def test_o_nofollow_catches_a_symlink_the_lstat_check_missed(tmp_path, monkeypatch) -> None:
-    """The second defence, exercised on its own.
-
-    `_open_at` refuses a symlink twice: an `lstat` before the open, and
-    `O_NOFOLLOW` on the open itself for the component that was swapped in
-    between. The first catches everything in practice, so the second had never
-    run -- `wreath mutant` reported the `ELOOP` branch UNREACHED while the
-    `lstat` refusal *survived* removal, which is the same fact from both ends.
-
-    Blinding `S_ISLNK` is how the race is reproduced deterministically: it puts
-    the walk in exactly the state a component swapped after the `lstat` leaves
-    it.
-    """
     secret = tmp_path.parent / "secret.txt"
     _write(secret, b"SECRET")
     os.symlink(secret, tmp_path / "link.txt")
@@ -201,14 +163,6 @@ def test_o_nofollow_catches_a_symlink_the_lstat_check_missed(tmp_path, monkeypat
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
 def test_an_error_that_is_not_a_symlink_stays_an_oserror(tmp_path) -> None:
-    """Only ELOOP/EMLINK/ENOTDIR mean "symlink"; everything else propagates.
-
-    The distinction matters to callers: `staticfiles` and the template loader
-    catch `ContainmentError` as "refused" and `OSError` as "could not read", and
-    collapsing the two would report an unreadable file as an escape attempt.
-    Nothing reached the `except OSError` branch with a non-symlink errno,
-    because a *missing* file fails at the `lstat` above it and never gets there.
-    """
     blocked = tmp_path / "blocked.txt"
     _write(blocked, b"hello")
     blocked.chmod(0o000)

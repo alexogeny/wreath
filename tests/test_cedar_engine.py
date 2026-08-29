@@ -1,8 +1,3 @@
-"""The built-in Cedar engine: parsing, evaluation semantics, and the app path.
-
-Every semantic case runs through ``CedarPolicies.is_authorized``.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -52,9 +47,6 @@ def decide(source: str, *, principal=ALICE, action=READ, resource=DOC, context=N
     )
 
 
-# -- parsing ------------------------------------------------------------------
-
-
 def test_a_policy_set_parses_once_and_reports_its_size() -> None:
     policies = CedarPolicies("permit(principal, action, resource);")
     assert len(policies) == 1
@@ -69,17 +61,17 @@ def test_entity_reference_requires_both_type_and_id(reference: str) -> None:
 @pytest.mark.parametrize(
     ("source", "message"),
     [
-        ('allow(principal, action, resource);', "expected 'permit' or 'forbid'"),
-        ('permit(resource, action, resource);', "expected 'principal'"),
-        ('permit(principal action, resource);', "expected ','"),
-        ('permit(principal, action, resource)', "found 'eof'"),
-        ('permit(principal, action, resource) when { context.x.nope() };', "unknown method .nope"),
+        ("allow(principal, action, resource);", "expected 'permit' or 'forbid'"),
+        ("permit(resource, action, resource);", "expected 'principal'"),
+        ("permit(principal action, resource);", "expected ','"),
+        ("permit(principal, action, resource)", "found 'eof'"),
+        ("permit(principal, action, resource) when { context.x.nope() };", "unknown method .nope"),
         ('permit(principal, action, resource) when { ip("127.0.0.1") };', "extension function ip"),
         (
             'permit(principal, action, resource) when { datetime("x") };',
             "extension function datetime",
         ),
-        ('permit(principal, action, resource) when { mystery };', "unknown identifier 'mystery'"),
+        ("permit(principal, action, resource) when { mystery };", "unknown identifier 'mystery'"),
     ],
 )
 def test_parser_refusals_name_the_failed_grammar_rule(source: str, message: str) -> None:
@@ -124,7 +116,7 @@ def test_not_equal_is_not_equal_rather_than_equal() -> None:
 
 def test_empty_sets_and_each_record_key_form_parse() -> None:
     source = (
-        'permit(principal, action, resource) when { [] == [] '
+        "permit(principal, action, resource) when { [] == [] "
         '&& {plain: 1, "quoted-key": 2, true: 3} '
         '== {plain: 1, "quoted-key": 2, true: 3} };'
     )
@@ -155,9 +147,7 @@ def test_escaped_star_is_unescaped_in_has_and_record_keys() -> None:
     entity = CedarEntity(DOC, attrs={"*": True})
     assert decide(has_star, entities=(entity,)).allowed
 
-    records = (
-        'permit(principal, action, resource) when { {"\\*": 1} == {"*": 1} };'
-    )
+    records = 'permit(principal, action, resource) when { {"\\*": 1} == {"*": 1} };'
     assert decide(records).allowed
 
 
@@ -171,8 +161,7 @@ def test_identifier_attribute_and_record_keys_avoid_string_unescaping(
 
     monkeypatch.setattr(module, "_unescape_star", unexpected)
     source = (
-        "permit(principal, action, resource) "
-        "when { resource has owner && {plain: 1}.plain == 1 };"
+        "permit(principal, action, resource) when { resource has owner && {plain: 1}.plain == 1 };"
     )
     entity = CedarEntity(DOC, attrs={"owner": ALICE})
 
@@ -349,8 +338,7 @@ def test_schema_rejects_a_misspelled_context_attribute_at_construction() -> None
 def test_schema_rejects_a_misspelled_guarded_attribute_at_construction() -> None:
     with pytest.raises(CedarParseError, match=r"context\.statsu"):
         CedarPolicies(
-            'permit(principal, action == Action::"read", resource) '
-            "when { context has statsu };",
+            'permit(principal, action == Action::"read", resource) when { context has statsu };',
             schema=_SCHEMA,
         )
 
@@ -445,17 +433,15 @@ def test_schema_context_validation_distinguishes_exact_from_group_scope() -> Non
     [
         ('context.flags.contains("x")', frozenset({"x"})),
         ('context.flags.containsAny(["x", "y"])', frozenset({"x", "y"})),
-        ('context.flags.isEmpty()', None),
-        ('context.flags == context.flags', None),
+        ("context.flags.isEmpty()", None),
+        ("context.flags == context.flags", None),
         ('context.regions.contains("x")', frozenset()),
     ],
 )
 def test_referenced_flag_inventory_recognizes_only_literal_naming_methods(
     expression: str, expected: frozenset[str] | None
 ) -> None:
-    engine = CedarPolicies(
-        f"permit(principal, action, resource) when {{ {expression} }};"
-    )
+    engine = CedarPolicies(f"permit(principal, action, resource) when {{ {expression} }};")
 
     assert engine.referenced_flags() == expected
 
@@ -480,9 +466,6 @@ def test_schema_requires_an_attribute_on_every_action_a_group_policy_can_match()
             'when { context.seat == "suspended" };',
             schema=schema,
         )
-
-
-# -- scopes and the authorization algorithm -----------------------------------
 
 
 def test_default_deny_when_nothing_matches() -> None:
@@ -592,12 +575,17 @@ async def test_authorizer_batch_empty_and_anonymous_boundaries() -> None:
         raise AssertionError("an empty batch resolved its principal")
 
     authorizer = CedarAuthorizer(engine=Engine(), principal=unexpected_principal)
-    assert await authorizer._authorize_resources(
-        _request_for(Identity("alice")), "read", (), stop_on_denied=False
-    ) == ()
+    assert (
+        await authorizer._authorize_resources(
+            _request_for(Identity("alice")), "read", (), stop_on_denied=False
+        )
+        == ()
+    )
 
     denied = await authorizer._authorize_resources(
-        _request_for(None), "read", (DOC, EntityUid("Document", "43")),
+        _request_for(None),
+        "read",
+        (DOC, EntityUid("Document", "43")),
         stop_on_denied=False,
     )
     assert tuple((item.allowed, item.reason) for item in denied) == (
@@ -615,9 +603,7 @@ async def test_authorizer_batch_applies_delegation_scope_per_resource() -> None:
         def is_authorized(self, **arguments: object) -> bool:
             return True
 
-    identity = Identity(
-        "alice", narrowing=Narrowing(actor="agent", scope=frozenset({"inspect"}))
-    )
+    identity = Identity("alice", narrowing=Narrowing(actor="agent", scope=frozenset({"inspect"})))
     decisions = await CedarAuthorizer(engine=Engine())._authorize_resources(
         _request_for(identity), "read", (DOC,), stop_on_denied=False
     )
@@ -720,6 +706,49 @@ def test_route_denial_layers_request_entities_and_accepts_absent_context() -> No
     assert allowed is None
 
 
+def test_prepared_route_denial_reads_request_owned_sets() -> None:
+    engine = CedarPolicies(
+        'permit(principal, action, resource) when { context.flags.contains("dense") '
+        '&& context.flags == ["dense", "dense"] };'
+    )
+
+    denial = engine._route_denial_prepared(
+        principal=("User", "alice"),
+        action=("Action", "read"),
+        resource=("Document", "42"),
+        context={"flags": frozenset({"dense"})},
+    )
+
+    assert denial is None
+
+
+def test_prepared_route_denial_converts_unprepared_context_values() -> None:
+    engine = CedarPolicies(
+        'permit(principal, action, resource) when { context.flags.contains("dense") };'
+    )
+
+    denial = engine._route_denial_prepared(
+        principal=("User", "alice"),
+        action=("Action", "read"),
+        resource=("Document", "42"),
+        context={"flags": ("dense",)},
+    )
+
+    assert denial is None
+
+
+def test_prepared_route_denial_preserves_conversion_refusals() -> None:
+    engine = CedarPolicies("permit(principal, action, resource);")
+
+    with pytest.raises(TypeError, match="has no Cedar equivalent"):
+        engine._route_denial_prepared(
+            principal=("User", "alice"),
+            action=("Action", "read"),
+            resource=("Document", "42"),
+            context={"ratio": 0.5},
+        )
+
+
 def test_materialized_batch_layers_request_entities() -> None:
     engine = CedarPolicies(
         "permit(principal, action, resource) when { resource.owner == principal };"
@@ -782,9 +811,7 @@ def test_native_batch_receives_layered_entities_and_empty_context(monkeypatch) -
 
 
 @pytest.mark.parametrize("operation", ["route", "batch", "native"])
-def test_absent_request_entities_skip_entity_conversion(
-    operation: str, monkeypatch
-) -> None:
+def test_absent_request_entities_skip_entity_conversion(operation: str, monkeypatch) -> None:
     import wreath._auth.cedar_engine as module
 
     engine = CedarPolicies("permit(principal, action, resource);")
@@ -794,9 +821,12 @@ def test_absent_request_entities_skip_entity_conversion(
 
     monkeypatch.setattr(module, "_as_entities", unexpected)
     if operation == "route":
-        assert engine._route_denial(
-            principal=ALICE, action=READ, resource=DOC, context=None, entities=None
-        ) is None
+        assert (
+            engine._route_denial(
+                principal=ALICE, action=READ, resource=DOC, context=None, entities=None
+            )
+            is None
+        )
     elif operation == "batch":
         assert engine._is_authorized_many(
             principal=ALICE,
@@ -831,9 +861,7 @@ async def test_route_fast_path_refuses_anonymous_and_delegated_callers() -> None
     requirement = PolicyRequirement("read", DOC)
 
     assert await authorizer._authorize_route(_request_for(None), requirement) == "anonymous"
-    delegated = Identity(
-        "alice", narrowing=Narrowing(actor="agent", scope=frozenset({"inspect"}))
-    )
+    delegated = Identity("alice", narrowing=Narrowing(actor="agent", scope=frozenset({"inspect"})))
     assert (
         await authorizer._authorize_route(_request_for(delegated), requirement)
         == "delegation scope does not cover this action"
@@ -904,9 +932,7 @@ async def test_route_fallback_preserves_a_reason_or_supplies_one(
 
 
 def test_route_requirement_compilation_covers_each_resource_shape() -> None:
-    native = CedarAuthorizer(
-        engine=CedarPolicies("permit(principal, action, resource);")
-    )
+    native = CedarAuthorizer(engine=CedarPolicies("permit(principal, action, resource);"))
     typed = PolicyRequirement("read", 'Document::"42"')
     identifier = PolicyRequirement("read", "document_id")
     entity = PolicyRequirement("read", DOC)
@@ -973,9 +999,6 @@ def test_principal_is_type_with_and_without_ancestor() -> None:
 def test_annotation_names_the_policy_in_diagnostics() -> None:
     decision = decide('@id("docs-read") permit(principal, action, resource);')
     assert decision.diagnostics == ("permit docs-read matched",)
-
-
-# -- conditions and the expression language -----------------------------------
 
 
 def test_when_reads_context_and_unless_vetoes() -> None:
@@ -1045,9 +1068,6 @@ def test_short_circuit_hides_errors_on_the_untaken_side() -> None:
     assert not decide("permit(principal, action, resource) when { false && (1 < true) };").allowed
 
 
-# -- error isolation ----------------------------------------------------------
-
-
 def test_an_erroring_policy_is_skipped_and_reported_not_satisfied() -> None:
     decision = decide(
         "permit(principal, action, resource) when { context.missing == 1 };"
@@ -1088,9 +1108,6 @@ def test_type_and_overflow_errors_never_satisfy(expression: str) -> None:
     assert any("skipped" in line for line in decision.diagnostics)
 
 
-# -- inputs and boundary conversion -------------------------------------------
-
-
 def test_uids_arrive_as_objects_or_strings() -> None:
     policies = CedarPolicies('permit(principal == User::"alice", action, resource);')
     for principal in (ALICE, 'User::"alice"', "User::alice"):
@@ -1120,41 +1137,21 @@ def test_request_entities_merge_over_static_entities() -> None:
     assert not ungranted.allowed
 
 
-# -- identifying the policy set -----------------------------------------------
-
-
 def test_the_policy_source_is_public() -> None:
-    """Callers that cache against a policy set need to identify it by content.
-
-    The permission manifest's `ETag` is the live one: a tag derived from the
-    engine object rather than its text differs per worker and per restart, so
-    `If-None-Match` never matches and the revalidation the manifest exists for
-    succeeds exactly never.
-    """
     source = 'permit(principal == User::"alice", action, resource);'
     assert CedarPolicies(source).source == source
 
 
 def test_two_engines_parsed_from_one_text_report_the_same_source() -> None:
-    """The property every worker in a deployment depends on."""
     source = "permit(principal, action, resource);"
     assert CedarPolicies(source).source == CedarPolicies(source).source
 
 
 def test_the_source_is_read_only_and_does_not_add_a_dict() -> None:
-    """The parse happens once; a settable source would drift from `_policies`.
-
-    The slots layout matters beyond tidiness -- `permissions.py` weak-references
-    engines to cache a tag, and an accidental `__dict__` would change which
-    branch of that cache an engine lands in.
-    """
     policies = CedarPolicies("permit(principal, action, resource);")
     with pytest.raises(AttributeError):
         object.__setattr__(policies, "source", "permit(principal, action, resource);")
     assert not hasattr(policies, "__dict__")
-
-
-# -- the whole app path -------------------------------------------------------
 
 
 async def invoke(app: Wreath, token: str, path: str = "/documents/42") -> list[dict[str, Any]]:
@@ -1485,9 +1482,6 @@ async def test_one_application_resource_provider_can_supply_route_hierarchy_and_
         return "allowed"
 
     assert (await invoke(app, "account"))[0]["status"] == 200
-
-
-# -- evaluator semantics over a spread of policy shapes ----------------------
 
 
 #: One policy set per Cedar feature, with the decision Cedar's semantics

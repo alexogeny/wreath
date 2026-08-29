@@ -105,7 +105,6 @@ class BackgroundTask:
         # `BACKGROUND_THREADS`. A callable classified as synchronous may still
         # return an awaitable (decorated functions, unusual callable objects);
         # await it without having run the potentially blocking body on the loop.
-        #
         # The context is copied exactly as `asyncio.to_thread` does it, so a
         # task still sees the ContextVars its request set.
         context = contextvars.copy_context()

@@ -94,8 +94,12 @@ class RecordingPolicyError(ValueError):
 
 
 def _validate_dispositions(
-    allow: frozenset[str], hashed: frozenset[str], masked: frozenset[str],
-    *, kind: str, forbidden: frozenset[str],
+    allow: frozenset[str],
+    hashed: frozenset[str],
+    masked: frozenset[str],
+    *,
+    kind: str,
+    forbidden: frozenset[str],
 ) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
     """Lower-case and validate a name -> single-disposition mapping (headers or
     query parameters): forbidden names are refused, and a name may sit in at most
@@ -177,15 +181,21 @@ class RedactionPolicy:
 
     def __post_init__(self) -> None:
         allow, hashed, masked = _validate_dispositions(
-            self.header_allowlist, self.header_hash, self.header_mask,
-            kind="header", forbidden=NEVER_CAPTURE_HEADERS,
+            self.header_allowlist,
+            self.header_hash,
+            self.header_mask,
+            kind="header",
+            forbidden=NEVER_CAPTURE_HEADERS,
         )
         object.__setattr__(self, "header_allowlist", allow)
         object.__setattr__(self, "header_hash", hashed)
         object.__setattr__(self, "header_mask", masked)
         q_allow, q_hash, q_mask = _validate_dispositions(
-            self.query_allowlist, self.query_hash, self.query_mask,
-            kind="query parameter", forbidden=frozenset(),
+            self.query_allowlist,
+            self.query_hash,
+            self.query_mask,
+            kind="query parameter",
+            forbidden=frozenset(),
         )
         object.__setattr__(self, "query_allowlist", q_allow)
         object.__setattr__(self, "query_hash", q_hash)
@@ -343,8 +353,7 @@ class RecordingPolicy:
             _BODY_ORDER[arm.dependency.value] <= _BODY_ORDER[ceiling.dependency.value]
         )
         return (
-            within_bytes and within_headers and within_query
-            and within_body and within_dependency
+            within_bytes and within_headers and within_query and within_body and within_dependency
         )
 
 
@@ -357,8 +366,6 @@ _BODY_ORDER = {
 }
 
 
-# --- compiled capture plan --------------------------------------------------
-#
 # A RedactionPolicy is the human-facing rule set; the request-path capture seam
 # needs a fast, immutable lookup from a field's identity to a native capture
 # decision (deny, or a (disposition, descriptor_id) pair). Compilation happens
@@ -455,7 +462,9 @@ def compile_redaction(policy: RedactionPolicy) -> CompiledRedaction:
         policy.header_allowlist, policy.header_hash, policy.header_mask, kind="header"
     )
     query_rules, query_names = _compile_sets(
-        policy.query_allowlist, policy.query_hash, policy.query_mask,
+        policy.query_allowlist,
+        policy.query_hash,
+        policy.query_mask,
         kind="query parameter",
     )
     body = _BODY_DISPOSITION[policy.body.value]
@@ -472,7 +481,11 @@ def compile_redaction(policy: RedactionPolicy) -> CompiledRedaction:
 
 
 def _compile_sets(
-    allow: frozenset[str], hashed: frozenset[str], masked: frozenset[str], *, kind: str,
+    allow: frozenset[str],
+    hashed: frozenset[str],
+    masked: frozenset[str],
+    *,
+    kind: str,
 ) -> tuple[dict[str, HeaderRule], tuple[str, ...]]:
     """Intern a name -> disposition mapping to deterministic descriptor ids
     (sorted union, 1-based) so the same policy always compiles to the same ids."""
@@ -495,8 +508,6 @@ def _compile_sets(
     return rules, tuple(names)
 
 
-# --- runtime arm registry ---------------------------------------------------
-#
 # A runtime capture arm is bounded and cannot broaden the startup ceiling. The
 # Inspector installs arms into this registry (behind a capability token); the
 # request-path capture seam consults the active arms and reports a match, which
@@ -563,15 +574,11 @@ class ArmRegistry:
         if capture.expiry_seconds <= 0:
             raise RecordingPolicyError("a runtime capture arm must have expiry_seconds > 0")
         if not self._ceiling.permits(capture):
-            raise RecordingPolicyError(
-                "capture arm exceeds the startup redaction/memory ceiling"
-            )
+            raise RecordingPolicyError("capture arm exceeds the startup redaction/memory ceiling")
         now = self._clock()
         self._prune(now)
         if len(self._arms) >= self._max_arms:
-            raise RecordingPolicyError(
-                f"too many concurrent capture arms (max {self._max_arms})"
-            )
+            raise RecordingPolicyError(f"too many concurrent capture arms (max {self._max_arms})")
         arm_id = self._next_id
         self._next_id += 1
         state = _ArmState(
@@ -621,8 +628,6 @@ class ArmRegistry:
         )
 
 
-# --- durable work: arming a job attempt --------------------------------------
-#
 # The request vocabulary above governs "which requests may be captured". This
 # governs "which job attempts may be captured", with the same posture: an
 # `AttemptPolicy` with no triggers captures nothing, and the tempting exception
@@ -880,7 +885,7 @@ def _bind_arguments(
     try:
         signature = inspect.signature(target)
         bound = signature.bind(*leading, *args, **kwargs)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         # A builtin with no signature, a C callable, or a row enqueued by a
         # release whose handler took a different arity -- the dead-letter path
         # already has the second one. Deny, never guess.
@@ -1037,8 +1042,13 @@ class AttemptRecorder:
     """
 
     __slots__ = (
-        "_policy", "_directory", "_image", "scope",
-        "written", "refused_oversize", "errors",
+        "_policy",
+        "_directory",
+        "_image",
+        "scope",
+        "written",
+        "refused_oversize",
+        "errors",
     )
 
     _directory: str
@@ -1059,9 +1069,7 @@ class AttemptRecorder:
     ) -> None:
         # Without a scope this watches only the runner's own database; a runner
         # has no application reference to infer the other resources from.
-        _init_recorder(
-            self, policy, directory=directory, scope=scope, image=image
-        )
+        _init_recorder(self, policy, directory=directory, scope=scope, image=image)
 
     @property
     def policy(self) -> AttemptPolicy:
@@ -1104,15 +1112,12 @@ class AttemptRecorder:
         return _write_recording(self, record, trace, path)
 
 
-# --- durable work: arming a workflow step ------------------------------------
-#
 # The third arming vocabulary, and the reason it is a third rather than a reuse
 # of `AttemptPolicy`: a step is not an attempt. It has no fence and no retry
 # budget, so `final_failure` has no meaning; it has a *position* and a
 # predecessor, so "the step that stopped the saga" is a question worth asking;
 # and its compensations either ran or did not, which is the fact a mid-saga
 # failure cannot be reconstructed without.
-#
 # The posture is the attempt policy's, unchanged: no triggers, no recordings,
 # and no "surely a failure is always worth keeping" exception.
 
@@ -1240,8 +1245,15 @@ class WorkflowStepRecorder:
     a place to find out that it contained a separator.
     """
 
-    __slots__ = ("_directory", "_image", "_policy", "errors", "refused_oversize",
-                 "scope", "written")
+    __slots__ = (
+        "_directory",
+        "_image",
+        "_policy",
+        "errors",
+        "refused_oversize",
+        "scope",
+        "written",
+    )
 
     _directory: str
     _image: object | None
@@ -1261,9 +1273,7 @@ class WorkflowStepRecorder:
     ) -> None:
         # A workflow has no database of its own, so an unscoped recorder watches
         # no boundaries rather than guessing which application owns the step.
-        _init_recorder(
-            self, policy, directory=directory, scope=scope, image=image
-        )
+        _init_recorder(self, policy, directory=directory, scope=scope, image=image)
 
     @property
     def policy(self) -> WorkflowStepPolicy:
@@ -1284,9 +1294,7 @@ class WorkflowStepRecorder:
             instance=instance,
         )
 
-    def write(
-        self, record: WorkflowStepRecord, trace: BoundaryTrace | None = None
-    ) -> str | None:
+    def write(self, record: WorkflowStepRecord, trace: BoundaryTrace | None = None) -> str | None:
         """Write one step recording, or refuse it and say why in a counter.
 
         Never raises, for the reason `AttemptRecorder.write` does not: a recorder
@@ -1319,8 +1327,7 @@ def _slug(value: str) -> str:
     mapping injective in practice.
     """
     safe = "".join(
-        character if character.isascii() and (character.isalnum() or character in "-_")
-        else "_"
+        character if character.isascii() and (character.isalnum() or character in "-_") else "_"
         for character in value
     )
     if safe == value and len(safe) <= _SLUG_LIMIT:

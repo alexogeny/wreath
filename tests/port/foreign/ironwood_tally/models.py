@@ -14,8 +14,7 @@ so a fix that reads the manager tree-wide still refuses everything here.
   declares its tables, so this needs a model before the two sides can relate.
 * `post_save` — an ORM signal. `wreath.orm` emits no row events a handler can
   subscribe to at this layer.
-* `DurationField` / `TimeField` — `docs/reference/port-gaps.md` records the
-  missing `PgType` for `Time` and `Interval`; `wreath.orm.types` has neither.
+* `DurationField` / `TimeField` — `wreath.orm.types` has no `PgType` for either.
 """
 
 from django.db import models

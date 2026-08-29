@@ -1,19 +1,3 @@
-"""Stateful and compositional attacks against an Internet-facing Wreath stack.
-
-``test_attack_surface_matrix`` concentrates on hostile bytes at one boundary.
-This companion concentrates on what changes across requests: principals share
-workers, work is cancelled, retries race, connections resolve more than one
-address, tenant names reach SQL setup, and operator tooling writes artifacts.
-
-The deep protocol/environment proofs remain in their owned suites: real proxy
-and HTTP parser differentials in ``test_server_fuzz``/``test_proxy_middleware``;
-disconnect-to-PostgreSQL cancellation in ``test_disconnect_cancels_query``;
-TOTP/WebAuthn races in ``test_users_totp``/``test_users_webauthn``; HTTP/MCP
-authorization equivalence in ``test_mcp_expose_routes``/``test_red_team_mcp``;
-capture redaction in ``test_flight_capture``/``test_mcp_recording``; and real
-QUIC requests in ``tests/http3/test_adversarial.py``.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -242,10 +226,7 @@ async def test_challenge_consumption_has_exactly_one_winner(racers: int) -> None
         ttl=60,
     )
     outcomes = await asyncio.gather(
-        *(
-            store.consume("same-handle", user_id="victim", kind="webauthn")
-            for _ in range(racers)
-        )
+        *(store.consume("same-handle", user_id="victim", kind="webauthn") for _ in range(racers))
     )
     assert outcomes.count({"challenge": "one-use"}) == 1
     assert outcomes.count(None) == racers - 1
@@ -367,9 +348,7 @@ def test_tenant_context_refuses_non_string_identifiers(value: Any) -> None:
     ),
 )
 @pytest.mark.parametrize("value", (0, -1))
-def test_every_request_resource_limit_refuses_non_positive_values(
-    field: str, value: int
-) -> None:
+def test_every_request_resource_limit_refuses_non_positive_values(field: str, value: int) -> None:
     with pytest.raises(ValueError, match=field):
         RequestLimits(**{field: value})
 
@@ -531,8 +510,6 @@ def test_malformed_forwarded_chain_cannot_replace_the_socket_peer(value: bytes) 
         (b"10.0.0.1, 10.0.0.2", "10.0.0.1"),
     ),
 )
-def test_valid_forwarded_chain_still_resolves_the_client(
-    value: bytes, expected: str
-) -> None:
+def test_valid_forwarded_chain_still_resolves_the_client(value: bytes, expected: str) -> None:
     trusted = TrustedNetworks(("10.0.0.0/8",))
     assert trusted.forwarded_client(value) == expected

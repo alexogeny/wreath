@@ -1,12 +1,3 @@
-"""`completion/complete`, answered from declarations that already existed.
-
-There is no completion registry and no `@mcp.completer`, on purpose. A prompt
-argument annotated `Literal[...]` or with an `Enum` already renders as an `enum`
-in the schema the binding layer derives, and that list is the answer. These
-tests exist to pin that: the values a client is offered are the values the
-annotation declared, so there is nothing to keep in step and nothing to forget.
-"""
-
 from __future__ import annotations
 
 import enum
@@ -103,7 +94,6 @@ async def test_the_values_are_the_ones_the_annotation_declared() -> None:
 
 
 async def test_an_enum_argument_completes_too() -> None:
-    """An `Enum` and a `Literal` arrive at the same rendered shape, so one path serves both."""
     app, _ = build()
     async with TestClient(app) as client:
         session, _ = await initialize(client)
@@ -144,7 +134,6 @@ async def test_what_has_been_typed_narrows_it() -> None:
 
 
 async def test_an_argument_that_declared_nothing_completes_to_nothing() -> None:
-    """A free-text argument has no candidates, and saying so is not an error."""
     app, _ = build()
     async with TestClient(app) as client:
         session, _ = await initialize(client)
@@ -219,7 +208,6 @@ async def test_the_capability_is_advertised_with_the_prompts() -> None:
 
 
 async def test_a_declared_enum_is_still_a_string_argument() -> None:
-    """It has to be: MCP carries prompt arguments as a map of strings."""
     _, mcp = build()
     (prompt,) = mcp.prompts
     assert [argument["name"] for argument in prompt.arguments] == [

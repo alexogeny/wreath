@@ -50,18 +50,14 @@ async def test_gzip_request_is_transparently_decoded_once() -> None:
 
 @pytest.mark.asyncio
 async def test_request_decompression_refuses_unsupported_and_bad_members() -> None:
-    app = Wreath(
-        http_policy=HttpPolicy(request_decompression=RequestDecompressionPolicy())
-    )
+    app = Wreath(http_policy=HttpPolicy(request_decompression=RequestDecompressionPolicy()))
 
     @app.post("/")
     async def receive(request):
         return await request.body()
 
     async with TestClient(app) as client:
-        unsupported = await client.post(
-            "/", content=b"payload", headers={"content-encoding": "br"}
-        )
+        unsupported = await client.post("/", content=b"payload", headers={"content-encoding": "br"})
         stacked = await client.post(
             "/", content=b"payload", headers={"content-encoding": "gzip, br"}
         )
@@ -88,9 +84,7 @@ async def test_request_decompression_bounds_expansion() -> None:
 
     encoded = gzip_compress(b"0" * 8192)
     async with TestClient(app) as client:
-        response = await client.post(
-            "/", content=encoded, headers={"content-encoding": "gzip"}
-        )
+        response = await client.post("/", content=encoded, headers={"content-encoding": "gzip"})
 
     assert response.status == 413
 

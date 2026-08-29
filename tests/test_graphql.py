@@ -1,5 +1,3 @@
-"""GraphQL: parsing limits, schema derivation, and execution over the ORM."""
-
 from __future__ import annotations
 
 import sys
@@ -36,8 +34,6 @@ from wreath.orm.session import Session
 from wreath.request import Request
 from wreath.testing import TestClient
 
-# --- parser: syntax ----------------------------------------------------------
-
 
 def test_parses_fields_aliases_arguments_and_variables() -> None:
     document = parse("""
@@ -64,14 +60,14 @@ def test_parses_shorthand_documents() -> None:
 @pytest.mark.parametrize(
     "source",
     [
-        "",                        # empty
-        "{",                       # unterminated
-        "{ }",                     # empty selection set
-        "query { user(id: ) }",    # missing value
+        "",  # empty
+        "{",  # unterminated
+        "{ }",  # empty selection set
+        "query { user(id: ) }",  # missing value
         'query { a(x: "unterminated) }',
-        "subscription { x }",      # unsupported operation
-        "fragment F { id }",       # missing `on`
-        "fragment F on T { id } fragment F on T { id }",   # duplicate
+        "subscription { x }",  # unsupported operation
+        "fragment F { id }",  # missing `on`
+        "fragment F on T { id } fragment F on T { id }",  # duplicate
     ],
 )
 def test_malformed_documents_are_refused(source: str) -> None:
@@ -101,9 +97,6 @@ def test_directives_are_accepted_and_ignored() -> None:
     assert document.operation().selection_set.selections[0].name == "users"
 
 
-# --- parser: safety limits ---------------------------------------------------
-
-
 def test_depth_is_bounded() -> None:
     source = "{" + "a{" * 30 + "b" + "}" * 30 + "}"
     with pytest.raises(GraphQLSyntaxError) as caught:
@@ -119,7 +112,6 @@ def test_complexity_is_bounded() -> None:
 
 
 def test_alias_amplification_is_bounded() -> None:
-    """A tiny document that asks for the same expensive field 100 times."""
     source = "{ " + " ".join(f"a{i}: user" for i in range(100)) + " }"
     with pytest.raises(GraphQLSyntaxError) as caught:
         parse(source, Limits(max_aliases=20))
@@ -127,7 +119,6 @@ def test_alias_amplification_is_bounded() -> None:
 
 
 def test_same_spelling_alias_still_counts_as_alias_syntax() -> None:
-    """`field: field` is still an alias even though its response key matches."""
     with pytest.raises(GraphQLSyntaxError) as caught:
         parse("{ field: field field: field }", Limits(max_aliases=1))
     assert caught.value.code == "aliases"
@@ -135,15 +126,14 @@ def test_same_spelling_alias_still_counts_as_alias_syntax() -> None:
 
 def test_the_step_budget_is_a_backstop() -> None:
     with pytest.raises(GraphQLSyntaxError) as caught:
-        parse("{ " + " ".join(f"f{i}" for i in range(5000)) + " }",
-              Limits(max_complexity=100_000, max_steps=500,
-                     max_document_bytes=1_000_000))
+        parse(
+            "{ " + " ".join(f"f{i}" for i in range(5000)) + " }",
+            Limits(max_complexity=100_000, max_steps=500, max_document_bytes=1_000_000),
+        )
     assert caught.value.code == "steps"
 
 
 def test_fragment_cycles_are_refused() -> None:
-    """No selection-set depth limit bounds this: the cycle is in the fragment
-    graph, and the document itself is three lines long."""
     with pytest.raises(GraphQLSyntaxError) as caught:
         parse("""
             { user { ...A } }
@@ -171,9 +161,6 @@ def test_measured_depth_and_complexity_are_reported() -> None:
     assert document.complexity == 3
 
 
-# --- schema ------------------------------------------------------------------
-
-
 @pytest.fixture
 def database() -> FakeDatabase:
     return FakeDatabase()
@@ -188,26 +175,23 @@ def test_the_schema_is_derived_from_the_orm(registry: Registry) -> None:
     api = GraphQL(registry, models=[User, Post])
     sdl = api.sdl()
     assert "type User {" in sdl
-    assert "email: String!" in sdl          # NOT NULL column -> non-null
+    assert "email: String!" in sdl  # NOT NULL column -> non-null
     # Nullable column -> nullable, and a timestamp is a real scalar rather than
     # falling through to String. The absent `!` is what this line is checking.
     assert "created_at: DateTime\n" in sdl
-    assert "scalar DateTime" in sdl         # ... and the SDL declares it
-    assert "posts: [Post!]!" in sdl         # to-many relationship
-    assert "author: User" in sdl            # to-one relationship
+    assert "scalar DateTime" in sdl  # ... and the SDL declares it
+    assert "posts: [Post!]!" in sdl  # to-many relationship
+    assert "author: User" in sdl  # to-one relationship
     assert "users(limit: Int, offset: Int)" in sdl
 
 
 def test_narrowing_models_narrows_what_is_reachable(registry: Registry) -> None:
-    """Exposure is opt-in, and a relationship cannot smuggle a model back in."""
     api = GraphQL(registry, models=[User])
     sdl = api.sdl()
     assert "type Post" not in sdl
-    assert "posts:" not in sdl              # the relationship is dropped too
+    assert "posts:" not in sdl  # the relationship is dropped too
 
 
-# --- retrieval columns -------------------------------------------------------
-#
 # Generated CRUD withholds a `Vector` and a `TsVector` from what it serializes,
 # because a retrieval column indexes content rather than carrying it. GraphQL is
 # derived from the same `ModelSpec` and filtered by the same functions, so it
@@ -223,9 +207,7 @@ def _doc_model():
         id: Mapped[int] = column(Int64, primary_key=True)
         title: Mapped[str] = column(Text)
         embedding: Mapped[list] = column(Vector(3), nullable=True)
-        search: Mapped[bytes] = column(
-            TsVector("english", sources=("title",)), index="gin"
-        )
+        search: Mapped[bytes] = column(TsVector("english", sources=("title",)), index="gin")
 
     return Doc
 
@@ -235,10 +217,6 @@ def _doc_row() -> list[Any]:
 
 
 def test_retrieval_columns_are_not_in_the_schema(database: FakeDatabase) -> None:
-    """A page of twenty `Vector(1536)` rows is thirty thousand floats.
-
-    And on this surface the client, not the server, chooses the page size.
-    """
     Doc = _doc_model()
     api = GraphQL(Registry(database, [Doc]), models=[Doc])
 
@@ -254,9 +232,7 @@ async def test_a_retrieval_column_cannot_be_queried(database: FakeDatabase) -> N
     database.connection.script("graphql_docs", [_doc_row()])
     api = GraphQL(registry, models=[Doc])
 
-    body = await api.run(
-        "{ doc(id: 1) { embedding search } }", Session(registry, "read")
-    )
+    body = await api.run("{ doc(id: 1) { embedding search } }", Session(registry, "read"))
 
     assert body["data"] is None
     assert "no field 'embedding'" in body["errors"][0]["message"]
@@ -264,26 +240,15 @@ async def test_a_retrieval_column_cannot_be_queried(database: FakeDatabase) -> N
 
 @pytest.mark.asyncio
 async def test_expose_puts_a_retrieval_column_back(database: FakeDatabase) -> None:
-    """The same explicit, auditable keyword `crud_router(expose=...)` asks for.
-
-    It widens only what may leave: nothing here widens what may be *written*,
-    because no mutation is generated -- a GraphQL write is a resolver somebody
-    wrote, and what it accepts is that resolver's business.
-    """
     Doc = _doc_model()
     registry = Registry(database, [Doc])
     database.connection.script("graphql_docs", [_doc_row()])
     api = GraphQL(registry, models=[Doc], expose=("Doc.embedding",))
 
-    body = await api.run(
-        "{ doc(id: 1) { title embedding } }", Session(registry, "read")
-    )
+    body = await api.run("{ doc(id: 1) { title embedding } }", Session(registry, "read"))
 
     assert body["data"]["doc"] == {"title": "llamas", "embedding": [1.0, 0.0, 0.0]}
-    assert "search" not in api.schema.types["Doc"].fields   # not exposed, not there
-
-
-# --- execution ---------------------------------------------------------------
+    assert "search" not in api.schema.types["Doc"].fields  # not exposed, not there
 
 
 @pytest.mark.asyncio
@@ -316,10 +281,13 @@ async def test_http_execution_writes_compiled_rows_directly_to_json(
 ) -> None:
     from wreath._json import loads
 
-    database.connection.script("users", [
-        user_row(1, "one@example.test", "One"),
-        user_row(2, "two@example.test", "Two"),
-    ])
+    database.connection.script(
+        "users",
+        [
+            user_row(1, "one@example.test", "One"),
+            user_row(2, "two@example.test", "Two"),
+        ],
+    )
     api = GraphQL(registry, models=[User, Post])
 
     body = await api._run(
@@ -332,17 +300,18 @@ async def test_http_execution_writes_compiled_rows_directly_to_json(
     )
 
     assert isinstance(body, bytes)
-    assert loads(body) == {"data": {"users": [
-        {"identifier": 1, "address": "one@example.test", "name": "One"},
-        {"identifier": 2, "address": "two@example.test", "name": "Two"},
-    ]}}
+    assert loads(body) == {
+        "data": {
+            "users": [
+                {"identifier": 1, "address": "one@example.test", "name": "One"},
+                {"identifier": 2, "address": "two@example.test", "name": "Two"},
+            ]
+        }
+    }
 
 
 @pytest.mark.asyncio
-async def test_a_list_root_is_always_bounded(
-    registry: Registry, database: FakeDatabase
-) -> None:
-    """An unpaginated root field would be a client-requested table scan."""
+async def test_a_list_root_is_always_bounded(registry: Registry, database: FakeDatabase) -> None:
     database.connection.script("users", [user_row(i) for i in range(1, 4)])
     api = GraphQL(registry, models=[User, Post], max_page_size=25)
 
@@ -370,14 +339,13 @@ async def test_a_client_cannot_raise_the_page_ceiling(
 async def test_a_relationship_is_batched_not_resolved_per_parent(
     registry: Registry, database: FakeDatabase
 ) -> None:
-    """The N+1 property: three users and their posts is two statements."""
     database.connection.script("users", [user_row(1), user_row(2), user_row(3)])
     database.connection.script("posts", [post_row(10, 1), post_row(11, 2)])
     api = GraphQL(registry, models=[User, Post])
 
     body = await api.run("{ users { id posts { title } } }", Session(registry, "read"))
 
-    assert len(database.connection.calls) == 2      # not 1 + 3
+    assert len(database.connection.calls) == 2  # not 1 + 3
     assert len(body["data"]["users"]) == 3
 
 
@@ -391,9 +359,7 @@ async def test_unknown_fields_and_roots_are_reported_as_errors(
     assert "unknown root field" in unknown_root["errors"][0]["message"]
 
     database.connection.script("users", [user_row(1)])
-    unknown_field = await api.run(
-        "{ user(id: 1) { nope } }", Session(registry, "read")
-    )
+    unknown_field = await api.run("{ user(id: 1) { nope } }", Session(registry, "read"))
     assert "no field" in unknown_field["errors"][0]["message"]
 
 
@@ -401,14 +367,6 @@ async def test_unknown_fields_and_roots_are_reported_as_errors(
 async def test_a_single_object_field_without_an_id_says_so(
     registry: Registry, database: FakeDatabase
 ) -> None:
-    """`{ user { id } }` names one row and does not say which.
-
-    Without the refusal the `id` argument is `None` and goes on to the primary
-    key's coercion, so the query fails somewhere inside the driver with a
-    message about a type rather than about the query -- and `{ user { posts {
-    ... } } }` is exactly the shape a depth-limit test writes, which is why
-    nothing had noticed. The list field takes no `id` and must keep working.
-    """
     api = GraphQL(registry, models=[User, Post])
 
     body = await api.run("{ user { id } }", Session(registry, "read"))
@@ -419,9 +377,7 @@ async def test_a_single_object_field_without_an_id_says_so(
 
 
 @pytest.mark.asyncio
-async def test_a_limit_breach_is_returned_as_a_coded_error(
-    registry: Registry
-) -> None:
+async def test_a_limit_breach_is_returned_as_a_coded_error(registry: Registry) -> None:
     api = GraphQL(registry, models=[User, Post], limits=Limits(max_depth=2))
     body = await api.run("{ user { posts { author { id } } } }", Session(registry, "read"))
     assert body["errors"][0]["extensions"]["code"] == "depth"
@@ -474,7 +430,6 @@ async def test_the_parse_cache_reuses_a_repeated_document(
 def test_a_validated_schema_reuses_the_cached_documents_weight(
     registry: Registry, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The schema-bound walk is retained only after declarations freeze."""
     import wreath.graphql as graphql_module
 
     api = GraphQL(registry, models=[User, Post])
@@ -502,15 +457,12 @@ def test_a_validated_schema_reuses_the_cached_documents_weight(
     assert first is second
 
 
-# --- authorization -----------------------------------------------------------
-#
 # Two kinds of test live here, and the distinction is the point: a double is
 # never more capable than the real thing. The *integration* is proved against the shipped
 # `CedarAuthorizer` and a real `CedarPolicies` policy set; the doubles below
 # only cover properties that are GraphQL's own -- caching, `on_denied`, a
 # resolver naming its own resource -- and they refuse anything the real provider
 # would refuse, so they cannot go on being more capable than it.
-#
 # They were more capable, for the whole life of this file: every authorizer here
 # was duck-typed as `authorize(request, resource: str)`, while
 # `AuthorizationProvider.authorize` takes a `PolicyRequirement`. The executor
@@ -604,14 +556,6 @@ def cedar() -> CedarAuthorizer:
 async def test_a_field_permitted_by_a_real_cedar_policy_is_served(
     registry: Registry, database: FakeDatabase, cedar: CedarAuthorizer
 ) -> None:
-    """The documented integration, against the shipped authorizer.
-
-    This is the regression guard for `AttributeError: 'str' object has no
-    attribute 'resource'`: before the executor built a `PolicyRequirement`, this
-    query answered `{"data": None, "errors": [{"code": "RESOLVER_ERROR"}]}` and
-    incremented `resolver_errors`, because the adapter blew up on the first
-    field. Proved red before it was made green.
-    """
     database.connection.script("users", [user_row(1, "a@b.c")])
     api = GraphQL(registry, models=[User, Post], authorizer=cedar)
 
@@ -629,12 +573,6 @@ async def test_a_field_permitted_by_a_real_cedar_policy_is_served(
 async def test_a_field_no_cedar_policy_permits_is_denied_with_the_engines_reason(
     registry: Registry, database: FakeDatabase, cedar: CedarAuthorizer
 ) -> None:
-    """The denial's shape: the engine's reason, and the path to the field.
-
-    `User.email` is named by no permit, so Cedar's default-deny answers. The
-    message is the engine's own `reason` -- not a wrapped one, and not the
-    generic `"the resolver failed"` an exception out of the adapter produced.
-    """
     database.connection.script("users", [user_row(1, "a@b.c")])
     api = GraphQL(registry, models=[User, Post], authorizer=cedar)
 
@@ -645,9 +583,7 @@ async def test_a_field_no_cedar_policy_permits_is_denied_with_the_engines_reason
     )
 
     assert body["data"] is None
-    assert body["errors"] == [
-        {"message": "no permit policy matched", "path": ["user", "email"]}
-    ]
+    assert body["errors"] == [{"message": "no permit policy matched", "path": ["user", "email"]}]
 
 
 @pytest.mark.asyncio
@@ -676,12 +612,6 @@ async def test_a_reasonless_authorization_denial_names_the_resource(
 async def test_one_cedar_clause_denies_every_mutation(
     registry: Registry, database: FakeDatabase, cedar: CedarAuthorizer
 ) -> None:
-    """`resource is Mutation` covers all writes, exactly as the guide claims.
-
-    Only expressible because `Mutation.createUser` reaches the engine as
-    `Mutation::"createUser"`. A bare string resource cannot be matched by type,
-    so this clause could not have been written at all.
-    """
     api = GraphQL(registry, models=[User, Post], authorizer=cedar)
 
     @api.mutation("createUser", returns="User")
@@ -701,12 +631,6 @@ async def test_one_cedar_clause_denies_every_mutation(
 async def test_the_real_authorizer_denies_an_anonymous_caller(
     registry: Registry, database: FakeDatabase, cedar: CedarAuthorizer
 ) -> None:
-    """`CedarAuthorizer` refuses without a principal, and GraphQL surfaces it.
-
-    A GraphQL endpoint is one route: nothing has necessarily run an
-    authentication backend by the time a field is authorized, so the provider's
-    own anonymous refusal is the one that has to hold.
-    """
     database.connection.script("users", [user_row(1, "a@b.c")])
     api = GraphQL(registry, models=[User, Post], authorizer=cedar)
 
@@ -718,11 +642,6 @@ async def test_the_real_authorizer_denies_an_anonymous_caller(
 
 
 def test_a_policy_resource_is_a_cedar_entity_reference() -> None:
-    """The one place the `Type.field` -> `Type::"field"` mapping is pinned.
-
-    Everything else derives from `policy_resource`, so this is where a change to
-    it has to be stated on purpose.
-    """
     assert policy_resource("User.email") == EntityUid("User", "email")
     assert policy_resource("Mutation.createUser") == EntityUid("Mutation", "createUser")
     # A policy already written as a reference is used verbatim, both spellings.
@@ -730,10 +649,7 @@ def test_a_policy_resource_is_a_cedar_entity_reference() -> None:
     assert policy_resource("Billing::read") == EntityUid("Billing", "read")
 
 
-def test_a_policy_no_engine_could_read_is_refused_at_declaration(
-    registry: Registry
-) -> None:
-    """A bare name is a startup error, not a resolver failure on first use."""
+def test_a_policy_no_engine_could_read_is_refused_at_declaration(registry: Registry) -> None:
     api = GraphQL(registry, models=[User, Post])
 
     with pytest.raises(ValueError, match="not a usable authorization resource"):
@@ -750,7 +666,6 @@ def test_a_policy_no_engine_could_read_is_refused_at_declaration(
 
 
 def test_an_unnamed_action_is_refused(registry: Registry) -> None:
-    """`Action::""` matches no policy, so every field would deny with no cause."""
     with pytest.raises(ValueError, match="action is required"):
         GraphQL(registry, models=[User], action="")
 
@@ -759,7 +674,6 @@ def test_an_unnamed_action_is_refused(registry: Registry) -> None:
 async def test_field_access_is_checked_against_the_authorizer(
     registry: Registry, database: FakeDatabase
 ) -> None:
-    """The protocol boundary: one requirement per resource, action included."""
     database.connection.script("users", [user_row(1, "a@b.c")])
     authorizer = DenyField("User.email")
     api = GraphQL(registry, models=[User, Post], authorizer=authorizer)
@@ -796,12 +710,8 @@ async def test_an_allowed_field_passes_the_authorizer(
     assert body["data"]["user"]["id"] == 1
 
 
-# --- introspection is off by default ----------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_introspection_is_off_by_default(registry: Registry) -> None:
-    """A schema dump is reconnaissance; it should not be on by accident."""
     router = GraphQL(registry, models=[User]).router()
     methods = {(m, r.path) for r in router.routes for m in r.methods}
     assert ("GET", "/graphql") not in methods
@@ -815,16 +725,7 @@ async def test_introspection_can_be_enabled(registry: Registry) -> None:
     assert ("GET", "/graphql") in methods
 
 
-# --- typegen integration -----------------------------------------------------
-
-
 def test_graphql_and_rest_share_one_model_set(registry: Registry) -> None:
-    """The whole point: one TypeScript `User`, not two.
-
-    A type the REST inspector already emitted is reused rather than duplicated,
-    so a client gets `useGetUser()` and the GraphQL root returning the same
-    interface.
-    """
     from wreath._graphql.typegen import merge_into
     from wreath.typegen.model import ApiModel, Field, Model, TypeRef
 
@@ -837,8 +738,8 @@ def test_graphql_and_rest_share_one_model_set(registry: Registry) -> None:
     merged = merge_into(rest, api.schema)
 
     names = [model.name for model in merged.models]
-    assert names.count("User") == 1          # not duplicated
-    assert "Post" in names                   # the GraphQL-only type is added
+    assert names.count("User") == 1  # not duplicated
+    assert "Post" in names  # the GraphQL-only type is added
     # The REST definition won, so nothing downstream sees a changed User.
     user = next(m for m in merged.models if m.name == "User")
     assert user.fields == rest.models[0].fields
@@ -870,11 +771,6 @@ def test_relationship_fields_reference_their_target_type(registry: Registry) -> 
 
 
 def test_document_size_is_bounded_before_any_scanning() -> None:
-    """The cheapest limit: parse cost scales with length, so cap the length.
-
-    Rejected on `len()` alone, before a character is tokenized, so an oversized
-    document costs nothing to refuse.
-    """
     huge = "{ " + "a " * 100_000 + "}"
     with pytest.raises(GraphQLSyntaxError) as caught:
         parse(huge, Limits(max_document_bytes=4096))
@@ -886,14 +782,10 @@ def test_a_document_at_the_size_limit_is_accepted() -> None:
     assert parse(source, Limits(max_document_bytes=len(source))) is not None
 
 
-# --- custom and chained resolvers -------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_batched_resolver_sees_the_whole_level(
     registry: Registry, database: FakeDatabase
 ) -> None:
-    """Batched by default: application code cannot reintroduce the N+1."""
     database.connection.script("users", [user_row(1), user_row(2), user_row(3)])
     api = GraphQL(registry, models=[User, Post])
     calls: list[int] = []
@@ -905,7 +797,7 @@ async def test_a_batched_resolver_sees_the_whole_level(
 
     body = await api.run("{ users { id shout } }", Session(registry, "read"))
 
-    assert calls == [3]                       # one call for three users
+    assert calls == [3]  # one call for three users
     assert body["data"]["users"][0]["shout"] == "A@B.C"
 
 
@@ -913,14 +805,6 @@ async def test_a_batched_resolver_sees_the_whole_level(
 async def test_each_resolve_is_a_flight_phase_carrying_the_levels_width(
     registry: Registry, database: FakeDatabase
 ) -> None:
-    """"Per-field latency in the Flight Recorder" -- against the real seam.
-
-    The module docstring promises `RESOLVER` phases "without wiring an
-    exporter", and nothing asked for one. The marker is the recorder's own
-    `ContextVar`, so binding it is the whole integration; the dependency count
-    is the level's width, which is what distinguishes a slow field from a wide
-    one.
-    """
     from wreath._flight_markers import PH_RESOLVER, phase_marker
 
     database.connection.script("users", [user_row(1), user_row(2), user_row(3)])
@@ -961,9 +845,7 @@ async def test_a_per_object_resolver_is_available_when_batching_makes_no_sense(
 
 
 @pytest.mark.asyncio
-async def test_a_resolver_can_be_synchronous(
-    registry: Registry, database: FakeDatabase
-) -> None:
+async def test_a_resolver_can_be_synchronous(registry: Registry, database: FakeDatabase) -> None:
     database.connection.script("users", [user_row(1)])
     api = GraphQL(registry, models=[User, Post])
 
@@ -979,7 +861,6 @@ async def test_a_resolver_can_be_synchronous(
 async def test_requires_chains_a_relationship_before_the_computed_field(
     registry: Registry, database: FakeDatabase
 ) -> None:
-    """The chaining story: declare the dependency, get it batched, in order."""
     database.connection.script("users", [user_row(1), user_row(2)])
     database.connection.script("posts", [post_row(10, 1), post_row(11, 1)])
     api = GraphQL(registry, models=[User, Post])
@@ -994,7 +875,7 @@ async def test_requires_chains_a_relationship_before_the_computed_field(
     # The dependency was loaded, but not emitted: asking for a computed field
     # must never silently widen the response.
     assert "posts" not in body["data"]["users"][0]
-    assert len(database.connection.calls) == 2      # still batched
+    assert len(database.connection.calls) == 2  # still batched
 
 
 @pytest.mark.asyncio
@@ -1084,13 +965,10 @@ async def test_a_batch_resolver_returning_the_wrong_count_is_an_error(
 
     @api.field("User", "bad", returns="Int")
     async def bad(users, info):
-        return [1]                     # two users, one value
+        return [1]  # two users, one value
 
     body = await api.run("{ users { bad } }", Session(registry, "read"))
     assert "returned 1 values for 2 objects" in body["errors"][0]["message"]
-
-
-# --- custom roots and mutations ---------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -1121,13 +999,9 @@ async def test_a_custom_root_can_return_a_registered_native_dataclass(
     async def summary(info):
         return TrekSummary("ridge", 3)
 
-    body = await api.run(
-        "{ summary { label count note } }", Session(registry, "read")
-    )
+    body = await api.run("{ summary { label count note } }", Session(registry, "read"))
 
-    assert body == {
-        "data": {"summary": {"label": "ridge", "count": 3, "note": None}}
-    }
+    assert body == {"data": {"summary": {"label": "ridge", "count": 3, "note": None}}}
     assert "type TrekSummary" in api.sdl()
 
 
@@ -1155,9 +1029,7 @@ def test_graphql_dataclass_nested_types_are_an_explicit_allowlist(
     with pytest.raises(TypeError, match="not registered"):
         build_schema(registry, [], dataclasses=[NestedSummary])
 
-    schema = build_schema(
-        registry, [User], dataclasses=[SummaryDetail, NestedSummary]
-    )
+    schema = build_schema(registry, [User], dataclasses=[SummaryDetail, NestedSummary])
     assert schema.types["NestedSummary"].fields["detail"].type_name == "SummaryDetail"
     assert schema.types["NestedSummary"].fields["history"].type_name == "SummaryDetail"
     assert schema.types["NestedSummary"].fields["history"].is_list
@@ -1196,9 +1068,7 @@ async def test_a_custom_root_field_needs_no_backing_table(
         assert info.arguments["term"] == "ada"
         return await info.session.fetch(User.select())
 
-    body = await api.run(
-        '{ search(term: "ada") { email } }', Session(registry, "read")
-    )
+    body = await api.run('{ search(term: "ada") { email } }', Session(registry, "read"))
     assert body["data"]["search"][0]["email"] == "ada@b.c"
 
 
@@ -1246,13 +1116,10 @@ async def test_a_resolver_returning_objects_is_projected(
 
     @api.field("User", "twin", returns="User")
     async def twin(users, info):
-        return list(users)          # each user is its own twin
+        return list(users)  # each user is its own twin
 
     body = await api.run("{ users { id twin { email } } }", Session(registry, "read"))
     assert body["data"]["users"][0]["twin"] == {"email": "a@b.c"}
-
-
-# --- tighter authorization ---------------------------------------------------
 
 
 class RecordingAuthorizer(_RequirementOnly):
@@ -1314,14 +1181,11 @@ class BatchRecordingAuthorizer(_RequirementOnly):
 async def test_authorization_is_asked_once_per_resource_per_request(
     registry: Registry, database: FakeDatabase
 ) -> None:
-    """The same field under three aliases is one decision, not three."""
     database.connection.script("users", [user_row(1)])
     authorizer = RecordingAuthorizer()
     api = GraphQL(registry, models=[User, Post], authorizer=authorizer)
 
-    await api.run(
-        "{ users { a: email b: email c: email } }", Session(registry, "read")
-    )
+    await api.run("{ users { a: email b: email c: email } }", Session(registry, "read"))
     assert authorizer.asked.count(resource("User.email")) == 1
 
 
@@ -1329,7 +1193,6 @@ async def test_authorization_is_asked_once_per_resource_per_request(
 async def test_native_selection_plan_preserves_the_generic_batch_protocol(
     registry: Registry, database: FakeDatabase
 ) -> None:
-    """Only the authorizer boundary materializes requirements, once each."""
     from wreath._json import loads
 
     database.connection.script("users", [user_row(1, "a@b.c")])
@@ -1359,7 +1222,6 @@ async def test_native_selection_plan_preserves_the_generic_batch_protocol(
 async def test_native_policy_decisions_belong_to_one_execution(
     registry: Registry, database: FakeDatabase
 ) -> None:
-    """A denial cannot leak through the compiled schema into the next request."""
     from wreath._json import loads
 
     authorizer = BatchRecordingAuthorizer({"User.email"})
@@ -1398,10 +1260,7 @@ async def test_native_policy_decisions_belong_to_one_execution(
 
 
 @pytest.mark.asyncio
-async def test_root_fields_are_authorized_too(
-    registry: Registry, database: FakeDatabase
-) -> None:
-    """`Query.users` is a resource, so a policy can deny a whole entry point."""
+async def test_root_fields_are_authorized_too(registry: Registry, database: FakeDatabase) -> None:
     authorizer = RecordingAuthorizer(denied={"Query.users"})
     api = GraphQL(registry, models=[User, Post], authorizer=authorizer)
 
@@ -1413,12 +1272,9 @@ async def test_root_fields_are_authorized_too(
 async def test_on_denied_null_returns_null_instead_of_failing_the_query(
     registry: Registry, database: FakeDatabase
 ) -> None:
-    """Partial results: the rest of the query still answers."""
     database.connection.script("users", [user_row(1, "a@b.c")])
     authorizer = RecordingAuthorizer(denied={"User.email"})
-    api = GraphQL(
-        registry, models=[User, Post], authorizer=authorizer, on_denied="null"
-    )
+    api = GraphQL(registry, models=[User, Post], authorizer=authorizer, on_denied="null")
 
     body = await api.run("{ users { id email } }", Session(registry, "read"))
     assert body["data"]["users"][0] == {"id": 1, "email": None}
@@ -1446,11 +1302,9 @@ def test_on_denied_must_be_a_known_mode(registry: Registry) -> None:
         GraphQL(registry, models=[User], on_denied="explode")
 
 
-def test_resolvers_cannot_be_added_after_the_endpoint_is_serving(
-    registry: Registry
-) -> None:
+def test_resolvers_cannot_be_added_after_the_endpoint_is_serving(registry: Registry) -> None:
     api = GraphQL(registry, models=[User])
-    api.router()                    # freezes
+    api.router()  # freezes
 
     with pytest.raises(ResolverError, match="before the endpoint serves"):
 
@@ -1459,9 +1313,7 @@ def test_resolvers_cannot_be_added_after_the_endpoint_is_serving(
             return []
 
 
-def test_the_sdl_shows_resolvers_custom_roots_and_mutations(
-    registry: Registry
-) -> None:
+def test_the_sdl_shows_resolvers_custom_roots_and_mutations(registry: Registry) -> None:
     api = GraphQL(registry, models=[User, Post])
 
     @api.field("User", "postCount", returns="Int", non_null=True, requires=["posts"])
@@ -1499,8 +1351,6 @@ async def test_the_http_endpoint_refuses_a_non_object_json_body(
     }
 
 
-# --- the session the endpoint opens ------------------------------------------
-#
 # `wreath mutant` survived `expression.take-branch` on `"write" if mutating else
 # "read"` in *both* directions, which means nothing asserted which pool a
 # request opens. `_session`'s own docstring records why that matters: without
@@ -1522,8 +1372,7 @@ async def test_a_mutation_opens_a_write_session_and_a_query_opens_a_read_one(
         return 1
 
     api.validate()
-    request = Request({"type": "http", "method": "POST", "path": "/graphql",
-                       "headers": []}, None)
+    request = Request({"type": "http", "method": "POST", "path": "/graphql", "headers": []}, None)
 
     session, close = await api._session(
         request, None, mutating=api._is_mutation("mutation { touch }")
@@ -1546,21 +1395,14 @@ async def test_a_mutation_opens_a_write_session_and_a_query_opens_a_read_one(
 async def test_a_supplied_session_factory_is_used_and_closed_by_its_owner(
     registry: Registry,
 ) -> None:
-    """Both shapes a factory may return, because the endpoint must not care.
-
-    A factory that hands back a session directly owns closing it -- `close` is
-    `None` -- and one that hands back an async context manager is exited by the
-    endpoint. Getting this backwards leaks a connection per request.
-    """
     api = GraphQL(registry, models=[User])
     api.validate()
-    request = Request({"type": "http", "method": "POST", "path": "/graphql",
-                       "headers": []}, None)
+    request = Request({"type": "http", "method": "POST", "path": "/graphql", "headers": []}, None)
 
     plain = Session(registry, "read")
     session, close = await api._session(request, lambda r: plain, mutating=True)
     assert session is plain
-    assert close is None                       # the factory's caller closes it
+    assert close is None  # the factory's caller closes it
     await plain.close()
 
     exited: list[bool] = []
@@ -1584,16 +1426,6 @@ async def test_a_supplied_session_factory_is_used_and_closed_by_its_owner(
 
 
 def test_the_cache_bound_is_dead_at_the_default_limits(registry: Registry) -> None:
-    """`MAX_CACHED_QUERY_CHARS` and `max_document_bytes` are the same number.
-
-    `parse` refuses a document longer than `max_document_bytes` before anything
-    else, so at the defaults nothing can be *long enough to skip the cache and
-    short enough to parse* -- the "parsed and not cached" branch is unreachable.
-    That is safe (the stricter check wins) but it means the memory bound the
-    docstring describes does nothing until a deployment raises the parse limit,
-    which is what the test below covers. `wreath mutant` found this by widening
-    `MAX_CACHED_QUERY_CHARS` past reach and seeing nothing object.
-    """
     from wreath._graphql.parser import Limits
     from wreath.graphql import MAX_CACHED_QUERY_CHARS
 
@@ -1609,33 +1441,26 @@ def test_the_cache_bound_is_dead_at_the_default_limits(registry: Registry) -> No
 def test_a_document_too_large_to_cache_is_parsed_but_not_remembered(
     registry: Registry,
 ) -> None:
-    """The branch itself, on a deployment that raised the parse limit.
-
-    The cache key is the client's own text, so counting entries let a few large
-    documents hold far more memory than the count suggested. Past the bound a
-    document is parsed and simply not remembered -- it is not refused.
-    """
     from wreath._graphql.parser import Limits
     from wreath.graphql import MAX_CACHED_QUERY_CHARS
 
     api = GraphQL(
-        registry, models=[User],
+        registry,
+        models=[User],
         limits=Limits(max_document_bytes=MAX_CACHED_QUERY_CHARS * 4),
     )
     api.validate()
 
     small = "query { users { id } }"
-    assert api.parse(small) is api.parse(small)          # cached: same object back
+    assert api.parse(small) is api.parse(small)  # cached: same object back
 
     large = "query {" + " " * MAX_CACHED_QUERY_CHARS + " users { id } }"
     assert len(large) > MAX_CACHED_QUERY_CHARS
     first, second = api.parse(large), api.parse(large)
-    assert first is not second                           # parsed twice, never held
-    assert first.complexity == second.complexity         # and parsed correctly
+    assert first is not second  # parsed twice, never held
+    assert first.complexity == second.complexity  # and parsed correctly
 
 
-# --- complexity is weighed, not counted --------------------------------------
-#
 # `cost=` on `field()`, `query()` and `mutation()` was threaded through three
 # layers and read by nothing: `wreath mutant` dropped the keyword at every one
 # of those call sites and no test objected, because the parser counted
@@ -1648,7 +1473,9 @@ def _weighed(api: GraphQL, source: str) -> int:
 
     document = api.parse(source)
     return weigh(
-        api._schema, document, document.operation(),
+        api._schema,
+        document,
+        document.operation(),
         max_complexity=api._limits.max_complexity,
     )
 
@@ -1657,7 +1484,6 @@ def _weighed(api: GraphQL, source: str) -> int:
 async def test_a_declared_cost_is_charged_and_a_plain_selection_is_not(
     registry: Registry,
 ) -> None:
-    """The whole point: two documents of the same *shape*, priced differently."""
     api = GraphQL(registry, models=[User])
 
     @api.field("User", "cheap", returns="Int")
@@ -1675,21 +1501,16 @@ async def test_a_declared_cost_is_charged_and_a_plain_selection_is_not(
     assert _weighed(api, "{ users { id expensive } }") == 10 + 1 + 50
     # Identical selection counts, a 49-point difference. Before this pass they
     # were the same number.
-    assert api.parse("{ users { id cheap } }").complexity == api.parse(
-        "{ users { id expensive } }"
-    ).complexity
+    assert (
+        api.parse("{ users { id cheap } }").complexity
+        == api.parse("{ users { id expensive } }").complexity
+    )
 
 
 @pytest.mark.asyncio
 async def test_a_document_over_budget_is_refused_the_way_the_parser_refuses(
     registry: Registry,
 ) -> None:
-    """One `code` for both refusals, so one client handler covers them.
-
-    The parser's selection count passes this document easily -- it is four
-    fields. The weights are what refuse it, which is the case `cost=` exists
-    for and the case that could not be caught while parsing.
-    """
     from wreath._graphql.parser import Limits
 
     api = GraphQL(registry, models=[User], limits=Limits(max_complexity=40))
@@ -1700,20 +1521,19 @@ async def test_a_document_over_budget_is_refused_the_way_the_parser_refuses(
 
     api.validate()
     source = "{ users { id expensive } }"
-    assert api.parse(source).complexity <= 40          # the parser is content
+    assert api.parse(source).complexity <= 40  # the parser is content
 
     body = await api.run(source, Session(registry, "read"))
     assert body["errors"][0]["extensions"]["code"] == "complexity"
     assert "costs more than 40" in body["errors"][0]["message"]
     assert "not a count of selections" in body["errors"][0]["message"]
-    assert "data" not in body                          # nothing ran
+    assert "data" not in body  # nothing ran
 
 
 @pytest.mark.asyncio
 async def test_a_document_within_budget_still_runs(
     registry: Registry, database: FakeDatabase
 ) -> None:
-    """The other half: the pass must not refuse what it should admit."""
     from wreath._graphql.parser import Limits
 
     database.connection.script("users", [user_row(1, "a@b.c", "Ada")])
@@ -1728,18 +1548,13 @@ async def test_a_document_within_budget_still_runs(
 async def test_cost_is_additive_rather_than_multiplied_by_a_list(
     registry: Registry,
 ) -> None:
-    """A list field does not multiply its children.
-
-    Fan-out is what the declaration is *for*, and a multiplier read off a
-    `limit` argument would make the budget depend on a value the client picks.
-    """
     api = GraphQL(registry, models=[User, Post])
     api.validate()
 
     single = _weighed(api, "{ user(id: 1) { id } }")
     listed = _weighed(api, "{ users { id } }")
-    assert single == 1 + 1          # a single-row root is an ordinary read
-    assert listed == 10 + 1         # a list root declares 10, not 10 x anything
+    assert single == 1 + 1  # a single-row root is an ordinary read
+    assert listed == 10 + 1  # a list root declares 10, not 10 x anything
     # And `limit` does not enter into it: the budget must not depend on a value
     # the client picks. `max_page_size` is what bounds that.
     assert _weighed(api, "{ users(limit: 1000) { id } }") == listed
@@ -1753,7 +1568,6 @@ async def test_cost_is_additive_rather_than_multiplied_by_a_list(
 async def test_a_mutation_is_weighed_against_the_mutation_roots(
     registry: Registry,
 ) -> None:
-    """Mutations live in their own namespace, and so do their weights."""
     api = GraphQL(registry, models=[User])
 
     @api.mutation("cheapWrite", returns="Int", cost=1)
@@ -1776,7 +1590,6 @@ async def test_a_mutation_is_weighed_against_the_mutation_roots(
 async def test_root_fragments_are_matched_against_the_operation_type(
     registry: Registry,
 ) -> None:
-    """A root spread uses Query or Mutation, not one fixed root type."""
     api = GraphQL(registry, models=[User])
 
     @api.mutation("costlyWrite", returns="Int", cost=99)
@@ -1784,28 +1597,26 @@ async def test_root_fragments_are_matched_against_the_operation_type(
         return 1
 
     api.validate()
-    assert _weighed(
-        api,
-        "query { ...Read } fragment Read on Query { users { id } }",
-    ) == 10 + 1
-    assert _weighed(
-        api,
-        "mutation { ...Write } "
-        "fragment Write on Mutation { costlyWrite }",
-    ) == 99
+    assert (
+        _weighed(
+            api,
+            "query { ...Read } fragment Read on Query { users { id } }",
+        )
+        == 10 + 1
+    )
+    assert (
+        _weighed(
+            api,
+            "mutation { ...Write } fragment Write on Mutation { costlyWrite }",
+        )
+        == 99
+    )
 
 
 @pytest.mark.asyncio
 async def test_fragments_are_expanded_before_they_are_weighed(
     registry: Registry,
 ) -> None:
-    """A cost hidden behind a spread is still a cost.
-
-    The weigher shares `execute._flatten` precisely so it cannot disagree with
-    the executor about which fields run; a separate implementation is how a
-    document gets billed for work it does not do, or not billed for work it
-    does.
-    """
     api = GraphQL(registry, models=[User])
 
     @api.field("User", "expensive", returns="Int", cost=50)
@@ -1816,9 +1627,7 @@ async def test_fragments_are_expanded_before_they_are_weighed(
     inline = _weighed(api, "{ users { id expensive } }")
     spread = _weighed(api, "{ users { id ...F } } fragment F on User { expensive }")
     assert spread == inline == 10 + 1 + 50
-    nested = _weighed(
-        api, "{ users { ... on User { expensive } } }"
-    )
+    nested = _weighed(api, "{ users { ... on User { expensive } } }")
     assert nested == 10 + 50
 
 
@@ -1826,12 +1635,6 @@ async def test_fragments_are_expanded_before_they_are_weighed(
 async def test_an_unknown_field_or_fragment_costs_nothing_and_keeps_its_own_error(
     registry: Registry,
 ) -> None:
-    """A typo must not come back as `complexity`.
-
-    The executor names the field or fragment it could not find; answering with
-    a budget refusal instead would send whoever wrote the query looking at the
-    wrong thing entirely.
-    """
     api = GraphQL(registry, models=[User])
     api.validate()
 
@@ -1840,11 +1643,10 @@ async def test_an_unknown_field_or_fragment_costs_nothing_and_keeps_its_own_erro
 
     body = await api.run("{ nope { id } }", Session(registry, "read"))
     assert body["errors"][0].get("extensions", {}).get("code") != "complexity"
-    assert "nope" in body["errors"][0]["message"]      # named, as it should be
+    assert "nope" in body["errors"][0]["message"]  # named, as it should be
 
 
 def test_an_unknown_declared_result_type_costs_only_its_root() -> None:
-    """A stale declaration stays the executor's schema error, not a cost crash."""
     from wreath._graphql.cost import weigh
 
     document = parse("{ ghost { id } }")
@@ -1853,18 +1655,20 @@ def test_an_unknown_declared_result_type_costs_only_its_root() -> None:
         mutations={},
         type_of=lambda _name: None,
     )
-    assert weigh(
-        schema,
-        document,
-        document.operation(),
-        max_complexity=100,
-    ) == 7
+    assert (
+        weigh(
+            schema,
+            document,
+            document.operation(),
+            max_complexity=100,
+        )
+        == 7
+    )
 
 
 def test_costing_tolerates_missing_object_selection_sets(
     registry: Registry,
 ) -> None:
-    """The cost pass does not dereference a selection set the client omitted."""
     api = GraphQL(registry, models=[User, Post])
     api.validate()
 
@@ -1876,7 +1680,6 @@ def test_costing_tolerates_missing_object_selection_sets(
 async def test_an_unresolvable_operation_is_left_for_the_executor(
     registry: Registry,
 ) -> None:
-    """Two operations and no name is "which one?", not "too expensive"."""
     api = GraphQL(registry, models=[User])
     api.validate()
 

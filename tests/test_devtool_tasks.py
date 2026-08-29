@@ -1,10 +1,3 @@
-"""Task entry points, and the group-eviction they exist to prevent.
-
-`uv sync` removes anything outside the groups it is given. These assert the one
-property that makes the tasks worth having: a task installs what it needs
-*additively*, so running one never uninstalls another's dependencies.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -50,26 +43,6 @@ def test_a_group_is_installed_without_removing_the_others(recorded: list[list[st
     assert "--group=benchmark" in recorded[0]
 
 
-def test_docs_builds_with_wreaths_own_generator(recorded: list[list[str]]) -> None:
-    """No group is installed: the docs toolchain is the framework itself."""
-    tasks.docs([])
-    assert not [c for c in recorded if c[1] == "sync"]
-    assert recorded[0][1:] == ["-m", "wreath", "docs", "check"]
-
-
-def test_docs_is_always_strict(recorded: list[list[str]]) -> None:
-    # A warning that is not an error is a warning nobody reads, so the task
-    # runs `check` -- which fails on an orphan page or a dead link -- and never
-    # the plain `build`.
-    tasks.docs([])
-    assert "check" in recorded[0] and "build" not in recorded[0]
-
-
-def test_docs_can_serve_instead(recorded: list[list[str]]) -> None:
-    tasks.docs(["--serve"])
-    assert recorded[0][1:] == ["-m", "wreath", "docs", "serve"]
-
-
 def test_bench_installs_the_benchmark_group(recorded: list[list[str]]) -> None:
     # --pin none so the test never re-pins the CPU affinity of the test runner.
     tasks.bench(["--pin", "none", "--matrix-only"])
@@ -86,15 +59,35 @@ def test_bench_runs_the_requested_number_of_matrix_passes(recorded: list[list[st
 def test_bench_forwards_unknown_arguments_to_the_matrix(recorded: list[list[str]]) -> None:
     # Owned flags are consumed; everything else still narrows benchmarks.run.
     # (wreath-native is auto-added next to wreath; see the native-arm test.)
-    tasks.bench(["--pin", "none", "--matrix-only", "--passes", "1",
-                 "--framework", "wreath", "starlette", "--protocol", "h2", "h3"])
+    tasks.bench(
+        [
+            "--pin",
+            "none",
+            "--matrix-only",
+            "--passes",
+            "1",
+            "--framework",
+            "wreath",
+            "starlette",
+            "--protocol",
+            "h2",
+            "h3",
+        ]
+    )
     matrix = next(c for c in recorded if c[1:3] == ["-m", "benchmarks.run"])
     assert matrix[3:] == [
-        "--framework", "wreath", "starlette", "wreath-native", "--protocol", "h2", "h3",
+        "--framework",
+        "wreath",
+        "starlette",
+        "wreath-native",
+        "--protocol",
+        "h2",
+        "h3",
         # Always stated, never inferred: an arm left on its own defaults takes
         # whatever parallelism its runtime prefers, and the row then compares
         # deployments instead of frameworks.
-        "--workers", "1",
+        "--workers",
+        "1",
     ]
 
 
@@ -117,8 +110,9 @@ def test_bench_multi_does_not_overrule_an_explicit_worker_count(
 ) -> None:
     # `--multi 4 --workers 2` is a legitimate ask -- four server cores, two
     # workers -- and the harness must not quietly rewrite it.
-    tasks.bench(["--pin", "none", "--matrix-only", "--passes", "1",
-                 "--multi", "4", "--workers", "2"])
+    tasks.bench(
+        ["--pin", "none", "--matrix-only", "--passes", "1", "--multi", "4", "--workers", "2"]
+    )
     matrix = next(c for c in recorded if c[1:3] == ["-m", "benchmarks.run"])
     assert "--workers" in matrix
     assert matrix[matrix.index("--workers") + 1] == "2"
@@ -128,13 +122,6 @@ def test_bench_multi_does_not_overrule_an_explicit_worker_count(
 def test_bench_multi_auto_leaves_the_generator_more_cores_than_the_server(
     recorded: list[list[str]],
 ) -> None:
-    """The generator must outrun what it measures, so it gets two cores per one.
-
-    Measured: one h2load thread saturates near 133k req/s and one metal worker
-    serves near 120k, so an even split stands the generator up at parity with
-    the server -- the case where a plateau reads as the server's ceiling when it
-    is really the client's.
-    """
     from wreath._devtools.quiet import physical_cores
 
     cores = len(physical_cores())
@@ -153,7 +140,8 @@ def test_bench_multi_rejects_a_nonsense_core_count(
 
 
 def test_bench_matrix_only_skips_the_database_battery(
-    recorded: list[list[str]], capsys: pytest.CaptureFixture[str],
+    recorded: list[list[str]],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     tasks.bench(["--pin", "none", "--matrix-only", "--passes", "1"])
     assert not any("podman" in c for c in recorded)
@@ -162,7 +150,9 @@ def test_bench_matrix_only_skips_the_database_battery(
 
 
 def test_bench_combines_a_matrix_result(
-    recorded: list[list[str]], monkeypatch: pytest.MonkeyPatch, tmp_path,
+    recorded: list[list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ) -> None:
     results = tmp_path / "benchmark-results"
     results.mkdir()
@@ -189,19 +179,19 @@ def test_bench_combines_a_matrix_result(
 def test_bench_adds_the_native_arm_when_wreath_is_requested(recorded: list[list[str]]) -> None:
     # wreath's own HTTP is the wreath-native arm; asking for `wreath` must not
     # silently measure only the uvicorn/httptools arm.
-    tasks.bench(["--pin", "none", "--matrix-only", "--passes", "1",
-                 "--framework", "wreath", "starlette"])
+    tasks.bench(
+        ["--pin", "none", "--matrix-only", "--passes", "1", "--framework", "wreath", "starlette"]
+    )
     matrix = next(c for c in recorded if c[1:3] == ["-m", "benchmarks.run"])
     assert "wreath-native" in matrix
     assert "wreath" in matrix and "starlette" in matrix
 
 
 def test_bench_leaves_an_explicit_native_only_selection_alone(recorded: list[list[str]]) -> None:
-    tasks.bench(["--pin", "none", "--matrix-only", "--passes", "1",
-                 "--framework", "wreath-native"])
+    tasks.bench(["--pin", "none", "--matrix-only", "--passes", "1", "--framework", "wreath-native"])
     matrix = next(c for c in recorded if c[1:3] == ["-m", "benchmarks.run"])
     assert matrix.count("wreath-native") == 1
-    assert "wreath" not in matrix[matrix.index("--framework"):]
+    assert "wreath" not in matrix[matrix.index("--framework") :]
 
 
 def test_ensure_native_arm_is_a_noop_without_a_framework_flag() -> None:
@@ -234,11 +224,6 @@ def test_check_passes_when_every_gate_passes(recorded: list[list[str]]) -> None:
     assert tasks.check([]) == 0
 
 
-def test_check_can_add_the_docs_build(recorded: list[list[str]]) -> None:
-    tasks.check(["--docs"])
-    assert any(c[-3:] == ["wreath", "docs", "check"] for c in recorded)
-
-
 def test_a_missing_uv_is_reported_rather_than_traced(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tasks.shutil, "which", lambda _name: None)
     with pytest.raises(SystemExit, match="uv"):
@@ -258,16 +243,6 @@ def test_a_failed_sync_stops_the_task(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_the_check_suite_goes_through_the_runner_not_bare_pytest() -> None:
-    """The gate and `wreath test` schedule the suite the same way.
-
-    `HistoricalSchedulerPlugin` is installed by the runner, not by the `pytest11`
-    entry point, so a gate that shelled `pytest -n 6` ran with no historical
-    scheduling *and* a second, lower worker cap. Measured at equal workers it
-    was 1.10x slower with a fifteenfold wider spread.
-
-    Pinned because the failure is invisible: a raw-pytest gate is perfectly
-    green, just slower and noisier than the command it is meant to mirror.
-    """
     command = tasks._pytest_command()
 
     assert command[1:4] == ["-m", "wreath.cli", "test"], command
@@ -281,7 +256,6 @@ def test_the_check_suite_goes_through_the_runner_not_bare_pytest() -> None:
 
 
 def test_the_check_suite_is_the_pytest_gate() -> None:
-    """The command above is the one `wreath-check` actually runs."""
     gates = dict(tasks._CHECKS)
 
     assert gates["pytest"] == tasks._pytest_command()

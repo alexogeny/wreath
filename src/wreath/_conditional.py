@@ -50,9 +50,7 @@ def etag_matches(header: str | None, tag: str) -> bool:
     if header.strip() == "*":
         return True
     target = tag.removeprefix("W/")
-    return any(
-        candidate.strip().removeprefix("W/") == target for candidate in header.split(",")
-    )
+    return any(candidate.strip().removeprefix("W/") == target for candidate in header.split(","))
 
 
 __all__ = ["STATUS_WITHOUT_BODY", "etag_matches"]

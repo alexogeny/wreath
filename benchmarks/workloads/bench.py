@@ -56,9 +56,7 @@ async def _bench(iterations: int, warmup: int) -> None:
             median = statistics.median(samples)
             p95 = samples[int(len(samples) * 0.95)]
             p99 = samples[int(len(samples) * 0.99)]
-            print(
-                f"  {name:<12} median={median:8.2f}us  p95={p95:8.2f}us  p99={p99:8.2f}us"
-            )
+            print(f"  {name:<12} median={median:8.2f}us  p95={p95:8.2f}us  p99={p99:8.2f}us")
     await server.close()
 
 

@@ -6,8 +6,6 @@
  * delivers ingress through `feed_external` (completion-driven provided
  * buffers) or `acquire_read_buffer`/`commit_read` (synchronous poll reads)
  * with no per-read Python calling convention, memoryview, or boxed sizes.
- * HTTP/1 was the first implementer (see docs/plans/native-buffered-protocol-
- * ingress.md); the shape is protocol-agnostic and versioned once here.
  */
 #ifndef WREATH_STREAM_H
 #define WREATH_STREAM_H

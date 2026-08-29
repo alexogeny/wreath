@@ -1,5 +1,3 @@
-"""Behavioural corpus for the canonical native policy router."""
-
 from __future__ import annotations
 
 import random
@@ -28,8 +26,29 @@ ROUTES = [
 ]
 
 _POOL = [
-    "users", "me", "posts", "latest", "files", "static", "css", "main", "x", "y",
-    "z", "1", "2", "a", "b", "c", "d", "e", "orders", "items", "detail", "42", "",
+    "users",
+    "me",
+    "posts",
+    "latest",
+    "files",
+    "static",
+    "css",
+    "main",
+    "x",
+    "y",
+    "z",
+    "1",
+    "2",
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "orders",
+    "items",
+    "detail",
+    "42",
+    "",
 ]
 
 
@@ -47,8 +66,7 @@ def test_registered_paths_agree() -> None:
         concrete = _concrete(path)
         for probe_method in (method, "HEAD"):
             results = {
-                name: normalize(t.match(probe_method, concrete))
-                for name, t in tables.items()
+                name: normalize(t.match(probe_method, concrete)) for name, t in tables.items()
             }
             assert len({repr(r) for r in results.values()}) == 1, (
                 probe_method,
@@ -139,10 +157,9 @@ def test_head_falls_back_after_dynamic_verification_miss(name: str) -> None:
     assert table.match("HEAD", "/h/1/neither") is None
 
 
-# --- sorted child lookup ----------------------------------------------------
-#
 # Registration order must not influence matching, and every literal must still
 # be reachable from a wide static fanout.
+
 
 def _build_stable(factory, routes: list[tuple[str, str]]):
     """Build with an order-independent handler, so only ordering is under test.
@@ -157,7 +174,6 @@ def _build_stable(factory, routes: list[tuple[str, str]]):
 
 
 def test_registration_order_does_not_affect_matching() -> None:
-    """Sorted insertion must be a pure implementation detail."""
     forward = list(ROUTES)
     reverse = list(reversed(ROUTES))
     shuffled = list(ROUTES)
@@ -187,11 +203,6 @@ def test_wide_static_fanout_finds_every_child(name: str) -> None:
 
 @pytest.mark.parametrize("name", list(IMPLS))
 def test_wide_fanout_with_shared_prefixes_and_lengths(name: str) -> None:
-    """Segments that share prefixes or differ only in length must not collide.
-
-    The child order tie-breaks equal prefixes by length, so these are exactly
-    the cases a wrong comparison would confuse.
-    """
     factory = IMPLS[name]
     table = factory()
     segments = ["a", "aa", "aaa", "ab", "b", "ba", "", "a-b", "a_b", "A", "AA"]
@@ -214,8 +225,6 @@ def test_literal_precedence_survives_wide_fanout(name: str) -> None:
     assert normalize(table.match("GET", "/nope")) == ("param", {"anything": "nope"})
 
 
-# --- adversarial miss -------------------------------------------------------
-
 def _adversarial(factory, depth: int):
     """Every level offers both a literal and a parameter branch."""
     table = factory()
@@ -227,11 +236,6 @@ def _adversarial(factory, depth: int):
 
 @pytest.mark.parametrize("name", list(IMPLS))
 def test_adversarial_miss_terminates_and_agrees(name: str) -> None:
-    """A method miss where every level branches must still be a clean miss.
-
-    The work must remain bounded by the table's own size rather than
-    re-exploring failed states.
-    """
     factory = IMPLS[name]
     table, path = _adversarial(factory, 10)
     assert table.match("GET", path) is None

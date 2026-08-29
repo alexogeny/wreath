@@ -44,6 +44,7 @@ def rotate_session(request: Request) -> None:
     """
     request.state._session_rotate = True
 
+
 #: Minimum session-secret length, matching `CsrfPolicy`. 32 bytes is
 #: HMAC-SHA256's digest length -- the point past which a longer key adds no
 #: strength, and so the floor a shorter one falls below.
@@ -109,8 +110,14 @@ class SessionPolicy:
     """
 
     __slots__ = (
-        "_cookie", "_http_only", "_max_age", "_previous", "_same_site", "_secret",
-        "_secure", "_store",
+        "_cookie",
+        "_http_only",
+        "_max_age",
+        "_previous",
+        "_same_site",
+        "_secret",
+        "_secure",
+        "_store",
     )
 
     def __init__(
@@ -129,9 +136,7 @@ class SessionPolicy:
             # The same floor `CsrfPolicy` applies. This secret signs the
             # cookie that *is* the session, so a short one is a forgeable
             # session, and "not empty" was not a meaningful bar.
-            raise ValueError(
-                f"session secret must contain at least {MIN_SECRET_BYTES} bytes"
-            )
+            raise ValueError(f"session secret must contain at least {MIN_SECRET_BYTES} bytes")
         self._secret = secret.encode("utf-8")
         # Secrets a cookie may still *verify* under, though nothing is signed
         # with them any more. Without this, rotating the secret invalidated
@@ -150,8 +155,7 @@ class SessionPolicy:
                 )
             if len(encoded) < MIN_SECRET_BYTES:
                 raise ValueError(
-                    f"previous_secrets[{index}] must contain at least "
-                    f"{MIN_SECRET_BYTES} bytes"
+                    f"previous_secrets[{index}] must contain at least {MIN_SECRET_BYTES} bytes"
                 )
             previous.append(encoded)
         self._previous = tuple(previous)
@@ -174,18 +178,14 @@ class SessionPolicy:
         """The store this policy delegates its tables to, if it has one.
 
         It owns no tables itself, so it answers with the store it was given
-        rather than forwarding a `component()`. Answering at all is the point:
-        `Wreath.schema_components` walks policy and asks each holder this
-        question, and this class used to expose neither it nor `component()`,
-        so a `PostgresSessionStore`'s `wreath_session` table was emitted by
-        `wreath schema sql` and created by nothing.
+        rather than forwarding a `component()`. `Wreath.schema_components`
+        walks policy and asks each holder this question, so a
+        `PostgresSessionStore` contributes its `wreath_session` table.
 
         Empty without a store, which is the cookie-only session and owns no
         tables at all -- not a claim that could not be attributed.
         """
         return () if self._store is None else (self._store,)
-
-    # --- signing -------------------------------------------------------------
 
     def describe(self):
         """The session cookie, named as this instance configured it."""
@@ -244,7 +244,7 @@ class SessionPolicy:
                 return None
             payload = b64url_decode(body)
             data = _json_loads(payload)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return None
         if not isinstance(data, dict):
             return None
@@ -255,8 +255,6 @@ class SessionPolicy:
         if not hmac.compare_digest(mac, current):
             return (data, b"")
         return (data, payload)
-
-    # --- hooks ----------------------------------------------------------------
 
     async def before(self, request: Request) -> None:
         """Publish `request.state.session` and the baseline `after` diffs against.
@@ -278,7 +276,6 @@ class SessionPolicy:
             # The decoded payload is the serialization to diff against, so a
             # request that does not touch the session pays one JSON pass, not
             # two. `after` still serializes once to detect a change.
-            #
             # Byte-for-byte, deliberately: a cookie whose bytes do not round-trip
             # -- one minted by another encoder, or with its keys in another order
             # -- looks changed and is reissued with the same content and a fresh
@@ -287,8 +284,6 @@ class SessionPolicy:
         request.state.session = session
         request.state._session_loaded = baseline
         return None
-
-    # --- server-side storage --------------------------------------------------
 
     async def _before_stored(self, request: Request) -> None:
         sid: str | None = None
@@ -383,10 +378,8 @@ class SessionPolicy:
             if int(stamp) + self._max_age < int(time.time()):
                 return None
             return b64url_decode(body).decode("ascii")
-        except (ValueError, TypeError, UnicodeDecodeError):
+        except ValueError, TypeError, UnicodeDecodeError:
             return None
-
-    # --- hooks ----------------------------------------------------------------
 
     async def after(self, request: Request, response: Any) -> Any:
         """Write, clear, or leave the session cookie, according to what changed.

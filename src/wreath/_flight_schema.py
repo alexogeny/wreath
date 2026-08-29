@@ -6,10 +6,7 @@ image. The reference codec in `wreath._flight_reference` and the
 `wreath._native._flight` extension must both agree with the constants here
 byte-for-byte; a parity test enforces it.
 
-Nothing here performs runtime telemetry. Stage 0 defines the schema and the
-deterministic metadata image only -- there is no recorder, ring, or request-path
-behavior. See `docs/plans/native-flight-recorder-stage-1.md` and
-`docs/plans/native-flight-recorder-stage-1.md`.
+Nothing here performs runtime telemetry.
 
 The provisional sizes below are acceptance decisions to be tuned by the Stage 3
 benchmark matrix, not frozen guarantees (provisional bounds, not tuning targets).
@@ -56,8 +53,6 @@ def _require_layout(actual: int, expected: int, what: str) -> None:
         )
 
 
-# --- versioning -------------------------------------------------------------
-
 #: Wire schema version. Readers reject an unknown major version rather than
 #: guessing. Bump only for an incompatible cell/container layout change.
 SCHEMA_VERSION: Final = 1
@@ -68,7 +63,6 @@ METADATA_VERSION: Final = 1
 #: Everything is little-endian, fixed, regardless of host byte order.
 BYTE_ORDER: Final = "<"
 
-# --- cell sizes (bytes) -----------------------------------------------------
 
 #: A completion/event/correlation cell. Trace IDs that do not fit a completion
 #: cell travel in a paired correlation cell, never a variable-length record.
@@ -218,7 +212,6 @@ FLAG_HAS_CLIENT_FACTS: Final = 1 << 9  # a compact client-facts cell follows
 FLAG_POLICY_REFUSED: Final = 1 << 10  # first-class ingress policy answered
 FLAG_AI_SCRAPING_REFUSED: Final = 1 << 11  # known autonomous crawler denied
 
-# --- histograms -------------------------------------------------------------
 
 #: base-2 log buckets over the microsecond duration, clamped to [0, 63].
 HISTOGRAM_BUCKETS: Final = 64
@@ -231,8 +224,6 @@ def histogram_bucket(duration_us: int) -> int:
     return min(duration_us.bit_length() - 1, HISTOGRAM_BUCKETS - 1)
 
 
-# --- completion cell codec --------------------------------------------------
-#
 # 64-byte little-endian layout (offsets in bytes):
 #   0  u8   schema_version
 #   1  u8   kind (EventKind)
@@ -331,9 +322,7 @@ class CompletionCell:
             bytes_in=bytes_in,
             bytes_out=bytes_out,
             protocol=Protocol(protocol) if protocol in _PROTOCOLS else Protocol.UNKNOWN,
-            terminal=(
-                TerminalStatus(terminal) if terminal in _TERMINALS else TerminalStatus.OK
-            ),
+            terminal=(TerminalStatus(terminal) if terminal in _TERMINALS else TerminalStatus.OK),
             error_class=error_class,
             worker_id=worker_id,
             flags=flags,
@@ -345,8 +334,6 @@ _PROTOCOLS = frozenset(int(p) for p in Protocol)
 _TERMINALS = frozenset(int(t) for t in TerminalStatus)
 
 
-# --- correlation cell codec -------------------------------------------------
-#
 # 64-byte little-endian layout:
 #   0  u8   schema_version
 #   1  u8   kind (EventKind.CORRELATION)
@@ -405,11 +392,8 @@ class CorrelationCell:
         )
 
 
-# --- client-facts cell codec ----------------------------------------------
-#
 # Only bounded database identifiers and booleans cross the request boundary.
 # The original address, User-Agent, and Signature-Agent never enter the ring.
-#
 #   0  u8   schema_version
 #   1  u8   kind (EventKind.CLIENT_FACTS)
 #   2  u16  flags (ClientFactFlag)
@@ -434,14 +418,8 @@ class ClientFactsCell:
         country = b"\x00\x00"
         if self.country is not None:
             normalized = self.country.upper()
-            if (
-                len(normalized) != 2
-                or not normalized.isascii()
-                or not normalized.isalpha()
-            ):
-                raise SchemaError(
-                    "client-facts country must be a two-letter ASCII code"
-                )
+            if len(normalized) != 2 or not normalized.isascii() or not normalized.isalpha():
+                raise SchemaError("client-facts country must be a two-letter ASCII code")
             country = normalized.encode("ascii")
         return _CLIENT_FACTS.pack(
             SCHEMA_VERSION,
@@ -455,11 +433,9 @@ class ClientFactsCell:
     @classmethod
     def decode(cls, data: bytes) -> ClientFactsCell:
         if len(data) < CELL_SIZE:
-            raise SchemaError(
-                f"client-facts cell needs {CELL_SIZE} bytes, got {len(data)}"
-            )
-        version, kind, flags, rule_id, raw_country, request_id = (
-            _CLIENT_FACTS.unpack(data[:CELL_SIZE])
+            raise SchemaError(f"client-facts cell needs {CELL_SIZE} bytes, got {len(data)}")
+        version, kind, flags, rule_id, raw_country, request_id = _CLIENT_FACTS.unpack(
+            data[:CELL_SIZE]
         )
         if version != SCHEMA_VERSION:
             raise SchemaError(f"unsupported schema version {version}")
@@ -468,9 +444,7 @@ class ClientFactsCell:
         country = None
         if raw_country != b"\x00\x00":
             if not all(65 <= byte <= 90 for byte in raw_country):
-                raise SchemaError(
-                    "client-facts country must contain uppercase ASCII letters"
-                )
+                raise SchemaError("client-facts country must contain uppercase ASCII letters")
             country = raw_country.decode("ascii")
         return cls(
             request_id=request_id,
@@ -480,14 +454,11 @@ class ClientFactsCell:
         )
 
 
-# --- phase (detail) codec ---------------------------------------------------
-#
 # A phase record is 16 bytes. Records are committed to the ring inside 64-byte
 # phase-batch cells: a 16-byte header (schema_version, kind=PHASE, count,
 # worker_id, request_id) plus up to three records. The request_id makes each
 # batch self-identifying, so phases attach to their completion by id rather than
 # by ring position (robust to drops and reordering).
-#
 # 16-byte record layout:
 #   0  u16  phase_id (PhaseKind)
 #   2  u16  dependency_id  (metadata id, truncated; 0 = none)
@@ -549,9 +520,7 @@ class PhaseRecord:
             duration_us=dur,
             start_offset_us=start_off,
             dependency_id=dep,
-            coverage=(
-                PhaseCoverage(coverage) if coverage in _COVERAGES else PhaseCoverage.UNKNOWN
-            ),
+            coverage=(PhaseCoverage(coverage) if coverage in _COVERAGES else PhaseCoverage.UNKNOWN),
             sequence=seq,
         )
 
@@ -595,9 +564,7 @@ class PhaseBatchCell:
         if not 1 <= count <= PHASE_RECORDS_PER_BATCH:
             raise SchemaError(f"phase batch count out of range: {count}")
         records = tuple(
-            PhaseRecord.decode(
-                data[(i + 1) * PHASE_CELL_SIZE : (i + 2) * PHASE_CELL_SIZE]
-            )
+            PhaseRecord.decode(data[(i + 1) * PHASE_CELL_SIZE : (i + 2) * PHASE_CELL_SIZE])
             for i in range(count)
         )
         return cls(request_id=request_id, records=records, worker_id=worker_id)
@@ -611,44 +578,31 @@ class SchemaError(ValueError):
     """A cell or metadata image failed to decode against this schema."""
 
 
-# --- log records ------------------------------------------------------------
-#
 # One application log record is one 64-byte ring cell, published by the same
 # writer as a completion and joined to its trace by request_id -- so a record
 # never carries a trace or span id of its own. Duplicating 24 bytes of
 # correlation onto every record would buy nothing the projector cannot already
 # reconstruct from the correlation carrier, and log records outnumber
 # completions by one to two orders of magnitude.
-#
 # The static half of a log statement -- template, severity, module, line, field
 # names, argument types, redaction dispositions -- is interned once into the
 # metadata image and addressed by `site_id`. Only the dynamic arguments travel
 # per record. That is the static/dynamic split NanoLog gets from a compile-time
 # pass; Python has none, so the binding happens at import instead.
-#
-# =========================================================================
 # TWO PACKERS, AND WHICH ONE RUNS
-# =========================================================================
-#
 # A published record is packed in C, straight into a ring cell:
-#
 #     Recorder.log()          PyObject...  -> 64 bytes -> ring
-#
 # The Python path below is the same work, in three steps, and remains the
 # boundary for sinks without a ring and for off-loop staging:
-#
 #     _logsite.pack_value()   PyObject*  -> LogArg      (per argument)
 #     LogCell.encode()        LogArg...  -> 64 bytes    (this module)
 #     Recorder.publish_log()  bytes      -> ring        (_flightmodule.c)
-#
 # `wreath_nfr_log` is checked against it byte for byte over a corpus of every
 # shape either can be handed (tests/test_logging_native_parity.py), and writing
 # that corpus found three defects -- an int wider than the wire slot, a float
 # too wide to narrow, and a lone surrogate -- each of which raised out of a
 # packer that promises never to.
-#
 # It is also what runs, by design, in three cases:
-#
 #   * **No recorder.** A test capture, `testing_runtime`, a plain callable
 #     sink: there is no ring, so there is nothing for C to pack into.
 #   * **A request-buffered record.** TRACE/DEBUG held for possible promotion is
@@ -658,20 +612,13 @@ class SchemaError(ValueError):
 #   * **Off the loop.** The ring has exactly one writer. A record from a job
 #     worker is packed here and staged (`_logscratch.OffLoopStage`) for the
 #     loop to publish, flagged LOG_FLAG_OFF_LOOP and one interval late.
-#
 # `wreath_nfr_publish_cell` (flight.c) stayed the seam through all of it: the
 # native emitter replaced what happens *above* that call, exactly as stage 1
 # framed it, and the dense site_id, declared argument types and pre-marshalling
 # level check are what made that swap mechanical rather than a redesign.
-#
-# Still deferred, each decided rather than forgotten -- see
-# docs/plans/first-class-logging.md for the full list and the reasoning:
-#
 #   * **`wreath.audit`.** Keeps its own `logging.getLogger` path. "Never
 #     blocks the request path" and "never loses a record" are incompatible
 #     promises; audit needs the second and must not inherit the first.
-#
-# =========================================================================
 
 
 class Severity(IntEnum):
@@ -1030,30 +977,24 @@ class LogCell:
 
     @classmethod
     def decode(cls, data: bytes) -> LogCell:
-        return _core.log_cell_decode(
-            data, SchemaError, LogArg, LogArgType, Severity, cls
-        )
+        return _core.log_cell_decode(data, SchemaError, LogArg, LogArgType, Severity, cls)
 
 
 _SEVERITIES = frozenset(int(s) for s in Severity)
 
 
-# --- the ring file (crash forensics) ----------------------------------------
-#
 # The ring is normally `PyMem_Calloc` memory, which the process owns and which a
 # segfault therefore takes with it -- along with every record since the
 # projector's last drain, which is the window a post-mortem is actually about.
 # Given a path, the recorder maps the ring from a file with MAP_SHARED instead,
 # so the pages belong to the kernel and outlive the process that was writing to
 # them.
-#
 # **This is not durability, and the distinction has to stay sharp.** MAP_SHARED
 # pages survive the *process* -- SIGSEGV, SIGKILL, abort -- because the kernel
 # writes them back on its own schedule. They do not survive a machine losing
 # power or a kernel panicking, unless they were written back first. Shutdown
 # msyncs; nothing else does. Documenting it the other way round would make the
 # whole feature a lie in exactly the situation someone reaches for it.
-#
 # The file is self-describing because the process that wrote it is, by
 # assumption, gone: a decoder gets the geometry, the clock calibration and the
 # provenance out of the header rather than from a live recorder. The cells that
@@ -1110,9 +1051,7 @@ _require_layout(_RING_FILE_CURSOR.size, 16, "the ring file cursor pair")
 #: in enum order.
 _RING_FILE_LOSSES = struct.Struct(BYTE_ORDER + f"{len(LossReason)}Q")
 if RING_FILE_LOSS_OFFSET + _RING_FILE_LOSSES.size > RING_FILE_HEADER_BYTES:
-    raise RuntimeError(
-        "the mirrored loss counters do not fit the ring file's header page"
-    )
+    raise RuntimeError("the mirrored loss counters do not fit the ring file's header page")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1165,8 +1104,7 @@ class RingFileHeader:
         ) = _RING_FILE_HEADER.unpack(data[: _RING_FILE_HEADER.size])
         if magic != RING_FILE_MAGIC:
             raise SchemaError(
-                f"not a wreath ring file: magic is {magic!r}, expected "
-                f"{RING_FILE_MAGIC!r}"
+                f"not a wreath ring file: magic is {magic!r}, expected {RING_FILE_MAGIC!r}"
             )
         if container_version != RING_FILE_VERSION:
             raise SchemaError(
@@ -1180,22 +1118,17 @@ class RingFileHeader:
             )
         if cell_size != CELL_SIZE:
             raise SchemaError(
-                f"ring file declares {cell_size}-byte cells; this build reads "
-                f"{CELL_SIZE}"
+                f"ring file declares {cell_size}-byte cells; this build reads {CELL_SIZE}"
             )
         if ring_records == 0 or ring_records & (ring_records - 1):
             raise SchemaError(
-                f"ring file declares {ring_records} records, which is not a "
-                "positive power of two"
+                f"ring file declares {ring_records} records, which is not a positive power of two"
             )
         head, tail = _RING_FILE_CURSOR.unpack(
             data[RING_FILE_CURSOR_OFFSET : RING_FILE_CURSOR_OFFSET + 16]
         )
         losses = _RING_FILE_LOSSES.unpack(
-            data[
-                RING_FILE_LOSS_OFFSET : RING_FILE_LOSS_OFFSET
-                + _RING_FILE_LOSSES.size
-            ]
+            data[RING_FILE_LOSS_OFFSET : RING_FILE_LOSS_OFFSET + _RING_FILE_LOSSES.size]
         )
         return cls(
             ring_records=ring_records,
@@ -1249,8 +1182,6 @@ def ring_file_bytes(ring_records: int) -> int:
     return RING_FILE_HEADER_BYTES + ring_records * CELL_SIZE
 
 
-# --- forensic capture (Stage 5) --------------------------------------------
-#
 # Forensic mode is the only mode that ever copies application bytes, and it does
 # so under a deny-by-default policy: a field is captured only when a compiled
 # rule produces it, and every byte is redacted (hashed/masked/length-only) or
@@ -1341,8 +1272,7 @@ class CaptureField:
     def truncated(self) -> bool:
         """True when a RAW field was clipped to fit the slab."""
         return (
-            self.disposition is CaptureDisposition.RAW
-            and len(self.payload) < self.original_length
+            self.disposition is CaptureDisposition.RAW and len(self.payload) < self.original_length
         )
 
 
@@ -1371,8 +1301,6 @@ _CAPTURE_CLASSES = frozenset(int(c) for c in CaptureFieldClass)
 _CAPTURE_DISPOSITIONS = frozenset(int(d) for d in CaptureDisposition)
 
 
-# --- deterministic metadata image ------------------------------------------
-#
 # Runtime records carry only numeric IDs. The metadata image is the canonical,
 # versioned table that gives those IDs meaning. IDs are deterministic within an
 # application image: descriptors are canonicalized and the image is hashed so the
@@ -1461,16 +1389,12 @@ class MetadataImage:
         return self.image_hash()[:IMAGE_HASH_BYTES]
 
 
-# --- the metadata image's decoder, and the keyed fingerprint ----------------
-#
 # These sit here beside `MetadataImage.canonical_bytes` because they describe
 # and consume the same wire format:
-#
 # * `decode_metadata_image` is the exact inverse of `canonical_bytes` above.
 # * `siphash24` is implemented by the always-present core extension, so schema
 #   callers and the recorder use the same dependency-free native primitive
 #   without coupling the portable schema surface to the Linux flight module.
-#
 # `tests/test_flight_capture.py` pins the published SipHash vector so recorder
 # and schema fingerprints cannot drift from the algorithm's external oracle.
 
@@ -1479,8 +1403,6 @@ MAX_CHUNK_BYTES = 64 * 1024 * 1024
 MAX_ROWS = 5_000_000
 
 
-# --- metadata image (de)serialization --------------------------------------
-#
 # The decoder consumes the canonical metadata wire form. Every declared length
 # is bounds-checked before it is used to slice, and a round trip preserves the
 # container hash.

@@ -5,6 +5,7 @@ import-time side effects), so this walks `ast` only. Two passes: (1) index every
 module's classes by framework base across the whole tree so body-params and query
 targets resolve cross-module; (2) classify constructs into findings.
 """
+
 from __future__ import annotations
 
 import ast
@@ -186,7 +187,10 @@ def module_findings(
     gap impossible rather than merely fixed.
     """
     analyzer = _Analyzer(
-        path, root, imports, context.index,
+        path,
+        root,
+        imports,
+        context.index,
         {**context.pk_types, **module_pk_types(tree, imports)},
         context.orm_columns,
         context.orm_relations,
@@ -265,8 +269,13 @@ def analyze(root) -> Report:
         rel = _relative_to(Path(path), root)
         # Detection reads the same parse, so naming the stack costs no extra I/O.
         signals[rel] = scan_module(tree)
-    return Report(findings, roots=[str(root)], skipped=list(skipped.values()),
-                  files_analyzed=analyzed, detection=Detection.of(signals))
+    return Report(
+        findings,
+        roots=[str(root)],
+        skipped=list(skipped.values()),
+        files_analyzed=analyzed,
+        detection=Detection.of(signals),
+    )
 
 
 def analyze_all(roots) -> Report:

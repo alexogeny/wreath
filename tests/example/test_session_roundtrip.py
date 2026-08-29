@@ -1,23 +1,3 @@
-"""Signing in, and then being recognised — the round trip through the cookie.
-
-`test_authorization.py` asks what each role may see, and does it with
-`acting_as`, which installs an identity directly. That is the right tool for a
-policy matrix, and it is why this file exists separately: `acting_as` never
-touches the session cookie, so nothing there exercises the path a browser
-actually takes — POST the credentials, receive `Set-Cookie`, send it back, be
-recognised.
-
-That gap hid a real defect. `GET /session` reported `signed_in: false` to a
-caller holding a cookie it had just issued, because it read `request.identity`
-on a route with no authentication requirement, and `authenticated()` is what
-asks the backend and populates that attribute. The route existed, the route
-table asserted it existed, and nothing ever asked it the question it is for.
-
-`TestClient` keeps no cookie jar, so the cookie is carried by hand here. That is
-not a workaround to apologise for: it makes the thing under test visible in the
-test, and a jar would have hidden which request actually carried the credential.
-"""
-
 from __future__ import annotations
 
 import os
@@ -86,11 +66,6 @@ async def anonymous_client():
 
 @skip_without_database
 async def test_an_anonymous_caller_is_told_so_rather_than_refused(anonymous_client) -> None:
-    """"Am I signed in" is a question an anonymous caller may ask.
-
-    A 401 here would be wrong: the console calls this on load to decide whether
-    to render the sign-in form, and a 401 is not an answer to that question.
-    """
     response = await anonymous_client.get("/session")
     assert response.status == 200
     assert response.json() == {"signed_in": False}
@@ -98,16 +73,6 @@ async def test_an_anonymous_caller_is_told_so_rather_than_refused(anonymous_clie
 
 @skip_without_database
 async def test_signing_in_is_visible_to_the_next_request(anonymous_client) -> None:
-    """The defect this file was written for.
-
-    Sign in, then ask who you are, carrying the cookie that was just issued.
-    Before the fix this answered `{"signed_in": false}` — the handler read
-    `request.identity` on a route with no authentication requirement, and that
-    attribute is populated only where `authenticated()` (or a decorator that
-    implies it) has asked the backend. The route cannot *use* that decorator
-    without turning the anonymous case into a 401, so it reads the session it
-    was handed instead.
-    """
     signed_in = await anonymous_client.post("/session", params={"email": VOLUNTEER})
     assert signed_in.status == 200
     assert signed_in.json()["role"] == "volunteer"
@@ -121,7 +86,6 @@ async def test_signing_in_is_visible_to_the_next_request(anonymous_client) -> No
 
 @skip_without_database
 async def test_signing_out_is_visible_to_the_next_request(anonymous_client) -> None:
-    """And the reverse: the answer goes back to anonymous rather than staying stale."""
     signed_in = await anonymous_client.post("/session", params={"email": VOLUNTEER})
     held = cookie(signed_in)
     assert (await anonymous_client.get("/session", headers=held)).json()["signed_in"] is True
@@ -137,12 +101,6 @@ async def test_signing_out_is_visible_to_the_next_request(anonymous_client) -> N
 async def test_the_session_cookie_admits_the_caller_to_a_protected_route(
     anonymous_client,
 ) -> None:
-    """The cookie is not decorative: it is what `/reserves` accepts.
-
-    Asserted here rather than assumed, because every other database test in
-    this package uses `acting_as` and would keep passing if the cookie stopped
-    being honoured entirely.
-    """
     assert (await anonymous_client.get("/reserves")).status == 401
 
     signed_in = await anonymous_client.post("/session", params={"email": VOLUNTEER})

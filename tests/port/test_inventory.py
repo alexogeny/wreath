@@ -1,5 +1,3 @@
-"""The migration inventory keeps ownership instead of flattening several apps."""
-
 from __future__ import annotations
 
 import importlib

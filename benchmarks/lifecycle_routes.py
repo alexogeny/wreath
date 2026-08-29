@@ -11,9 +11,7 @@ numbers in a real API are path *parameters*, which this table already has. The
 distinction is not cosmetic. A router that keys on segment bytes behaves very
 differently on ``resource-137`` (a long shared prefix, discriminated only by
 digits deep in the segment) than on ``invoices``, and measuring the numbered
-shape reports a number that no real application would see -- in either
-direction. See the "Discriminating bytes" section of
-``docs/plans/bitset-routing.md`` for how large that difference is.
+shape reports a number that no real application would see.
 
 Shape, count, depth, and per-branch permissions are unchanged from the numbered
 version, so this is the same benchmark with a realistic vocabulary -- but
@@ -31,18 +29,51 @@ API_PREFIX_TEMPLATE = "/api/v2/organizations/{organization_id}"
 #: One noun per domain branch. 24 of them, the sibling subtrees a
 #: permission-aware router gets to prune.
 BRANCH_WORDS = (
-    "billing", "identity", "catalog", "shipping", "payments", "accounts",
-    "inventory", "orders", "shipments", "returns", "invoices", "contracts",
-    "documents", "messaging", "analytics", "reporting", "search", "media",
-    "webhooks", "audit", "compliance", "support", "workflows", "admin-console",
+    "billing",
+    "identity",
+    "catalog",
+    "shipping",
+    "payments",
+    "accounts",
+    "inventory",
+    "orders",
+    "shipments",
+    "returns",
+    "invoices",
+    "contracts",
+    "documents",
+    "messaging",
+    "analytics",
+    "reporting",
+    "search",
+    "media",
+    "webhooks",
+    "audit",
+    "compliance",
+    "support",
+    "workflows",
+    "admin-console",
 )
 #: One noun per group, 4 of them: the repeated mid-path literal.
 GROUP_WORDS = ("public", "internal", "partner", "restricted")
 #: One noun per leaf, 16 of them: the distinct per-leaf literal.
 RESOURCE_WORDS = (
-    "invoices", "members", "documents", "webhooks", "sessions", "tokens",
-    "exports", "reports", "plans", "teams", "events", "audits",
-    "policies", "secrets", "regions", "zones",
+    "invoices",
+    "members",
+    "documents",
+    "webhooks",
+    "sessions",
+    "tokens",
+    "exports",
+    "reports",
+    "plans",
+    "teams",
+    "events",
+    "audits",
+    "policies",
+    "secrets",
+    "regions",
+    "zones",
 )
 
 assert len(BRANCH_WORDS) == ROUTE_BRANCHES
@@ -56,15 +87,9 @@ TARGET_BRANCH_WORD = BRANCH_WORDS[TARGET_BRANCH]
 
 def leaf_suffix(leaf: int, item_param: str) -> str:
     """The decoy leaf path below a branch, with `item_param` already formatted."""
-    return (
-        f"/services/{GROUP_WORDS[leaf % len(GROUP_WORDS)]}"
-        f"/{RESOURCE_WORDS[leaf]}/{item_param}"
-    )
+    return f"/services/{GROUP_WORDS[leaf % len(GROUP_WORDS)]}/{RESOURCE_WORDS[leaf]}/{item_param}"
 
 
 def request_path(organization_id: int, user_id: int) -> str:
     """The one URL the benchmark measures."""
-    return (
-        f"/api/v2/organizations/{organization_id}"
-        f"/{TARGET_BRANCH_WORD}/admin/users/{user_id}"
-    )
+    return f"/api/v2/organizations/{organization_id}/{TARGET_BRANCH_WORD}/admin/users/{user_id}"

@@ -1,21 +1,3 @@
-"""Red-team the framework's owned failure handling with replay fault injection.
-
-These tests use replay + fault injection to drive Wreath's *own* code under
-adversity and assert the owned outcome is deterministic and safe:
-
-- **Transport / parser:** truncated, short-read, reset, and half-closed inbound
-  streams never crash the driver, never fabricate a success response, and produce
-  the same owned outcome on a re-run (a first-class property for a parser).
-- **PostgreSQL / ORM:** a boundary fault (pool timeout, server error, connection
-  drop, ambiguous commit) is mapped to an owned status *and the leased connection
-  is returned to the pool* — the framework, not the handler, owns release.
-- **Outbound HTTP:** a connect/read fault propagates through the client's owned
-  timeout/error path and, through a handler, maps to an owned status.
-
-This file is the behavioral baseline: adding a route and a fault here exercises
-real framework logic, not a mock of it.
-"""
-
 from __future__ import annotations
 
 import importlib
@@ -67,9 +49,6 @@ def _app() -> wreath.Wreath:
         return wreath.response.TextResponse("pong")
 
     return app
-
-
-# --- transport / parser red-team ---------------------------------------------
 
 
 @proto
@@ -172,9 +151,6 @@ async def test_timeout_fault_on_an_idle_connection_closes_deterministically(
     assert a.matches(b)
 
 
-# --- PostgreSQL / ORM red-team -----------------------------------------------
-
-
 def _db_app() -> wreath.Wreath:
     app = wreath.Wreath()
     app.postgres("main", dsn="postgres://stub/db")
@@ -208,7 +184,8 @@ def _db_app() -> wreath.Wreath:
 async def test_query_server_error_maps_to_500_and_releases_the_connection() -> None:
     double = DatabaseDouble("main", query_faults={0: AdapterFault.SERVER_ERROR})
     result = await replay_endpoint_plan(
-        _db_app(), CanonicalRequest("GET", "/users"),
+        _db_app(),
+        CanonicalRequest("GET", "/users"),
         adapters=ReplayAdapters(databases={"main": double}),
     )
     assert result.status == 500
@@ -223,7 +200,8 @@ async def test_query_server_error_maps_to_500_and_releases_the_connection() -> N
 async def test_acquire_faults_map_to_500_without_a_phantom_release(fault: AdapterFault) -> None:
     double = DatabaseDouble("main", acquire_fault=fault)
     result = await replay_endpoint_plan(
-        _db_app(), CanonicalRequest("GET", "/users"),
+        _db_app(),
+        CanonicalRequest("GET", "/users"),
         adapters=ReplayAdapters(databases={"main": double}),
     )
     assert result.status == 500
@@ -240,7 +218,8 @@ async def test_acquire_faults_map_to_500_without_a_phantom_release(fault: Adapte
 async def test_midflight_db_faults_never_leak_a_connection(fault: AdapterFault) -> None:
     double = DatabaseDouble("main", query_faults={0: fault})
     result = await replay_endpoint_plan(
-        _db_app(), CanonicalRequest("GET", "/users"),
+        _db_app(),
+        CanonicalRequest("GET", "/users"),
         adapters=ReplayAdapters(databases={"main": double}),
     )
     assert result.status == 500
@@ -252,7 +231,8 @@ async def test_fault_on_the_second_query_still_releases() -> None:
     # The Nth-query coordinate: the first query succeeds, the second faults.
     double = DatabaseDouble("main", query_faults={1: AdapterFault.SERVER_ERROR})
     result = await replay_endpoint_plan(
-        _db_app(), CanonicalRequest("GET", "/two"),
+        _db_app(),
+        CanonicalRequest("GET", "/two"),
         adapters=ReplayAdapters(databases={"main": double}),
     )
     assert result.status == 500
@@ -265,7 +245,8 @@ async def test_handler_that_swallows_the_db_error_still_releases() -> None:
     # returns 200, the binder returns the connection to the pool.
     double = DatabaseDouble("main", query_faults={0: AdapterFault.SERVER_ERROR})
     result = await replay_endpoint_plan(
-        _db_app(), CanonicalRequest("GET", "/guarded"),
+        _db_app(),
+        CanonicalRequest("GET", "/guarded"),
         adapters=ReplayAdapters(databases={"main": double}),
     )
     assert result.status == 200
@@ -278,16 +259,14 @@ async def test_db_fault_outcome_is_deterministic() -> None:
     def run():
         double = DatabaseDouble("main", query_faults={0: AdapterFault.SERVER_ERROR})
         return replay_endpoint_plan(
-            _db_app(), CanonicalRequest("GET", "/users"),
+            _db_app(),
+            CanonicalRequest("GET", "/users"),
             adapters=ReplayAdapters(databases={"main": double}),
         )
 
     a = await run()
     b = await run()
     assert a.matches(b)
-
-
-# --- outbound HTTP red-team --------------------------------------------------
 
 
 @pytest.mark.asyncio

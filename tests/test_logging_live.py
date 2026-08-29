@@ -1,15 +1,3 @@
-"""Logging, live end-to-end over a real server.
-
-Everything the other logging suites test is reachable by hand. This one asserts
-the wiring: that a record written in a handler reaches the ring the recorder
-owns, is joined to *its own* request's trace by the projector, and comes out of
-the writer carrying the trace and span ids the recorder generated -- without the
-handler having said anything about correlation.
-
-That is the whole claim the design rests on, so it is tested against a real
-server over a real socket rather than against a fake recorder.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -86,7 +74,7 @@ async def _get(port: int, path: str) -> bytes:
     writer.close()
     try:
         await writer.wait_closed()
-    except (ConnectionResetError, BrokenPipeError):
+    except ConnectionResetError, BrokenPipeError:
         pass
     return body
 
@@ -137,7 +125,6 @@ async def test_debug_records_stay_quiet_on_a_healthy_request() -> None:
 
 @pytest.mark.asyncio
 async def test_debug_records_are_promoted_when_the_request_fails() -> None:
-    """The payoff: verbose history for exactly the request that went wrong."""
     lines: list[str] = []
     server = await serve(_app(), _config(lines))
     port = server.sockets[0].getsockname()[1]
@@ -155,7 +142,6 @@ async def test_debug_records_are_promoted_when_the_request_fails() -> None:
 
 @pytest.mark.asyncio
 async def test_two_requests_do_not_share_a_trace() -> None:
-    """The join is by request id, so concurrent requests must not cross."""
     lines: list[str] = []
     server = await serve(_app(), _config(lines))
     port = server.sockets[0].getsockname()[1]
@@ -172,7 +158,6 @@ async def test_two_requests_do_not_share_a_trace() -> None:
 
 @pytest.mark.asyncio
 async def test_logging_is_inert_when_telemetry_is_off() -> None:
-    """Off must stay off: no runtime installed, no records, no writer thread."""
     lines: list[str] = []
     config = ServerConfig(host="127.0.0.1", port=0, lifespan="off", log_writer=lines.append)
     server = await serve(_app(), config)
@@ -184,8 +169,6 @@ async def test_logging_is_inert_when_telemetry_is_off() -> None:
     assert lines == []
 
 
-# --- HTTP/2, HTTP/3 and WebSocket ------------------------------------------
-#
 # The dict-scope transports have no request-context object, so their protocols
 # seed the recorder's request id into the scope. If that seeding regresses, a
 # record still emits -- it just silently loses its correlation, which is the
@@ -236,13 +219,12 @@ async def _ws(port: int, path: str) -> None:
     writer.close()
     try:
         await writer.wait_closed()
-    except (ConnectionResetError, BrokenPipeError):
+    except ConnectionResetError, BrokenPipeError:
         pass
 
 
 @pytest.mark.asyncio
 async def test_websocket_records_are_correlated() -> None:
-    """A session is one recorder context, so its records join one trace."""
     lines: list[str] = []
     server = await serve(_ws_app(), _config(lines))
     port = server.sockets[0].getsockname()[1]
@@ -287,19 +269,19 @@ async def test_a_healthy_websocket_session_stays_quiet() -> None:
     assert not [r for r in records if r.get("event") == "live.step"]
 
 
-# --- configuration ----------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_the_configured_level_is_honoured() -> None:
-    """`level` was hardcoded once; this is the test that keeps it plumbed."""
     from wreath.telemetry import LoggingConfig
 
     lines: list[str] = []
     config = ServerConfig(
-        host="127.0.0.1", port=0, lifespan="off",
+        host="127.0.0.1",
+        port=0,
+        lifespan="off",
         telemetry=TelemetryConfig(
-            mode=Mode.DETAILED, ring_records=512, active_requests=32,
+            mode=Mode.DETAILED,
+            ring_records=512,
+            active_requests=32,
             detailed=SamplingPolicy(rate=1.0),
             logging=LoggingConfig(level=log.ERROR, capture_level=log.ERROR),
         ),
@@ -308,7 +290,7 @@ async def test_the_configured_level_is_honoured() -> None:
     server = await serve(_app(), config)
     port = server.sockets[0].getsockname()[1]
     try:
-        await _get(port, "/ok")   # emits WARN, below the configured ERROR
+        await _get(port, "/ok")  # emits WARN, below the configured ERROR
     finally:
         await server.close()
     records = [json.loads(ln) for ln in lines if ln.startswith("{")]

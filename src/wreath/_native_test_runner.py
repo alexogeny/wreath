@@ -88,9 +88,7 @@ def _schedule_fuzz_cases(cases: Iterable[Case], seed: str) -> tuple[Case, ...]:
     return tuple(
         sorted(
             cases,
-            key=lambda case: hashlib.sha256(
-                f"{seed}\0{case.node_id}".encode()
-            ).digest(),
+            key=lambda case: hashlib.sha256(f"{seed}\0{case.node_id}".encode()).digest(),
         )
     )
 
@@ -333,9 +331,7 @@ class _FixtureRuntime:
             self._temp_directory = tempfile.TemporaryDirectory(prefix="wreath-native-tmp-")
         return Path(self._temp_directory.name)
 
-    def storage(
-        self, scope: str, module_id: str
-    ) -> tuple[dict[Any, Any], Any, ExitStack]:
+    def storage(self, scope: str, module_id: str) -> tuple[dict[Any, Any], Any, ExitStack]:
         if scope == "session":
             return self.session_values, "session", self.session_stack
         stack = self.module_stacks.setdefault(module_id, ExitStack())
@@ -405,6 +401,7 @@ class _FixtureCall:
         values = dict(self.assigned)
         resolving: list[str] = []
         with ExitStack() as stack:
+
             def resolve(name: str, owner_stack: ExitStack = stack) -> Any:
                 if name in values:
                     return values[name]
@@ -439,9 +436,7 @@ class _FixtureCall:
                     values[name] = capture
                     return capture
                 if name == "recwarn":
-                    captured = owner_stack.enter_context(
-                        warnings.catch_warnings(record=True)
-                    )
+                    captured = owner_stack.enter_context(warnings.catch_warnings(record=True))
                     warnings.simplefilter("always")
                     if owner_stack is stack:
                         values[name] = captured
@@ -478,9 +473,7 @@ class _FixtureCall:
                         for item in definition.dependencies
                     )
                     if inspect.isgeneratorfunction(definition.function):
-                        value = fixture_stack.enter_context(
-                            _yield_fixture(definition, arguments)
-                        )
+                        value = fixture_stack.enter_context(_yield_fixture(definition, arguments))
                     else:
                         value = definition.function(*arguments)
                 finally:
@@ -500,6 +493,7 @@ class _FixtureCall:
         values = dict(self.assigned)
         resolving: list[str] = []
         async with AsyncExitStack() as stack:
+
             async def resolve(name: str, owner_stack: Any = stack) -> Any:
                 if name in values:
                     return values[name]
@@ -531,9 +525,7 @@ class _FixtureCall:
                     values[name] = capture
                     return capture
                 if name == "recwarn":
-                    captured = owner_stack.enter_context(
-                        warnings.catch_warnings(record=True)
-                    )
+                    captured = owner_stack.enter_context(warnings.catch_warnings(record=True))
                     warnings.simplefilter("always")
                     values[name] = captured
                     return captured
@@ -563,30 +555,28 @@ class _FixtureCall:
                 resolving.append(name)
                 try:
                     selected_param = self.fixture_params.get(name)
-                    arguments = tuple([
-                        _FixtureRequest(
-                            self.node,
-                            _async_fixture_lookup,
-                            fixture_stack,
-                            None if selected_param is None else selected_param[1],
-                            selected_param is not None,
-                        )
-                        if item == "request"
-                        else await resolve(item, fixture_stack)
-                        for item in definition.dependencies
-                    ])
+                    arguments = tuple(
+                        [
+                            _FixtureRequest(
+                                self.node,
+                                _async_fixture_lookup,
+                                fixture_stack,
+                                None if selected_param is None else selected_param[1],
+                                selected_param is not None,
+                            )
+                            if item == "request"
+                            else await resolve(item, fixture_stack)
+                            for item in definition.dependencies
+                        ]
+                    )
                     if inspect.isasyncgenfunction(definition.function):
                         value = await cast(
                             "AsyncExitStack[Any]", fixture_stack
-                        ).enter_async_context(
-                            _async_yield_fixture(definition, arguments)
-                        )
+                        ).enter_async_context(_async_yield_fixture(definition, arguments))
                     elif inspect.iscoroutinefunction(definition.function):
                         value = await definition.function(*arguments)
                     elif inspect.isgeneratorfunction(definition.function):
-                        value = fixture_stack.enter_context(
-                            _yield_fixture(definition, arguments)
-                        )
+                        value = fixture_stack.enter_context(_yield_fixture(definition, arguments))
                     else:
                         value = definition.function(*arguments)
                 finally:
@@ -596,9 +586,7 @@ class _FixtureCall:
 
             for name in self.autouse:
                 await resolve(name)
-            arguments = tuple(
-                [await resolve(name) for name in self.parameter_names]
-            )
+            arguments = tuple([await resolve(name) for name in self.parameter_names])
             result = self.function(*arguments)
             if inspect.isawaitable(result):
                 return await result
@@ -634,17 +622,20 @@ def _bound_fixture_callable(
     method_call: _TestMethod, function: Callable[..., Any]
 ) -> Callable[..., Any]:
     if inspect.isasyncgenfunction(function):
+
         async def async_generator(*arguments: Any) -> Any:
             async for value in function(method_call.instance(), *arguments):
                 yield value
 
         return async_generator
     if inspect.iscoroutinefunction(function):
+
         async def coroutine(*arguments: Any) -> Any:
             return await function(method_call.instance(), *arguments)
 
         return coroutine
     if inspect.isgeneratorfunction(function):
+
         def generator(*arguments: Any) -> Any:
             yield from function(method_call.instance(), *arguments)
 
@@ -657,9 +648,7 @@ def _bound_fixture_callable(
 
 
 @contextmanager
-def _yield_fixture(
-    definition: FixtureDef, arguments: tuple[Any, ...]
-) -> Iterator[Any]:
+def _yield_fixture(definition: FixtureDef, arguments: tuple[Any, ...]) -> Iterator[Any]:
     generator = definition.function(*arguments)
     try:
         value = next(generator)
@@ -682,9 +671,7 @@ def _yield_fixture(
 
 
 @asynccontextmanager
-async def _async_yield_fixture(
-    definition: FixtureDef, arguments: tuple[Any, ...]
-) -> Any:
+async def _async_yield_fixture(definition: FixtureDef, arguments: tuple[Any, ...]) -> Any:
     generator = definition.function(*arguments)
     try:
         value = await anext(generator)
@@ -802,10 +789,10 @@ def _configured_markers(directory: Path | None = None) -> str | None:
     if pyproject.is_file():
         try:
             document = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-            addopts = document.get("tool", {}).get("pytest", {}).get("ini_options", {}).get(
-                "addopts"
+            addopts = (
+                document.get("tool", {}).get("pytest", {}).get("ini_options", {}).get("addopts")
             )
-        except (OSError, tomllib.TOMLDecodeError):
+        except OSError, tomllib.TOMLDecodeError:
             addopts = None
     if addopts is None:
         for name in ("pytest.ini", "tox.ini", "setup.cfg"):
@@ -815,7 +802,7 @@ def _configured_markers(directory: Path | None = None) -> str | None:
             parser = configparser.ConfigParser()
             try:
                 parser.read(candidate, encoding="utf-8")
-            except (configparser.Error, OSError):
+            except configparser.Error, OSError:
                 continue
             for section in ("pytest", "tool:pytest"):
                 addopts = parser.get(section, "addopts", fallback=None)
@@ -862,9 +849,7 @@ def _selected_files(
             if path.name == "conftest.py":
                 raise ValueError(f"{_display_path(path)} is not supported by the native engine")
             if not path.name.startswith("test_") or path.suffix != ".py":
-                raise ValueError(
-                    f"native test file {selected} must be named test_*.py"
-                )
+                raise ValueError(f"native test file {selected} must be named test_*.py")
             files.add(path)
             continue
         files.update(candidate.resolve() for candidate in path.rglob("test_*.py"))
@@ -916,7 +901,7 @@ def _collect_ignore_declarations(
 ) -> tuple[tuple[str, tuple[str, ...]], ...]:
     try:
         tree = ast.parse(conftest.read_text(encoding="utf-8"), filename=str(conftest))
-    except (OSError, SyntaxError):
+    except OSError, SyntaxError:
         return ()
     declarations: list[tuple[str, tuple[str, ...]]] = []
     for statement in tree.body:
@@ -932,20 +917,17 @@ def _collect_ignore_declarations(
         kind = min(selected)
         try:
             patterns = ast.literal_eval(statement.value)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             raise ValueError(
                 f"{_display_path(conftest)}: {kind} must be a literal "
                 "sequence of paths or glob patterns"
             ) from None
         if not isinstance(patterns, list | tuple):
             raise ValueError(
-                f"{_display_path(conftest)}: collect ignore declaration must be "
-                "a literal sequence"
+                f"{_display_path(conftest)}: collect ignore declaration must be a literal sequence"
             )
         if not all(isinstance(pattern, str) for pattern in patterns):
-            raise ValueError(
-                f"{_display_path(conftest)}: collect ignore entries must be strings"
-            )
+            raise ValueError(f"{_display_path(conftest)}: collect ignore entries must be strings")
         frozen_patterns = tuple(patterns)
         for name in sorted(selected):
             declarations.append((name, frozen_patterns))
@@ -965,9 +947,7 @@ def _conftest_paths(directory: Path) -> tuple[Path, ...]:
     else:
         directories = list(reversed((resolved, *resolved.parents)))
     return tuple(
-        candidate
-        for parent in directories
-        if (candidate := parent / "conftest.py").is_file()
+        candidate for parent in directories if (candidate := parent / "conftest.py").is_file()
     )
 
 
@@ -1018,9 +998,7 @@ def collect(options: Options) -> Collection:
                 module_name = _module_name(path)
                 module = _load_module(path, module_name)
                 modules.append(module_name)
-                local = _fixture_defs(
-                    path, module, conftest=False
-                )
+                local = _fixture_defs(path, module, conftest=False)
                 fixtures = {**inherited, **{item.name: item for item in local}}
                 cases.extend(_collect_module(path, module, fixtures, runtime))
         except BaseException:
@@ -1071,9 +1049,7 @@ def _load_module(path: Path, module_name: str) -> ModuleType:
     sys.modules[module_name] = module
     import_roots = [str(Path.cwd().resolve()), str(path.parent)]
     import_roots.extend(
-        str(parent)
-        for parent in path.parents
-        if (parent / "conftest.py").is_file()
+        str(parent) for parent in path.parents if (parent / "conftest.py").is_file()
     )
     current_roots = set(sys.path)
     inserted = [root for root in dict.fromkeys(import_roots) if root not in current_roots]
@@ -1089,8 +1065,7 @@ def _load_module(path: Path, module_name: str) -> ModuleType:
     except (ImportError, SyntaxError) as error:
         sys.modules.pop(module_name, None)
         raise ValueError(
-            f"{_display_path(path)} could not be imported: "
-            f"{type(error).__name__}: {error}"
+            f"{_display_path(path)} could not be imported: {type(error).__name__}: {error}"
         ) from error
     except BaseException:
         sys.modules.pop(module_name, None)
@@ -1221,8 +1196,7 @@ def _validate_fixture_graph(
         if name in _BUILTIN_FIXTURES:
             if (
                 parent is not None
-                and _FIXTURE_SCOPE_RANK[_BUILTIN_SCOPE[name]]
-                < _FIXTURE_SCOPE_RANK[parent.scope]
+                and _FIXTURE_SCOPE_RANK[_BUILTIN_SCOPE[name]] < _FIXTURE_SCOPE_RANK[parent.scope]
             ):
                 raise ValueError(
                     f"{parent.source}: {parent.scope}-scoped fixture {parent.name!r} "
@@ -1234,9 +1208,7 @@ def _validate_fixture_graph(
         if name in visiting:
             start = visiting.index(name)
             cycle = " -> ".join((*visiting[start:], name))
-            raise ValueError(
-                f"{display_path}: test {test_name!r} has fixture cycle {cycle}"
-            )
+            raise ValueError(f"{display_path}: test {test_name!r} has fixture cycle {cycle}")
         definition = fixtures.get(name)
         if definition is None:
             raise ValueError(
@@ -1245,8 +1217,7 @@ def _validate_fixture_graph(
             )
         if (
             parent is not None
-            and _FIXTURE_SCOPE_RANK[definition.scope]
-            < _FIXTURE_SCOPE_RANK[parent.scope]
+            and _FIXTURE_SCOPE_RANK[definition.scope] < _FIXTURE_SCOPE_RANK[parent.scope]
         ):
             raise ValueError(
                 f"{parent.source}: {parent.scope}-scoped fixture {parent.name!r} "
@@ -1284,10 +1255,7 @@ def _fixture_parameter_ids(definition: FixtureDef) -> tuple[str, ...]:
     params = definition.params or ()
     declared = definition.param_ids
     if callable(declared):
-        return tuple(
-            declared(value) or _value_id(value)
-            for value in params
-        )
+        return tuple(declared(value) or _value_id(value) for value in params)
     if declared is not None:
         ids = tuple(declared)
         if len(ids) != len(params):
@@ -1322,9 +1290,7 @@ def _collect_module(
             )
 
     raw_module_marks = module.__dict__.get("pytestmark", ())
-    if isinstance(raw_module_marks, Sequence) and not isinstance(
-        raw_module_marks, (str, bytes)
-    ):
+    if isinstance(raw_module_marks, Sequence) and not isinstance(raw_module_marks, (str, bytes)):
         module_marks = tuple(_as_mark(item) for item in raw_module_marks)
     elif raw_module_marks:
         module_marks = (_as_mark(raw_module_marks),)
@@ -1355,9 +1321,7 @@ def _collect_module(
         ):
             continue
         collected.extend(
-            _expand_function(
-                display_path, name, value, module_marks, fixtures, runtime
-            )
+            _expand_function(display_path, name, value, module_marks, fixtures, runtime)
         )
     return collected
 
@@ -1376,9 +1340,7 @@ def _collect_class(
             "pytest test classes must use the default constructor"
         )
     raw_class_marks = owner.__dict__.get("pytestmark", ())
-    if isinstance(raw_class_marks, Sequence) and not isinstance(
-        raw_class_marks, (str, bytes)
-    ):
+    if isinstance(raw_class_marks, Sequence) and not isinstance(raw_class_marks, (str, bytes)):
         class_marks = tuple(_as_mark(item) for item in raw_class_marks)
     elif raw_class_marks:
         class_marks = (_as_mark(raw_class_marks),)
@@ -1395,8 +1357,7 @@ def _collect_class(
     raw_class_fixtures = tuple(
         (name, value, value.__wreath_fixture__)
         for name, value in owner.__dict__.items()
-        if inspect.isfunction(value)
-        and getattr(value, "__wreath_fixture__", None) is not None
+        if inspect.isfunction(value) and getattr(value, "__wreath_fixture__", None) is not None
     )
     for method_name, method in owner.__dict__.items():
         if not method_name.startswith("test_") or not inspect.isfunction(method):
@@ -1477,8 +1438,7 @@ def _expand_function(
     default_values = {
         parameter.name: parameter.default
         for parameter in signature.parameters.values()
-        if parameter.name in signature_name_set
-        and parameter.default is not inspect.Parameter.empty
+        if parameter.name in signature_name_set and parameter.default is not inspect.Parameter.empty
     }
     declarations: tuple[facade.Parametrize, ...] = (
         *inherited_parametrize,
@@ -1493,16 +1453,10 @@ def _expand_function(
             break
         declared_name_set.add(declared_name)
     if duplicate is not None:
-        raise ValueError(
-            f"{display_path}: test {name!r} parametrizes {duplicate!r} more than once"
-        )
-    unknown = next(
-        (item for item in declared_names if item not in signature_name_set), None
-    )
+        raise ValueError(f"{display_path}: test {name!r} parametrizes {duplicate!r} more than once")
+    unknown = next((item for item in declared_names if item not in signature_name_set), None)
     if unknown is not None:
-        raise ValueError(
-            f"{display_path}: test {name!r} parametrizes unknown argument {unknown!r}"
-        )
+        raise ValueError(f"{display_path}: test {name!r} parametrizes unknown argument {unknown!r}")
     fixture_names = tuple(
         item
         for item in signature_names
@@ -1536,9 +1490,7 @@ def _expand_function(
 
     if not declarations:
         combinations = [(default_values, [], function_marks)]
-    fixture_combinations: list[tuple[dict[str, tuple[int, Any]], list[str]]] = [
-        ({}, [])
-    ]
+    fixture_combinations: list[tuple[dict[str, tuple[int, Any]], list[str]]] = [({}, [])]
     for definition in _fixture_closure((*autouse, *fixture_names), fixtures):
         if definition.params is None:
             continue
@@ -1669,14 +1621,10 @@ def _compile_matcher(
     tokens = [match.group(1) for match in _EXPRESSION_TOKEN.finditer(expression)]
     position = 0
 
-    def either(
-        left: Callable[[Any], bool], right: Callable[[Any], bool]
-    ) -> Callable[[Any], bool]:
+    def either(left: Callable[[Any], bool], right: Callable[[Any], bool]) -> Callable[[Any], bool]:
         return lambda value: left(value) or right(value)
 
-    def both(
-        left: Callable[[Any], bool], right: Callable[[Any], bool]
-    ) -> Callable[[Any], bool]:
+    def both(left: Callable[[Any], bool], right: Callable[[Any], bool]) -> Callable[[Any], bool]:
         return lambda value: left(value) and right(value)
 
     def parse_or() -> Callable[[Any], bool]:
@@ -1805,11 +1753,7 @@ def _render(results: Sequence[Result], *, quiet: bool, slowest: int) -> None:
     counts = {outcome: 0 for outcome in ("passed", "failed", "skipped", "interrupted")}
     for result in results:
         counts[result.outcome] += 1
-    parts = [
-        f"{count} {name}"
-        for name, count in counts.items()
-        if count and name != "interrupted"
-    ]
+    parts = [f"{count} {name}" for name, count in counts.items() if count and name != "interrupted"]
     if counts["interrupted"]:
         parts.append(f"{counts['interrupted']} interrupted")
     print(", ".join(parts) if parts else "no tests ran")
@@ -1858,9 +1802,7 @@ def _child_payload(
             (
                 None
                 if result.exception is None
-                else "".join(
-                    traceback.TracebackException.from_exception(result.exception).format()
-                )
+                else "".join(traceback.TracebackException.from_exception(result.exception).format())
             ),
         )
         for result in results
@@ -1878,9 +1820,7 @@ def _raw_child_payload(
             (
                 None
                 if exception is None
-                else "".join(
-                    traceback.TracebackException.from_exception(exception).format()
-                )
+                else "".join(traceback.TracebackException.from_exception(exception).format())
             ),
         )
         for node_id, outcome, duration_ns, exception in results
@@ -1988,9 +1928,9 @@ class _WorkerProgressObserver:
             duration_ns = 0
         else:
             duration_ns = max(0, time.perf_counter_ns() - self.started_ns)
-        encoded = json.dumps(
-            [node_id, outcome, duration_ns], separators=(",", ":")
-        ).encode() + b"\n"
+        encoded = (
+            json.dumps([node_id, outcome, duration_ns], separators=(",", ":")).encode() + b"\n"
+        )
         descriptor = self.descriptor
         if descriptor is None:
             return
@@ -2056,9 +1996,7 @@ def _run_parallel(
         append_stage_event = _append_stage_event
     temporary = tempfile.TemporaryDirectory(prefix="wreath-native-workers-")
     directory = Path(temporary.name)
-    children: dict[
-        int, tuple[Path, Path, tuple[Case, ...], int, int | None]
-    ] = {}
+    children: dict[int, tuple[Path, Path, tuple[Case, ...], int, int | None]] = {}
     progress_buffers: dict[int, bytes] = {}
     progress_owners: dict[int, int] = {}
     completed_worker_cases: dict[int, int] = {}
@@ -2105,9 +2043,7 @@ def _run_parallel(
         # file is eligible to advance into fuzz.
         gold = tuple(sorted(state.verified_files))
         gold_lookup = dict.fromkeys(gold, True)
-        passed_files = sum(
-            file_state.outcome == "passed" for file_state in activity.files.values()
-        )
+        passed_files = sum(file_state.outcome == "passed" for file_state in activity.files.values())
         if (
             not live_fuzz_started
             and fuzz_namespace is not None
@@ -2143,6 +2079,7 @@ def _run_parallel(
         ):
             return 0
         from ._mutant.runner import _progressive_live_jobs
+
         return _progressive_live_jobs(
             len(shards),
             len(finished_progress_files),
@@ -2151,11 +2088,7 @@ def _run_parallel(
         )
 
     def rebalance_test_workers() -> None:
-        fuzz_slots = (
-            1
-            if live_fuzz is not None and live_fuzz.process.poll() is None
-            else 0
-        )
+        fuzz_slots = 1 if live_fuzz is not None and live_fuzz.process.poll() is None else 0
         target = max(1, len(shards) - mutation_slots() - fuzz_slots)
         while waiting_children_by_pid and len(running_children) < target:
             pid = waiting_children.popleft()
@@ -2179,10 +2112,7 @@ def _run_parallel(
         if outcome is None:
             activity.start_test(node_id)
             test = activity.tests[node_id]
-            if (
-                stage_events is not None
-                and append_stage_event is not None
-            ):
+            if stage_events is not None and append_stage_event is not None:
                 append_stage_event(
                     stage_events,
                     activity.files[test.path],
@@ -2245,7 +2175,7 @@ def _run_parallel(
                 break
             try:
                 record_progress(json.loads(raw), descriptor)
-            except (UnicodeDecodeError, ValueError):
+            except UnicodeDecodeError, ValueError:
                 continue
         return rows[last_index], True
 
@@ -2255,6 +2185,7 @@ def _run_parallel(
         while until_eof and consumed:
             pending, consumed = consume_progress_chunk(descriptor, pending)
         progress_buffers[descriptor] = pending
+
     try:
         activity.collect(tuple(case.node_id for case in collection.cases))
         if progress_stream is not None:
@@ -2310,25 +2241,25 @@ def _run_parallel(
                         case_count=len(shard),
                     )
                     try:
-                        results = _run_raw(
-                            worker_collection, max_failures, progress_observer
-                        )
+                        results = _run_raw(worker_collection, max_failures, progress_observer)
                     finally:
                         if tracer is not None:
                             tracer.stop()
                         if trace_observer is not None:
                             trace_observer.finish()
                         progress_observer.finish()
-                    hits = () if tracer is None else tuple(
-                        (f"{path}:{line}", tuple(nodes))
-                        for (path, line), nodes in tracer.index().items()
+                    hits = (
+                        ()
+                        if tracer is None
+                        else tuple(
+                            (f"{path}:{line}", tuple(nodes))
+                            for (path, line), nodes in tracer.index().items()
+                        )
                     )
                     target.write_bytes(_encode_raw_worker_payload(results, hits))
                     exit_code = 0
                 except Exception:
-                    target.write_bytes(
-                        _encode_worker_payload((), (), traceback.format_exc())
-                    )
+                    target.write_bytes(_encode_worker_payload((), (), traceback.format_exc()))
                 finally:
                     if progress_observer is not None:
                         progress_observer.finish()
@@ -2382,9 +2313,7 @@ def _run_parallel(
             rebalance_test_workers()
             if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0 or not target.exists():
                 log = (
-                    output.read_text(encoding="utf-8", errors="replace")
-                    if output.exists()
-                    else ""
+                    output.read_text(encoding="utf-8", errors="replace") if output.exists() else ""
                 )
                 detail = log or f"native worker {pid} exited with status {status}"
                 rows: Sequence[tuple[str, str, int, str | None]] = ()
@@ -2408,18 +2337,14 @@ def _run_parallel(
                         str(row[0]),
                         str(row[1]),
                         int(row[2]),
-                        RuntimeError(str(row[3]))
-                        if row[3] is not None
-                        else None,
+                        RuntimeError(str(row[3])) if row[3] is not None else None,
                     )
                     for row in rows
                 )
                 if trace_spec is not None:
                     trace_spec.output_dir.mkdir(parents=True, exist_ok=True)
                     trace_target = trace_spec.output_dir / f"trace-{pid}.json"
-                    trace_target.write_text(
-                        json.dumps({"hits": hits}), encoding="utf-8"
-                    )
+                    trace_target.write_text(json.dumps({"hits": hits}), encoding="utf-8")
             finished_ids = {result.node_id for result in shard_results}
             for case in shard:
                 if case.node_id not in finished_ids:
@@ -2447,9 +2372,8 @@ def _run_parallel(
                 shard_paths = {case.node_id.split("::", 1)[0] for case in shard}
                 for path in sorted(shard_paths):
                     file_state = activity.files[path]
-                    if (
-                        path not in finished_stage_files
-                        and file_state.finished == len(file_state.nodeids)
+                    if path not in finished_stage_files and file_state.finished == len(
+                        file_state.nodeids
                     ):
                         append_stage_event(stage_events, file_state)
                         finished_stage_files.add(path)
@@ -2525,9 +2449,7 @@ def execute(namespace: Any) -> int:
             raise ValueError("--mutant sample found no eligible controls")
         if trace_spec is not None:
             selection_path = temporary_path / "mutation-selection.json"
-            selection_path.write_text(
-                json.dumps(sorted(trace_spec.selected)), encoding="utf-8"
-            )
+            selection_path.write_text(json.dumps(sorted(trace_spec.selected)), encoding="utf-8")
             if not options.collect_only:
                 baseline_wait_path = temporary_path / "mutation-baseline.json"
                 prepared_mutation = _start_mutation_process(
@@ -2549,9 +2471,7 @@ def execute(namespace: Any) -> int:
                 if case_selection is not None:
                     case_selection_path = Path(str(case_selection))
                     try:
-                        selected_value = json.loads(
-                            case_selection_path.read_text(encoding="utf-8")
-                        )
+                        selected_value = json.loads(case_selection_path.read_text(encoding="utf-8"))
                     except (OSError, ValueError) as error:
                         raise ValueError(
                             f"--case-selection must name a readable JSON test list: {error}"
@@ -2570,23 +2490,16 @@ def execute(namespace: Any) -> int:
                             f"{min(missing)!r}; select its test file and use its exact node ID"
                         )
                     fuzz_case_ids = tuple(
-                        sorted(
-                            case.node_id
-                            for case in collection.cases
-                            if case.has_mark("fuzz")
-                        )
+                        sorted(case.node_id for case in collection.cases if case.has_mark("fuzz"))
                     )
                     selected_cases = tuple(
                         case
                         for case in collection.cases
-                        if selected_ids.get(case.node_id, False)
-                        or case.has_mark("fuzz")
+                        if selected_ids.get(case.node_id, False) or case.has_mark("fuzz")
                     )
                     schedule_seed = os.environ.get("WREATH_FUZZ_SCHEDULE_SEED")
                     if schedule_seed is not None:
-                        selected_cases = _schedule_fuzz_cases(
-                            selected_cases, schedule_seed
-                        )
+                        selected_cases = _schedule_fuzz_cases(selected_cases, schedule_seed)
                     collection = Collection(
                         selected_cases,
                         collection.modules,
@@ -2623,16 +2536,10 @@ def execute(namespace: Any) -> int:
                         live_mutation_limit=max(
                             1,
                             _resolve_mutant_workers("auto")
-                            - (
-                                1
-                                if getattr(namespace, "fuzz", "off") == "on"
-                                else 0
-                            ),
+                            - (1 if getattr(namespace, "fuzz", "off") == "on" else 0),
                         ),
                         fuzz_namespace=(
-                            namespace
-                            if getattr(namespace, "fuzz", "off") == "on"
-                            else None
+                            namespace if getattr(namespace, "fuzz", "off") == "on" else None
                         ),
                         fuzz_directory=temporary_path / "live-fuzz",
                         stage_events=(
@@ -2691,9 +2598,7 @@ def execute(namespace: Any) -> int:
             renderer.finish()
             return status
         if not passed:
-            mutation_activity = MutationActivity(
-                mode=str(namespace.mutant), state="no_green"
-            )
+            mutation_activity = MutationActivity(mode=str(namespace.mutant), state="no_green")
             if namespace.fuzz == "on":
                 fuzz, fuzz_activity = _no_gold_fuzz()
                 if user_report is not None:
@@ -2749,9 +2654,7 @@ def execute(namespace: Any) -> int:
                 mutation_activity,
                 renderer=renderer,
             )
-        early_selected = (
-            frozenset() if live_fuzz is None else frozenset(live_fuzz.selected)
-        )
+        early_selected = frozenset() if live_fuzz is None else frozenset(live_fuzz.selected)
         final_gold_set = frozenset(final_gold)
         batches = []
         if early_batch is not None and early_selected <= final_gold_set:
@@ -2888,8 +2791,7 @@ def execute_dual(namespace: Any) -> int:
     )
     if native_outcome_identities != pytest_outcome_identities:
         raise ValueError(
-            "native/pytest outcomes differ; "
-            f"native={native_outcomes!r}, pytest={pytest_outcomes!r}"
+            f"native/pytest outcomes differ; native={native_outcomes!r}, pytest={pytest_outcomes!r}"
         )
     _render(native_results, quiet=options.quiet, slowest=int(namespace.slowest))
     return pytest_status

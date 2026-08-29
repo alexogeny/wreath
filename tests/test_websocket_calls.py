@@ -1,21 +1,3 @@
-"""Request/response over a frame pipe, correlated and bounded.
-
-A WebSocket delivers frames in order and pairs nothing. Every protocol that
-puts a request/response contract on one grows the same three pieces by hand: an
-identifier on the way out, a map of what is outstanding, and a deadline. `Calls`
-is those three, and `wreath._correlation.Pending` is the part it shares with
-`wreath.entity` rather than writing twice.
-
-What is pinned here is the behaviour that is easy to get wrong in either place:
-
-* a reply for an identifier nobody awaits is ordinary, not an error;
-* a second reply must not settle an already-answered call;
-* a malformed frame must not end the read loop, because the calls still
-  outstanding on that socket are still answerable;
-* a closing socket fails its outstanding calls rather than letting each wait
-  out a deadline for an answer that provably cannot arrive.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -94,9 +76,6 @@ async def _answer_next(ws: FakeSocket, calls: Calls, body: dict[str, Any]) -> No
     ws.deliver(json.dumps({"reply_to": identifier, **body}))
 
 
-# --- the round trip -------------------------------------------------------------------
-
-
 async def test_a_call_gets_the_reply_that_names_it() -> None:
     ws = FakeSocket()
     async with _calls(ws) as calls:
@@ -154,9 +133,6 @@ async def test_a_second_reply_does_not_disturb_the_first() -> None:
         assert (await task)["value"] == "first"
 
 
-# --- the peer's own requests ----------------------------------------------------------
-
-
 async def test_a_peer_initiated_frame_reaches_the_handler() -> None:
     import json
 
@@ -211,9 +187,6 @@ async def test_only_one_request_handler() -> None:
             return None
 
 
-# --- the failure edges ----------------------------------------------------------------
-
-
 async def test_a_malformed_frame_does_not_end_the_loop() -> None:
     # The socket is still live and the calls outstanding on it are still
     # answerable; closing on garbage is a decision for the protocol, not a
@@ -258,9 +231,6 @@ async def test_too_many_outstanding_calls_are_refused() -> None:
         first.cancel()
         with pytest.raises(asyncio.CancelledError):
             await first
-
-
-# --- the shared primitive -------------------------------------------------------------
 
 
 async def test_a_slot_is_released_even_when_the_body_raises() -> None:
@@ -321,9 +291,6 @@ async def test_settling_an_already_answered_slot_reports_false() -> None:
         assert pending.settle("x", "second") is False
         assert pending.fail("x", RuntimeError("late")) is False
         assert await waiter == "first"
-
-
-# --- controls `wreath mutant` found nothing watching ----------------------------------
 
 
 async def test_closing_a_calls_that_never_started_does_not_raise() -> None:

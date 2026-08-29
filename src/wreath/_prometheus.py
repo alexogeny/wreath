@@ -57,8 +57,6 @@ _LABEL_NAME_LEAD = re.compile(r"^[^a-zA-Z_]")
 RouteLabels = Callable[[int], Mapping[str, str]] | Mapping[int, Mapping[str, str]] | None
 
 
-# --- formatting -------------------------------------------------------------
-
 def _sanitize_metric_name(name: str) -> str:
     name = _NAME_INVALID.sub("_", name)
     if _NAME_LEAD.match(name):
@@ -98,6 +96,7 @@ def render_exposition(
     without it, rows are labelled `route_id="<n>"`.
     """
     ns = _sanitize_metric_name(namespace).rstrip("_")
+
     def _cfam(name: str) -> str:
         # OpenMetrics declares the counter family without the `_total` suffix the
         # samples carry; Prometheus 0.0.4 uses the full name for both.
@@ -123,13 +122,16 @@ def render_exposition(
         snapshot,
         recorder_loss,
         (
-            _cfam(assembled), assembled, pending,
-            _cfam(proj_loss), proj_loss, _cfam(rec_loss), rec_loss,
+            _cfam(assembled),
+            assembled,
+            pending,
+            _cfam(proj_loss),
+            proj_loss,
+            _cfam(rec_loss),
+            rec_loss,
         ),
     )
 
-    # --- subsystem counters --------------------------------------------------
-    #
     # Grouped by family before emitting, because the exposition format requires
     # every sample of a family to be contiguous and a scraper rejects the text
     # outright when they are not -- two queues would otherwise interleave into
@@ -148,8 +150,6 @@ def render_exposition(
     )
 
 
-# --- bridge + mountable handler ---------------------------------------------
-
 class PrometheusBridge:
     """Renders a snapshot source's metrics as Prometheus exposition on demand.
 
@@ -160,7 +160,11 @@ class PrometheusBridge:
     """
 
     __slots__ = (
-        "_app", "_counter_sources", "_source", "_namespace", "_route_labels",
+        "_app",
+        "_counter_sources",
+        "_source",
+        "_namespace",
+        "_route_labels",
         "_openmetrics",
     )
 
@@ -176,9 +180,7 @@ class PrometheusBridge:
     ) -> None:
         from .metrics import _counter_sources, _snapshot_source
 
-        explicit_sources = _counter_sources(
-            counter_sources, bridge="Prometheus"
-        )
+        explicit_sources = _counter_sources(counter_sources, bridge="Prometheus")
         #: The application whose registered subsystems are asked for counters on
         #: every render. Optional and defaulted absent: the projector half works
         #: without one, and a bridge built for a test double should not have to

@@ -1,12 +1,3 @@
-"""Declarations that subsystems outside the ORM attach to a model.
-
-`Facet` is one mechanism, not one per subsystem: the audit trail's
-`audited(redact=...)` and a privacy classification are the same shape with
-different payloads. What the ORM contributes -- and what each subsystem would
-otherwise get wrong on its own -- is the two checks below: the column names are
-validated when the class is created, and two facets cannot share a namespace.
-"""
-
 from __future__ import annotations
 
 import pytest

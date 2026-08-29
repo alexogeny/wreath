@@ -1,10 +1,3 @@
-"""Recording a durable job attempt: the policy, the container, the refusals.
-
-A job attempt recording is identity + cause + boundaries + outcome. These tests
-pin each of those, the deny-by-default arming in front of them, and the two
-ways a container can lie about what it holds.
-"""
-
 from __future__ import annotations
 
 import io
@@ -63,11 +56,7 @@ def _written(*records: AttemptRecord, close: bool = True) -> bytes:
     return buffer.getvalue()
 
 
-# --- arming ------------------------------------------------------------------
-
-
 def test_a_policy_with_no_triggers_captures_nothing():
-    """Deny by default, and the failing attempt is the tempting exception."""
     policy = AttemptPolicy()
     assert not policy.captures(
         task="send", outcome=AttemptOutcome.RAISED, attempt=1, max_attempts=5, job_id=1
@@ -84,18 +73,15 @@ def test_arming_on_failure_captures_every_outcome_that_is_not_completion():
         AttemptOutcome.DEADLINE_CANCELLED,
         AttemptOutcome.LEASE_EXPIRED,
     ):
-        assert policy.captures(
-            task="send", outcome=outcome, attempt=1, max_attempts=5, job_id=1
-        ), outcome
+        assert policy.captures(task="send", outcome=outcome, attempt=1, max_attempts=5, job_id=1), (
+            outcome
+        )
     assert not policy.captures(
         task="send", outcome=AttemptOutcome.COMPLETED, attempt=1, max_attempts=5, job_id=1
     )
 
 
 def test_a_deadline_cancellation_is_not_folded_into_raised():
-    """Four outcomes, not three. `_run_handler` counts a deadline separately in
-    `run_timeouts` precisely because nothing failed -- work was stopped -- so a
-    policy that wants only genuine raises must be able to say so."""
     policy = AttemptPolicy(triggers=(AttemptTrigger(AttemptTriggerKind.RAISED),))
     assert policy.captures(
         task="send", outcome=AttemptOutcome.RAISED, attempt=1, max_attempts=5, job_id=1
@@ -123,9 +109,7 @@ def test_arming_on_final_failure_waits_for_the_attempt_that_exhausts_the_budget(
 
 
 def test_arming_by_task_name_captures_that_task_and_no_other():
-    policy = AttemptPolicy(
-        triggers=(AttemptTrigger(AttemptTriggerKind.TASK, task="import_herd"),)
-    )
+    policy = AttemptPolicy(triggers=(AttemptTrigger(AttemptTriggerKind.TASK, task="import_herd"),))
     assert policy.captures(
         task="import_herd",
         outcome=AttemptOutcome.COMPLETED,
@@ -143,8 +127,6 @@ def test_arming_by_task_name_captures_that_task_and_no_other():
 
 
 def test_a_sampled_task_trigger_is_deterministic_in_the_job_id():
-    """Sampling has to be reproducible from the row, not from an RNG: two
-    workers reading the same job must agree on whether it is being recorded."""
     policy = AttemptPolicy(
         triggers=(AttemptTrigger(AttemptTriggerKind.TASK, task="import_herd", rate=0.5),)
     )
@@ -174,8 +156,6 @@ def test_a_sampled_task_trigger_is_deterministic_in_the_job_id():
 
 
 def test_an_unnamed_task_trigger_is_refused():
-    """`TASK` with no task is 'record every attempt', which this subsystem does
-    not have a spelling for."""
     with pytest.raises(RecordingPolicyError, match="names the task"):
         AttemptTrigger(AttemptTriggerKind.TASK)
 
@@ -193,9 +173,6 @@ def test_a_policy_bound_must_be_positive():
 
 
 def test_a_trigger_kind_may_be_spelled_as_its_string():
-    """Policies arrive from configuration as often as from code, and a
-    `"failure"` that stayed a `str` would compare unequal to every member and
-    arm nothing at all."""
     trigger = AttemptTrigger("failure")
     assert trigger.kind is AttemptTriggerKind.FAILURE
     assert AttemptPolicy(triggers=(trigger,)).captures(
@@ -207,12 +184,7 @@ def test_a_trigger_kind_may_be_spelled_as_its_string():
 
 def test_an_outcome_may_be_spelled_as_its_string_too():
     policy = AttemptPolicy(triggers=(AttemptTrigger(AttemptTriggerKind.FAILURE),))
-    assert policy.captures(
-        task="send", outcome="raised", attempt=1, max_attempts=5, job_id=1
-    )
-
-
-# --- the trace ---------------------------------------------------------------
+    assert policy.captures(task="send", outcome="raised", attempt=1, max_attempts=5, job_id=1)
 
 
 def test_a_trace_numbers_each_seam_and_target_separately():
@@ -224,7 +196,10 @@ def test_a_trace_numbers_each_seam_and_target_separately():
     trace.note(1, "other")
     trace.note(6, "objects")
     assert [(e.seam, e.target, e.coordinate) for e in trace.events] == [
-        (1, "main", 0), (1, "main", 1), (1, "other", 0), (6, "objects", 0),
+        (1, "main", 0),
+        (1, "main", 1),
+        (1, "other", 0),
+        (6, "objects", 0),
     ]
 
 
@@ -244,9 +219,6 @@ def test_an_overflowing_trace_stops_recording_and_says_so():
 
 
 def test_a_recorder_uses_the_image_it_was_given():
-    """A recording made by an application carries that application's metadata
-    image, which is what makes its route and dependency ids mean anything. The
-    empty stand-in is for a runner with no application, not the default answer."""
     import tempfile
 
     from wreath._flight_schema import NamedMeta
@@ -255,8 +227,19 @@ def test_a_recorder_uses_the_image_it_was_given():
     # Deliberately *not* the empty image, or the stand-in and the given one
     # would hash the same and this would pass whichever was used.
     image = MetadataImage(
-        SCHEMA_VERSION, (), (), (), (), (), (), (), (), (),
-        (NamedMeta(entry_id=1, name="main"),), (), (),
+        SCHEMA_VERSION,
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (NamedMeta(entry_id=1, name="main"),),
+        (),
+        (),
     )
     assert image.image_hash_short() != _image().image_hash_short()
 
@@ -270,9 +253,6 @@ def test_a_recorder_uses_the_image_it_was_given():
         assert recorder.written == 1
 
 
-# --- the container -----------------------------------------------------------
-
-
 def test_an_attempt_round_trips_through_the_wfr1_container():
     decoded = read_recording(_written(_record()))
     assert decoded.clean
@@ -281,8 +261,6 @@ def test_an_attempt_round_trips_through_the_wfr1_container():
 
 
 def test_the_attempt_is_a_record_kind_beside_the_others_not_a_second_format():
-    """One container, one decoder. The footer counts it, so a reader that never
-    heard of an attempt still knows the file holds one."""
     blob = _written(_record())
     assert blob[:4] == b"WFR1"
     decoded = read_recording(blob)
@@ -311,8 +289,6 @@ def test_every_recorded_fact_survives_the_round_trip():
 
 
 def test_a_truncated_attempt_recording_is_refused_by_name():
-    """Not recovered, not half-decoded. A recording whose tail was torn is the
-    one thing a reader must not quietly report as complete."""
     blob = _written(_record())
     for cut in (len(blob) - 1, len(blob) // 2):
         with pytest.raises(SchemaError, match="truncated"):
@@ -332,8 +308,6 @@ def test_an_attempt_chunk_that_declares_more_than_it_holds_is_refused_by_name():
 
 
 def test_a_chunked_attempt_recording_is_refused_by_name():
-    """An attempt split across chunks would decode as the prefix that fits and
-    say nothing about the rest, which is a recording of less than it claims."""
     blob = bytearray(_written(_record()))
     marker = blob.index(b"ATT1")
     blob[marker + 5] |= 0x01  # the continuation flag
@@ -355,8 +329,6 @@ def test_a_container_holding_no_attempt_is_refused_by_name():
 
 
 def test_an_attempt_recording_with_no_footer_is_refused():
-    """No footer means the process died mid-write. Every boundary after the
-    tear is missing and nothing in the bytes says how many."""
     with pytest.raises(SchemaError, match="truncated"):
         read_attempt_recording(_written(_record(), close=False))
 
@@ -371,8 +343,6 @@ def test_the_boundary_trace_keeps_its_order():
     assert [b.coordinate for b in decoded.boundaries] == list(range(9))
 
 
-# --- what the record decoder refuses on its own ------------------------------
-#
 # Reached through `AttemptRecord.decode` rather than through a whole file: the
 # container recovers a torn tail by design, so a chunk that never arrives is
 # *dropped* there and these refusals are never consulted. They are what stops a
@@ -399,8 +369,6 @@ def test_a_record_from_a_future_version_is_refused_rather_than_guessed_at():
 
 
 def test_a_record_torn_inside_a_text_field_is_refused_by_name():
-    """The declared total still matches, because the tear is *inside* the body:
-    a field says it is longer than what follows it."""
     from wreath._recording_format import _ATTEMPT_FIXED, _ATTEMPT_HEADER
 
     payload = bytearray(_record().encode())
@@ -412,9 +380,6 @@ def test_a_record_torn_inside_a_text_field_is_refused_by_name():
 
 
 def test_an_error_message_is_clamped_to_what_the_queue_row_itself_keeps():
-    """`last_error` is `error[:2000]`, so a recording that held more of a
-    failure than the row does would be describing something nobody can see in
-    the queue."""
     from wreath._recording_format import MAX_ERROR_MESSAGE
 
     decoded = read_attempt_recording(_written(_record(error_message="x" * 9000)))
@@ -422,17 +387,20 @@ def test_an_error_message_is_clamped_to_what_the_queue_row_itself_keeps():
 
 
 def test_a_footer_written_before_the_attempt_record_kind_still_reports_its_counts():
-    """The attempt count was *appended* after the footer rather than widening
-    it. Widening would have made an older footer fail the length check and
-    silently report zero slabs and zero cells -- a recording that looks empty."""
     import struct
 
     blob = bytearray(_written(_record()))
     footer_payload = blob.rindex(b"FOOT") + 12
-    legacy = bytes(blob[:footer_payload]) + bytes(blob[footer_payload:footer_payload + 24])
+    legacy = bytes(blob[:footer_payload]) + bytes(blob[footer_payload : footer_payload + 24])
     legacy = bytearray(legacy)
-    struct.pack_into("<4sII", legacy, footer_payload - 12, b"FOOT", 24,
-                     __import__("zlib").crc32(bytes(legacy[footer_payload:])) & 0xFFFFFFFF)
+    struct.pack_into(
+        "<4sII",
+        legacy,
+        footer_payload - 12,
+        b"FOOT",
+        24,
+        __import__("zlib").crc32(bytes(legacy[footer_payload:])) & 0xFFFFFFFF,
+    )
     decoded = read_recording(bytes(legacy))
     assert decoded.clean
     assert decoded.footer_attempts == 0  # the old footer never carried one
@@ -451,8 +419,6 @@ def _recrc(blob: bytearray, marker: int) -> None:
     struct.pack_into("<4sII", blob, header, tag, length, zlib.crc32(payload) & 0xFFFFFFFF)
 
 
-# --- `wreath flight read` reaches the record kind ----------------------------
-#
 # The decoder shipped with the record kind and the *dispatch* did not, so a
 # `.wfr1` handed to `flight read` was answered with the ring reader's complaint
 # about a `WFRR` magic: a true statement about the wrong thing, to somebody who
@@ -472,8 +438,6 @@ def _wfr1(tmp_path, *records: AttemptRecord, close: bool = True):
 
 
 def test_flight_read_decodes_an_attempt_recording(tmp_path, capsys) -> None:
-    """Success: the identity, the outcome and the boundary trace, in the file
-    the recorder actually wrote."""
     assert _flight(_wfr1(tmp_path, _record())) == 0
     out = capsys.readouterr().out
     assert "WFR1 container" in out
@@ -486,9 +450,6 @@ def test_flight_read_decodes_an_attempt_recording(tmp_path, capsys) -> None:
 
 
 def test_flight_read_says_when_no_argument_was_allowed(tmp_path, capsys) -> None:
-    """The count is forensic; the values are absent unless an operator named
-    one, and a reader looking for them should learn that here rather than
-    concluding the file was truncated."""
     assert _flight(_wfr1(tmp_path, _record())) == 0
     assert "2 argument(s), none allowed by name" in capsys.readouterr().out
 
@@ -512,8 +473,6 @@ def test_flight_read_emits_versioned_json_for_a_recording(tmp_path, capsys) -> N
 
 
 def test_flight_read_refuses_a_truncated_recording_by_name(tmp_path, capsys) -> None:
-    """Malformed: no footer means the process died mid-write, and what is
-    missing cannot be counted. Reported, and the exit code says so."""
     path = tmp_path / "torn.wfr1"
     path.write_bytes(_written(_record(), close=False))
     assert _flight(str(path)) == 0
@@ -526,8 +485,6 @@ def test_flight_read_refuses_a_truncated_recording_by_name(tmp_path, capsys) -> 
 
 
 def test_flight_read_propagates_a_decoder_refusal_as_a_message(tmp_path, capsys) -> None:
-    """Error propagation: a `SchemaError` from the decoder is a usage failure
-    with exit 2, not a traceback -- the same contract the ring path has."""
     path = tmp_path / "corrupt.wfr1"
     blob = bytearray(_written(_record()))
     blob[8:12] = b"\xff\xff\xff\xff"  # an unreadable schema version
@@ -536,15 +493,7 @@ def test_flight_read_propagates_a_decoder_refusal_as_a_message(tmp_path, capsys)
     assert capsys.readouterr().err, "the refusal must name something"
 
 
-def test_flight_read_refuses_a_transport_recording_naming_the_command(
-    tmp_path, capsys
-) -> None:
-    """Unsupported, and the useful kind of unsupported.
-
-    A `WTR1` is a recorder file, just not this command's. Left to the ring
-    reader it answered "not a wreath ring file" -- true, and it sends the
-    reader looking for a different *file* rather than for a different command.
-    """
+def test_flight_read_refuses_a_transport_recording_naming_the_command(tmp_path, capsys) -> None:
     path = tmp_path / "connection.wtr1"
     path.write_bytes(b"WTR1" + b"\x00" * 512)
     assert _flight(str(path)) == 2
@@ -553,11 +502,7 @@ def test_flight_read_refuses_a_transport_recording_naming_the_command(
     assert "wreath replay transport" in err
 
 
-def test_flight_read_refuses_a_file_that_is_no_container_at_all(
-    tmp_path, capsys
-) -> None:
-    """Neither a ring, a recording, nor a transport recording. The ring reader
-    owns this message, because "what even is this file" is its question."""
+def test_flight_read_refuses_a_file_that_is_no_container_at_all(tmp_path, capsys) -> None:
     path = tmp_path / "elsewhere.bin"
     path.write_bytes(b"ZZZZ" + b"\x00" * 512)
     assert _flight(str(path)) == 2
@@ -565,9 +510,6 @@ def test_flight_read_refuses_a_file_that_is_no_container_at_all(
 
 
 def test_flight_read_still_reads_a_ring_file(tmp_path) -> None:
-    """The dispatch must not have moved the ring path. Its own suite is
-    `tests/test_flight_ring_file.py`; this is the pin that the magic check
-    sits in front of it rather than instead of it."""
     from wreath._cli import _flight_magic
 
     path = tmp_path / "attempt.wfr1"
@@ -579,8 +521,6 @@ def test_flight_read_still_reads_a_ring_file(tmp_path) -> None:
     assert _flight_magic(str(ring)) == b"WFRR"
 
 
-# --- capturing an argument, safely -------------------------------------------
-#
 # `args jsonb` is positional and `RedactionPolicy` is name-keyed, so the names
 # come from the *handler's signature* -- the one place in the recording process
 # that has them. Everything below is about the four rules that make that safe,
@@ -594,9 +534,7 @@ def _policy(*names: str, **limits) -> AttemptPolicy:
 
     bounds = {"max_fields": 32, "max_depth": 4, "max_body_bytes": 4096}
     bounds.update(limits)
-    return AttemptPolicy(
-        argument_allowlist=frozenset(names), redaction=RedactionPolicy(**bounds)
-    )
+    return AttemptPolicy(argument_allowlist=frozenset(names), redaction=RedactionPolicy(**bounds))
 
 
 def send_password_reset(user_id, token):
@@ -604,17 +542,18 @@ def send_password_reset(user_id, token):
 
 
 def test_no_allowlist_captures_nothing() -> None:
-    """The default, and it is the behaviour that shipped before this existed."""
-    assert AttemptPolicy().capture_arguments(
-        task="send_password_reset",
-        handler=send_password_reset,
-        args=(41, "reset-token"),
-        kwargs={},
-    ) == ()
+    assert (
+        AttemptPolicy().capture_arguments(
+            task="send_password_reset",
+            handler=send_password_reset,
+            args=(41, "reset-token"),
+            kwargs={},
+        )
+        == ()
+    )
 
 
 def test_one_parameter_is_captured_and_its_neighbour_is_not() -> None:
-    """The whole point: `user_id` yes, `token` never."""
     captured = _policy("send_password_reset.user_id").capture_arguments(
         task="send_password_reset",
         handler=send_password_reset,
@@ -626,37 +565,39 @@ def test_one_parameter_is_captured_and_its_neighbour_is_not() -> None:
 
 
 def test_an_allowlist_for_another_task_captures_nothing() -> None:
-    """The key is `task.parameter`, so `other.user_id` does not reach this one."""
-    assert _policy("other_task.user_id").capture_arguments(
-        task="send_password_reset",
-        handler=send_password_reset,
-        args=(41, "t"),
-        kwargs={},
-    ) == ()
+    assert (
+        _policy("other_task.user_id").capture_arguments(
+            task="send_password_reset",
+            handler=send_password_reset,
+            args=(41, "t"),
+            kwargs={},
+        )
+        == ()
+    )
 
 
 def test_a_task_this_process_cannot_resolve_captures_nothing() -> None:
-    """Rule 1. The dead-letter path already meets a row whose handler is gone;
-    falling back to position would record whatever happened to be first."""
-    assert _policy("send_password_reset.user_id").capture_arguments(
-        task="send_password_reset", handler=None, args=(41, "t"), kwargs={}
-    ) == ()
+    assert (
+        _policy("send_password_reset.user_id").capture_arguments(
+            task="send_password_reset", handler=None, args=(41, "t"), kwargs={}
+        )
+        == ()
+    )
 
 
 def test_a_call_that_does_not_bind_captures_nothing() -> None:
-    """Rule 1 again, in its other shape: a row enqueued by a release whose
-    handler took a different arity."""
-    assert _policy("send_password_reset.user_id").capture_arguments(
-        task="send_password_reset",
-        handler=send_password_reset,
-        args=(41, "t", "extra"),
-        kwargs={},
-    ) == ()
+    assert (
+        _policy("send_password_reset.user_id").capture_arguments(
+            task="send_password_reset",
+            handler=send_password_reset,
+            args=(41, "t", "extra"),
+            kwargs={},
+        )
+        == ()
+    )
 
 
 def test_a_value_that_lands_in_varargs_is_never_named() -> None:
-    """Rule 2. `*rest` has no declared parameter to allow, so no spelling of
-    the allowlist reaches it."""
 
     def fan_out(first, *rest, **options):
         pass
@@ -675,8 +616,6 @@ def test_a_value_that_lands_in_varargs_is_never_named() -> None:
 
 
 def test_a_defaulted_parameter_the_call_omitted_is_absent() -> None:
-    """Not withheld -- absent. The job did not carry it, and recording a
-    default the caller never sent would be a recording of this process."""
 
     def report(period, verbose=True):
         pass
@@ -688,8 +627,6 @@ def test_a_defaulted_parameter_the_call_omitted_is_absent() -> None:
 
 
 def test_nested_structure_is_captured_whole_under_the_bounds() -> None:
-    """Rule 3: the parameter is the unit of consent, and it is the whole
-    argument. There is no per-field key space, and the docstring says so."""
 
     def ingest(payload):
         pass
@@ -700,15 +637,10 @@ def test_nested_structure_is_captured_whole_under_the_bounds() -> None:
         args=({"a": [1, 2, {"b": None}], "c": True},),
         kwargs={},
     )
-    assert _json.loads(captured[0][1]) == {
-        "value": {"a": [1, 2, {"b": None}], "c": True}
-    }
+    assert _json.loads(captured[0][1]) == {"value": {"a": [1, 2, {"b": None}], "c": True}}
 
 
 def test_an_unsupported_type_is_withheld_with_its_reason() -> None:
-    """Rule 4, and the reason is recorded rather than the value dropped: an
-    operator who allowed a parameter and finds nothing cannot otherwise tell an
-    absence from a refusal."""
 
     def ingest(payload):
         pass
@@ -720,8 +652,6 @@ def test_an_unsupported_type_is_withheld_with_its_reason() -> None:
 
 
 def test_bytes_are_not_a_string(tmp_path) -> None:
-    """`bytes` has a `repr`, which is exactly why it must not be captured: a
-    forensic file is not the place to discover what was in a blob."""
 
     def ingest(payload):
         pass
@@ -746,8 +676,6 @@ def test_a_cycle_is_withheld_rather_than_recursed() -> None:
 
 
 def test_the_same_list_twice_is_not_a_cycle() -> None:
-    """The cycle check is on the path, not on everything seen -- otherwise a
-    value that appears twice side by side is refused for no reason."""
 
     def ingest(payload):
         pass
@@ -760,9 +688,6 @@ def test_the_same_list_twice_is_not_a_cycle() -> None:
 
 
 def test_depth_past_the_limit_withholds_the_whole_argument() -> None:
-    """The *whole* argument. A truncated structure is the shape this subsystem
-    refuses everywhere else: a reader cannot tell three from the first three of
-    nine."""
 
     def ingest(payload):
         pass
@@ -788,9 +713,7 @@ def test_a_value_over_the_byte_budget_is_withheld() -> None:
     def ingest(payload):
         pass
 
-    captured = _policy(
-        "ingest.payload", max_body_bytes=16, max_fields=4096
-    ).capture_arguments(
+    captured = _policy("ingest.payload", max_body_bytes=16, max_fields=4096).capture_arguments(
         task="ingest", handler=ingest, args=("x" * 4000,), kwargs={}
     )
     assert "argument budget" in _json.loads(captured[0][1])["withheld"]
@@ -808,9 +731,6 @@ def test_a_non_string_mapping_key_is_withheld() -> None:
 
 
 def test_a_non_finite_number_is_withheld_rather_than_raising() -> None:
-    """`json.dumps(allow_nan=False)` would raise from inside the serialiser,
-    past the path that records a reason -- and a recorder that can take a
-    worker down with it is worse than no recorder."""
 
     def ingest(payload):
         pass
@@ -822,8 +742,6 @@ def test_a_non_finite_number_is_withheld_rather_than_raising() -> None:
 
 
 def test_the_capture_is_immutable_against_a_handler_that_mutates_after() -> None:
-    """Normalised into new containers and serialised immediately, so a handler
-    that keeps its argument and edits it cannot change what was recorded."""
 
     def ingest(payload):
         pass
@@ -838,8 +756,6 @@ def test_the_capture_is_immutable_against_a_handler_that_mutates_after() -> None
 
 
 def test_an_allowlist_without_bounds_is_refused_where_it_is_written() -> None:
-    """A policy that names an argument but sets no limits would capture a value
-    of unknown shape into a file nobody can open."""
     with pytest.raises(RecordingPolicyError, match="needs redaction limits"):
         AttemptPolicy(argument_allowlist=frozenset({"t.p"}))
 
@@ -850,8 +766,6 @@ def test_a_malformed_allowlist_key_is_refused() -> None:
 
 
 def test_a_dotted_task_name_still_names_one_parameter() -> None:
-    """Split on the last dot, so `billing.reconcile.month` is the `month`
-    parameter of `billing.reconcile` and not a path into something."""
 
     def reconcile(month):
         pass
@@ -863,8 +777,6 @@ def test_a_dotted_task_name_still_names_one_parameter() -> None:
 
 
 def test_a_captured_argument_round_trips_through_the_container() -> None:
-    """The record kind carries it, and a recording written before this existed
-    still decodes -- the section is appended, not folded into the header."""
     record = _record(arguments=(("user_id", '{"value":41}'),))
     decoded = read_attempt_recording(_written(record))
     assert decoded.arguments == (("user_id", '{"value":41}'),)
@@ -872,11 +784,6 @@ def test_a_captured_argument_round_trips_through_the_container() -> None:
 
 
 def test_a_framework_supplied_parameter_is_never_capturable() -> None:
-    """`JobRunner` calls `handler(ctx, *job.args)`, so `ctx` occupies the first
-    parameter and is this process's object rather than anything the queue row
-    carried. It is aligned past, and an allowlist entry naming it records
-    nothing -- otherwise an operator could point the recorder at a live
-    database handle."""
 
     def send(ctx, address, token):
         pass
@@ -892,8 +799,6 @@ def test_a_framework_supplied_parameter_is_never_capturable() -> None:
 
 
 def test_a_cycle_through_a_mapping_is_withheld_too() -> None:
-    """The list case has its own test above; a dict closes the loop just as
-    easily, and the two are separate branches."""
 
     def ingest(payload):
         pass
@@ -907,9 +812,6 @@ def test_a_cycle_through_a_mapping_is_withheld_too() -> None:
 
 
 def test_an_infinite_number_is_withheld_like_a_nan() -> None:
-    """`allow_nan=False` refuses both, and both must be caught before the
-    serialiser sees them -- a raise from inside `json.dumps` escapes past the
-    path that records a reason."""
 
     def ingest(payload):
         pass
@@ -923,18 +825,9 @@ def test_an_infinite_number_is_withheld_like_a_nan() -> None:
 
 @pytest.mark.parametrize("missing", ["max_fields", "max_depth", "max_body_bytes"])
 def test_each_bound_is_required_on_its_own(missing: str) -> None:
-    """One refusal, three conditions -- so three tests.
-
-    A single test that leaves all three unset passes whichever clause fired,
-    which is the shape `AGENTS.md` names: a refusal test that proves only that
-    *something* refused. Each of these sets the other two and leaves one at
-    zero.
-    """
     from wreath.recording import RedactionPolicy
 
     bounds = {"max_fields": 32, "max_depth": 4, "max_body_bytes": 4096}
     bounds[missing] = 0
     with pytest.raises(RecordingPolicyError, match="needs redaction limits"):
-        AttemptPolicy(
-            argument_allowlist=frozenset({"t.p"}), redaction=RedactionPolicy(**bounds)
-        )
+        AttemptPolicy(argument_allowlist=frozenset({"t.p"}), redaction=RedactionPolicy(**bounds))

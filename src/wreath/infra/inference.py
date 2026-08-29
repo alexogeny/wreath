@@ -61,7 +61,9 @@ _SUBSYSTEM_CATALOGUE: tuple[tuple[str, str, tuple[str, ...], str], ...] = (
     ("rooms", "wreath.rooms", ("Redis pub/sub",), "PostgreSQL LISTEN/NOTIFY"),
     ("calculated views", "wreath.series", ("a warehouse", "dbt"), "PostgreSQL"),
     (
-        "distributed locks", "wreath.locks", ("Redis", "etcd", "ZooKeeper"),
+        "distributed locks",
+        "wreath.locks",
+        ("Redis", "etcd", "ZooKeeper"),
         "PostgreSQL advisory locks",
     ),
     ("application cache", "wreath.cache", ("Redis", "Memcached"), "in-process memory"),
@@ -79,8 +81,7 @@ _STORE_COMPONENTS: Mapping[str, str] = {
     "idempotency": "wreath.policy.idempotency",
 }
 
-#: Subsystems the application object cannot see, and why. Each is a declaration
-#: this stage would use if it could reach it; see `docs/guides/infra.md`.
+#: Subsystems the application object cannot see, and why.
 _UNOBSERVABLE: Mapping[str, str] = {
     "wreath.workflows": (
         "a Workflow is constructed with a store and handed to a handler; nothing "
@@ -94,9 +95,7 @@ _UNOBSERVABLE: Mapping[str, str] = {
         "a Series is a declared class queried through a session; it registers "
         "nothing on the application"
     ),
-    "wreath.locks": (
-        "advisory locks are taken per call site, so there is no declaration to read"
-    ),
+    "wreath.locks": ("advisory locks are taken per call site, so there is no declaration to read"),
     "wreath.cache": ("@cached decorates a function; the application never sees it"),
     "wreath.response_cache": (
         "response caching is a route decoration, not an application registration"
@@ -294,8 +293,7 @@ def _orm_facts(registry: Any) -> tuple[int, tuple[str, ...], set[str]]:
 
     specs = tuple(registry.specs)
     extensions = {
-        column.pg_type.extension
-        for _spec, column in declared_extension_columns(registry)
+        column.pg_type.extension for _spec, column in declared_extension_columns(registry)
     }
     schemas = {spec.schema for spec in specs if getattr(spec, "schema", None)}
     return len(specs), tuple(sorted(extensions)), schemas
@@ -502,9 +500,7 @@ def _settings(
                         ),
                     )
                 )
-        contracts.append(
-            SettingsContract(model=label, prefix=prefix, keys=tuple(keys), unread=())
-        )
+        contracts.append(SettingsContract(model=label, prefix=prefix, keys=tuple(keys), unread=()))
     # Without a contract nothing is known to read anything, so every key would
     # be "unread" and the report would be noise. An empty `unread` then adds
     # nothing below, which is why the emptiness is not tested for separately.
@@ -519,10 +515,7 @@ def _settings(
                 Gap(
                     kind=GapKind.UNREAD_KEY,
                     subject=key,
-                    detail=(
-                        f"{dotenv_keys[key]} supplies {key}, and no settings field "
-                        "reads it"
-                    ),
+                    detail=(f"{dotenv_keys[key]} supplies {key}, and no settings field reads it"),
                 )
             )
     return tuple(contracts), gaps
@@ -566,9 +559,7 @@ def infer(
             "`wreath infra infer` reads the declarations a `Wreath` object holds"
         )
     databases, gaps = _database_requirements(app)
-    contracts, settings_gaps = _settings(
-        settings, supplied or {}, dotenv_keys or {}
-    )
+    contracts, settings_gaps = _settings(settings, supplied or {}, dotenv_keys or {})
     notes: list[str] = []
     if not contracts:
         notes.append(

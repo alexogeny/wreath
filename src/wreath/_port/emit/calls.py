@@ -40,7 +40,6 @@ class _CallRewrite(
     _BackgroundWork,
     _ForeignRewrite,
 ):
-    # -- calls (FastAPI/APIRouter name, HTTPException, CORS, queries, infra) ------
     def visit_Call(self, node: ast.Call) -> None:
         func = node.func
         origin = self.imports.origin(func)
@@ -79,7 +78,8 @@ class _CallRewrite(
             and (
                 self._enclosing_callable_id(node),
                 func.value.id,
-            ) in self._http_responses
+            )
+            in self._http_responses
             and func.attr == "json"
             and not node.args
             and not node.keywords
@@ -151,9 +151,8 @@ class _CallRewrite(
         if (
             isinstance(func, ast.Attribute)
             and func.attr in ("delay", "apply_async")
-            and celery_enqueue_rule(
-                node, inside_async=self._enclosing_is_async(node)
-            ) == "bg.celery.enqueue"
+            and celery_enqueue_rule(node, inside_async=self._enclosing_is_async(node))
+            == "bg.celery.enqueue"
         ):
             self._rewrite_celery_enqueue(node)
         if self._foreign_call(node):
@@ -167,10 +166,7 @@ class _CallRewrite(
             # and the value it wrapped stays.
             self._rewritten.add(id(func))
             self._replace_all_of(node, self._seg(node.args[0]))
-        elif (
-            origin in _RENAMED_ORIGINS
-            and _RENAMED_ORIGINS[origin] in _RESPONSE_BODY_ARG
-        ):
+        elif origin in _RENAMED_ORIGINS and _RENAMED_ORIGINS[origin] in _RESPONSE_BODY_ARG:
             self._rewrite_response_call(node, _RENAMED_ORIGINS[origin])
         elif origin.startswith("arrow.") and tail in _ARROW_RENAME:
             # `arrow.utcnow()` is `temporal.now()`. An `Instant` is a datetime
@@ -185,8 +181,7 @@ class _CallRewrite(
         elif (
             isinstance(func, ast.Attribute)
             and func.attr == "get_pydantic"
-            and pydantic_projection_rule(func, self._parents)
-            == "pydantic.get_pydantic_exact"
+            and pydantic_projection_rule(func, self._parents) == "pydantic.get_pydantic_exact"
         ):
             self._rewrite_model_dataclass(node, func)
         elif isinstance(func, ast.Attribute) and func.attr == "add_middleware":
@@ -358,20 +353,14 @@ class _CallRewrite(
             )
         receiver = self._seg(node.func.value) if isinstance(node.func, ast.Attribute) else "app"
         self.needs.update({"HttpPolicy", "RateLimitPolicy"})
-        self._removed_middleware_imports.update(
-            {"RateLimitingMiddleware", "InMemoryLimitProvider"}
-        )
+        self._removed_middleware_imports.update({"RateLimitingMiddleware", "InMemoryLimitProvider"})
         self._replace_all_of(
             node,
             f"{receiver}.configure_http_policy(HttpPolicy("
             f"rate_limit=RateLimitPolicy({', '.join(arguments)})))",
         )
         blocked = options.get("block_duration")
-        if not (
-            blocked is None
-            or isinstance(blocked, ast.Constant)
-            and blocked.value is None
-        ):
+        if not (blocked is None or isinstance(blocked, ast.Constant) and blocked.value is None):
             self._note(
                 node.lineno,
                 "mw.custom",

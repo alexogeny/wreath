@@ -272,7 +272,7 @@ cedar_type_name(PyObject *value)
     if (PyTuple_Check(value)) {
         return "entity";
     }
-    if (PyList_Check(value)) {
+    if (PyList_Check(value) || PySet_Check(value) || PyFrozenSet_Check(value)) {
         return "set";
     }
     if (PyDict_Check(value)) {
@@ -290,6 +290,12 @@ cedar_is_uid(PyObject *value)
 }
 
 static int cedar_dedupe_key(PyObject *value, PyObject **key);
+
+static int
+cedar_is_set(PyObject *value)
+{
+    return PyList_Check(value) || PySet_Check(value) || PyFrozenSet_Check(value);
+}
 
 /* Structural equality: 1 equal, 0 unequal, -1 error (ctx->error or Python). */
 static int
@@ -315,10 +321,9 @@ cedar_eq(cedar_ctx *ctx, PyObject *a, PyObject *b, int depth)
     if (PyTuple_Check(a) && PyTuple_Check(b)) {
         return PyObject_RichCompareBool(a, b, Py_EQ);
     }
-    if (PyList_Check(a) && PyList_Check(b)) {
+    if (cedar_is_set(a) && cedar_is_set(b)) {
         PyObject *left = NULL, *right = NULL;
         int equal;
-        if (PyList_GET_SIZE(a) != PyList_GET_SIZE(b)) return 0;
         if (cedar_dedupe_key(a, &left) < 0 ||
             cedar_dedupe_key(b, &right) < 0) {
             Py_XDECREF(left);
@@ -355,13 +360,25 @@ cedar_eq(cedar_ctx *ctx, PyObject *a, PyObject *b, int depth)
 static int
 cedar_set_contains(cedar_ctx *ctx, PyObject *set_list, PyObject *value, int depth)
 {
-    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(set_list); i++) {
-        int equal = cedar_eq(ctx, value, PyList_GET_ITEM(set_list, i), depth);
-        if (equal != 0) {
-            return equal;
+    if (PyList_Check(set_list)) {
+        for (Py_ssize_t i = 0; i < PyList_GET_SIZE(set_list); i++) {
+            int equal = cedar_eq(ctx, value, PyList_GET_ITEM(set_list, i), depth);
+            if (equal != 0) return equal;
         }
+        return 0;
     }
-    return 0;
+    PyObject *iterator = PyObject_GetIter(set_list);
+    if (iterator == NULL) return -1;
+    PyObject *item;
+    int equal = 0;
+    while ((item = PyIter_Next(iterator)) != NULL) {
+        equal = cedar_eq(ctx, value, item, depth);
+        Py_DECREF(item);
+        if (equal != 0) break;
+    }
+    Py_DECREF(iterator);
+    if (equal == 0 && PyErr_Occurred()) return -1;
+    return equal;
 }
 
 /* Build a hashable identity for a Cedar value.
@@ -394,7 +411,7 @@ cedar_dedupe_key(PyObject *value, PyObject **key)
          * exception to signal "not applicable". */
         tag = "t";
     }
-    else if (PyList_Check(value)) {
+    else if (cedar_is_set(value)) {
         PyObject *members = PySet_New(NULL);
         PyObject *frozen = NULL;
         if (members == NULL) return -1;
@@ -402,16 +419,42 @@ cedar_dedupe_key(PyObject *value, PyObject **key)
             Py_DECREF(members);
             return -1;
         }
-        for (Py_ssize_t index = 0; index < PyList_GET_SIZE(value); index++) {
-            PyObject *member = NULL;
-            if (cedar_dedupe_key(PyList_GET_ITEM(value, index), &member) < 0 ||
-                member == NULL || PySet_Add(members, member) < 0) {
-                Py_XDECREF(member);
+        if (PyList_Check(value)) {
+            for (Py_ssize_t index = 0; index < PyList_GET_SIZE(value); index++) {
+                PyObject *member = NULL;
+                if (cedar_dedupe_key(PyList_GET_ITEM(value, index), &member) < 0 ||
+                    member == NULL || PySet_Add(members, member) < 0) {
+                    Py_XDECREF(member);
+                    Py_LeaveRecursiveCall();
+                    Py_DECREF(members);
+                    return -1;
+                }
+                Py_DECREF(member);
+            }
+        }
+        else {
+            PyObject *iterator = PyObject_GetIter(value);
+            if (iterator == NULL) {
                 Py_LeaveRecursiveCall();
                 Py_DECREF(members);
                 return -1;
             }
-            Py_DECREF(member);
+            PyObject *item;
+            while ((item = PyIter_Next(iterator)) != NULL) {
+                PyObject *member = NULL;
+                int failed = cedar_dedupe_key(item, &member) < 0 ||
+                             member == NULL || PySet_Add(members, member) < 0;
+                Py_DECREF(item);
+                Py_XDECREF(member);
+                if (failed) break;
+            }
+            int failed = PyErr_Occurred() != NULL;
+            Py_DECREF(iterator);
+            if (failed) {
+                Py_LeaveRecursiveCall();
+                Py_DECREF(members);
+                return -1;
+            }
         }
         Py_LeaveRecursiveCall();
         frozen = PyFrozenSet_New(members);
@@ -927,7 +970,7 @@ cedar_eval_method(cedar_ctx *ctx, PyObject *node, int depth)
     if (operand == NULL) {
         return NULL;
     }
-    if (!PyList_Check(operand)) {
+    if (!cedar_is_set(operand)) {
         PyObject *message = PyUnicode_FromFormat(
             "set methods require a set, got %s", cedar_type_name(operand));
         Py_DECREF(operand);
@@ -935,7 +978,7 @@ cedar_eval_method(cedar_ctx *ctx, PyObject *node, int depth)
     }
     long method = cedar_program_int(PyTuple_GET_ITEM(node, 1));
     if (method == 3) { /* isEmpty */
-        PyObject *result = PyBool_FromLong(PyList_GET_SIZE(operand) == 0);
+        PyObject *result = PyBool_FromLong(PyObject_Size(operand) == 0);
         Py_DECREF(operand);
         return result;
     }
@@ -948,19 +991,30 @@ cedar_eval_method(cedar_ctx *ctx, PyObject *node, int depth)
     if (method == 0) { /* contains */
         outcome = cedar_set_contains(ctx, operand, argument, depth);
     }
-    else if (!PyList_Check(argument)) {
+    else if (!cedar_is_set(argument)) {
         cedar_fail(ctx, PyUnicode_FromString("containsAll/containsAny require a set argument"));
     }
-    else if (method == 1) { /* containsAll */
-        outcome = 1;
-        for (Py_ssize_t i = 0; i < PyList_GET_SIZE(argument) && outcome == 1; i++) {
-            outcome = cedar_set_contains(ctx, operand, PyList_GET_ITEM(argument, i), depth);
+    else if (PyList_Check(argument)) {
+        outcome = method == 1;
+        for (Py_ssize_t i = 0;
+             i < PyList_GET_SIZE(argument) && outcome == (method == 1);
+             i++) {
+            outcome = cedar_set_contains(
+                ctx, operand, PyList_GET_ITEM(argument, i), depth);
         }
     }
-    else { /* containsAny */
-        outcome = 0;
-        for (Py_ssize_t i = 0; i < PyList_GET_SIZE(argument) && outcome == 0; i++) {
-            outcome = cedar_set_contains(ctx, operand, PyList_GET_ITEM(argument, i), depth);
+    else {
+        PyObject *iterator = PyObject_GetIter(argument);
+        if (iterator != NULL) {
+            outcome = method == 1;
+            PyObject *item;
+            while (outcome == (method == 1) &&
+                   (item = PyIter_Next(iterator)) != NULL) {
+                outcome = cedar_set_contains(ctx, operand, item, depth);
+                Py_DECREF(item);
+            }
+            Py_DECREF(iterator);
+            if (outcome >= 0 && PyErr_Occurred()) outcome = -1;
         }
     }
     Py_DECREF(operand);
@@ -1606,6 +1660,67 @@ cedar_authorize_plan_one(
     return 0;
 }
 
+static int
+cedar_prepared_value(PyObject *value, int depth)
+{
+    if (depth > CEDAR_MAX_DEPTH) return 0;
+    if (PyBool_Check(value) || PyUnicode_Check(value)) return 1;
+    if (PyLong_Check(value)) {
+        int overflow = 0;
+        (void)PyLong_AsLongLongAndOverflow(value, &overflow);
+        if (PyErr_Occurred()) {
+            PyErr_Clear();
+            return 0;
+        }
+        return overflow == 0;
+    }
+    if (depth == 0 && PyDict_CheckExact(value)) {
+        Py_ssize_t position = 0;
+        PyObject *key, *item;
+        while (PyDict_Next(value, &position, &key, &item)) {
+            if (!PyUnicode_Check(key)) return 0;
+            int prepared = cedar_prepared_value(item, depth + 1);
+            if (prepared <= 0) return prepared;
+        }
+        return 1;
+    }
+    if (PyFrozenSet_CheckExact(value)) {
+        PyObject *iterator = PyObject_GetIter(value);
+        if (iterator == NULL) return -1;
+        PyObject *item;
+        int prepared = 1;
+        while ((item = PyIter_Next(iterator)) != NULL) {
+            prepared = cedar_prepared_value(item, depth + 1);
+            Py_DECREF(item);
+            if (prepared <= 0) break;
+        }
+        Py_DECREF(iterator);
+        if (prepared > 0 && PyErr_Occurred()) return -1;
+        return prepared;
+    }
+    return 0;
+}
+
+static PyObject *
+cedar_plan_denial(
+    const CedarPlan *plan, PyObject *principal, PyObject *action,
+    PyObject *resource, PyObject *context, PyObject *store)
+{
+    unsigned char allowed, reason;
+    if (cedar_authorize_plan_one(
+            plan, principal, action, resource, context, store,
+            &allowed, &reason) < 0) return NULL;
+    if (allowed) Py_RETURN_NONE;
+    static const char *reasons[] = {
+        "no permit policy matched", "cedar permit", "explicit forbid",
+    };
+    if (reason > 2) {
+        PyErr_SetString(PyExc_RuntimeError, "invalid native Cedar reason");
+        return NULL;
+    }
+    return PyUnicode_FromString(reasons[reason]);
+}
+
 PyObject *
 wreath_cedar_is_authorized(PyObject *Py_UNUSED(self), PyObject *args)
 {
@@ -1631,19 +1746,24 @@ wreath_cedar_route_denial(PyObject *Py_UNUSED(self), PyObject *args)
     }
     CedarPlan *plan = PyCapsule_GetPointer(plan_object, CEDAR_PLAN_CAPSULE);
     if (plan == NULL) return NULL;
-    unsigned char allowed, reason;
-    if (cedar_authorize_plan_one(
-            plan, principal, action, resource, context, store,
-            &allowed, &reason) < 0) return NULL;
-    if (allowed) Py_RETURN_NONE;
-    static const char *reasons[] = {
-        "no permit policy matched", "cedar permit", "explicit forbid",
-    };
-    if (reason > 2) {
-        PyErr_SetString(PyExc_RuntimeError, "invalid native Cedar reason");
+    return cedar_plan_denial(plan, principal, action, resource, context, store);
+}
+
+PyObject *
+wreath_cedar_route_denial_prepared(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *plan_object, *principal, *action, *resource, *context, *store;
+    if (!PyArg_ParseTuple(args, "OOOOOO!:cedar_route_denial_prepared",
+                          &plan_object, &principal, &action, &resource,
+                          &context, &PyDict_Type, &store)) {
         return NULL;
     }
-    return PyUnicode_FromString(reasons[reason]);
+    CedarPlan *plan = PyCapsule_GetPointer(plan_object, CEDAR_PLAN_CAPSULE);
+    if (plan == NULL) return NULL;
+    int prepared = cedar_prepared_value(context, 0);
+    if (prepared < 0) return NULL;
+    if (!prepared) Py_RETURN_NOTIMPLEMENTED;
+    return cedar_plan_denial(plan, principal, action, resource, context, store);
 }
 
 PyObject *

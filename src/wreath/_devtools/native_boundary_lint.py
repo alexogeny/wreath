@@ -79,13 +79,10 @@ DYNAMIC_LOOKUP = re.compile(
 # these rules recommend, and counting it as a dynamic lookup tells the author to
 # do what they have already done. `PyObject_GetAttrString(obj, "name")` stays
 # counted: it builds the name object on every call.
-#
 # Deliberately narrow. Only a bare identifier qualifies -- an expression, a
 # subscript, or an inline `PyUnicode_FromString(...)` all still count, because
 # none of them is a pre-resolved constant.
-PRERESOLVED_GETATTR = re.compile(
-    r"\bPyObject_GetAttr\s*\(\s*[^,()]+,\s*[A-Za-z_]\w*\s*\)"
-)
+PRERESOLVED_GETATTR = re.compile(r"\bPyObject_GetAttr\s*\(\s*[^,()]+,\s*[A-Za-z_]\w*\s*\)")
 
 # A call into an error raiser. Everything it builds runs only once the request
 # has already failed, so it is not hot-path boundary traffic -- the arguments to
@@ -240,9 +237,7 @@ def scan_text(path: str, text: str) -> list[Finding]:
             if index in error_lines:
                 continue
             line = code_lines[index]
-            score += sum(
-                weight * len(pattern.findall(line)) for pattern, weight in WEIGHTED_APIS
-            )
+            score += sum(weight * len(pattern.findall(line)) for pattern, weight in WEIGHTED_APIS)
             score -= 3 * len(PRERESOLVED_GETATTR.findall(line))
         if score >= BOUNDARY_SCORE_LIMIT and not _is_init_function(function):
             anchor = indexes[0]

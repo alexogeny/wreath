@@ -55,12 +55,12 @@ from .native_lint import repo_root
 ProbeFn = Callable[[int], "float | tuple[float, dict[str, int]]"]
 
 #: Checked-in complexity assumptions for the request-hot probes.
-BASELINE_PATH = Path("docs/agents/complexity-baseline.json")
+BASELINE_PATH = Path("tools/baselines/complexity-baseline.json")
 #: acknowledged output of the static discovery sweep. A probe proves a contract
 #: somebody already suspected; the sweep finds the shapes nobody has written a
 #: probe for yet, and this file is what keeps a *new* one from joining the
 #: scenery. See `complexity_discover`.
-DISCOVERY_PATH = Path("docs/agents/complexity-discovery.json")
+DISCOVERY_PATH = Path("tools/baselines/complexity-discovery.json")
 BASELINE_VERSION = 1
 DISCOVERY_VERSION = 3
 
@@ -68,15 +68,25 @@ DISCOVERY_VERSION = 3
 #: scan can *report* what it measured; nothing in this tree is expected to be
 #: quartic or worse, and a probe declaring one should be read as a defect.
 _CLASSES = (
-    (0.0, "O(1)"), (1.0, "O(n)"), (2.0, "O(n^2)"), (3.0, "O(n^3)"),
-    (4.0, "O(n^4)"), (5.0, "O(n^5)"), (6.0, "O(n^6)"),
+    (0.0, "O(1)"),
+    (1.0, "O(n)"),
+    (2.0, "O(n^2)"),
+    (3.0, "O(n^3)"),
+    (4.0, "O(n^4)"),
+    (5.0, "O(n^5)"),
+    (6.0, "O(n^6)"),
 )
 
 #: Plain-English degree names, so a report can say "quartic" rather than making
 #: the reader count carets.
 _DEGREE_NAMES = {
-    0.0: "constant", 1.0: "linear", 2.0: "quadratic", 3.0: "cubic",
-    4.0: "quartic", 5.0: "quintic", 6.0: "sextic",
+    0.0: "constant",
+    1.0: "linear",
+    2.0: "quadratic",
+    3.0: "cubic",
+    4.0: "quartic",
+    5.0: "quintic",
+    6.0: "sextic",
 }
 
 
@@ -133,7 +143,7 @@ class Todo:
 class Probe:
     name: str
     fn: ProbeFn
-    expect: float          # maximum expected growth exponent
+    expect: float  # maximum expected growth exponent
     sizes: tuple[int, ...]
     doc: str = ""
     repeats: int = 3
@@ -158,13 +168,21 @@ class Probe:
 _REGISTRY: dict[str, Probe] = {}
 
 
-def probe(name: str, *, expect: float | None = None, sizes: tuple[int, ...],
-          repeats: int = 3, tolerance: float = 0.5,
-          metric: str | None = None, noise_floor: float = 1e-6,
-          axis: str = "input size", assumption: str = "",
-          stage: str = "component", group: str = "extended",
-          todo: Todo | None = None,
-          ) -> Callable[[ProbeFn], ProbeFn]:
+def probe(
+    name: str,
+    *,
+    expect: float | None = None,
+    sizes: tuple[int, ...],
+    repeats: int = 3,
+    tolerance: float = 0.5,
+    metric: str | None = None,
+    noise_floor: float = 1e-6,
+    axis: str = "input size",
+    assumption: str = "",
+    stage: str = "component",
+    group: str = "extended",
+    todo: Todo | None = None,
+) -> Callable[[ProbeFn], ProbeFn]:
     """Register `fn(size)` as a named complexity assumption.
 
     Pass `expect` for a contract, or `todo` for a known defect -- one or the
@@ -175,8 +193,7 @@ def probe(name: str, *, expect: float | None = None, sizes: tuple[int, ...],
     """
     if (expect is None) == (todo is None):
         raise ValueError(
-            f"{name}: pass exactly one of expect= (a contract) or "
-            f"todo= (a recorded defect)"
+            f"{name}: pass exactly one of expect= (a contract) or todo= (a recorded defect)"
         )
     bound = todo.degree if todo is not None else expect
     if bound is None:
@@ -185,27 +202,37 @@ def probe(name: str, *, expect: float | None = None, sizes: tuple[int, ...],
     def register(fn: ProbeFn) -> ProbeFn:
         doc = (fn.__doc__ or "").strip()
         _REGISTRY[name] = Probe(
-            name=name, fn=fn, expect=bound, sizes=sizes, doc=doc,
-            repeats=repeats, tolerance=tolerance, noise_floor=noise_floor,
-            metric=metric, axis=axis,
+            name=name,
+            fn=fn,
+            expect=bound,
+            sizes=sizes,
+            doc=doc,
+            repeats=repeats,
+            tolerance=tolerance,
+            noise_floor=noise_floor,
+            metric=metric,
+            axis=axis,
             assumption=assumption or (doc.splitlines()[0] if doc else ""),
-            stage=stage, group=group, todo=todo,
+            stage=stage,
+            group=group,
+            todo=todo,
         )
         return fn
+
     return register
 
 
-def _measure(p: Probe, size: int) -> tuple[float, dict[str, int]]:
+def _measure(probe: Probe, size: int) -> tuple[float, dict[str, int]]:
     best = math.inf
     counters: dict[str, int] = {}
-    for _ in range(p.repeats):
+    for _ in range(probe.repeats):
         gc.collect()
         gc.disable()
         try:
-            out = p.fn(size)
+            output = probe.fn(size)
         finally:
             gc.enable()
-        seconds, extra = out if isinstance(out, tuple) else (out, {})
+        seconds, extra = output if isinstance(output, tuple) else (output, {})
         if seconds < best:
             best = seconds
             counters = dict(extra)
@@ -214,20 +241,25 @@ def _measure(p: Probe, size: int) -> tuple[float, dict[str, int]]:
 
 def _fit_exponent(sizes: tuple[int, ...], times: list[float]) -> float:
     """Least-squares slope of log(time) over log(size)."""
-    xs = [math.log(s) for s in sizes]
-    ys = [math.log(max(t, 1e-9)) for t in times]
-    n = len(xs)
-    mean_x = sum(xs) / n
-    mean_y = sum(ys) / n
-    denominator = sum((x - mean_x) ** 2 for x in xs)
+    log_sizes = [math.log(size) for size in sizes]
+    log_times = [math.log(max(seconds, 1e-9)) for seconds in times]
+    sample_count = len(log_sizes)
+    mean_log_size = sum(log_sizes) / sample_count
+    mean_log_time = sum(log_times) / sample_count
+    denominator = sum((log_size - mean_log_size) ** 2 for log_size in log_sizes)
     if denominator == 0.0:
         return 0.0
-    return sum((x - mean_x) * (y - mean_y)
-               for x, y in zip(xs, ys, strict=True)) / denominator
+    return (
+        sum(
+            (log_size - mean_log_size) * (log_time - mean_log_time)
+            for log_size, log_time in zip(log_sizes, log_times, strict=True)
+        )
+        / denominator
+    )
 
 
 def _classify(exponent: float) -> str:
-    best = min(_CLASSES, key=lambda c: abs(c[0] - exponent))
+    best = min(_CLASSES, key=lambda candidate: abs(candidate[0] - exponent))
     return best[1]
 
 
@@ -243,85 +275,87 @@ class Result:
     ok: bool = field(init=False)
 
     def __post_init__(self) -> None:
-        p = self.probe
-        if p.metric is not None:
-            missing = [size for size, counters in zip(p.sizes, self.counters, strict=True)
-                       if p.metric not in counters]
+        probe = self.probe
+        if probe.metric is not None:
+            missing = [
+                size
+                for size, counters in zip(probe.sizes, self.counters, strict=True)
+                if probe.metric not in counters
+            ]
             if missing:
                 raise ValueError(
-                    f"{p.name}: metric {p.metric!r} missing at sizes {missing}"
+                    f"{probe.name}: metric {probe.metric!r} missing at sizes {missing}"
                 )
-            values = [float(c[p.metric]) for c in self.counters]
+            values = [float(counters[probe.metric]) for counters in self.counters]
             below_floor = False
         else:
             values = self.times
-            below_floor = max(self.times) <= p.noise_floor
-        self.exponent = _fit_exponent(p.sizes, values)
-        tail_count = min(3, len(p.sizes))
-        self.tail_exponent = _fit_exponent(
-            p.sizes[-tail_count:], values[-tail_count:]
-        )
+            below_floor = max(self.times) <= probe.noise_floor
+        self.exponent = _fit_exponent(probe.sizes, values)
+        tail_count = min(3, len(probe.sizes))
+        self.tail_exponent = _fit_exponent(probe.sizes[-tail_count:], values[-tail_count:])
         self.local_exponents = [
-            math.log(max(right, 1e-12) / max(left, 1e-12)) /
-            math.log(right_size / left_size)
+            math.log(max(right, 1e-12) / max(left, 1e-12)) / math.log(right_size / left_size)
             for left_size, right_size, left, right in zip(
-                p.sizes, p.sizes[1:], values, values[1:], strict=False
+                probe.sizes, probe.sizes[1:], values, values[1:], strict=False
             )
         ]
         observed = max(self.exponent, self.tail_exponent)
         if below_floor:
             self.status = "UNRESOLVED"
-        elif observed >= p.expect + p.tolerance:
+        elif observed >= probe.expect + probe.tolerance:
             self.status = "FAIL"
-        elif p.todo is not None and observed <= p.todo.degree - p.tolerance:
-            # The recorded defect is gone. Both fits are used via `observed`
-            # (the max), so a single noisy tail cannot declare a fix that the
-            # global slope does not agree with -- staleness has to be the
-            # honest reading of the whole curve, not the flattering half.
+        elif probe.todo is not None and observed <= probe.todo.degree - probe.tolerance:
             self.status = "STALE"
         else:
             self.status = "PASS"
         self.ok = self.status == "PASS"
 
 
-def run_probe(p: Probe) -> Result:
-    # Warm up allocators, import side effects, and branch predictors off-line.
-    _measure(p, max(min(p.sizes) // 4, 1))
+def run_probe(probe: Probe) -> Result:
+    warmup_size = max(min(probe.sizes) // 4, 1)
+    _measure(probe, warmup_size)
     times: list[float] = []
     counters: list[dict[str, int]] = []
-    for size in p.sizes:
-        seconds, extra = _measure(p, size)
+    for size in probe.sizes:
+        seconds, extra = _measure(probe, size)
         times.append(seconds)
         counters.append(extra)
-    return Result(p, times, counters)
+    return Result(probe, times, counters)
 
 
-def _print_result(r: Result) -> None:
-    p = r.probe
-    on = f" on {p.metric}" if p.metric else ""
+def _print_result(result: Result) -> None:
+    probe = result.probe
+    metric_suffix = f" on {probe.metric}" if probe.metric else ""
     fitted = (
-        f"global n^{r.exponent:.2f}, tail n^{r.tail_exponent:.2f}{on} "
-        f"({_classify(r.tail_exponent)})"
+        f"global n^{result.exponent:.2f}, tail n^{result.tail_exponent:.2f}"
+        f"{metric_suffix} ({_classify(result.tail_exponent)})"
     )
-    bound = (f"pinned at {_classify(p.expect)}" if p.todo
-             else f"at most {_classify(p.expect)}")
-    print(f"\n== {p.name} — {bound}, {fitted} [{r.status}]")
-    if p.todo is not None:
-        print(f"   {p.todo.explain()}")
-    print(f"   axis: {p.axis}; stage: {p.stage}; assumption: {p.assumption}")
-    if r.status == "STALE" and p.todo is not None:
-        print(f"   STALE MARK: measured {degree_name(max(r.exponent, r.tail_exponent))} "
-              f"(n^{max(r.exponent, r.tail_exponent):.2f}), below the recorded "
-              f"n^{p.todo.degree:g}.\n"
-              f"   The defect this mark records appears to be fixed. Retarget the "
-              f"mark to what\n   the code does now, or delete it and give the probe a "
-              f"real expect= contract.")
-    counter_names = sorted({k for c in r.counters for k in c})
+    bound = (
+        f"pinned at {_classify(probe.expect)}"
+        if probe.todo
+        else f"at most {_classify(probe.expect)}"
+    )
+    print(f"\n== {probe.name} — {bound}, {fitted} [{result.status}]")
+    if probe.todo is not None:
+        print(f"   {probe.todo.explain()}")
+    print(f"   axis: {probe.axis}; stage: {probe.stage}; assumption: {probe.assumption}")
+    if result.status == "STALE" and probe.todo is not None:
+        observed = max(result.exponent, result.tail_exponent)
+        print(
+            f"   STALE MARK: measured {degree_name(observed)} "
+            f"(n^{observed:.2f}), below the recorded "
+            f"n^{probe.todo.degree:g}.\n"
+            f"   The defect this mark records appears to be fixed. Retarget the "
+            f"mark to what\n   the code does now, or delete it and give the probe a "
+            f"real expect= contract."
+        )
+    counter_names = sorted({name for counters in result.counters for name in counters})
     header = f"{'size':>10} {'time':>12} {'ratio':>7}"
     header += "".join(f" {name:>14}" for name in counter_names)
     print(header)
     previous = None
-    for size, seconds, extra in zip(p.sizes, r.times, r.counters, strict=True):
+    for size, seconds, extra in zip(probe.sizes, result.times, result.counters, strict=True):
         ratio = f"{seconds / previous:.2f}x" if previous else "-"
         row = f"{size:>10} {seconds * 1e3:>10.3f}ms {ratio:>7}"
         row += "".join(f" {extra.get(name, ''):>14}" for name in counter_names)
@@ -330,8 +364,6 @@ def _print_result(r: Result) -> None:
     sys.stdout.flush()
 
 
-# --- probes: native timing wheel ------------------------------------------
-#
 # Contracts fixed in reactor_wheel.c (tie-counted slot minima, deadline-jump
 # drain): batch fire and cohort cancel are linear -- one slot rescan per
 # batch, not per node -- and parked long timers cost nothing to skip past.
@@ -342,8 +374,7 @@ _WHEEL_SLOTS = 4096
 
 def _wheel():
     reactor: Any = importlib.import_module("wreath._native._reactor")
-    return reactor.TimingWheel(
-        resolution=_WHEEL_RES, slots=_WHEEL_SLOTS, base=0.0)
+    return reactor.TimingWheel(resolution=_WHEEL_RES, slots=_WHEEL_SLOTS, base=0.0)
 
 
 def _noop() -> None:
@@ -378,8 +409,7 @@ def _wheel_cancel_cohort(k: int):
     return elapsed, {"slot_rescans": w.slot_rescans - rescans}
 
 
-@probe("wheel-parked-rotation", expect=0.0,
-       sizes=(50_000, 100_000, 200_000, 400_000))
+@probe("wheel-parked-rotation", expect=0.0, sizes=(50_000, 100_000, 200_000, 400_000))
 def _wheel_parked_rotation(n: int):
     """advance() across one idle rotation with n parked long timers: O(1).
 
@@ -400,9 +430,6 @@ def _wheel_parked_rotation(n: int):
     return elapsed
 
 
-# --- probes: bitset route table -------------------------------------------
-
-
 def _bitset_uniform_literal_table(r: int):
     """R param routes sharing literal 'api' at seg0, distinct literal subsets
     over 11 tail positions (value f'v{j}' at position j wherever present)."""
@@ -421,8 +448,13 @@ def _bitset_uniform_literal_table(r: int):
     return table, miss
 
 
-@probe("bitset-uniform-literal-miss", expect=0.0,
-       sizes=(250, 500, 1000, 2000), repeats=5, metric="verified_per_match")
+@probe(
+    "bitset-uniform-literal-miss",
+    expect=0.0,
+    sizes=(250, 500, 1000, 2000),
+    repeats=5,
+    metric="verified_per_match",
+)
 def _bitset_uniform_literal_miss(r: int):
     """match() missing only at a group-uniform literal position: O(1).
 
@@ -440,8 +472,7 @@ def _bitset_uniform_literal_miss(r: int):
     if result is not None:
         raise RuntimeError(f"uniform-literal miss unexpectedly matched {result!r}")
     after = dict(table.probe_stats())
-    verified = (after.get("verify_routes", 0) -
-                before.get("verify_routes", 0)) // loops
+    verified = (after.get("verify_routes", 0) - before.get("verify_routes", 0)) // loops
     return elapsed, {"verified_per_match": verified}
 
 
@@ -457,8 +488,7 @@ def _loop_timer_churn(k: int):
 
     from wreath.reactor import EventLoop
 
-    loop = EventLoop(selectors.EpollSelector(),
-                     native_loop=True, timers="wheel")
+    loop = EventLoop(selectors.EpollSelector(), native_loop=True, timers="wheel")
     try:
         start = time.perf_counter()
         handles = [loop.call_later(60.0, _noop) for _ in range(k)]
@@ -473,15 +503,11 @@ def _loop_timer_churn(k: int):
     return elapsed, {"retained_timers": retained}
 
 
-# --- probes: native HTTP/1 receive queue ----------------------------------
-
-
 class _SinkTransport:
     """The minimum asyncio.Transport surface the native protocol touches."""
 
     def __init__(self) -> None:
-        self._extra = {"sockname": ("127.0.0.1", 8000),
-                       "peername": ("127.0.0.1", 54321)}
+        self._extra = {"sockname": ("127.0.0.1", 8000), "peername": ("127.0.0.1", 54321)}
         self.closed = False
         self.bytes_written = 0
 
@@ -493,6 +519,7 @@ class _SinkTransport:
 
     def writelines(self, chunks: Any) -> None:
         self.bytes_written += sum(map(len, chunks))
+
     def pause_reading(self) -> None: ...
     def resume_reading(self) -> None: ...
     def is_closing(self) -> bool:
@@ -506,11 +533,13 @@ class _SinkTransport:
 
 
 @probe(
-    "http1-receive-queue-lockstep", expect=0.0,
+    "http1-receive-queue-lockstep",
+    expect=0.0,
     sizes=(16384, 32768, 65536, 131072),
     axis="retained receive-queue capacity",
     assumption="one pop plus one push is amortized O(1) in queue capacity",
-    stage="ingress", group="metal-http1",
+    stage="ingress",
+    group="metal-http1",
 )
 def _http1_receive_queue_lockstep(cap: int):
     """Chunk ingest with the receive queue in pop/push lockstep at capacity:
@@ -545,10 +574,8 @@ def _http1_receive_queue_lockstep(cap: int):
         config = ServerConfig(read_high_water_messages=1 << 22)
         protocol = _server.HttpProtocol(app, config, loop, set())
         protocol.connection_made(_SinkTransport())
-        protocol.data_received(
-            b"POST / HTTP/1.1\r\nHost: x\r\n"
-            b"Transfer-Encoding: chunked\r\n\r\n")
-        for _ in range(cap):        # queue array grows to exactly `cap`
+        protocol.data_received(b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n")
+        for _ in range(cap):  # queue array grows to exactly `cap`
             protocol.data_received(chunk)
         await asyncio.sleep(0)
         ingest = 0.0
@@ -609,18 +636,20 @@ async def _http1_bridge_trial(
 
 
 @probe(
-    "http1-fragmented-head", expect=1.0,
+    "http1-fragmented-head",
+    expect=1.0,
     sizes=(2000, 4000, 8000, 16000),
     axis="request-head bytes delivered one byte at a time",
     assumption="incremental delimiter scans visit each buffered byte O(1) times",
-    stage="ingress", group="metal-http1",
+    stage="ingress",
+    group="metal-http1",
 )
 def _http1_fragmented_head(n: int):
     """Byte-at-a-time native protocol ingestion is O(total request-head bytes)."""
     import asyncio
 
     request = b"GET / HTTP/1.1\r\nHost: x\r\nX-Pad: " + b"x" * n + b"\r\n\r\n"
-    chunks = tuple(request[index:index + 1] for index in range(len(request)))
+    chunks = tuple(request[index : index + 1] for index in range(len(request)))
     elapsed, written = asyncio.run(_http1_bridge_trial(chunks))
     if written <= 0:
         raise RuntimeError("fragmented HTTP/1 request emitted no response bytes")
@@ -628,11 +657,13 @@ def _http1_fragmented_head(n: int):
 
 
 @probe(
-    "http1-pipelined-requests", expect=1.0,
+    "http1-pipelined-requests",
+    expect=1.0,
     sizes=(500, 1000, 2000, 4000),
     axis="keep-alive requests queued on one protocol",
     assumption="request parsing, activation, and response emission are O(requests)",
-    stage="request", group="metal-http1",
+    stage="request",
+    group="metal-http1",
 )
 def _http1_pipelined_requests(n: int):
     """Queued keep-alive requests complete in linear time with amortized compaction."""
@@ -680,11 +711,13 @@ def _http1_pipelined_requests(n: int):
 
 
 @probe(
-    "http1-response-headers", expect=1.0,
+    "http1-response-headers",
+    expect=1.0,
     sizes=(2000, 4000, 8000, 16000),
     axis="response header count at fixed value width",
     assumption="one-shot response validation and serialization are O(header bytes)",
-    stage="egress", group="metal-http1",
+    stage="egress",
+    group="metal-http1",
 )
 def _http1_response_headers(n: int):
     """Native one-shot response serialization is linear in response headers."""
@@ -692,22 +725,20 @@ def _http1_response_headers(n: int):
 
     headers = [(f"x-h{index}".encode(), b"v" * 16) for index in range(n)]
     request = (b"GET / HTTP/1.1\r\nHost: x\r\n\r\n",)
-    elapsed, written = asyncio.run(
-        _http1_bridge_trial(request, response_headers=headers)
-    )
+    elapsed, written = asyncio.run(_http1_bridge_trial(request, response_headers=headers))
     if written <= n * 16:
-        raise RuntimeError(
-            f"{n} response headers emitted only {written} bytes"
-        )
+        raise RuntimeError(f"{n} response headers emitted only {written} bytes")
     return elapsed
 
 
 @probe(
-    "http1-chunked-body-frames", expect=1.0,
+    "http1-chunked-body-frames",
+    expect=1.0,
     sizes=(2000, 4000, 8000, 16000),
     axis="chunk frames in one chunked request body, one read per frame",
     assumption="per-frame size-line scan and buffer consumption are O(frames)",
-    stage="ingress", group="metal-http1",
+    stage="ingress",
+    group="metal-http1",
 )
 def _http1_chunked_body_frames(n: int):
     """Decoding an n-frame chunked body is O(n), one read per frame.
@@ -725,8 +756,7 @@ def _http1_chunked_body_frames(n: int):
     _server: Any = importlib.import_module("wreath._native._server")
 
     payload = b"abcdefgh"
-    head = (b"POST / HTTP/1.1\r\nHost: x\r\n"
-            b"transfer-encoding: chunked\r\n\r\n")
+    head = b"POST / HTTP/1.1\r\nHost: x\r\ntransfer-encoding: chunked\r\n\r\n"
     frame = b"%x\r\n%s\r\n" % (len(payload), payload)
 
     async def run() -> tuple[float, dict[str, int]]:
@@ -745,9 +775,7 @@ def _http1_chunked_body_frames(n: int):
         # This probe deliberately scales chunk count beyond the production
         # default. Raise only that budget so it continues measuring parser
         # complexity instead of exercising the separate DoS rejection guard.
-        protocol = _server.HttpProtocol(
-            app, ServerConfig(max_body_chunks=n), loop, set()
-        )
+        protocol = _server.HttpProtocol(app, ServerConfig(max_body_chunks=n), loop, set())
         transport = _SinkTransport()
         protocol.connection_made(transport)
         start = time.perf_counter()
@@ -761,20 +789,21 @@ def _http1_chunked_body_frames(n: int):
         await asyncio.sleep(0)
         expected = n * len(payload)
         if received != expected:
-            raise RuntimeError(
-                f"chunked HTTP/1 body delivered {received} of {expected} bytes"
-            )
+            raise RuntimeError(f"chunked HTTP/1 body delivered {received} of {expected} bytes")
         return elapsed, {"body_bytes": received}
 
     return asyncio.run(run())
 
 
 @probe(
-    "wheel-colliding-slot-chain", expect=1.0, tolerance=0.6,
+    "wheel-colliding-slot-chain",
+    expect=1.0,
+    tolerance=0.6,
     sizes=(500, 1000, 2000, 4000),
     axis="timers sharing one slot at distinct deadlines",
     assumption="pairing heaps and the slot tournament drain k colliding timers in O(k)",
-    stage="timers", group="metal-host",
+    stage="timers",
+    group="metal-host",
 )
 def _wheel_colliding_slot_chain(k: int):
     """k timers in one slot at distinct deadlines remain linear to drain.
@@ -810,11 +839,13 @@ def _wheel_colliding_slot_chain(k: int):
 
 
 @probe(
-    "wheel-spread-slot-chain", expect=1.0,
+    "wheel-spread-slot-chain",
+    expect=1.0,
     sizes=(500, 1000, 2000, 4000),
     axis="timers spread one per slot at consecutive deadlines",
     assumption="draining k timers that do not share a slot is O(k)",
-    stage="timers", group="metal-host",
+    stage="timers",
+    group="metal-host",
 )
 def _wheel_spread_slot_chain(k: int):
     """The control for `wheel-colliding-slot-chain`: same k, no collisions.
@@ -847,11 +878,13 @@ def _wheel_spread_slot_chain(k: int):
 
 
 @probe(
-    "metal-egress-writelines-chunks", expect=1.0,
+    "metal-egress-writelines-chunks",
+    expect=1.0,
     sizes=(2000, 4000, 8000, 16000),
     axis="chunks in one writelines() behind a blocked metal socket",
     assumption="gathered-write buffering is O(chunks), not O(chunks * buffered)",
-    stage="egress", group="metal-host",
+    stage="egress",
+    group="metal-host",
 )
 def _metal_egress_writelines_chunks(n: int):
     """One writelines() of n chunks onto a blocked socket is O(n).
@@ -893,11 +926,13 @@ def _metal_egress_writelines_chunks(n: int):
 
 
 @probe(
-    "metal-egress-backpressure", expect=1.0,
+    "metal-egress-backpressure",
+    expect=1.0,
     sizes=(1000, 2000, 4000, 8000),
     axis="fixed-size writes retained behind a blocked metal socket",
     assumption="native egress enqueue is amortized O(writes) under backpressure",
-    stage="egress", group="metal-host",
+    stage="egress",
+    group="metal-host",
 )
 def _metal_egress_backpressure(n: int):
     """Real native-transport enqueue remains linear while the peer does not read."""
@@ -931,22 +966,17 @@ def _metal_egress_backpressure(n: int):
         loop.close()
 
 
-# --- probes: native body validation ---------------------------------------
-
-
 def _dataclass_plan(field_count: int):
     """A compiled native plan for a dataclass with `field_count` int fields."""
     import dataclasses
 
     from wreath import binding
 
-    cls = dataclasses.make_dataclass(
-        "Probe", [(f"field{i}", int) for i in range(field_count)])
+    cls = dataclasses.make_dataclass("Probe", [(f"field{i}", int) for i in range(field_count)])
     return binding._compile_plan(cls, frozenset())
 
 
-@probe("validate-unexpected-fields", expect=1.0,
-       sizes=(400, 800, 1600, 3200))
+@probe("validate-unexpected-fields", expect=1.0, sizes=(400, 800, 1600, 3200))
 def _validate_unexpected_fields(n: int):
     """Rejecting a body with n extra keys against an n-field schema: O(n).
 
@@ -976,8 +1006,7 @@ def _union_bomb_plan(depth: int):
     return node
 
 
-@probe("validate-union-bomb", expect=0.0,
-       sizes=(22, 24, 26, 28), repeats=1, noise_floor=0.0)
+@probe("validate-union-bomb", expect=0.0, sizes=(22, 24, 26, 28), repeats=1, noise_floor=0.0)
 def _validate_union_bomb(depth: int):
     """A nested-union validation bomb stays bounded regardless of depth: O(1).
 
@@ -989,12 +1018,10 @@ def _validate_union_bomb(depth: int):
 
     plan = _union_bomb_plan(depth)
     start = time.perf_counter()
-    _core.run_validation(plan, "x", ["body"])   # a str fails every int leaf
+    _core.run_validation(plan, "x", ["body"])  # a str fails every int leaf
     return time.perf_counter() - start
 
 
-# --- baseline probes: verified-clean hot paths ----------------------------
-#
 # These pin the linear/bounded shape of paths audited clean, so a future change
 # that regresses one to superlinear is caught as a failing exponent rather than
 # a silent latency cliff. Each scales the attacker- or app-controlled dimension.
@@ -1057,19 +1084,20 @@ def _build_header_map(n: int):
     return time.perf_counter() - start
 
 
-@probe("append-missing-headers-bounded", expect=1.0,
-       sizes=(1000, 2000, 4000, 8000))
+@probe("append-missing-headers-bounded", expect=1.0, sizes=(1000, 2000, 4000, 8000))
 def _append_missing_headers(n: int):
     """Injecting a fixed set of default headers into an n-header response stays
     O(n): once n exceeds 256/additions the check switches to a set, so it never
     degrades to the O(n*additions) nested scan."""
     from wreath._native import _core
 
-    additions = [(b"x-frame-options", b"DENY"),
-                 (b"x-content-type-options", b"nosniff"),
-                 (b"referrer-policy", b"no-referrer"),
-                 (b"x-permitted-cross-domain-policies", b"none"),
-                 (b"cross-origin-opener-policy", b"same-origin")]
+    additions = [
+        (b"x-frame-options", b"DENY"),
+        (b"x-content-type-options", b"nosniff"),
+        (b"referrer-policy", b"no-referrer"),
+        (b"x-permitted-cross-domain-policies", b"none"),
+        (b"cross-origin-opener-policy", b"same-origin"),
+    ]
     start = time.perf_counter()
     headers = [[b"x-h%d" % i, b"v%d" % i] for i in range(n)]
     headers = [(a, b) for a, b in headers]
@@ -1078,11 +1106,13 @@ def _append_missing_headers(n: int):
 
 
 @probe(
-    "replace-reused-response-headers", expect=1.0,
+    "replace-reused-response-headers",
+    expect=1.0,
     sizes=(1000, 2000, 4000, 8000),
     axis="middleware headers accumulated on a reused response",
     assumption="built-in egress header replacement is linear and leaves one current value",
-    stage="egress", group="metal-http1",
+    stage="egress",
+    group="metal-http1",
 )
 def _replace_reused_response_headers(n: int):
     """Replacing built-in headers on a reused response is O(n), then bounded.
@@ -1109,11 +1139,13 @@ def _replace_reused_response_headers(n: int):
 
 
 @probe(
-    "reused-response-lifecycle", expect=1.0,
+    "reused-response-lifecycle",
+    expect=1.0,
     sizes=(250, 500, 1000, 2000),
     axis="requests returning the same mutable response",
     assumption="the standard middleware lifecycle is linear in sends and keeps headers bounded",
-    stage="egress", group="metal-http1",
+    stage="egress",
+    group="metal-http1",
 )
 def _reused_response_lifecycle(n: int):
     """Sending one response n times stays O(n) with O(1) retained headers.
@@ -1131,9 +1163,7 @@ def _reused_response_lifecycle(n: int):
 
     async def drive() -> tuple[float, dict[str, int]]:
         app = Wreath(
-            http_policy=policy_from_components(
-                [factory() for factory in POLICY_FACTORIES]
-            )
+            http_policy=policy_from_components([factory() for factory in POLICY_FACTORIES])
         )
         response = Response(b"ok")
 
@@ -1165,16 +1195,13 @@ def _multipart_many_parts(n: int):
     monotonically (Two-Way memmem), so no consumed bytes are rescanned."""
     from wreath._native import _core
 
-    part = (b"--B\r\nContent-Disposition: form-data; name=\"f%d\"\r\n\r\n"
-            b"value%d\r\n")
+    part = b'--B\r\nContent-Disposition: form-data; name="f%d"\r\n\r\nvalue%d\r\n'
     body = b"".join(part % (i, i) for i in range(n)) + b"--B--\r\n"
     start = time.perf_counter()
     _core.multipart_parse(body, b"B")
     return time.perf_counter() - start
 
 
-# --- probes: routing match scale (the core design claim) ------------------
-#
 # The load-bearing routing assumption is that per-request match cost is
 # independent of how many routes are registered -- adding routes must not slow
 # matching. These build tables of N param routes sharing a segment count (one
@@ -1185,11 +1212,14 @@ _MATCH_LOOPS = 4000
 
 
 @probe(
-    "bitset-router-static-scale", expect=0.0,
-    sizes=(1000, 4000, 16000, 64000), repeats=1,
+    "bitset-router-static-scale",
+    expect=0.0,
+    sizes=(1000, 4000, 16000, 64000),
+    repeats=1,
     axis="unrelated static route count",
     assumption="static route activation is O(1) in total route count",
-    stage="routing", group="metal-http1",
+    stage="routing",
+    group="metal-http1",
 )
 def _bitset_router_static_scale(n: int):
     """Bitset (default) static-route match is O(1) in total route count.
@@ -1212,11 +1242,14 @@ def _bitset_router_static_scale(n: int):
 
 
 @probe(
-    "bitset-router-same-group-scale", expect=1.0,
-    sizes=(8000, 16000, 32000, 64000), repeats=1,
+    "bitset-router-same-group-scale",
+    expect=1.0,
+    sizes=(8000, 16000, 32000, 64000),
+    repeats=1,
     axis="same-shape parameter route group size",
     assumption="worst-case bitset activation is O(group size / 64)",
-    stage="routing", group="metal-http1",
+    stage="routing",
+    group="metal-http1",
 )
 def _bitset_router_same_group_scale(n: int):
     """Bitset match within ONE same-shape param group is O(group_size/64).
@@ -1233,7 +1266,7 @@ def _bitset_router_same_group_scale(n: int):
 
     table = _core.PolicyRouteTable()
     for i in range(n):
-        table.add(f"/seg{i}/{{id}}", "GET", object())   # one (GET, nseg=2) group
+        table.add(f"/seg{i}/{{id}}", "GET", object())  # one (GET, nseg=2) group
     table.compile()
     path = f"/seg{n // 2}/42"
     start = time.perf_counter()
@@ -1242,30 +1275,27 @@ def _bitset_router_same_group_scale(n: int):
     return time.perf_counter() - start
 
 
-# --- baseline probes: ingress parse & codecs ------------------------------
-
-
 @probe(
-    "http-parse-request-headers", expect=1.0, sizes=(500, 1000, 2000, 4000),
+    "http-parse-request-headers",
+    expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
     axis="request header count",
     assumption="request-head parsing is O(headers plus header bytes)",
-    stage="ingress", group="metal-http1",
+    stage="ingress",
+    group="metal-http1",
 )
 def _http_parse_request_headers(n: int):
     """Parsing a request with n headers is O(n): the header loop is a single
     forward pass, not an O(n^2) rescan or per-header dedup scan."""
     from wreath._native import _core
 
-    data = (b"GET / HTTP/1.1\r\n"
-            + b"".join(b"x-h%d: v%d\r\n" % (i, i) for i in range(n))
-            + b"\r\n")
+    data = b"GET / HTTP/1.1\r\n" + b"".join(b"x-h%d: v%d\r\n" % (i, i) for i in range(n)) + b"\r\n"
     start = time.perf_counter()
     _core.http_parse_request(data)
     return time.perf_counter() - start
 
 
-@probe("json-decode-distinct-keys", expect=1.0,
-       sizes=(10_000, 20_000, 40_000, 80_000))
+@probe("json-decode-distinct-keys", expect=1.0, sizes=(10_000, 20_000, 40_000, 80_000))
 def _json_decode_distinct_keys(n: int):
     """Decoding an object with n distinct keys is O(n): the parser-local key
     cache is direct-mapped (O(1) per key), so distinct keys do not degrade it
@@ -1302,14 +1332,14 @@ def _ws_unmask(n: int):
     return time.perf_counter() - start
 
 
-# --- baseline probe: middleware tape dispatch -----------------------------
-
-
 @probe(
-    "middleware-tape-fused-dispatch", expect=1.0, sizes=(8, 16, 32, 64),
+    "middleware-tape-fused-dispatch",
+    expect=1.0,
+    sizes=(8, 16, 32, 64),
     axis="fused synchronous middleware hook count",
     assumption="middleware dispatch is O(active hooks)",
-    stage="middleware", group="metal-http1",
+    stage="middleware",
+    group="metal-http1",
 )
 def _middleware_tape_fused_dispatch(n: int):
     """Dispatching a tape of n fused synchronous before hooks is O(n): the
@@ -1326,11 +1356,11 @@ def _middleware_tape_fused_dispatch(n: int):
         endpoint,
         tuple(MiddlewareHooks(before_sync=lambda r: None) for _ in range(n)),
     )
-    request: Any = object()   # the fused sync hooks ignore it
+    request: Any = object()  # the fused sync hooks ignore it
     loops = 20000
 
     async def run() -> float:
-        for _ in range(1000):        # warm up
+        for _ in range(1000):  # warm up
             await tape(request)
         start = time.perf_counter()
         for _ in range(loops):
@@ -1341,11 +1371,14 @@ def _middleware_tape_fused_dispatch(n: int):
 
 
 @probe(
-    "middleware-tape-mixed-dispatch", expect=1.0, sizes=(8, 16, 32, 64),
+    "middleware-tape-mixed-dispatch",
+    expect=1.0,
+    sizes=(8, 16, 32, 64),
     axis="mixed async before/after middleware pair count",
     assumption="tape dispatch is O(instructions), with a per-instruction cost "
-               "that does not grow with the number of instruction kinds",
-    stage="middleware", group="metal-http1",
+    "that does not grow with the number of instruction kinds",
+    stage="middleware",
+    group="metal-http1",
 )
 def _middleware_tape_mixed_dispatch(n: int):
     """A tape of n async before+after pairs dispatches in O(instructions).
@@ -1379,14 +1412,13 @@ def _middleware_tape_mixed_dispatch(n: int):
     expected_operations = 2 * n + 1
     if len(tape.operations) != expected_operations:
         raise RuntimeError(
-            f"middleware tape has {len(tape.operations)} operations, "
-            f"expected {expected_operations}"
+            f"middleware tape has {len(tape.operations)} operations, expected {expected_operations}"
         )
     request: Any = object()
     loops = 2000
 
     async def run() -> float:
-        for _ in range(200):         # warm up
+        for _ in range(200):  # warm up
             await tape(request)
         start = time.perf_counter()
         for _ in range(loops):
@@ -1396,15 +1428,14 @@ def _middleware_tape_mixed_dispatch(n: int):
     return asyncio.run(run())
 
 
-# --- baseline probe: response coercion fast path --------------------------
-
-
 @probe(
-    "response-coerce-text", expect=1.0,
+    "response-coerce-text",
+    expect=1.0,
     sizes=(20_000, 40_000, 80_000, 160_000),
     axis="text response body bytes",
     assumption="response coercion is O(encoded body bytes)",
-    stage="egress", group="metal-http1",
+    stage="egress",
+    group="metal-http1",
 )
 def _response_coerce_text(n: int):
     """Coercing an n-byte string handler return into a Response is O(n): the
@@ -1420,8 +1451,6 @@ def _response_coerce_text(n: int):
     return time.perf_counter() - start
 
 
-# --- probes: the Python consumer subsystems (web/orm facade) ---------------
-#
 # The probes above pin the C tier (_core / reactor / server). These pin the
 # Python request-facing helpers an app actually calls per request: pagination
 # query-shaping, AWS SigV4 signing, and retry backoff. Each scales a request- or
@@ -1448,10 +1477,13 @@ def _pagination_model() -> Any:
 
 
 @probe(
-    "pagination-apply-sort", expect=1.0, sizes=(1000, 2000, 4000, 8000),
+    "pagination-apply-sort",
+    expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
     axis="request ?sort= token count",
     assumption="folding sort tokens into the query is O(tokens)",
-    stage="request", group="web",
+    stage="request",
+    group="web",
 )
 def _pagination_apply_sort(n: int):
     """Applying n request-controlled sort tokens is O(n), not O(n^2).
@@ -1468,17 +1500,19 @@ def _pagination_apply_sort(n: int):
     shaped = apply_sort(base, tokens, allow=("name",))
     elapsed = time.perf_counter() - start
     if len(shaped.orderings) != n:
-        raise RuntimeError(
-            f"pagination retained {len(shaped.orderings)} of {n} sort tokens"
-        )
+        raise RuntimeError(f"pagination retained {len(shaped.orderings)} of {n} sort tokens")
     return elapsed
 
 
 @probe(
-    "orm-hydrate-key-maps", expect=0.0, sizes=(250, 500, 1000, 2000),
+    "orm-hydrate-key-maps",
+    expect=0.0,
+    sizes=(250, 500, 1000, 2000),
     axis="rows in one hydrated result set",
     assumption="primary-key offsets are resolved per query shape, not per row",
-    stage="handler", group="web", metric="key_map_builds",
+    stage="handler",
+    group="web",
+    metric="key_map_builds",
 )
 def _orm_hydrate_key_maps(rows: int):
     """Resolving a projection's key offsets is O(1) in the row count.
@@ -1531,17 +1565,23 @@ def _orm_hydrate_fixture() -> Any:
             return [index, f"{index}@example.test", f"name{index}", stamp]
 
         _ORM_HYDRATE_FIXTURE = (
-            spec, spec.columns, Session(registry, "read"), make_row,
+            spec,
+            spec.columns,
+            Session(registry, "read"),
+            make_row,
         )
     return _ORM_HYDRATE_FIXTURE
 
 
 @probe(
-    "static-mount-match-scale", expect=1.0, sizes=(4, 8, 16, 32),
+    "static-mount-match-scale",
+    expect=1.0,
+    sizes=(4, 8, 16, 32),
     axis="registered static mount count",
     assumption="an unmatched request scans mounts in registration order, and "
-               "costs nothing per request-path character",
-    stage="routing", group="web",
+    "costs nothing per request-path character",
+    stage="routing",
+    group="web",
 )
 def _static_mount_match_scale(mounts: int):
     """Static-mount matching is O(mounts) and O(1) in path length.
@@ -1575,11 +1615,13 @@ def _static_mount_match_scale(mounts: int):
 
 
 @probe(
-    "static-mount-path-length", expect=0.0,
+    "static-mount-path-length",
+    expect=0.0,
     sizes=(2000, 4000, 8000, 16000),
     axis="unmatched request path bytes",
     assumption="a missed static match does not scan the request path",
-    stage="routing", group="web",
+    stage="routing",
+    group="web",
 )
 def _static_mount_path_length(length: int):
     """A request that matches no mount is O(1) in the path length.
@@ -1606,10 +1648,13 @@ def _static_mount_path_length(length: int):
 
 
 @probe(
-    "graphql-parse-scale", expect=1.0, sizes=(500, 1000, 2000, 4000),
+    "graphql-parse-scale",
+    expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
     axis="selected fields in one document",
     assumption="parsing is O(document size), never superlinear in field count",
-    stage="request", group="web",
+    stage="request",
+    group="web",
 )
 def _graphql_parse_scale(fields: int):
     """Parsing an n-field document is O(n).
@@ -1636,18 +1681,20 @@ def _graphql_parse_scale(fields: int):
     elapsed = (time.perf_counter() - start) / loops
     if document.complexity != fields:
         raise RuntimeError(
-            f"GraphQL parser counted complexity {document.complexity}, "
-            f"expected {fields}"
+            f"GraphQL parser counted complexity {document.complexity}, expected {fields}"
         )
     return elapsed
 
 
 @probe(
-    "graphql-depth-rejection", expect=1.0, sizes=(2000, 4000, 8000, 16000),
+    "graphql-depth-rejection",
+    expect=1.0,
+    sizes=(2000, 4000, 8000, 16000),
     axis="nesting depth of a hostile document",
     assumption="rejecting an over-deep document is O(document size), and it is "
-               "`max_document_bytes` -- not the depth check -- that bounds it",
-    stage="request", group="web",
+    "`max_document_bytes` -- not the depth check -- that bounds it",
+    stage="request",
+    group="web",
 )
 def _graphql_depth_rejection(depth: int):
     """Rejecting an over-nested document costs O(document size), not O(depth
@@ -1671,7 +1718,9 @@ def _graphql_depth_rejection(depth: int):
 
     source = "{" + "a{" * depth + "b" + "}" * depth + "}"
     limits = Limits(
-        max_depth=8, max_complexity=10 * depth, max_steps=20 * depth,
+        max_depth=8,
+        max_complexity=10 * depth,
+        max_steps=20 * depth,
         max_document_bytes=len(source) + 1,
     )
     loops = 20
@@ -1706,8 +1755,7 @@ def _graphql_policy_plan_harness(field_count: int, *, unique: bool) -> float:
             for index in range(field_count)
         }
         fields = tuple(
-            Field(name=f"field{index}", key=f"field{index}")
-            for index in range(field_count)
+            Field(name=f"field{index}", key=f"field{index}") for index in range(field_count)
         )
     else:
         schema_fields = {
@@ -1719,19 +1767,14 @@ def _graphql_policy_plan_harness(field_count: int, *, unique: bool) -> float:
                 policy="Report.shared",
             )
         }
-        fields = tuple(
-            Field(name="shared", key=f"alias{index}")
-            for index in range(field_count)
-        )
+        fields = tuple(Field(name="shared", key=f"alias{index}") for index in range(field_count))
     schema = _core.graphql_policy_schema(
         tuple(item.policy for item in schema_fields.values()), policy_resource
     )
     before = time.perf_counter()
     for _ in range(500):
         state = _core.graphql_policy_state(schema)
-        plan = _core.graphql_policy_prepare(
-            schema, state, schema_fields, fields, None, "report"
-        )
+        plan = _core.graphql_policy_prepare(schema, state, schema_fields, fields, None, "report")
         del plan, state
     return time.perf_counter() - before
 
@@ -1765,10 +1808,13 @@ def _graphql_policy_plan_alias_control(field_count: int):
 
 
 @probe(
-    "sigv4-canonical-request", expect=1.0, sizes=(500, 1000, 2000, 4000),
+    "sigv4-canonical-request",
+    expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
     axis="signed request header count",
     assumption="SigV4 header signing is O(headers log headers)",
-    stage="egress", group="web",
+    stage="egress",
+    group="web",
 )
 def _sigv4_canonical_request(n: int):
     """Signing a request with n headers is O(n log n): the canonical form sorts
@@ -1778,20 +1824,27 @@ def _sigv4_canonical_request(n: int):
     headers = {f"x-amz-meta-{i:05d}": f"value-{i}" for i in range(n)}
     start = time.perf_counter()
     _sigv4.sign(
-        method="GET", host="bucket.s3.amazonaws.com", path="/obj",
-        region="us-east-1", service="s3",
-        access_key="AKIDEXAMPLE", secret_key="secret",
-        amz_date="20260726T000000Z", headers=headers,
+        method="GET",
+        host="bucket.s3.amazonaws.com",
+        path="/obj",
+        region="us-east-1",
+        service="s3",
+        access_key="AKIDEXAMPLE",
+        secret_key="secret",
+        amz_date="20260726T000000Z",
+        headers=headers,
     )
     return time.perf_counter() - start
 
 
 @probe(
-    "compute-backoff-attempt", expect=0.0,
+    "compute-backoff-attempt",
+    expect=0.0,
     sizes=(10_000, 20_000, 40_000, 80_000),
     axis="retry attempt number",
     assumption="backoff arithmetic is O(1) in the attempt number",
-    stage="component", group="web",
+    stage="component",
+    group="web",
 )
 def _compute_backoff_attempt(attempt: int):
     """Retry backoff is O(1) in the attempt number, not O(attempt).
@@ -1809,35 +1862,37 @@ def _compute_backoff_attempt(attempt: int):
     return time.perf_counter() - start
 
 
-# --- checked assumption baseline ------------------------------------------
-
-
 def _result_document(result: Result) -> dict[str, Any]:
-    p = result.probe
+    probe = result.probe
     return {
-        "probe": p.name,
-        "group": p.group,
-        "stage": p.stage,
-        "axis": p.axis,
-        "assumption": p.assumption,
-        "expect_exponent": p.expect,
-        "tolerance": p.tolerance,
+        "probe": probe.name,
+        "group": probe.group,
+        "stage": probe.stage,
+        "axis": probe.axis,
+        "assumption": probe.assumption,
+        "expect_exponent": probe.expect,
+        "tolerance": probe.tolerance,
         "fitted_exponent": round(result.exponent, 3),
         "tail_exponent": round(result.tail_exponent, 3),
         "local_exponents": [round(value, 3) for value in result.local_exponents],
         "class": _classify(result.tail_exponent),
         "degree_name": degree_name(result.tail_exponent),
-        "todo": _todo_document(p.todo),
+        "todo": _todo_document(probe.todo),
         "status": result.status,
-        "sizes": list(p.sizes),
+        "sizes": list(probe.sizes),
         "seconds": result.times,
         "counters": result.counters,
     }
 
 
-@probe("cedar-set-dedupe", expect=1.0, sizes=(200, 400, 800, 1600),
-       stage="handler", group="web",
-       assumption="The same-size flat-value control is linear in n.")
+@probe(
+    "cedar-set-dedupe",
+    expect=1.0,
+    sizes=(200, 400, 800, 1600),
+    stage="handler",
+    group="web",
+    assumption="The same-size flat-value control is linear in n.",
+)
 def _cedar_set_dedupe(n: int):
     """Same-size scalar control for nested Cedar structural deduplication.
 
@@ -1859,8 +1914,11 @@ def _cedar_set_dedupe(n: int):
 
 
 @probe(
-    "cedar-nested-set-dedupe", expect=1.0, sizes=(200, 400, 800, 1600),
-    stage="handler", group="web",
+    "cedar-nested-set-dedupe",
+    expect=1.0,
+    sizes=(200, 400, 800, 1600),
+    stage="handler",
+    group="web",
     axis="singleton nested sets in one Cedar value",
     assumption="structural identities make nested-set deduplication linear",
 )
@@ -1882,9 +1940,14 @@ def _cedar_nested_set_dedupe(n: int):
     return (time.perf_counter() - start) / loops
 
 
-@probe("cedar-set-literal-eval", expect=1.0, sizes=(100, 200, 400, 800),
-       stage="handler", group="web",
-       assumption="Evaluating an n-member Cedar set literal is linear in n.")
+@probe(
+    "cedar-set-literal-eval",
+    expect=1.0,
+    sizes=(100, 200, 400, 800),
+    stage="handler",
+    group="web",
+    assumption="Evaluating an n-member Cedar set literal is linear in n.",
+)
 def _cedar_set_literal_eval(n: int):
     """One authorization against a policy holding an n-member set: O(n).
 
@@ -1899,8 +1962,7 @@ def _cedar_set_literal_eval(n: int):
 
     members = ", ".join(f'"m{index}"' for index in range(n))
     policies = CedarPolicies(
-        f"permit(principal, action, resource) when {{ "
-        f"[{members}].contains(principal.tag) }};"
+        f"permit(principal, action, resource) when {{ [{members}].contains(principal.tag) }};"
     )
     entity = CedarEntity(uid=EntityUid("User", "bo"), attrs={"tag": "m0"})
     principal = EntityUid("User", "bo")
@@ -1911,17 +1973,23 @@ def _cedar_set_literal_eval(n: int):
     start = time.perf_counter()
     for _ in range(loops):
         decision = policies.is_authorized(
-            principal=principal, action=action, resource=resource,
-            entities=[entity])
+            principal=principal, action=action, resource=resource, entities=[entity]
+        )
     elapsed = (time.perf_counter() - start) / loops
     if not decision.allowed:
         raise RuntimeError(f"Cedar membership probe unexpectedly denied: {decision!r}")
     return elapsed
 
 
-@probe("authorize-any-clause-expansion", expect=0.0, sizes=(4, 8, 16, 32),
-       stage="routing", group="web", metric="clauses",
-       assumption="Repeated overlapping 'any' checks do not multiply clauses.")
+@probe(
+    "authorize-any-clause-expansion",
+    expect=0.0,
+    sizes=(4, 8, 16, 32),
+    stage="routing",
+    group="web",
+    metric="clauses",
+    assumption="Repeated overlapping 'any' checks do not multiply clauses.",
+)
 def _authorize_any_clause_expansion(n: int):
     """n overlapping mode='any' role checks on one route: bounded clauses.
 
@@ -1956,9 +2024,15 @@ def _authorize_any_clause_expansion(n: int):
     return elapsed, {"clauses": len(clauses)}
 
 
-@probe("orm-write-plan-cache", expect=0.0, sizes=(32, 64, 128, 256),
-       stage="handler", group="web", metric="compiles",
-       assumption="Flushing n rows of one shape compiles one statement.")
+@probe(
+    "orm-write-plan-cache",
+    expect=0.0,
+    sizes=(32, 64, 128, 256),
+    stage="handler",
+    group="web",
+    metric="compiles",
+    assumption="Flushing n rows of one shape compiles one statement.",
+)
 def _orm_write_plan_cache(n: int):
     """Inserting n rows of one model: one compiled statement, not n.
 
@@ -1977,15 +2051,13 @@ def _orm_write_plan_cache(n: int):
     from wreath.orm.registry import Registry
     from wreath.orm.session import Session
 
-    registry = Registry(
-        FakeDatabase(), [User, Post, Membership], validate_schema="off")
+    registry = Registry(FakeDatabase(), [User, Post, Membership], validate_schema="off")
     created = datetime.datetime(2024, 1, 1)
 
     async def flush_rows() -> None:
         session = Session(registry, "write")
         for index in range(n):
-            session.add(User(id=index, email=f"u{index}@e.x",
-                             name=f"n{index}", created_at=created))
+            session.add(User(id=index, email=f"u{index}@e.x", name=f"n{index}", created_at=created))
         async with session.begin():
             await session.flush()
 
@@ -2000,8 +2072,6 @@ def _orm_write_plan_cache(n: int):
         loop.close()
     return elapsed, {"compiles": compiles}
 
-
-# --- probes: the driver's Python half --------------------------------------
 
 def _cancel_harness(k: int, order: str):
     """Queue k operations on a real Connection and cancel them in `order`.
@@ -2029,8 +2099,7 @@ def _cancel_harness(k: int, order: str):
         connection._backend_key = 0
         operations = []
         for index in range(k):
-            operation = Operation(
-                index, "SELECT 1", (), "fetch", loop.create_future(), None)
+            operation = Operation(index, "SELECT 1", (), "fetch", loop.create_future(), None)
             connection._waiting.append(operation)
             operations.append(operation)
         victims = operations if order == "front" else list(reversed(operations))
@@ -2043,9 +2112,7 @@ def _cancel_harness(k: int, order: str):
                 f"operation cancellation left {connection._waiting_live} live waiters"
             )
         if len(connection._waiting) != k:
-            raise RuntimeError(
-                f"operation queue kept {len(connection._waiting)} of {k} tombstones"
-            )
+            raise RuntimeError(f"operation queue kept {len(connection._waiting)} of {k} tombstones")
         for operation in operations:
             operation.future.cancel()
         return elapsed, {"cancelled": len(operations)}
@@ -2053,16 +2120,15 @@ def _cancel_harness(k: int, order: str):
     return asyncio.run(run())
 
 
-
-
-
-
 @probe(
-    "pipeline-cancel-back-to-front", expect=1.0, tolerance=0.6,
+    "pipeline-cancel-back-to-front",
+    expect=1.0,
+    tolerance=0.6,
     sizes=(500, 1000, 2000, 4000),
     axis="queued operations cancelled newest-first",
     assumption="tombstoning a queued operation is O(1), independent of position",
-    stage="database", group="web",
+    stage="database",
+    group="web",
 )
 def _pipeline_cancel_back_to_front(k: int):
     """Cancelling k queued operations newest-first remains O(k).
@@ -2075,11 +2141,13 @@ def _pipeline_cancel_back_to_front(k: int):
 
 
 @probe(
-    "pipeline-cancel-front-to-back", expect=1.0,
+    "pipeline-cancel-front-to-back",
+    expect=1.0,
     sizes=(500, 1000, 2000, 4000),
     axis="queued operations cancelled oldest-first",
     assumption="cancelling the head of the queue is O(1) per operation",
-    stage="database", group="web",
+    stage="database",
+    group="web",
 )
 def _pipeline_cancel_front_to_back(k: int):
     """The order control for the newest-first cancellation probe."""
@@ -2120,11 +2188,13 @@ def _series_reconcile_harness(bucket_count: int, *, populated: bool) -> float:
 
 
 @probe(
-    "series-reconcile-populated", expect=1.0,
+    "series-reconcile-populated",
+    expect=1.0,
     sizes=(250, 500, 1000, 2000),
     axis="dense buckets at eight series and four measures",
     assumption="reconciling populated cells is linear in emitted cell count",
-    stage="series", group="web",
+    stage="series",
+    group="web",
 )
 def _series_reconcile_populated(bucket_count: int):
     """Successful sparse lookups add constant work to every emitted cell."""
@@ -2132,11 +2202,13 @@ def _series_reconcile_populated(bucket_count: int):
 
 
 @probe(
-    "series-reconcile-empty-control", expect=1.0,
+    "series-reconcile-empty-control",
+    expect=1.0,
     sizes=(250, 500, 1000, 2000),
     axis="dense buckets at eight series and four measures",
     assumption="the same-size missing-cell control is linear in emitted cell count",
-    stage="series", group="web",
+    stage="series",
+    group="web",
 )
 def _series_reconcile_empty_control(bucket_count: int):
     """Same-size control: identical output shape, with every lookup missing."""
@@ -2186,11 +2258,13 @@ def _series_chart_spine_harness(bucket_count: int, *, populated: bool) -> float:
 
 
 @probe(
-    "series-chart-spine-populated", expect=1.0,
+    "series-chart-spine-populated",
+    expect=1.0,
     sizes=(250, 500, 1000, 2000),
     axis="native dense buckets at four series and two measures",
     assumption="range reconciliation and path emission are linear in bucket count",
-    stage="series", group="web",
+    stage="series",
+    group="web",
 )
 def _series_chart_spine_populated(bucket_count: int):
     """A populated native-owned range has one bounded pass per selected row."""
@@ -2198,11 +2272,13 @@ def _series_chart_spine_populated(bucket_count: int):
 
 
 @probe(
-    "series-chart-spine-empty-control", expect=1.0,
+    "series-chart-spine-empty-control",
+    expect=1.0,
     sizes=(250, 500, 1000, 2000),
     axis="native dense buckets at four series and two measures",
     assumption="the same-size empty range projection remains linear",
-    stage="series", group="web",
+    stage="series",
+    group="web",
 )
 def _series_chart_spine_empty_control(bucket_count: int):
     """Same-size control: identical paths and axes, with no populated cells."""
@@ -2226,18 +2302,18 @@ def _trajectory_grid_harness(fix_count: int, *, inside: bool) -> float:
     )
     lattice = grid(BoundingBox(-28.0, -27.0, 152.4, 153.4), metres=20_000)
     before = time.perf_counter()
-    trajectory.grid_summary(
-        start, start + datetime.timedelta(seconds=fix_count + 1), lattice
-    )
+    trajectory.grid_summary(start, start + datetime.timedelta(seconds=fix_count + 1), lattice)
     return time.perf_counter() - before
 
 
 @probe(
-    "trajectory-grid-inside", expect=1.0,
+    "trajectory-grid-inside",
+    expect=1.0,
     sizes=(500, 1000, 2000, 4000),
     axis="packed fixes scanned inside one grid",
     assumption="distance and occupancy are accumulated in one linear pass",
-    stage="geospatial", group="web",
+    stage="geospatial",
+    group="web",
 )
 def _trajectory_grid_inside(fix_count: int):
     """The occupied-cell subject scans each native record once."""
@@ -2245,11 +2321,13 @@ def _trajectory_grid_inside(fix_count: int):
 
 
 @probe(
-    "trajectory-grid-outside-control", expect=1.0,
+    "trajectory-grid-outside-control",
+    expect=1.0,
     sizes=(500, 1000, 2000, 4000),
     axis="packed fixes scanned outside one grid",
     assumption="the same-size no-occupancy control is linear",
-    stage="geospatial", group="web",
+    stage="geospatial",
+    group="web",
 )
 def _trajectory_grid_outside_control(fix_count: int):
     """Same-size control: every distance leg remains, no cell is emitted."""
@@ -2274,9 +2352,7 @@ def _validation_list_harness(n: int, *, typed: bool, response: bool) -> float:
             if body is None:
                 raise RuntimeError(errors)
         else:
-            result, errors = _core.decode_json_validation_tape(
-                wire, plan, ("body",)
-            )
+            result, errors = _core.decode_json_validation_tape(wire, plan, ("body",))
             if len(result) != n:
                 raise RuntimeError(errors)
         if errors:
@@ -2285,11 +2361,13 @@ def _validation_list_harness(n: int, *, typed: bool, response: bool) -> float:
 
 
 @probe(
-    "validation-json-int-list", expect=1.0,
+    "validation-json-int-list",
+    expect=1.0,
     sizes=(2000, 4000, 8000, 16000),
     axis="integers in one typed JSON request array",
     assumption="fused decode and homogeneous scalar validation are linear",
-    stage="validation", group="web",
+    stage="validation",
+    group="web",
 )
 def _validation_json_int_list(n: int):
     """Typed request arrays validate without per-item location objects."""
@@ -2297,11 +2375,13 @@ def _validation_json_int_list(n: int):
 
 
 @probe(
-    "validation-json-any-list-control", expect=1.0,
+    "validation-json-any-list-control",
+    expect=1.0,
     sizes=(2000, 4000, 8000, 16000),
     axis="values in one untyped JSON request array",
     assumption="the same-size decode-only control is linear",
-    stage="validation", group="web",
+    stage="validation",
+    group="web",
 )
 def _validation_json_any_list_control(n: int):
     """Same-size control: identical wire data with no scalar type predicate."""
@@ -2309,11 +2389,13 @@ def _validation_json_any_list_control(n: int):
 
 
 @probe(
-    "validation-response-int-list", expect=1.0,
+    "validation-response-int-list",
+    expect=1.0,
     sizes=(2000, 4000, 8000, 16000),
     axis="integers in one typed JSON response array",
     assumption="successful scalar validation and JSON emission are linear",
-    stage="egress", group="web",
+    stage="egress",
+    group="web",
 )
 def _validation_response_int_list(n: int):
     """Typed response arrays do not build a duplicate Python object graph."""
@@ -2321,11 +2403,13 @@ def _validation_response_int_list(n: int):
 
 
 @probe(
-    "validation-response-any-list-control", expect=1.0,
+    "validation-response-any-list-control",
+    expect=1.0,
     sizes=(2000, 4000, 8000, 16000),
     axis="values in one untyped JSON response array",
     assumption="the same-size encode control is linear",
-    stage="egress", group="web",
+    stage="egress",
+    group="web",
 )
 def _validation_response_any_list_control(n: int):
     """Same-size control: identical values with no scalar type predicate."""
@@ -2337,8 +2421,7 @@ def _sync_state_harness(n: int, *, changed: bool) -> float:
     from wreath._native import _core
 
     rows = tuple(
-        {"key": f"row-{index}", "values": {"value": index, "active": True}}
-        for index in range(n)
+        {"key": f"row-{index}", "values": {"value": index, "active": True}} for index in range(n)
     )
     current = tuple(
         {
@@ -2360,10 +2443,13 @@ def _sync_state_harness(n: int, *, changed: bool) -> float:
 
 
 @probe(
-    "sync-state-all-changed", expect=1.0, sizes=(250, 500, 1000, 2000),
+    "sync-state-all-changed",
+    expect=1.0,
+    sizes=(250, 500, 1000, 2000),
     axis="bounded rows whose values all changed",
     assumption="native digest comparison and upsert selection are linear",
-    stage="sync", group="web",
+    stage="sync",
+    group="web",
 )
 def _sync_state_all_changed(n: int):
     """Every row changes, so the public Delta materializes n row references."""
@@ -2371,11 +2457,13 @@ def _sync_state_all_changed(n: int):
 
 
 @probe(
-    "sync-state-unchanged-control", expect=1.0,
+    "sync-state-unchanged-control",
+    expect=1.0,
     sizes=(250, 500, 1000, 2000),
     axis="bounded rows whose values are unchanged",
     assumption="the same-size no-delta control is linear",
-    stage="sync", group="web",
+    stage="sync",
+    group="web",
 )
 def _sync_state_unchanged_control(n: int):
     """Same-size control: hashes and lookups remain, materialization does not."""
@@ -2408,11 +2496,14 @@ def _trajectory_compile_harness(n: int, *, reversed_order: bool) -> float:
 
 
 @probe(
-    "trajectory-compile-ordered", expect=1.0, tolerance=0.6,
+    "trajectory-compile-ordered",
+    expect=1.0,
+    tolerance=0.6,
     sizes=(1000, 2000, 4000, 8000),
     axis="ordered fixes copied into packed trajectory storage",
     assumption="boundary validation, sorting and distance accumulation are near-linear",
-    stage="geospatial", group="web",
+    stage="geospatial",
+    group="web",
 )
 def _trajectory_compile_ordered(n: int):
     """The common ordered-fix construction path validates each pair once."""
@@ -2420,11 +2511,14 @@ def _trajectory_compile_ordered(n: int):
 
 
 @probe(
-    "trajectory-compile-reversed-control", expect=1.0, tolerance=0.6,
+    "trajectory-compile-reversed-control",
+    expect=1.0,
+    tolerance=0.6,
     sizes=(1000, 2000, 4000, 8000),
     axis="reverse-ordered fixes copied into packed trajectory storage",
     assumption="the same-size adversarial sort control remains near-linear",
-    stage="geospatial", group="web",
+    stage="geospatial",
+    group="web",
 )
 def _trajectory_compile_reversed_control(n: int):
     """Same-size control: qsort receives reverse order before the same scan."""
@@ -2443,8 +2537,7 @@ def _series_cell_rows_harness(n: int, *, populated: bool) -> float:
             for index in range(n)
         )
     else:
-        rows = tuple((index // 100, index % 100, None, None, None, None)
-                     for index in range(n))
+        rows = tuple((index // 100, index % 100, None, None, None, None) for index in range(n))
     loops = 10
     before = time.perf_counter()
     for _ in range(loops):
@@ -2455,11 +2548,13 @@ def _series_cell_rows_harness(n: int, *, populated: bool) -> float:
 
 
 @probe(
-    "series-cell-rows-populated", expect=1.0,
+    "series-cell-rows-populated",
+    expect=1.0,
     sizes=(500, 1000, 2000, 4000),
     axis="dense heatmap cells with four populated measures",
     assumption="boundary materialization is linear in emitted cells",
-    stage="series", group="web",
+    stage="series",
+    group="web",
 )
 def _series_cell_rows_populated(n: int):
     """Every measure takes its database value at the result boundary."""
@@ -2467,11 +2562,13 @@ def _series_cell_rows_populated(n: int):
 
 
 @probe(
-    "series-cell-rows-empty-control", expect=1.0,
+    "series-cell-rows-empty-control",
+    expect=1.0,
     sizes=(500, 1000, 2000, 4000),
     axis="dense heatmap cells with four null measures",
     assumption="the same-size fill-value control is linear",
-    stage="series", group="web",
+    stage="series",
+    group="web",
 )
 def _series_cell_rows_empty_control(n: int):
     """Same-size control: identical output shape, every value takes its fill."""
@@ -2483,10 +2580,9 @@ def _scim_filter_harness(n: int, *, match: bool) -> float:
     from wreath._scim.filters import parse, select
 
     resources = tuple(
-        {"id": str(index), "active": True, "userName": f"user-{index}"}
-        for index in range(n)
+        {"id": str(index), "active": True, "userName": f"user-{index}"} for index in range(n)
     )
-    node = parse('active eq true' if match else 'active eq false')
+    node = parse("active eq true" if match else "active eq false")
     loops = 20
     before = time.perf_counter()
     for _ in range(loops):
@@ -2497,10 +2593,13 @@ def _scim_filter_harness(n: int, *, match: bool) -> float:
 
 
 @probe(
-    "scim-filter-all-match", expect=1.0, sizes=(250, 500, 1000, 2000),
+    "scim-filter-all-match",
+    expect=1.0,
+    sizes=(250, 500, 1000, 2000),
     axis="SCIM resources selected by one predicate",
     assumption="predicate evaluation and result collection are linear",
-    stage="scim", group="web",
+    stage="scim",
+    group="web",
 )
 def _scim_filter_all_match(n: int):
     """Every resource matches and materializes at the response boundary."""
@@ -2508,11 +2607,13 @@ def _scim_filter_all_match(n: int):
 
 
 @probe(
-    "scim-filter-none-match-control", expect=1.0,
+    "scim-filter-none-match-control",
+    expect=1.0,
     sizes=(250, 500, 1000, 2000),
     axis="SCIM resources rejected by one predicate",
     assumption="the same-size no-result control is linear",
-    stage="scim", group="web",
+    stage="scim",
+    group="web",
 )
 def _scim_filter_none_match_control(n: int):
     """Same-size control: every predicate runs, no result list entries survive."""
@@ -2538,11 +2639,13 @@ def _scim_values_wide_harness(n: int, *, target_first: bool) -> float:
 
 
 @probe(
-    "scim-values-wide-last-key", expect=1.0,
+    "scim-values-wide-last-key",
+    expect=1.0,
     sizes=(500, 1000, 2000, 4000),
     axis="mapping keys visited before a case-insensitive SCIM path match",
     assumption="wide path lookup is one forward mapping pass",
-    stage="scim", group="web",
+    stage="scim",
+    group="web",
 )
 def _scim_values_wide_last_key(n: int):
     """The wanted key follows n irrelevant keys in insertion order."""
@@ -2550,11 +2653,13 @@ def _scim_values_wide_last_key(n: int):
 
 
 @probe(
-    "scim-values-wide-first-key-control", expect=1.0,
+    "scim-values-wide-first-key-control",
+    expect=1.0,
     sizes=(500, 1000, 2000, 4000),
     axis="same wide mapping with the SCIM path match first",
     assumption="the same-size mapping control stays bounded by one pass",
-    stage="scim", group="web",
+    stage="scim",
+    group="web",
 )
 def _scim_values_wide_first_key_control(n: int):
     """Same-size control: target order changes without changing resource width."""
@@ -2581,10 +2686,13 @@ def _template_loop_harness(n: int, *, escaped: bool) -> float:
 
 
 @probe(
-    "template-loop-escaped", expect=1.0, sizes=(500, 1000, 2000, 4000),
+    "template-loop-escaped",
+    expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
     axis="escaped values emitted by one compiled template loop",
     assumption="loop execution and escaping are linear in emitted values",
-    stage="egress", group="web",
+    stage="egress",
+    group="web",
 )
 def _template_loop_escaped(n: int):
     """Every value takes the ordinary HTML-escaping path."""
@@ -2592,11 +2700,13 @@ def _template_loop_escaped(n: int):
 
 
 @probe(
-    "template-loop-markup-control", expect=1.0,
+    "template-loop-markup-control",
+    expect=1.0,
     sizes=(500, 1000, 2000, 4000),
     axis="trusted values emitted by one compiled template loop",
     assumption="the same-size already-safe control is linear",
-    stage="egress", group="web",
+    stage="egress",
+    group="web",
 )
 def _template_loop_markup_control(n: int):
     """Same-size control: loop and output remain, character escaping does not."""
@@ -2622,11 +2732,13 @@ def _graphql_results_field_harness(n: int, *, distinct: bool) -> float:
 
 
 @probe(
-    "graphql-results-distinct-fields", expect=1.0,
+    "graphql-results-distinct-fields",
+    expect=1.0,
     sizes=(100, 200, 400, 800),
     axis="distinct fields accumulated in one native result plan",
     assumption="field-plan insertion is O(1) amortized per distinct key",
-    stage="graphql-projection", group="web",
+    stage="graphql-projection",
+    group="web",
 )
 def _graphql_results_distinct_fields(n: int):
     """Distinct response keys must not linearly rescan all earlier columns."""
@@ -2634,11 +2746,13 @@ def _graphql_results_distinct_fields(n: int):
 
 
 @probe(
-    "graphql-results-overwrite-control", expect=1.0,
+    "graphql-results-overwrite-control",
+    expect=1.0,
     sizes=(100, 200, 400, 800),
     axis="writes to one repeated native result key",
     assumption="the same-size overwrite control is linear",
-    stage="graphql-projection", group="web",
+    stage="graphql-projection",
+    group="web",
 )
 def _graphql_results_overwrite_control(n: int):
     """Same-size control: n stores resolve to one existing field slot."""
@@ -2668,11 +2782,13 @@ def _graphql_projection_harness(n: int, *, attributes: bool) -> float:
 
 
 @probe(
-    "graphql-project-attributes", expect=1.0,
+    "graphql-project-attributes",
+    expect=1.0,
     sizes=(500, 1000, 2000, 4000),
     axis="object attributes projected into GraphQL result rows",
     assumption="attribute materialization is linear in response rows",
-    stage="graphql-projection", group="web",
+    stage="graphql-projection",
+    group="web",
 )
 def _graphql_project_attributes(n: int):
     """The native result plan reads one boundary attribute per row."""
@@ -2680,11 +2796,13 @@ def _graphql_project_attributes(n: int):
 
 
 @probe(
-    "graphql-project-values-control", expect=1.0,
+    "graphql-project-values-control",
+    expect=1.0,
     sizes=(500, 1000, 2000, 4000),
     axis="already-resolved values projected into GraphQL result rows",
     assumption="the same-size direct-value control is linear",
-    stage="graphql-projection", group="web",
+    stage="graphql-projection",
+    group="web",
 )
 def _graphql_project_values_control(n: int):
     """Same-size control: result ownership remains, attribute lookup does not."""
@@ -2732,11 +2850,13 @@ def _protobuf_repeated_harness(n: int, *, packed: bool, decode: bool) -> float:
 
 
 @probe(
-    "protobuf-encode-packed-repeated", expect=1.0,
+    "protobuf-encode-packed-repeated",
+    expect=1.0,
     sizes=(1000, 2000, 4000, 8000),
     axis="varints in one packed repeated protobuf field",
     assumption="packed size and emission passes are linear in item count",
-    stage="protobuf", group="web",
+    stage="protobuf",
+    group="web",
 )
 def _protobuf_encode_packed_repeated(n: int):
     """Packed values share one tag and length prefix."""
@@ -2744,11 +2864,13 @@ def _protobuf_encode_packed_repeated(n: int):
 
 
 @probe(
-    "protobuf-encode-unpacked-control", expect=1.0,
+    "protobuf-encode-unpacked-control",
+    expect=1.0,
     sizes=(1000, 2000, 4000, 8000),
     axis="varints in one unpacked repeated protobuf field",
     assumption="the same-size per-item-tag control is linear",
-    stage="protobuf", group="web",
+    stage="protobuf",
+    group="web",
 )
 def _protobuf_encode_unpacked_control(n: int):
     """Same-size control: each value carries its own field tag."""
@@ -2756,11 +2878,13 @@ def _protobuf_encode_unpacked_control(n: int):
 
 
 @probe(
-    "protobuf-decode-packed-repeated", expect=1.0,
+    "protobuf-decode-packed-repeated",
+    expect=1.0,
     sizes=(1000, 2000, 4000, 8000),
     axis="varints decoded from one packed protobuf field",
     assumption="packed decoding visits each payload byte a bounded number of times",
-    stage="protobuf", group="web",
+    stage="protobuf",
+    group="web",
 )
 def _protobuf_decode_packed_repeated(n: int):
     """One length-delimited packed field grows one native-owned decode array."""
@@ -2768,11 +2892,13 @@ def _protobuf_decode_packed_repeated(n: int):
 
 
 @probe(
-    "protobuf-decode-unpacked-control", expect=1.0,
+    "protobuf-decode-unpacked-control",
+    expect=1.0,
     sizes=(1000, 2000, 4000, 8000),
     axis="varints decoded from repeated unpacked protobuf fields",
     assumption="the same-size tag-heavy control is linear",
-    stage="protobuf", group="web",
+    stage="protobuf",
+    group="web",
 )
 def _protobuf_decode_unpacked_control(n: int):
     """Same-size control: each value re-enters field dispatch from its tag."""
@@ -2797,7 +2923,10 @@ def _protobuf_compile_harness(n: int, *, one_descriptor: bool) -> float:
         else:
             for index in range(n):
                 result = _core.protobuf_compile(
-                    (row,), (f"field_{index}",), (None,), {},
+                    (row,),
+                    (f"field_{index}",),
+                    (None,),
+                    {},
                 )
                 if result is None:
                     raise RuntimeError("protobuf compiler produced no descriptor")
@@ -2805,11 +2934,13 @@ def _protobuf_compile_harness(n: int, *, one_descriptor: bool) -> float:
 
 
 @probe(
-    "protobuf-compile-wide-descriptor", expect=1.0,
+    "protobuf-compile-wide-descriptor",
+    expect=1.0,
     sizes=(100, 200, 400, 800),
     axis="fields compiled into one protobuf descriptor",
     assumption="field lookup and JSON-name uniqueness are O(n log n) or better",
-    stage="protobuf-startup", group="web",
+    stage="protobuf-startup",
+    group="web",
 )
 def _protobuf_compile_wide_descriptor(n: int):
     """Distinct camel names must not be compared with every prior field."""
@@ -2817,11 +2948,13 @@ def _protobuf_compile_wide_descriptor(n: int):
 
 
 @probe(
-    "protobuf-compile-single-field-control", expect=1.0,
+    "protobuf-compile-single-field-control",
+    expect=1.0,
     sizes=(100, 200, 400, 800),
     axis="fields compiled across one-field protobuf descriptors",
     assumption="the same total-field control scales linearly",
-    stage="protobuf-startup", group="web",
+    stage="protobuf-startup",
+    group="web",
 )
 def _protobuf_compile_single_field_control(n: int):
     """Same-size control: compile n fields without an intra-plan uniqueness set."""
@@ -2832,8 +2965,7 @@ def _msgpack_collection_harness(n: int, *, mapping: bool) -> float:
     """Price MessagePack container traversal at equal element counts."""
     from wreath._native import _core
 
-    value: Any = ({f"k{index}": index for index in range(n)} if mapping
-                  else list(range(n)))
+    value: Any = {f"k{index}": index for index in range(n)} if mapping else list(range(n))
     loops = 30
     before = time.perf_counter()
     for _ in range(loops):
@@ -2844,10 +2976,13 @@ def _msgpack_collection_harness(n: int, *, mapping: bool) -> float:
 
 
 @probe(
-    "msgpack-map", expect=1.0, sizes=(1000, 2000, 4000, 8000),
+    "msgpack-map",
+    expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
     axis="entries in one MessagePack mapping",
     assumption="mapping encoding is linear in keys plus values",
-    stage="msgpack", group="web",
+    stage="msgpack",
+    group="web",
 )
 def _msgpack_map(n: int):
     """Distinct keys exercise mapping iteration and string encoding."""
@@ -2855,11 +2990,13 @@ def _msgpack_map(n: int):
 
 
 @probe(
-    "msgpack-array-control", expect=1.0,
+    "msgpack-array-control",
+    expect=1.0,
     sizes=(1000, 2000, 4000, 8000),
     axis="items in one MessagePack array",
     assumption="the same-size scalar-array control is linear",
-    stage="msgpack", group="web",
+    stage="msgpack",
+    group="web",
 )
 def _msgpack_array_control(n: int):
     """Same-size control: container growth remains, key encoding does not."""
@@ -2886,11 +3023,13 @@ def _xml_wide_harness(n: int, *, attributes: bool, canonical: bool) -> float:
 
 
 @probe(
-    "xml-parse-wide-attributes", expect=1.0,
+    "xml-parse-wide-attributes",
+    expect=1.0,
     sizes=(250, 500, 1000, 2000),
     axis="wide sibling elements each carrying one attribute",
     assumption="XML parsing is linear in elements and attributes",
-    stage="xml", group="web",
+    stage="xml",
+    group="web",
 )
 def _xml_parse_wide_attributes(n: int):
     """Every sibling exercises attribute-name and value parsing."""
@@ -2898,11 +3037,13 @@ def _xml_parse_wide_attributes(n: int):
 
 
 @probe(
-    "xml-parse-wide-text-control", expect=1.0,
+    "xml-parse-wide-text-control",
+    expect=1.0,
     sizes=(250, 500, 1000, 2000),
     axis="wide sibling elements carrying text only",
     assumption="the same-size no-attribute control is linear",
-    stage="xml", group="web",
+    stage="xml",
+    group="web",
 )
 def _xml_parse_wide_text_control(n: int):
     """Same-size control: element and text ownership remain, attributes do not."""
@@ -2910,11 +3051,13 @@ def _xml_parse_wide_text_control(n: int):
 
 
 @probe(
-    "xml-c14n-wide-attributes", expect=1.0,
+    "xml-c14n-wide-attributes",
+    expect=1.0,
     sizes=(250, 500, 1000, 2000),
     axis="wide attributed siblings in exclusive canonicalization",
     assumption="namespace and attribute ordering stay linear for fixed width",
-    stage="xml", group="web",
+    stage="xml",
+    group="web",
 )
 def _xml_c14n_wide_attributes(n: int):
     """Canonicalization repeats a fixed one-attribute scope n times."""
@@ -2922,11 +3065,13 @@ def _xml_c14n_wide_attributes(n: int):
 
 
 @probe(
-    "xml-c14n-wide-text-control", expect=1.0,
+    "xml-c14n-wide-text-control",
+    expect=1.0,
     sizes=(250, 500, 1000, 2000),
     axis="wide text-only siblings in exclusive canonicalization",
     assumption="the same-size no-sort control is linear",
-    stage="xml", group="web",
+    stage="xml",
+    group="web",
 )
 def _xml_c14n_wide_text_control(n: int):
     """Same-size control: tag and text emission remain, attribute sorting does not."""
@@ -2951,11 +3096,13 @@ def _sql_renumber_harness(n: int, *, parameters: bool) -> float:
 
 
 @probe(
-    "sql-renumber-parameters", expect=1.0,
+    "sql-renumber-parameters",
+    expect=1.0,
     sizes=(1000, 2000, 4000, 8000),
     axis="positional parameters in one SQL fragment",
     assumption="parameter recognition and decimal rewriting are linear",
-    stage="database", group="web",
+    stage="database",
+    group="web",
 )
 def _sql_renumber_parameters(n: int):
     """Every token is an active placeholder whose number changes."""
@@ -2963,11 +3110,13 @@ def _sql_renumber_parameters(n: int):
 
 
 @probe(
-    "sql-renumber-quoted-control", expect=1.0,
+    "sql-renumber-quoted-control",
+    expect=1.0,
     sizes=(1000, 2000, 4000, 8000),
     axis="quoted numeric tokens in one SQL fragment",
     assumption="the same-size quote-state control is linear",
-    stage="database", group="web",
+    stage="database",
+    group="web",
 )
 def _sql_renumber_quoted_control(n: int):
     """Same-size control: lexer state remains, no placeholder is rewritten."""
@@ -2990,11 +3139,13 @@ def _dkim_body_harness(n: int, *, whitespace: bool) -> float:
 
 
 @probe(
-    "dkim-relaxed-whitespace", expect=1.0,
+    "dkim-relaxed-whitespace",
+    expect=1.0,
     sizes=(1000, 2000, 4000, 8000),
     axis="body lines with repeated horizontal whitespace",
     assumption="relaxed whitespace folding is one forward pass",
-    stage="egress", group="web",
+    stage="egress",
+    group="web",
 )
 def _dkim_relaxed_whitespace(n: int):
     """Every line exercises compression and trailing-space deletion."""
@@ -3002,11 +3153,13 @@ def _dkim_relaxed_whitespace(n: int):
 
 
 @probe(
-    "dkim-relaxed-plain-control", expect=1.0,
+    "dkim-relaxed-plain-control",
+    expect=1.0,
     sizes=(1000, 2000, 4000, 8000),
     axis="body lines already in relaxed form",
     assumption="the same-size copy control is linear",
-    stage="egress", group="web",
+    stage="egress",
+    group="web",
 )
 def _dkim_relaxed_plain_control(n: int):
     """Same-size control: line scanning remains, whitespace folding does not."""
@@ -3028,11 +3181,13 @@ def _sse_frame_harness(n: int, *, multiline: bool) -> float:
 
 
 @probe(
-    "sse-multiline-data", expect=1.0,
+    "sse-multiline-data",
+    expect=1.0,
     sizes=(1000, 2000, 4000, 8000),
     axis="newline-delimited values in one SSE data field",
     assumption="prefix insertion and newline normalization are linear",
-    stage="egress", group="web",
+    stage="egress",
+    group="web",
 )
 def _sse_multiline_data(n: int):
     """Every two input bytes produce another data-field prefix."""
@@ -3040,11 +3195,13 @@ def _sse_multiline_data(n: int):
 
 
 @probe(
-    "sse-single-line-control", expect=1.0,
+    "sse-single-line-control",
+    expect=1.0,
     sizes=(1000, 2000, 4000, 8000),
     axis="same bytes in one SSE data line",
     assumption="the same-size no-split control is linear",
-    stage="egress", group="web",
+    stage="egress",
+    group="web",
 )
 def _sse_single_line_control(n: int):
     """Same-size control: UTF-8 copying remains, line prefixes do not."""
@@ -3070,11 +3227,13 @@ def _websocket_frame_harness(n: int, *, masked: bool) -> float:
 
 
 @probe(
-    "websocket-parse-masked", expect=1.0,
+    "websocket-parse-masked",
+    expect=1.0,
     sizes=(2000, 4000, 8000, 16000),
     axis="masked WebSocket payload bytes",
     assumption="frame parsing and unmasking are linear in payload bytes",
-    stage="websocket", group="web",
+    stage="websocket",
+    group="web",
 )
 def _websocket_parse_masked(n: int):
     """The parser copies and unmasks the complete payload."""
@@ -3082,11 +3241,13 @@ def _websocket_parse_masked(n: int):
 
 
 @probe(
-    "websocket-parse-unmasked-control", expect=1.0,
+    "websocket-parse-unmasked-control",
+    expect=1.0,
     sizes=(2000, 4000, 8000, 16000),
     axis="unmasked WebSocket payload bytes",
     assumption="the same-size copy-only control is linear",
-    stage="websocket", group="web",
+    stage="websocket",
+    group="web",
 )
 def _websocket_parse_unmasked_control(n: int):
     """Same-size control: framing and payload ownership remain, XOR does not."""
@@ -3097,8 +3258,7 @@ def _queue_drain_harness(n: int, *, priority: bool) -> float:
     """Price native bounded queue insertion and complete draining."""
     from wreath.queue import PriorityQueue, Queue
 
-    queue: Any = (PriorityQueue(capacity=n + 1) if priority
-                  else Queue(capacity=n + 1))
+    queue: Any = PriorityQueue(capacity=n + 1) if priority else Queue(capacity=n + 1)
     before = time.perf_counter()
     if priority:
         for index in range(n):
@@ -3115,11 +3275,14 @@ def _queue_drain_harness(n: int, *, priority: bool) -> float:
 
 
 @probe(
-    "priority-queue-offer-drain", expect=1.0, tolerance=0.65,
+    "priority-queue-offer-drain",
+    expect=1.0,
+    tolerance=0.65,
     sizes=(1000, 2000, 4000, 8000),
     axis="items offered to and drained from a native priority queue",
     assumption="heap maintenance is O(n log n), not quadratic",
-    stage="queue", group="web",
+    stage="queue",
+    group="web",
 )
 def _priority_queue_offer_drain(n: int):
     """A varied-priority heap executes one logarithmic adjustment per item."""
@@ -3127,11 +3290,13 @@ def _priority_queue_offer_drain(n: int):
 
 
 @probe(
-    "fifo-queue-offer-drain-control", expect=1.0,
+    "fifo-queue-offer-drain-control",
+    expect=1.0,
     sizes=(1000, 2000, 4000, 8000),
     axis="items offered to and drained from a native FIFO queue",
     assumption="the same-size ring-buffer control is linear",
-    stage="queue", group="web",
+    stage="queue",
+    group="web",
 )
 def _fifo_queue_offer_drain_control(n: int):
     """Same-size control: queue ownership remains, heap ordering does not."""
@@ -3142,8 +3307,7 @@ def _queue_snapshot_harness(n: int, *, priority: bool) -> float:
     """Price a non-destructive ordered snapshot at one held size."""
     from wreath.queue import PriorityQueue, Queue
 
-    queue: Any = (PriorityQueue(capacity=n + 1) if priority
-                  else Queue(capacity=n + 1))
+    queue: Any = PriorityQueue(capacity=n + 1) if priority else Queue(capacity=n + 1)
     if priority:
         for index in range(n):
             queue.offer(index, priority=(index * 7919) % max(n, 1))
@@ -3160,11 +3324,14 @@ def _queue_snapshot_harness(n: int, *, priority: bool) -> float:
 
 
 @probe(
-    "priority-queue-snapshot", expect=1.0, tolerance=0.65,
+    "priority-queue-snapshot",
+    expect=1.0,
+    tolerance=0.65,
     sizes=(500, 1000, 2000, 4000),
     axis="held priority-queue entries copied in get order",
     assumption="snapshot ordering is O(n log n), not selection-sort quadratic",
-    stage="queue", group="web",
+    stage="queue",
+    group="web",
 )
 def _priority_queue_snapshot(n: int):
     """The copied heap must be ordered without repeatedly scanning its tail."""
@@ -3172,11 +3339,13 @@ def _priority_queue_snapshot(n: int):
 
 
 @probe(
-    "fifo-queue-snapshot-control", expect=1.0,
+    "fifo-queue-snapshot-control",
+    expect=1.0,
     sizes=(500, 1000, 2000, 4000),
     axis="held FIFO entries copied in get order",
     assumption="the same-size ring snapshot control is linear",
-    stage="queue", group="web",
+    stage="queue",
+    group="web",
 )
 def _fifo_queue_snapshot_control(n: int):
     """Same-size control: owned references are copied without ordering."""
@@ -3187,8 +3356,11 @@ def _rank_indices_harness(n: int, *, sorted_input: bool) -> float:
     """Price numeric ranking under ordered and disordered inputs."""
     from wreath._native import _core
 
-    scores = ([float(index) for index in range(n)] if sorted_input else
-              [float((index * 7919) % max(n, 1)) for index in range(n)])
+    scores = (
+        [float(index) for index in range(n)]
+        if sorted_input
+        else [float((index * 7919) % max(n, 1)) for index in range(n)]
+    )
     loops = 30
     before = time.perf_counter()
     for _ in range(loops):
@@ -3199,11 +3371,14 @@ def _rank_indices_harness(n: int, *, sorted_input: bool) -> float:
 
 
 @probe(
-    "rank-indices-disordered", expect=1.0, tolerance=0.65,
+    "rank-indices-disordered",
+    expect=1.0,
+    tolerance=0.65,
     sizes=(1000, 2000, 4000, 8000),
     axis="disordered numeric scores ranked into indices",
     assumption="native ranking is O(n log n), not quadratic",
-    stage="query", group="web",
+    stage="query",
+    group="web",
 )
 def _rank_indices_disordered(n: int):
     """A deterministic permutation exercises the general qsort path."""
@@ -3211,11 +3386,14 @@ def _rank_indices_disordered(n: int):
 
 
 @probe(
-    "rank-indices-sorted-control", expect=1.0, tolerance=0.65,
+    "rank-indices-sorted-control",
+    expect=1.0,
+    tolerance=0.65,
     sizes=(1000, 2000, 4000, 8000),
     axis="already-sorted numeric scores ranked into indices",
     assumption="the same-size ordered control remains O(n log n) or better",
-    stage="query", group="web",
+    stage="query",
+    group="web",
 )
 def _rank_indices_sorted_control(n: int):
     """Same-size control: conversion and output remain, comparisons simplify."""
@@ -3230,10 +3408,7 @@ def _fused_order_harness(n: int, *, overlap: bool) -> float:
         base = tuple(f"item-{index}" for index in range(n))
         rankings = (base, base[::-1], base)
     else:
-        rankings = tuple(
-            tuple(f"arm-{arm}-item-{index}" for index in range(n))
-            for arm in range(3)
-        )
+        rankings = tuple(tuple(f"arm-{arm}-item-{index}" for index in range(n)) for arm in range(3))
     loops = 10
     before = time.perf_counter()
     for _ in range(loops):
@@ -3245,11 +3420,14 @@ def _fused_order_harness(n: int, *, overlap: bool) -> float:
 
 
 @probe(
-    "rank-fusion-overlap", expect=1.0, tolerance=0.65,
+    "rank-fusion-overlap",
+    expect=1.0,
+    tolerance=0.65,
     sizes=(500, 1000, 2000, 4000),
     axis="ranking cells resolving to an overlapping key set",
     assumption="hash accumulation plus final sort are O(n log n)",
-    stage="query", group="web",
+    stage="query",
+    group="web",
 )
 def _rank_fusion_overlap(n: int):
     """Three arms update the same n native hash slots."""
@@ -3257,11 +3435,14 @@ def _rank_fusion_overlap(n: int):
 
 
 @probe(
-    "rank-fusion-disjoint-control", expect=1.0, tolerance=0.65,
+    "rank-fusion-disjoint-control",
+    expect=1.0,
+    tolerance=0.65,
     sizes=(500, 1000, 2000, 4000),
     axis="same ranking cells resolving to disjoint key sets",
     assumption="the same-size maximum-output control remains O(n log n)",
-    stage="query", group="web",
+    stage="query",
+    group="web",
 )
 def _rank_fusion_disjoint_control(n: int):
     """Same-size input cell count: three times as many unique result slots."""
@@ -3273,10 +3454,7 @@ def _accept_sort_harness(n: int, *, ascending: bool) -> float:
     from wreath._native import _core
 
     indices = range(n) if ascending else range(n - 1, -1, -1)
-    header = ",".join(
-        f"application/x-{index};q={(index + 1) / (n + 1):.8f}"
-        for index in indices
-    )
+    header = ",".join(f"application/x-{index};q={(index + 1) / (n + 1):.8f}" for index in indices)
     loops = 20
     before = time.perf_counter()
     for _ in range(loops):
@@ -3287,11 +3465,14 @@ def _accept_sort_harness(n: int, *, ascending: bool) -> float:
 
 
 @probe(
-    "accept-ranges-reverse-quality", expect=1.0, tolerance=0.45,
+    "accept-ranges-reverse-quality",
+    expect=1.0,
+    tolerance=0.45,
     sizes=(250, 500, 1000, 2000),
     axis="Accept ranges arriving opposite their negotiated quality order",
     assumption="range ordering is O(n log n), never insertion-sort quadratic",
-    stage="ingress", group="web",
+    stage="ingress",
+    group="web",
 )
 def _accept_ranges_reverse_quality(n: int):
     """Each later range sorts ahead of every earlier one."""
@@ -3299,11 +3480,14 @@ def _accept_ranges_reverse_quality(n: int):
 
 
 @probe(
-    "accept-ranges-ranked-control", expect=1.0, tolerance=0.65,
+    "accept-ranges-ranked-control",
+    expect=1.0,
+    tolerance=0.65,
     sizes=(250, 500, 1000, 2000),
     axis="Accept ranges arriving in negotiated quality order",
     assumption="the same-size already-ranked control is O(n log n) or better",
-    stage="ingress", group="web",
+    stage="ingress",
+    group="web",
 )
 def _accept_ranges_ranked_control(n: int):
     """Same-size control: tokenization and output remain, ordering is pre-sorted."""
@@ -3320,9 +3504,7 @@ def _media_negotiation_harness(n: int, *, adversarial: bool) -> float:
         denied = [f"application/x-{index};q=0" for index in range(n)]
         header = ",".join((*accepted, *denied))
     else:
-        header = ",".join(
-            f"application/missing-{index};q=0" for index in range(n * 2)
-        )
+        header = ",".join(f"application/missing-{index};q=0" for index in range(n * 2))
     loops = 5
     before = time.perf_counter()
     for _ in range(loops):
@@ -3333,11 +3515,13 @@ def _media_negotiation_harness(n: int, *, adversarial: bool) -> float:
 
 
 @probe(
-    "media-negotiation-excluded-wildcards", expect=1.0,
+    "media-negotiation-excluded-wildcards",
+    expect=1.0,
     sizes=(50, 100, 200, 400),
     axis="accepted wildcards, denied exact ranges, and offered media types",
     assumption="exclusions and candidates are indexed per call, not cross-scanned",
-    stage="ingress", group="web",
+    stage="ingress",
+    group="web",
 )
 def _media_negotiation_excluded_wildcards(n: int):
     """Every wildcard matches every offer, all of which exact ranges exclude."""
@@ -3345,11 +3529,13 @@ def _media_negotiation_excluded_wildcards(n: int):
 
 
 @probe(
-    "media-negotiation-denied-control", expect=1.0,
+    "media-negotiation-denied-control",
+    expect=1.0,
     sizes=(50, 100, 200, 400),
     axis="same count of denied ranges beside the same offered media set",
     assumption="the same-size parse and normalization control is linear",
-    stage="ingress", group="web",
+    stage="ingress",
+    group="web",
 )
 def _media_negotiation_denied_control(n: int):
     """Same-size control: no positive range enters candidate selection."""
@@ -3376,11 +3562,13 @@ def _argument_normalization_harness(n: int, *, nested: bool) -> float:
 
 
 @probe(
-    "argument-normalize-deep", expect=1.0,
+    "argument-normalize-deep",
+    expect=1.0,
     sizes=(100, 200, 400, 800),
     axis="nested container edges in one bounded policy argument",
     assumption="cycle detection uses an operation-owned active set, not ancestor rescans",
-    stage="authorization", group="web",
+    stage="authorization",
+    group="web",
 )
 def _argument_normalize_deep(n: int):
     """Acyclic singleton lists make depth equal the number of emitted edges."""
@@ -3388,11 +3576,13 @@ def _argument_normalize_deep(n: int):
 
 
 @probe(
-    "argument-normalize-flat-control", expect=1.0,
+    "argument-normalize-flat-control",
+    expect=1.0,
     sizes=(100, 200, 400, 800),
     axis="flat scalar items in one bounded policy argument",
     assumption="the same-size JSON-emission control is linear",
-    stage="authorization", group="web",
+    stage="authorization",
+    group="web",
 )
 def _argument_normalize_flat_control(n: int):
     """Same-size control: output and field accounting remain without deep ancestry."""
@@ -3403,8 +3593,11 @@ def _sparsevector_compile_harness(n: int, *, ordered: bool) -> float:
     """Price conversion of a Python declaration into native sparse storage."""
     from wreath._native import _core
 
-    indices = (range(1, n + 1) if ordered else
-               sorted(range(1, n + 1), key=lambda index: (index * 7919) % n))
+    indices = (
+        range(1, n + 1)
+        if ordered
+        else sorted(range(1, n + 1), key=lambda index: (index * 7919) % n)
+    )
     elements = {index: float(index) for index in indices}
     loops = 20
     before = time.perf_counter()
@@ -3416,11 +3609,14 @@ def _sparsevector_compile_harness(n: int, *, ordered: bool) -> float:
 
 
 @probe(
-    "sparsevector-compile-disordered", expect=1.0, tolerance=0.65,
+    "sparsevector-compile-disordered",
+    expect=1.0,
+    tolerance=0.65,
     sizes=(500, 1000, 2000, 4000),
     axis="disordered sparse-vector declaration entries",
     assumption="native storage compilation is O(n log n), never quadratic",
-    stage="database", group="web",
+    stage="database",
+    group="web",
 )
 def _sparsevector_compile_disordered(n: int):
     """A deterministic key permutation exercises the general ordering path."""
@@ -3428,11 +3624,14 @@ def _sparsevector_compile_disordered(n: int):
 
 
 @probe(
-    "sparsevector-compile-ordered-control", expect=1.0, tolerance=0.65,
+    "sparsevector-compile-ordered-control",
+    expect=1.0,
+    tolerance=0.65,
     sizes=(500, 1000, 2000, 4000),
     axis="already-ordered sparse-vector declaration entries",
     assumption="the same-size native-storage control is O(n log n) or better",
-    stage="database", group="web",
+    stage="database",
+    group="web",
 )
 def _sparsevector_compile_ordered_control(n: int):
     """Same-size control: conversion and native filling remain with one sorted run."""
@@ -3448,8 +3647,11 @@ def _prometheus_routes_harness(n: int, *, populated: bool) -> float:
     buckets = tuple(1 if populated else 0 for _ in range(64))
     routes = tuple(
         SimpleNamespace(
-            route_id=index, count=64, errors=0,
-            duration_us_sum=4096.0, duration_us_max=128.0,
+            route_id=index,
+            count=64,
+            errors=0,
+            duration_us_sum=4096.0,
+            duration_us_max=128.0,
             buckets=buckets,
         )
         for index in range(n)
@@ -3465,11 +3667,13 @@ def _prometheus_routes_harness(n: int, *, populated: bool) -> float:
 
 
 @probe(
-    "prometheus-routes-full-histograms", expect=1.0,
+    "prometheus-routes-full-histograms",
+    expect=1.0,
     sizes=(50, 100, 200, 400),
     axis="route metric rows with every fixed histogram bucket populated",
     assumption="route planning and bounded histogram emission are linear in routes",
-    stage="observability", group="web",
+    stage="observability",
+    group="web",
 )
 def _prometheus_routes_full_histograms(n: int):
     """Every route emits all 64 duration buckets plus scalar families."""
@@ -3477,11 +3681,13 @@ def _prometheus_routes_full_histograms(n: int):
 
 
 @probe(
-    "prometheus-routes-empty-control", expect=1.0,
+    "prometheus-routes-empty-control",
+    expect=1.0,
     sizes=(50, 100, 200, 400),
     axis="same route metric rows with empty fixed histograms",
     assumption="the same-size route-planning control is linear",
-    stage="observability", group="web",
+    stage="observability",
+    group="web",
 )
 def _prometheus_routes_empty_control(n: int):
     """Same-size control: attributes and scalar families remain, buckets omit."""
@@ -3492,14 +3698,21 @@ def _flight_metadata_harness(n: int, *, ordered: bool) -> float:
     """Price canonical native metadata emission under row ordering changes."""
     from wreath._flight_schema import SCHEMA_VERSION, MetadataImage, NamedMeta
 
-    indices = (range(n) if ordered else range(n - 1, -1, -1))
-    dependencies = tuple(NamedMeta(index + 1, f"dependency-{index}")
-                         for index in indices)
+    indices = range(n) if ordered else range(n - 1, -1, -1)
+    dependencies = tuple(NamedMeta(index + 1, f"dependency-{index}") for index in indices)
     image = MetadataImage(
         version=SCHEMA_VERSION,
-        routes=(), plans=(), dependencies=dependencies, middleware=(),
-        auth_policies=(), serializers=(), validators=(), limits=(),
-        clients=(), databases=(), models=(),
+        routes=(),
+        plans=(),
+        dependencies=dependencies,
+        middleware=(),
+        auth_policies=(),
+        serializers=(),
+        validators=(),
+        limits=(),
+        clients=(),
+        databases=(),
+        models=(),
     )
     loops = 20
     before = time.perf_counter()
@@ -3511,11 +3724,14 @@ def _flight_metadata_harness(n: int, *, ordered: bool) -> float:
 
 
 @probe(
-    "flight-metadata-reverse-rows", expect=1.0, tolerance=0.65,
+    "flight-metadata-reverse-rows",
+    expect=1.0,
+    tolerance=0.65,
     sizes=(250, 500, 1000, 2000),
     axis="reverse-ID native-flight metadata rows",
     assumption="canonical row ordering is O(n log n), never quadratic",
-    stage="observability", group="web",
+    stage="observability",
+    group="web",
 )
 def _flight_metadata_reverse_rows(n: int):
     """Rows arrive opposite their canonical ID order."""
@@ -3523,11 +3739,14 @@ def _flight_metadata_reverse_rows(n: int):
 
 
 @probe(
-    "flight-metadata-ordered-control", expect=1.0, tolerance=0.65,
+    "flight-metadata-ordered-control",
+    expect=1.0,
+    tolerance=0.65,
     sizes=(250, 500, 1000, 2000),
     axis="already-ID-ordered native-flight metadata rows",
     assumption="the same-size canonical-emission control is O(n log n) or better",
-    stage="observability", group="web",
+    stage="observability",
+    group="web",
 )
 def _flight_metadata_ordered_control(n: int):
     """Same-size control: field reads and wire output remain in canonical order."""
@@ -3539,21 +3758,14 @@ def _privacy_topology_harness(n: int, *, chain: bool) -> float:
     from wreath._privacy.graph import Graph, Node, order_children_first
     from wreath._privacy.model import Edge
 
-    models: tuple[type, ...] = tuple(
-        type(f"PrivacyProbe{index}", (), {}) for index in range(n)
-    )
+    models: tuple[type, ...] = tuple(type(f"PrivacyProbe{index}", (), {}) for index in range(n))
     nodes: dict[type, Node] = {
         model: Node(model, model.__name__, "public", f"t{index:06d}", (), {})
         for index, model in enumerate(models)
     }
     edge = Edge("child", "parent_id", "parent", "id", "r")
     outbound: dict[type, tuple[tuple[Edge, type], ...]] = (
-        {
-            models[index]: ((edge, models[index - 1]),)
-            for index in range(1, n)
-        }
-        if chain
-        else {}
+        {models[index]: ((edge, models[index - 1]),) for index in range(1, n)} if chain else {}
     )
     graph = Graph(nodes, outbound, {})
     members: set[type] = set(models)
@@ -3567,11 +3779,13 @@ def _privacy_topology_harness(n: int, *, chain: bool) -> float:
 
 
 @probe(
-    "privacy-topology-chain", expect=1.0,
+    "privacy-topology-chain",
+    expect=1.0,
     sizes=(200, 400, 800, 1600),
     axis="models in one foreign-key chain",
     assumption="children-first ordering visits each model and edge once",
-    stage="privacy", group="extended",
+    stage="privacy",
+    group="extended",
 )
 def _privacy_topology_chain(n: int):
     """A chain unlocks exactly one parent at each topological layer."""
@@ -3579,18 +3793,17 @@ def _privacy_topology_chain(n: int):
 
 
 @probe(
-    "privacy-topology-disconnected-control", expect=1.0,
+    "privacy-topology-disconnected-control",
+    expect=1.0,
     sizes=(200, 400, 800, 1600),
     axis="disconnected models in one privacy graph",
     assumption="the same-size deterministic-ordering control is linear",
-    stage="privacy", group="extended",
+    stage="privacy",
+    group="extended",
 )
 def _privacy_topology_disconnected_control(n: int):
     """Same-size control: model ordering remains while dependency edges do not."""
     return _privacy_topology_harness(n, chain=False)
-
-
-# --- superlinear-removal contracts -----------------------------------------
 
 
 def _cedar_store_harness(n: int, *, chain: bool) -> float:
@@ -3612,10 +3825,13 @@ def _cedar_store_harness(n: int, *, chain: bool) -> float:
 
 
 @probe(
-    "cedar-store-chain", expect=1.0, sizes=(250, 500, 1000, 2000),
+    "cedar-store-chain",
+    expect=1.0,
+    sizes=(250, 500, 1000, 2000),
     axis="entities in one direct-parent chain",
     assumption="Cedar construction materializes every entity and direct edge once",
-    stage="authorization", group="web",
+    stage="authorization",
+    group="web",
 )
 def _cedar_store_chain(n: int):
     """A deep hierarchy stays linear because transitive closure remains native."""
@@ -3623,10 +3839,13 @@ def _cedar_store_chain(n: int):
 
 
 @probe(
-    "cedar-store-flat-control", expect=1.0, sizes=(250, 500, 1000, 2000),
+    "cedar-store-flat-control",
+    expect=1.0,
+    sizes=(250, 500, 1000, 2000),
     axis="same entity and edge count in a flat hierarchy",
     assumption="the same-size flat Cedar construction control is linear",
-    stage="authorization", group="web",
+    stage="authorization",
+    group="web",
 )
 def _cedar_store_flat_control(n: int):
     """Same-size control: all non-root entities share one direct parent."""
@@ -3638,10 +3857,8 @@ def _signature_index_harness(n: int, *, late_match: bool) -> float:
 
     from wreath.webhooks import _constant_time_signature_match
 
-    expected = tuple(hashlib.sha256(f"expected-{index}".encode()).digest()
-                     for index in range(n))
-    supplied = [hashlib.sha256(f"supplied-{index}".encode()).digest()
-                for index in range(n)]
+    expected = tuple(hashlib.sha256(f"expected-{index}".encode()).digest() for index in range(n))
+    supplied = [hashlib.sha256(f"supplied-{index}".encode()).digest() for index in range(n)]
     if late_match:
         supplied[-1] = expected[-1]
     loops = 100
@@ -3655,10 +3872,13 @@ def _signature_index_harness(n: int, *, late_match: bool) -> float:
 
 
 @probe(
-    "webhook-signature-index-miss", expect=1.0, sizes=(32, 64, 128, 256),
+    "webhook-signature-index-miss",
+    expect=1.0,
+    sizes=(32, 64, 128, 256),
     axis="configured secrets and supplied signatures with no match",
     assumption="webhook multi-signature verification indexes both collections linearly",
-    stage="authentication", group="web",
+    stage="authentication",
+    group="web",
 )
 def _webhook_signature_index_miss(n: int):
     """Disjoint expected and supplied signature collections remain linear."""
@@ -3666,11 +3886,13 @@ def _webhook_signature_index_miss(n: int):
 
 
 @probe(
-    "webhook-signature-index-match-control", expect=1.0,
+    "webhook-signature-index-match-control",
+    expect=1.0,
     sizes=(32, 64, 128, 256),
     axis="same signature collections with one late match",
     assumption="the same-size successful verification control remains linear",
-    stage="authentication", group="web",
+    stage="authentication",
+    group="web",
 )
 def _webhook_signature_index_match_control(n: int):
     """Same-size control: the final expected signature has one indexed match."""
@@ -3703,10 +3925,13 @@ def _queue_waiter_harness(n: int, *, cancel: bool) -> float:
 
 
 @probe(
-    "queue-waiter-mass-cancel", expect=1.0, sizes=(250, 500, 1000, 2000),
+    "queue-waiter-mass-cancel",
+    expect=1.0,
+    sizes=(250, 500, 1000, 2000),
     axis="simultaneously cancelled queue getters",
     assumption="waiter cancellation leaves FIFO tombstones and cleans them in aggregate O(n)",
-    stage="queue", group="web",
+    stage="queue",
+    group="web",
 )
 def _queue_waiter_mass_cancel(n: int):
     """Cancelling every parked getter never linearly removes each future."""
@@ -3714,10 +3939,13 @@ def _queue_waiter_mass_cancel(n: int):
 
 
 @probe(
-    "queue-waiter-wake-control", expect=1.0, sizes=(250, 500, 1000, 2000),
+    "queue-waiter-wake-control",
+    expect=1.0,
+    sizes=(250, 500, 1000, 2000),
     axis="same parked getters woken by items",
     assumption="the same-size successful wake control is linear",
-    stage="queue", group="web",
+    stage="queue",
+    group="web",
 )
 def _queue_waiter_wake_control(n: int):
     """Same-size control: every parked getter receives one item."""
@@ -3742,10 +3970,13 @@ def _route_registration_harness(n: int, *, named: bool) -> float:
 
 
 @probe(
-    "named-route-registration", expect=1.0, sizes=(500, 1000, 2000, 4000),
+    "named-route-registration",
+    expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
     axis="uniquely named routes registered on one application",
     assumption="route-name uniqueness uses the application-owned hash index",
-    stage="startup", group="web",
+    stage="startup",
+    group="web",
 )
 def _named_route_registration(n: int):
     """Registering uniquely named routes is linear in route count."""
@@ -3753,11 +3984,13 @@ def _named_route_registration(n: int):
 
 
 @probe(
-    "unnamed-route-registration-control", expect=1.0,
+    "unnamed-route-registration-control",
+    expect=1.0,
     sizes=(500, 1000, 2000, 4000),
     axis="same static routes without names",
     assumption="the same-size router-add control is linear",
-    stage="startup", group="web",
+    stage="startup",
+    group="web",
 )
 def _unnamed_route_registration_control(n: int):
     """Same-size control: native static registration without the name index."""
@@ -3769,8 +4002,7 @@ def _protobuf_wide_fixture(n: int):
 
     annotations = {f"field_{index}": int for index in range(n)}
     namespace: dict[str, Any] = {"__annotations__": annotations}
-    namespace.update({name: field(index + 1)
-                      for index, name in enumerate(annotations)})
+    namespace.update({name: field(index + 1) for index, name in enumerate(annotations)})
     cls = message(type(f"WideProbe{n}", (), namespace))
     snake = {name: index + 1 for index, name in enumerate(annotations)}
     camel = {name.replace("_", ""): value for name, value in snake.items()}
@@ -3802,10 +4034,13 @@ def _protobuf_wide_harness(n: int, *, operation: str) -> float:
 
 
 @probe(
-    "protobuf-otlp-wide-encode", expect=1.0, sizes=(50, 100, 200, 400),
+    "protobuf-otlp-wide-encode",
+    expect=1.0,
+    sizes=(50, 100, 200, 400),
     axis="OTLP/JSON keys against an equally wide protobuf descriptor",
     assumption="native OTLP encoding performs one descriptor hash lookup per key",
-    stage="serialization", group="web",
+    stage="serialization",
+    group="web",
 )
 def _protobuf_otlp_wide_encode(n: int):
     """Encoding a dict with every declared field is linear in field count."""
@@ -3813,11 +4048,13 @@ def _protobuf_otlp_wide_encode(n: int):
 
 
 @probe(
-    "protobuf-object-wide-encode-control", expect=1.0,
+    "protobuf-object-wide-encode-control",
+    expect=1.0,
     sizes=(50, 100, 200, 400),
     axis="same protobuf fields encoded from a constructed object",
     assumption="the same-size compiled object encoder control is linear",
-    stage="serialization", group="web",
+    stage="serialization",
+    group="web",
 )
 def _protobuf_object_wide_encode_control(n: int):
     """Same-size control: the ordinary compiled object encoder visits each field."""
@@ -3825,10 +4062,13 @@ def _protobuf_object_wide_encode_control(n: int):
 
 
 @probe(
-    "protobuf-otlp-wide-decode", expect=1.0, sizes=(50, 100, 200, 400),
+    "protobuf-otlp-wide-decode",
+    expect=1.0,
+    sizes=(50, 100, 200, 400),
     axis="OTLP/JSON keys converted into an equally wide protobuf object",
     assumption="native OTLP conversion performs one descriptor hash lookup per key",
-    stage="serialization", group="web",
+    stage="serialization",
+    group="web",
 )
 def _protobuf_otlp_wide_decode(n: int):
     """Constructing a message from every JSON field is linear in field count."""
@@ -3836,11 +4076,13 @@ def _protobuf_otlp_wide_decode(n: int):
 
 
 @probe(
-    "protobuf-object-wide-init-control", expect=1.0,
+    "protobuf-object-wide-init-control",
+    expect=1.0,
     sizes=(50, 100, 200, 400),
     axis="same protobuf fields passed directly to its dataclass initializer",
     assumption="the same-size Python object-construction control is linear",
-    stage="serialization", group="web",
+    stage="serialization",
+    group="web",
 )
 def _protobuf_object_wide_init_control(n: int):
     """Same-size control: materialize the identical output without JSON lookup."""
@@ -3866,10 +4108,13 @@ def _css_media_harness(n: int, *, media: bool) -> float:
 
 
 @probe(
-    "css-many-media-blocks", expect=1.0, sizes=(100, 200, 400, 800),
+    "css-many-media-blocks",
+    expect=1.0,
+    sizes=(100, 200, 400, 800),
     axis="media blocks spread through one stylesheet",
     assumption="media stripping advances regex position without copying suffixes",
-    stage="audit", group="extended",
+    stage="audit",
+    group="extended",
 )
 def _css_many_media_blocks(n: int):
     """Removing many media blocks is linear in total stylesheet bytes."""
@@ -3877,10 +4122,13 @@ def _css_many_media_blocks(n: int):
 
 
 @probe(
-    "css-no-media-control", expect=1.0, sizes=(100, 200, 400, 800),
+    "css-no-media-control",
+    expect=1.0,
+    sizes=(100, 200, 400, 800),
     axis="same stylesheet bytes containing no media blocks",
     assumption="the same-size regex scan control is linear",
-    stage="audit", group="extended",
+    stage="audit",
+    group="extended",
 )
 def _css_no_media_control(n: int):
     """Same-size control: one failed media search consumes the stylesheet."""
@@ -3926,11 +4174,13 @@ def _postgres_waiter_harness(n: int, *, cancel: bool) -> float:
 
 
 @probe(
-    "postgres-waiter-reverse-cancel", expect=1.0,
+    "postgres-waiter-reverse-cancel",
+    expect=1.0,
     sizes=(500, 1000, 2000, 4000),
     axis="queued PostgreSQL acquisitions cancelled newest-first",
     assumption="cancellation marks each waiter inactive and clears tombstones once",
-    stage="postgres-pool", group="extended",
+    stage="postgres-pool",
+    group="extended",
 )
 def _postgres_waiter_reverse_cancel(n: int):
     """Reverse cancellation must not scan the remaining FIFO per waiter."""
@@ -3938,11 +4188,13 @@ def _postgres_waiter_reverse_cancel(n: int):
 
 
 @probe(
-    "postgres-waiter-wake-control", expect=1.0,
+    "postgres-waiter-wake-control",
+    expect=1.0,
     sizes=(500, 1000, 2000, 4000),
     axis="same queued PostgreSQL acquisitions resolved in FIFO order",
     assumption="the same-size successful wake control is linear",
-    stage="postgres-pool", group="extended",
+    stage="postgres-pool",
+    group="extended",
 )
 def _postgres_waiter_wake_control(n: int):
     """Same-size control: resolve every live waiter from the head."""
@@ -3976,11 +4228,13 @@ def _livedoc_close_harness(n: int, *, shared_principal: bool) -> float:
 
 
 @probe(
-    "livedoc-one-principal-close", expect=1.0,
+    "livedoc-one-principal-close",
+    expect=1.0,
     sizes=(500, 1000, 2000, 4000),
     axis="subscriptions closed from one principal bucket",
     assumption="subscription release deletes directly from an insertion-ordered map",
-    stage="livedoc", group="extended",
+    stage="livedoc",
+    group="extended",
 )
 def _livedoc_one_principal_close(n: int):
     """Closing one principal's subscribers is linear in subscriber count."""
@@ -3988,11 +4242,13 @@ def _livedoc_one_principal_close(n: int):
 
 
 @probe(
-    "livedoc-many-principals-control", expect=1.0,
+    "livedoc-many-principals-control",
+    expect=1.0,
     sizes=(500, 1000, 2000, 4000),
     axis="same subscriptions split across one principal each",
     assumption="the same-size one-entry-bucket control is linear",
-    stage="livedoc", group="extended",
+    stage="livedoc",
+    group="extended",
 )
 def _livedoc_many_principals_control(n: int):
     """Same-size control: each release empties a one-entry principal bucket."""
@@ -4009,10 +4265,7 @@ def _port_session_propagation_harness(n: int, *, chain: bool) -> float:
     for index in range(n):
         target = f"f{index + 1}" if chain and index + 1 < n else "query_leaf"
         lines.append(f"async def f{index}():\n    return await {target}()\n")
-    lines.append(
-        "async def query_leaf():\n"
-        "    return await Llama.objects.all()\n"
-    )
+    lines.append("async def query_leaf():\n    return await Llama.objects.all()\n")
     with tempfile.TemporaryDirectory(prefix="wreath-complexity-") as directory:
         path = Path(directory) / "application.py"
         path.write_text("\n".join(lines), encoding="utf-8")
@@ -4025,11 +4278,13 @@ def _port_session_propagation_harness(n: int, *, chain: bool) -> float:
 
 
 @probe(
-    "port-session-propagation-chain", expect=1.0,
+    "port-session-propagation-chain",
+    expect=1.0,
     sizes=(100, 200, 400, 800),
     axis="functions in a deep session-requirement call chain",
     assumption="reverse worklist propagation visits each call-graph edge once",
-    stage="port-analysis", group="extended",
+    stage="port-analysis",
+    group="extended",
 )
 def _port_session_propagation_chain(n: int):
     """A deepest-leaf query must not require one whole-graph pass per caller."""
@@ -4037,11 +4292,13 @@ def _port_session_propagation_chain(n: int):
 
 
 @probe(
-    "port-session-propagation-star-control", expect=1.0,
+    "port-session-propagation-star-control",
+    expect=1.0,
     sizes=(100, 200, 400, 800),
     axis="same functions each calling one query leaf",
     assumption="the same-size one-layer propagation control is linear",
-    stage="port-analysis", group="extended",
+    stage="port-analysis",
+    group="extended",
 )
 def _port_session_propagation_star_control(n: int):
     """Same-size control: every caller is one edge from the query leaf."""
@@ -4118,7 +4375,7 @@ def _run_discovery() -> list[Finding]:
             str(relative): (str(fingerprint), tuple(grouped.get(str(relative), ())))
             for relative, fingerprint in sources.items()
         }
-    except (KeyError, OSError, TypeError, ValueError):
+    except KeyError, OSError, TypeError, ValueError:
         return discover(root)
     return discover(root, cache=cache)
 
@@ -4138,13 +4395,17 @@ def _print_discovery(findings: list[Finding]) -> None:
         by_code[finding.code] = by_code.get(finding.code, 0) + 1
     for finding in findings:
         if finding.confidence == "high":
-            print(f"{finding.file}:{finding.line} {finding.func}() "
-                  f"[{finding.code}] {finding.message}")
+            print(
+                f"{finding.file}:{finding.line} {finding.func}() [{finding.code}] {finding.message}"
+            )
             if finding.source:
                 print(f"    | {finding.source}")
     print()
-    print(f"{len(findings)} candidates "
-          f"({sum(1 for f in findings if f.confidence == 'high')} high confidence)")
+    print(
+        f"{len(findings)} candidates "
+        f"({sum(1 for finding in findings if finding.confidence == 'high')} "
+        "high confidence)"
+    )
     for code, count in sorted(by_code.items(), key=lambda kv: -kv[1]):
         print(f"  {code:<20} {count}")
 
@@ -4154,9 +4415,9 @@ def _write_discovery(findings: list[Finding]) -> int:
     payload = {
         "version": DISCOVERY_VERSION,
         "note": "Exceptional confirmed output of the static superlinear sweep "
-                "(wreath-complexity-probe --discover). Bounded and output-sized "
-                "sites carry exact-code waivers in source. --discover-check "
-                "fails when a new unwaived site appears.",
+        "(wreath-complexity-probe --discover). Bounded and output-sized "
+        "sites carry exact-code waivers in source. --discover-check "
+        "fails when a new unwaived site appears.",
         "keys": sorted({finding.key for finding in findings}),
         "candidates": [finding.document() for finding in findings],
         "scanner": _discovery_scanner_identity(),
@@ -4164,32 +4425,44 @@ def _write_discovery(findings: list[Finding]) -> int:
     }
     path = _discovery_path()
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    print(f"wreath-complexity-probe: wrote {DISCOVERY_PATH} "
-          f"({len(findings)} candidates)")
+    print(f"wreath-complexity-probe: wrote {DISCOVERY_PATH} ({len(findings)} candidates)")
     return 0
 
 
 def _check_discovery(findings: list[Finding]) -> int:
     path = _discovery_path()
     if not path.exists():
-        print(f"wreath-complexity-probe: no discovery baseline at {DISCOVERY_PATH}; "
-              f"run --update-discovery", file=sys.stderr)
+        print(
+            f"wreath-complexity-probe: no discovery baseline at {DISCOVERY_PATH}; "
+            f"run --update-discovery",
+            file=sys.stderr,
+        )
         return 1
     known = set(json.loads(path.read_text(encoding="utf-8"))["keys"])
     fresh = [finding for finding in findings if finding.key not in known]
     if fresh:
-        print(f"wreath-complexity-probe: {len(fresh)} unacknowledged superlinear "
-              f"candidate(s)", file=sys.stderr)
+        print(
+            f"wreath-complexity-probe: {len(fresh)} unacknowledged superlinear candidate(s)",
+            file=sys.stderr,
+        )
         for finding in fresh:
-            print(f"  {finding.file}:{finding.line} {finding.func}() "
-                  f"[{finding.code}] {finding.message}", file=sys.stderr)
+            print(
+                f"  {finding.file}:{finding.line} {finding.func}() "
+                f"[{finding.code}] {finding.message}",
+                file=sys.stderr,
+            )
             if finding.source:
                 print(f"      | {finding.source}", file=sys.stderr)
-        print("\nEither write a probe for it, restructure it, or acknowledge it "
-              "with --update-discovery and say why in the change.", file=sys.stderr)
+        print(
+            "\nEither write a probe for it, restructure it, or acknowledge it "
+            "with --update-discovery and say why in the change.",
+            file=sys.stderr,
+        )
         return 1
-    print(f"wreath-complexity-probe: no new superlinear candidates "
-          f"({len(findings)} acknowledged in {DISCOVERY_PATH})")
+    print(
+        f"wreath-complexity-probe: no new superlinear candidates "
+        f"({len(findings)} acknowledged in {DISCOVERY_PATH})"
+    )
     return 0
 
 
@@ -4199,8 +4472,10 @@ def _write_baseline(names: list[str]) -> int:
     if failures:
         for result in failures:
             _print_result(result)
-        print("wreath-complexity-probe: refusing to record a failing/unresolved baseline",
-              file=sys.stderr)
+        print(
+            "wreath-complexity-probe: refusing to record a failing/unresolved baseline",
+            file=sys.stderr,
+        )
         return 1
     path = _baseline_path()
     recorded: dict[str, Any] = {}
@@ -4227,13 +4502,15 @@ def _write_baseline(names: list[str]) -> int:
             )
             return 1
         recorded.update(existing_probes)
-    recorded.update({
-        result.probe.name: {
-            "contract": _contract(result.probe),
-            "observation": _result_document(result),
+    recorded.update(
+        {
+            result.probe.name: {
+                "contract": _contract(result.probe),
+                "observation": _result_document(result),
+            }
+            for result in results
         }
-        for result in results
-    })
+    )
     payload = {
         "version": BASELINE_VERSION,
         "note": (
@@ -4272,16 +4549,18 @@ def _print_todo_summary(names: list[str]) -> None:
     for p in sorted(marked, key=lambda q: (-(q.todo.degree if q.todo else 0), q.name)):
         if p.todo is None:
             raise RuntimeError(f"{p.name}: marked probe lost its defect contract")
-        print(f"  {p.name:<36} n^{p.todo.degree:g} -> n^{p.todo.target:g}  "
-              f"[{p.todo.owner}]")
+        print(f"  {p.name:<36} n^{p.todo.degree:g} -> n^{p.todo.target:g}  [{p.todo.owner}]")
         print(f"  {'':<36} {p.todo.reason}")
 
 
 def _check_baseline(names: list[str]) -> int:
     path = _baseline_path()
     if not path.exists():
-        print(f"wreath-complexity-probe: no baseline at {BASELINE_PATH}; "
-              "create it with --update-baseline", file=sys.stderr)
+        print(
+            f"wreath-complexity-probe: no baseline at {BASELINE_PATH}; "
+            "create it with --update-baseline",
+            file=sys.stderr,
+        )
         return 1
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("version") != BASELINE_VERSION:
@@ -4496,12 +4775,8 @@ def _room_dense_leave_all_control(size: int) -> float:
 def _orm_insert_batch_harness(size: int, *, distinct_models: bool) -> float:
     from wreath.orm.session import Session
 
-    model_types: list[type] = [
-        type(f"Pending{index}", (), {}) for index in range(size)
-    ]
-    order: dict[type, int] = {
-        model: index for index, model in enumerate(model_types)
-    }
+    model_types: list[type] = [type(f"Pending{index}", (), {}) for index in range(size)]
+    order: dict[type, int] = {model: index for index, model in enumerate(model_types)}
 
     class Registry:
         specs = tuple(range(size))
@@ -4554,9 +4829,7 @@ def _orm_dirty_discovery_harness(size: int, *, dense: bool) -> float:
     from wreath.orm.registry import Registry
     from wreath.orm.session import Session
 
-    registry = Registry(
-        _ScriptedDatabase(), [TracedUser, TracedPost], validate_schema="off"
-    )
+    registry = Registry(_ScriptedDatabase(), [TracedUser, TracedPost], validate_schema="off")
     session = Session(registry, "write")
     spec = registry.spec_for(TracedUser)
     instances = []
@@ -4656,37 +4929,51 @@ def _notification_live_window_control(size: int) -> float:
     return _notification_window_harness(size, expired=False)
 
 
-# --- CLI ------------------------------------------------------------------
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="wreath-complexity-probe",
         description="Empirically verify complexity contracts of hot-path "
-                    "operations via doubling-size scaling ratios.")
-    parser.add_argument("probes", nargs="*",
-                        help="probe names to run (default: all)")
-    parser.add_argument("--list", action="store_true", dest="list_probes",
-                        help="list registered probes and exit")
-    parser.add_argument("--todos", action="store_true",
-                        help="list probes marked as recorded defects and exit")
-    parser.add_argument("--sizes", type=str, default=None,
-                        help="comma-separated size override for every probe")
-    parser.add_argument("--repeats", type=int, default=None,
-                        help="best-of repeats per size (default: per probe)")
+        "operations via doubling-size scaling ratios.",
+    )
+    parser.add_argument("probes", nargs="*", help="probe names to run (default: all)")
+    parser.add_argument(
+        "--list", action="store_true", dest="list_probes", help="list registered probes and exit"
+    )
+    parser.add_argument(
+        "--todos", action="store_true", help="list probes marked as recorded defects and exit"
+    )
+    parser.add_argument(
+        "--sizes", type=str, default=None, help="comma-separated size override for every probe"
+    )
+    parser.add_argument(
+        "--repeats", type=int, default=None, help="best-of repeats per size (default: per probe)"
+    )
     parser.add_argument("--format", choices=("table", "json"), default="table")
     parser.add_argument("--group", help="run probes in one named group")
-    parser.add_argument("--check", action="store_true",
-                        help=f"rerun and check assumptions in {BASELINE_PATH}")
-    parser.add_argument("--update-baseline", action="store_true",
-                        help=f"record assumptions and observations in {BASELINE_PATH}")
-    parser.add_argument("--discover", action="store_true",
-                        help="statically sweep src/wreath for superlinear shapes "
-                             "no probe covers yet, and report them")
-    parser.add_argument("--discover-check", action="store_true",
-                        help=f"fail on any candidate not acknowledged in {DISCOVERY_PATH}")
-    parser.add_argument("--update-discovery", action="store_true",
-                        help=f"acknowledge every current candidate in {DISCOVERY_PATH}")
+    parser.add_argument(
+        "--check", action="store_true", help=f"rerun and check assumptions in {BASELINE_PATH}"
+    )
+    parser.add_argument(
+        "--update-baseline",
+        action="store_true",
+        help=f"record assumptions and observations in {BASELINE_PATH}",
+    )
+    parser.add_argument(
+        "--discover",
+        action="store_true",
+        help="statically sweep src/wreath for superlinear shapes "
+        "no probe covers yet, and report them",
+    )
+    parser.add_argument(
+        "--discover-check",
+        action="store_true",
+        help=f"fail on any candidate not acknowledged in {DISCOVERY_PATH}",
+    )
+    parser.add_argument(
+        "--update-discovery",
+        action="store_true",
+        help=f"acknowledge every current candidate in {DISCOVERY_PATH}",
+    )
     options = parser.parse_args(argv)
 
     if options.check and options.update_baseline:
@@ -4705,10 +4992,9 @@ def main(argv: list[str] | None = None) -> int:
         _print_discovery(findings)
         return 0
     if options.list_probes:
-        for p in _REGISTRY.values():
-            bound = ("PINNED " if p.todo else "at most") + f" {_classify(p.expect):<7}"
-            print(f"{p.name:<34} {p.group:<12} {bound} "
-                  f"{p.axis}: {p.assumption}")
+        for probe in _REGISTRY.values():
+            bound = ("PINNED " if probe.todo else "at most") + f" {_classify(probe.expect):<7}"
+            print(f"{probe.name:<34} {probe.group:<12} {bound} {probe.axis}: {probe.assumption}")
         return 0
     if options.todos:
         _print_todo_summary(list(_REGISTRY))
@@ -4716,15 +5002,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if options.probes and options.group:
         parser.error("probe names and --group are exclusive")
-    names = (options.probes or
-             ([name for name, p in _REGISTRY.items() if p.group == options.group]
-              if options.group else list(_REGISTRY)))
+    names = options.probes or (
+        [name for name, probe in _REGISTRY.items() if probe.group == options.group]
+        if options.group
+        else list(_REGISTRY)
+    )
     if options.group and not names:
         parser.error(f"unknown or empty group: {options.group}")
-    unknown = [n for n in names if n not in _REGISTRY]
+    unknown = [name for name in names if name not in _REGISTRY]
     if unknown:
-        parser.error(f"unknown probe(s): {', '.join(unknown)} "
-                     f"(--list shows registered names)")
+        parser.error(f"unknown probe(s): {', '.join(unknown)} (--list shows registered names)")
 
     if options.update_baseline:
         return _write_baseline(names)
@@ -4734,12 +5021,12 @@ def main(argv: list[str] | None = None) -> int:
     failures = 0
     documents: list[dict[str, Any]] = []
     for name in names:
-        p = _REGISTRY[name]
+        probe = _REGISTRY[name]
         if options.sizes:
-            p.sizes = tuple(int(s) for s in options.sizes.split(","))
+            probe.sizes = tuple(int(part) for part in options.sizes.split(","))
         if options.repeats:
-            p.repeats = options.repeats
-        result = run_probe(p)
+            probe.repeats = options.repeats
+        result = run_probe(probe)
         if options.format == "table":
             _print_result(result)
         else:

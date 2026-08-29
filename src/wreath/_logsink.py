@@ -213,9 +213,7 @@ class LogPipeline:
         if self._thread is not None:
             return
         self._stop.clear()
-        self._thread = threading.Thread(
-            target=self._run, name="wreath-log-writer", daemon=True
-        )
+        self._thread = threading.Thread(target=self._run, name="wreath-log-writer", daemon=True)
         self._thread.start()
 
     def stop(self, timeout: float = 2.0) -> None:
@@ -241,14 +239,14 @@ class LogPipeline:
         for record in self._queue.drain():
             try:
                 line = self._renderer(self._registry, record)
-            except (ValueError, TypeError, KeyError, LookupError):
+            except ValueError, TypeError, KeyError, LookupError:
                 # A record that cannot be rendered is a defect in a call site,
                 # not a reason to stop writing the ones that can be.
                 self._render_error += 1
                 continue
             try:
                 self._write(line)
-            except (OSError, ValueError):
+            except OSError, ValueError:
                 # The sink is the outside world: a full disk, a closed pipe, a
                 # rotated file. Count it and keep draining -- a writer that
                 # stops on the first error loses every record after it.
@@ -270,21 +268,16 @@ class LogPipeline:
         }
 
 
-# --- the canonical log line -------------------------------------------------
-#
 # One structured record per request, carrying what the recorder already knows
 # plus whatever the application attached. The completion cell is already this
 # record in binary; these two functions are its rendering.
-#
 # Application fields arrive as ordinary log cells flagged LOG_FLAG_EVENT_FIELDS,
 # joined to the trace by request id like every other record. Folding them here
 # rather than printing them as their own lines is what makes the result *one*
 # authoritative record instead of a scatter of partial ones.
 
 
-def _canonical_parts(
-    registry: SiteRegistry, trace: ProjectedTrace
-) -> tuple[dict[str, Any], int]:
+def _canonical_parts(registry: SiteRegistry, trace: ProjectedTrace) -> tuple[dict[str, Any], int]:
     """Split a trace's records into attached fields and ordinary records."""
     attributes: dict[str, Any] = {}
     records = 0

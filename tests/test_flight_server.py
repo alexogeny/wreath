@@ -1,10 +1,3 @@
-"""Stage 1 server integration: the native HTTP/1 protocol emits Pulse cells.
-
-Drives the native Http1Protocol over a fake transport (the established harness in
-test_server_protocol) with a recorder attached, and asserts one completion cell
-per request. Skips cleanly when the native server or _flight is not built.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -76,9 +69,7 @@ async def test_pulse_records_a_completion_per_request() -> None:
     assert cell.bytes_out > 0
 
 
-_POST = (
-    b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\n\r\nhello world"
-)
+_POST = b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\n\r\nhello world"
 
 
 @pytest.mark.asyncio
@@ -96,9 +87,7 @@ async def test_request_body_is_counted_as_bytes_in() -> None:
     recorder = _flight.Recorder(_flight.MODE_PULSE, ring_records=64, active_requests=8)
     loop = asyncio.get_running_loop()
     transport = FakeTransport()
-    protocol = _native_server.HttpProtocol(
-        echo, ServerConfig(), loop, set(), recorder=recorder
-    )
+    protocol = _native_server.HttpProtocol(echo, ServerConfig(), loop, set(), recorder=recorder)
     protocol.connection_made(transport)
     feed(protocol, _POST)
     await _settle()
@@ -159,9 +148,7 @@ async def test_route_attribution_stamps_metadata_ids() -> None:
 
     app._compile_routes()
     image = build_metadata_image(app)
-    expected = {
-        (r.method, r.path): (r.route_id, r.plan_id) for r in image.routes
-    }
+    expected = {(r.method, r.path): (r.route_id, r.plan_id) for r in image.routes}
     route_id, plan_id = expected[("GET", "/widgets/{widget_id}")]
     assert route_id != 0  # a real id was assigned
 
@@ -215,8 +202,6 @@ async def test_incoming_traceparent_produces_a_correlation_cell() -> None:
     assert correlation.span_id != 0
 
 
-# --- WebSocket completion cells ---------------------------------------------
-#
 # A WebSocket connection maps to one completion cell for the whole session,
 # emitted when the app task ends. protocol is WEBSOCKET; status carries the
 # handshake disposition (101 established, else the rejection status); terminal
@@ -231,8 +216,9 @@ _WS_MASK = b"\x01\x02\x03\x04"
 def _ws_upgrade(path: bytes = b"/ws") -> bytes:
     return (
         b"GET " + path + b" HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
-        b"Connection: Upgrade\r\nSec-WebSocket-Key: " + _WS_KEY +
-        b"\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        b"Connection: Upgrade\r\nSec-WebSocket-Key: "
+        + _WS_KEY
+        + b"\r\nSec-WebSocket-Version: 13\r\n\r\n"
     )
 
 
@@ -382,9 +368,6 @@ async def test_ws_route_attribution_stamps_metadata_ids() -> None:
     assert cell.plan_id == plan_id
 
 
-# --- Stage 3 slice 2b: request-path phase markers ---------------------------
-
-
 def _phase_cells(blob: bytes) -> list:
     out = []
     for i in range(len(blob) // fs.CELL_SIZE):
@@ -397,9 +380,7 @@ def _phase_cells(blob: bytes) -> list:
 async def _drive_app(recorder, app, request: bytes) -> None:
     loop = asyncio.get_running_loop()
     transport = FakeTransport()
-    protocol = _native_server.HttpProtocol(
-        app, ServerConfig(), loop, set(), recorder=recorder
-    )
+    protocol = _native_server.HttpProtocol(app, ServerConfig(), loop, set(), recorder=recorder)
     protocol.connection_made(transport)
     feed(protocol, request)
     await _settle()
@@ -419,9 +400,7 @@ async def test_native_ai_refusal_is_a_structured_flight_completion() -> None:
         reached = True
         return "not reached"
 
-    recorder = _flight.Recorder(
-        _flight.MODE_PULSE, ring_records=64, active_requests=8
-    )
+    recorder = _flight.Recorder(_flight.MODE_PULSE, ring_records=64, active_requests=8)
     await _drive_app(
         recorder,
         app,
@@ -446,14 +425,10 @@ async def test_native_cors_preflight_is_a_non_refusal_completion() -> None:
 
     app = Wreath(
         http_policy=HttpPolicy(
-            cors=CorsPolicy(
-                allow_origins=["https://app.example"], allow_methods=["GET"]
-            )
+            cors=CorsPolicy(allow_origins=["https://app.example"], allow_methods=["GET"])
         )
     )
-    recorder = _flight.Recorder(
-        _flight.MODE_PULSE, ring_records=64, active_requests=8
-    )
+    recorder = _flight.Recorder(_flight.MODE_PULSE, ring_records=64, active_requests=8)
     await _drive_app(
         recorder,
         app,
@@ -486,19 +461,14 @@ async def test_client_facts_resolve_into_a_compact_flight_cell() -> None:
         return Response(b"ok")
 
     app._compile_routes()
-    recorder = _flight.Recorder(
-        _flight.MODE_PULSE, ring_records=64, active_requests=8
-    )
+    recorder = _flight.Recorder(_flight.MODE_PULSE, ring_records=64, active_requests=8)
     await _drive_app(
         recorder,
         app,
         b"GET /facts HTTP/1.1\r\nHost: x\r\nUser-Agent: ClaudeBot/1.0\r\n\r\n",
     )
     blob = recorder.drain()
-    cells = [
-        blob[offset : offset + fs.CELL_SIZE]
-        for offset in range(0, len(blob), fs.CELL_SIZE)
-    ]
+    cells = [blob[offset : offset + fs.CELL_SIZE] for offset in range(0, len(blob), fs.CELL_SIZE)]
     completion = fs.CompletionCell.decode(cells[0])
     assert completion.flags & fs.FLAG_HAS_CLIENT_FACTS
     client = fs.ClientFactsCell.decode(cells[1])
@@ -525,20 +495,19 @@ async def test_armed_request_emits_handler_and_serialize_phases() -> None:
 
     app._compile_routes()
     recorder = _flight.Recorder(
-        _flight.MODE_DETAILED, ring_records=64, active_requests=8,
-        detailed_sample_rate=1.0, phase_slots=4,
+        _flight.MODE_DETAILED,
+        ring_records=64,
+        active_requests=8,
+        detailed_sample_rate=1.0,
+        phase_slots=4,
     )
-    await _drive_app(
-        recorder, app, b"GET /x HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n"
-    )
+    await _drive_app(recorder, app, b"GET /x HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
 
     assert seen_flight == [2]  # armed state was visible to dispatch
     blob = recorder.drain()
     assert blob[1] == fs.EventKind.COMPLETION
     records = [r for b in _phase_cells(blob) for r in b.records]
-    assert [r.phase_id for r in records] == [
-        fs.PhaseKind.HANDLER, fs.PhaseKind.SERIALIZE
-    ]
+    assert [r.phase_id for r in records] == [fs.PhaseKind.HANDLER, fs.PhaseKind.SERIALIZE]
     assert all(r.coverage is fs.PhaseCoverage.PYTHON for r in records)
     completion = fs.CompletionCell.decode(blob[: fs.CELL_SIZE])
     batches = _phase_cells(blob)
@@ -561,9 +530,7 @@ async def test_pulse_request_stays_unarmed_and_emits_no_phases() -> None:
 
     app._compile_routes()
     recorder = _flight.Recorder(_flight.MODE_PULSE, ring_records=64, active_requests=8)
-    await _drive_app(
-        recorder, app, b"GET /x HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n"
-    )
+    await _drive_app(recorder, app, b"GET /x HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
 
     assert seen_flight == [1]  # recording, not armed
     blob = recorder.drain()
@@ -592,8 +559,11 @@ async def test_armed_protected_request_emits_an_auth_phase() -> None:
 
     app._compile_routes()
     recorder = _flight.Recorder(
-        _flight.MODE_DETAILED, ring_records=64, active_requests=8,
-        detailed_sample_rate=1.0, phase_slots=4,
+        _flight.MODE_DETAILED,
+        ring_records=64,
+        active_requests=8,
+        detailed_sample_rate=1.0,
+        phase_slots=4,
     )
     await _drive_app(
         recorder,
@@ -629,12 +599,13 @@ async def test_armed_request_propagates_marker_and_severs_it_at_completion() -> 
 
     app._compile_routes()
     recorder = _flight.Recorder(
-        _flight.MODE_DETAILED, ring_records=64, active_requests=8,
-        detailed_sample_rate=1.0, phase_slots=4,
+        _flight.MODE_DETAILED,
+        ring_records=64,
+        active_requests=8,
+        detailed_sample_rate=1.0,
+        phase_slots=4,
     )
-    await _drive_app(
-        recorder, app, b"GET /x HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n"
-    )
+    await _drive_app(recorder, app, b"GET /x HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
 
     assert seen["marker"] is not None  # the seam-visible binding existed
     context = seen["context"]
@@ -663,7 +634,5 @@ async def test_pulse_request_does_not_bind_the_marker() -> None:
 
     app._compile_routes()
     recorder = _flight.Recorder(_flight.MODE_PULSE, ring_records=64, active_requests=8)
-    await _drive_app(
-        recorder, app, b"GET /x HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n"
-    )
+    await _drive_app(recorder, app, b"GET /x HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
     assert seen["marker"] is None

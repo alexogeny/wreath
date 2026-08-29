@@ -1,18 +1,3 @@
-"""The lazy ASGI scope must stay lazy on the native server path.
-
-On `wreath.server` a request is a native `_RequestContext`, and `Request`
-exposes `.method`/`.path`/`.scheme`/`.query_string`/`.headers`/`.client` as
-direct member reads so the ASGI scope dict is never built. `_asgi_scope()`
-allocates a 13-key dict and retains it for the request lifetime, so one
-`request.scope[...]` in a global hook costs that on *every* request.
-
-These tests pin the contract by handing each component a context whose
-`_asgi_scope()` fails the test, which is deterministic -- no timing involved.
-Components that legitimately need the whole scope (a user handler, the
-`scope` property itself) are not covered here; the request-path components
-below are the ones that only ever wanted one member.
-"""
-
 from __future__ import annotations
 
 import time
@@ -70,7 +55,6 @@ def _request(context: StrictContext, **kwargs: Any) -> Request:
     return Request(context, _receive, **kwargs)
 
 
-# --- SecurityHeadersPolicy ----------------------------------------------
 # `after` is a global hook, so this one ran on literally every response.
 
 
@@ -92,9 +76,6 @@ async def test_security_headers_reads_scheme_without_building_the_scope(
     assert (b"strict-transport-security" in names) is (scheme == "https")
 
 
-# --- CsrfPolicy ---------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_csrf_safe_method_does_not_build_the_scope() -> None:
     context = StrictContext(method="GET")
@@ -108,7 +89,6 @@ async def test_csrf_safe_method_does_not_build_the_scope() -> None:
 
 @pytest.mark.asyncio
 async def test_csrf_unsafe_method_does_not_build_the_scope() -> None:
-    """The origin check reads the scheme; it used to reach it via the scope."""
     middleware = CsrfPolicy(_SECRET, secure=False)
     token = middleware._new_token(int(time.time()))
 
@@ -142,12 +122,8 @@ async def test_csrf_rejection_path_does_not_build_the_scope() -> None:
     assert context.scope_calls == 0
 
 
-# --- the compiled binder ----------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_query_binding_does_not_build_the_scope() -> None:
-    """Every handler with a typed query parameter went through the scope."""
 
     async def handler(request: Request, limit: int = 10, name: str = "") -> dict:
         return {"limit": limit, "name": name}
@@ -174,12 +150,8 @@ async def test_query_binding_defaults_without_a_query_string() -> None:
     assert context.scope_calls == 0
 
 
-# --- the dict-scope path still behaves identically ---------------------------
-
-
 @pytest.mark.asyncio
 async def test_dict_scope_backed_requests_are_unaffected() -> None:
-    """Under a portable ASGI server the scope *is* the dict; same answers."""
     scope = {
         "type": "http",
         "method": "GET",
@@ -197,13 +169,10 @@ async def test_dict_scope_backed_requests_are_unaffected() -> None:
     async def handler(request: Request, limit: int = 10) -> dict:
         return {"limit": limit}
 
-    assert await compile_binder(handler, "/items")(Request(scope, _receive)) == {
-        "limit": 7
-    }
+    assert await compile_binder(handler, "/items")(Request(scope, _receive)) == {"limit": 7}
 
 
 @pytest.mark.asyncio
 async def test_scheme_defaults_to_http_when_a_dict_scope_omits_it() -> None:
-    """`Request.scheme` keeps the `scope.get("scheme", "http")` default."""
     request = Request({"type": "http", "method": "GET", "path": "/"}, _receive)
     assert request.scheme == "http"

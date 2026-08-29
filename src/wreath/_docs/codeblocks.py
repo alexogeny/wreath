@@ -64,7 +64,8 @@ _PYTHON = ("python", "py", "python3")
 #: still sit inside a longer example fence, which merely takes the full path;
 #: no match proves ``scan`` cannot yield a Python block at all.
 _PYTHON_FENCE = re.compile(
-    r"^(?:`{3,}|~{3,})(?:python|python3|py)(?:\s|$)", re.MULTILINE,
+    r"^(?:`{3,}|~{3,})(?:python|python3|py)(?:\s|$)",
+    re.MULTILINE,
 )
 
 #: Conventional names the docs use for objects the reader is assumed to hold,
@@ -169,9 +170,6 @@ def scan(text: str) -> Iterator[Block]:
     """
     for info, body, line in _native_docs.python_blocks(text):
         yield Block(info, body, line)
-
-
-# --- resolving a name to a real object ---------------------------------------
 
 
 def _load(spec: str) -> object | None:
@@ -375,8 +373,6 @@ def _describe(owner: object) -> str:
     return getattr(owner, "__name__", repr(owner))
 
 
-# --- the rule catalog --------------------------------------------------------
-#
 # One entry per known way to hold wreath wrong that name resolution cannot see,
 # because every name in the expression exists. A rule states the mistake and the
 # correct spelling, because an error that only says "no" makes the reader guess.
@@ -482,9 +478,6 @@ _RULES = (
 )
 
 
-# --- the floor ---------------------------------------------------------------
-
-
 def _bind_annotation(node: ast.AST, env: _Environment) -> None:
     """Bind every written annotation in the block: parameters, then variables."""
     if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
@@ -586,9 +579,7 @@ def _has_member(owner: type, name: str) -> bool:
             slots = (slots,)
         if name in tuple(slots):
             return True
-        annotations = annotationlib.get_annotations(
-            klass, format=annotationlib.Format.STRING
-        )
+        annotations = annotationlib.get_annotations(klass, format=annotationlib.Format.STRING)
         if name in annotations:
             return True
     return False
@@ -671,8 +662,7 @@ def _check_page(
                     found.append(finding)
                 for index, rule in enumerate(_RULES):
                     rule_findings[index].extend(
-                        Finding(page, block.line, message)
-                        for message in rule(node, local)
+                        Finding(page, block.line, message) for message in rule(node, local)
                     )
             for findings_for_rule in rule_findings:
                 found.extend(findings_for_rule)

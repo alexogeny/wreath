@@ -1,12 +1,3 @@
-"""The proto target: one model, three schemas that cannot disagree.
-
-The usual arrangement is a hand-maintained `.proto` beside a hand-maintained
-REST contract, agreeing by discipline. These check the joins that make that
-unnecessary -- and, more importantly, check that what proto3 cannot express is
-*refused* rather than approximated, because a schema that compiles and
-describes the wrong bytes fails in someone else's decoder.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -47,9 +38,6 @@ def _llama_app() -> Wreath:
     return app
 
 
-# --- the shape ---------------------------------------------------------------
-
-
 def test_the_target_emits_one_proto_file() -> None:
     assert set(render_proto(build_api_model(_llama_app()))) == {"api.proto"}
 
@@ -73,18 +61,12 @@ def test_the_header_declares_proto3_and_a_package() -> None:
 
 
 def test_the_header_warns_that_field_numbers_track_declaration_order() -> None:
-    """The hazard is real and invisible: reordering a dataclass renumbers the
-    wire fields, and nothing on either side fails. Saying so is the mitigation
-    this generator can actually offer."""
     source = _rendered(_llama_app())
     assert "FIELD NUMBERS COME FROM DECLARATION ORDER" in source
 
 
 def test_no_service_block_is_generated() -> None:
     assert "service " not in _rendered(_llama_app())
-
-
-# --- named scalars -----------------------------------------------------------
 
 
 @dataclass
@@ -113,9 +95,6 @@ def test_named_scalars_travel_as_string_except_bytes() -> None:
     assert "bytes blob = 4;" in source, source
 
 
-# --- containers --------------------------------------------------------------
-
-
 @dataclass
 class Herd:
     names: list[str]
@@ -142,13 +121,7 @@ def test_a_mapping_becomes_a_map() -> None:
 
 
 def test_a_literal_travels_as_its_underlying_scalar() -> None:
-    """Not a generated enum: proto3 enums need a zero value and a name per
-    member, and inventing both puts names in the contract the source never
-    chose."""
     assert "string grade = 3;" in _rendered(_herd_app())
-
-
-# --- Page gets a wrapper message per element type ---------------------------
 
 
 def _paged_app() -> Wreath:
@@ -162,7 +135,6 @@ def _paged_app() -> Wreath:
 
 
 def test_a_page_becomes_a_named_wrapper_message() -> None:
-    """proto3 has no generics, so each instantiation needs its own message."""
     source = _rendered(_paged_app())
     assert "message PageLlama {" in source, source
     assert "repeated Llama items = 1;" in source, source
@@ -170,22 +142,10 @@ def test_a_page_becomes_a_named_wrapper_message() -> None:
 
 
 def test_no_page_wrapper_when_nothing_returns_one() -> None:
-    """An unused wrapper is a name in someone's namespace for nothing."""
     assert "message Page" not in _rendered(_llama_app())
 
 
 def test_a_bare_page_never_reaches_the_proto_target_at_all() -> None:
-    """Which is why the target's own "an untyped page" refusal reads unreached.
-
-    A mutation sweep reported that refusal as never executed, and the reason is
-    one layer up rather than in the tests: `build_api_model` refuses a bare
-    `Page` while it is still resolving annotations -- it reaches the target as
-    `Sequence[T]`, an unresolved type variable -- so the generator is never
-    handed a page with no element type. The guard is therefore defence behind a
-    defence, and this test pins the defence that actually fires; if the
-    inspector ever starts admitting a bare `Page`, this goes red and the
-    generator's own refusal becomes reachable and worth a test of its own.
-    """
     from wreath.typegen.model import TypegenError
 
     app = Wreath()
@@ -198,9 +158,6 @@ def test_a_bare_page_never_reaches_the_proto_target_at_all() -> None:
         _rendered(app)
     assert "unsupported annotation" in str(caught.value), caught.value
     assert "getPages" in str(caught.value), caught.value
-
-
-# --- refusals ----------------------------------------------------------------
 
 
 @dataclass
@@ -219,13 +176,6 @@ def _untyped_app() -> Wreath:
 
 
 def test_an_unannotated_value_is_refused_naming_the_field() -> None:
-    """Asserts *which* refusal fired, not merely that one did.
-
-    Every refusal message names the field, so checking only the field name
-    passes whichever branch happened to raise -- including the fallthrough.
-    The mutation pass found exactly that: removing the `unknown` branch left
-    every refusal test green.
-    """
     with pytest.raises(ProtoTargetError) as caught:
         _rendered(_untyped_app())
     message = str(caught.value)
@@ -273,7 +223,6 @@ def _nested_app() -> Wreath:
 
 
 def test_a_repeated_repeated_value_is_refused() -> None:
-    """proto3 has no nested repeated field, and flattening would lose a level."""
     with pytest.raises(ProtoTargetError) as caught:
         _rendered(_nested_app())
     assert "a repeated repeated value" in str(caught.value), caught.value
@@ -298,9 +247,6 @@ def test_a_heterogeneous_tuple_is_refused() -> None:
     with pytest.raises(ProtoTargetError) as caught:
         _rendered(_tuple_app())
     assert "a heterogeneous tuple" in str(caught.value), caught.value
-
-
-# --- literals travel as their underlying scalar ------------------------------
 
 
 @dataclass
@@ -372,8 +318,6 @@ def _mixed_literal_app() -> Wreath:
 
 
 def test_a_literal_mixing_value_types_is_refused() -> None:
-    """Nothing exercised this refusal, so the type choice could have silently
-    fallen through to `string` and put an integer on the wire as text."""
     with pytest.raises(ProtoTargetError) as caught:
         _rendered(_mixed_literal_app())
     assert "a literal mixing value types" in str(caught.value), caught.value
@@ -395,16 +339,11 @@ def _page_field_app() -> Wreath:
 
 
 def test_a_page_as_a_model_field_renders_the_wrapper() -> None:
-    """The page tests above return `Page[T]` from an operation, which reaches
-    `_page_messages` but never `_field_type` -- so the field path through the
-    page branch was unexercised."""
     source = _rendered(_page_field_app())
     assert "PageLlama page = 1;" in source, source
 
 
 def test_a_literal_ignores_its_none_member_when_choosing_a_type() -> None:
-    """`Literal["a", None]` is a string field that may be absent, not a mixed
-    literal -- the `None` says optionality, which proto3 spells separately."""
     source = _rendered(_nullable_app())
     assert "string grade = 1;" in source, source
 
@@ -416,16 +355,12 @@ def test_a_refusal_reaches_the_cli_as_an_error_not_a_file(tmp_path) -> None:
     assert not (tmp_path / "api.proto").exists(), "a refused schema must not be written"
 
 
-# --- the CLI -----------------------------------------------------------------
-
-
 def test_the_cli_selects_the_proto_target(tmp_path) -> None:
     assert run(_llama_app(), TypegenOptions(target="proto", output=str(tmp_path))) == 0
     assert (tmp_path / "api.proto").exists()
 
 
 def test_the_other_targets_are_unaffected(tmp_path) -> None:
-    """Adding a target must not change what the existing ones emit."""
     from wreath.typegen.targets.typescript import render_typescript
 
     api = build_api_model(_llama_app())
@@ -434,10 +369,7 @@ def test_the_other_targets_are_unaffected(tmp_path) -> None:
     assert render_typescript(api) == before
 
 
-# --- the golden --------------------------------------------------------------
-
-
-GOLDEN = '''\
+GOLDEN = """\
 // Generated by wreath typegen. Do not edit.
 //
 // Message shapes for Wreath 0.1.0.
@@ -462,14 +394,8 @@ message Llama {
   bool healthy = 4;
   optional string paddock = 5;
 }
-'''
+"""
 
 
 def test_the_emitted_schema_matches_the_golden() -> None:
-    """Whole-file, because a `.proto` is read by other people's compilers.
-
-    Asserting fragments would let whitespace, ordering and the header drift
-    without any test objecting -- and those are exactly what a foreign
-    generator is sensitive to.
-    """
     assert _rendered(_llama_app()) == GOLDEN

@@ -47,7 +47,6 @@ def _marker_default(call: ast.Call) -> ast.expr | None:
 
 
 class _RouteRewrite(_SessionThreading, _TestClient, _BackgroundWork, _ForeignRewrite):
-    # -- functions (routes) ------------------------------------------------------
     def visit_FunctionDef(self, node) -> None:
         for dec in node.decorator_list:
             target = dec.func if isinstance(dec, ast.Call) else dec
@@ -151,7 +150,6 @@ class _RouteRewrite(_SessionThreading, _TestClient, _BackgroundWork, _ForeignRew
         # queries are left where they are and the note goes on the *function* —
         # one decision to make ("this needs a session, and every caller has to
         # pass it") rather than the same sentence over every query in the body.
-        #
         # `--opinionated` makes that decision instead: the parameter is added and
         # the queries are written out. It is separated because it is the one
         # rewrite whose effect leaves the file — every call to this function now
@@ -167,8 +165,7 @@ class _RouteRewrite(_SessionThreading, _TestClient, _BackgroundWork, _ForeignRew
                     *node.args.args,
                     *node.args.kwonlyargs,
                 )
-                if argument.annotation is not None
-                and self._is_orm_session(argument.annotation)
+                if argument.annotation is not None and self._is_orm_session(argument.annotation)
             ),
             None,
         )

@@ -1,22 +1,3 @@
-"""The consumer-side contract gate: a provider's breaking change fails a build.
-
-`SPEC_DIGEST` pins the document a client was generated from, but a digest can
-only answer *changed or not*. Classifying a change as breaking or compatible
-needs the previous document itself, so the generated package retains it and the
-gate compares provider-now against client-was.
-
-The split that matters, and the reason this is a separate surface from
-`--check`:
-
-* `--check` asks **"are the files on disk stale?"** -- regenerate and diff.
-* `--check-contract` asks **"has the provider broken me?"** -- semantic, and
-  the only one whose answer should fail a consumer's pipeline.
-
-Runtime verification is deliberately absent: a client refusing to start because
-the provider added an optional field would be an outage generator, and OpenAPI
-calls that change compatible.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -67,9 +48,7 @@ def _v2_breaking() -> Wreath:
     app = Wreath()
 
     @app.get("/llamas/{llama_id}")
-    async def get_llama(
-        request: Any, llama_id: int, tenant: Annotated[str, Query()]
-    ) -> Llama:
+    async def get_llama(request: Any, llama_id: int, tenant: Annotated[str, Query()]) -> Llama:
         return Llama(id=llama_id, name="Bo")
 
     return app
@@ -77,16 +56,12 @@ def _v2_breaking() -> Wreath:
 
 def _generate(app: Wreath, into: Path) -> None:
     into.mkdir(parents=True, exist_ok=True)
-    assert run(app, TypegenOptions(
-        target="python", output=str(into), class_name="LlamaClient"
-    )) == 0
-
-
-# --- the pinned document ----------------------------------------------------
+    assert (
+        run(app, TypegenOptions(target="python", output=str(into), class_name="LlamaClient")) == 0
+    )
 
 
 def test_the_generated_package_retains_the_document_it_was_built_from(tmp_path) -> None:
-    """Without it there is nothing to compare against, only a digest."""
     _generate(_v1(), tmp_path / "pkg")
     assert (tmp_path / "pkg" / "spec.json").exists()
 
@@ -99,16 +74,12 @@ def test_the_pinned_document_is_the_providers_document(tmp_path) -> None:
     assert pinned == generate_openapi(_v1())
 
 
-# --- the gate ---------------------------------------------------------------
-
-
 def test_an_unchanged_provider_reports_no_changes(tmp_path) -> None:
     _generate(_v1(), tmp_path / "pkg")
     assert check_contract(generate_openapi(_v1()), tmp_path / "pkg") == ()
 
 
 def test_a_compatible_change_is_not_breaking(tmp_path) -> None:
-    """An added operation must not fail a consumer's build."""
     _generate(_v1(), tmp_path / "pkg")
     assert check_contract(generate_openapi(_v2_compatible()), tmp_path / "pkg") == ()
 
@@ -143,8 +114,6 @@ def test_the_cli_exits_zero_on_a_compatible_change(tmp_path) -> None:
 
 
 def test_the_gate_refuses_when_there_is_nothing_pinned(tmp_path) -> None:
-    """A gate that passes because it found no baseline is a gate with nothing
-    to check -- the same false success `wreath mutant` now exits 2 for."""
     from wreath.typegen.cli import TypegenCliError
 
     empty = tmp_path / "empty"

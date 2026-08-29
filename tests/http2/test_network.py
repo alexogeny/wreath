@@ -1,8 +1,3 @@
-"""End-to-end HTTP/2 over a real TLS transport with ALPN (RFC 9113 s3.3).
-
-These drive the network server (``wreath.server.serve``) with a TLS ``TLSConfig``
-and negotiate ``h2`` via ALPN, then speak the protocol with the reference codec.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -31,19 +26,28 @@ def _self_signed() -> tuple[str, str]:
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
     now = datetime.datetime.now(datetime.UTC)
-    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
-            .public_key(key.public_key()).serial_number(x509.random_serial_number())
-            .not_valid_before(now - datetime.timedelta(days=1))
-            .not_valid_after(now + datetime.timedelta(days=1))
-            .sign(key, hashes.SHA256()))
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=1))
+        .sign(key, hashes.SHA256())
+    )
     tmp = tempfile.mkdtemp()
     cert_path, key_path = f"{tmp}/cert.pem", f"{tmp}/key.pem"
     with open(cert_path, "wb") as fh:
         fh.write(cert.public_bytes(serialization.Encoding.PEM))
     with open(key_path, "wb") as fh:
-        fh.write(key.private_bytes(serialization.Encoding.PEM,
-                                   serialization.PrivateFormat.TraditionalOpenSSL,
-                                   serialization.NoEncryption()))
+        fh.write(
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption(),
+            )
+        )
     return cert_path, key_path
 
 
@@ -56,8 +60,7 @@ async def _serve_h2():
     tls = TLSConfig(certfile=cert, keyfile=key)
     server = await serve(
         _echo_app,
-        ServerConfig(host="127.0.0.1", port=0, lifespan="off",
-                     protocols=("h2",)),
+        ServerConfig(host="127.0.0.1", port=0, lifespan="off", protocols=("h2",)),
         tls=tls,
     )
     return server
@@ -65,8 +68,13 @@ async def _serve_h2():
 
 async def _echo_app(scope, receive, send):
     assert scope["http_version"] == "2"
-    await send({"type": "http.response.start", "status": 200,
-                "headers": [(b"content-type", b"text/plain")]})
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"content-type", b"text/plain")],
+        }
+    )
     await send({"type": "http.response.body", "body": b"h2-ok"})
 
 

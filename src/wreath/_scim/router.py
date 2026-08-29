@@ -77,9 +77,7 @@ def _refused(error: PatchError) -> ScimResponse:
     once means `POST`, `PUT` and `PATCH` cannot answer the same refusal
     differently.
     """
-    return _error(
-        409 if error.scim_type == "uniqueness" else 400, error.detail, error.scim_type
-    )
+    return _error(409 if error.scim_type == "uniqueness" else 400, error.detail, error.scim_type)
 
 
 def _entity_safe(organization: str) -> str:
@@ -136,11 +134,7 @@ def _parsed_filter(
 def _sortable_value(value: Any) -> tuple[bool, str]:
     if isinstance(value, list):
         primary = next(
-            (
-                item
-                for item in value
-                if isinstance(item, Mapping) and item.get("primary") is True
-            ),
+            (item for item in value if isinstance(item, Mapping) and item.get("primary") is True),
             value[0] if value else None,
         )
         value = primary.get("value") if isinstance(primary, Mapping) else primary
@@ -327,13 +321,10 @@ def scim_router(
     user_filter_cache = BoundedCache(max_entries=_FILTER_CACHE_SIZE)
     group_filter_cache = BoundedCache(max_entries=_FILTER_CACHE_SIZE)
 
-    # --- reading the two stores ---------------------------------------------
-
     async def membership_map(org: str) -> dict[str, frozenset[str]]:
         """Every member of `org`, user id -> roles, one store call."""
         return {
-            membership.user_id: membership.roles
-            for membership in await organizations.members(org)
+            membership.user_id: membership.roles for membership in await organizations.members(org)
         }
 
     async def roles_in(org: str, user_id: str) -> frozenset[str] | None:
@@ -372,8 +363,6 @@ def scim_router(
         if found is None or found.email.strip().lower() != name.strip().lower():
             return None
         return found
-
-    # --- writing ------------------------------------------------------------
 
     async def hashed(password: str) -> str:
         """`password` hashed off the event loop, as `wreath.users` does it."""
@@ -448,9 +437,7 @@ def scim_router(
         for element in target["members"]:
             value = element.get("value")
             if not isinstance(value, str) or not value:
-                raise PatchError(
-                    "invalidValue", "every group member needs a string 'value'"
-                )
+                raise PatchError("invalidValue", "every group member needs a string 'value'")
             wanted.append(value)
         held = await membership_map(org)
         for user_id in wanted:
@@ -467,8 +454,6 @@ def scim_router(
                 continue
             next_roles = (roles | {role}) if should_hold else (roles - {role})
             await organizations.add_member(org, user_id, roles=next_roles)
-
-    # --- query parameters ---------------------------------------------------
 
     def query_of(request: Any) -> dict[str, str]:
         values: dict[str, str] = {}
@@ -510,8 +495,7 @@ def scim_router(
 
         present = [document for document in documents if not sortable(document)[0]]
         missing = [document for document in documents if sortable(document)[0]]
-        present.sort(key=lambda document: sortable(document)[1],
-                     reverse=order == "descending")
+        present.sort(key=lambda document: sortable(document)[1], reverse=order == "descending")
         return present + missing
 
     def paging(query: Mapping[str, str]) -> tuple[int, int]:
@@ -535,9 +519,7 @@ def scim_router(
         try:
             return int(raw)
         except ValueError:
-            raise PatchError(
-                "invalidValue", f"{name} must be an integer (got {raw!r})"
-            ) from None
+            raise PatchError("invalidValue", f"{name} must be an integer (got {raw!r})") from None
 
     def selected(
         documents: list[dict[str, Any]], query: Mapping[str, str], shape: resources.Shape
@@ -556,8 +538,6 @@ def scim_router(
                 window, total=len(documents), start_index=start, per_page=len(window)
             )
         )
-
-    # --- discovery ----------------------------------------------------------
 
     def authentication_scheme(request: Any) -> dict[str, Any]:
         """What section 5 calls `authenticationSchemes`, read off the app's backend.
@@ -603,9 +583,7 @@ def scim_router(
     async def scim_resource_types(request: Any) -> Response:
         found = resources.resource_types(base=base_of(request))
         return ScimResponse(
-            resources.list_response(
-                found, total=len(found), start_index=1, per_page=len(found)
-            )
+            resources.list_response(found, total=len(found), start_index=1, per_page=len(found))
         )
 
     @router.get("/ResourceTypes/{name}")
@@ -622,9 +600,7 @@ def scim_router(
     async def scim_schemas(request: Any) -> Response:
         found = resources.schema_documents(base=base_of(request))
         return ScimResponse(
-            resources.list_response(
-                found, total=len(found), start_index=1, per_page=len(found)
-            )
+            resources.list_response(found, total=len(found), start_index=1, per_page=len(found))
         )
 
     @router.get("/Schemas/{urn}")
@@ -635,8 +611,6 @@ def scim_router(
             if found["id"] == wanted:
                 return ScimResponse(found)
         return _error(404, f"no schema named {wanted!r}")
-
-    # --- users --------------------------------------------------------------
 
     async def user_documents(org: str, base: str, limit: int) -> list[dict[str, Any]]:
         """Every member's representation, refusing an organisation over `limit`."""
@@ -652,9 +626,7 @@ def scim_router(
         for user_id in sorted(held):
             record = await users.get_by_id(user_id)
             if record is not None:
-                found.append(
-                    resources.user_document(record, roles=held[user_id], base=base)
-                )
+                found.append(resources.user_document(record, roles=held[user_id], base=base))
         return found
 
     @router.get("/Users")
@@ -680,9 +652,7 @@ def scim_router(
             for user_id in ordered[start - 1 : start - 1 + count]:
                 record = await users.get_by_id(user_id)
                 if record is not None:
-                    found.append(
-                        resources.user_document(record, roles=held[user_id], base=base)
-                    )
+                    found.append(resources.user_document(record, roles=held[user_id], base=base))
             return ScimResponse(
                 resources.list_response(
                     found, total=len(ordered), start_index=start, per_page=len(found)
@@ -701,9 +671,7 @@ def scim_router(
         if found is None:
             return _error(404, "no such user in this organization")
         record, held = found
-        return ScimResponse(
-            resources.user_document(record, roles=held, base=base_of(request))
-        )
+        return ScimResponse(resources.user_document(record, roles=held, base=base_of(request)))
 
     @router.post("/Users")
     @authorize(action=write_action, resource=cedar_resource)
@@ -723,8 +691,7 @@ def scim_router(
         if record is not None and await roles_in(org, record.id) is not None:
             return _error(
                 409,
-                f"a user with the userName {name!r} is already provisioned in this "
-                "organization",
+                f"a user with the userName {name!r} is already provisioned in this organization",
                 "uniqueness",
             )
         if record is None:
@@ -750,9 +717,7 @@ def scim_router(
             return _refused(error)
         document = resources.user_document(record, roles=(), base=base)
         response = ScimResponse(document, status=201)
-        response.headers.append(
-            (b"location", document["meta"]["location"].encode("utf-8"))
-        )
+        response.headers.append((b"location", document["meta"]["location"].encode("utf-8")))
         return response
 
     async def write_user(request: Any, patching: bool) -> Response:
@@ -775,9 +740,7 @@ def scim_router(
             record = await commit_user(org, record, current, target)
         except PatchError as error:
             return _refused(error)
-        return ScimResponse(
-            resources.user_document(record, roles=held, base=base)
-        )
+        return ScimResponse(resources.user_document(record, roles=held, base=base))
 
     @router.put("/Users/{id}")
     @authorize(action=write_action, resource=cedar_resource)
@@ -801,8 +764,6 @@ def scim_router(
         # cascading here would make an accidental one unrecoverable.
         return Response(b"", status=204)
 
-    # --- groups -------------------------------------------------------------
-
     async def group_documents(org: str, base: str) -> list[dict[str, Any]]:
         held = await membership_map(org)
         return [
@@ -820,9 +781,7 @@ def scim_router(
         org = org_of(request)
         query = query_of(request)
         try:
-            return selected(
-                await group_documents(org, base_of(request)), query, resources.GROUP
-            )
+            return selected(await group_documents(org, base_of(request)), query, resources.GROUP)
         except FilterError as error:
             return _error(400, error.detail, "invalidFilter")
         except PatchError as error:

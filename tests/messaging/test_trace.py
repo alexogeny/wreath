@@ -1,23 +1,3 @@
-"""Plan 01 stage 3, the bus half: a durable message names the publish that caused it.
-
-The plan's own rule -- "context rides the row, never the NOTIFY" -- was written
-for `wreath.jobs`, where `pg_notify($1, '')` is deliberately empty and the row
-is the message. **It does not transfer literally to this module**, because the
-two tiers are opposites:
-
-* **Durable publish** writes one row per subscriber group and rings an empty
-  doorbell. That is the direct analogue of a job, and it carries the context on
-  the row. That is what these tests pin.
-* **Ephemeral publish** has no row at all: `pg_notify($1, $2)` carries the
-  user's payload *as* the message. There is nowhere to put a traceparent that
-  is not inside that payload, so propagating it would mean wrapping every
-  ephemeral message in an envelope -- a breaking change to a live wire format
-  between processes. That is deferred, deliberately and in writing; see
-  `docs/reference/roadmap.md` and `MessageBus.publish`. The test below pins the
-  wire format *unchanged*, so the deferral is a decision the suite defends
-  rather than an omission nobody noticed.
-"""
-
 from __future__ import annotations
 
 import json
@@ -130,12 +110,6 @@ class TestADurableMessageCarriesTheContextOfItsPublish:
         assert sql.count(f", {mark})") == 2
 
     async def test_an_untraced_publish_writes_null_not_an_empty_string(self):
-        """An empty string is a *value*, and would match `IS NOT NULL`.
-
-        The same distinction `wreath.jobs.JobRunner.enqueue` had to make: a
-        forensic lookup filtering on the column being present would otherwise
-        find every message ever published.
-        """
         conn = FakeConn()
         await _bus(conn).publish("orders", {"id": 1}, durable=True)
         sql, args = _inserts(conn)[0]
@@ -146,16 +120,14 @@ class TestADurableMessageCarriesTheContextOfItsPublish:
         assert args[-1] is None
 
     async def test_a_consumer_runs_the_handler_under_the_publishers_trace(self):
-        """The other half of the seam, and the reason the column exists.
-
-        The consumer is a different process on a different day. Delivered with
-        an unrelated context bound, so a handler that merely inherited the
-        ambient value would fail this.
-        """
         conn = FakeConn(
             row={
-                "id": 7, "payload": json.dumps({"id": 1}), "tenant": "",
-                "fence": 1, "attempts": 0, "trace_context": PARENT,
+                "id": 7,
+                "payload": json.dumps({"id": 1}),
+                "tenant": "",
+                "fence": 1,
+                "attempts": 0,
+                "trace_context": PARENT,
             }
         )
         bus = _bus(conn)
@@ -183,16 +155,14 @@ class TestADurableMessageCarriesTheContextOfItsPublish:
         )
 
     async def test_an_untraced_message_binds_none_rather_than_leaking(self):
-        """The staleness rule every other seam in this plan had to adopt.
-
-        A consumer running thousands of messages must not hand message N+1 the
-        context of message N, and a message published untraced must not inherit
-        whatever the worker happens to hold.
-        """
         conn = FakeConn(
             row={
-                "id": 7, "payload": json.dumps({"id": 1}), "tenant": "",
-                "fence": 1, "attempts": 0, "trace_context": None,
+                "id": 7,
+                "payload": json.dumps({"id": 1}),
+                "tenant": "",
+                "fence": 1,
+                "attempts": 0,
+                "trace_context": None,
             }
         )
         bus = _bus(conn)
@@ -216,8 +186,12 @@ class TestADurableMessageCarriesTheContextOfItsPublish:
     async def test_the_context_is_reset_after_delivery(self):
         conn = FakeConn(
             row={
-                "id": 7, "payload": json.dumps({}), "tenant": "",
-                "fence": 1, "attempts": 0, "trace_context": PARENT,
+                "id": 7,
+                "payload": json.dumps({}),
+                "tenant": "",
+                "fence": 1,
+                "attempts": 0,
+                "trace_context": PARENT,
             }
         )
         bus = _bus(conn)
@@ -231,11 +205,14 @@ class TestADurableMessageCarriesTheContextOfItsPublish:
         assert telemetry.outbound_context.get() is None
 
     async def test_the_context_is_reset_even_when_the_handler_raises(self):
-        """A handler that raises drives retry, and must not leave a binding behind."""
         conn = FakeConn(
             row={
-                "id": 7, "payload": json.dumps({}), "tenant": "",
-                "fence": 1, "attempts": 0, "trace_context": PARENT,
+                "id": 7,
+                "payload": json.dumps({}),
+                "tenant": "",
+                "fence": 1,
+                "attempts": 0,
+                "trace_context": PARENT,
             }
         )
         bus = _bus(conn)
@@ -264,11 +241,6 @@ class TestTheDurablePublishAccountsForItsConnection:
         assert bus._db.released == 1
 
     async def test_a_publish_inside_a_transaction_acquires_nothing(self):
-        """The outbox guarantee: nothing goes out behind the caller's back.
-
-        Including the column probe, which is why `_carries_trace` takes the
-        executor the statement will use rather than opening a connection.
-        """
         conn = FakeConn()
         bus = MessageBus(FakeDB(conn), name="events")
 
@@ -283,7 +255,6 @@ class TestTheDurablePublishAccountsForItsConnection:
 
 class TestTheSchemaMayBeOlderThanTheBuild:
     async def test_a_build_meeting_a_version_one_schema_still_publishes(self):
-        """Losing the trace is a degradation; losing the message is not."""
         conn = FakeConn(trace_column=False)
         await _bus(conn).publish("orders", {"id": 1}, durable=True)
         sql, args = _inserts(conn)[0]
@@ -299,8 +270,11 @@ class TestTheSchemaMayBeOlderThanTheBuild:
         conn = FakeConn(
             trace_column=False,
             row={
-                "id": 7, "payload": json.dumps({}), "tenant": "",
-                "fence": 1, "attempts": 0,
+                "id": 7,
+                "payload": json.dumps({}),
+                "tenant": "",
+                "fence": 1,
+                "attempts": 0,
             },
         )
         bus = _bus(conn)
@@ -331,18 +305,6 @@ class TestTheSchemaMayBeOlderThanTheBuild:
 
 class TestEphemeralFanOutIsDeliberatelyUnchanged:
     async def test_the_ephemeral_wire_format_is_the_payload_and_nothing_else(self):
-        """The deferral, pinned.
-
-        Ephemeral fan-out has only the NOTIFY, so carrying a traceparent means
-        wrapping the user's payload in an envelope -- a breaking change to a
-        live wire format between processes, which needs a versioned envelope an
-        old-build subscriber can still read through a rolling deploy. The
-        8000-byte NOTIFY bound is not the obstacle; a traceparent is 55 bytes.
-
-        This test exists so that when someone does build the envelope, they
-        have to come here and say so, rather than discovering during a deploy
-        that half the fleet cannot read the other half's messages.
-        """
         conn = FakeConn()
         bus = MessageBus(FakeDB(conn), name="events")
         token = _bound(PARENT)
@@ -362,12 +324,6 @@ class TestEphemeralFanOutIsDeliberatelyUnchanged:
 @pytest.mark.database
 @pytest.mark.skipif(not _DSN, reason="needs WREATH_TEST_POSTGRES_DSN (a live PostgreSQL)")
 async def test_a_durable_message_carries_its_trace_across_processes() -> None:
-    """Publisher and consumer as two buses, against a real server.
-
-    The consumer is built after the publisher is gone and delivers with a
-    different context bound, which is the closest a test gets to "another
-    service picked this up".
-    """
     from wreath.postgres import Database
 
     worker = os.environ.get("PYTEST_XDIST_WORKER", "solo")

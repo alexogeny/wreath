@@ -8,6 +8,7 @@ strip a zoom-disabling viewport); everything else stays suggestion-only. For sou
 *generated* HTML (the API-docs shell) the CLI presents these as patch suggestions rather
 than editing rendered bytes, since that artefact is rebuilt each run.
 """
+
 from __future__ import annotations
 
 import re
@@ -81,7 +82,7 @@ def apply_fixes(html: str) -> tuple[str, list[str]]:
         raw = node.attr("tabindex")
         if raw and raw.lstrip("-").isdigit() and int(raw) > 0:
             close = tx.tag_close(start)
-            tag = html[start:close + 1]
+            tag = html[start : close + 1]
             tag = re.sub(r'tabindex\s*=\s*"[^"]*"', 'tabindex="0"', tag, count=1)
             tag = re.sub(r"tabindex\s*=\s*'[^']*'", "tabindex='0'", tag, count=1)
             tx.replace(start, close + 1, tag)
@@ -91,11 +92,13 @@ def apply_fixes(html: str) -> tuple[str, list[str]]:
             content = node.attr("content") or ""
             stripped = re.sub(
                 r"\s*,?\s*(user-scalable\s*=\s*no|maximum-scale\s*=\s*[0-9.]+)",
-                "", content, flags=re.I,
+                "",
+                content,
+                flags=re.I,
             ).strip(", ")
             if stripped != content:
                 close = tx.tag_close(start)
-                tx.replace(start, close + 1, html[start:close + 1].replace(content, stripped))
+                tx.replace(start, close + 1, html[start : close + 1].replace(content, stripped))
                 applied.append(f"viewport-scale ({node.loc}): removed the zoom restriction")
             continue
 

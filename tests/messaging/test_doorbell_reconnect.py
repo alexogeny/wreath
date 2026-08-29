@@ -1,19 +1,3 @@
-"""The doorbell survives losing its LISTEN connection.
-
-A bus holds one connection for the life of the process to carry ephemeral
-fan-out and the durable wake-ups. Every reason a long-lived Postgres connection
-ends -- a failover, an idle timeout, a `pg_terminate_backend`, a network blip --
-happens to that connection eventually, and the driver's `notifications()`
-iterator *ends* when it does rather than raising. An unsupervised loop therefore
-returns with nothing to notice: ephemeral delivery stops for the lifetime of the
-process, durable consumers silently degrade to the poll interval, and the system
-keeps working, slower and lossier, with no signal at all.
-
-These tests pin the reconnect, the counter that makes the outage countable, and
-the two things a reconnect loop is most likely to break: a clean shutdown, and
-telling a dropped connection apart from a bug inside a subscriber's callback.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -177,15 +161,7 @@ async def _started(database: FakeDatabase, handler: Any) -> tuple[MessageBus, Ru
     return bus, supervisor
 
 
-# --- the finding --------------------------------------------------------------
-
-
 async def test_a_dropped_listen_connection_comes_back() -> None:
-    """The failure the whole file exists for: drop it, and delivery resumes.
-
-    Before the reconnect loop, `notifications()` simply ended, `_doorbell`
-    returned, and nothing ever spawned it again.
-    """
     seen: list[Any] = []
 
     async def handler(message: Message) -> None:
@@ -211,7 +187,6 @@ async def test_a_dropped_listen_connection_comes_back() -> None:
 
 
 async def test_losing_the_connection_is_counted() -> None:
-    """`unrouted_publishes` is the precedent: degradation stays countable."""
 
     async def handler(message: Message) -> None:
         pass
@@ -227,7 +202,6 @@ async def test_losing_the_connection_is_counted() -> None:
 
 
 async def test_a_database_that_is_down_at_startup_still_gets_a_doorbell() -> None:
-    """Startup used to swallow the failure and never spawn the loop at all."""
     seen: list[Any] = []
 
     async def handler(message: Message) -> None:
@@ -239,9 +213,9 @@ async def test_a_database_that_is_down_at_startup_still_gets_a_doorbell() -> Non
     bus.subscribe("order_placed")(handler)
     supervisor = RunningSupervisor()
 
-    await bus.start(supervisor)                    # must not raise
+    await bus.start(supervisor)  # must not raise
     try:
-        database.acquire_error = None              # the database comes back
+        database.acquire_error = None  # the database comes back
         assert await _until(lambda: database.listeners != []), (
             "the bus never opened a doorbell once the database returned"
         )
@@ -249,20 +223,16 @@ async def test_a_database_that_is_down_at_startup_still_gets_a_doorbell() -> Non
         assert await _until(lambda: database.live.listening == [wire])
         database.live.deliver(wire, '{"id": 1}')
         assert await _until(lambda: seen == [{"id": 1}])
-        assert bus.doorbell_reconnects >= 1         # the outage was countable
+        assert bus.doorbell_reconnects >= 1  # the outage was countable
     finally:
         await supervisor.stop(bus)
 
 
-# --- backoff ------------------------------------------------------------------
-
-
 def test_the_reconnect_backoff_grows_and_is_bounded() -> None:
-    """A database that is genuinely down must not become a reconnect storm."""
     delays = [_doorbell_delay(attempt) for attempt in range(1, 12)]
-    assert delays[0] < 0.2                          # a blip recovers immediately
-    assert delays[3] > delays[0]                    # ... and a real outage backs off
-    assert max(delays) <= 6.0                       # cap 5.0 + 20% jitter
+    assert delays[0] < 0.2  # a blip recovers immediately
+    assert delays[3] > delays[0]  # ... and a real outage backs off
+    assert max(delays) <= 6.0  # cap 5.0 + 20% jitter
     # Jittered, so a fleet of buses does not retry in lockstep.
     assert len({_doorbell_delay(9) for _ in range(20)}) > 1
 
@@ -270,11 +240,6 @@ def test_the_reconnect_backoff_grows_and_is_bounded() -> None:
 async def test_a_flapping_connection_backs_off_too(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A connection accepted and killed at once must not reset the backoff.
-
-    Otherwise the loop retries at the base delay forever against a database in
-    exactly the state that least wants the traffic.
-    """
 
     async def handler(message: Message) -> None:
         pass
@@ -297,7 +262,7 @@ async def test_a_flapping_connection_backs_off_too(
         await original_listen(self, wire)
         self.drop()
 
-    FakeListenConnection.listen = listen_then_die       # type: ignore[method-assign]
+    FakeListenConnection.listen = listen_then_die  # type: ignore[method-assign]
     try:
         await bus.start(supervisor)
         assert await _until(lambda: len(attempts) >= 4)
@@ -306,14 +271,13 @@ async def test_a_flapping_connection_backs_off_too(
         # counts after a long sleep.
         assert attempts[:4] == [1, 2, 3, 4]
     finally:
-        FakeListenConnection.listen = original_listen   # type: ignore[method-assign]
+        FakeListenConnection.listen = original_listen  # type: ignore[method-assign]
         await supervisor.stop(bus)
 
 
 async def test_a_persistent_outage_does_not_spin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Attempts are spaced by the backoff, not issued as fast as the loop runs."""
 
     async def handler(message: Message) -> None:
         pass
@@ -346,11 +310,7 @@ async def test_a_persistent_outage_does_not_spin(
         await supervisor.stop(bus)
 
 
-# --- shutdown -----------------------------------------------------------------
-
-
 async def test_stopping_during_a_reconnect_backoff_finishes_promptly() -> None:
-    """The loop must not fight cancellation, nor hold the process open."""
 
     async def handler(message: Message) -> None:
         pass
@@ -373,7 +333,6 @@ async def test_stopping_during_a_reconnect_backoff_finishes_promptly() -> None:
 
 
 async def test_a_clean_stop_releases_the_connection_without_reconnecting() -> None:
-    """Draining closes the doorbell; that is not an outage."""
 
     async def handler(message: Message) -> None:
         pass
@@ -384,22 +343,18 @@ async def test_a_clean_stop_releases_the_connection_without_reconnecting() -> No
 
     supervisor.stopping.set()
     await bus.drain(asyncio.get_running_loop().time() + 1.0)
-    connection.drop()                                # as a real close would
+    connection.drop()  # as a real close would
     await asyncio.wait(supervisor.tasks, timeout=1.0)
 
     assert connection.released is True
     assert bus._listen_conn is None
     assert bus.doorbell_reconnects == 0
-    assert len(database.listeners) == 1              # it did not reopen one
+    assert len(database.listeners) == 1  # it did not reopen one
     for task in supervisor.tasks:
         assert task.done() and task.exception() is None
 
 
-# --- user code is not a dropped connection ------------------------------------
-
-
 async def test_a_raising_subscriber_is_not_mistaken_for_a_connection_failure() -> None:
-    """A bug in a handler must not read as a flapping database."""
     seen: list[Any] = []
 
     async def handler(message: Message) -> None:
@@ -423,7 +378,6 @@ async def test_a_raising_subscriber_is_not_mistaken_for_a_connection_failure() -
 
 
 async def test_an_undecodable_payload_is_delivered_as_none_not_a_disconnect() -> None:
-    """Only a JSON failure is suppressed there, and it does not end the loop."""
     seen: list[Any] = []
 
     async def handler(message: Message) -> None:
@@ -442,7 +396,6 @@ async def test_an_undecodable_payload_is_delivered_as_none_not_a_disconnect() ->
 
 
 async def test_a_durable_wakeup_still_wakes_consumers_after_a_reconnect() -> None:
-    """The doorbell's other job: a NOTIFY on any channel sets the wake event."""
 
     async def handler(message: Message) -> None:
         pass

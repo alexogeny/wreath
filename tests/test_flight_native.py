@@ -1,10 +1,3 @@
-"""Stage 1 Native Flight Recorder core: ring, active table, completion, losses.
-
-Drives the native ``_flight.Recorder`` directly (no server yet) and checks it
-against the reference recorder in ``wreath._flight_reference``. The extension is optional;
-tests skip cleanly if it was not built.
-"""
-
 from __future__ import annotations
 
 import random
@@ -62,15 +55,15 @@ def test_completion_summaries_off_keeps_counters_without_cells() -> None:
 def test_terminal_status_and_error_class_round_trip() -> None:
     rec = _flight.Recorder(_flight.MODE_PULSE, ring_records=8)
     rec.record(
-        start_ns=0, end_ns=1000, status=500,
-        terminal=fs.TerminalStatus.ERROR, error_class=7,
+        start_ns=0,
+        end_ns=1000,
+        status=500,
+        terminal=fs.TerminalStatus.ERROR,
+        error_class=7,
     )
     cell = fs.CompletionCell.decode(rec.drain())
     assert cell.terminal is fs.TerminalStatus.ERROR
     assert cell.error_class == 7
-
-
-# --- ring behavior ----------------------------------------------------------
 
 
 def test_ring_full_drops_and_counts_loss() -> None:
@@ -93,9 +86,6 @@ def test_ring_wraps_and_preserves_sequence() -> None:
             seen.append(fs.CompletionCell.decode(blob[j : j + fs.CELL_SIZE]).status)
     assert seen == [200 + i for i in range(20)]
     assert rec.loss(_flight.LOSS_RING_FULL) == 0
-
-
-# --- active table -----------------------------------------------------------
 
 
 def test_active_slots_reserve_release_and_reuse() -> None:
@@ -132,9 +122,6 @@ def test_dropped_request_releases_its_slot() -> None:
     assert rec.active_count == 0
 
 
-# --- histograms -------------------------------------------------------------
-
-
 def test_histogram_records_log2_buckets() -> None:
     rec = _flight.Recorder(_flight.MODE_PULSE, ring_records=64)
     rec.record(start_ns=0, end_ns=1000, status=200)  # ~1us -> bucket 0
@@ -143,9 +130,6 @@ def test_histogram_records_log2_buckets() -> None:
     assert hist[0] == 1
     assert hist[fs.histogram_bucket(1000)] == 1
     assert sum(hist) == 2
-
-
-# --- differential against the reference recorder -----------------------------------
 
 
 def _run_sequence(rec, seed: int) -> tuple[bytes, tuple]:
@@ -157,9 +141,7 @@ def _run_sequence(rec, seed: int) -> tuple[bytes, tuple]:
             start_ns=start,
             end_ns=start + dur,
             connection_id=rng.randrange(0, 1000),
-            protocol=rng.choice(
-                [_flight.PROTO_HTTP1, _flight.PROTO_HTTP2, _flight.PROTO_HTTP3]
-            ),
+            protocol=rng.choice([_flight.PROTO_HTTP1, _flight.PROTO_HTTP2, _flight.PROTO_HTTP3]),
             route_id=rng.randrange(0, 50),
             plan_id=rng.randrange(0, 10),
             status=rng.choice([200, 204, 404, 500]),
@@ -198,9 +180,6 @@ def test_native_matches_pure_oracle_under_ring_pressure() -> None:
     assert native.loss(_flight.LOSS_RING_FULL) > 0
 
 
-# --- Stage 3: Detailed-mode arming ------------------------------------------
-
-
 def _armed_fraction(rec, n: int) -> float:
     for i in range(n):
         rec.record(start_ns=i * 1000, end_ns=i * 1000 + 500)
@@ -215,7 +194,9 @@ def _armed_fraction(rec, n: int) -> float:
 @pytest.mark.parametrize("rate", [0.0, 0.25, 0.5, 1.0])
 def test_detailed_arming_tracks_sample_rate(rate: float) -> None:
     rec = _flight.Recorder(
-        _flight.MODE_DETAILED, ring_records=8192, active_requests=64,
+        _flight.MODE_DETAILED,
+        ring_records=8192,
+        active_requests=64,
         detailed_sample_rate=rate,
     )
     fraction = _armed_fraction(rec, 4000)
@@ -227,9 +208,7 @@ def test_detailed_arming_tracks_sample_rate(rate: float) -> None:
 
 def test_pulse_never_arms_even_at_full_rate() -> None:
     # Arming is a Detailed-mode concept; Pulse must stay crossing/flag identical.
-    rec = _flight.Recorder(
-        _flight.MODE_PULSE, ring_records=1024, detailed_sample_rate=1.0
-    )
+    rec = _flight.Recorder(_flight.MODE_PULSE, ring_records=1024, detailed_sample_rate=1.0)
     assert _armed_fraction(rec, 500) == 0.0
 
 
@@ -243,9 +222,8 @@ def test_detailed_arming_is_deterministic_per_request() -> None:
             rec.record(start_ns=i, end_ns=i + 1)
         blob = rec.drain(300)
         return [
-            fs.CompletionCell.decode(
-                blob[i * fs.CELL_SIZE : (i + 1) * fs.CELL_SIZE]
-            ).flags & fs.FLAG_DETAILED_ARMED
+            fs.CompletionCell.decode(blob[i * fs.CELL_SIZE : (i + 1) * fs.CELL_SIZE]).flags
+            & fs.FLAG_DETAILED_ARMED
             for i in range(len(blob) // fs.CELL_SIZE)
         ]
 
@@ -271,17 +249,18 @@ def test_native_matches_pure_oracle_detailed_arming() -> None:
     # The armed flag rides the completion cell, so drained cells must be
     # byte-identical between the native worker and the reference recorder.
     native = _flight.Recorder(
-        _flight.MODE_DETAILED, ring_records=1024, active_requests=64,
+        _flight.MODE_DETAILED,
+        ring_records=1024,
+        active_requests=64,
         detailed_sample_rate=0.5,
     )
     pure = ReferenceRecorder(
-        fs.Mode.DETAILED, ring_records=1024, active_requests=64,
+        fs.Mode.DETAILED,
+        ring_records=1024,
+        active_requests=64,
         detailed_sample_rate=0.5,
     )
     assert _run_detailed_sequence(native, seed=7) == _run_detailed_sequence(pure, seed=7)
-
-
-# --- Stage 3 slice 2: phase scratch + batch commit --------------------------
 
 
 def _phase_cells(blob: bytes) -> list:
@@ -295,17 +274,28 @@ def _phase_cells(blob: bytes) -> list:
 
 def test_phases_commit_as_batches_after_the_completion() -> None:
     rec = _flight.Recorder(
-        _flight.MODE_DETAILED, ring_records=64, active_requests=8,
-        detailed_sample_rate=1.0, phase_slots=4,
+        _flight.MODE_DETAILED,
+        ring_records=64,
+        active_requests=8,
+        detailed_sample_rate=1.0,
+        phase_slots=4,
     )
     req = rec.begin(connection_id=9, protocol=fs.Protocol.HTTP1, start_ns=1000)
     kinds = [
-        fs.PhaseKind.BINDING, fs.PhaseKind.AUTH, fs.PhaseKind.HANDLER,
-        fs.PhaseKind.DB_QUERY, fs.PhaseKind.SERIALIZE,
+        fs.PhaseKind.BINDING,
+        fs.PhaseKind.AUTH,
+        fs.PhaseKind.HANDLER,
+        fs.PhaseKind.DB_QUERY,
+        fs.PhaseKind.SERIALIZE,
     ]
     for seq, kind in enumerate(kinds):
-        req.phase(phase_id=int(kind), dependency_id=seq, coverage=int(fs.PhaseCoverage.PYTHON),
-                  start_offset_us=seq * 10, duration_us=seq + 1)
+        req.phase(
+            phase_id=int(kind),
+            dependency_id=seq,
+            coverage=int(fs.PhaseCoverage.PYTHON),
+            start_offset_us=seq * 10,
+            duration_us=seq + 1,
+        )
     assert req.phase_count == 5
     req.finish(now_ns=1000 + 200_000, status=200)
 
@@ -323,7 +313,10 @@ def test_phases_commit_as_batches_after_the_completion() -> None:
 
 def test_phase_budget_overflow_drops_and_counts_loss() -> None:
     rec = _flight.Recorder(
-        _flight.MODE_DETAILED, ring_records=64, detailed_sample_rate=1.0, phase_slots=2,
+        _flight.MODE_DETAILED,
+        ring_records=64,
+        detailed_sample_rate=1.0,
+        phase_slots=2,
     )
     req = rec.begin(start_ns=0)
     for i in range(fs.PHASE_CELL_BUDGET + 5):  # five past the budget
@@ -339,8 +332,11 @@ def test_phase_pool_exhaustion_counts_loss_and_arms_without_scratch() -> None:
     # Two scratch blocks, three concurrent armed requests: the third arms but
     # records no phases (loss counted), and completes normally.
     rec = _flight.Recorder(
-        _flight.MODE_DETAILED, ring_records=64, active_requests=8,
-        detailed_sample_rate=1.0, phase_slots=2,
+        _flight.MODE_DETAILED,
+        ring_records=64,
+        active_requests=8,
+        detailed_sample_rate=1.0,
+        phase_slots=2,
     )
     a = rec.begin(start_ns=1)
     b = rec.begin(start_ns=2)
@@ -369,7 +365,10 @@ def test_unarmed_requests_record_no_phases() -> None:
 def test_phase_slot_is_released_and_reused() -> None:
     # One scratch block, reused across sequential requests.
     rec = _flight.Recorder(
-        _flight.MODE_DETAILED, ring_records=64, detailed_sample_rate=1.0, phase_slots=1,
+        _flight.MODE_DETAILED,
+        ring_records=64,
+        detailed_sample_rate=1.0,
+        phase_slots=1,
     )
     for _ in range(5):
         req = rec.begin(start_ns=0)
@@ -381,7 +380,10 @@ def test_phase_slot_is_released_and_reused() -> None:
 
 def test_abandoned_armed_request_commits_no_phases_but_frees_the_slot() -> None:
     rec = _flight.Recorder(
-        _flight.MODE_DETAILED, ring_records=64, detailed_sample_rate=1.0, phase_slots=1,
+        _flight.MODE_DETAILED,
+        ring_records=64,
+        detailed_sample_rate=1.0,
+        phase_slots=1,
     )
     req = rec.begin(start_ns=0)
     req.phase(phase_id=int(fs.PhaseKind.HANDLER), duration_us=1)
@@ -412,12 +414,16 @@ def _run_phase_sequence(rec, seed: int) -> tuple[bytes, tuple]:
                 duration_us=rng.randrange(0, 1000),
             )
         if rng.random() < 0.9:
-            r.finish(now_ns=i * 1000 + rng.randrange(1, 900_000),
-                     status=rng.choice([200, 404, 500]), terminal=rng.randrange(0, 3))
+            r.finish(
+                now_ns=i * 1000 + rng.randrange(1, 900_000),
+                status=rng.choice([200, 404, 500]),
+                terminal=rng.randrange(0, 3),
+            )
         else:
             r.abandon()
     snap = (
-        rec.requests, rec.completions,
+        rec.requests,
+        rec.completions,
         rec.loss(int(fs.LossReason.PHASE_SCRATCH_FULL)),
         rec.loss(int(fs.LossReason.RING_FULL)),
     )
@@ -428,12 +434,18 @@ def test_native_matches_pure_oracle_with_phases_under_pressure() -> None:
     # Small ring and phase pool so both ring-full and scratch-full losses fire;
     # drained cells (completions + phase batches) and counters must agree exactly.
     native = _flight.Recorder(
-        _flight.MODE_DETAILED, ring_records=64, active_requests=64,
-        detailed_sample_rate=0.5, phase_slots=8,
+        _flight.MODE_DETAILED,
+        ring_records=64,
+        active_requests=64,
+        detailed_sample_rate=0.5,
+        phase_slots=8,
     )
     pure = ReferenceRecorder(
-        fs.Mode.DETAILED, ring_records=64, active_requests=64,
-        detailed_sample_rate=0.5, phase_slots=8,
+        fs.Mode.DETAILED,
+        ring_records=64,
+        active_requests=64,
+        detailed_sample_rate=0.5,
+        phase_slots=8,
     )
     n_cells, n_snap = _run_phase_sequence(native, seed=2024)
     p_cells, p_snap = _run_phase_sequence(pure, seed=2024)
@@ -443,16 +455,15 @@ def test_native_matches_pure_oracle_with_phases_under_pressure() -> None:
     assert native.loss(int(fs.LossReason.RING_FULL)) > 0
 
 
-# --- Stage 3 slice 3: completion promotion (slow / error) -------------------
-
-
 def _only_cell(rec) -> fs.CompletionCell:
     return fs.CompletionCell.decode(rec.drain()[: fs.CELL_SIZE])
 
 
 def test_slow_completion_is_promoted() -> None:
     rec = _flight.Recorder(
-        _flight.MODE_DETAILED, ring_records=16, detailed_sample_rate=0.0,
+        _flight.MODE_DETAILED,
+        ring_records=16,
+        detailed_sample_rate=0.0,
         detailed_slow_us=1000,
     )
     rec.record(start_ns=0, end_ns=2_000_000, status=200, terminal=0)  # 2000us
@@ -463,7 +474,9 @@ def test_slow_completion_is_promoted() -> None:
 
 def test_fast_completion_is_not_promoted() -> None:
     rec = _flight.Recorder(
-        _flight.MODE_DETAILED, ring_records=16, detailed_sample_rate=0.0,
+        _flight.MODE_DETAILED,
+        ring_records=16,
+        detailed_sample_rate=0.0,
         detailed_slow_us=1000,
     )
     rec.record(start_ns=0, end_ns=500_000, status=200, terminal=0)  # 500us < 1000
@@ -472,21 +485,21 @@ def test_fast_completion_is_not_promoted() -> None:
 
 def test_error_and_timeout_completions_are_promoted() -> None:
     rec = _flight.Recorder(_flight.MODE_DETAILED, ring_records=16, detailed_sample_rate=0.0)
-    rec.record(start_ns=0, end_ns=1000, status=500,
-               terminal=int(fs.TerminalStatus.ERROR))
+    rec.record(start_ns=0, end_ns=1000, status=500, terminal=int(fs.TerminalStatus.ERROR))
     assert _only_cell(rec).flags & fs.FLAG_ERROR_PROMOTED
-    rec.record(start_ns=0, end_ns=1000, status=504,
-               terminal=int(fs.TerminalStatus.TIMEOUT))
+    rec.record(start_ns=0, end_ns=1000, status=504, terminal=int(fs.TerminalStatus.TIMEOUT))
     assert _only_cell(rec).flags & fs.FLAG_ERROR_PROMOTED
 
 
 def test_pulse_never_promotes() -> None:
     # Promotion is a Detailed concept; Pulse cells stay byte-identical to Stage 2.
     rec = _flight.Recorder(
-        _flight.MODE_PULSE, ring_records=16, detailed_sample_rate=0.0, detailed_slow_us=1,
+        _flight.MODE_PULSE,
+        ring_records=16,
+        detailed_sample_rate=0.0,
+        detailed_slow_us=1,
     )
-    rec.record(start_ns=0, end_ns=9_000_000, status=500,
-               terminal=int(fs.TerminalStatus.ERROR))
+    rec.record(start_ns=0, end_ns=9_000_000, status=500, terminal=int(fs.TerminalStatus.ERROR))
     cell = _only_cell(rec)
     assert not cell.flags & fs.FLAG_SLOW_PROMOTED
     assert not cell.flags & fs.FLAG_ERROR_PROMOTED
@@ -505,11 +518,15 @@ def test_promotion_matches_pure_oracle() -> None:
         return rec.drain(10_000)
 
     native = _flight.Recorder(
-        _flight.MODE_DETAILED, ring_records=512, detailed_sample_rate=0.3,
+        _flight.MODE_DETAILED,
+        ring_records=512,
+        detailed_sample_rate=0.3,
         detailed_slow_us=1500,
     )
     pure = ReferenceRecorder(
-        fs.Mode.DETAILED, ring_records=512, detailed_sample_rate=0.3,
+        fs.Mode.DETAILED,
+        ring_records=512,
+        detailed_sample_rate=0.3,
         detailed_slow_us=1500,
     )
     assert drive(native) == drive(pure)
@@ -527,12 +544,18 @@ def test_phase_pool_pressure_gauges_track_reserve_and_release() -> None:
     # Slice 3b: occupancy and high-water for the phase-scratch pool, mirrored by
     # the reference recorder. High water is sticky; occupancy falls as requests finish.
     rec = _flight.Recorder(
-        _flight.MODE_DETAILED, ring_records=64, active_requests=8,
-        detailed_sample_rate=1.0, phase_slots=4,
+        _flight.MODE_DETAILED,
+        ring_records=64,
+        active_requests=8,
+        detailed_sample_rate=1.0,
+        phase_slots=4,
     )
     pure = ReferenceRecorder(
-        fs.Mode.DETAILED, ring_records=64, active_requests=8,
-        detailed_sample_rate=1.0, phase_slots=4,
+        fs.Mode.DETAILED,
+        ring_records=64,
+        active_requests=8,
+        detailed_sample_rate=1.0,
+        phase_slots=4,
     )
     for r in (rec, pure):
         assert (r.phase_capacity, r.phase_in_use, r.phase_high_water) == (4, 0, 0)
@@ -550,12 +573,18 @@ def test_phase_pool_pressure_gauges_track_reserve_and_release() -> None:
 
 def test_phase_pool_gauges_saturate_at_capacity_on_exhaustion() -> None:
     rec = _flight.Recorder(
-        _flight.MODE_DETAILED, ring_records=64, active_requests=8,
-        detailed_sample_rate=1.0, phase_slots=2,
+        _flight.MODE_DETAILED,
+        ring_records=64,
+        active_requests=8,
+        detailed_sample_rate=1.0,
+        phase_slots=2,
     )
     pure = ReferenceRecorder(
-        fs.Mode.DETAILED, ring_records=64, active_requests=8,
-        detailed_sample_rate=1.0, phase_slots=2,
+        fs.Mode.DETAILED,
+        ring_records=64,
+        active_requests=8,
+        detailed_sample_rate=1.0,
+        phase_slots=2,
     )
     native_reqs = [rec.begin(start_ns=0) for _ in range(4)]  # two past the pool
     pure_reqs = [pure.begin(start_ns=0) for _ in range(4)]

@@ -112,8 +112,6 @@ _build_capability_mask = _core.build_capability_mask
 _build_compiled_capability_mask = _core.build_compiled_capability_mask
 _request_new = _core.request_new
 
-# Baseline Response.__call__ used to detect subclasses that override sending;
-# only unmodified responses ride the one-shot "wreath.response" server extension.
 _RESPONSE_CALL = Response.__call__
 # Shared immutable half of the direct native JSON header list. The dynamic
 # content-length pair is still built per body so HTTP/2 preserves the same
@@ -262,12 +260,9 @@ def walk_claims(holders: Iterable[Any]) -> Iterator[tuple[Any, Any, Any]]:
     store while the *declaration* that named a database was made about the
     middleware. `Wreath._schema_database` consults each in turn.
 
-    This used to be written out three times: twice in this module and once in
-    `wreath.infra.inference`. They drifted, which is the whole argument for one
-    copy -- the middleware limb of the holder list reached one walk before the
-    others, so `wreath_ratelimit`, `wreath_idempotency` and `wreath_session`
-    were emitted by `wreath schema sql` and applied by nothing. Nothing
-    deduplicates here; each caller wants a different key.
+    Nothing deduplicates here; each caller owns the key by which it combines
+    claims. Keeping the holder traversal here gives schema application and
+    infrastructure inference the same ownership facts.
     """
     for holder in holders:
         for candidate in (holder, *getattr(holder, "schema_owners", ())):
@@ -364,9 +359,7 @@ class _ApplicationImage:
         routes = self.routes()
         if not self._analyzed:
             handler_facts = tuple(
-                _inspect_handler_facts(
-                    definition.endpoint, definition.path, definition.host
-                )
+                _inspect_handler_facts(definition.endpoint, definition.path, definition.host)
                 for definition in routes
             )
             self._binding_specs = tuple(facts.binding for facts in handler_facts)
@@ -958,13 +951,9 @@ class Wreath:
         rate-limit and idempotency stores reach an application that way rather
         than through a registry of their own. A middleware does not own tables
         itself -- it delegates them to a store -- so it answers `schema_owners`
-        with the store it holds and the claim is collected from there. Both
-        halves are needed and for a while only one was present: the walk was
-        repaired to reach the middleware, but the shipped three still exposed
-        neither `component()` nor `schema_owners`, so `wreath_ratelimit`,
-        `wreath_idempotency` and `wreath_session` stayed emitted by
-        `wreath schema sql` and applied by nothing. This docstring claimed the
-        guarantee across that gap, which is worse than not claiming it.
+        with the store it holds and the claim is collected from there. This
+        includes the PostgreSQL stores behind rate limiting, idempotency and
+        sessions.
 
         Returns:
             One `wreath.schema.Component` per registered subsystem that owns
@@ -979,9 +968,8 @@ class Wreath:
         """Everything registered that might own tables, in registration order.
 
         The one list. `schema_components`, `_schema_owners` and
-        `wreath.infra.inference` all walk it, and while there were three copies
-        the middleware limb was present in some and missing from others -- which
-        is how `wreath_ratelimit`, `wreath_idempotency` and `wreath_session`
+        `wreath.infra.inference` all walk it. The middleware limb is what makes
+        `wreath_ratelimit`, `wreath_idempotency` and `wreath_session`
         came to be emitted by `wreath schema sql` and applied by nothing.
         """
         return self._registered_holders()
@@ -1320,9 +1308,7 @@ class Wreath:
         from .http_client import HTTPClient
 
         if not isinstance(client, HTTPClient):
-            raise TypeError(
-                "http_client must be an HTTPClient registered with app.http_client()"
-            )
+            raise TypeError("http_client must be an HTTPClient registered with app.http_client()")
         provider = OidcProvider(
             name, issuer=issuer, audience=audience, http_client=client, **options
         )
@@ -2942,11 +2928,6 @@ class Wreath:
         if not native_response and _ambiguous_request_path(scope, path):
             await self._handle_http(scope, receive, send, method, path, native_response)
             return
-        # `_select_dispatch` assigns classifying applications containing an auth
-        # route to `_handle_http_plain_auth` and trie applications to the general
-        # dispatcher, so every route reachable here is public.
-        # Asking a classifying table to package `(1, match)` only to unpack it
-        # again was a remnant of the former shared dispatcher, not useful work.
         matched = self._match(method, path)
         if matched is None:
             await self._handle_http(scope, receive, send, method, path, native_response)
@@ -3855,7 +3836,6 @@ class Wreath:
         # `flight` flag is a T_INT member that is truthy only when a live recorder
         # context is attached -- so native Off skips with no new crossing, and the
         # stamp rides the context that already crossed into C.
-        #
         # HTTP/2 and HTTP/3 dispatch through the dict-scope path (no
         # _RequestContext). Their native protocol seeds `_wreath_flight` into the
         # scope only when a recorder is attached; we overwrite it with the
@@ -4033,10 +4013,7 @@ class Wreath:
                                 value = handler(request)
                                 if value.__class__ is _COROUTINE:
                                     value = await value
-                                elif (
-                                    _monotonic_ns() - deadline_started
-                                    > deadline._nanoseconds
-                                ):
+                                elif _monotonic_ns() - deadline_started > deadline._nanoseconds:
                                     value = deadline._refusal()
                         except TimeoutError:
                             if not deadline_scope.expired():
@@ -4046,9 +4023,7 @@ class Wreath:
                     if has_permit and policy is not None:
                         policy._reference_action_exit()
                 if flight_phase is not None:
-                    flight_phase(
-                        _PH_HANDLER, 0, _COV_PYTHON, _monotonic_ns() - handler_start
-                    )
+                    flight_phase(_PH_HANDLER, 0, _COV_PYTHON, _monotonic_ns() - handler_start)
                     serialize_start = _monotonic_ns()
                 response = (
                     value
@@ -4056,9 +4031,7 @@ class Wreath:
                     else _coerce_response(value)
                 )
                 if flight_phase is not None:
-                    flight_phase(
-                        _PH_SERIALIZE, 0, _COV_PYTHON, _monotonic_ns() - serialize_start
-                    )
+                    flight_phase(_PH_SERIALIZE, 0, _COV_PYTHON, _monotonic_ns() - serialize_start)
         except Exception as error:  # noqa: BLE001 -- see _handle_exception
             response = await self._handle_exception(request, error)
 
@@ -4339,9 +4312,6 @@ class Wreath:
         # by switching protocols and session-backed auth sees the loaded session.
         identity: Identity | None = None
         requirement = requirement_for(handler)
-        # One question, asked in one place: `needs_backend` now covers the
-        # checks this used to name itself, and the second-factor window it did
-        # not name -- see `AuthRequirement.access_level`.
         needs_auth = requirement.needs_backend
         websocket_hooks = self._websocket_hooks
         request: Request | None = None
@@ -5002,7 +4972,6 @@ class Wreath:
                     # memory: `_eligible` scans every clause on every request,
                     # so an unbounded expansion silently turns route matching
                     # into a per-request linear scan of that same product.
-                    #
                     # Refused rather than expanded, because an app that would
                     # take minutes to start and then match routes slowly is
                     # worse than one that names the problem at declaration.
@@ -5284,13 +5253,10 @@ class Wreath:
     ) -> bool:
         """Backwards-compatible alias for `enable_api_docs()`.
 
-        Serves the self-contained docs page and OpenAPI document **outside
-        production**. The gate is the difference from what this used to do: the
-        alias registered both routes unconditionally, so the shorter, older,
-        more-copied spelling was the one that published the whole API surface
-        from a production deployment. Pass `environments=None` to register
-        everywhere, or use `enable_api_docs()` for auth as well as env
-        gating.
+        Serves the self-contained docs page and OpenAPI document only in the
+        named non-production environments by default. Pass `environments=None`
+        to register everywhere, or use `enable_api_docs()` for authorization as
+        well as environment gating.
 
         Returns whether the routes were registered.
         """

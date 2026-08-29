@@ -1,5 +1,3 @@
-"""Golden SQL, bind extraction, shape keys, and the bounded plan cache."""
-
 from __future__ import annotations
 
 import pytest
@@ -58,8 +56,7 @@ def test_where_fields_refuses_an_unknown_column() -> None:
 def test_select_all_columns_is_explicit_never_star(registry: Registry) -> None:
     compiled = compile_select(registry, User.select())
     assert compiled.sql == (
-        'SELECT "t0"."id", "t0"."email", "t0"."name", "t0"."created_at" '
-        f"FROM {USERS}"
+        f'SELECT "t0"."id", "t0"."email", "t0"."name", "t0"."created_at" FROM {USERS}'
     )
     assert "*" not in compiled.sql
 
@@ -68,9 +65,7 @@ def test_projection_keeps_declaration_order_and_binds_no_values(registry: Regist
     compiled = compile_select(
         registry, User.select(User.id, User.email).where(User.email == "a@b.c")
     )
-    assert compiled.sql == (
-        f'SELECT "t0"."id", "t0"."email" FROM {USERS} WHERE "t0"."email" = $1'
-    )
+    assert compiled.sql == (f'SELECT "t0"."id", "t0"."email" FROM {USERS} WHERE "t0"."email" = $1')
     assert compiled.bind_values == ("a@b.c",)
     assert compiled.bind_oids == (Text.oid,)
 
@@ -100,9 +95,7 @@ def test_the_primary_key_is_selected_even_when_omitted(registry: Registry) -> No
 
 def test_composite_primary_keys_are_added_in_declaration_order(registry: Registry) -> None:
     compiled = compile_select(registry, Membership.select(Membership.role))
-    assert compiled.sql.startswith(
-        'SELECT "t0"."role", "t0"."org_id", "t0"."user_id" FROM'
-    )
+    assert compiled.sql.startswith('SELECT "t0"."role", "t0"."org_id", "t0"."user_id" FROM')
 
 
 def test_predicates_and_ordering_and_bounds(registry: Registry) -> None:
@@ -303,9 +296,6 @@ def test_paginate_sets_both_bounds_without_losing_the_query_shape() -> None:
     assert page.orderings is base.orderings
 
 
-# -- caching -------------------------------------------------------------------
-
-
 def test_one_shape_compiles_once(registry: Registry) -> None:
     compile_select(registry, User.select(User.id).where(User.id == 1))
     assert registry.cached_plan_count == 1
@@ -344,13 +334,6 @@ def test_a_cache_hit_still_extracts_this_query_s_values(registry: Registry) -> N
 
 
 def test_cache_hit_executes_compiled_bind_program(monkeypatch, registry: Registry) -> None:
-    """A cache hit reads this query's values without re-walking its tree.
-
-    Patched on whichever traversal the *current* build actually uses:
-    `_collect_value_nodes` when `orm_collect_values` is bound, and `_walk_values`
-    otherwise. Naming only one of them turns this into an `AttributeError`
-    instead of a check.
-    """
     compile_select(registry, User.select(User.id).where(User.name == "A").limit(5))
 
     def fail_collect(*_args, **_kwargs):
@@ -394,12 +377,9 @@ def test_registries_do_not_share_cached_plans() -> None:
     assert second.cached_plan_count == 0
 
 
-# --- COUNT(*) compilation ---------------------------------------------------
-
-
 def test_count_selects_star_aggregate_not_columns(registry: Registry) -> None:
     sql, values, oids = compile_count(registry, User.select())
-    assert sql == f'SELECT COUNT(*) FROM {USERS}'
+    assert sql == f"SELECT COUNT(*) FROM {USERS}"
     assert values == () and oids == ()
 
 
@@ -440,8 +420,6 @@ def test_count_ignores_a_projected_count_query_never_returns_star(registry: Regi
     assert sql.count("JOIN") == 1
 
 
-# -- IN (SELECT ...) ----------------------------------------------------------
-#
 # `in_` used to take a list and nothing else, so filtering by "the rows some
 # other table names" meant two round trips and a list of ids on the wire. That
 # is correct at forty rows and wrong at a million, and the canonical example was
@@ -482,7 +460,6 @@ def test_not_in_with_a_subquery_renders_the_negated_form(registry: Registry) -> 
 
 
 def test_a_nested_subquery_gets_its_own_alias(registry: Registry) -> None:
-    """Aliases derive from the enclosing one, so depth cannot collide."""
     compiled = compile_select(
         registry,
         Post.select(Post.id).where(
@@ -499,11 +476,6 @@ def test_a_nested_subquery_gets_its_own_alias(registry: Registry) -> None:
 
 
 def test_count_renders_the_subquery_too(registry: Registry) -> None:
-    """A page's total must be filtered identically to the page itself.
-
-    Filtering after the fetch is what the subquery exists to avoid; a `COUNT(*)`
-    that skipped the subquery would make `total` a number no page matches.
-    """
     query = Post.select(Post.id).where(
         Post.author_id.in_(User.select(User.id).where(User.email == "a@b.c"))
     )
@@ -517,13 +489,10 @@ def test_count_renders_the_subquery_too(registry: Registry) -> None:
 
 
 def test_the_subquerys_values_stay_out_of_the_shape_key(registry: Registry) -> None:
-    """The plan cache keys on shape. Two values, one plan; two shapes, two plans."""
     def key(email_column: object, operator: str = "in") -> bytes:
         subquery = User.select(User.id).where(email_column)
         predicate = (
-            Post.author_id.in_(subquery)
-            if operator == "in"
-            else Post.author_id.not_in(subquery)
+            Post.author_id.in_(subquery) if operator == "in" else Post.author_id.not_in(subquery)
         )
         return shape_of(registry, Post.select(Post.id).where(predicate))
 
@@ -533,7 +502,6 @@ def test_the_subquerys_values_stay_out_of_the_shape_key(registry: Registry) -> N
 
 
 def test_a_subquery_over_a_different_model_keys_differently(registry: Registry) -> None:
-    """The model is in the key, so two same-shaped subqueries cannot collide."""
     from .conftest import Membership
 
     first = shape_of(
@@ -571,12 +539,6 @@ def test_a_subquery_refuses_a_relationship_traversal() -> None:
 
 
 def test_not_in_refuses_a_nullable_subquery_column() -> None:
-    """SQL's three-valued logic, caught at the call site instead of in production.
-
-    `NOT IN (SELECT ...)` returns *no rows at all* once the subquery yields one
-    NULL. It passes every test written against data without NULLs, so the only
-    place to catch it is before the query exists.
-    """
     with pytest.raises(DeclarationError, match="matches nothing at all"):
         Post.author_id.not_in(User.select(User.created_at))
     # `IN` has no such hazard: a NULL simply never matches.
@@ -584,10 +546,7 @@ def test_not_in_refuses_a_nullable_subquery_column() -> None:
 
 
 def test_the_list_form_is_unchanged(registry: Registry) -> None:
-    """The refusals above are new; none of them may reach the existing form."""
-    compiled = compile_select(
-        registry, Post.select(Post.id).where(Post.author_id.in_([1, 2, 3]))
-    )
+    compiled = compile_select(registry, Post.select(Post.id).where(Post.author_id.in_([1, 2, 3])))
     assert compiled.sql.endswith('WHERE "t0"."author_id" IN ($1, $2, $3)')
     assert compiled.bind_values == (1, 2, 3)
     with pytest.raises(ValueError, match="at least one value"):
@@ -597,12 +556,6 @@ def test_the_list_form_is_unchanged(registry: Registry) -> None:
 
 
 def test_a_predicate_naming_another_models_column_is_still_caught() -> None:
-    """`check_predicate_columns` must see through the subquery, not around it.
-
-    The outer operand belongs to the outer model and the subquery's predicates
-    to its own; checking either against the wrong one is a bug in both
-    directions, so both are asserted.
-    """
     from wreath.orm.compiler import check_predicate_columns
 
     good = Post.author_id.in_(User.select(User.id).where(User.email == "a"))

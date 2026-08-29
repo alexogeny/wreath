@@ -1,4 +1,3 @@
-"""Graceful shutdown via GOAWAY (RFC 9113 s6.8)."""
 from __future__ import annotations
 
 import asyncio
@@ -38,8 +37,9 @@ async def test_new_stream_after_goaway_is_refused(make_driver):
 
     d = make_driver(app)
     await d.preface()
-    await d.feed_and_settle(support.build_headers_frame(
-        1, support.request_headers(), end_stream=False))
+    await d.feed_and_settle(
+        support.build_headers_frame(1, support.request_headers(), end_stream=False)
+    )
     d.protocol.stop_accepting()
     await d.settle()
     d.frames()

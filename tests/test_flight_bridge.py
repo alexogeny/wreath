@@ -1,11 +1,3 @@
-"""Stage 4c -- the lazy OpenTelemetry bridge in ``wreath.telemetry``.
-
-The bridge reads only the incoming ``traceparent`` and constructs no OTel object
-unless ``activate_otel`` is called AND the OTel API is installed. These check the
-native view, the traceparent round-trip, and the no-op fallback when OTel is
-absent.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -47,12 +39,13 @@ def test_server_span_prefers_the_owned_generated_span() -> None:
     # trace 4bf9...4736 carried on the wire; the owned server span is a different
     # (generated) span within the same trace.
     incoming = current_span(FakeRequest({"traceparent": _VALID}))
-    context = _FakeContext(incoming.trace_id >> 64, incoming.trace_id & ((1 << 64) - 1),
-                           0x876BED62CCBA134B)
+    context = _FakeContext(
+        incoming.trace_id >> 64, incoming.trace_id & ((1 << 64) - 1), 0x876BED62CCBA134B
+    )
     owned = server_span(FakeRequest({"traceparent": _VALID}, context=context))
-    assert owned.trace_id == incoming.trace_id      # same trace
-    assert owned.span_id == 0x876BED62CCBA134B      # the owned server span
-    assert owned.span_id != incoming.span_id        # not the incoming parent
+    assert owned.trace_id == incoming.trace_id  # same trace
+    assert owned.span_id == 0x876BED62CCBA134B  # the owned server span
+    assert owned.span_id != incoming.span_id  # not the incoming parent
 
 
 def test_server_span_falls_back_to_incoming_without_a_context() -> None:

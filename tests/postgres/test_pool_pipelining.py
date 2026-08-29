@@ -1,26 +1,3 @@
-"""Sharing a connection between concurrent statements, and what bounds it.
-
-A pool that leases exclusively gives a PostgreSQL backend one query per wakeup.
-The driver has always been able to hold several operations in flight on one
-connection -- that is what `_waiting` and `_emitted` are for -- but the pool
-never let two callers reach the same connection at once, so the capability was
-unreachable from `Statement`.
-
-`PoolConfig.pipeline_depth` is what reaches it: up to that many concurrent
-operations share a connection, and the driver batches whatever is queued when
-it flushes. `pipeline_depth=1` is the old exclusive behaviour exactly.
-
-The bound matters in both directions. Too shallow and nothing batches; too deep
-and one connection accumulates a queue that a `max_emitted_operations` flush
-cannot drain in one flight, which is latency with no throughput to show for it.
-
-**Explicit acquisition is never shared.** `Database.acquire()` hands out a
-connection the caller may run a transaction on, and the driver refuses
-concurrent operations once a transaction is open -- so a shared connection
-would turn one caller's `BEGIN` into another caller's `InterfaceError`. Only
-`Statement`'s single autocommit statements share.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -74,10 +51,9 @@ async def _database(depth: int, registry: dict[str, Any]) -> Database:
         return SlowConnection(registry)
 
     database = Database(
-        "t", "postgresql://u:p@localhost/db",
-        pools={"read": PoolConfig(
-            min_size=1, max_size=1, max_queue=256, pipeline_depth=depth
-        )},
+        "t",
+        "postgresql://u:p@localhost/db",
+        pools={"read": PoolConfig(min_size=1, max_size=1, max_queue=256, pipeline_depth=depth)},
         connector=connect,
     )
     await database.start()
@@ -86,11 +62,6 @@ async def _database(depth: int, registry: dict[str, Any]) -> Database:
 
 @pytest.mark.asyncio
 async def test_serial_is_still_available_and_still_serial() -> None:
-    """`pipeline_depth=1` is the old behaviour, unchanged.
-
-    It is the option, not the default, and it has to keep working exactly:
-    one caller on a connection at a time, whatever the concurrency.
-    """
     registry = {"peak": 0}
     database = await _database(1, registry)
     statement = database.statement("q", "SELECT 1")
@@ -121,15 +92,13 @@ async def test_batching_lets_concurrent_statements_share_a_connection() -> None:
 
 @pytest.mark.asyncio
 async def test_the_depth_is_a_bound_and_is_respected() -> None:
-    """Sharing is capped, so a connection cannot accumulate unbounded work."""
     registry = {"peak": 0}
     database = await _database(3, registry)
     statement = database.statement("q", "SELECT 1")
     try:
         await asyncio.gather(*(statement.fetch() for _ in range(24)))
         assert registry["peak"] <= 3, (
-            f"{registry['peak']} operations shared one connection with "
-            f"pipeline_depth=3"
+            f"{registry['peak']} operations shared one connection with pipeline_depth=3"
         )
     finally:
         await database.stop()
@@ -137,12 +106,6 @@ async def test_the_depth_is_a_bound_and_is_respected() -> None:
 
 @pytest.mark.asyncio
 async def test_explicit_acquisition_is_never_shared() -> None:
-    """`Database.acquire()` stays exclusive whatever the depth is set to.
-
-    A caller holding one may open a transaction, and the driver refuses
-    concurrent operations once it has -- so sharing here would turn one
-    caller's `BEGIN` into another caller's failure.
-    """
     registry = {"peak": 0}
     database = await _database(8, registry)
     try:
@@ -162,7 +125,6 @@ async def test_explicit_acquisition_is_never_shared() -> None:
 
 @pytest.mark.asyncio
 async def test_every_caller_gets_its_own_result() -> None:
-    """Sharing must not cross results between callers."""
     registry = {"peak": 0}
     database = await _database(8, registry)
     statements = [database.statement(f"q{i}", f"SELECT {i}") for i in range(12)]
@@ -173,28 +135,18 @@ async def test_every_caller_gets_its_own_result() -> None:
         await database.stop()
 
 
-# --------------------------------------------------------------------------
 # The uncontended lease takes no await points.
-#
 # Borrowing and returning a connection with no query at all measured 18,732
 # instructions a lease -- roughly a tenth of a Fortunes request -- for a deque
 # pop, a dict store and their inverses. Seven coroutines were created and
 # stepped to do it, and `wreath-decomp --suite calibrate` prices a
 # non-suspending await at 95.7ns against 49.8ns for a guarded synchronous call.
-#
 # So the uncontended case is done in the calling frame. These tests pin what
 # that fast path must not change.
-# --------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_a_statement_is_refused_once_the_pool_is_stopping() -> None:
-    """The fast path must check `_stopping`, not just look for an idle connection.
-
-    A stopped pool still has its connections in `_available` for the length of
-    the drain, so a lease that only tests availability would hand one out after
-    shutdown began and the drain would then wait for a lease nobody knew about.
-    """
     from wreath.postgres import InterfaceError
 
     registry = {"peak": 0}
@@ -217,7 +169,6 @@ async def test_a_statement_is_refused_once_the_pool_is_stopping() -> None:
 
 @pytest.mark.asyncio
 async def test_releasing_a_connection_twice_is_still_refused() -> None:
-    """A double release would put one connection in the idle set twice."""
     from wreath.postgres import InterfaceError
 
     registry = {"peak": 0}
@@ -233,13 +184,6 @@ async def test_releasing_a_connection_twice_is_still_refused() -> None:
 
 @pytest.mark.asyncio
 async def test_an_armed_request_still_records_its_pool_wait() -> None:
-    """Telemetry attribution survives the fast path.
-
-    `Database.acquire_shared` is the one seam the Flight Recorder attributes
-    pool waiting from. A fast path that skipped it would leave an armed
-    request's `db.pool_wait` phase empty, which reads as a pool that never
-    waited rather than as a measurement that was not taken.
-    """
     from wreath._flight_markers import PH_DB_POOL_WAIT
     from wreath.postgres import _phase_marker
 
@@ -275,7 +219,8 @@ async def test_startup_compiles_a_statement_onto_its_workload_pool() -> None:
         return SlowConnection(registry)
 
     database = Database(
-        "t", "postgresql://u:p@localhost/db",
+        "t",
+        "postgresql://u:p@localhost/db",
         pools={"read": PoolConfig(min_size=1, max_size=1, pipeline_depth=4)},
         connector=connect,
     )
@@ -291,7 +236,6 @@ async def test_startup_compiles_a_statement_onto_its_workload_pool() -> None:
 
 
 def test_statement_query_methods_return_the_backend_work_awaitable_directly() -> None:
-    """Native statements remove `_call`; the Python facade retains its reference."""
     database = Database("t", "postgresql://u:p@localhost/db")
     statement = database.statement("q", "SELECT 1")
     for name in ("execute", "fetch", "fetch_batch", "fetchrow", "fetchval"):
@@ -308,24 +252,14 @@ def test_statement_query_methods_return_the_backend_work_awaitable_directly() ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    _implementation != "native", reason="native Statement continuation path"
-)
+@pytest.mark.skipif(_implementation != "native", reason="native Statement continuation path")
 async def test_native_statement_is_its_own_operation_completion_cell() -> None:
-    """The exact driver path must not quietly allocate an asyncio Future.
-
-    Drive the iterator the same way Task does: its first suspension yields the
-    statement object itself, PostgreSQL completes that object, and the next
-    step returns the query result.  A Future-backed implementation yields a
-    distinct object and fails this structural check even when its bytes agree.
-    """
     server = FakePostgres(fragment=False)
     dsn = await server.start_tcp()
     database = Database(
-        "t", dsn,
-        pools={"read": PoolConfig(
-            min_size=1, max_size=1, pipeline_depth=4
-        )},
+        "t",
+        dsn,
+        pools={"read": PoolConfig(min_size=1, max_size=1, pipeline_depth=4)},
         connector=native_postgres.connect,
     )
     await database.start()
@@ -354,17 +288,14 @@ async def test_native_statement_is_its_own_operation_completion_cell() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    _implementation != "native", reason="native Statement continuation path"
-)
+@pytest.mark.skipif(_implementation != "native", reason="native Statement continuation path")
 async def test_native_statement_completion_propagates_task_cancellation() -> None:
     server = FakePostgres(fragment=False)
     dsn = await server.start_tcp()
     database = Database(
-        "t", dsn,
-        pools={"read": PoolConfig(
-            min_size=1, max_size=1, pipeline_depth=4
-        )},
+        "t",
+        dsn,
+        pools={"read": PoolConfig(min_size=1, max_size=1, pipeline_depth=4)},
         connector=native_postgres.connect,
     )
     await database.start()
@@ -378,9 +309,7 @@ async def test_native_statement_completion_propagates_task_cancellation() -> Non
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=1.0)
         server.query_gate.set()
-        assert (await asyncio.wait_for(statement.fetch(), timeout=1.0))[0][
-            "value"
-        ] == 1
+        assert (await asyncio.wait_for(statement.fetch(), timeout=1.0))[0]["value"] == 1
     finally:
         server.query_gate.set()
         await database.stop()
@@ -389,12 +318,6 @@ async def test_native_statement_completion_propagates_task_cancellation() -> Non
 
 @pytest.mark.asyncio
 async def test_a_shared_lease_still_idles_the_connection_for_an_exclusive_caller() -> None:
-    """The last borrower out must return the connection to the idle set.
-
-    A fast release that decremented the share count without idling the
-    connection would leave a pool that looks fully borrowed forever, and the
-    next explicit `acquire()` would queue against nothing.
-    """
     registry = {"peak": 0}
     database = await _database(4, registry)
     statement = database.statement("q", "SELECT 1")
@@ -408,13 +331,6 @@ async def test_a_shared_lease_still_idles_the_connection_for_an_exclusive_caller
 
 @pytest.mark.asyncio
 async def test_the_fast_lease_declines_rather_than_deciding_what_it_cannot() -> None:
-    """Each case the synchronous path must hand back, stated as its return value.
-
-    A fast path that quietly did the slow path's job would still pass every
-    behavioural test in this file -- it would just never be fast. These pin
-    which branch runs, which is the only way a mutation of the guard is
-    distinguishable from the guard being there.
-    """
     registry = {"peak": 0}
     shared = await _database(4, registry)
     serial = await _database(1, registry)
@@ -476,12 +392,6 @@ async def test_native_pool_core_mutates_the_python_owned_shared_state() -> None:
 
 @pytest.mark.asyncio
 async def test_a_closed_connection_is_not_idled_by_the_fast_release() -> None:
-    """A connection that died in use must leave the pool, not go back into it.
-
-    The synchronous release ends in `_available.append`, so a missing check here
-    returns a dead connection to the idle set and the next caller gets it. The
-    slow path drops it and frees the capacity instead.
-    """
     registry = {"peak": 0}
     database = await _database(4, registry)
     try:
@@ -499,7 +409,6 @@ async def test_a_closed_connection_is_not_idled_by_the_fast_release() -> None:
 
 @pytest.mark.asyncio
 async def test_a_shutting_down_pool_does_not_idle_a_returned_shared_lease() -> None:
-    """Mid-drain, a returned connection is dropped rather than made available."""
     registry = {"peak": 0}
     database = await _database(4, registry)
     try:

@@ -81,9 +81,7 @@ def run(warmup: int, trials: int) -> dict[str, Any]:
         )
         for header_count in (64, 128, 256, 512):
             existing = [(f"x-existing-{i}".encode(), b"value") for i in range(header_count)]
-            additions = tuple(
-                (f"x-added-{i}".encode(), b"first") for i in range(header_count)
-            )
+            additions = tuple((f"x-added-{i}".encode(), b"first") for i in range(header_count))
             additions += tuple((key.upper(), b"duplicate") for key, _ in additions)
             record = _measure(
                 lambda b=backend, h=existing, a=additions: b.append_missing_headers(h.copy(), a),

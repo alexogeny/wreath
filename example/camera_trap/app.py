@@ -73,14 +73,10 @@ def build(*, validate_schema: str = "error") -> Wreath:
     # `wreath schema sql` and created by nothing.
     application.series(database="main")
 
-    # --- who you are ---------------------------------------------------------
-    #
     # Session state is a first-class activation policy, fixed before identity.
     application.configure_http_policy(
         HttpPolicy(
-            session=SessionPolicy(
-                secret=SETTINGS.session_secret(), secure=SETTINGS.session_secure
-            )
+            session=SessionPolicy(secret=SETTINGS.session_secret(), secure=SETTINGS.session_secure)
         )
     )
     application.configure_auth(
@@ -93,8 +89,6 @@ def build(*, validate_schema: str = "error") -> Wreath:
     for router in ROUTERS:
         application.include_router(router)
 
-    # --- the console's own question ------------------------------------------
-    #
     # "What may I do?", answered from the same `@authorize` declarations that
     # enforce it. The console greys out the buttons a volunteer cannot press
     # without a second list of rules to keep in step with the first.
@@ -110,12 +104,9 @@ def build(*, validate_schema: str = "error") -> Wreath:
 
     admin.mount(application, open_session)
 
-    # --- bytes, and the work that follows them -------------------------------
-    #
     # The store is registered on the application so its root is opened at
     # registration and closed on shutdown -- including when startup fails part
     # way, which is the case a `finally` in this function would miss.
-    #
     # `url_secret` is bytes. `app.objects` takes `**options: Any`, so a `str`
     # here is not refused at registration; it flows through to the first
     # `store.url(...)` call and raises `TypeError` from inside `hmac.new`,
@@ -134,9 +125,7 @@ def build(*, validate_schema: str = "error") -> Wreath:
     # for a single worker. Handing it the bus is the one change needed to make
     # an ingest launched on one worker watchable from another.
     progress = ProgressRegistry()
-    runner = application.jobs(
-        tasks.QUEUE, database="main", progress=progress, schema=SCHEMA
-    )
+    runner = application.jobs(tasks.QUEUE, database="main", progress=progress, schema=SCHEMA)
     tasks.register(runner, registry, store)
     uploads.mount(application, store, runner)
     return application

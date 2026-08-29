@@ -1,15 +1,3 @@
-"""Red-team the owned HTTP/2 framing/HPACK/protocol layer with replay + faults.
-
-These drive the real native ``Http2Protocol`` through ``replay_transport_h2`` with
-adversarial frame sequences and byte-level faults, and assert the owned response
-is safe and deterministic: a connection-level violation yields a GOAWAY and close,
-a stream-level violation an RST_STREAM, a truncated stream no fabricated success —
-and a re-run gives the identical owned outcome every time.
-
-The reference frame/HPACK codec in ``support`` builds the adversarial requests;
-the production decoder in ``wreath._h2_codec`` reads the server's replies.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -53,22 +41,21 @@ async def _replay(data: bytes, **kw):
     return await replay_transport_h2(_app(), record_transport_segments([data]), **kw)
 
 
-# --- connection-level violations -> GOAWAY + close ---------------------------
-
-
 async def test_data_on_stream_zero_is_a_connection_error() -> None:
     data = _conn(support.encode_frame(support.DATA, 0, 0, b"x"))
     a = await _replay(data)
     b = await _replay(data)
-    assert a.goaway is not None       # owned GOAWAY for the protocol error
+    assert a.goaway is not None  # owned GOAWAY for the protocol error
     assert a.terminal == "closed"
-    assert not a.streams              # no request was ever completed
-    assert a.matches(b)               # deterministic
+    assert not a.streams  # no request was ever completed
+    assert a.matches(b)  # deterministic
 
 
 async def test_malformed_hpack_is_a_compression_error() -> None:
     bad = support.encode_frame(
-        support.HEADERS, support.FLAG_END_HEADERS | support.FLAG_END_STREAM, 1,
+        support.HEADERS,
+        support.FLAG_END_HEADERS | support.FLAG_END_STREAM,
+        1,
         b"\xff\xff\xff\xff\xff",  # not a decodable HPACK block
     )
     a = await _replay(_conn(bad))
@@ -97,9 +84,6 @@ async def test_oversized_header_block_never_crashes_or_answers_200() -> None:
     assert a.matches(b)
 
 
-# --- stream-level violations -> RST_STREAM -----------------------------------
-
-
 async def test_missing_path_pseudo_header_is_a_stream_error() -> None:
     headers = [(b":method", b"GET"), (b":scheme", b"https"), (b":authority", b"x")]
     bad = support.build_headers_frame(1, headers, end_stream=True)
@@ -117,9 +101,6 @@ async def test_client_reset_after_headers_cancels_without_a_response() -> None:
     b = await _replay(data)
     assert not any(s.status == 200 and s.body == b"pong" for s in a.streams.values())
     assert a.matches(b)
-
-
-# --- byte-level faults on the H2 stream --------------------------------------
 
 
 async def test_truncated_h2_stream_never_fabricates_a_response() -> None:
@@ -145,15 +126,13 @@ async def test_reset_at_every_segment_is_deterministic_and_bounded() -> None:
             assert a.matches(b)
 
 
-# --- interleaved / multiplexed adversity -------------------------------------
-
-
 async def test_one_bad_stream_does_not_sink_a_good_one() -> None:
     # Stream 1 is a valid GET; stream 3 is missing :path. The good stream should
     # still answer while the bad one is refused — and it is deterministic.
     good = _get(1)
     bad = support.build_headers_frame(
-        3, [(b":method", b"GET"), (b":scheme", b"https"), (b":authority", b"x")],
+        3,
+        [(b":method", b"GET"), (b":scheme", b"https"), (b":authority", b"x")],
         end_stream=True,
     )
     a = await _replay(_conn(good, bad))
@@ -162,9 +141,6 @@ async def test_one_bad_stream_does_not_sink_a_good_one() -> None:
     # Either the good stream answered, or a connection error subsumed both; both
     # are owned, deterministic outcomes — never a hang or a crash.
     assert a.goaway is not None or (1 in a.streams and a.streams[1].status == 200)
-
-
-# --- self-review gaps: preface, frame layer, stream-id rules -----------------
 
 
 async def test_a_bad_connection_preface_is_refused() -> None:

@@ -4,11 +4,8 @@
 takes an observer's email, looks the row up, and writes who they are into a
 signed session cookie. There is no password, no OIDC dance, and no second
 factor, because every one of those would double the setup a reader must do
-before they can see an authorization rule work — and the cookbook already owns
-that ground: [OIDC / OAuth2](../../docs/cookbook/recipes/oauth2-login.md) and
-[API keys](../../docs/cookbook/recipes/api-key-auth.md) are real recipes against
-the same seam this router uses. Swap this file for one of those and nothing
-else in the example changes, which is the point of the seam.
+before they can see an authorization rule work. Swap this file for another
+authentication backend and nothing else in the example changes.
 
 **What the session carries is the interesting part.** The principal written here
 is `{"sub", "type", "roles"}`, and `SessionIdentityBackend` reads exactly that

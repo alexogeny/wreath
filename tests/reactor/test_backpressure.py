@@ -1,8 +1,3 @@
-"""Transport backpressure: pause/resume reading and write high/low water.
-
-The server relies on these to bound memory under a slow peer (the flow-control
-substrate beneath H1/H2/H3). Semantics must match asyncio's transports.
-"""
 from __future__ import annotations
 
 import asyncio

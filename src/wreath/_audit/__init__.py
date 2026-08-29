@@ -8,6 +8,7 @@ performance checks over the API-docs surface and static HTML trees, `--fix` reme
 of the safe subset, a runtime HTTP mode (`run_runtime_audit`), and an opt-in dev
 `AuditMiddleware`.
 """
+
 from .fix import apply_fixes
 from .middleware import AuditMiddleware
 from .model import Finding, Report, Severity
@@ -15,6 +16,13 @@ from .runtime import audit_response, run_runtime_audit
 from .sources import discover_static_dirs, run_audit
 
 __all__ = [
-    "Finding", "Report", "Severity", "run_audit", "discover_static_dirs",
-    "apply_fixes", "AuditMiddleware", "run_runtime_audit", "audit_response",
+    "Finding",
+    "Report",
+    "Severity",
+    "run_audit",
+    "discover_static_dirs",
+    "apply_fixes",
+    "AuditMiddleware",
+    "run_runtime_audit",
+    "audit_response",
 ]

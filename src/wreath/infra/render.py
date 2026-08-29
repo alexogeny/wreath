@@ -104,9 +104,7 @@ def _egress(plan: InfrastructurePlan, lines: list[str]) -> None:
     _rule(lines, f"Egress ({len(plan.egress)})")
     if not plan.egress:
         lines.append("  none: this application pins no outbound HTTP client.")
-        lines.append(
-            "  A ServiceClient built over a client the application did not register is"
-        )
+        lines.append("  A ServiceClient built over a client the application did not register is")
         lines.append("  invisible here; see the notes.")
         return
     for rule in plan.egress:
@@ -142,7 +140,8 @@ def _columns(lines: list[str], rows: list[tuple[str, ...]], *, indent: str = "  
     """
     widths = [
         # complexity: allow SL-COMP-LOOP -- widths visit every input table cell
-        max(len(row[index]) for row in rows) for index in range(len(rows[0]) - 1)
+        max(len(row[index]) for row in rows)
+        for index in range(len(rows[0]) - 1)
     ]
     for row in rows:
         cells = [cell.ljust(width) for cell, width in zip(row[:-1], widths, strict=True)]
@@ -157,9 +156,7 @@ def _subsystems(plan: InfrastructurePlan, lines: list[str]) -> None:
     lines.append("")
     rows: list[tuple[str, ...]] = [("", "subsystem", "lives in", "instead of")]
     for row in plan.subsystems:
-        rows.append(
-            (row.presence.value, row.name, row.backing, ", ".join(row.instead_of))
-        )
+        rows.append((row.presence.value, row.name, row.backing, ", ".join(row.instead_of)))
     _columns(lines, rows)
     lines.append("")
     for row in plan.subsystems:
@@ -175,9 +172,7 @@ def _settings(plan: InfrastructurePlan, lines: list[str]) -> None:
     for contract in plan.settings:
         prefix = contract.prefix or "(no prefix)"
         lines.append(f"  {contract.model}, prefix {prefix}")
-        lines.append(
-            "  keys as wreath.config.Environment.bind resolves them, in declaration order"
-        )
+        lines.append("  keys as wreath.config.Environment.bind resolves them, in declaration order")
         rows: list[tuple[str, ...]] = [("key", "field", "type", "supplied by")]
         rows.extend(
             (key.key, key.field, key.annotation, key.supplied_by or _NOTHING)
@@ -196,8 +191,9 @@ def _gaps(plan: InfrastructurePlan, lines: list[str]) -> None:
     for gap in plan.gaps:
         label = "missing" if gap.kind is GapKind.SETTINGS_KEY else gap.kind.value
         lines.append(f"  [{label}] {gap.subject}")
-        lines.extend(textwrap.wrap(gap.detail, width=76, initial_indent="      ",
-                                   subsequent_indent="      "))
+        lines.extend(
+            textwrap.wrap(gap.detail, width=76, initial_indent="      ", subsequent_indent="      ")
+        )
 
 
 def _notes(plan: InfrastructurePlan, lines: list[str]) -> None:

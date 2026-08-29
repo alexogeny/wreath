@@ -6,7 +6,6 @@ in them. Ecologists ask what moved, where, and when.
 
 This package is wreath's canonical example: one application that uses the
 framework's parts together rather than a gallery of snippets that each use one.
-Start at ``docs/example/index.md``.
 """
 
 from __future__ import annotations

@@ -76,7 +76,7 @@ _SUPPRESSED = object()
 #: Methods this revision defines that Wreath has not implemented yet, and the
 #: stage each is planned for. Answering `method not found` is correct either
 #: way; naming the stage is the difference between a client author guessing and
-#: knowing. See `docs/plans/native-mcp-server.md`.
+#: knowing.
 _NOT_YET: dict[str, str] = {
     "logging/setLevel": "logging",
 }
@@ -380,9 +380,7 @@ class MCP:
             publish=self._publish,
         )
         self._metadata_path = metadata_path_for(path)
-        self._metadata_url = (
-            "" if auth is None else _origin(auth.resource) + self._metadata_path
-        )
+        self._metadata_url = "" if auth is None else _origin(auth.resource) + self._metadata_path
         #: Calls attempted, including the ones that failed.
         self.tool_calls = 0
         #: Calls whose tool raised. A rejected call is *not* counted here --
@@ -570,9 +568,7 @@ class MCP:
     def mount(self, app: Any) -> None:
         """Register this server's routes on `app`, which may be a `Router`."""
         self._app = app
-        app.post(self._path, tags=("mcp",), summary=f"MCP endpoint for {self._name}")(
-            self._post
-        )
+        app.post(self._path, tags=("mcp",), summary=f"MCP endpoint for {self._name}")(self._post)
         app.get(self._path, tags=("mcp",), summary=f"MCP endpoint for {self._name}")(self._get)
         app.delete(self._path, tags=("mcp",), summary="End an MCP session")(self._delete)
         if self._auth is not None:
@@ -799,8 +795,6 @@ class MCP:
             return register(handler)
         return register
 
-    # -- server-to-client notifications ----------------------------------
-
     def notify_resource_updated(self, uri: str) -> int:
         """Tell every subscriber that `uri` changed. Returns how many were told.
 
@@ -833,8 +827,6 @@ class MCP:
             return True
         self.notifications_dropped += 1
         return False
-
-    # -- HTTP surface ----------------------------------------------------
 
     async def _metadata(self, request: Request) -> Any:
         """RFC 9728 protected-resource metadata. Served without a token."""
@@ -995,8 +987,7 @@ class MCP:
             return None, self._transport_error(
                 400,
                 INVALID_REQUEST,
-                "an Mcp-Session-Id header is required on every message after "
-                "initialize",
+                "an Mcp-Session-Id header is required on every message after initialize",
                 identifier=identifier,
             )
         session = self._sessions.get(session_id)
@@ -1036,8 +1027,6 @@ class MCP:
             )
         self._sessions.discard(session_id)
         return Response(b"", status=204)
-
-    # -- authentication --------------------------------------------------
 
     async def _authenticate(self, request: Request) -> Any:
         """Verify the caller and publish the identity, or None when unprotected.
@@ -1099,8 +1088,6 @@ class MCP:
             headers=headers,
         )
 
-    # -- dispatch --------------------------------------------------------
-
     async def _initialize(
         self, request: Request, message: Message, identity: Any, *, stream: bool
     ) -> Any:
@@ -1120,9 +1107,7 @@ class MCP:
         # the decision with the client: it sees what came back and disconnects
         # if it cannot speak it, which is a clearer failure than a server
         # guessing at a revision it has never seen.
-        negotiated = (
-            requested if requested in SUPPORTED_PROTOCOL_VERSIONS else PROTOCOL_VERSION
-        )
+        negotiated = requested if requested in SUPPORTED_PROTOCOL_VERSIONS else PROTOCOL_VERSION
         client_info = params.get("clientInfo")
         # What the client says it can do is the only thing that decides whether
         # a server-to-client request is even attempted. Kept on the session
@@ -1140,9 +1125,7 @@ class MCP:
                 principal=None if identity is None else identity.id,
             )
         except RuntimeError as error:
-            return self._transport_error(
-                503, INTERNAL_ERROR, str(error), identifier=message.id
-            )
+            return self._transport_error(503, INTERNAL_ERROR, str(error), identifier=message.id)
         # Advertised from what is declared, not from what the build could do. A
         # server with no resources that claims the capability invites a client
         # to open a stream and subscribe to nothing.
@@ -1163,9 +1146,7 @@ class MCP:
         }
         if self._instructions is not None:
             result["instructions"] = self._instructions
-        return self._reply(
-            encode_success(message.id, result), stream=stream, session_id=session.id
-        )
+        return self._reply(encode_success(message.id, result), stream=stream, session_id=session.id)
 
     def _handle_notification(self, session: Session, message: Message) -> None:
         if message.method == "notifications/cancelled":
@@ -1219,8 +1200,7 @@ class MCP:
         if stage is not None:
             raise JsonRpcError(
                 METHOD_NOT_FOUND,
-                f"{method} is reserved: Wreath's MCP surface does not implement "
-                f"{stage} yet",
+                f"{method} is reserved: Wreath's MCP surface does not implement {stage} yet",
             )
         if method in _CLIENT_ONLY:
             raise JsonRpcError(
@@ -1280,8 +1260,7 @@ class MCP:
             marker(_record.OUTCOME_THROTTLED)
             raise JsonRpcError(
                 RATE_LIMITED,
-                f"tool {name!r} is rate limited for this caller; retry in "
-                f"{retry_after:.1f}s",
+                f"tool {name!r} is rate limited for this caller; retry in {retry_after:.1f}s",
                 {"retryAfter": retry_after},
             )
 
@@ -1342,9 +1321,7 @@ class MCP:
             # that never appears, which is the right behaviour for an endpoint
             # anyone can watch and the wrong one for a call we know just began.
             self._progress.report(task_id, 0.0, "")
-            watcher = asyncio.ensure_future(
-                self._relay_progress(session, task_id, token)
-            )
+            watcher = asyncio.ensure_future(self._relay_progress(session, task_id, token))
 
         # The call runs in its own task so that `notifications/cancelled`, which
         # necessarily arrives on a *different* POST, has something to cancel.
@@ -1379,9 +1356,7 @@ class MCP:
         stream of its own. This relays what it holds onto the MCP session, and
         owns nothing.
         """
-        async for snapshot in self._progress.stream(
-            task_id, interval=self._progress_interval
-        ):
+        async for snapshot in self._progress.stream(task_id, interval=self._progress_interval):
             params: dict[str, Any] = {
                 "progressToken": token,
                 "progress": snapshot.percent,
@@ -1391,11 +1366,7 @@ class MCP:
                 params["message"] = snapshot.message
             self._notify(session, "notifications/progress", params)
 
-    # -- resources -------------------------------------------------------
-
-    async def _resources_read(
-        self, request: Request, session: Session, message: Message
-    ) -> Any:
+    async def _resources_read(self, request: Request, session: Session, message: Message) -> Any:
         resource = self._resource_named(message.params)
         request.state.mcp = ToolContext(
             session_id=session.id,
@@ -1459,11 +1430,7 @@ class MCP:
         self._sessions.subscribe(session, resource.uri)
         return {}
 
-    # -- prompts ---------------------------------------------------------
-
-    async def _prompts_get(
-        self, request: Request, session: Session, message: Message
-    ) -> Any:
+    async def _prompts_get(self, request: Request, session: Session, message: Message) -> Any:
         params = message.params
         name = params.get("name")
         if not isinstance(name, str):
@@ -1511,11 +1478,7 @@ class MCP:
                 INTERNAL_ERROR, f"prompt {name!r} raised {type(error).__name__}"
             ) from error
 
-    # -- server-to-client requests ---------------------------------------
-
-    async def _client_request(
-        self, session: Session, method: str, params: dict[str, Any]
-    ) -> Any:
+    async def _client_request(self, session: Session, method: str, params: dict[str, Any]) -> Any:
         """Ask the client one question, or say why it could not be asked.
 
         Raises:
@@ -1586,7 +1549,7 @@ class MCP:
             raise ClientRequestError(
                 f"{context.tool!r} did not declare `sampling=`, so it may not "
                 "ask the client's model to generate. Declare the Cedar action a "
-                "caller must be allowed for it -- `@mcp.tool(sampling=\"...\")` "
+                'caller must be allowed for it -- `@mcp.tool(sampling="...")` '
                 "-- or `sampling=True` for no policy at all. Sampling is off by "
                 "default because a tool that can put words in the caller's model "
                 "is a different thing from a tool that reads a row."
@@ -1789,7 +1752,7 @@ class MCP:
             raise RuntimeError(
                 "this MCP server has no `file_root=`, so it reads no files. "
                 "Declare the directory reads are confined to: "
-                "`MCP(app, ..., file_root=\"/srv/data\")`. There is deliberately "
+                '`MCP(app, ..., file_root="/srv/data")`. There is deliberately '
                 "no way to read a path that is not beneath one."
             )
         declared = await self._roots(session)
@@ -1835,9 +1798,7 @@ class MCP:
         key = principal if principal is not None else session.id
         return limiter.try_acquire(key, 1.0, time.monotonic())
 
-    async def _authorize(
-        self, request: Request, entry: Any, *, noun: str = "tool"
-    ) -> str | None:
+    async def _authorize(self, request: Request, entry: Any, *, noun: str = "tool") -> str | None:
         """None when the call may proceed, or the reason it may not.
 
         One decision for tools, resources, prompts and route-derived tools
@@ -1932,7 +1893,6 @@ class MCP:
             # deployment can tell a broken tool from a confused caller, a
             # refused one, and a busy one. `CancelledError` is a `BaseException`
             # and passes straight through, which is what makes cancellation work.
-            #
             # Only the exception's type travels. Its message is application
             # detail written for an operator, not for whoever is driving the
             # model; a tool that wants to say something to the caller raises
@@ -1942,8 +1902,6 @@ class MCP:
                 _text_result(f"the tool raised {type(error).__name__}", is_error=True),
                 _record.OUTCOME_RAISED,
             )
-
-    # -- responses -------------------------------------------------------
 
     def _reply(self, body: bytes, *, stream: bool, session_id: str | None = None) -> Any:
         headers: list[tuple[bytes, bytes]] = []

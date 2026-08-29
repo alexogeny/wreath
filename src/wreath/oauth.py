@@ -1,12 +1,7 @@
 """Issuing OAuth 2.1 tokens, for a deployment that decided to.
 
-Wreath has always *verified* bearer tokens -- `wreath.auth.JwtVerifier`,
-`MCPAuth`'s protected-resource metadata, an audience-bound refusal for a token
-minted elsewhere -- and minted none. `docs/reference/roadmap.md` declined the
-other half on the grounds that issuance belongs to the deployment's identity
-provider, which is right for a deployment that has one and unhelpful for a
-deployment that *is* one: a service whose own machine clients need tokens has
-nowhere to get them, and writes the endpoint by hand.
+Wreath verifies bearer tokens with `wreath.auth.JwtVerifier` and issues them for
+deployments that act as their own identity provider.
 
 **The first obligation is that what this mints is what wreath already verifies.**
 An issuer whose output its own verifier rejects is two features rather than one,
@@ -176,9 +171,8 @@ _S256_CHALLENGE_LENGTH: Final = 43
 def _check_challenge(challenge: str) -> None:
     """Refuse a `code_challenge` that is not an S256 digest.
 
-    An empty one is the case this was written for: it used to be the default,
-    and `redeem` skipped PKCE entirely on it, so the control the module
-    docstring calls required was optional in practice.
+    Empty challenges are refused. Under S256 the challenge is an unpadded
+    base64url SHA-256 digest with exactly 43 ASCII characters.
     """
     if len(challenge) != _S256_CHALLENGE_LENGTH or not challenge.isascii():
         raise OAuthRefusal(
@@ -241,21 +235,29 @@ class Es256Signer:
         publish is simply not among the fields.
         """
         x, y = self._public_point()
-        return [{
-            "kty": "EC", "crv": "P-256", "alg": "ES256", "use": "sig",
-            "kid": self.kid,
-            "x": _b64(x.to_bytes(32, "big")),
-            "y": _b64(y.to_bytes(32, "big")),
-        }]
+        return [
+            {
+                "kty": "EC",
+                "crv": "P-256",
+                "alg": "ES256",
+                "use": "sig",
+                "kid": self.kid,
+                "x": _b64(x.to_bytes(32, "big")),
+                "y": _b64(y.to_bytes(32, "big")),
+            }
+        ]
 
     def encode(self, claims: Mapping[str, Any]) -> str:
         from ._webpush import _ecdsa_sign
 
-        header = _b64(json.dumps(
-            {"alg": "ES256", "typ": "JWT", "kid": self.kid},
-            separators=(",", ":")).encode("utf-8"))
-        payload = _b64(json.dumps(
-            dict(claims), separators=(",", ":"), sort_keys=True).encode("utf-8"))
+        header = _b64(
+            json.dumps(
+                {"alg": "ES256", "typ": "JWT", "kid": self.kid}, separators=(",", ":")
+            ).encode("utf-8")
+        )
+        payload = _b64(
+            json.dumps(dict(claims), separators=(",", ":"), sort_keys=True).encode("utf-8")
+        )
         signing_input = f"{header}.{payload}".encode("ascii")
         signature = _ecdsa_sign(self.private, hashlib.sha256(signing_input).digest())
         return f"{header}.{payload}.{_b64(signature)}"
@@ -278,9 +280,20 @@ class AuthorizationServer:
     """An OAuth 2.1 authorization server over wreath's own JWT vocabulary."""
 
     __slots__ = (
-        "_chains", "_clients", "_code_ttl", "_codes", "_issued", "_issuer",
-        "_lifetime", "_refresh", "_refresh_ttl", "_revoked", "_secret", "_signer",
-        "_signing_seconds", "_spent",
+        "_chains",
+        "_clients",
+        "_code_ttl",
+        "_codes",
+        "_issued",
+        "_issuer",
+        "_lifetime",
+        "_refresh",
+        "_refresh_ttl",
+        "_revoked",
+        "_secret",
+        "_signer",
+        "_signing_seconds",
+        "_spent",
     )
 
     def __init__(
@@ -334,8 +347,6 @@ class AuthorizationServer:
         self._issued = 0
         self._signing_seconds = 0.0
 
-    # -- discovery ----------------------------------------------------------
-
     def metadata(self) -> dict[str, Any]:
         """RFC 8414 metadata, so a client configures itself instead of being told."""
         return {
@@ -344,8 +355,7 @@ class AuthorizationServer:
             "token_endpoint": f"{self._issuer}/oauth/token",
             "jwks_uri": f"{self._issuer}/oauth/jwks",
             "response_types_supported": ["code"],
-            "grant_types_supported": ["authorization_code", "refresh_token",
-                                      "client_credentials"],
+            "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials"],
             "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": ["client_secret_basic"],
         }
@@ -362,8 +372,6 @@ class AuthorizationServer:
         if self._signer is None:
             return {"keys": []}
         return {"keys": list(self._signer.public_jwks())}
-
-    # -- the authorization endpoint -----------------------------------------
 
     def register(self, client: ClientRegistration) -> None:
         self._clients[client.client_id] = client
@@ -389,9 +397,7 @@ class AuthorizationServer:
             return client
         expected = client.client_secret
         supplied = (
-            client_secret.encode("utf-8")
-            if isinstance(client_secret, str)
-            else client_secret
+            client_secret.encode("utf-8") if isinstance(client_secret, str) else client_secret
         )
         if (
             not isinstance(expected, bytes)
@@ -405,7 +411,11 @@ class AuthorizationServer:
         return client
 
     def authorize(
-        self, *, client_id: str, redirect_uri: str, challenge_method: str = "S256",
+        self,
+        *,
+        client_id: str,
+        redirect_uri: str,
+        challenge_method: str = "S256",
     ) -> ClientRegistration:
         """Check an authorization request before anything is minted for it."""
         client = self._client(client_id)
@@ -440,12 +450,9 @@ class AuthorizationServer:
     ) -> str:
         """Mint one authorization code, bound to a client, a URI and a challenge.
 
-        `challenge` and `redirect_uri` carry **no defaults**, and that is the
-        fix for a defect rather than a style: they used to default to `""`, and
-        `redeem` skipped both checks on an empty value. A deployment that simply
-        did not pass a challenge got a PKCE-free authorization-code flow, which
-        the module docstring says cannot exist. An optional security parameter
-        is an optional security control.
+        `challenge` and `redirect_uri` carry **no defaults**. The challenge must
+        be an S256 digest and the redirect URI must exactly match the client's
+        registration; neither security control is optional.
 
         Raises:
             OAuthRefusal: unknown client, a scope outside its registration, a
@@ -472,8 +479,12 @@ class AuthorizationServer:
             )
         code = secrets.token_urlsafe(32)
         self._codes[code] = _Code(
-            client_id=client_id, subject=subject, scope=wanted, challenge=challenge,
-            redirect_uri=redirect_uri, tenant=tenant,
+            client_id=client_id,
+            subject=subject,
+            scope=wanted,
+            challenge=challenge,
+            redirect_uri=redirect_uri,
+            tenant=tenant,
             issued_at=time.time() if now is None else now,
         )
         return code
@@ -505,8 +516,7 @@ class AuthorizationServer:
         self._authenticate_client(client_id, client_secret)
         record = self._codes.get(code)
         if record is None:
-            raise OAuthRefusal(
-                "unknown-code", "no such authorization code; it was never issued")
+            raise OAuthRefusal("unknown-code", "no such authorization code; it was never issued")
         if record.issued_token:
             # Two parties hold this code and only one of them is the client.
             # Refusing the second alone would leave the attacker's token live if
@@ -553,23 +563,28 @@ class AuthorizationServer:
         if not hmac.compare_digest(offered, record.challenge):
             raise OAuthRefusal(
                 "pkce-mismatch",
-                "the code_verifier does not match the challenge this code was "
-                "issued against",
+                "the code_verifier does not match the challenge this code was issued against",
             )
         token = self.issue_access(
-            subject=record.subject, audience=record.client_id, scope=record.scope,
-            tenant=record.tenant, now=now, with_refresh=True,
+            subject=record.subject,
+            audience=record.client_id,
+            scope=record.scope,
+            tenant=record.tenant,
+            now=now,
+            with_refresh=True,
             refresh_client_id=record.client_id,
         )
         self._codes[code] = _Code(
-            client_id=record.client_id, subject=record.subject, scope=record.scope,
-            challenge=record.challenge, redirect_uri=record.redirect_uri,
-            tenant=record.tenant, issued_at=record.issued_at,
+            client_id=record.client_id,
+            subject=record.subject,
+            scope=record.scope,
+            challenge=record.challenge,
+            redirect_uri=record.redirect_uri,
+            tenant=record.tenant,
+            issued_at=record.issued_at,
             issued_token=token.access_token,
         )
         return token
-
-    # -- token minting ------------------------------------------------------
 
     def issue_access(
         self,
@@ -612,15 +627,15 @@ class AuthorizationServer:
             refresh, chain = minted.token, minted.chain
         access = self._encode(claims)
         if chain:
-            # **Into the chain it seeded.** `issue_refresh` starts a chain empty
-            # and the token minted alongside it used to stay outside, so
-            # `revoke_chain` returned 0 for a freshly redeemed code and left the
-            # one token that grant had actually issued live.
             self._chains.setdefault(chain, []).append(access)
         return IssuedToken(
             access_token=access,
-            subject=subject, audience=audience, scope=wanted,
-            expires_at=expires, tenant=tenant, refresh_token=refresh,
+            subject=subject,
+            audience=audience,
+            scope=wanted,
+            expires_at=expires,
+            tenant=tenant,
+            refresh_token=refresh,
         )
 
     def client_credentials(
@@ -658,10 +673,7 @@ class AuthorizationServer:
                 "invalid-scope",
                 f"client {client_id!r} is not registered for scope {', '.join(outside)}",
             )
-        return self.issue_access(
-            subject=None, audience=client_id, scope=wanted)
-
-    # -- refresh ------------------------------------------------------------
+        return self.issue_access(subject=None, audience=client_id, scope=wanted)
 
     def issue_refresh(
         self,
@@ -675,10 +687,14 @@ class AuthorizationServer:
     ) -> _Refresh:
         chain = secrets.token_urlsafe(12)
         record = _Refresh(
-            token=secrets.token_urlsafe(32), subject=subject, chain=chain,
+            token=secrets.token_urlsafe(32),
+            subject=subject,
+            chain=chain,
             issued_at=time.time() if now is None else now,
             audience=audience or self._issuer,
-            scope=tuple(scope), tenant=tenant, client_id=client_id,
+            scope=tuple(scope),
+            tenant=tenant,
+            client_id=client_id,
         )
         self._refresh[record.token] = record
         self._chains[chain] = []
@@ -739,18 +755,25 @@ class AuthorizationServer:
             now=moment,
         )
         successor = _Refresh(
-            token=secrets.token_urlsafe(32), subject=record.subject,
-            chain=record.chain, issued_at=moment,
-            audience=record.audience, scope=record.scope, tenant=record.tenant,
+            token=secrets.token_urlsafe(32),
+            subject=record.subject,
+            chain=record.chain,
+            issued_at=moment,
+            audience=record.audience,
+            scope=record.scope,
+            tenant=record.tenant,
             client_id=record.client_id,
         )
         self._refresh[successor.token] = successor
         self._spent[token] = (record.chain, record.client_id)
         self._chains.setdefault(record.chain, []).append(issued.access_token)
         return IssuedToken(
-            access_token=issued.access_token, subject=issued.subject,
-            audience=issued.audience, scope=issued.scope,
-            expires_at=issued.expires_at, tenant=issued.tenant,
+            access_token=issued.access_token,
+            subject=issued.subject,
+            audience=issued.audience,
+            scope=issued.scope,
+            expires_at=issued.expires_at,
+            tenant=issued.tenant,
             refresh_token=successor.token,
         )
 
@@ -793,8 +816,6 @@ class AuthorizationServer:
         """The `RevocationCheck` `JwtVerifier` already takes."""
         return access_token in self._revoked
 
-    # -- signing ------------------------------------------------------------
-
     def counters(self) -> Any:
         """What signing has cost, so the ceiling is watched rather than warned about.
 
@@ -831,10 +852,12 @@ class AuthorizationServer:
                 self._signing_seconds += time.perf_counter() - started
                 self._issued += 1
         self._issued += 1
-        header = _b64(json.dumps(
-            {"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode("utf-8"))
-        payload = _b64(json.dumps(
-            dict(claims), separators=(",", ":"), sort_keys=True).encode("utf-8"))
+        header = _b64(
+            json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode("utf-8")
+        )
+        payload = _b64(
+            json.dumps(dict(claims), separators=(",", ":"), sort_keys=True).encode("utf-8")
+        )
         signing_input = f"{header}.{payload}".encode("ascii")
         signature = _b64(hmac.new(self._secret, signing_input, hashlib.sha256).digest())
         return f"{header}.{payload}.{signature}"

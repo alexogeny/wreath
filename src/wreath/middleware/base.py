@@ -85,9 +85,7 @@ class MiddlewareRoute:
 #: * `etag` -- retain the `ETag`, send `If-None-Match`, treat 304 as a hit.
 #: * `csrf-token` -- read the token where the middleware says and send it on
 #:   the unsafe methods.
-BEHAVIOURS: frozenset[str] = frozenset(
-    {"idempotency-key", "retry-after", "etag", "csrf-token"}
-)
+BEHAVIOURS: frozenset[str] = frozenset({"idempotency-key", "retry-after", "etag", "csrf-token"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,8 +324,8 @@ _UNSET = object()
 #: instruction is fixed when the tape is compiled, so the ladder was re-deriving
 #: a constant on every request.
 #:
-#: Not visible in docs/agents/request-boundary-baseline.json: the traced sample
-#: app registers global middleware, which runs from `_global_hooks` rather than
+#: The traced sample app registers global middleware, which runs from
+#: `_global_hooks` rather than
 #: a route tape, so that scenario never enters this loop. The
 #: `middleware-tape-mixed-dispatch` complexity probe covers it instead.
 _OP_FUSED_BEFORE = 0
@@ -444,9 +442,7 @@ class MiddlewareTape:
         return response
 
 
-_HOOK_ATTRIBUTES = (
-    "before", "before_sync", "after", "after_sync", "after_inplace"
-)
+_HOOK_ATTRIBUTES = ("before", "before_sync", "after", "after_sync", "after_inplace")
 
 
 def _is_fused(middleware: Middleware) -> bool:
@@ -494,9 +490,7 @@ def _fuse_sync_befores(instructions: list[_Instruction]) -> list[_Instruction]:
             ):
                 current = cast(_BeforeInstruction, instructions[index])
                 remap[index] = new_position
-                pairs.append(
-                    (cast(SyncBeforeHook, current.hook), current.failure_target)
-                )
+                pairs.append((cast(SyncBeforeHook, current.hook), current.failure_target))
                 index += 1
             grouped.append(_FusedBeforeInstruction(tuple(pairs)))
         else:
@@ -539,9 +533,7 @@ def _compile_tape(endpoint: CallNext, middleware: tuple[Middleware, ...]) -> Mid
     ] = []
     for current in middleware:
         before_sync = cast(SyncBeforeHook | None, getattr(current, "before_sync", None))
-        after_inplace = cast(
-            InPlaceAfterHook | None, getattr(current, "after_inplace", None)
-        )
+        after_inplace = cast(InPlaceAfterHook | None, getattr(current, "after_inplace", None))
         after_sync = cast(SyncAfterHook | None, getattr(current, "after_sync", None))
         after = (
             after_inplace
@@ -574,9 +566,7 @@ def _compile_tape(endpoint: CallNext, middleware: tuple[Middleware, ...]) -> Mid
             )
 
     before_entries = [
-        (index, hook, sync)
-        for index, (hook, sync, _, _, _) in enumerate(hooks)
-        if hook
+        (index, hook, sync) for index, (hook, sync, _, _, _) in enumerate(hooks) if hook
     ]
     after_entries = [
         (index, after, sync, inplace)
@@ -593,11 +583,7 @@ def _compile_tape(endpoint: CallNext, middleware: tuple[Middleware, ...]) -> Mid
     instructions: list[_Instruction] = []
     for middleware_index, hook, sync in before_entries:
         failure_target = min(
-            (
-                position
-                for index, position in after_positions.items()
-                if index <= middleware_index
-            ),
+            (position for index, position in after_positions.items() if index <= middleware_index),
             default=final_position,
         )
         instructions.append(_BeforeInstruction(cast(BeforeHook, hook), failure_target, sync))
@@ -618,9 +604,7 @@ def _compile_tape(endpoint: CallNext, middleware: tuple[Middleware, ...]) -> Mid
 def _adapt_fused(middleware: Middleware) -> LegacyMiddleware:
     before_sync = cast(SyncBeforeHook | None, getattr(middleware, "before_sync", None))
     before = cast(BeforeHook | None, getattr(middleware, "before", None))
-    after_inplace = cast(
-        InPlaceAfterHook | None, getattr(middleware, "after_inplace", None)
-    )
+    after_inplace = cast(InPlaceAfterHook | None, getattr(middleware, "after_inplace", None))
     after_sync = cast(SyncAfterHook | None, getattr(middleware, "after_sync", None))
     after = cast(AfterHook | None, getattr(middleware, "after", None))
 

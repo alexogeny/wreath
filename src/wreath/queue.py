@@ -80,14 +80,6 @@ class Awaiting:
         def get_nowait(self) -> Any: ...
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        # Chains normally, because both rings now configure themselves in
-        # `__init__` exactly as `wreath.kv.KV` does. They used to build in
-        # `__new__`, which meant this could not call `super().__init__` at all
-        # -- a rule that lived only in a comment.
-        #
-        # `*args, **kwargs` rather than a restated signature: the ring beneath
-        # validates them, and a second copy here is a second thing to keep in
-        # step for no reader's benefit.
         super().__init__(*args, **kwargs)
         self._waiters: deque[asyncio.Future[None]] = deque()
         self._active_waiters: set[asyncio.Future[None]] = set()
@@ -268,8 +260,7 @@ class RoundRobin(Awaiting):
 
     It carries the same surface as the other three: `offer`, `get`, `get_nowait`,
     `peek`, `drain`, `snapshot`, `clear`, `close`, `closed`, `capacity`,
-    `offered`, `dropped`, `len()`. It used to carry about half of them, which
-    made it the one queue in this module a reader had to learn separately.
+    `offered`, `dropped`, `len()`.
 
     The rotation is deliberately plain Python. It moves a cursor over a list once
     per item and is nowhere near the cost of the queue operation it wraps, so
@@ -280,9 +271,18 @@ class RoundRobin(Awaiting):
 
     # `_loop` and `_waiters` belong to `Awaiting` and are declared here for the
     # reason its docstring gives: the mixin cannot carry a layout of its own.
-    __slots__ = ("_active_waiters", "_capacity", "_closed", "_cursor",
-                 "_drop_oldest", "_lanes", "_loop", "_max_lanes", "_order",
-                 "_waiters")
+    __slots__ = (
+        "_active_waiters",
+        "_capacity",
+        "_closed",
+        "_cursor",
+        "_drop_oldest",
+        "_lanes",
+        "_loop",
+        "_max_lanes",
+        "_order",
+        "_waiters",
+    )
 
     def __init__(
         self,

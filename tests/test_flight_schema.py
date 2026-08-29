@@ -1,10 +1,3 @@
-"""Stage 0 Native Flight Recorder: schema, codec, metadata image, config, C parity.
-
-No runtime telemetry exists yet; these tests pin the wire schema, the
-deterministic metadata image, config validation, and byte-for-byte parity
-between the Python schema and its C mirror header.
-"""
-
 from __future__ import annotations
 
 import re
@@ -33,9 +26,6 @@ from wreath.telemetry import (
 )
 
 _NATIVE = Path(__file__).parents[1] / "src" / "wreath" / "_native"
-
-
-# --- cell codecs ------------------------------------------------------------
 
 
 def test_completion_cell_round_trips() -> None:
@@ -160,9 +150,6 @@ def test_histogram_bucket_is_monotonic_and_clamped() -> None:
         prev = bucket
 
 
-# --- metadata image determinism --------------------------------------------
-
-
 def _image(routes: list[fs.RouteMeta]) -> fs.MetadataImage:
     return fs.MetadataImage(
         version=fs.METADATA_VERSION,
@@ -209,9 +196,6 @@ def test_metadata_hash_changes_on_semantic_change() -> None:
     assert len(base.image_hash_short()) == fs.IMAGE_HASH_BYTES
 
 
-# --- container codec --------------------------------------------------------
-
-
 def test_container_round_trips_with_events() -> None:
     image = _image([_route(1, "GET", "/a")])
     events = (
@@ -255,14 +239,6 @@ def test_metadata_image_rejects_trailing_bytes() -> None:
 
 
 def test_metadata_image_rejects_something_that_is_not_one() -> None:
-    """The marker, which nothing had ever handed the wrong bytes.
-
-    Trailing junk was covered and a wrong *start* was not, and the two fail in
-    different places: without the marker check the reader skips seven bytes and
-    reads whatever follows as a version, so a truncated or foreign blob is
-    diagnosed as an unsupported version -- or, with the right four bytes at
-    offset seven, decoded as routes that were never written.
-    """
     image = _image([_route(1, "GET", "/a")]).canonical_bytes()
     with pytest.raises(codec.SchemaError, match="missing its marker"):
         fs.decode_metadata_image(b"NOTMETA" + image[7:])
@@ -270,9 +246,6 @@ def test_metadata_image_rejects_something_that_is_not_one() -> None:
         fs.decode_metadata_image(b"")
     # ... and the real thing still decodes, so the check is not a blanket refusal.
     assert fs.decode_metadata_image(image).routes[0].path == "/a"
-
-
-# --- config validation ------------------------------------------------------
 
 
 def test_default_config_is_off_and_valid() -> None:
@@ -336,14 +309,10 @@ def test_memory_budget_components_are_exact() -> None:
 
 
 def test_memory_budget_counts_the_logging_tables() -> None:
-    """A budget that silently omits a component is worse than one that names
-    what it estimates -- `logging` is the Python-object half."""
     from wreath.telemetry import LoggingConfig
 
     on = TelemetryConfig(mode=Mode.PULSE, logging=LoggingConfig()).memory_budget()
-    off = TelemetryConfig(
-        mode=Mode.PULSE, logging=LoggingConfig(enabled=False)
-    ).memory_budget()
+    off = TelemetryConfig(mode=Mode.PULSE, logging=LoggingConfig(enabled=False)).memory_budget()
     assert off.logging == 0
     assert on.logging > 0
     assert on.total - off.total == on.logging
@@ -360,9 +329,6 @@ def test_logging_config_rejects_unbounded_tables() -> None:
         LoggingConfig(scratch_budget=1 << 20)
 
 
-# --- recording policy (deny-by-default) -------------------------------------
-
-
 def test_forbidden_headers_cannot_be_allowlisted() -> None:
     with pytest.raises(RecordingPolicyError):
         RedactionPolicy(header_allowlist=frozenset({"Authorization"}))
@@ -374,7 +340,8 @@ def test_forbidden_headers_cannot_be_allowlisted() -> None:
 
 def test_capture_ceiling_bounds_runtime_arms() -> None:
     ceiling = RecordingPolicy(
-        capture_slabs=8, max_capture_bytes=8 * 4096,
+        capture_slabs=8,
+        max_capture_bytes=8 * 4096,
         redaction=RedactionPolicy(body=BodyCapture.HASHED),
     )
     from wreath.recording import CapturePolicy
@@ -389,9 +356,6 @@ def test_capture_ceiling_bounds_runtime_arms() -> None:
     )
     assert ceiling.permits(within)
     assert not ceiling.permits(beyond)
-
-
-# --- metadata builder from a real app ---------------------------------------
 
 
 def _demo_app(order: str = "abc"):
@@ -440,9 +404,6 @@ def test_metadata_builder_covers_routes_and_plans() -> None:
     assert user_route.coverage == "mixed"
 
 
-# --- C / Python schema parity ----------------------------------------------
-
-
 def _header_text() -> str:
     return (_NATIVE / "flight_schema.h").read_text()
 
@@ -478,10 +439,7 @@ def test_c_header_defines_match_python() -> None:
     assert flag("WREATH_NFR_FLAG_HAS_CORRELATION") == fs.FLAG_HAS_CORRELATION
     assert flag("WREATH_NFR_FLAG_HAS_CLIENT_FACTS") == fs.FLAG_HAS_CLIENT_FACTS
     assert flag("WREATH_NFR_FLAG_POLICY_REFUSED") == fs.FLAG_POLICY_REFUSED
-    assert (
-        flag("WREATH_NFR_FLAG_AI_SCRAPING_REFUSED")
-        == fs.FLAG_AI_SCRAPING_REFUSED
-    )
+    assert flag("WREATH_NFR_FLAG_AI_SCRAPING_REFUSED") == fs.FLAG_AI_SCRAPING_REFUSED
 
 
 def test_c_enums_match_python() -> None:
@@ -508,8 +466,6 @@ def test_c_enums_match_python() -> None:
 
 
 def test_c_struct_layout_matches_python(tmp_path: Path) -> None:
-    """Compile a probe that prints sizeof/offsetof and compare to the Python
-    struct offsets. This is the byte-for-byte layout guarantee."""
     import shutil
 
     cc = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
@@ -518,8 +474,8 @@ def test_c_struct_layout_matches_python(tmp_path: Path) -> None:
 
     probe = tmp_path / "probe.c"
     probe.write_text(
-        '#include <stddef.h>\n'
-        '#include <stdio.h>\n'
+        "#include <stddef.h>\n"
+        "#include <stdio.h>\n"
         f'#include "{(_NATIVE / "flight_schema.h").as_posix()}"\n'
         "int main(void) {\n"
         '    printf("cell=%zu\\n", sizeof(wreath_nfr_completion_cell));\n'
@@ -527,9 +483,9 @@ def test_c_struct_layout_matches_python(tmp_path: Path) -> None:
         '    printf("phase=%zu\\n", sizeof(wreath_nfr_phase_cell));\n'
         '    printf("phasebatch=%zu\\n", sizeof(wreath_nfr_phase_batch_cell));\n'
         '    printf("batch_request_id=%zu\\n",'
-        ' offsetof(wreath_nfr_phase_batch_cell, request_id));\n'
+        " offsetof(wreath_nfr_phase_batch_cell, request_id));\n"
         '    printf("batch_records=%zu\\n",'
-        ' offsetof(wreath_nfr_phase_batch_cell, records));\n'
+        " offsetof(wreath_nfr_phase_batch_cell, records));\n"
         '    printf("phase_start=%zu\\n", offsetof(wreath_nfr_phase_cell, start_offset_us));\n'
         '    printf("phase_dur=%zu\\n", offsetof(wreath_nfr_phase_cell, duration_us));\n'
         '    printf("status=%zu\\n", offsetof(wreath_nfr_completion_cell, status));\n'
@@ -542,9 +498,7 @@ def test_c_struct_layout_matches_python(tmp_path: Path) -> None:
         "}\n"
     )
     binary = tmp_path / "probe"
-    subprocess.run(
-        [cc, "-std=c11", str(probe), "-o", str(binary)], check=True, capture_output=True
-    )
+    subprocess.run([cc, "-std=c11", str(probe), "-o", str(binary)], check=True, capture_output=True)
     output = subprocess.run([str(binary)], check=True, capture_output=True, text=True).stdout
     values = dict(line.split("=") for line in output.strip().splitlines())
 
@@ -579,8 +533,6 @@ def test_python_struct_sizes_are_sixty_four() -> None:
 
 
 def test_logging_config_rejects_a_floor_above_the_publish_level() -> None:
-    """A capture floor above `level` would buffer records that can never be
-    published -- a configuration with no correct interpretation."""
     from wreath._flight_schema import Severity
     from wreath.telemetry import LoggingConfig
 
@@ -590,7 +542,6 @@ def test_logging_config_rejects_a_floor_above_the_publish_level() -> None:
 
 
 def test_logging_config_defaults_buffer_verbose_records() -> None:
-    """The shipped default has to make failure-triggered logging work at all."""
     from wreath._flight_schema import Severity
     from wreath.telemetry import LoggingConfig
 

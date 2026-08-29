@@ -15,13 +15,11 @@ MIGRATIONS: dict[str, tuple[str, str, str, str]] = {
     # Most are ordinary DDL that `wreath migrations generate`
     # derives from the models; the ones that are not are worth separating,
     # because they are the ones that make a deploy slow, risky, or wrong.
-    #
     # `mig.derived` is translated for the same reason `pydantic.config_forbid`
     # and `resp.jsonable` are: the determined target is *no hand-written code*.
     # Wreath's migration source of truth is the ORM image, and detection covers
     # tables, columns (type, nullability, identity, generated, server default),
-    # primary keys, unique constraints, foreign keys and btree indexes
-    # (docs/from-fastapi/alembic.md, "What `detect` sees"). Every operation in
+    # primary keys, unique constraints, foreign keys and btree indexes. Every operation in
     # that set is a function of the model change the porter is already making,
     # so there is nothing left to decide at the revision. What is NOT in that
     # set gets its own verdict below rather than riding along on this one.

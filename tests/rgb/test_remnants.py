@@ -1,6 +1,3 @@
-"""The remaining smaller items (report 23: B-11, G-17, G-31, G-34, G-35, G-38,
-G-39, G-46, G-60, G-71, G-77, G-83, G-87, R-47)."""
-
 from __future__ import annotations
 
 import pytest
@@ -105,7 +102,7 @@ class TestMultipartBoundary:
     def test_an_illegal_character_is_refused(self):
         from wreath.request import _multipart_boundary
 
-        assert _multipart_boundary(b'multipart/form-data; boundary=a\x00b') is None
+        assert _multipart_boundary(b"multipart/form-data; boundary=a\x00b") is None
 
     def test_an_ordinary_boundary_is_accepted(self):
         from wreath.request import _multipart_boundary
@@ -142,7 +139,9 @@ class TestCrudRequirementOrdering:
             name: Mapped[str] = column(Text)
 
         router = crud_router(
-            Gadget, lambda request: None, operations=("list",),
+            Gadget,
+            lambda request: None,
+            operations=("list",),
             authorize=Access.roles("admin"),
         )
         endpoint = router.routes[0].endpoint
@@ -160,7 +159,7 @@ class TestSsoSessionLifetime:
 
         class _State:
             session = {
-                "principal": {"sub": "u1", "roles": [], "exp": 0},   # long expired
+                "principal": {"sub": "u1", "roles": [], "exp": 0},  # long expired
             }
 
         class _Request:
@@ -224,9 +223,7 @@ class TestLifespanTeardown:
 
         source = inspect.getsource(app_module.Wreath._lifespan)
         failure = source.split("lifespan.startup.failed")[0]
-        assert "_app_scope" in failure, (
-            "app-scoped dependencies survive a failed startup"
-        )
+        assert "_app_scope" in failure, "app-scoped dependencies survive a failed startup"
 
 
 class TestWebhookReplayScope:

@@ -138,9 +138,7 @@ async def time_app(app: Any, template: dict[str, Any], iterations: int) -> float
     return (time.perf_counter() - start) / iterations * 1e6
 
 
-async def time_app_cpu(
-    app: Any, template: dict[str, Any], iterations: int
-) -> tuple[float, float]:
+async def time_app_cpu(app: Any, template: dict[str, Any], iterations: int) -> tuple[float, float]:
     """Wall and CPU microseconds per request, from one pass.
 
     `time.process_time()` counts user plus system CPU for the whole process and

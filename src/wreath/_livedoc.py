@@ -87,7 +87,7 @@ def _as_text(data: Any) -> str:
 
 @dataclass(frozen=True, slots=True)
 class Change:
-    """"Your copy may be stale", with the new tag when one can be stated.
+    """ "Your copy may be stale", with the new tag when one can be stated.
 
     `etag is None` means *refetch, we cannot tell you the tag* -- which is an
     honest answer rather than a degraded one, because the client refetches
@@ -257,8 +257,6 @@ class LiveDocument:
         self._watching = False
         self._bridge = BusBridge(bus, channel=channel, apply=self._apply)
 
-    # -- introspection ---------------------------------------------------------
-
     @property
     def channel(self) -> str:
         """The bus channel this document's change notifications travel on.
@@ -301,8 +299,6 @@ class LiveDocument:
     def watching(self) -> bool:
         """Whether this document is currently listening for ORM writes."""
         return self._watching
-
-    # -- subscriptions ---------------------------------------------------------
 
     def subscribe(self, principal: str) -> Subscription | None:
         """A slot for one stream, or `None` when the registry is full.
@@ -349,8 +345,6 @@ class LiveDocument:
             for subscription in tuple(holders):
                 subscription.close()
 
-    # -- notifications ---------------------------------------------------------
-
     def notify(self, principal: str, reason: str, *, etag: str | None = None) -> None:
         """One principal's document is stale, here and on the other workers."""
         self._deliver(principal, Change(reason, etag))
@@ -381,9 +375,7 @@ class LiveDocument:
         # an error. The cost of a lost notification is one client holding a
         # stale document until it revalidates, which is the at-most-once
         # property this feature is designed around.
-        self._bridge.publish_soon(
-            {"principal": principal, "reason": reason, "etag": etag}
-        )
+        self._bridge.publish_soon({"principal": principal, "reason": reason, "etag": etag})
 
     async def _apply(self, payload: dict[str, Any]) -> None:
         """Deliver another worker's notification. Never republished -- one hop."""
@@ -396,8 +388,6 @@ class LiveDocument:
             return
         self._deliver(principal, Change(reason, etag if isinstance(etag, str) else None))
 
-    # -- what the ORM tells us -------------------------------------------------
-
     def _on_write(self, model_names: frozenset[str]) -> None:
         """A committed write to a watched model makes these documents stale.
 
@@ -408,8 +398,6 @@ class LiveDocument:
         if self._watch.isdisjoint(model_names):
             return
         self.notify_all(self._watch_reason)
-
-    # -- the shared half of the tag -------------------------------------------
 
     def fingerprint(self) -> str:
         """The non-per-principal part of the tag, cached for a moment.
@@ -479,9 +467,7 @@ async def change_events(
             if etag is None and tag_for is not None:
                 etag = tag_for(change.reason)
             seen = document.fingerprint()
-            yield ServerSentEvent(
-                data=_as_text(Change(change.reason, etag).as_dict()), event=event
-            )
+            yield ServerSentEvent(data=_as_text(Change(change.reason, etag).as_dict()), event=event)
     finally:
         subscription.close()
 
@@ -495,7 +481,5 @@ def change_stream(
 ) -> SSEResponse:
     """An SSE response over `change_events`."""
     return SSEResponse(
-        change_events(
-            subscription, tag_for=tag_for, event=event, keepalive=keepalive
-        )
+        change_events(subscription, tag_for=tag_for, event=event, keepalive=keepalive)
     )

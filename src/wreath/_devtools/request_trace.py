@@ -16,7 +16,7 @@ definition), some of them not.
     uv run wreath-request-trace --verbose
     uv run wreath-request-trace --format json
 
-The sample app's trace is checkpointed in `docs/agents/request-boundary-baseline.json`.
+The sample app's trace is checkpointed in `tools/baselines/request-boundary-baseline.json`.
 `--check` re-measures and diffs against it, so a change that adds pre-activation
 Python shows up as a reviewable number rather than as drift nobody noticed:
 
@@ -52,7 +52,7 @@ from .native_lint import repo_root
 from .sample_app import SCENARIOS
 
 #: Checked in, and reviewed like any other contract. See `--check`.
-BASELINE_PATH = Path("docs/agents/request-boundary-baseline.json")
+BASELINE_PATH = Path("tools/baselines/request-boundary-baseline.json")
 
 # Landmarks in `wreath.app` that open a lifecycle phase. Keyed by code name, which
 # is stable across the private reshuffling these internals are subject to.
@@ -159,10 +159,7 @@ class _Tracer:
         caller_is_traced_python = caller is not None and (
             _is_wreath_frame(caller.f_code) or caller.f_code in self._handler_codes
         )
-        if (
-            (_is_wreath_frame(code) or code in self._handler_codes)
-            and not caller_is_traced_python
-        ):
+        if (_is_wreath_frame(code) or code in self._handler_codes) and not caller_is_traced_python:
             self._record("PY", f"{_short_path(code)}:{code.co_name}")
 
 
@@ -216,7 +213,6 @@ def _load_app(target: str) -> Any:
         raise SystemExit(f"wreath-request-trace: {error}") from error
 
 
-
 async def _drive(app: Any, method: str, path: str, headers: dict[str, str]) -> tuple[Trace, int]:
     sent: list[dict[str, Any]] = []
 
@@ -264,9 +260,7 @@ async def _drive(app: Any, method: str, path: str, headers: dict[str, str]) -> t
     return tracer.trace, status
 
 
-def trace_request(
-    app: Any, method: str, path: str, headers: dict[str, str]
-) -> tuple[Trace, int]:
+def trace_request(app: Any, method: str, path: str, headers: dict[str, str]) -> tuple[Trace, int]:
     """Count one request's boundary crossings. Returns (trace, response status)."""
     return asyncio.run(_drive(app, method, path, headers))
 
@@ -344,9 +338,7 @@ def _summarize(trace: Trace, status: int) -> dict[str, Any]:
         },
         "pre_activation": {
             "c": sum(by_phase.get(phase, {}).get("c", 0) for phase in _PRE_ACTIVATION),
-            "python": sum(
-                by_phase.get(phase, {}).get("python", 0) for phase in _PRE_ACTIVATION
-            ),
+            "python": sum(by_phase.get(phase, {}).get("python", 0) for phase in _PRE_ACTIVATION),
         },
         "phases": {phase: by_phase[phase] for phase in _PHASE_ORDER if phase in by_phase},
         "c_calls": dict(trace.c_calls.most_common()),
@@ -452,9 +444,7 @@ def main(argv: list[str] | None = None) -> int:
         help="repeatable request header",
     )
     parser.add_argument("--format", choices=("text", "json"), default="text")
-    parser.add_argument(
-        "--verbose", action="store_true", help="print the ordered per-event trace"
-    )
+    parser.add_argument("--verbose", action="store_true", help="print the ordered per-event trace")
     parser.add_argument(
         "--check",
         action="store_true",

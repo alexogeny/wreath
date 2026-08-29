@@ -146,9 +146,7 @@ class MethodNotAllowed(HTTPException):
         # RFC 9110 15.5.6: a 405 response MUST carry an Allow header listing the
         # methods the target resource does support.
         methods = tuple(allow)
-        headers = (
-            ((b"allow", ", ".join(methods).encode("latin-1")),) if methods else ()
-        )
+        headers = ((b"allow", ", ".join(methods).encode("latin-1")),) if methods else ()
         super().__init__(detail, headers=headers)
 
 
@@ -222,7 +220,6 @@ class TooManyRequests(HTTPException):
         # RFC 9110 10.2.3 / RFC 6585 4: a 429 MAY tell the client how long to
         # wait via Retry-After (delta-seconds).
         headers = (
-            () if retry_after is None
-            else ((b"retry-after", str(retry_after).encode("latin-1")),)
+            () if retry_after is None else ((b"retry-after", str(retry_after).encode("latin-1")),)
         )
         super().__init__(detail, headers=headers)

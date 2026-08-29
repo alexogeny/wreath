@@ -108,6 +108,7 @@ __all__ = [
     "unknown_fields",
 ]
 
+
 class ProtobufDeclarationError(TypeError):
     """A message declaration cannot be compiled to a wire plan.
 
@@ -305,8 +306,7 @@ def _resolve(annotation: Any, name: str, spec: FieldSpec) -> tuple[int, int, Any
         # surfacing as `TypeError: unhashable type` from inside a lookup, which
         # names neither the field nor the mistake.
         raise ProtobufDeclarationError(
-            f"field {name!r}: {inner!r} is not a type, so it has no protobuf "
-            "wire mapping"
+            f"field {name!r}: {inner!r} is not a type, so it has no protobuf wire mapping"
         )
 
     if spec.kind is not None:
@@ -327,8 +327,7 @@ def _resolve(annotation: Any, name: str, spec: FieldSpec) -> tuple[int, int, Any
     default_kind = _DEFAULT_KIND.get(inner)
     if default_kind is None:
         raise ProtobufDeclarationError(
-            f"field {name!r}: {getattr(inner, '__name__', inner)!r} has no "
-            "protobuf wire mapping"
+            f"field {name!r}: {getattr(inner, '__name__', inner)!r} has no protobuf wire mapping"
         )
     return default_kind, flags, None, None
 
@@ -367,7 +366,6 @@ def message[T](cls: type[T]) -> type[T]:
     # annotations through the closure they were written in, so a message or an
     # enum declared inside a function resolves; `get_type_hints` rebuilds the
     # namespace from module globals and raises NameError for exactly those.
-    #
     # `eval_str` covers the other half. A module that *does* use
     # `from __future__ import annotations` (PEP 563) stringifies first, and
     # those strings evaluate against module globals only -- so a locally
@@ -398,13 +396,11 @@ def message[T](cls: type[T]) -> type[T]:
             )
         if number in _RESERVED:
             raise ProtobufDeclarationError(
-                f"field {name!r}: number {number} is inside the reserved range "
-                "19000..19999"
+                f"field {name!r}: number {number} is inside the reserved range 19000..19999"
             )
         if number in seen:
             raise ProtobufDeclarationError(
-                f"field {name!r}: number {number} is already used by "
-                f"{seen[number]!r}"
+                f"field {name!r}: number {number} is already used by {seen[number]!r}"
             )
         seen[number] = name
 

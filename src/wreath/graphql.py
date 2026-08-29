@@ -21,7 +21,7 @@ What owning this in-tree buys, none of which a bolt-on library can:
   -- a `PolicyRequirement` whose resource is the field as a Cedar entity
   reference, `User::"email"` -- so the shipped `CedarAuthorizer` needs no
   adapter. Hand it the same object you handed `configure_auth`; there is
-  deliberately no pickup from the application (see `docs/guides/graphql.md`).
+  deliberately no pickup from the application.
 * **Per-field latency in the Flight Recorder**, as `RESOLVER` phases, without
   wiring an exporter.
 * **Typegen.** `wreath typegen` emits GraphQL operations alongside the REST
@@ -100,9 +100,20 @@ class GraphQL:
     """A GraphQL endpoint over one ORM registry."""
 
     __slots__ = (
-        "_action", "_authorizer", "_cache", "_frozen", "_introspection", "_limits",
-        "_max_page_size", "_on_denied", "_registry", "_resolvers", "_schema",
-        "_policy_schema", "_session_factory", "resolver_errors",
+        "_action",
+        "_authorizer",
+        "_cache",
+        "_frozen",
+        "_introspection",
+        "_limits",
+        "_max_page_size",
+        "_on_denied",
+        "_registry",
+        "_resolvers",
+        "_schema",
+        "_policy_schema",
+        "_session_factory",
+        "resolver_errors",
     )
 
     def __init__(
@@ -144,9 +155,7 @@ class GraphQL:
             raise ValueError("authorization action is required")
         self._action = action
         self._registry = registry
-        self._schema = build_schema(
-            registry, models, expose=expose, dataclasses=dataclasses
-        )
+        self._schema = build_schema(registry, models, expose=expose, dataclasses=dataclasses)
         self._limits = limits or Limits()
         self._authorizer = authorizer
         self._introspection = introspection
@@ -167,8 +176,6 @@ class GraphQL:
     @property
     def schema(self) -> Schema:
         return self._schema
-
-    # -- resolvers -----------------------------------------------------------
 
     def field(
         self,
@@ -204,11 +211,20 @@ class GraphQL:
         """
 
         def register(fn):
-            self._add_resolver(ResolverSpec(
-                type_name=type_name, field_name=field_name, fn=fn,
-                requires=tuple(requires), batch=batch, type_name_out=returns,
-                is_list=is_list, non_null=non_null, policy=policy, cost=cost,
-            ))
+            self._add_resolver(
+                ResolverSpec(
+                    type_name=type_name,
+                    field_name=field_name,
+                    fn=fn,
+                    requires=tuple(requires),
+                    batch=batch,
+                    type_name_out=returns,
+                    is_list=is_list,
+                    non_null=non_null,
+                    policy=policy,
+                    cost=cost,
+                )
+            )
             return fn
 
         return register
@@ -299,8 +315,15 @@ class GraphQL:
         self._policy_schema = None
 
     def _add_root(
-        self, name: str, fn: Any, returns: str, is_list: bool,
-        policy: str | None, cost: int, *, mutation: bool,
+        self,
+        name: str,
+        fn: Any,
+        returns: str,
+        is_list: bool,
+        policy: str | None,
+        cost: int,
+        *,
+        mutation: bool,
     ) -> None:
         self._check_mutable()
         self._checked_policy(policy)
@@ -311,12 +334,19 @@ class GraphQL:
         # them inert, which is the state `cost=` was in across the whole stack
         # until the weigher existed.
         spec = ResolverSpec(
-            type_name="Mutation" if mutation else "Query", field_name=name, fn=fn,
-            type_name_out=returns, is_list=is_list, policy=policy,
+            type_name="Mutation" if mutation else "Query",
+            field_name=name,
+            fn=fn,
+            type_name_out=returns,
+            is_list=is_list,
+            policy=policy,
         )
         self._resolvers.add_root(spec, mutation=mutation)
         root = RootField(
-            name=name, type_name=returns, is_list=is_list, resolver=spec,
+            name=name,
+            type_name=returns,
+            is_list=is_list,
+            resolver=spec,
             policy=policy or f"{'Mutation' if mutation else 'Query'}.{name}",
             cost=cost,
         )
@@ -348,16 +378,16 @@ class GraphQL:
     def _ensure_policy_schema(self) -> Any:
         """Compile immutable policy names once for native request-local decisions."""
         if self._policy_schema is None:
-            policies = tuple(
-                schema_field.policy
-                for object_type in self._schema.types.values()
-                for schema_field in object_type.fields.values()
-            ) + tuple(root.policy for root in self._schema.roots.values()) + tuple(
-                root.policy for root in self._schema.mutations.values()
+            policies = (
+                tuple(
+                    schema_field.policy
+                    for object_type in self._schema.types.values()
+                    for schema_field in object_type.fields.values()
+                )
+                + tuple(root.policy for root in self._schema.roots.values())
+                + tuple(root.policy for root in self._schema.mutations.values())
             )
-            self._policy_schema = _core.graphql_policy_schema(
-                policies, policy_resource
-            )
+            self._policy_schema = _core.graphql_policy_schema(policies, policy_resource)
         return self._policy_schema
 
     def declared_actions(self) -> dict[str, tuple[str, ...]]:
@@ -444,7 +474,7 @@ class GraphQL:
 
         try:
             operation = document.operation(operation_name)
-        except (KeyError, ValueError):
+        except KeyError, ValueError:
             # Execution owns the useful error for an unresolved operation.
             return document
         key = operation.name
@@ -480,7 +510,7 @@ class GraphQL:
         """
         try:
             operation = document.operation(operation_name)
-        except (KeyError, ValueError):
+        except KeyError, ValueError:
             return
         weigh(self._schema, document, operation, max_complexity=self._limits.max_complexity)
 
@@ -502,9 +532,7 @@ class GraphQL:
         try:
             document = self._prepare(source, operation_name)
         except GraphQLSyntaxError as error:
-            return result({
-                "errors": [{"message": str(error), "extensions": {"code": error.code}}]
-            })
+            return result({"errors": [{"message": str(error), "extensions": {"code": error.code}}]})
         try:
             executor = execute_json if json_output else execute
             data = await executor(
@@ -532,12 +560,19 @@ class GraphQL:
             # message is deliberately generic: a resolver's exception text is
             # server-side detail (see `wreath.crud._unprocessable`).
             self.resolver_errors += 1
-            return result({
-                "data": None,
-                "errors": [{"message": "the resolver failed", "extensions": {
-                    "code": "RESOLVER_ERROR",
-                }}],
-            })
+            return result(
+                {
+                    "data": None,
+                    "errors": [
+                        {
+                            "message": "the resolver failed",
+                            "extensions": {
+                                "code": "RESOLVER_ERROR",
+                            },
+                        }
+                    ],
+                }
+            )
         if json_output:
             return data
         return {"data": data}
@@ -591,10 +626,16 @@ class GraphQL:
             content_type = (request.header("content-type") or "").split(";")[0].strip()
             if content_type not in _ACCEPTED_CONTENT_TYPES:
                 return JSONResponse(
-                    {"errors": [{"message": (
-                        "a GraphQL request must be sent as "
-                        f"{' or '.join(sorted(_ACCEPTED_CONTENT_TYPES))}"
-                    )}]},
+                    {
+                        "errors": [
+                            {
+                                "message": (
+                                    "a GraphQL request must be sent as "
+                                    f"{' or '.join(sorted(_ACCEPTED_CONTENT_TYPES))}"
+                                )
+                            }
+                        ]
+                    },
                     status=415,
                 )
             try:
@@ -666,7 +707,7 @@ class GraphQL:
             return False
         try:
             return document.operation().operation == "mutation"
-        except (KeyError, ValueError):
+        except KeyError, ValueError:
             # `Document.operation` raises `KeyError` for a name it does not hold
             # and `ValueError` when the document has no unambiguous operation.
             # Neither is a mutation, and a document that cannot name one will be

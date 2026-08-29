@@ -79,8 +79,7 @@ class RelationshipExpr:
         if isinstance(attribute, RelationshipExpr):
             return RelationshipExpr(attribute.relationship, (*self.path, attribute.relationship))
         raise TypeError(
-            f"{self._label()}.{name} is not a column or relationship of "
-            f"{target.__name__}"
+            f"{self._label()}.{name} is not a column or relationship of {target.__name__}"
         )
 
     def _label(self) -> str:
@@ -207,8 +206,7 @@ def relationship(
     """
     if load not in LOAD_STRATEGIES:
         raise DeclarationError(
-            f"unknown load strategy {load!r}; expected one of "
-            f"{', '.join(sorted(LOAD_STRATEGIES))}"
+            f"unknown load strategy {load!r}; expected one of {', '.join(sorted(LOAD_STRATEGIES))}"
         )
     if not isinstance(target, (str, type)):
         raise DeclarationError(

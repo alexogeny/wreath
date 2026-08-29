@@ -1,28 +1,3 @@
-"""A `point` column and its GiST index through detect/generate/apply/down.
-
-The claim `wreath.geospatial` rests on is that a proximity search is *indexable
-on a stock PostgreSQL* -- no extension, because `point` and the `point_ops`
-operator class are core. An index that cannot survive a migration round trip
-does not deliver that: `detect` would report drift on an index it created
-itself, `generate` would emit the same statement forever, and the operator
-would eventually stop reading the output.
-
-That failure is silent in exactly the way the pgvector one was, and it had
-exactly one cause there -- a declared operator class that PostgreSQL treats as
-its *default* and therefore does not record. `point_ops` is gist's default for
-`point`, so this suite runs the same arm deliberately: `index="gist"` with no
-opclass, and `index="gist", index_ops="point_ops"` naming the default out loud.
-Both have to come back clean.
-
-The rendering tests below prove the emitter agrees with itself. Only the gated
-ones prove it agrees with *PostgreSQL*, which is the claim the guide makes.
-
-Named `test_geospatial_columns` rather than `test_geospatial`: `tests/` has no
-`__init__.py`, so pytest derives a module name from the basename alone and two
-files called `test_geospatial.py` in different directories collide with an
-"import file mismatch" that names the *other* file.
-"""
-
 from __future__ import annotations
 
 import importlib
@@ -84,13 +59,8 @@ def _forward(*models: type) -> list[tuple[int, str]]:
     return _statements(native._migration_render_sql(plan))
 
 
-# --- rendering ----------------------------------------------------------------
-
-
 def test_a_point_column_is_created_as_the_builtin_type() -> None:
-    assert any(
-        'add column "at" point not null;' in sql for _flags, sql in _forward(Station)
-    )
+    assert any('add column "at" point not null;' in sql for _flags, sql in _forward(Station))
 
 
 def test_the_index_names_gist_as_its_access_method() -> None:
@@ -99,7 +69,6 @@ def test_the_index_names_gist_as_its_access_method() -> None:
 
 
 def test_nothing_about_a_point_model_falls_back_to_manual() -> None:
-    """A MANUAL step is one an operator writes by hand, which is not the promise."""
     assert not any(flags & 2 for flags, _sql in _forward(Station)), _forward(Station)
 
 
@@ -112,8 +81,6 @@ def test_down_drops_the_index_and_the_column() -> None:
     assert any('drop table "app"."stations"' in sql for sql in statements), statements
     assert not any(flags & 2 for flags, _sql in rendered), rendered
 
-
-# --- against a real server -----------------------------------------------------
 
 _DSN = os.environ.get("WREATH_TEST_POSTGRES_DSN")
 
@@ -181,14 +148,6 @@ async def test_a_gist_index_on_a_point_round_trips() -> None:
 @pytest.mark.asyncio
 @pytest.mark.database
 async def test_naming_gists_default_operator_class_round_trips_too() -> None:
-    """The arm that found the pgvector defect, run against the geo default.
-
-    `point_ops` is gist's default operator class for `point`, and PostgreSQL
-    does not record that a default was named -- the catalog read blanks it. A
-    desired descriptor that kept the name would disagree with the catalog on
-    every run, so `detect` would report drift on an index that is already
-    exactly right and `generate` would emit a MANUAL forever.
-    """
     schema = f"wreath_geo_{uuid.uuid4().hex[:12]}"
 
     class Live(Model, table="stations", schema=schema):
@@ -202,12 +161,6 @@ async def test_naming_gists_default_operator_class_round_trips_too() -> None:
 @pytest.mark.asyncio
 @pytest.mark.database
 async def test_the_declared_and_blanked_spellings_are_one_migration_not_two() -> None:
-    """Declaring the default and omitting it must describe the *same* index.
-
-    Two spellings that each round-trip individually could still be different
-    descriptors, in which case switching between them would emit a spurious
-    migration. Resolved against this database's real defaults, they are one.
-    """
     schema = f"wreath_geo_{uuid.uuid4().hex[:12]}"
 
     class Bare(Model, table="stations", schema=schema):
@@ -224,9 +177,7 @@ async def test_the_declared_and_blanked_spellings_are_one_migration_not_two() ->
         named = Registry(Database(), [Named], validate_schema="off")
         await migrations._resolve_default_opclasses(bare, db)
         await migrations._resolve_default_opclasses(named, db)
-        assert migrations._registry_descriptor(bare) == migrations._registry_descriptor(
-            named
-        )
+        assert migrations._registry_descriptor(bare) == migrations._registry_descriptor(named)
     finally:
         await db.close()
 
@@ -235,13 +186,6 @@ async def test_the_declared_and_blanked_spellings_are_one_migration_not_two() ->
 @pytest.mark.asyncio
 @pytest.mark.database
 async def test_apply_then_down_returns_the_schema_to_where_it_started() -> None:
-    """The whole cycle: generate, apply, detect clean, revert, nothing left.
-
-    `apply` and `down` are the two halves nobody runs in a rendering test, and
-    the reverse tape is derived from the forward plan rather than regenerated
-    -- so a `point` column or a GiST index the inverter did not understand
-    would strand the schema half-migrated rather than raise.
-    """
     schema = f"wreath_geo_{uuid.uuid4().hex[:12]}"
 
     class Live(Model, table="stations", schema=schema):
@@ -295,8 +239,7 @@ async def test_apply_then_down_returns_the_schema_to_where_it_started() -> None:
         )
         assert remaining == 0, "the reverse tape left the table behind"
         tip = await db.fetchval(
-            'SELECT count(*) FROM "wreath_migrations"."history" '
-            "WHERE target_schema = $1",
+            'SELECT count(*) FROM "wreath_migrations"."history" WHERE target_schema = $1',
             schema,
         )
         assert tip == 0
@@ -309,15 +252,12 @@ async def test_apply_then_down_returns_the_schema_to_where_it_started() -> None:
         await db.close()
 
 
-# --- tier 2: a PostGIS `geography` column ---------------------------------------
-#
 # The same round trip one type further out, and the extension is the whole of
 # the difference. `point` renders from a compile-time OID; `geography`'s OID is
 # assigned by `CREATE EXTENSION`, so the descriptor carries the *spelling*
 # `geography(Point,4326)` and the catalog read produces `format_type`'s -- a
 # disagreement of one byte would rediscover the column as drift forever, which
 # is the defect the pgvector suite was written after finding.
-#
 # Nothing here runs in the database `tests/orm/test_geospatial_live.py` uses:
 # that one is created from `template0` and stays extension-free, which is what
 # keeps the tier-1 claim an assertion rather than an assumption.
@@ -334,13 +274,6 @@ def _bind_geography(oid: int) -> None:
 @pytest.mark.asyncio
 @pytest.mark.database
 async def test_a_geography_column_and_its_gist_index_round_trip() -> None:
-    """Render, apply, then read back: the two spellings have to agree.
-
-    Asserted against a real PostGIS rather than against a synthetic catalog
-    image, because rendering agreeing with itself is not the claim -- the claim
-    is that the emitter agrees with PostgreSQL, and that has exactly one
-    failure mode and it is silent.
-    """
     from wreath.orm.types import Geography, _unbind_extension_oids
 
     schema = f"wreath_postgis_{uuid.uuid4().hex[:12]}"
@@ -401,12 +334,6 @@ async def test_a_geography_column_and_its_gist_index_round_trip() -> None:
 @pytest.mark.asyncio
 @pytest.mark.database
 async def test_a_geography_migration_applies_and_downgrades() -> None:
-    """`apply` and `down` over an extension-typed column and its GiST index.
-
-    The reverse tape is inverted from the forward plan rather than regenerated,
-    so a column spelling the inverter did not carry would strand the schema
-    half-migrated rather than raise.
-    """
     from wreath.orm.types import Geography, _unbind_extension_oids
 
     schema = f"wreath_postgis_{uuid.uuid4().hex[:12]}"
@@ -463,14 +390,11 @@ async def test_a_geography_migration_applies_and_downgrades() -> None:
         await db.close()
 
 
-# --- the alphabet an extension spelling may use ---------------------------------
-#
 # `geography(Point,4326)` is the first declared type whose modifier carries
 # *letters*. The renderer's whitelist admitted only digits, commas and spaces
 # inside the parentheses, so the column became an empty MANUAL and `generate`
 # omitted it while still emitting the index that referenced it -- applying such
 # a plan fails on a column that was never added.
-#
 # The alphabet is wider now, and these pin that widening: nothing that could
 # close a statement or open a literal is admitted at any point. The spelling
 # comes from a declaration rather than from a request, so this is defence in
@@ -500,13 +424,9 @@ def _one_column_descriptor(spelling: str) -> bytes:
     ],
 )
 def test_a_hostile_type_spelling_stays_manual(spelling: str) -> None:
-    plan = native._migration_plan_descriptors(
-        _one_column_descriptor(spelling), EMPTY_IMAGE
-    )
+    plan = native._migration_plan_descriptors(_one_column_descriptor(spelling), EMPTY_IMAGE)
     rendered = _statements(native._migration_render_sql(plan))
-    column_steps = [
-        (flags, sql) for flags, sql in rendered if not sql.startswith("create table")
-    ]
+    column_steps = [(flags, sql) for flags, sql in rendered if not sql.startswith("create table")]
     assert column_steps, rendered
     assert all(flags & 2 for flags, _sql in column_steps), column_steps
     assert not any(spelling and spelling in sql for _f, sql in rendered), rendered
@@ -517,10 +437,7 @@ def test_a_hostile_type_spelling_stays_manual(spelling: str) -> None:
     ["geography(Point,4326)", "geography(PointZ,4326)", "vector(1536)", "bit(8)"],
 )
 def test_a_format_type_spelling_still_renders(spelling: str) -> None:
-    """The other side of the same boundary: what PostgreSQL really produces."""
-    plan = native._migration_plan_descriptors(
-        _one_column_descriptor(spelling), EMPTY_IMAGE
-    )
+    plan = native._migration_plan_descriptors(_one_column_descriptor(spelling), EMPTY_IMAGE)
     rendered = _statements(native._migration_render_sql(plan))
     assert any(spelling in sql for _f, sql in rendered), rendered
     assert not any(flags & 2 for flags, _sql in rendered), rendered

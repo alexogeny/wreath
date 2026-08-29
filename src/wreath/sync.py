@@ -85,8 +85,7 @@ rule applied wholesale -- and it costs one bounded query.
 
 Resuming from a durable cursor instead would need a row-grained change feed
 appended *inside* the writing transaction, which is `wreath.audit_log`'s hook
-rather than one this module may add on its own. `docs/reference/roadmap.md`
-carries the row.
+rather than one this module may add on its own.
 """
 
 from __future__ import annotations
@@ -123,6 +122,7 @@ __all__ = [
 #: thousand is comfortably more than a client renders and comfortably less than
 #: a leak.
 DEFAULT_MAX_ROWS: Final = 5000
+
 
 class SyncError(RuntimeError):
     """A shape or a subscription that cannot be honoured."""
@@ -180,8 +180,8 @@ def _loaded_values(row: Any) -> dict[str, Any]:
     for spec in type(row).__wreath_columns__:
         if not row._orm_is_loaded(spec.index):
             continue
-        values[spec.python_name] = None if row._orm_is_null(spec.index) else row._orm_get(
-            spec.index
+        values[spec.python_name] = (
+            None if row._orm_is_null(spec.index) else row._orm_get(spec.index)
         )
     return values
 
@@ -325,8 +325,6 @@ class Sync:
             keepalive=keepalive,
         )
 
-    # -- introspection ---------------------------------------------------------
-
     @property
     def model(self) -> type:
         """The model these shapes select from."""
@@ -361,8 +359,6 @@ class Sync:
         and the client sees the same thing in both cases: nothing.
         """
         return self._stale
-
-    # -- declaration -----------------------------------------------------------
 
     def shape(self, name: str) -> Callable[[Callable[[Any], Any]], Callable[[Any], Any]]:
         """Declare a named shape. The function is returned unchanged.
@@ -413,8 +409,6 @@ class Sync:
             raise SyncError(f"no shape named {name!r}; declared: {known}")
         return shape
 
-    # -- evaluation ------------------------------------------------------------
-
     async def evaluate(self, session: Any, name: str, principal: Any) -> Snapshot:
         """Run a shape now and return the whole current answer.
 
@@ -439,8 +433,6 @@ class Sync:
             keys.append(key)
             payload.append({"key": key, "values": values})
         return Snapshot(tuple(payload), tuple(keys))
-
-    # -- subscriptions ---------------------------------------------------------
 
     def subscribe(self, principal: Any, name: str) -> SyncSubscription | None:
         """A subscription over one shape, or `None` when the registry is full.
@@ -530,9 +522,7 @@ class SyncSubscription:
 
     __slots__ = ("_held", "_shape", "_slot", "_sync", "principal")
 
-    def __init__(
-        self, sync: Sync, shape: Shape, principal: Any, slot: Subscription
-    ) -> None:
+    def __init__(self, sync: Sync, shape: Shape, principal: Any, slot: Subscription) -> None:
         self._sync = sync
         self._shape = shape
         self._slot = slot
@@ -579,9 +569,7 @@ class SyncSubscription:
         correct to send.
         """
         result = await self._sync.evaluate(session, self._shape.name, self.principal)
-        self._held, upserted, removed = _core.sync_state_diff(
-            self._held, result.rows
-        )
+        self._held, upserted, removed = _core.sync_state_diff(self._held, result.rows)
         return Delta(upserted, removed)
 
     async def wait(self) -> bool:

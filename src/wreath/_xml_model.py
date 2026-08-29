@@ -140,9 +140,7 @@ class Document:
     #: facade passes the C one in when it parsed with C, so a document carries
     #: its backend explicitly rather than the module reaching for a global that
     #: some other import may have swapped.
-    canonicalizer: Callable[..., bytes] | None = field(
-        default=None, repr=False, compare=False
-    )
+    canonicalizer: Callable[..., bytes] | None = field(default=None, repr=False, compare=False)
 
     def subtree_bytes(self, element: Element) -> bytes:
         """The original bytes of `element`, start tag through end tag.
@@ -204,13 +202,10 @@ class Document:
             from .xml import canonicalize_span
 
             backend = canonicalize_span
-        return backend(
-            self.source, start, end, target.nsinherited, inclusive_prefixes
-        )
+        return backend(self.source, start, end, target.nsinherited, inclusive_prefixes)
 
 
 def _walk(element: Element) -> Iterator[Element]:
     yield element
     for child in element.children:
         yield from _walk(child)
-

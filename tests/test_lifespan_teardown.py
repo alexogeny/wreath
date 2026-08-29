@@ -1,13 +1,3 @@
-"""Lifespan teardown must be total: one failing close cannot strand the rest.
-
-Both lifespan failure paths release resources in reverse order. A close that
-raises used to abandon every step queued behind it -- and, on the startup path,
-the `lifespan.startup.failed` reply as well, which left the ASGI server waiting
-for a message that was never sent. These tests pin the property that makes that
-impossible: every registered teardown step runs, the failure is counted and
-logged, and the reply still goes out carrying the *original* error.
-"""
-
 from __future__ import annotations
 
 from typing import Any

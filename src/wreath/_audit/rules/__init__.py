@@ -1,4 +1,5 @@
 """Rule registries. Import the submodules for their registration side effects."""
+
 from .a11y import A11Y_RULES
 from .code import CODE_RULES, scan_source
 from .perf import HTML_PERF_RULES, app_perf

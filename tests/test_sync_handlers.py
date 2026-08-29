@@ -1,19 +1,3 @@
-"""A `def` route handler is served, and keeps its call convention throughout.
-
-Before this, a synchronous handler was neither supported nor refused: it was
-`await`ed like every other endpoint, `await {"ok": True}` raised `TypeError`
-inside dispatch, and the caller got a 500 naming nothing. That is the worst of
-the three available answers, so the behaviour is pinned here rather than left to
-whichever wrapper happens to run.
-
-The wrappers are the interesting part. A route acquires a different chain
-depending on what it declares -- a return annotation adds
-`compile_response_validator`, a non-200 status adds `_ensure_response`,
-middleware adds `compile_middleware` -- and each of those used to force the
-result back into a coroutine. Every combination below therefore has to answer
-the same as its `async def` twin.
-"""
-
 from __future__ import annotations
 
 import inspect
@@ -54,9 +38,7 @@ def _app() -> Wreath:
         return {"doubled": item_id * 2}
 
     @app.get("/depends")
-    def depends(
-        request: Any, value: int = Depends(_sync_dependency)
-    ) -> dict[str, int]:
+    def depends(request: Any, value: int = Depends(_sync_dependency)) -> dict[str, int]:
         return {"value": value}
 
     @app.get("/raises")
@@ -80,7 +62,6 @@ async def test_a_synchronous_handler_is_served() -> None:
 
 @pytest.mark.asyncio
 async def test_a_return_annotation_still_validates_a_synchronous_handler() -> None:
-    """`compile_response_validator` wraps it, and must not force a coroutine."""
     async with TestClient(_app()) as client:
         response = await client.get("/annotated")
     assert response.status == 200
@@ -89,7 +70,6 @@ async def test_a_return_annotation_still_validates_a_synchronous_handler() -> No
 
 @pytest.mark.asyncio
 async def test_a_declared_status_survives_a_synchronous_handler() -> None:
-    """`_ensure_response` is the wrapper on this path."""
     async with TestClient(_app()) as client:
         response = await client.get("/created")
     assert response.status == 201
@@ -122,7 +102,6 @@ async def test_dependencies_resolve_for_a_synchronous_handler() -> None:
 
 @pytest.mark.asyncio
 async def test_an_exception_from_a_synchronous_handler_reaches_the_error_path() -> None:
-    """Not swallowed, and not escaped: the same 500 an `async def` would raise."""
     async with TestClient(_app()) as client:
         response = await client.get("/raises")
     assert response.status == 500
@@ -141,12 +120,6 @@ async def test_a_synchronous_handler_answers_exactly_as_its_async_twin() -> None
 
 
 def test_the_compiled_synchronous_handler_is_not_a_coroutine_function() -> None:
-    """The point of the change: no wrapper reintroduced the coroutine.
-
-    Asserted on the compiled endpoint rather than on timing, because a timing
-    assertion for ~300ns is a flaky test and this is the property that produces
-    it.
-    """
     app = _app()
     app._compile_routes()
     handler, _params = app._route_match("GET", "/annotated", 0)

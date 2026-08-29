@@ -1,24 +1,3 @@
-"""Plan 01 stage 4: the trace id an operator can actually reach.
-
-Stages 1-3 put a `traceparent` on four durable rows. That is worth nothing until
-somebody at three in the morning can get from a failure to the request that
-caused it, and back the other way. Three surfaces do that:
-
-* `wreath jobs list` -- the dead letters, each with the trace id of the request
-  that enqueued it. The request finished hours ago; this is the only thread back
-  to it.
-* `wreath passes status` -- the same, on a pass that stopped.
-* `wreath doctor trace <id>` -- the join: given a trace id, every job, durable
-  message, workflow instance and chunked pass carrying it, plus the recorded
-  request when an Inspector socket is given.
-
-The property this file cares about most is the last one's **`omitted` list**.
-A forensic tool that quietly leaves a source out is worse than one that answers
-nothing, because the reader concludes "nothing else carries this trace" from a
-search that never ran. Every source that could not be read is named in the same
-report as the findings, and the tests below fail if one goes quiet.
-"""
-
 from __future__ import annotations
 
 import json
@@ -126,15 +105,12 @@ class TestTheTraceLookupNamesWhatItCouldNotRead:
         assert "schema version before propagation" in note
 
     async def test_a_version_one_workflow_table_is_reported_as_such(self):
-        """The workflow source has its own present/upgraded pair of answers.
-
-        It lives in a different schema from the other three and is read by
-        different code, so "the table is there but predates propagation" is a
-        third state it has to name rather than folding into "not there".
-        """
         columns = _schema("jobs", "messages", "passes")
         columns[("wreath_system", "workflow_steps_instances")] = {
-            "key", "workflow", "state", "tenant",
+            "key",
+            "workflow",
+            "state",
+            "tenant",
         }
         connection = _Connection(columns=columns)
         lookup = await find_work_with_trace(connection, TRACE_ID)
@@ -144,19 +120,12 @@ class TestTheTraceLookupNamesWhatItCouldNotRead:
         assert "does not exist" not in note
 
     async def test_the_ephemeral_bus_is_always_named_as_unsearched(self):
-        """The deferral, surfaced where an operator will actually read it.
-
-        Ephemeral fan-out carries no context by decision, not by oversight. If
-        the lookup stayed silent about it, "no durable work carries this trace"
-        would read as "nothing does".
-        """
         connection = _Connection(columns=_schema("jobs", "messages", "passes"))
         lookup = await find_work_with_trace(connection, TRACE_ID)
 
         assert any("ephemeral bus messages" in note for note in lookup.omitted)
 
     async def test_every_source_is_matched_on_the_trace_id_not_a_prefix(self):
-        """`split_part`, not `LIKE`: no wildcard to escape, no span-id collision."""
         connection = _Connection(columns=_schema("jobs", "messages", "passes"))
         await find_work_with_trace(connection, TRACE_ID)
 
@@ -171,19 +140,28 @@ class TestTheTraceLookupNamesWhatItCouldNotRead:
             rows=(
                 (
                     "jobs",
-                    [{
-                        "id": 7, "task": "send_receipt", "state": "dead",
-                        "tenant": "acme", "last_error": "boom",
-                        "trace_context": PARENT,
-                    }],
+                    [
+                        {
+                            "id": 7,
+                            "task": "send_receipt",
+                            "state": "dead",
+                            "tenant": "acme",
+                            "last_error": "boom",
+                            "trace_context": PARENT,
+                        }
+                    ],
                 ),
                 (
                     "passes",
-                    [{
-                        "name": "normalize_grades", "phase": "blocked",
-                        "tenant": "", "last_error": "chunk gave up",
-                        "trace_context": PARENT,
-                    }],
+                    [
+                        {
+                            "name": "normalize_grades",
+                            "phase": "blocked",
+                            "tenant": "",
+                            "last_error": "chunk gave up",
+                            "trace_context": PARENT,
+                        }
+                    ],
                 ),
             ),
         )
@@ -195,9 +173,7 @@ class TestTheTraceLookupNamesWhatItCouldNotRead:
         assert kinds["job"].state == "dead"
         assert kinds["job"].tenant == "acme"
         assert kinds["pass"].identifier == "normalize_grades"
-        assert kinds["pass"].state == "blocked", (
-            "a pass's state column is `phase`, not `state`"
-        )
+        assert kinds["pass"].state == "blocked", "a pass's state column is `phase`, not `state`"
 
 
 class _InspectorClient:
@@ -210,22 +186,47 @@ class _InspectorClient:
 
 class TestTheRequestHalfComesFromTheRing:
     async def test_a_matching_trace_is_returned(self):
-        client = _InspectorClient([
-            {"request_id": 3, "route_id": 1, "status": 500, "duration_us": 900,
-             "is_failure": True, "error_class": 2, "trace_id": TRACE_ID},
-            {"request_id": 4, "route_id": 1, "status": 200, "duration_us": 100,
-             "is_failure": False, "error_class": 0, "trace_id": "b" * 32},
-        ])
+        client = _InspectorClient(
+            [
+                {
+                    "request_id": 3,
+                    "route_id": 1,
+                    "status": 500,
+                    "duration_us": 900,
+                    "is_failure": True,
+                    "error_class": 2,
+                    "trace_id": TRACE_ID,
+                },
+                {
+                    "request_id": 4,
+                    "route_id": 1,
+                    "status": 200,
+                    "duration_us": 100,
+                    "is_failure": False,
+                    "error_class": 0,
+                    "trace_id": "b" * 32,
+                },
+            ]
+        )
         found = await find_requests_with_trace(client, TRACE_ID)
 
         assert [r.request_id for r in found] == [3]
         assert found[0].is_failure
 
     async def test_an_unsampled_request_carries_no_id_and_is_not_matched(self):
-        client = _InspectorClient([
-            {"request_id": 3, "route_id": 1, "status": 200, "duration_us": 1,
-             "is_failure": False, "error_class": 0, "trace_id": None},
-        ])
+        client = _InspectorClient(
+            [
+                {
+                    "request_id": 3,
+                    "route_id": 1,
+                    "status": 200,
+                    "duration_us": 1,
+                    "is_failure": False,
+                    "error_class": 0,
+                    "trace_id": None,
+                },
+            ]
+        )
         assert await find_requests_with_trace(client, TRACE_ID) == ()
 
 
@@ -265,14 +266,6 @@ class TestTheDoctorTraceCommand:
         assert "no application target was given" in out
 
     def test_a_populated_report_renders_every_part_it_found(self, capsys):
-        """The renderer, over a lookup that actually found something.
-
-        Added because a mutant sweep found the whole populated branch
-        unexercised: every test above drives an empty result, so the lines that
-        print a request, a tenant-qualified label and a row's error could all be
-        deleted and nothing objected. A report nobody has seen rendered is not a
-        report.
-        """
         from wreath._cli import _print_trace_lookup
         from wreath.doctor import TracedRequest, TracedWork, TraceLookup
 
@@ -281,23 +274,39 @@ class TestTheDoctorTraceCommand:
                 trace_id=TRACE_ID,
                 requests=(
                     TracedRequest(
-                        request_id=3, route_id=1, status=500, duration_us=912,
-                        is_failure=True, error_class=2,
+                        request_id=3,
+                        route_id=1,
+                        status=500,
+                        duration_us=912,
+                        is_failure=True,
+                        error_class=2,
                     ),
                     TracedRequest(
-                        request_id=4, route_id=1, status=200, duration_us=11,
-                        is_failure=False, error_class=0,
+                        request_id=4,
+                        route_id=1,
+                        status=200,
+                        duration_us=11,
+                        is_failure=False,
+                        error_class=0,
                     ),
                 ),
                 work=(
                     TracedWork(
-                        kind="job", identifier="7", label="send_receipt",
-                        state="dead", tenant="acme", detail="boom",
+                        kind="job",
+                        identifier="7",
+                        label="send_receipt",
+                        state="dead",
+                        tenant="acme",
+                        detail="boom",
                         traceparent=PARENT,
                     ),
                     TracedWork(
-                        kind="workflow", identifier="checkout:1", label="checkout",
-                        state="compensated", tenant="", detail=None,
+                        kind="workflow",
+                        identifier="checkout:1",
+                        label="checkout",
+                        state="compensated",
+                        tenant="",
+                        detail=None,
                         traceparent=PARENT,
                     ),
                 ),
@@ -322,10 +331,6 @@ class TestTheDoctorTraceCommand:
         assert "not searched:" in out
 
     def test_a_report_with_nothing_omitted_prints_no_such_section(self, capsys):
-        """There is no such lookup today -- ephemeral messages are always
-        unsearched -- but the renderer is a general one, and a section header
-        with nothing under it is the shape that erodes trust in the section.
-        """
         from wreath._cli import _print_trace_lookup
         from wreath.doctor import TraceLookup
 
@@ -337,12 +342,6 @@ class TestTheDoctorTraceCommand:
         assert "no durable work carries this trace" in out
 
     def test_with_no_socket_it_says_the_request_was_not_searched(self, capsys):
-        """The half a database cannot answer, named rather than implied.
-
-        The request lives in the Flight Recorder's ring. Printing "no durable
-        work carries this trace" without this line would read as "this trace
-        does not exist".
-        """
         namespace = build_parser().parse_args(["doctor", "trace", TRACE_ID])
         execute_doctor(namespace)
         assert "Flight Recorder's ring" in capsys.readouterr().out
@@ -392,24 +391,42 @@ class TestWreathJobsPrintsTheTrace:
                     "jobs",
                     [
                         {
-                            "id": 7, "queue": "work", "task": "send_receipt",
-                            "tenant": "", "state": "dead", "attempts": 5,
-                            "max_attempts": 5, "run_at": "2026-08-01",
-                            "updated_at": "2026-08-01", "last_error": "boom",
+                            "id": 7,
+                            "queue": "work",
+                            "task": "send_receipt",
+                            "tenant": "",
+                            "state": "dead",
+                            "attempts": 5,
+                            "max_attempts": 5,
+                            "run_at": "2026-08-01",
+                            "updated_at": "2026-08-01",
+                            "last_error": "boom",
                             "trace_context": PARENT,
                         },
                         {
-                            "id": 8, "queue": "work", "task": "sweep",
-                            "tenant": "", "state": "dead", "attempts": 5,
-                            "max_attempts": 5, "run_at": "2026-08-01",
-                            "updated_at": "2026-08-01", "last_error": "nope",
+                            "id": 8,
+                            "queue": "work",
+                            "task": "sweep",
+                            "tenant": "",
+                            "state": "dead",
+                            "attempts": 5,
+                            "max_attempts": 5,
+                            "run_at": "2026-08-01",
+                            "updated_at": "2026-08-01",
+                            "last_error": "nope",
                             "trace_context": None,
                         },
                         {
-                            "id": 9, "queue": "work", "task": "reindex",
-                            "tenant": "", "state": "ready", "attempts": 0,
-                            "max_attempts": 5, "run_at": "2026-08-01",
-                            "updated_at": "2026-08-01", "last_error": None,
+                            "id": 9,
+                            "queue": "work",
+                            "task": "reindex",
+                            "tenant": "",
+                            "state": "ready",
+                            "attempts": 0,
+                            "max_attempts": 5,
+                            "run_at": "2026-08-01",
+                            "updated_at": "2026-08-01",
+                            "last_error": None,
                             "trace_context": PARENT,
                         },
                         # Untraced *and* not dead. The explanation of why a row
@@ -417,10 +434,16 @@ class TestWreathJobsPrintsTheTrace:
                         # somebody is looking for a cause, and is noise on a job
                         # that has not failed -- so this row must produce none.
                         {
-                            "id": 10, "queue": "work", "task": "warm_cache",
-                            "tenant": "", "state": "ready", "attempts": 0,
-                            "max_attempts": 5, "run_at": "2026-08-01",
-                            "updated_at": "2026-08-01", "last_error": None,
+                            "id": 10,
+                            "queue": "work",
+                            "task": "warm_cache",
+                            "tenant": "",
+                            "state": "ready",
+                            "attempts": 0,
+                            "max_attempts": 5,
+                            "run_at": "2026-08-01",
+                            "updated_at": "2026-08-01",
+                            "last_error": None,
                             "trace_context": None,
                         },
                     ],
@@ -433,9 +456,7 @@ class TestWreathJobsPrintsTheTrace:
         )
         return database
 
-    def test_a_failed_row_prints_the_trace_id_and_how_to_use_it(
-        self, application, capsys
-    ):
+    def test_a_failed_row_prints_the_trace_id_and_how_to_use_it(self, application, capsys):
         namespace = build_parser().parse_args(["jobs", "list", "app:app"])
         assert execute_jobs(namespace) == 0
         out = capsys.readouterr().out
@@ -452,15 +473,7 @@ class TestWreathJobsPrintsTheTrace:
         # withholds it from a traced row is only visible as an absence.
         assert out.count("trace: none") == 1
 
-    def test_a_dead_row_with_no_trace_says_why_rather_than_going_quiet(
-        self, application, capsys
-    ):
-        """Two different absences, and the operator has to be able to tell.
-
-        A job enqueued outside a traced request and a database still on the
-        schema version before the column both read as `None` here. Printing
-        nothing would leave the reader thinking the tool had failed.
-        """
+    def test_a_dead_row_with_no_trace_says_why_rather_than_going_quiet(self, application, capsys):
         namespace = build_parser().parse_args(["jobs", "list", "app:app"])
         execute_jobs(namespace)
         out = capsys.readouterr().out
@@ -471,9 +484,7 @@ class TestWreathJobsPrintsTheTrace:
         # render no line at all rather than "error: None".
         assert out.count("error: ") == 2
 
-    def test_json_carries_both_the_traceparent_and_the_id(
-        self, application, capsys
-    ):
+    def test_json_carries_both_the_traceparent_and_the_id(self, application, capsys):
         namespace = build_parser().parse_args(["jobs", "list", "app:app", "--json"])
         execute_jobs(namespace)
         body = json.loads(capsys.readouterr().out)
@@ -511,14 +522,10 @@ class TestWreathJobsPrintsTheTrace:
         assert any("state IN ($1, $2)" in q for q in read)
 
     def test_a_queue_filter_is_a_bind_not_an_interpolation(self, application, capsys):
-        namespace = build_parser().parse_args(
-            ["jobs", "list", "app:app", "--queue", "work"]
-        )
+        namespace = build_parser().parse_args(["jobs", "list", "app:app", "--queue", "work"])
         execute_jobs(namespace)
         sql, args = next(
-            (sql, args)
-            for sql, args in application.connection.reads
-            if ".jobs" in sql
+            (sql, args) for sql, args in application.connection.reads if ".jobs" in sql
         )
         assert "queue = $2" in sql
         assert "work" in args
@@ -546,13 +553,21 @@ class TestWreathJobsPrintsTheTrace:
             rows=(
                 (
                     "jobs",
-                    [{
-                        "id": 7, "queue": "work", "task": "send_receipt",
-                        "tenant": "acme", "state": "dead", "attempts": 5,
-                        "max_attempts": 5, "run_at": "2026-08-01",
-                        "updated_at": "2026-08-01", "last_error": "boom",
-                        "trace_context": PARENT,
-                    }],
+                    [
+                        {
+                            "id": 7,
+                            "queue": "work",
+                            "task": "send_receipt",
+                            "tenant": "acme",
+                            "state": "dead",
+                            "attempts": 5,
+                            "max_attempts": 5,
+                            "run_at": "2026-08-01",
+                            "updated_at": "2026-08-01",
+                            "last_error": "boom",
+                            "trace_context": PARENT,
+                        }
+                    ],
                 ),
             )
         )
@@ -565,20 +580,25 @@ class TestWreathJobsPrintsTheTrace:
         assert "send_receipt@acme" in out
         assert "error: boom" in out
 
-    def test_a_build_meeting_a_version_one_schema_reads_untraced(
-        self, monkeypatch, capsys
-    ):
-        """Losing the trace is a degradation; failing the read is not."""
+    def test_a_build_meeting_a_version_one_schema_reads_untraced(self, monkeypatch, capsys):
         database = _StartableDatabase(
             rows=(
                 (
                     "jobs",
-                    [{
-                        "id": 7, "queue": "work", "task": "send_receipt",
-                        "tenant": "", "state": "dead", "attempts": 5,
-                        "max_attempts": 5, "run_at": "2026-08-01",
-                        "updated_at": "2026-08-01", "last_error": "boom",
-                    }],
+                    [
+                        {
+                            "id": 7,
+                            "queue": "work",
+                            "task": "send_receipt",
+                            "tenant": "",
+                            "state": "dead",
+                            "attempts": 5,
+                            "max_attempts": 5,
+                            "run_at": "2026-08-01",
+                            "updated_at": "2026-08-01",
+                            "last_error": "boom",
+                        }
+                    ],
                 ),
             ),
             trace_column=False,
@@ -601,9 +621,7 @@ class TestWreathJobsPrintsTheTrace:
             _databases: dict = {}
             _job_runners: dict = {}
 
-        monkeypatch.setattr(
-            "wreath._cli.load_application", lambda target, factory=False: _Empty()
-        )
+        monkeypatch.setattr("wreath._cli.load_application", lambda target, factory=False: _Empty())
         with pytest.raises(CliError):
             execute_jobs(build_parser().parse_args(["jobs", "list", "app:app"]))
 
@@ -611,12 +629,6 @@ class TestWreathJobsPrintsTheTrace:
 @pytest.mark.database
 @pytest.mark.skipif(not _DSN, reason="needs WREATH_TEST_POSTGRES_DSN (a live PostgreSQL)")
 async def test_a_trace_lookup_joins_four_subsystems_on_a_seeded_database() -> None:
-    """The whole point of the plan, asserted end to end against a real server.
-
-    One trace id, written onto a job, a durable message, a workflow instance and
-    a pass by four different subsystems that share no code, and one query that
-    finds all four.
-    """
     from wreath.postgres import Database
 
     worker = os.environ.get("PYTEST_XDIST_WORKER", "solo")
@@ -643,9 +655,7 @@ async def test_a_trace_lookup_joins_four_subsystems_on_a_seeded_database() -> No
             for component in (runner.component(), bus.component(), _ledger.schema_claim(schema)):
                 for statement in component.statements():
                     await connection.execute(statement)
-            for statement in PostgresWorkflowStore.schema_sql(
-                schema=workflow_schema
-            ).split(";\n"):
+            for statement in PostgresWorkflowStore.schema_sql(schema=workflow_schema).split(";\n"):
                 if statement.strip():
                     await connection.execute(statement.strip())
 
@@ -677,19 +687,19 @@ async def test_a_trace_lookup_joins_four_subsystems_on_a_seeded_database() -> No
             )
 
             lookup = await find_work_with_trace(
-                connection, TRACE_ID, schema=schema,
+                connection,
+                TRACE_ID,
+                schema=schema,
                 workflow_schema=workflow_schema,
             )
         finally:
             await database.release("write", connection)
 
-        assert {item.kind for item in lookup.work} == {
-            "job", "message", "pass", "workflow"
-        }, f"found only {[item.kind for item in lookup.work]}"
+        assert {item.kind for item in lookup.work} == {"job", "message", "pass", "workflow"}, (
+            f"found only {[item.kind for item in lookup.work]}"
+        )
         assert all(item.traceparent == PARENT for item in lookup.work)
         # Only the ephemeral bus remains unsearchable, and it says so.
-        assert [n for n in lookup.omitted] == [
-            n for n in lookup.omitted if "ephemeral" in n
-        ]
+        assert [n for n in lookup.omitted] == [n for n in lookup.omitted if "ephemeral" in n]
     finally:
         await database.stop()

@@ -1,5 +1,3 @@
-"""RateLimitPolicy and its stores."""
-
 from __future__ import annotations
 
 from typing import Any
@@ -18,9 +16,6 @@ from wreath.policy import (
 from wreath.testing import TestClient
 
 _BUCKETS = [_core.TokenBucket]
-
-
-# --- bucket mechanics -------------------------------------------------------
 
 
 @pytest.mark.parametrize("bucket_type", _BUCKETS)
@@ -67,7 +62,6 @@ def test_bucket_validates_configuration(bucket_type: Any) -> None:
 
 @pytest.mark.parametrize("bucket_type", _BUCKETS)
 def test_bucket_honours_max_entries_under_key_spraying(bucket_type: Any) -> None:
-    """Distinct-key floods must not grow the table without bound."""
     bucket = bucket_type(capacity=5.0, rate=1.0, max_entries=100)
     # Four complete table turnovers prove repeated eviction.
     for index in range(400):
@@ -118,22 +112,6 @@ class _ModelBucket:
 
 @pytest.mark.parametrize("bucket_type", _BUCKETS)
 def test_bucket_refill_matches_the_arithmetic_over_a_long_sweep(bucket_type: Any) -> None:
-    """400 steps that spend faster than the rate refills, so the branch crosses.
-
-    The parameters are the point. Each of three keys is asked every 90ms while
-    it earns 0.18 tokens in that time, so the bucket drains within four visits
-    and then alternates: five or six refusals whose retry-after must count down
-    correctly, then one admission. An earlier version of this swept seventeen
-    keys, which gave each one 1.02 tokens between visits against a cost of 1 --
-    it never drained, every call returned 0.0, and the test could not tell any
-    arithmetic from any other.
-
-    Three things it now crosses that a monotonic sweep does not: an idle hour
-    (the refill must clamp at capacity, so the burst after it is three and not
-    thirty), a clock that steps backwards (elapsed is floored at zero, never
-    minting), and a cost of 2 against a capacity of 3 (the shortfall is
-    `cost - tokens`, not `cost`).
-    """
     bucket = bucket_type(capacity=3.0, rate=2.0, max_entries=64)
     models = {f"k{index}": _ModelBucket(3.0, 2.0) for index in range(3)}
     now = 1000.0
@@ -145,13 +123,13 @@ def test_bucket_refill_matches_the_arithmetic_over_a_long_sweep(bucket_type: Any
         elif step == 300:
             now -= 5.0  # a clock that went backwards mints nothing
         cost = 2.0 if step % 37 == 0 else 1.0
-        assert bucket.acquire(key, now, cost) == pytest.approx(
-            models[key].acquire(now, cost)
-        ), (step, key, now, cost)
+        assert bucket.acquire(key, now, cost) == pytest.approx(models[key].acquire(now, cost)), (
+            step,
+            key,
+            now,
+            cost,
+        )
     assert bucket.tracked == len(models)
-
-
-# --- middleware -------------------------------------------------------------
 
 
 def _app(**kwargs: Any) -> Wreath:
@@ -205,9 +183,7 @@ async def test_custom_key_separates_callers() -> None:
 
 
 async def test_limiting_covers_responses_the_router_never_reached() -> None:
-    app = Wreath(
-        http_policy=HttpPolicy(rate_limit=RateLimitPolicy(limit=1, window=60.0))
-    )
+    app = Wreath(http_policy=HttpPolicy(rate_limit=RateLimitPolicy(limit=1, window=60.0)))
 
     async with TestClient(app) as client:
         first = await client.get("/missing")
@@ -262,7 +238,6 @@ def test_postgres_store_schema_is_offered_as_a_migration() -> None:
 
 
 def test_postgres_store_refuses_a_second_policy() -> None:
-    """Two policies over one keyspace would limit neither of them."""
     store = PostgresRateLimitStore(object())
     store.configure(3.0, 1.0)
     with pytest.raises(ValueError, match="already configured"):
@@ -270,13 +245,6 @@ def test_postgres_store_refuses_a_second_policy() -> None:
 
 
 def test_memory_store_refuses_a_second_policy_even_an_identical_one() -> None:
-    """The two stores must agree, and the strict rule is the right one.
-
-    A second `configure` means two middlewares sharing one store, and that is a
-    configuration error whether or not the numbers match: one keyspace means
-    requests to one route consume the other's budget. "Same policy" does not
-    make it harmless -- it makes it harder to notice.
-    """
     store = MemoryRateLimitStore()
     store.configure(3.0, 1.0)
     with pytest.raises(ValueError, match="already configured"):
@@ -284,13 +252,6 @@ def test_memory_store_refuses_a_second_policy_even_an_identical_one() -> None:
 
 
 def test_a_reconfigure_can_never_hand_a_throttled_caller_a_full_bucket() -> None:
-    """The defect underneath the rule.
-
-    A same-policy `configure` used to be accepted and rebuilt the `TokenBucket`,
-    discarding every accumulated bucket -- so it did not merely re-state the
-    policy, it reset every caller's consumption. A client that had just been
-    throttled was immediately let through again.
-    """
     store = MemoryRateLimitStore()
     store.configure(10.0, 1.0)
     for _ in range(10):
@@ -304,13 +265,9 @@ def test_a_reconfigure_can_never_hand_a_throttled_caller_a_full_bucket() -> None
     assert store.try_acquire("alice", 1.0, 100.0) > 0.0
 
 
-# --- Postgres store ---------------------------------------------------------
-#
 # These pin the store's contract against a fake connection. The SQL itself is
 # only meaningful against a real server: it was verified on Postgres 16, where
 # 30 concurrent acquires against a capacity-3 bucket admitted exactly 3.
-
-
 
 
 def _pg_store(
@@ -340,8 +297,7 @@ def _acquires(connection: PooledConnection) -> list[tuple[str, tuple[object, ...
     # Named on the bucket table rather than on `INSERT INTO`, because schema
     # bootstrap writes its version marker with one of those too.
     return [
-        call for call in connection.calls
-        if call[0].startswith("INSERT INTO wreath_rate_limit")
+        call for call in connection.calls if call[0].startswith("INSERT INTO wreath_rate_limit")
     ]
 
 
@@ -405,8 +361,6 @@ def test_middleware_binds_the_sync_path_for_the_memory_store() -> None:
     assert middleware._ingress_sync.__name__ == "_before_local_sync"
 
 
-# --- the keyless request, and the limit that cannot work ---------------------
-#
 # `wreath mutant` survived three controls here. Two are the same scenario from
 # both ends: a request the key function cannot name. `principal_key` returns
 # None for one with no identity and no client address, and `_identify` turns
@@ -417,8 +371,12 @@ def test_middleware_binds_the_sync_path_for_the_memory_store() -> None:
 
 def _scope(client: tuple[str, int] | None) -> dict[str, Any]:
     scope: dict[str, Any] = {
-        "type": "http", "method": "GET", "scheme": "https", "path": "/",
-        "query_string": b"", "headers": [(b"host", b"example.test")],
+        "type": "http",
+        "method": "GET",
+        "scheme": "https",
+        "path": "/",
+        "query_string": b"",
+        "headers": [(b"host", b"example.test")],
     }
     if client is not None:
         scope["client"] = client
@@ -430,7 +388,6 @@ async def _receive_body() -> dict[str, Any]:
 
 
 def test_principal_key_is_none_when_there_is_nobody_and_no_address() -> None:
-    """A Unix-socket or in-process request has no client tuple to fall back to."""
     from wreath.policy import principal_key
     from wreath.request import Request
 
@@ -441,46 +398,37 @@ def test_principal_key_is_none_when_there_is_nobody_and_no_address() -> None:
 
 
 async def test_a_request_nobody_can_key_is_still_limited() -> None:
-    """`UNKEYED` is a shared bucket, not an exemption.
-
-    Returning `None` from `_identify` means "do not limit this request", and it
-    is how `exempt=` works. A key function that simply could not name the caller
-    must not land in the same branch: that would make an un-addressable request
-    -- and any bug in a custom `key=` that returns None -- a way past the limit
-    entirely, which is the opposite of failing closed.
-    """
     middleware = RateLimitPolicy(limit=1, window=60.0, key=lambda request: None)
     from wreath.request import Request
 
     first = middleware._ingress_sync(Request(_scope(("203.0.113.7", 5000)), _receive_body))
     second = middleware._ingress_sync(Request(_scope(("198.51.100.9", 5000)), _receive_body))
-    assert first is None                       # admitted
-    assert second is not None                  # ... and the next one is refused,
-    assert second.status == 429                # sharing one bucket rather than none
+    assert first is None  # admitted
+    assert second is not None  # ... and the next one is refused,
+    assert second.status == 429  # sharing one bucket rather than none
 
 
 async def test_an_exempt_request_is_the_only_thing_that_skips_the_bucket() -> None:
-    """The other side of the same distinction, so neither can absorb the other."""
     middleware = RateLimitPolicy(
-        limit=1, window=60.0, key=lambda request: None,
+        limit=1,
+        window=60.0,
+        key=lambda request: None,
         exempt=lambda request: True,
     )
     from wreath.request import Request
 
     for _ in range(5):
-        assert middleware._ingress_sync(
-            Request(_scope(("203.0.113.7", 5000)), _receive_body)
-        ) is None
+        assert (
+            middleware._ingress_sync(Request(_scope(("203.0.113.7", 5000)), _receive_body)) is None
+        )
 
 
 def test_a_limit_that_admits_nobody_is_refused() -> None:
-    """Zero is a typo; `exempt` and not mounting it are how "never" is spelled."""
     for limit in (0, -1):
         with pytest.raises(ValueError, match="limit must be positive"):
             RateLimitPolicy(limit=limit, window=60.0)
 
-# --- three more controls `wreath mutant` walked past -------------------------
-#
+
 # Each was covered by a test that could not tell the clause was there: the
 # exemption test only ever passed a predicate that says *yes*, and the keying
 # test only ever passed a request with nobody to identify. A control needs the
@@ -488,13 +436,6 @@ def test_a_limit_that_admits_nobody_is_refused() -> None:
 
 
 def test_an_exemption_that_says_no_still_limits() -> None:
-    """`exempt is not None and exempt(request)` -- both halves.
-
-    Dropping the *call* leaves "an exempt callable was configured", which
-    exempts every request the moment anyone passes one. The existing test hands
-    it `lambda request: True`, so it bypasses either way and cannot see the
-    difference. This one says no.
-    """
     from wreath.policy import RateLimitPolicy
     from wreath.request import Request
 
@@ -507,12 +448,6 @@ def test_an_exemption_that_says_no_still_limits() -> None:
 
 
 def test_principal_key_names_the_caller_rather_than_the_address() -> None:
-    """An identified caller keys by principal; only an anonymous one falls to IP.
-
-    If the identity branch never fires, every authenticated caller behind one
-    address shares a bucket -- so a single tenant on a corporate NAT throttles
-    its colleagues, and the limit stops being per-account at all.
-    """
     from wreath.policy import principal_key
     from wreath.request import Request
 
@@ -534,12 +469,6 @@ def test_principal_key_names_the_caller_rather_than_the_address() -> None:
 
 
 def test_clearing_a_store_that_was_never_configured_is_a_no_op() -> None:
-    """`clear()` is documented as safe as a reset between tests.
-
-    A store built and never handed to an application has no bucket, and the
-    guard is what keeps `clear()` from raising `AttributeError` on `None` in
-    exactly the fixture teardown it exists for.
-    """
     from wreath.policy import MemoryRateLimitStore
 
     MemoryRateLimitStore().clear()  # must not raise

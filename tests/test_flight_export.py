@@ -1,11 +1,3 @@
-"""Stage 4c -- the OTLP export pipeline: bounded queue, batching, isolation.
-
-These drive :class:`wreath._export.ExportPipeline` with a collecting fake
-transport (so no network is required for the core behaviors) and exercise the
-concrete :class:`wreath._export.OtlpHttpExporter` against a localhost HTTP server
-in one integration test.
-"""
-
 from __future__ import annotations
 
 import threading
@@ -50,8 +42,12 @@ def _trace(request_id: int, **kw: object) -> ProjectedTrace:
 def _snapshot() -> ProjectorSnapshot:
     metric = RouteMetric(route_id=7, count=3, errors=1, duration_us_sum=30)
     return ProjectorSnapshot(
-        assembled=3, recent=(), failures=(), routes=(metric,),
-        loss=ProjectorLoss(), pending=0,
+        assembled=3,
+        recent=(),
+        failures=(),
+        routes=(metric,),
+        loss=ProjectorLoss(),
+        pending=0,
     )
 
 
@@ -89,9 +85,6 @@ class BoomTransport:
         raise RuntimeError("collector down")
 
 
-# --- synchronous pipeline behavior (no thread) -----------------------------
-
-
 def test_on_trace_enqueues_and_tick_exports() -> None:
     transport = CollectingTransport()
     pipe = ExportPipeline(transport, snapshot_provider=_snapshot)
@@ -112,10 +105,7 @@ def test_batching_splits_into_multiple_requests() -> None:
     pipe._tick()
 
     # 5 traces at batch_size 2 -> requests of 2, 2, 1.
-    sizes = [
-        len(req["resourceSpans"][0]["scopeSpans"][0]["spans"])
-        for req in transport.traces
-    ]
+    sizes = [len(req["resourceSpans"][0]["scopeSpans"][0]["spans"]) for req in transport.traces]
     assert sizes == [2, 2, 1]
     assert transport.span_count() == 5
 
@@ -159,9 +149,6 @@ def test_validates_tuning() -> None:
         ExportPipeline(transport, batch_size=0)
 
 
-# --- threaded lifecycle ----------------------------------------------------
-
-
 def test_background_thread_exports_then_stop_flushes() -> None:
     transport = CollectingTransport()
     pipe = ExportPipeline(transport, interval=0.01, snapshot_provider=_snapshot)
@@ -188,8 +175,6 @@ def test_start_is_idempotent() -> None:
 
 
 def test_concurrent_producers_conserve_every_trace() -> None:
-    """Many threads offering while the exporter drains: nothing is created or
-    lost -- offered == exported + dropped, exactly."""
     transport = CollectingTransport()
     pipe = ExportPipeline(transport, interval=0.001, queue_capacity=256, batch_size=32)
     pipe.start()
@@ -219,9 +204,6 @@ def test_concurrent_producers_conserve_every_trace() -> None:
     # Every offered trace is either exported or counted as a drop -- never lost.
     assert stats["exported_traces"] + stats["dropped"] == offered
     assert transport.span_count() == stats["exported_traces"]
-
-
-# --- concrete OTLP/HTTP exporter -------------------------------------------
 
 
 class _OtlpHandler(BaseHTTPRequestHandler):
@@ -333,9 +315,7 @@ def test_otlp_redirect_origin_normalizes_scheme_host_and_default_port(
 
 
 def test_otlp_redirect_refuses_a_non_http_location() -> None:
-    handler = _export._SameOriginRedirectHandler(
-        ("https", "collector.invalid", 443)
-    )
+    handler = _export._SameOriginRedirectHandler(("https", "collector.invalid", 443))
     request = _export.urllib.request.Request(
         "https://collector.invalid/v1/traces", data=b"payload", method="POST"
     )
@@ -374,13 +354,6 @@ def test_otlp_collector_can_redirect_within_its_pinned_origin() -> None:
 
 
 def test_otlp_collector_cannot_redirect_export_to_an_internal_origin() -> None:
-    """A collector response must not turn configured telemetry into SSRF.
-
-    Both peers are real loopback HTTP servers. The first is the configured
-    collector; the second is an internal canary that must remain untouched.
-    This failed against urllib's default redirect handler: it rewrote the POST
-    to a GET and fetched `/internal` from the second origin.
-    """
     _InternalCanaryHandler.gets = []
     internal = HTTPServer(("127.0.0.1", 0), _InternalCanaryHandler)
     internal_thread = threading.Thread(
@@ -391,9 +364,7 @@ def test_otlp_collector_cannot_redirect_export_to_an_internal_origin() -> None:
     internal_thread.start()
 
     internal_host, internal_port = internal.server_address
-    _RedirectingCollectorHandler.location = (
-        f"http://{internal_host}:{internal_port}/internal"
-    )
+    _RedirectingCollectorHandler.location = f"http://{internal_host}:{internal_port}/internal"
     collector = HTTPServer(("127.0.0.1", 0), _RedirectingCollectorHandler)
     collector_thread = threading.Thread(
         target=collector.serve_forever,
@@ -405,9 +376,7 @@ def test_otlp_collector_cannot_redirect_export_to_an_internal_origin() -> None:
 
     refusal: DestinationRejected | None = None
     try:
-        exporter = OtlpHttpExporter(
-            f"http://{collector_host}:{collector_port}", timeout=5.0
-        )
+        exporter = OtlpHttpExporter(f"http://{collector_host}:{collector_port}", timeout=5.0)
         try:
             exporter.export_traces({"resourceSpans": [{"scopeSpans": []}]})
         except DestinationRejected as error:

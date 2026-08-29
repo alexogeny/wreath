@@ -1,17 +1,3 @@
-"""Dependency binding, path placeholders, and optional identity.
-
-Three gaps the canonical example hit while being built, each of which forced it
-into a workaround it had to document as forced rather than chosen. Two are
-members of the family the refuse-rather-than-half-wire rule in `AGENTS.md`
-names -- a declaration accepted at registration that then fails per request as a
-status blaming the caller -- and the third is a missing spelling rather than a
-wrong one.
-
-The over-refusal guards carry as much weight as the refusals here. A check that
-rejects a correct declaration fails at import and takes the whole application
-with it, which is worse than the runtime error it replaced.
-"""
-
 from __future__ import annotations
 
 from typing import Annotated, Any
@@ -25,8 +11,6 @@ from wreath.pagination import DEFAULT_SIZE, MAX_PAGE, MAX_SIZE, PageParams, page
 from wreath.request import Request
 from wreath.router import Router
 from wreath.testing import TestClient
-
-# --- path converters ----------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -114,7 +98,6 @@ def test_an_empty_placeholder_is_refused() -> None:
 
 
 def test_an_ordinary_placeholder_still_registers() -> None:
-    """Over-refusal guard: the check must not reject what already worked."""
     app = wreath.Wreath()
 
     @app.get("/llamas/{id}")
@@ -122,9 +105,6 @@ def test_an_ordinary_placeholder_still_registers() -> None:
         return {"id": id}
 
     app._compile_routes()
-
-
-# --- Depends inside Annotated: silently rebound as a request body -------------
 
 
 async def _one(request: Request) -> int:  # pragma: no cover
@@ -135,13 +115,6 @@ async def _one(request: Request) -> int:  # pragma: no cover
 
 
 def test_depends_inside_annotated_is_refused() -> None:
-    """The worse of the two spellings, because it blames the caller.
-
-    `Depends` is read from the parameter default only, so inside `Annotated` it
-    was invisible and the parameter fell through to body binding -- a GET
-    answered `400 "invalid JSON body"`. A 500 says *we* broke; a 400 says *you*
-    broke, and nothing in the response tells the caller which it was.
-    """
     app = wreath.Wreath()
 
     @app.get("/a")
@@ -159,7 +132,6 @@ def test_depends_inside_annotated_is_refused() -> None:
 
 
 def test_depends_as_a_default_still_works() -> None:
-    """Over-refusal guard: `Depends` genuinely is written as a default."""
 
     async def dependency(request: Request) -> int:
         return 7
@@ -173,15 +145,7 @@ def test_depends_as_a_default_still_works() -> None:
     app._compile_routes()
 
 
-# --- a binding marker on a dependency's own parameter ------------------------
-
-
 def test_a_marker_on_the_first_dependency_parameter_is_refused() -> None:
-    """The request object arrives *as* that value, and the next compare is a 500.
-
-    A dependency is called `fn(request, **nested_depends)` and nothing else, so
-    a `Query()` on its first parameter does not bind -- it receives the request.
-    """
 
     def dependency(page: Annotated[int, Query(minimum=1)] = 1) -> int:  # pragma: no cover
         return page
@@ -199,7 +163,6 @@ def test_a_marker_on_the_first_dependency_parameter_is_refused() -> None:
 
 
 def test_a_marker_on_a_later_dependency_parameter_is_refused() -> None:
-    """Quieter and worse: the Python default wins and the answer is wrong at 200."""
 
     def dependency(
         request: Request, size: Annotated[int, Query(maximum=10)] = 5
@@ -217,7 +180,6 @@ def test_a_marker_on_a_later_dependency_parameter_is_refused() -> None:
 
 
 def test_a_plain_dependency_default_is_untouched() -> None:
-    """Over-refusal guard: an ordinary default stays an ordinary default."""
 
     def dependency(request: Request, scale: int = 3) -> int:
         return scale
@@ -231,16 +193,8 @@ def test_a_plain_dependency_default_is_untouched() -> None:
     app._compile_routes()
 
 
-# --- page_params: the shipped dependency the defect made unusable -------------
-
-
 @pytest.mark.asyncio
 async def test_page_params_binds_the_query_string() -> None:
-    """What `wreath.pagination` has always documented it does, now true.
-
-    It reads `request.query_string` itself rather than carrying `Query()`
-    markers, because a dependency's own parameters are never bound.
-    """
     app = wreath.Wreath()
 
     @app.get("/llamas")
@@ -260,12 +214,6 @@ async def test_page_params_binds_the_query_string() -> None:
 
 @pytest.mark.asyncio
 async def test_page_params_clamps_rather_than_refusing() -> None:
-    """A page past the end asks for the last page; that is not a protocol error.
-
-    `MAX_PAGE` exists because `LIMIT/OFFSET` makes the database walk and discard
-    every row before the offset, so an unbounded page number is a scan an
-    anonymous caller could ask for repeatedly.
-    """
     app = wreath.Wreath()
 
     @app.get("/llamas")
@@ -281,9 +229,6 @@ async def test_page_params_clamps_rather_than_refusing() -> None:
             "page": 1,
             "size": DEFAULT_SIZE,
         }
-
-
-# --- identify(): anonymous is a value, not an error ---------------------------
 
 
 class _HeaderBackend(AuthenticationBackend):
@@ -321,12 +266,6 @@ def _identity_app() -> wreath.Wreath:
 
 @pytest.mark.asyncio
 async def test_identify_publishes_the_identity_it_finds() -> None:
-    """The defect: a caller holding a good session was told `signed_in: false`.
-
-    `request.identity` is populated only when the backend runs, and the backend
-    ran only for a route that *required* an identity -- so the one question a
-    sign-in-aware page asks on load could not be answered.
-    """
     async with TestClient(_identity_app()) as client:
         known = await client.get("/session", headers={"x-who": "bo"})
         assert known.status == 200
@@ -335,7 +274,6 @@ async def test_identify_publishes_the_identity_it_finds() -> None:
 
 @pytest.mark.asyncio
 async def test_identify_admits_an_anonymous_caller() -> None:
-    """No challenge, no 401 -- the route is public and the answer is `None`."""
     async with TestClient(_identity_app()) as client:
         anonymous = await client.get("/session")
         assert anonymous.status == 200
@@ -344,7 +282,6 @@ async def test_identify_admits_an_anonymous_caller() -> None:
 
 @pytest.mark.asyncio
 async def test_authenticated_still_refuses_an_anonymous_caller() -> None:
-    """The distinction is the point: `identify` must not soften `authenticated`."""
     async with TestClient(_identity_app()) as client:
         assert (await client.get("/private")).status == 401
         assert (await client.get("/private", headers={"x-who": "bo"})).status == 200
@@ -352,12 +289,6 @@ async def test_authenticated_still_refuses_an_anonymous_caller() -> None:
 
 @pytest.mark.asyncio
 async def test_a_route_with_no_requirement_still_sees_no_identity() -> None:
-    """The control. Without it, `identify` publishing an identity proves nothing.
-
-    An unmarked route must stay unmarked: the backend is not asked, so a caller
-    holding a perfectly good credential is still anonymous there. That is the
-    documented contract and the reason `identify()` has to exist at all.
-    """
     async with TestClient(_identity_app()) as client:
         response = await client.get("/public", headers={"x-who": "bo"})
         assert response.json() == {"identity_is": "none"}

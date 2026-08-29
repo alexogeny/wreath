@@ -89,7 +89,7 @@ def perf_counters(command: list[str]) -> dict[str, float] | None:
             capture_output=True,
             text=True,
         )
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
     if proc.returncode != 0:
         return None
@@ -137,7 +137,7 @@ def observed_mhz() -> float:
     for path in Path("/sys/devices/system/cpu").glob("cpu*/cpufreq/scaling_cur_freq"):
         try:
             values.append(int(path.read_text()) / 1000.0)
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
     return max(values) if values else 0.0
 
@@ -209,8 +209,7 @@ def main(argv: list[str] | None = None) -> int:
     unknown = [name for name in names if name not in module.ARMS]
     if unknown:
         print(
-            f"wreath-cpu-probe: unknown arm(s) {unknown}; "
-            f"available: {sorted(module.ARMS)}",
+            f"wreath-cpu-probe: unknown arm(s) {unknown}; available: {sorted(module.ARMS)}",
             file=sys.stderr,
         )
         return 2
@@ -228,9 +227,16 @@ def main(argv: list[str] | None = None) -> int:
             "ns": seconds / args.requests * 1e9,
             "counters": per_operation(
                 lambda n, name=name: [
-                    sys.executable, str(benchmark), "--arm", name,
-                    "--trials", str(args.trials), "--warmup", str(args.warmup),
-                    "--requests", str(n),
+                    sys.executable,
+                    str(benchmark),
+                    "--arm",
+                    name,
+                    "--trials",
+                    str(args.trials),
+                    "--warmup",
+                    str(args.warmup),
+                    "--requests",
+                    str(n),
                 ],
                 args.requests,
                 scale=args.trials,

@@ -33,9 +33,7 @@ _COLUMN_EXISTS = (
 )
 
 
-async def column_exists(
-    executor: Any, *, schema: str, table: str, column: str
-) -> bool:
+async def column_exists(executor: Any, *, schema: str, table: str, column: str) -> bool:
     """Whether `schema.table` currently has `column`.
 
     `attnum > 0` excludes the system columns and `NOT attisdropped` excludes one

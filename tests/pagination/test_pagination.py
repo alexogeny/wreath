@@ -1,5 +1,3 @@
-"""Pagination: page math + query-param parsing (pure) and query shaping (ORM)."""
-
 from __future__ import annotations
 
 import pytest
@@ -39,7 +37,6 @@ def test_numeric_rank_can_bound_and_transform_the_owned_source() -> None:
 
 
 def test_numeric_rank_partial_workspace_matches_python_sort() -> None:
-    """Small requested prefixes still keep exact score and tie ordering."""
     from wreath.pagination import _rank_indices
 
     for count in (0, 1, 7, 48, 129):
@@ -52,13 +49,12 @@ def test_numeric_rank_partial_workspace_matches_python_sort() -> None:
                 ordered.reverse()
             for page, size in ((1, 1), (1, 12), (2, 12), (5, 7), (20, 12)):
                 start = (page - 1) * size
-                assert _rank_indices(
-                    scores, page=page, size=size, descending=descending
-                ) == tuple(ordered[start:start + size])
+                assert _rank_indices(scores, page=page, size=size, descending=descending) == tuple(
+                    ordered[start : start + size]
+                )
 
 
 def test_numeric_rank_empty_page_still_validates_every_score() -> None:
-    """Skipping an unnecessary sort must not turn an empty page into a bypass."""
     from wreath.pagination import _rank_indices
 
     with pytest.raises(TypeError, match="rank score 1 must be int or float"):
@@ -104,12 +100,6 @@ def test_page_params_defaults():
 
 
 def test_page_params_clamps_and_falls_back():
-    """Out of range clamps; unparseable falls back. Neither raises.
-
-    A hand-edited URL should degrade to a page that exists, not 422 -- and
-    `MAX_PAGE` is a real ceiling because `LIMIT/OFFSET` walks and discards every
-    row before the offset.
-    """
     from wreath.pagination import MAX_PAGE, MAX_SIZE
 
     clamped = page_params(_Q(f"page={MAX_PAGE + 1}&size={MAX_SIZE + 1}"))
@@ -125,9 +115,6 @@ def test_cursor_params_keeps_the_opaque_position_and_native_bounds():
     assert cursor_params(_Q("after=abc-_&size=9999&sort=-name")) == CursorParams(
         after="abc-_", size=100, sort=("-name",)
     )
-
-
-# --- ORM query shaping (needs the built package for the model layout) --------
 
 
 def _model():
@@ -165,12 +152,6 @@ def _retrieval_model():
 
 
 def test_the_default_allowlist_holds_no_retrieval_column():
-    """`?sort=embedding` is the deep `OFFSET` again, twenty lines away.
-
-    pgvector gives `vector` a btree opclass, so `ORDER BY embedding` is valid SQL
-    that runs -- a full sort of the table on kilobyte values, with no index that
-    can serve it, on a query string an anonymous caller controls.
-    """
     from wreath.pagination import apply_filters, apply_sort, sortable_fields
 
     Doc = _retrieval_model()
@@ -298,19 +279,7 @@ async def test_a_cursor_is_bound_to_its_sort_order():
         )
 
 
-# --- what `wreath mutant` found nothing was standing on -----------------------
-
-
 def test_the_ceilings_are_the_documented_numbers() -> None:
-    """`test_page_params_clamps_and_falls_back` cannot notice these moving.
-
-    It asserts `page == MAX_PAGE` after asking for `MAX_PAGE + 1`, so widening
-    the constant widens the expectation with it -- `value.widen-bound` pushed
-    both past reach and the test stayed green. These bounds are the ones an
-    anonymous caller runs into, so the numbers themselves are the contract:
-    `LIMIT/OFFSET` makes the database walk and discard every row before the
-    offset, and `MAX_SIZE` is how many rows one request may materialise.
-    """
     from wreath.pagination import MAX_PAGE, MAX_SIZE
 
     assert (MAX_SIZE, MAX_PAGE) == (100, 10_000)
@@ -322,11 +291,6 @@ def test_the_ceilings_are_the_documented_numbers() -> None:
 
 
 def test_parse_sort_drops_blanks_rather_than_producing_them() -> None:
-    """An empty token would reach `_column` as `""` and refuse the whole request.
-
-    `?sort=name,` and `?sort=,` are what a UI produces when a chip is removed,
-    so the blank has to go rather than become a lookup for a column named "".
-    """
     assert parse_sort("name,") == ("name",)
     assert parse_sort(",name") == ("name",)
     assert parse_sort("name,,id") == ("name", "id")
@@ -335,7 +299,6 @@ def test_parse_sort_drops_blanks_rather_than_producing_them() -> None:
 
 
 def test_a_blank_page_or_size_falls_back_rather_than_clamping_to_one() -> None:
-    """`?page=` is absent, not zero: the default is 1 and 20, not 1 and 1."""
     assert page_params(_Q("page=&size=")) == PageParams(
         page=1,
         size=DEFAULT_SIZE,
@@ -348,12 +311,6 @@ def test_a_blank_page_or_size_falls_back_rather_than_clamping_to_one() -> None:
 
 
 def test_a_leading_minus_sorts_descending_and_its_absence_ascending() -> None:
-    """Both directions, because `expression.take-branch` survived both ways.
-
-    Nothing asserted that `-name` differs from `name` at all: the existing test
-    counts the orderings rather than reading them, so a build that ignored the
-    minus sign passed.
-    """
     from wreath.pagination import apply_sort
 
     Widget = _model()
@@ -367,7 +324,6 @@ def test_a_leading_minus_sorts_descending_and_its_absence_ascending() -> None:
 
 
 def test_sorting_by_nothing_returns_the_query_unchanged() -> None:
-    """An empty sort must not append an empty `ORDER BY`."""
     from wreath.pagination import apply_sort
 
     Widget = _model()
@@ -377,7 +333,6 @@ def test_sorting_by_nothing_returns_the_query_unchanged() -> None:
 
 
 def test_filtering_by_nothing_returns_the_query_unchanged() -> None:
-    """The `WHERE`-building half, which no test reached at all."""
     from wreath.pagination import apply_filters
 
     Widget = _model()
@@ -392,7 +347,6 @@ def test_filtering_by_nothing_returns_the_query_unchanged() -> None:
 
 
 def test_filters_default_to_the_same_allow_list_as_sorting() -> None:
-    """`allow=None` means `sortable_fields`, which excludes retrieval columns."""
     from wreath.pagination import apply_filters
 
     Widget = _model()
@@ -440,13 +394,6 @@ def test_filter_set_refuses_text_operators_on_non_text_columns_at_declaration() 
 
 
 def test_a_filter_allow_list_narrows_below_the_default() -> None:
-    """`allow=` must actually replace `sortable_fields`, not sit beside it.
-
-    The earlier test refuses a column the model does not have, which the default
-    allow-list refuses too -- so it passed with `allow=` ignored. This refuses a
-    column the model *does* have and the caller did not permit, which is the
-    only shape that tells the two apart.
-    """
     from wreath.pagination import apply_filters, sortable_fields
 
     Widget = _model()
@@ -458,11 +405,6 @@ def test_a_filter_allow_list_narrows_below_the_default() -> None:
 
 @pytest.mark.asyncio
 async def test_paginate_applies_the_sort_and_honours_allow_sort() -> None:
-    """`paginate`'s own sort branch, and the allow-list it forwards.
-
-    Both were invisible: every `paginate` test passed `PageParams` with no
-    `sort`, so the branch never ran, and `allow_sort=` was never given at all.
-    """
     from wreath.pagination import paginate
 
     Widget = _model()

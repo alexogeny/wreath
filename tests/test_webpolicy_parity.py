@@ -1,11 +1,3 @@
-"""Browser response/request policy, held to RFC 9110 rather than to ourselves.
-
-Every vector is an expectation from outside Wreath: an example lifted from RFC
-9110 with its clause quoted beside it, or -- where the behaviour is Wreath's own
-choice rather than the RFC's -- a value spelled out with the derivation written
-down.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -14,7 +6,6 @@ from wreath._native import _core
 
 
 def test_every_helper_this_file_covers_is_exported() -> None:
-    """A missing export would otherwise skip a whole block of vectors silently."""
     for name in (
         "select_content_encoding",
         "append_vary",
@@ -30,8 +21,6 @@ def test_every_helper_this_file_covers_is_exported() -> None:
         assert hasattr(_core, name), name
 
 
-# -- Accept-Encoding, RFC 9110 §12.5.3 ----------------------------------------
-#
 # `select_content_encoding` answers one question: which coding, if any, should
 # this response be encoded with. `None` means "send it uncoded", which is the
 # `identity` coding the RFC says is "acceptable by default".
@@ -42,13 +31,11 @@ def test_every_helper_this_file_covers_is_exported() -> None:
     [
         # The five field values RFC 9110 §12.5.3 gives as its own worked
         # examples, in the order the RFC lists them.
-        #
         #   Accept-Encoding: compress, gzip
         #   Accept-Encoding:
         #   Accept-Encoding: *
         #   Accept-Encoding: compress;q=0.5, gzip;q=1.0
         #   Accept-Encoding: gzip;q=1.0, identity; q=0.5, *;q=0
-        #
         # gzip is named with the default weight of 1, and Wreath offers gzip.
         (b"compress, gzip", "gzip"),
         # "An Accept-Encoding header field with a combined field value that is
@@ -64,9 +51,6 @@ def test_every_helper_this_file_covers_is_exported() -> None:
         # `*;q=0` excludes everything unlisted, but gzip is listed at q=1 and
         # the more specific entry wins.
         (b"gzip;q=1.0, identity; q=0.5, *;q=0", "gzip"),
-        #
-        # -- the rules those examples exercise, one at a time -----------------
-        #
         # A weight is optional and defaults to 1 (§12.4.2).
         (b"gzip", "gzip"),
         # "a value of 0 means 'not acceptable'" (§12.4.2).
@@ -90,9 +74,6 @@ def test_every_helper_this_file_covers_is_exported() -> None:
         # "content coding values are case-insensitive" (§8.4.1), and OWS is
         # allowed around the parameter separators (§5.6.1.2, §12.4.2).
         (b"GZip ; q=1.000", "gzip"),
-        #
-        # -- Wreath's own policy, where the RFC leaves a choice ---------------
-        #
         # zstd is offered only to a client that named it. A bare wildcard still
         # means gzip, so nothing that used to get gzip gets an unasked-for
         # coding. §12.5.3 would permit reading `*` as consent to zstd; a client
@@ -178,19 +159,7 @@ def test_allowed_origins_are_normalized_before_comparison() -> None:
     assert _core.origin_matches(origin, allowed)
 
 
-# -- Vary, RFC 9110 §12.5.5 ---------------------------------------------------
-
-
 def test_header_mutations() -> None:
-    """Two Vary field lines collapse into one, and Content-Length is replaced.
-
-    RFC 9110 §5.3 permits a recipient to combine field lines with the same name
-    "into one field line ... by appending each subsequent field line value to
-    the initial field line value in order, separated by a comma", which is what
-    `append_vary` does before adding its own token. §12.5.5 makes the value a
-    list of field names, and §5.1 makes those names case-insensitive, so
-    `Origin` and `Cookie` normalize to lower case.
-    """
     expected = [
         (b"vary", b"origin, cookie, accept-encoding"),
         (b"content-length", b"12"),
@@ -243,18 +212,6 @@ def test_append_vary_follows_rfc_9110(
 
 
 def test_each_replacement_helper_replaces_exactly_its_own_field() -> None:
-    """One replacement each, with every other header of that name preserved.
-
-    The three helpers differ in what "one" means, and the expected list below is
-    what distinguishes them: `replace_response_header` drops every field line
-    with that name (§5.3 makes them one field, so replacing means replacing all
-    of it), `replace_cookie` keeps the Set-Cookie lines whose cookie-name
-    differs (RFC 6265 §4.1 makes each line a separate cookie), and
-    `replace_server_timing` keeps the other metrics inside the field value
-    (Server-Timing is a list, and its metric names are case-insensitive).
-    Each replacement lands at the end, where the first surviving header of that
-    name used to be irrelevant.
-    """
     initial = [
         (b"X-Request-ID", b"old"),
         (b"set-cookie", b"session=keep; Path=/"),
@@ -338,13 +295,6 @@ def test_append_missing_headers_duplicates(
 
 
 def test_append_missing_headers_crosses_the_set_threshold() -> None:
-    """Past 256 name comparisons `append_missing_headers` swaps its scan for a set.
-
-    The answer may not change with it, so the expected list is written out in
-    full: 64 existing headers untouched, the 64 lower-case additions appended in
-    order, and the 64 upper-case repeats of those recognised as the same field
-    names (RFC 9110 §5.1) and dropped.
-    """
     headers = [(f"x-existing-{i}".encode(), b"value") for i in range(64)]
     additions = tuple((f"x-added-{i}".encode(), b"first") for i in range(64))
     additions += tuple((name.upper(), b"second") for name, _ in additions)

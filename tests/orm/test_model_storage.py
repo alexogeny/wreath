@@ -1,11 +1,3 @@
-"""Fixed-size model storage: layout, bitmaps, protocol, and GC.
-
-These tests assert the *shape* of the generated C types. Behavior is covered by
-the shared suite, which runs against whichever storage is active; what is
-specific here is that the layout is fixed, aligned, non-overlapping, and
-collectable.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -85,9 +77,7 @@ def test_scalar_columns_are_stored_inline_and_only_payloads_are_boxed() -> None:
 
 def test_cells_are_aligned_and_never_overlap() -> None:
     layout = Wide.__layout__
-    spans = sorted(
-        (field["offset"], field["offset"] + field["size"]) for field in layout["fields"]
-    )
+    spans = sorted((field["offset"], field["offset"] + field["size"]) for field in layout["fields"])
     for (_, end), (start, _) in zip(spans, spans[1:], strict=False):
         assert end <= start, f"cells overlap: {spans}"
     assert spans[-1][1] <= layout["storage_basicsize"]
@@ -214,9 +204,6 @@ def test_loaded_values_materialize_only_the_public_boundary() -> None:
     assert instance._orm_loaded_values() == {"id": 7, "flag": True, "label": None}
 
 
-# -- garbage collection --------------------------------------------------------
-
-
 def test_instances_are_collectable_through_reference_cycles() -> None:
     class Node(Model, table="gc_nodes"):
         id: Mapped[int] = column(Int64, primary_key=True)
@@ -255,12 +242,24 @@ def test_a_model_class_and_its_storage_are_collectable() -> None:
 
 def test_many_instances_survive_repeated_collection() -> None:
     for _ in range(3):
-        batch = [Wide(id=i, flag=True, small=1, label="x" * i, medium=1, ratio=1.0,
-                      amount=1.0, blob=b"", day=datetime.date(2024, 1, 1),
-                      moment=datetime.datetime(2024, 1, 1),
-                      zoned=datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC),
-                      key=uuid.uuid4(), doc={})
-                 for i in range(200)]
+        batch = [
+            Wide(
+                id=i,
+                flag=True,
+                small=1,
+                label="x" * i,
+                medium=1,
+                ratio=1.0,
+                amount=1.0,
+                blob=b"",
+                day=datetime.date(2024, 1, 1),
+                moment=datetime.datetime(2024, 1, 1),
+                zoned=datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC),
+                key=uuid.uuid4(),
+                doc={},
+            )
+            for i in range(200)
+        ]
         gc.collect()
         assert len(batch) == 200
         del batch

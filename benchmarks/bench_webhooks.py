@@ -29,6 +29,7 @@ _KEY = {"benchmark": b"wreath-webhook-benchmark-key-material"}
 _BODY = b'{"event":"benchmark","value":42}'
 _TIMESTAMP = datetime(2026, 7, 16, 10, 0, tzinfo=UTC)
 
+
 @dataclass
 class _Payload:
     event: str
@@ -104,9 +105,7 @@ async def run(iterations: int, trials: int) -> dict[str, Any]:
         return verifier.verify(body=_BODY, headers=headers, now=_TIMESTAMP)
 
     def source_verify() -> WebhookEnvelope:
-        return verifier._verify_normalized(
-            body=_BODY, headers=headers, now=_TIMESTAMP
-        )
+        return verifier._verify_normalized(body=_BODY, headers=headers, now=_TIMESTAMP)
 
     raw_headers = list(headers.items())
 
@@ -150,9 +149,7 @@ async def run(iterations: int, trials: int) -> dict[str, Any]:
     timestamp = _format_timestamp(_TIMESTAMP)
 
     def signature_base() -> bytes:
-        return _signature_base(
-            timestamp, _ENVELOPE.id, _ENVELOPE.type, _ENVELOPE.body
-        )
+        return _signature_base(timestamp, _ENVELOPE.id, _ENVELOPE.type, _ENVELOPE.body)
 
     verified = verify()
     if verified.body != _BODY or verified.id != _ENVELOPE.id:
@@ -170,18 +167,14 @@ async def run(iterations: int, trials: int) -> dict[str, Any]:
         },
         "aa_noise": _aa_noise(iterations, trials),
         "results": {
-            "header_normalization": _summary(
-                _measure(normalize_headers, iterations, trials)
-            ),
+            "header_normalization": _summary(_measure(normalize_headers, iterations, trials)),
             "source_headers_two_pass": _summary(
                 _measure(source_headers_two_pass, iterations, trials)
             ),
             "source_headers_one_pass": _summary(
                 _measure(source_headers_one_pass, iterations, trials)
             ),
-            "identity_decode": _summary(
-                _measure(decode_identity, iterations, trials)
-            ),
+            "identity_decode": _summary(_measure(decode_identity, iterations, trials)),
             "timestamp_parse": _summary(
                 _measure(lambda: _parse_timestamp(timestamp), iterations, trials)
             ),
@@ -191,17 +184,11 @@ async def run(iterations: int, trials: int) -> dict[str, Any]:
             "compiled_payload_validation": _summary(
                 _measure(compiled_validation, iterations, trials)
             ),
-            "signature_base": _summary(
-                _measure(signature_base, iterations, trials)
-            ),
+            "signature_base": _summary(_measure(signature_base, iterations, trials)),
             "hmac_sign": _summary(_measure(sign, iterations, trials)),
             "hmac_verify": _summary(_measure(verify, iterations, trials)),
-            "source_verify": _summary(
-                _measure(source_verify, iterations, trials)
-            ),
-            "local_replay_claim": _summary(
-                await _measure_replay(iterations, trials)
-            ),
+            "source_verify": _summary(_measure(source_verify, iterations, trials)),
+            "local_replay_claim": _summary(await _measure_replay(iterations, trials)),
         },
     }
 

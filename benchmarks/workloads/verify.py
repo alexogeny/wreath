@@ -51,39 +51,29 @@ async def _run() -> int:
         print("Shape 1: small JSON serialization")
         response = await client.get("/json")
         checker.check(response.status == 200, "JSON status 200")
-        checker.check(
-            response.header("content-type") == "application/json", "JSON content type"
-        )
+        checker.check(response.header("content-type") == "application/json", "JSON content type")
         checker.check(response.body == b'{"message":"Hello, World!"}', "JSON exact bytes")
 
         print("Shape 2: reusable static/plaintext response")
         response = await client.get("/plaintext")
         checker.check(response.body == b"Hello, World!", "plaintext body")
-        checker.check(
-            response.header("content-length") == "13", "plaintext content-length"
-        )
+        checker.check(response.header("content-length") == "13", "plaintext content-length")
         head = await client.head("/plaintext")
         checker.check(head.body == b"", "HEAD suppresses body")
-        checker.check(
-            head.header("content-length") == "13", "HEAD keeps content-length"
-        )
+        checker.check(head.header("content-length") == "13", "HEAD keeps content-length")
 
         print("Shape 3: point database read")
         before = len(server.flights)
         response = await client.get("/widget/1")
         checker.check(response.json() == {"id": 1, "value": 100}, "point read value")
-        checker.check(
-            len(server.flights) - before == 1, "point read is one database operation"
-        )
+        checker.check(len(server.flights) - before == 1, "point read is one database operation")
 
         print("Shape 4: independent fan-out reads")
         before = len(server.flights)
         response = await client.get("/widgets?queries=3")
         rows = response.json()
         checker.check(len(rows) == 3, "fan-out returns one row per input")
-        checker.check(
-            len(server.flights) - before == 3, "fan-out is one Sync per input"
-        )
+        checker.check(len(server.flights) - before == 3, "fan-out is one Sync per input")
         # Query clamp: 0 -> minimum 1; huge -> maximum 500 (not exercised in full).
         clamped_low = await client.get("/widgets?queries=0")
         checker.check(len(clamped_low.json()) == 1, "query clamp low -> minimum")
@@ -95,7 +85,7 @@ async def _run() -> int:
         payload = {"updates": [{"id": 1, "value": 11}, {"id": 2, "value": 22}]}
         response = await client.post("/widgets/update?queries=2", json=payload)
         checker.check(response.json()["updated"] == 2, "update applied two rows")
-        new_sql = server.executed_sql[len(before_sql):]
+        new_sql = server.executed_sql[len(before_sql) :]
         begin = new_sql.index("BEGIN")
         commit = new_sql.index("COMMIT")
         reads = [i for i, s in enumerate(new_sql) if s.startswith("SELECT id, value")]

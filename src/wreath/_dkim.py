@@ -78,8 +78,6 @@ class DkimError(Exception):
     """A key could not be read, or a signature failed its own verification."""
 
 
-# --- canonicalisation (RFC 6376 §3.4) ---------------------------------------
-
 _WSP_RUN = re.compile(rb"[ \t]+")
 
 
@@ -101,9 +99,6 @@ def canonicalize_header_relaxed(name: str, value: str) -> bytes:
 
 
 canonicalize_body_relaxed = _core.dkim_canonicalize_body
-
-
-# --- keys -------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,9 +222,6 @@ def _rsa_from_pkcs1(der: bytes) -> RsaKey:
     return RsaKey(n=n, e=e, d=d, p=p, q=q, dp=dp, dq=dq, qinv=qinv)
 
 
-# --- RSASSA-PKCS1-v1_5 (RFC 8017) -------------------------------------------
-
-
 def _pkcs1_encode(digest: bytes, size: int) -> bytes:
     suffix = _SHA256_DIGEST_INFO + digest
     padding = size - len(suffix) - 3
@@ -258,9 +250,6 @@ def _rsa_sign(key: RsaKey, message: bytes) -> bytes:
     return signature.to_bytes(key.size_bytes, "big")
 
 
-# --- Ed25519 signing (RFC 8032 §5.1.6) --------------------------------------
-
-
 def _ed25519_sign(seed: bytes, message: bytes) -> bytes:
     if len(seed) != 32:
         raise DkimError("an Ed25519 seed is 32 bytes")
@@ -272,9 +261,6 @@ def ed25519_public_key(seed: bytes) -> bytes:
     if len(seed) != 32:
         raise DkimError("an Ed25519 seed is 32 bytes")
     return _core.curve_ed_public_key(seed)
-
-
-# --- the signer -------------------------------------------------------------
 
 
 def _fold(value: str) -> str:

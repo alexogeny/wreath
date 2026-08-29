@@ -114,7 +114,7 @@ class Progress:
 
     percent: float
     message: str = ""
-    state: str = "running"     # "running" | "done" | "failed"
+    state: str = "running"  # "running" | "done" | "failed"
     error: str | None = None
 
     @property
@@ -134,8 +134,12 @@ class Progress:
         return self.state in _TERMINAL or self.state in _STREAM_ENDED
 
     def as_dict(self) -> dict[str, Any]:
-        return {"percent": self.percent, "message": self.message,
-                "state": self.state, "error": self.error}
+        return {
+            "percent": self.percent,
+            "message": self.message,
+            "state": self.state,
+            "error": self.error,
+        }
 
 
 class ProgressRegistry:
@@ -163,8 +167,13 @@ class ProgressRegistry:
         self._bridge = BusBridge(bus, channel=channel, apply=self._apply)
 
     def report(
-        self, task_id: str, percent: float, message: str = "",
-        *, state: str = "running", error: str | None = None,
+        self,
+        task_id: str,
+        percent: float,
+        message: str = "",
+        *,
+        state: str = "running",
+        error: str | None = None,
     ) -> None:
         progress = Progress(_clamp(percent), message[:MAX_MESSAGE_CHARS], state, error)
         self._store.set(task_id, progress)
@@ -177,8 +186,6 @@ class ProgressRegistry:
             # stale bar until the next update, and the terminal state is what
             # actually matters.
             self._bridge.publish_soon({"task_id": task_id, **progress.as_dict()})
-
-    # -- across workers --------------------------------------------------------
 
     async def _apply(self, payload: dict[str, Any]) -> None:
         """Apply another worker's report. Never republished -- one hop only."""
@@ -218,12 +225,10 @@ class ProgressRegistry:
         task that never appeared has been waited for long enough, or once
         `max_duration` seconds have passed.
 
-        That last case is the one worth naming: a stream for an id that does not
-        exist used to poll forever, so any caller -- including an unauthenticated
-        one, since these helpers carry no auth of their own -- could hold a
-        connection open indefinitely by asking about a task that was never
-        launched. A short grace period still covers the real race, where a client
-        starts watching a moment before the task is registered.
+        An unknown id receives a short grace period for the race where a client
+        starts watching just before task registration, then the stream emits an
+        `unknown` event and closes. These helpers carry no authentication of
+        their own; authorization belongs on the route that exposes the stream.
 
         **Every stream ends with an event saying why**, so a close is never
         ambiguous with a dropped connection: `done`/`failed` when the task
@@ -237,8 +242,7 @@ class ProgressRegistry:
         last: Progress | None = None
         missing = 0
         deadline = (
-            None if max_duration is None
-            else asyncio.get_running_loop().time() + max_duration
+            None if max_duration is None else asyncio.get_running_loop().time() + max_duration
         )
         while True:
             if deadline is not None and asyncio.get_running_loop().time() >= deadline:
@@ -283,7 +287,8 @@ class ProgressReporter:
 
     def fail(self, error: object, message: str = "") -> None:
         self._registry.report(
-            self._task_id, self._current_percent(), message, state="failed", error=str(error))
+            self._task_id, self._current_percent(), message, state="failed", error=str(error)
+        )
 
     def _current_percent(self) -> float:
         current = self._registry.get(self._task_id)
@@ -327,9 +332,7 @@ async def _progress_events(
     interval: float,
     max_duration: float | None = None,
 ):
-    async for progress in registry.stream(
-        task_id, interval=interval, max_duration=max_duration
-    ):
+    async for progress in registry.stream(task_id, interval=interval, max_duration=max_duration):
         yield ServerSentEvent(data=_as_text(progress.as_dict()), event="progress")
 
 
@@ -361,7 +364,5 @@ async def push_progress(
     max_duration: float | None = None,
 ) -> None:
     """Push progress as JSON text frames over an accepted WebSocket until terminal."""
-    async for progress in registry.stream(
-        task_id, interval=interval, max_duration=max_duration
-    ):
+    async for progress in registry.stream(task_id, interval=interval, max_duration=max_duration):
         await websocket.send_text(_as_text(progress.as_dict()))

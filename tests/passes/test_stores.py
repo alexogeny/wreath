@@ -1,12 +1,3 @@
-"""The first caller: the five purge loops a chunked pass replaces.
-
-Three of Wreath's own store tables were a single unbounded ``DELETE`` -- the long
-transaction one transaction per chunk exists to prevent -- and the two webhook
-purges had a chunk size with no cursor, no resumption, and no pacing. That is
-what a primitive looks like while it is being rediscovered, so retiring all five
-onto one is the point of doing this caller first.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -36,9 +27,6 @@ def _purge(declaration=REPLAYS, **options):
     from wreath._passes.stores import keyed_purge_pass
 
     return keyed_purge_pass(declaration, name="purge_replays", **options)
-
-
-# --- the declaration a store implies ------------------------------------------
 
 
 def test_a_keyed_store_yields_a_recurring_pass_over_its_own_table():
@@ -92,9 +80,6 @@ def test_an_idle_store_purge_holds_the_frontier_back():
     walk = _purge(after=3600.0)
 
     assert walk.frontier.after == 3600.0
-
-
-# --- the walk over a real store table -----------------------------------------
 
 
 async def test_the_purge_drops_expired_rows_and_leaves_live_ones():
@@ -171,9 +156,6 @@ async def test_a_redeploy_mid_purge_resumes_rather_than_restarting():
     assert world.rows == []
 
 
-# --- the store surfaces -------------------------------------------------------
-
-
 def test_every_store_that_purges_offers_a_pass():
     from wreath.policy.idempotency import PostgresIdempotencyStore
     from wreath.policy.ratelimit import PostgresRateLimitStore
@@ -204,11 +186,6 @@ def test_the_unbounded_purge_documents_what_it_costs():
 
 
 def test_a_purge_pass_builder_takes_no_database():
-    """A pass is a declaration; it is handed a database when it is driven.
-
-    All three keyed stores passed one and it was discarded, so the signature
-    promised a wiring step that did not exist.
-    """
     import inspect
 
     from wreath._passes.stores import keyed_purge_pass
@@ -216,7 +193,5 @@ def test_a_purge_pass_builder_takes_no_database():
     parameters = inspect.signature(keyed_purge_pass).parameters
     assert "database" not in parameters
     assert [
-        name
-        for name, p in parameters.items()
-        if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+        name for name, p in parameters.items() if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
     ] == ["declaration"]

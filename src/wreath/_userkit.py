@@ -57,7 +57,6 @@ __all__ = [
     "verify_token",
 ]
 
-# --- password hashing -------------------------------------------------------
 
 _SCRYPT_N = 2**14
 _SCRYPT_R = 8
@@ -92,8 +91,13 @@ def hash_password(
         raise ValueError(f"password must not exceed {MAX_PASSWORD_BYTES} bytes")
     salt = os.urandom(16)
     dk = hashlib.scrypt(
-        password.encode("utf-8"), salt=salt, n=n, r=r, p=p,
-        dklen=_SCRYPT_DKLEN, maxmem=_SCRYPT_MAXMEM,
+        password.encode("utf-8"),
+        salt=salt,
+        n=n,
+        r=r,
+        p=p,
+        dklen=_SCRYPT_DKLEN,
+        maxmem=_SCRYPT_MAXMEM,
     )
     return f"scrypt${n}${r}${p}${_b64(salt)}${_b64(dk)}"
 
@@ -110,15 +114,17 @@ def verify_password(password: str, encoded: str) -> bool:
             return False
         expected = _unb64(hash_b64)
         dk = hashlib.scrypt(
-            password.encode("utf-8"), salt=_unb64(salt_b64),
-            n=int(n), r=int(r), p=int(p), dklen=len(expected), maxmem=_SCRYPT_MAXMEM,
+            password.encode("utf-8"),
+            salt=_unb64(salt_b64),
+            n=int(n),
+            r=int(r),
+            p=int(p),
+            dklen=len(expected),
+            maxmem=_SCRYPT_MAXMEM,
         )
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return False
     return hmac.compare_digest(dk, expected)
-
-
-# --- signed action tokens ---------------------------------------------------
 
 
 def _frame(*fields: str) -> str:
@@ -172,24 +178,17 @@ def verify_token(
     """Return the token `subject` if valid/unexpired/purpose-and-bound-matched, else None."""
     try:
         encoded, mac = token.split(".")
-        expected = hmac.new(
-            secret.encode("utf-8"), encoded.encode("ascii"), "sha256"
-        ).hexdigest()
+        expected = hmac.new(secret.encode("utf-8"), encoded.encode("ascii"), "sha256").hexdigest()
         if not hmac.compare_digest(mac, expected):
             return None
-        got_purpose, subject, expires, got_bound = _unframe(
-            _unb64(encoded).decode("utf-8"), 4
-        )
-    except (ValueError, TypeError):
+        got_purpose, subject, expires, got_bound = _unframe(_unb64(encoded).decode("utf-8"), 4)
+    except ValueError, TypeError:
         return None
     if got_purpose != purpose or got_bound != bound:
         return None
     if int(expires) < int(time.time() if now is None else now):
         return None
     return subject
-
-
-# --- user record + store ----------------------------------------------------
 
 
 @dataclass(slots=True)
@@ -303,8 +302,11 @@ class InMemoryUserStore:
         self._seq += 1
         now = time.time()
         record = UserRecord(
-            id=str(self._seq), email=_normalize_email(email),
-            hashed_password=hashed_password, created_at=now, updated_at=now,
+            id=str(self._seq),
+            email=_normalize_email(email),
+            hashed_password=hashed_password,
+            created_at=now,
+            updated_at=now,
         )
         self._by_id[record.id] = record
         self._by_email[record.email] = record.id
@@ -324,9 +326,6 @@ class InMemoryUserStore:
         self._by_id[user.id] = user
         self._by_email[_normalize_email(user.email)] = user.id
         return user
-
-
-# --- email hook -------------------------------------------------------------
 
 
 @runtime_checkable
@@ -417,9 +416,6 @@ class CapturingEmailSender:
             if reason is not None:
                 raise SuppressedError(f"{message.to} is suppressed ({reason})")
         self.messages.append(message)
-
-
-# --- what kind of mail this is ----------------------------------------------
 
 
 class MailClass(StrEnum):
@@ -652,9 +648,7 @@ class SmtpEmailSender:
         """
         await self._send_link(email, link, self.reset_subject, "Reset your password")
 
-    async def _send_link(
-        self, email: str, link: str, subject: str, instruction: str
-    ) -> None:
+    async def _send_link(self, email: str, link: str, subject: str, instruction: str) -> None:
         await self.send(
             Message(
                 to=email,
@@ -754,7 +748,7 @@ class SmtpEmailSender:
             # `EmailMessage` under its own policy, which can refold a header and
             # invalidate the signature over it.
             smtp.sendmail(self.from_addr, [message.to], raw)
-        except (OSError, smtplib.SMTPException):
+        except OSError, smtplib.SMTPException:
             # Counted, then re-raised. Not swallowed: this is the exact site
             # where "the mail sent, nothing raised, nobody got it" comes from,
             # and the counter is what makes an outage visible to an operator
@@ -766,8 +760,6 @@ class SmtpEmailSender:
             smtp.close()
 
 
-# --- flow logic (framework-agnostic) ----------------------------------------
-#
 # Each returns plain data (bool / UserRecord | None) — the router glue in
 # wreath.users maps these to JSON responses + session writes. Responses are kept
 # uniform for register/forgot so an attacker can't enumerate accounts.
@@ -875,8 +867,9 @@ async def start_password_reset(
         # send remains the honest asymmetry; queue it to remove that too.
         sign_token(secret, _RESET, "", ttl=ttl, bound="", now=now)
         return None
-    token = sign_token(secret, _RESET, user.id, ttl=ttl,
-                       bound=fingerprint(user.hashed_password), now=now)
+    token = sign_token(
+        secret, _RESET, user.id, ttl=ttl, bound=fingerprint(user.hashed_password), now=now
+    )
     await mailer.send_password_reset(user.email, link_builder(_RESET, token))
     return None
 
@@ -897,8 +890,10 @@ async def reset_password(
     user = await store.get_by_id(subject)
     if user is None:
         return False
-    if verify_token(secret, _RESET, token, now=now,
-                    bound=fingerprint(user.hashed_password)) != user.id:
+    if (
+        verify_token(secret, _RESET, token, now=now, bound=fingerprint(user.hashed_password))
+        != user.id
+    ):
         return False
     try:
         hashed = await _hash_password_off_loop(new_password)
@@ -916,5 +911,5 @@ def _token_subject(token: str) -> str | None:
     try:
         encoded = token.split(".", 1)[0]
         return _unframe(_unb64(encoded).decode("utf-8"), 4)[1]
-    except (ValueError, TypeError, IndexError):
+    except ValueError, TypeError, IndexError:
         return None

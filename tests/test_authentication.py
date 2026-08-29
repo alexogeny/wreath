@@ -94,9 +94,7 @@ def test_a_typed_vocabulary_catches_an_unknown_route_action_at_compile() -> None
         READ = "Document::read"
 
     app = Wreath()
-    app.configure_auth(
-        BearerTokenBackend({}), vocabulary=AuthorizationVocabulary(Actions)
-    )
+    app.configure_auth(BearerTokenBackend({}), vocabulary=AuthorizationVocabulary(Actions))
 
     @app.get("/documents")
     @authorize(action="Document::delete", resource="Document::all")
@@ -250,8 +248,6 @@ async def test_admin_route_is_pruned_for_non_admin_and_allowed_for_admin() -> No
     assert allowed[0]["status"] == 200
 
 
-# --- the session backend's ordering requirement -------------------------------
-#
 # `SessionIdentityBackend` reads `request.state.session`, which `SessionPolicy`
 # publishes. Route middleware runs *after* authorization, so registering the two
 # in the obvious way authenticated every caller as anonymous and answered 401 to
@@ -289,13 +285,11 @@ def test_a_session_backend_refuses_route_scoped_session_middleware() -> None:
 
 
 def test_the_correct_registration_is_not_refused() -> None:
-    """Otherwise the refusal above could pass by refusing everything."""
     app = _session_app(global_scope=True)
     app._compile_routes()
 
 
 def test_a_composite_backend_propagates_the_session_requirement() -> None:
-    """A wrapper must not hide the requirement its members carry."""
     from wreath.auth import CompositeBackend, SessionIdentityBackend
 
     bearer = BearerTokenBackend({"t": Identity(id="bo", type="User")})
@@ -335,16 +329,6 @@ class _SessionRequest:
     ],
 )
 async def test_a_session_that_names_nobody_is_anonymous(session, why) -> None:
-    """Every way the session backend can decline, one row each.
-
-    The happy path covered the mapping checks and nothing else, so several of
-    these guards could be deleted and the suite stayed green -- and each one
-    fails *open*: without the subject checks the backend returns
-    `Identity(id=None)`, `Identity(id="")` or `Identity(id=12345)`, and every
-    one of those is a truthy identity that `@authenticated()` admits. An empty
-    id then compares equal to a Cedar principal built the same way from an
-    empty claim, which is how an anonymous caller becomes somebody.
-    """
     from wreath.auth import SessionIdentityBackend
 
     assert await SessionIdentityBackend().authenticate(_SessionRequest(*session)) is None, why
@@ -352,14 +336,6 @@ async def test_a_session_that_names_nobody_is_anonymous(session, why) -> None:
 
 @pytest.mark.asyncio
 async def test_a_boolean_expiry_is_not_an_expiry() -> None:
-    """`True` is an `int`, and `True <= time.time()` is `True`.
-
-    So a principal carrying `exp: True` -- a flag written where a timestamp
-    belongs -- would read as an SSO session that expired one second after the
-    epoch and sign the caller out on every request, while a `False` would be an
-    expiry in 1970 too. The `isinstance(expires, bool)` clause is what stops the
-    bool being read as a number at all; nothing had ever passed one.
-    """
     from wreath.auth import SessionIdentityBackend
 
     backend = SessionIdentityBackend()
@@ -412,14 +388,6 @@ class _Answering:
 
 @pytest.mark.asyncio
 async def test_a_composite_backend_stops_at_the_first_identity() -> None:
-    """ "First one wins" is the whole ordering contract, and nothing held it.
-
-    A composite is written bearer-first so a request carrying a token is not
-    also charged a session decode -- and, more than cost, so a caller holding
-    both is the *token's* identity rather than whichever member happened to
-    answer last. Asserting only the returned identity would pass with the walk
-    inverted, so the later member's `asked` count is the assertion.
-    """
     from wreath.auth import CompositeBackend
 
     first = _Answering(Identity(id="from-bearer", type="User"))
@@ -434,12 +402,6 @@ async def test_a_composite_backend_stops_at_the_first_identity() -> None:
 
 @pytest.mark.asyncio
 async def test_a_composite_backend_walks_past_a_backend_that_declines() -> None:
-    """The other half: declining must not end the walk.
-
-    Without this, "stop at the first identity" could be satisfied by a composite
-    that stops at the first *answer* of any kind, which is the anonymous-caller
-    path for every bearer-then-session app.
-    """
     from wreath.auth import CompositeBackend
 
     first = _Answering(None)
@@ -454,7 +416,6 @@ async def test_a_composite_backend_walks_past_a_backend_that_declines() -> None:
 
 @pytest.mark.asyncio
 async def test_a_composite_backend_is_anonymous_when_every_member_declines() -> None:
-    """No member answering is `None`, not the last member's `None` by accident."""
     from wreath.auth import CompositeBackend
 
     first, second = _Answering(None), _Answering(None)
@@ -465,13 +426,6 @@ async def test_a_composite_backend_is_anonymous_when_every_member_declines() -> 
 
 @pytest.mark.asyncio
 async def test_a_composite_backend_lets_a_failing_backend_stop_the_walk() -> None:
-    """A verifier that could not reach its store has not established anything.
-
-    Treating the exception as "this member declines" would fall through to the
-    session backend and answer 401 -- or worse, admit a stale session -- on what
-    is an infrastructure failure, and the caller would never learn the token was
-    never checked.
-    """
     from wreath.auth import CompositeBackend
 
     first = _Answering(raises=RuntimeError("token store unreachable"))
@@ -484,13 +438,6 @@ async def test_a_composite_backend_lets_a_failing_backend_stop_the_walk() -> Non
 
 
 def test_a_composite_backend_advertises_the_first_challenge_offered() -> None:
-    """A session member offers nothing, so the composite must not offer nothing.
-
-    `WWW-Authenticate` has no scheme meaning "log in through the browser", so
-    `SessionIdentityBackend.challenge` is `None`; a composite that answered with
-    its first member's challenge unconditionally would strip the `Bearer` the
-    API half of the same app depends on.
-    """
     from wreath.auth import CompositeBackend
 
     silent, bearer = _Answering(), _Answering(offers='Bearer realm="api"')
@@ -501,11 +448,6 @@ def test_a_composite_backend_advertises_the_first_challenge_offered() -> None:
 
 
 def test_an_empty_composite_backend_is_refused() -> None:
-    """It would authenticate nobody while reading as configured authentication.
-
-    Every route would be 401 with no challenge and no backend to blame, which is
-    indistinguishable from a bearer verifier rejecting every token.
-    """
     from wreath.auth import CompositeBackend
 
     with pytest.raises(ValueError, match="at least one backend"):
@@ -513,11 +455,6 @@ def test_an_empty_composite_backend_is_refused() -> None:
 
 
 def test_an_unnamed_authorization_action_is_refused() -> None:
-    """`Action::""` matches no policy, so the route would deny with no cause.
-
-    `wreath.graphql` refuses the same empty string for the same reason and has
-    always been tested for it; the decorator every route uses was not.
-    """
     from wreath.authorization import authorize
 
     with pytest.raises(ValueError, match="action is required"):
@@ -525,13 +462,6 @@ def test_an_unnamed_authorization_action_is_refused() -> None:
 
 
 def test_a_bearer_only_app_may_still_use_route_scoped_sessions() -> None:
-    """The refusal is about the *backend's* need, not about sessions at all.
-
-    A session used only by handlers -- a flash message, a wizard step -- has no
-    ordering requirement, and route scope is the cheaper registration because a
-    miss or a static file never decodes the cookie. Refusing that too would have
-    made the check a blanket ban rather than a statement about ordering.
-    """
     from wreath.policy import SessionPolicy
 
     app = Wreath()
@@ -544,9 +474,6 @@ def test_a_bearer_only_app_may_still_use_route_scoped_sessions() -> None:
         return {"id": request.identity.id}
 
     app._compile_routes()
-
-
-# --- one rule, two enforcers -------------------------------------------------
 
 
 def _step_up_app() -> tuple[Wreath, Any]:
@@ -583,9 +510,6 @@ def _step_up_app() -> tuple[Wreath, Any]:
 
 @pytest.mark.asyncio
 async def test_a_bare_second_factor_requirement_is_refused_over_http() -> None:
-    """The HTTP pipeline's half of the agreement: an identity that has not
-    proved a factor lately is refused, and an anonymous caller is challenged
-    rather than admitted because the requirement never set `authenticated`."""
     app, _ = _step_up_app()
 
     refused = await invoke(app, "/wipe", authorization=b"Bearer t")
@@ -598,9 +522,6 @@ async def test_a_bare_second_factor_requirement_is_refused_over_http() -> None:
 
 @pytest.mark.asyncio
 async def test_the_same_requirement_is_refused_by_mcp() -> None:
-    """MCP's half. `_authorize` used to skip the whole decision on
-    `access_level == 0`, which a bare second-factor requirement was -- so the
-    identical declaration refused an HTTP caller and admitted a model."""
     from wreath.mcp import PROTOCOL_VERSION
     from wreath.testing import TestClient
 
@@ -635,13 +556,6 @@ async def test_the_same_requirement_is_refused_by_mcp() -> None:
 
 @pytest.mark.asyncio
 async def test_the_two_enforcers_ask_the_same_question_of_a_requirement() -> None:
-    """The shared definition itself, over every field that can refuse a caller.
-
-    Both enforcers gate on `access_level`, so a field it forgets is a field one
-    of them skips: `second_factor` was missing from it, and MCP read it while
-    the HTTP pipeline read `authenticated` instead. Asserted per field rather
-    than per enforcer, because the defect is a field going unnamed.
-    """
     from wreath._auth.requirements import PolicyRequirement, SetRequirement
     from wreath.authorization import AuthRequirement
 

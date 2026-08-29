@@ -47,7 +47,6 @@ _UNLOCK = {"exclusive": "pg_advisory_unlock", "shared": "pg_advisory_unlock_shar
 # Both advisory-lock key operands are hashed in the server so Python and
 # PostgreSQL can never disagree on the derived key (the migration runner hashes
 # the same way). ``$1`` is the namespace, ``$2`` the caller's key.
-#
 # One 64-bit key, not two 32-bit ones. The two-argument form fills each operand
 # with `hashtext`, so distinct (namespace, key) pairs collided at roughly 77 000
 # of them -- and a collision is silent, appearing only as one caller waiting on
@@ -60,9 +59,7 @@ _KEYED = "hashtextextended($2::text, hashtextextended($1::text, 0))"
 
 def _validate_mode(mode: str) -> None:
     if mode not in _ACQUIRE:
-        raise ValueError(
-            f"advisory lock mode must be 'exclusive' or 'shared', not {mode!r}"
-        )
+        raise ValueError(f"advisory lock mode must be 'exclusive' or 'shared', not {mode!r}")
 
 
 def _reject_read_only(database: Database, workload: Workload) -> None:
@@ -112,7 +109,7 @@ _held_locks: dict[tuple[int, str], int] = {}
 def _pool_max_size(database: Database, workload: Workload) -> int | None:
     try:
         return database._configs[workload].max_size
-    except (KeyError, AttributeError):
+    except KeyError, AttributeError:
         return None
 
 
@@ -214,6 +211,7 @@ class AdvisoryLock(_SessionLockExit):
         _enter_held(self._database, self._workload)
         return self
 
+
 class AdvisoryTryLock(_SessionLockExit):
     """A non-blocking (or timeout-bounded) session-scoped advisory lock.
 
@@ -224,7 +222,12 @@ class AdvisoryTryLock(_SessionLockExit):
     """
 
     __slots__ = (
-        "_connection", "_database", "_key", "_mode", "_namespace", "_timeout",
+        "_connection",
+        "_database",
+        "_key",
+        "_mode",
+        "_namespace",
+        "_timeout",
         "_workload",
     )
 
@@ -247,12 +250,26 @@ class AdvisoryTryLock(_SessionLockExit):
         try:
             acquired = await self._attempt(connection)
         except BaseException:
-            await _release(self._database, self._workload, connection, self._mode,
-                           self._namespace, self._key, unlock=False)
+            await _release(
+                self._database,
+                self._workload,
+                connection,
+                self._mode,
+                self._namespace,
+                self._key,
+                unlock=False,
+            )
             raise
         if not acquired:
-            await _release(self._database, self._workload, connection, self._mode,
-                           self._namespace, self._key, unlock=False)
+            await _release(
+                self._database,
+                self._workload,
+                connection,
+                self._mode,
+                self._namespace,
+                self._key,
+                unlock=False,
+            )
             return None
         self._connection = connection
         _enter_held(self._database, self._workload)
@@ -289,6 +306,7 @@ class AdvisoryTryLock(_SessionLockExit):
             # Never leak a non-default timeout onto the pooled connection.
             await connection.execute("SET lock_timeout = DEFAULT")
 
+
 class SingletonRunner:
     """Run one coroutine at a time across the whole fleet, via an advisory lock.
 
@@ -302,8 +320,17 @@ class SingletonRunner:
     """
 
     __slots__ = (
-        "_database", "_jitter", "_key", "_lead_errors", "_namespace", "_poll",
-        "_release_errors", "_stopped", "_task", "_work", "_workload",
+        "_database",
+        "_jitter",
+        "_key",
+        "_lead_errors",
+        "_namespace",
+        "_poll",
+        "_release_errors",
+        "_stopped",
+        "_task",
+        "_work",
+        "_workload",
     )
 
     def __init__(
@@ -385,7 +412,6 @@ class SingletonRunner:
             except Exception:  # noqa: BLE001 -- breadth is the decision; see below
                 # Connection died or work() failed: drop the connection so the
                 # lock is released server-side and a follower can be promoted.
-                #
                 # Broad on purpose. `work()` is caller-supplied and may raise
                 # anything, and the query above can fail in any driver-specific
                 # way -- but every one of those has the same answer, so naming a
@@ -393,7 +419,6 @@ class SingletonRunner:
                 # because a `work()` that fails every time would otherwise flap
                 # leadership forever with no signal: acquire, fail, drop, sleep,
                 # repeat, while the fleet looks healthy.
-                #
                 # Deliberately *not* `BaseException`. `CancelledError` is handled
                 # above and re-raised; `KeyboardInterrupt` and `SystemExit` must
                 # end the process rather than be retried on a timer.
@@ -415,10 +440,16 @@ class SingletonRunner:
                     from .postgres import PostgresError
 
                     try:
-                        await _release(self._database, self._workload, connection,
-                                       "exclusive", self._namespace, self._key,
-                                       unlock=held)
-                    except (PostgresError, OSError):
+                        await _release(
+                            self._database,
+                            self._workload,
+                            connection,
+                            "exclusive",
+                            self._namespace,
+                            self._key,
+                            unlock=held,
+                        )
+                    except PostgresError, OSError:
                         # A failed release degrades this round; it must not end
                         # the runner. Escaping a `finally` is exactly how it did:
                         # the task died for the process lifetime, and because
@@ -426,7 +457,6 @@ class SingletonRunner:
                         # as "Task exception was never retrieved" at GC. A runner
                         # that has silently stopped contending is indistinguishable
                         # from one that is simply not the leader.
-                        #
                         # Named types, not `Exception`: `Pool.release` raises
                         # `InterfaceError` on a double release, and the trailing
                         # `connection.close()` fails with `OSError` on a dead
@@ -475,9 +505,7 @@ async def _release(
     broken = False
     try:
         if unlock:
-            await connection.fetchval(
-                f"SELECT {_UNLOCK[mode]}({_KEYED})", namespace, key
-            )
+            await connection.fetchval(f"SELECT {_UNLOCK[mode]}({_KEYED})", namespace, key)
     except Exception:  # noqa: BLE001 -- one answer for every failure; see docstring
         broken = True
     except BaseException:

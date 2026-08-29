@@ -45,7 +45,7 @@ Two consequences worth stating:
   parameters are only knowable from the application object rather than from one
   file. The archive-member case *is* covered, because there the provenance is
   visible in the same expression. General traversal waits for the app-level
-  tier; see `docs/reference/audit.md`.
+  tier.
 * **Taint starts at the route boundary, and that is what makes it precise.**
   A handler is identifiable from its decorator alone -- `@router.get(...)`,
   `@app.post(...)` -- so its parameters are known to be caller-controlled
@@ -58,8 +58,7 @@ Two consequences worth stating:
   an injection. A first draft of this file did not separate them and reported
   103 findings against Wreath's own source and six against a correct example
   application -- which is precisely the "cries wolf, gets suppressed wholesale"
-  failure this module claims to avoid. Measured, not assumed: the sweep is in
-  `docs/reference/audit.md`.
+  failure this module claims to avoid.
 
 ## Adding a rule
 
@@ -99,133 +98,183 @@ class CodeRule:
 
 CODE_RULES: tuple[CodeRule, ...] = (
     CodeRule(
-        "sql-interpolation", Severity.ERROR, "CWE-89",
+        "sql-interpolation",
+        Severity.ERROR,
+        "CWE-89",
         "pass values as $1, $2 parameters to Session.raw; Wreath never rewrites raw SQL",
         "SQL built by string interpolation reaches the database unmodified",
     ),
     CodeRule(
-        "timing-unsafe-compare", Severity.ERROR, "CWE-208",
+        "timing-unsafe-compare",
+        Severity.ERROR,
+        "CWE-208",
         "compare secrets with hmac.compare_digest, which does not return early",
         "a secret compared with == leaks its prefix through response timing",
     ),
     CodeRule(
-        "weak-randomness", Severity.ERROR, "CWE-338",
+        "weak-randomness",
+        Severity.ERROR,
+        "CWE-338",
         "use secrets.token_urlsafe / secrets.choice for anything an attacker must not guess",
         "a security value drawn from random, which is a predictable Mersenne Twister",
     ),
     CodeRule(
-        "hardcoded-secret", Severity.ERROR, "CWE-798",
+        "hardcoded-secret",
+        Severity.ERROR,
+        "CWE-798",
         "read the key from the environment or a secret store; never a literal in source",
         "a signing key or password written as a string literal",
     ),
     CodeRule(
-        "ssrf-policy-widened", Severity.ERROR, "CWE-918",
+        "ssrf-policy-widened",
+        Severity.ERROR,
+        "CWE-918",
         "leave DestinationPolicy at its defaults and name the hosts you mean with hosts=",
         "an outbound client permitted to reach private, loopback or link-local addresses",
     ),
     CodeRule(
-        "unsafe-xml-parser", Severity.ERROR, "CWE-611",
+        "unsafe-xml-parser",
+        Severity.ERROR,
+        "CWE-611",
         "parse with wreath.xml.parse, which refuses DOCTYPE and every non-predefined entity",
         "XML read with a parser that resolves external entities",
     ),
     CodeRule(
-        "template-from-request", Severity.ERROR, "CWE-1336",
+        "template-from-request",
+        Severity.ERROR,
+        "CWE-1336",
         "compile templates from a TemplateDirectory at startup, never from a request",
         "a template compiled from a value that is not a literal",
     ),
     CodeRule(
-        "dynamic-import", Severity.ERROR, "CWE-470",
+        "dynamic-import",
+        Severity.ERROR,
+        "CWE-470",
         "map a closed vocabulary of names to functions; never resolve a caller's string",
         "a module, attribute or expression resolved from data",
     ),
     CodeRule(
-        "unsafe-archive-extract", Severity.ERROR, "CWE-22",
+        "unsafe-archive-extract",
+        Severity.ERROR,
+        "CWE-22",
         "extract with wreath.objects.unzip_stream and ZipExtractionLimits",
         "an archive extracted without member, size, ratio or symlink limits",
     ),
     CodeRule(
-        "path-from-request", Severity.ERROR, "CWE-22",
+        "path-from-request",
+        Severity.ERROR,
+        "CWE-22",
         "normalise the name with wreath.objects.normalize_key and read it through a "
         "wreath.storage backend, which opens beneath a root descriptor",
         "a filesystem path joined from a value the caller chose",
     ),
     CodeRule(
-        "mass-assignment", Severity.ERROR, "CWE-915",
+        "mass-assignment",
+        Severity.ERROR,
+        "CWE-915",
         "declare the body as a dataclass or ORM model; Wreath rejects unknown fields",
         "a request body walked onto an object with setattr",
     ),
     CodeRule(
-        "case-mapped-authz", Severity.WARN, "CWE-178",
+        "case-mapped-authz",
+        Severity.WARN,
+        "CWE-178",
         "compare the stored, normalised value; upper()/lower()/casefold() are not injective",
         "an authorization decision made after a Unicode case mapping",
     ),
     CodeRule(
-        "cors-reflect-origin", Severity.ERROR, "CWE-942",
+        "cors-reflect-origin",
+        Severity.ERROR,
+        "CWE-942",
         "use CorsPolicy with an explicit allow_origins list",
         "the request Origin reflected into Access-Control-Allow-Origin",
     ),
     CodeRule(
-        "debug-enabled", Severity.WARN, "CWE-489",
+        "debug-enabled",
+        Severity.WARN,
+        "CWE-489",
         "drive debug from configuration so production cannot inherit a developer's value",
         "the application constructed with debug=True as a literal",
     ),
     CodeRule(
-        "untrusted-forwarded-header", Severity.WARN, "CWE-348",
+        "untrusted-forwarded-header",
+        Severity.WARN,
+        "CWE-348",
         "establish the header with ProxyPolicy(trusted=...) before reading it",
         "a forwarded client address read without a configured proxy trust boundary",
     ),
     CodeRule(
-        "wildcard-trust-list", Severity.ERROR, "CWE-346",
+        "wildcard-trust-list",
+        Severity.ERROR,
+        "CWE-346",
         "name the hosts, origins or CIDRs you mean; a trust list of '*' is not a boundary",
         "a trust boundary configured to accept every peer",
     ),
     CodeRule(
-        "secret-in-log", Severity.ERROR, "CWE-532",
+        "secret-in-log",
+        Severity.ERROR,
+        "CWE-532",
         "hold it in wreath.config.Secret, whose repr and str are redacted, and log through "
         "wreath.logging, which redacts by default",
         "a credential or a caller's own body formatted into a log record",
     ),
     CodeRule(
-        "authz-fail-open", Severity.ERROR, "CWE-863",
+        "authz-fail-open",
+        Severity.ERROR,
+        "CWE-863",
         "raise on the undecidable branch too; an authorizer answers Allow or Deny and has no "
         "third answer",
         "an authorization check that returns, rather than refuses, when it cannot decide",
     ),
     CodeRule(
-        "auth-disable-flag", Severity.ERROR, "CWE-1188",
+        "auth-disable-flag",
+        Severity.ERROR,
+        "CWE-1188",
         "give a test a test principal; there is no supported way to switch authentication off",
         "a configuration flag that skips authentication entirely",
     ),
     CodeRule(
-        "auth-fallback-on-exception", Severity.ERROR, "CWE-1390",
+        "auth-fallback-on-exception",
+        Severity.ERROR,
+        "CWE-1390",
         "verify with one JwtVerifier and one key source; catch the specific error and refuse",
         "an authentication path that retries with a weaker verifier when the strong one raises",
     ),
     CodeRule(
-        "outbound-url-from-request", Severity.ERROR, "CWE-918",
+        "outbound-url-from-request",
+        Severity.ERROR,
+        "CWE-918",
         "give the client a DestinationPolicy naming the hosts you mean; it checks every DNS "
         "answer and every redirect, not just the string you were handed",
         "an outbound request whose destination the caller chose",
     ),
     CodeRule(
-        "substring-security-match", Severity.ERROR, "CWE-697",
+        "substring-security-match",
+        Severity.ERROR,
+        "CWE-697",
         "compare whole values: str.startswith for a prefix, a frozenset for membership, a Cedar "
         "action for a policy",
         "a security decision made by substring, so a longer value satisfies a shorter rule",
     ),
     CodeRule(
-        "error-detail-leaked", Severity.WARN, "CWE-209",
+        "error-detail-leaked",
+        Severity.WARN,
+        "CWE-209",
         "write the refusal the caller should read; the Flight Recorder keeps the diagnosis",
         "a caught exception's own text returned to the caller",
     ),
     CodeRule(
-        "env-conditional-security", Severity.WARN, "CWE-1188",
+        "env-conditional-security",
+        Severity.WARN,
+        "CWE-1188",
         "declare it in wreath.config with a secure default, so weakening it is a value someone "
         "can see rather than a branch in the source",
         "a security control whose strength depends on which environment is running",
     ),
     CodeRule(
-        "unparseable", Severity.WARN, "wreath:audit",
+        "unparseable",
+        Severity.WARN,
+        "wreath:audit",
         "check the file parses under the interpreter this audit runs on",
         "the file could not be parsed, so no rule could be applied to it",
     ),
@@ -259,15 +308,21 @@ _EQUIVALENT_NOQA = {
 _WAIVER = "wreath-audit: allow"
 
 
-# --- vocabularies ------------------------------------------------------------
-#
 # Kept as data rather than inline so the docs table and the tests can quote
 # them, and so widening one is a reviewable one-line change.
 
 #: Names that are a secret whatever else is in the expression.
 _SECRET_WORDS = (
-    "secret", "hmac", "password", "passwd", "apikey", "api_key",
-    "otp", "totp", "salt", "credential",
+    "secret",
+    "hmac",
+    "password",
+    "passwd",
+    "apikey",
+    "api_key",
+    "otp",
+    "totp",
+    "salt",
+    "credential",
 )
 
 #: Names that are *sometimes* a secret. A route signature, a lexer token, a
@@ -278,8 +333,15 @@ _WEAK_SECRET_WORDS = ("token", "signature", "digest", "mac")
 
 #: The second signal: one side names what the other is being checked against.
 _COMPARISON_ROLES = (
-    "expected", "provided", "given", "supplied", "received", "candidate",
-    "computed", "presented", "claimed",
+    "expected",
+    "provided",
+    "given",
+    "supplied",
+    "received",
+    "candidate",
+    "computed",
+    "presented",
+    "claimed",
 )
 
 #: Suffixes that make a name an identifier or a tag rather than a secret.
@@ -289,8 +351,23 @@ _COMPARISON_ROLES = (
 #: environment variable* the secret is read from, which is the opposite of a
 #: secret in the source -- it is the mechanism for keeping one out of it.
 _NOT_SECRET_SUFFIXES = (
-    "_id", "_ids", "_name", "_version", "_type", "_kind", "_key_id", "_uid", "_uuid",
-    "_variable", "_var", "_env", "_envvar", "_setting", "_field", "_header", "_param",
+    "_id",
+    "_ids",
+    "_name",
+    "_version",
+    "_type",
+    "_kind",
+    "_key_id",
+    "_uid",
+    "_uuid",
+    "_variable",
+    "_var",
+    "_env",
+    "_envvar",
+    "_setting",
+    "_field",
+    "_header",
+    "_param",
 )
 #: Deliberately excludes a bare "key" (`for key, value in ...` is everywhere),
 #: and "auth"/"sig", which matched `oauth2` helpers and anything with "signal"
@@ -299,8 +376,17 @@ _SECRET_EXACT = ("pin",)
 
 #: Keyword arguments whose literal value is a credential.
 _SECRET_KEYWORDS = frozenset(
-    {"secret", "secret_key", "url_secret", "password", "api_key", "apikey",
-     "token", "private_key", "signing_key"}
+    {
+        "secret",
+        "secret_key",
+        "url_secret",
+        "password",
+        "api_key",
+        "apikey",
+        "token",
+        "private_key",
+        "signing_key",
+    }
 )
 
 #: Constructors whose *first positional* argument is a signing key.
@@ -333,14 +419,31 @@ _FORWARDED_HEADERS = frozenset(
 #: on the mapped side: a CORS preflight uppercases an HTTP *method*, and a
 #: method is not a principal.
 _IDENTITY_WORDS = (
-    "email", "user", "login", "principal", "account", "name", "subject",
-    "actor", "identity", "address",
+    "email",
+    "user",
+    "login",
+    "principal",
+    "account",
+    "name",
+    "subject",
+    "actor",
+    "identity",
+    "address",
 )
 
 #: Containers whose membership decides authorization.
 _AUTHZ_WORDS = (
-    "allow", "permit", "admin", "ops", "staff", "role", "whitelist", "allowlist",
-    "member", "privileged", "superuser",
+    "allow",
+    "permit",
+    "admin",
+    "ops",
+    "staff",
+    "role",
+    "whitelist",
+    "allowlist",
+    "member",
+    "privileged",
+    "superuser",
 )
 
 _CASE_MAPPINGS = frozenset({"upper", "lower", "casefold", "title", "swapcase"})
@@ -366,8 +469,18 @@ _LOG_LEVELS = frozenset(
 #: half of `path-from-request`: `EXPORT_ROOT / name` is a join, `total / count`
 #: is division, and only the name says which.
 _PATH_ROOT_WORDS = (
-    "root", "dir", "directory", "path", "base", "folder", "store", "home",
-    "media", "uploads", "exports", "storage",
+    "root",
+    "dir",
+    "directory",
+    "path",
+    "base",
+    "folder",
+    "store",
+    "home",
+    "media",
+    "uploads",
+    "exports",
+    "storage",
 )
 
 #: The provenance half of `timing-unsafe-compare`. Two secret-named operands
@@ -375,8 +488,20 @@ _PATH_ROOT_WORDS = (
 #: one -- the same signal `_COMPARISON_ROLES` carries, in the spelling a
 #: double-submit check actually uses.
 _PROVENANCE_WORDS = (
-    "cookie", "header", "session", "stored", "saved", "request", "client",
-    "server", "incoming", "submitted", "body", "query", "param", "form",
+    "cookie",
+    "header",
+    "session",
+    "stored",
+    "saved",
+    "request",
+    "client",
+    "server",
+    "incoming",
+    "submitted",
+    "body",
+    "query",
+    "param",
+    "form",
 )
 
 #: Names that mean "authentication is off". Deliberately the disabling half
@@ -384,31 +509,75 @@ _PROVENANCE_WORDS = (
 #: it off is a backdoor with a config key attached. Nobody writes these by
 #: accident, which is what lets the list stay short and the rule stay quiet.
 _AUTH_DISABLE_WORDS = (
-    "no_auth", "noauth", "auth_disabled", "disable_auth", "disable_authentication",
-    "skip_auth", "skip_authentication", "bypass_auth", "auth_bypass", "allow_anonymous",
-    "anonymous_ok", "insecure_skip_verify", "auth_off", "disable_security",
+    "no_auth",
+    "noauth",
+    "auth_disabled",
+    "disable_auth",
+    "disable_authentication",
+    "skip_auth",
+    "skip_authentication",
+    "bypass_auth",
+    "auth_bypass",
+    "allow_anonymous",
+    "anonymous_ok",
+    "insecure_skip_verify",
+    "auth_off",
+    "disable_security",
 )
 
 #: Values whose weak setting is a vulnerability rather than a preference. The
 #: `env-conditional-security` rule is narrow on purpose: environments differ,
 #: and that is what they are for.
 _SECURITY_FLAG_NAMES = frozenset(
-    {"secure", "httponly", "http_only", "samesite", "same_site", "csrf", "csrf_enabled",
-     "csrf_required", "verify", "verify_ssl", "ssl_verify", "tls_verify", "check_hostname",
-     "hsts", "strict_transport_security", "signature_required", "auth_required",
-     "authentication_required", "authorization_required"}
+    {
+        "secure",
+        "httponly",
+        "http_only",
+        "samesite",
+        "same_site",
+        "csrf",
+        "csrf_enabled",
+        "csrf_required",
+        "verify",
+        "verify_ssl",
+        "ssl_verify",
+        "tls_verify",
+        "check_hostname",
+        "hsts",
+        "strict_transport_security",
+        "signature_required",
+        "auth_required",
+        "authentication_required",
+        "authorization_required",
+    }
 )
 
 #: Names that mean "which deployment is this?". The security-flag rule needs one
 #: of these on the deciding side, so an ordinary feature toggle stays quiet.
 _ENVIRONMENT_WORDS = (
-    "env", "environment", "stage", "deployment", "debug", "devel", "development",
-    "testing", "local",
+    "env",
+    "environment",
+    "stage",
+    "deployment",
+    "debug",
+    "devel",
+    "development",
+    "testing",
+    "local",
 )
 
 #: Exceptions that refuse a request on authorization grounds.
-_AUTHZ_EXCEPTIONS = ("forbidden", "unauthoris", "unauthoriz", "authoris", "authoriz",
-                     "permission", "denied", "notpermitted", "accessdenied")
+_AUTHZ_EXCEPTIONS = (
+    "forbidden",
+    "unauthoris",
+    "unauthoriz",
+    "authoris",
+    "authoriz",
+    "permission",
+    "denied",
+    "notpermitted",
+    "accessdenied",
+)
 
 #: Status codes that make an `HTTPException(...)`-shaped call a refusal.
 _REFUSAL_STATUSES = frozenset({401, 403})
@@ -418,8 +587,16 @@ _REFUSAL_STATUSES = frozenset({401, 403})
 #: generally, and a rule that repeated it everywhere would be a lint, not a
 #: security finding.
 _AUTHENTICATION_FUNCTIONS = (
-    "authenticate", "authentication", "verify", "validate_token", "login", "identify",
-    "decode_token", "check_token", "current_user", "principal",
+    "authenticate",
+    "authentication",
+    "verify",
+    "validate_token",
+    "login",
+    "identify",
+    "decode_token",
+    "check_token",
+    "current_user",
+    "principal",
 )
 
 #: Calls that verify a credential. The handler of a broad `except` reaching for
@@ -429,10 +606,23 @@ _VERIFIER_CALLS = ("decode", "verify", "authenticate", "validate", "unseal", "ch
 #: Callables whose argument becomes the response body. A caught exception's own
 #: text reaching one of these is free reconnaissance for the caller.
 _RESPONSE_CALLEES = (
-    "httpexception", "badrequest", "unauthorized", "forbidden", "notfound", "conflict",
-    "unprocessableentity", "internalerror", "internalservererror", "toomanyrequests",
-    "payloadtoolarge", "response", "jsonresponse", "plaintextresponse", "htmlresponse",
-    "problemresponse", "abort",
+    "httpexception",
+    "badrequest",
+    "unauthorized",
+    "forbidden",
+    "notfound",
+    "conflict",
+    "unprocessableentity",
+    "internalerror",
+    "internalservererror",
+    "toomanyrequests",
+    "payloadtoolarge",
+    "response",
+    "jsonresponse",
+    "plaintextresponse",
+    "htmlresponse",
+    "problemresponse",
+    "abort",
 )
 
 #: Keyword arguments that carry response text.
@@ -455,16 +645,39 @@ _HTTP_VERBS = frozenset(
 #: Left-hand operands whose membership test is a security decision. A substring
 #: match against one of these is the finding; `character in "aeiou"` is not.
 _MATCH_CONTEXT_WORDS = (
-    "header", "method", "scheme", "path", "route", "url", "role", "scope",
-    "permission", "action", "origin", "host", "claim", "audience",
+    "header",
+    "method",
+    "scheme",
+    "path",
+    "route",
+    "url",
+    "role",
+    "scope",
+    "permission",
+    "action",
+    "origin",
+    "host",
+    "claim",
+    "audience",
 )
 
 #: Right-hand operands that are a policy, a path or a scope *string*. Paired
 #: with a `str` annotation, this is what separates `"admin" in roles` -- correct
 #: code over a collection -- from `"admin" in scope_string`, which is not.
 _MATCH_SUBJECT_WORDS = (
-    "path", "url", "route", "endpoint", "condition", "scope", "scopes", "permission",
-    "permissions", "policy", "authorities", "claims", "target",
+    "path",
+    "url",
+    "route",
+    "endpoint",
+    "condition",
+    "scope",
+    "scopes",
+    "permission",
+    "permissions",
+    "policy",
+    "authorities",
+    "claims",
+    "target",
 )
 
 #: Below this, a string literal on the right of `in` is a character class
@@ -513,9 +726,7 @@ def _is_secret_name(name: str) -> bool:
 
 def _is_weak_secret_name(name: str) -> bool:
     lowered = name.lower()
-    return not lowered.endswith(_NOT_SECRET_SUFFIXES) and _mentions(
-        lowered, _WEAK_SECRET_WORDS
-    )
+    return not lowered.endswith(_NOT_SECRET_SUFFIXES) and _mentions(lowered, _WEAK_SECRET_WORDS)
 
 
 def _is_credential_name(name: str) -> bool:
@@ -541,9 +752,7 @@ _DECLARED_SECRET_LENGTH = 16
 
 #: The characters a key is drawn from -- hex, base64, base64url. Anything else
 #: in the literal means it is a sentinel or a URN rather than a secret.
-_KEY_ALPHABET = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/=-_"
-)
+_KEY_ALPHABET = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/=-_")
 
 
 def _looks_like_a_key(value: str | bytes) -> bool:
@@ -575,10 +784,32 @@ def _looks_like_a_key(value: str | bytes) -> bool:
 #: identifier. Closing the gap the docstring above declares: a passphrase with
 #: no digit in it, which the alphabet test cannot see.
 _DEVELOPMENT_KEY_WORDS = (
-    "secret", "password", "passphrase", "changeme", "change-me", "change_me",
-    "insecure", "placeholder", "dev-", "-dev", "_dev", "dev_", "test-", "-test",
-    "local-", "-local", "example", "sample", "dummy", "notsecure", "topsecret",
-    "hunter2", "letmein", "unsafe", "donotuse", "do-not-use",
+    "secret",
+    "password",
+    "passphrase",
+    "changeme",
+    "change-me",
+    "change_me",
+    "insecure",
+    "placeholder",
+    "dev-",
+    "-dev",
+    "_dev",
+    "dev_",
+    "test-",
+    "-test",
+    "local-",
+    "-local",
+    "example",
+    "sample",
+    "dummy",
+    "notsecure",
+    "topsecret",
+    "hunter2",
+    "letmein",
+    "unsafe",
+    "donotuse",
+    "do-not-use",
 )
 
 
@@ -656,8 +887,11 @@ def _interpolated(node: ast.AST) -> list[ast.AST]:
         return [node.right]
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         return [side for side in (node.left, node.right) if not isinstance(side, ast.Constant)]
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
-            and node.func.attr == "format":
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "format"
+    ):
         return [*node.args, *(keyword.value for keyword in node.keywords)]
     return []
 
@@ -733,9 +967,7 @@ def _is_broad_handler(handler: ast.ExceptHandler) -> bool:
 
 #: Characters a whole value is made of. A left operand outside them is a syntax
 #: fragment rather than something being matched.
-_VALUE_CHARACTERS = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/"
-)
+_VALUE_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/")
 
 
 def _is_whole_value(node: ast.AST) -> bool:
@@ -751,10 +983,7 @@ def _is_whole_value(node: ast.AST) -> bool:
         return True
     if not isinstance(node.value, str):
         return False
-    return (
-        len(node.value) >= _MEMBERSHIP_LITERAL_LENGTH
-        and set(node.value) <= _VALUE_CHARACTERS
-    )
+    return len(node.value) >= _MEMBERSHIP_LITERAL_LENGTH and set(node.value) <= _VALUE_CHARACTERS
 
 
 def _debug_gated(scope: ast.AST, target: ast.AST) -> bool:
@@ -956,8 +1185,6 @@ class _Scanner(ast.NodeVisitor):
             if isinstance(target, ast.Name)
         }
 
-    # -- emit ----------------------------------------------------------------
-
     def _waived(self, rule_id: str, line: int) -> bool:
         """Whether a reviewed directive already covers this line.
 
@@ -998,14 +1225,11 @@ class _Scanner(ast.NodeVisitor):
             )
         )
 
-    # -- pass one ------------------------------------------------------------
-
     def prepare(self) -> None:
         for statement in self.tree.body:
             if isinstance(statement, (ast.Assign, ast.AnnAssign)) and statement.value is not None:
                 targets = (
-                    statement.targets if isinstance(statement, ast.Assign)
-                    else [statement.target]
+                    statement.targets if isinstance(statement, ast.Assign) else [statement.target]
                 )
                 for target in targets:
                     self.module_constants.update(_bound_names(target))
@@ -1022,8 +1246,11 @@ class _Scanner(ast.NodeVisitor):
                     self.proxy_trusted = True
                 if name == "DestinationPolicy":
                     self.destination_policy = True
-                if dotted.endswith("infolist") or dotted.endswith("namelist") \
-                        or dotted.endswith("getmembers"):
+                if (
+                    dotted.endswith("infolist")
+                    or dotted.endswith("namelist")
+                    or dotted.endswith("getmembers")
+                ):
                     self.archive_members.add(dotted.split(".")[0])
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self._collect_string_parameters(node)
@@ -1086,7 +1313,7 @@ class _Scanner(ast.NodeVisitor):
         followed by `sql = f"...{needle}..."` needs two, and the statements are
         not guaranteed to be walked in that order.
         """
-        for _ in range(8):                    # bounded; real chains are short
+        for _ in range(8):  # bounded; real chains are short
             before = len(self.caller_controlled) + len(self.dynamic_strings)
             for node in ast.walk(self.tree):
                 if not isinstance(node, (ast.Assign, ast.AnnAssign)):
@@ -1166,8 +1393,6 @@ class _Scanner(ast.NodeVisitor):
             for arg in node.args
         )
 
-    # -- pass two ------------------------------------------------------------
-
     def visit_Call(self, node: ast.Call) -> None:
         self._sql(node)
         self._secrets(node)
@@ -1199,7 +1424,8 @@ class _Scanner(ast.NodeVisitor):
         for argument in node.args[1:]:
             if self._tainted(argument):
                 self._flag(
-                    "path-from-request", node,
+                    "path-from-request",
+                    node,
                     "a path is joined with a value the caller chose; an absolute "
                     "component replaces the root rather than extending it",
                 )
@@ -1245,7 +1471,8 @@ class _Scanner(ast.NodeVisitor):
             if supplied or _reads_request(expression):
                 named = sorted(supplied)[0] if supplied else "a value read off the request"
                 self._flag(
-                    "secret-in-log", node,
+                    "secret-in-log",
+                    node,
                     f"{named} is the caller's own body, which is not known to be "
                     "free of credentials",
                 )
@@ -1281,7 +1508,8 @@ class _Scanner(ast.NodeVisitor):
         if chosen or _reads_request(target):
             named = sorted(chosen)[0] if chosen else "the request"
             self._flag(
-                "outbound-url-from-request", node,
+                "outbound-url-from-request",
+                node,
                 f"the destination of this request comes from {named}",
             )
 
@@ -1303,7 +1531,8 @@ class _Scanner(ast.NodeVisitor):
         # draft of this rule unusable.
         if interpolated and tainted:
             self._flag(
-                "sql-interpolation", node,
+                "sql-interpolation",
+                node,
                 f"SQL passed to .{node.func.attr}() is built by string interpolation",
             )
 
@@ -1313,14 +1542,16 @@ class _Scanner(ast.NodeVisitor):
             first = node.args[0]
             if isinstance(first, ast.Constant) and isinstance(first.value, (str, bytes)):
                 self._flag(
-                    "hardcoded-secret", node,
+                    "hardcoded-secret",
+                    node,
                     f"{callee} is constructed with a literal signing key",
                 )
         for keyword in node.keywords:
             if keyword.arg in _SECRET_KEYWORDS and isinstance(keyword.value, ast.Constant):
                 if isinstance(keyword.value.value, (str, bytes)) and keyword.value.value:
                     self._flag(
-                        "hardcoded-secret", node,
+                        "hardcoded-secret",
+                        node,
                         f"{keyword.arg}= is a literal",
                     )
 
@@ -1336,7 +1567,8 @@ class _Scanner(ast.NodeVisitor):
                 continue
             if keyword.arg in _TRUST_KEYWORDS:
                 self._flag(
-                    "wildcard-trust-list", node,
+                    "wildcard-trust-list",
+                    node,
                     f"{keyword.arg}= accepts every peer",
                 )
             elif keyword.arg in _ORIGIN_KEYWORDS and credentialed:
@@ -1344,7 +1576,8 @@ class _Scanner(ast.NodeVisitor):
                 # what turn the wildcard into a trust decision, and that single
                 # pair is the one `CorsPolicy` refuses at construction.
                 self._flag(
-                    "wildcard-trust-list", node,
+                    "wildcard-trust-list",
+                    node,
                     f"{keyword.arg}= is a wildcard alongside allow_credentials=True",
                 )
 
@@ -1360,7 +1593,8 @@ class _Scanner(ast.NodeVisitor):
         ]
         if widened:
             self._flag(
-                "ssrf-policy-widened", node,
+                "ssrf-policy-widened",
+                node,
                 "DestinationPolicy permits " + ", ".join(sorted(widened)),
             )
 
@@ -1371,7 +1605,8 @@ class _Scanner(ast.NodeVisitor):
             name = _name_of(arg)
             if name.startswith("feature_external"):
                 self._flag(
-                    "unsafe-xml-parser", node,
+                    "unsafe-xml-parser",
+                    node,
                     f"{name} is enabled, which lets the document name files and URLs",
                 )
 
@@ -1379,17 +1614,20 @@ class _Scanner(ast.NodeVisitor):
         if not isinstance(node.func, ast.Attribute) or node.func.attr != "from_string":
             return
         first = node.args[0] if node.args else None
-        constant = isinstance(first, ast.Constant) or (
-            isinstance(first, ast.Name) and first.id in self.module_constants
-        ) or (
-            # `_SHELL % {...}` -- a constant formatted with constants.
-            isinstance(first, ast.BinOp)
-            and isinstance(first.left, ast.Name)
-            and first.left.id in self.module_constants
+        constant = (
+            isinstance(first, ast.Constant)
+            or (isinstance(first, ast.Name) and first.id in self.module_constants)
+            or (
+                # `_SHELL % {...}` -- a constant formatted with constants.
+                isinstance(first, ast.BinOp)
+                and isinstance(first.left, ast.Name)
+                and first.left.id in self.module_constants
+            )
         )
         if first is not None and not constant:
             self._flag(
-                "template-from-request", node,
+                "template-from-request",
+                node,
                 "a template is compiled from a value that is not a literal",
             )
 
@@ -1403,20 +1641,23 @@ class _Scanner(ast.NodeVisitor):
             caller_chose = bool(node.args) and self._tainted(node.args[0])
             if node.args and not isinstance(node.args[0], ast.Constant) and caller_chose:
                 self._flag(
-                    "dynamic-import", node,
+                    "dynamic-import",
+                    node,
                     "a module name is resolved from a value that is not a literal",
                 )
 
     def _archive(self, node: ast.Call) -> None:
         if isinstance(node.func, ast.Attribute) and node.func.attr == "extractall":
             self._flag(
-                "unsafe-archive-extract", node,
+                "unsafe-archive-extract",
+                node,
                 "extractall() honours member paths and symlinks as given",
             )
 
     def _cors(self, node: ast.Call) -> None:
         literals = [
-            arg for arg in ast.walk(node)
+            arg
+            for arg in ast.walk(node)
             if isinstance(arg, ast.Constant)
             and isinstance(arg.value, (str, bytes))
             and _as_text(arg.value) == "access-control-allow-origin"
@@ -1426,7 +1667,8 @@ class _Scanner(ast.NodeVisitor):
         names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
         if names & self.origin_bound or any(_mentions(n, ("origin",)) for n in names):
             self._flag(
-                "cors-reflect-origin", node,
+                "cors-reflect-origin",
+                node,
                 "Access-Control-Allow-Origin is set from the request's own Origin",
             )
 
@@ -1434,8 +1676,11 @@ class _Scanner(ast.NodeVisitor):
         if _name_of(node.func) != "Wreath":
             return
         for keyword in node.keywords:
-            if keyword.arg == "debug" and isinstance(keyword.value, ast.Constant) \
-                    and keyword.value.value is True:
+            if (
+                keyword.arg == "debug"
+                and isinstance(keyword.value, ast.Constant)
+                and keyword.value.value is True
+            ):
                 self._flag("debug-enabled", node, "the application is constructed with debug=True")
 
     def _forwarded(self, node: ast.Call) -> None:
@@ -1444,10 +1689,14 @@ class _Scanner(ast.NodeVisitor):
         if not _dotted(node.func).endswith(("header", "get")):
             return
         for arg in node.args:
-            if isinstance(arg, ast.Constant) and isinstance(arg.value, str) \
-                    and arg.value.lower() in _FORWARDED_HEADERS:
+            if (
+                isinstance(arg, ast.Constant)
+                and isinstance(arg.value, str)
+                and arg.value.lower() in _FORWARDED_HEADERS
+            ):
                 self._flag(
-                    "untrusted-forwarded-header", node,
+                    "untrusted-forwarded-header",
+                    node,
                     f"{arg.value} is read but no ProxyPolicy establishes it",
                 )
 
@@ -1463,7 +1712,8 @@ class _Scanner(ast.NodeVisitor):
             )
             if not fixed:
                 self._flag(
-                    "weak-randomness", node,
+                    "weak-randomness",
+                    node,
                     "random.Random is seeded from a value, so every draw is reproducible",
                 )
 
@@ -1471,7 +1721,8 @@ class _Scanner(ast.NodeVisitor):
         names = [name for target in node.targets for name in _bound_names(target)]
         if any(_is_secret_name(name) for name in names) and self._draws_on_random(node.value):
             self._flag(
-                "weak-randomness", node,
+                "weak-randomness",
+                node,
                 f"{names[0]} is drawn from random rather than secrets",
             )
         self._declared_secret(names, node)
@@ -1504,7 +1755,8 @@ class _Scanner(ast.NodeVisitor):
         for name in names:
             if _is_credential_name(name):
                 self._flag(
-                    "hardcoded-secret", node,
+                    "hardcoded-secret",
+                    node,
                     f"{name} is declared with a literal value",
                 )
                 return
@@ -1529,7 +1781,8 @@ class _Scanner(ast.NodeVisitor):
             return
         if any(_mentions(name, _ENVIRONMENT_WORDS) for name in _expression_names(decider)):
             self._flag(
-                "env-conditional-security", node,
+                "env-conditional-security",
+                node,
                 f"{names[0]} is decided by which environment is running",
             )
 
@@ -1567,21 +1820,25 @@ class _Scanner(ast.NodeVisitor):
         if isinstance(subject, ast.Constant) and isinstance(subject.value, str):
             if len(subject.value) < _MEMBERSHIP_LITERAL_LENGTH:
                 return
-            if any(_mentions(name, _MATCH_CONTEXT_WORDS)
-                   for name in _expression_names(node.left)):
+            if any(_mentions(name, _MATCH_CONTEXT_WORDS) for name in _expression_names(node.left)):
                 self._flag(
-                    "substring-security-match", node,
+                    "substring-security-match",
+                    node,
                     f'this tests for a substring of "{subject.value}", not equality with it',
                 )
             return
         # Deciding on what the file *says* the value is, rather than on what the
         # expression looks like: `"admin" in roles` over a collection is correct
         # code, and nothing distinguishes it by shape alone.
-        if isinstance(subject, ast.Name) and subject.id in self.str_names \
-                and _mentions(subject.id, _MATCH_SUBJECT_WORDS) \
-                and _is_whole_value(node.left):
+        if (
+            isinstance(subject, ast.Name)
+            and subject.id in self.str_names
+            and _mentions(subject.id, _MATCH_SUBJECT_WORDS)
+            and _is_whole_value(node.left)
+        ):
             self._flag(
-                "substring-security-match", node,
+                "substring-security-match",
+                node,
                 f"{subject.id} is a string, so this is a containment test rather than a match",
             )
 
@@ -1611,7 +1868,8 @@ class _Scanner(ast.NodeVisitor):
         )
         if strong or weak or paired:
             self._flag(
-                "timing-unsafe-compare", node,
+                "timing-unsafe-compare",
+                node,
                 "a secret is compared with == , which returns on the first wrong byte",
             )
 
@@ -1628,12 +1886,11 @@ class _Scanner(ast.NodeVisitor):
             return
         if any(_mentions(_name_of(operand), _AUTHZ_WORDS) for operand in node.comparators):
             self._flag(
-                "case-mapped-authz", node,
+                "case-mapped-authz",
+                node,
                 f".{left.func.attr}() is applied before an authorization comparison",  # type: ignore[union-attr]
             )
 
-    # -- control flow --------------------------------------------------------
-    #
     # The rules above decide an expression. These decide a *branch*, which
     # needs one fact the expression rules do not: what the enclosing function
     # is for. A `return None` is unremarkable in a lookup and is an open door
@@ -1671,7 +1928,8 @@ class _Scanner(ast.NodeVisitor):
             for statement in inner.body:
                 if _is_open_return(statement):
                     self._flag(
-                        "authz-fail-open", statement,
+                        "authz-fail-open",
+                        statement,
                         "this leaves the check without deciding, so an unresolved subject is "
                         "indistinguishable from a permitted one",
                     )
@@ -1699,12 +1957,14 @@ class _Scanner(ast.NodeVisitor):
                 verifier = _verifier_call(handler.body)
                 if authentication and verifier:
                     self._flag(
-                        "auth-fallback-on-exception", handler,
+                        "auth-fallback-on-exception",
+                        handler,
                         f"a failed verification falls through to {verifier}()",
                     )
                 elif _refuses_authorization(ast.Module(body=inner.body, type_ignores=[])):
                     self._flag(
-                        "auth-fallback-on-exception", handler,
+                        "auth-fallback-on-exception",
+                        handler,
                         "a refusal raised in this block is caught here, so a denial becomes a "
                         "retry rather than a refusal",
                     )
@@ -1714,7 +1974,8 @@ class _Scanner(ast.NodeVisitor):
             for statement in node.body:
                 if isinstance(statement, ast.Return):
                     self._flag(
-                        "auth-disable-flag", node,
+                        "auth-disable-flag",
+                        node,
                         "a configuration flag short-circuits this check",
                     )
                     break
@@ -1723,7 +1984,8 @@ class _Scanner(ast.NodeVisitor):
     def visit_IfExp(self, node: ast.IfExp) -> None:
         if _mentions_disable(node.test):
             self._flag(
-                "auth-disable-flag", node,
+                "auth-disable-flag",
+                node,
                 "a configuration flag decides whether this control is applied",
             )
         self.generic_visit(node)
@@ -1765,7 +2027,8 @@ class _Scanner(ast.NodeVisitor):
                 for candidate in candidates:
                     if any(name == handler.name for name in _expression_names(candidate)):
                         self._flag(
-                            "error-detail-leaked", inner,
+                            "error-detail-leaked",
+                            inner,
                             f"the caught exception's own text is returned to the caller "
                             f"as {responder or 'the response'} content",
                         )
@@ -1808,7 +2071,8 @@ class _Scanner(ast.NodeVisitor):
                 continue
             if any(isinstance(inner, ast.Return) for inner in statement.body):
                 self._flag(
-                    "timing-unsafe-compare", test,
+                    "timing-unsafe-compare",
+                    test,
                     "this loop returns at the first difference, so how long it "
                     "runs says how much of the secret was right",
                 )
@@ -1836,7 +2100,8 @@ class _Scanner(ast.NodeVisitor):
         if not self._tainted(node.right):
             return
         self._flag(
-            "path-from-request", node,
+            "path-from-request",
+            node,
             "a path is joined with a value the caller chose, which `/` does not contain",
         )
 
@@ -1847,9 +2112,7 @@ class _Scanner(ast.NodeVisitor):
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
             return self._is_pathlike(node.left)
         name = _name_of(node)
-        return bool(name) and (
-            _mentions(name, _PATH_ROOT_WORDS) or name in self.path_names
-        )
+        return bool(name) and (_mentions(name, _PATH_ROOT_WORDS) or name in self.path_names)
 
     def _mass_assignment(self, node: ast.For) -> None:
         # A bound body model is the same value as `await request.json()` with a
@@ -1860,7 +2123,8 @@ class _Scanner(ast.NodeVisitor):
         for inner in ast.walk(node):
             if isinstance(inner, ast.Call) and _name_of(inner.func) == "setattr":
                 self._flag(
-                    "mass-assignment", inner,
+                    "mass-assignment",
+                    inner,
                     "every key of the request body is written onto the object",
                 )
                 return
@@ -1878,10 +2142,14 @@ class _Scanner(ast.NodeVisitor):
             if not isinstance(inner, ast.BinOp) or not isinstance(inner.op, ast.Div):
                 continue
             for side in (inner.left, inner.right):
-                if isinstance(side, ast.Attribute) and side.attr in ("filename", "name") \
-                        and _name_of(side.value) in members:
+                if (
+                    isinstance(side, ast.Attribute)
+                    and side.attr in ("filename", "name")
+                    and _name_of(side.value) in members
+                ):
                     self._flag(
-                        "unsafe-archive-extract", inner,
+                        "unsafe-archive-extract",
+                        inner,
                         "a destination path is built from an archive member's own name",
                     )
                     return
@@ -1890,7 +2158,8 @@ class _Scanner(ast.NodeVisitor):
         for alias in node.names:
             if alias.name.startswith(_UNSAFE_XML_MODULES):
                 self._flag(
-                    "unsafe-xml-parser", node,
+                    "unsafe-xml-parser",
+                    node,
                     f"{alias.name} resolves external entities unless explicitly disabled",
                 )
         self.generic_visit(node)
@@ -1898,7 +2167,8 @@ class _Scanner(ast.NodeVisitor):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         if node.module and node.module.startswith(_UNSAFE_XML_MODULES):
             self._flag(
-                "unsafe-xml-parser", node,
+                "unsafe-xml-parser",
+                node,
                 f"{node.module} resolves external entities unless explicitly disabled",
             )
         self.generic_visit(node)

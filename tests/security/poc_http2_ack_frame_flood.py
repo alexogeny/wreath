@@ -1,15 +1,3 @@
-"""PoC: bypass HTTP/2's frame-flood budget with ACK-only frames.
-
-Run from the repository root::
-
-    uv run python tests/security/poc_http2_ack_frame_flood.py
-
-The script binds only to loopback and uses TLS+ALPN, Wreath's metal event loop,
-native HTTP/2 parser, and an independent test frame/HPACK encoder. A vulnerable
-build exempts SETTINGS and PING ACK frames from its no-progress budget and
-processes all 10,000 ACK-only frames before answering the request that follows.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -97,9 +85,7 @@ def _exchange(
                 end_stream=True,
             )
             try:
-                client.sendall(
-                    h2.PREFACE + h2.encode_settings({}) + ack_flood + headers
-                )
+                client.sendall(h2.PREFACE + h2.encode_settings({}) + ack_flood + headers)
             except OSError:
                 pass
             client.settimeout(2)
@@ -114,7 +100,7 @@ def _exchange(
                         for frame in parser.frames()
                     ):
                         break
-            except (OSError, TimeoutError):
+            except OSError, TimeoutError:
                 pass
     finally:
         output.append((bytes(response), perf_counter() - started))
@@ -160,13 +146,9 @@ def main() -> int:
     loop = metal_event_loop(gc_mode="stock")
     try:
         tls = TLSConfig(certfile=cert_path, keyfile=key_path)
-        config = ServerConfig(
-            host="127.0.0.1", port=0, protocols=("h2",), lifespan="off"
-        )
+        config = ServerConfig(host="127.0.0.1", port=0, protocols=("h2",), lifespan="off")
         server = Server(app, config, loop)
-        loop.run_until_complete(
-            server._start(ssl=tls.build_ssl_context(("h2",)), tls=None)
-        )
+        loop.run_until_complete(server._start(ssl=tls.build_ssl_context(("h2",)), tls=None))
         port = server.sockets[0].getsockname()[1]
         response, elapsed = loop.run_until_complete(_drive(server, port))
     finally:

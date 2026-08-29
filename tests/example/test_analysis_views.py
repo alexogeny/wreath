@@ -1,32 +1,3 @@
-"""The two calculated views, driven through the application.
-
-These tests exist to ask the charts their question rather than to observe that
-they answer. The distinction is the lesson stage 4 paid for: a route table
-asserted ``GET /session`` existed while nothing asked it who it thought you
-were, and it reported ``signed_in: false`` to a caller holding a cookie the
-server had just issued.
-
-So nothing here reads ``result.buckets`` and stops. Each test names a property
-the declaration is *for* — the dense axis, the per-measure fill, the reader's
-own calendar — and would fail if the framework quietly stopped providing it
-while still returning a plausible-looking chart.
-
-**Sealing is not exercised here, and that is a boundary rather than a gap.**
-Sealing works -- `tests/postgres/test_series_integration.py::TestSealingPersists`
-drives a bucket through settling, reading back, and a correction against a real
-server. What these tests own is the *application's* two views, which declare no
-seal, so a seal assertion here would be testing the framework through the
-example instead of testing the example.
-
-This file briefly carried a pin asserting sealing was broken. It was written
-while the defect was live and left behind after a concurrent fix landed, and it
-had been aimed at the wrong subject anyway: it asserted the *driver* refuses a
-mapping, which is permanently true and always will be, because the fix converts
-the mapping to a JSON string before binding rather than teaching the driver to
-bind mappings. It would have passed forever while describing something that no
-longer existed. See AGENTS.md's rule about a check that has nothing to check.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -105,14 +76,6 @@ async def _station_id(client) -> int:
 
 @skip_without_database
 async def test_the_activity_axis_is_dense_and_in_the_reserves_calendar(client) -> None:
-    """Every local day in the window is present, in order, with no gaps.
-
-    This is the property a hand-written ``GROUP BY`` does not have, and the
-    reason the endpoint returns a declaration's envelope rather than rows: a day
-    nothing walked past has to be a zero in the axis, or a renderer draws a line
-    from the day before to the day after and invents activity that did not
-    happen.
-    """
     station = await _station_id(client)
     response = await client.get(
         f"/reserves/{RESERVE}/stations/{station}/activity",
@@ -139,17 +102,6 @@ async def test_the_activity_axis_is_dense_and_in_the_reserves_calendar(client) -
 
 @skip_without_database
 async def test_an_empty_day_is_zero_sightings_and_no_confidence(client) -> None:
-    """Per-measure fill: a count fills with 0, an average fills with null.
-
-    The single most useful thing this view does, and the easiest to lose. Zero
-    animals is a fact worth plotting; the mean confidence of no identifications
-    is not a number, and filling it with 0 would draw a confidence collapse on
-    every quiet night.
-
-    Skipped rather than asserted vacuously if the window happens to have no
-    empty day — a test that silently proves nothing is worse than one that says
-    it had nothing to look at.
-    """
     station = await _station_id(client)
     response = await client.get(
         f"/reserves/{RESERVE}/stations/{station}/activity",
@@ -180,11 +132,6 @@ async def test_an_empty_day_is_zero_sightings_and_no_confidence(client) -> None:
 
 @skip_without_database
 async def test_the_measures_carry_their_units(client) -> None:
-    """A percentage says so, and a count does not claim one.
-
-    The unit travels with the series because a renderer that has to infer it
-    from the measure's name gets it wrong exactly once, on the axis label.
-    """
     station = await _station_id(client)
     response = await client.get(
         f"/reserves/{RESERVE}/stations/{station}/activity",
@@ -196,11 +143,6 @@ async def test_the_measures_carry_their_units(client) -> None:
 
 @skip_without_database
 async def test_the_window_is_bounded_by_the_binding_layer(client) -> None:
-    """A decade of daily buckets is refused before a query is built.
-
-    ``CAMERA_TRAP_MAX_WINDOW_DAYS`` is start-up configuration, so this is a 422
-    from the binding layer rather than a slow query someone notices later.
-    """
     station = await _station_id(client)
     response = await client.get(
         f"/reserves/{RESERVE}/stations/{station}/activity",
@@ -211,12 +153,6 @@ async def test_the_window_is_bounded_by_the_binding_layer(client) -> None:
 
 @skip_without_database
 async def test_the_species_mix_ranks_and_does_not_fold_a_tail(client) -> None:
-    """The bars are the answer, so nothing is merged into an ``other`` bucket.
-
-    ``Series.by()`` would fold the tail to preserve a total, which is right for
-    a part-to-whole chart and wrong here: a ranger looking for a species needs
-    it to be absent-or-present, not silently summed into a remainder.
-    """
     station = await _station_id(client)
     response = await client.get(f"/reserves/{RESERVE}/stations/{station}/species-mix")
     assert response.status == 200
@@ -239,13 +175,6 @@ async def test_the_species_mix_ranks_and_does_not_fold_a_tail(client) -> None:
 
 @skip_without_database
 async def test_the_mix_and_the_series_agree_on_the_total(client) -> None:
-    """Two declarations over one table have to reach the same number.
-
-    The series is filtered to a window and the aggregate is not, so this compares
-    the aggregate against the *unwindowed* count the list endpoint reports for
-    the same station. If these ever disagree, one of the two is applying a
-    filter the other is not — which is the failure a chart cannot show you.
-    """
     station = await _station_id(client)
     mix = await client.get(f"/reserves/{RESERVE}/stations/{station}/species-mix")
     total = sum(row["values"]["sightings"] for row in mix.json()["rows"])
@@ -263,19 +192,6 @@ async def test_the_mix_and_the_series_agree_on_the_total(client) -> None:
 
 @skip_without_database
 async def test_a_card_pulled_late_records_a_correction() -> None:
-    """The late-SD-card story, on the example's own schema.
-
-    A card collected a year after its photos were taken carries sightings for a
-    day that sealed long ago. The settled count is not rewritten -- the
-    difference is recorded beside it and folded in on read, so late data reads
-    as late data arriving rather than as a number that quietly changed.
-
-    Driven through ``camera_trap.views.sealed_activity`` rather than a bare
-    ``Series``, so this asserts the declaration the docs describe rather than a
-    reconstruction of it. The framework-level round trip -- that a settled bucket
-    survives storage at all -- is proved in
-    ``tests/postgres/test_series_integration.py``.
-    """
     from _camera_trap import build_schema, drop_schema
     from camera_trap.models import MODELS, SCHEMA
     from camera_trap.views import sealed_activity
@@ -302,7 +218,7 @@ async def test_a_card_pulled_late_records_a_correction() -> None:
         # a handful of sightings -- so a hard-coded date makes this fail for a
         # reason that has nothing to do with sealing the day the seed shifts.
         busiest = await connection.fetch(
-            f'SELECT station_id, date_trunc(\'day\', captured_at AT TIME ZONE $1) '
+            f"SELECT station_id, date_trunc('day', captured_at AT TIME ZONE $1) "
             f'FROM "{SCHEMA}"."sightings" GROUP BY 1, 2 '
             "ORDER BY count(*) DESC, 1, 2 LIMIT 1",
             ZONE,
@@ -332,7 +248,6 @@ async def test_a_card_pulled_late_records_a_correction() -> None:
         # correction behind, and the first read below would fold them in and
         # measure the wrong thing. Cleared by this view's own identity so a
         # sibling suite's settled rows are left alone.
-        #
         # That identity is *schema-blind*: `view_key` digests the model's module
         # and qualname, not the schema it resolves to, so two deployments of this
         # application against different schemas file their settled rows under the
@@ -385,9 +300,7 @@ async def test_a_card_pulled_late_records_a_correction() -> None:
         assert moved, "reconcile did not notice the late card"
 
         after = await view.run(session, range=window, now=now, station=station)
-        assert after.series[0].values[0] == settled + 1, (
-            "the correction did not fold in on read"
-        )
+        assert after.series[0].values[0] == settled + 1, "the correction did not fold in on read"
         assert after.state.corrections, (
             "the envelope must say which bucket carries a correction, or late "
             "data is indistinguishable from a number that changed on its own"

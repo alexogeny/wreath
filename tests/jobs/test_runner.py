@@ -1,5 +1,3 @@
-"""JobRunner unit tests using a fake database (real enqueue/schema paths, no DB)."""
-
 from __future__ import annotations
 
 import pytest
@@ -76,6 +74,7 @@ def test_duplicate_task_rejected():
         pass
 
     with pytest.raises(ValueError):
+
         @runner.task("send")
         async def send2(ctx):
             pass
@@ -135,7 +134,6 @@ async def test_enqueue_on_transaction_uses_tx_not_pool():
 
 
 async def test_deduplicated_launch_returns_the_surviving_handle():
-    """The ordinary dedup case: the row the unique index kept is what you watch."""
     db = FakeDatabase()
     runner = _runner(db)
 
@@ -152,10 +150,6 @@ async def test_deduplicated_launch_returns_the_surviving_handle():
 
 
 async def test_launch_never_hands_back_a_stringified_none():
-    """The row vanished between the conflict and the read -- a retention sweep of
-    completed jobs will do that. There is no id to watch, and `str(None)` would
-    hand the client the four-character task id "None": a status endpoint that
-    404s and an SSE stream that never terminates."""
     db = FakeDatabase()
     runner = _runner(db)
 
@@ -172,14 +166,6 @@ async def test_launch_never_hands_back_a_stringified_none():
 
 
 async def test_a_deduplicated_launch_seeds_progress_when_this_worker_has_none():
-    """The other route to an unwatchable handle.
-
-    Progress fan-out is at-most-once with no replay, so a worker that started
-    after the original `launch` has no registry entry for it. Handing back a
-    `running` handle for a task this worker knows nothing about gives a client
-    something that 404s on status and hangs on the SSE stream -- the same
-    failure as a stringified `None`, arrived at differently.
-    """
     from wreath.progress import ProgressRegistry
 
     registry = ProgressRegistry()
@@ -199,11 +185,6 @@ async def test_a_deduplicated_launch_seeds_progress_when_this_worker_has_none():
 
 
 async def test_a_deduplicated_launch_never_rewinds_real_progress():
-    """...but a worker that *does* know is not reset to zero.
-
-    The original may be at 70% on this very worker; re-seeding unconditionally
-    would tell every watching client the import had started over.
-    """
     from wreath.progress import ProgressRegistry
 
     registry = ProgressRegistry()
@@ -225,13 +206,6 @@ async def test_a_deduplicated_launch_never_rewinds_real_progress():
 
 
 async def test_a_pass_that_cannot_be_started_is_counted_not_swallowed():
-    """A pass that is never driven does nothing at all, silently.
-
-    `_start_passes` wrapped the whole per-pass body in `suppress(Exception)`, so
-    a database that would not answer at startup left the pass unqueued with
-    nothing anywhere to say so -- the "nothing is driving this pass" state the
-    CLI can print but nothing set.
-    """
 
     class UnreachableDatabase:
         async def acquire(self, workload):
@@ -262,7 +236,6 @@ async def test_a_pass_that_cannot_be_started_is_counted_not_swallowed():
 
 
 async def test_one_unstartable_pass_does_not_strand_the_others():
-    """Isolation is per pass, not around the loop."""
     db = FakeDatabase()
     runner = _runner(db)
 
@@ -321,33 +294,28 @@ def test_schedule_registration_and_validation():
         runner.schedule("rollup", cron="0 3 * * *", misfire="fire")
 
 
-# --- a job enqueued by an older release (design 22 item 10) ------------------
-
-
 def _stale_job(**kw):
     from wreath.jobs import _Claimed
 
     defaults = dict(
-        id=7, task="send_receipt", args=["o-1", "plain"], tenant=None,
-        attempts=0, max_attempts=3, fence=1, key=None,
+        id=7,
+        task="send_receipt",
+        args=["o-1", "plain"],
+        tenant=None,
+        attempts=0,
+        max_attempts=3,
+        fence=1,
+        key=None,
     )
     return _Claimed(**{**defaults, **kw})
 
 
 async def test_args_that_no_longer_bind_dead_letter_instead_of_escaping():
-    """A signature change between releases must not kill the worker silently.
-
-    Binding used to happen inside the call that builds the coroutine, which sat
-    *outside* `_run`'s try -- so the TypeError escaped `_run` entirely: no
-    `_fail`, no `last_error`, no backoff. The job stayed leased until the
-    sweeper reclaimed it and eventually recorded "lease expired before
-    completion", which points at a hung handler rather than a stale enqueue.
-    """
     db = FakeDatabase()
     runner = _runner(db)
 
     @runner.task("send_receipt")
-    async def send_receipt(ctx, order_id, template, locale):   # three, not two
+    async def send_receipt(ctx, order_id, template, locale):  # three, not two
         pass
 
     await runner._run(_stale_job())
@@ -360,7 +328,9 @@ async def test_args_that_no_longer_bind_dead_letter_instead_of_escaping():
 
 async def test_a_stale_enqueue_names_the_arity_and_does_not_retry():
     db = FakeDatabase()
-    runner = _runner(db, )
+    runner = _runner(
+        db,
+    )
 
     @runner.task("send_receipt")
     async def send_receipt(ctx, order_id, template, locale):
@@ -379,7 +349,6 @@ async def test_a_stale_enqueue_names_the_arity_and_does_not_retry():
 
 
 async def test_a_handler_that_raises_still_retries_normally():
-    """The permanent path must not swallow ordinary failures."""
     db = FakeDatabase()
     runner = _runner(db)
 
@@ -423,8 +392,6 @@ async def test_a_job_binds_only_its_own_trace_context(trace_context, expected):
     assert seen == [expected]
 
 
-# --- `drive`: the shift handler that keeps an online pass moving ---------------
-#
 # `jobs.drive(pass)` is how the purge and rewrite passes behind `session_store`,
 # `webhooks`, `policy/idempotency` and `policy/ratelimit` make progress,
 # and the closure it registers had never been executed by a test: `_start_passes`
@@ -436,8 +403,9 @@ async def test_a_job_binds_only_its_own_trace_context(trace_context, expected):
 class _Result:
     """A `run_shift` result, duck-typed as `ChunkedPass.run_shift` returns one."""
 
-    def __init__(self, *, rows=10, chunks=1, error=None, stopped=None,
-                 should_continue=False, complete=True):
+    def __init__(
+        self, *, rows=10, chunks=1, error=None, stopped=None, should_continue=False, complete=True
+    ):
         self.rows = rows
         self.chunks = chunks
         self.error = error
@@ -457,8 +425,7 @@ class _Ledger:
 class _DrivenWalk:
     """Enough of a `ChunkedPass` for `drive` to register and run a shift."""
 
-    def __init__(self, result, *, name="purge_replays", tenant="", recurring=False,
-                 shift=5.0):
+    def __init__(self, result, *, name="purge_replays", tenant="", recurring=False, shift=5.0):
         self.name = name
         self.tenant = tenant
         self.workload = "write"
@@ -502,7 +469,6 @@ async def test_a_shift_with_more_to_do_enqueues_the_next_one():
 
 
 async def test_a_shift_that_made_chunks_but_is_not_complete_continues_too():
-    """`result.chunks and not result.complete`, the arm `should_continue` does not cover."""
     db = FakeDatabase()
     runner = _runner(db)
     walk = _DrivenWalk(_Result(chunks=2, complete=False, should_continue=False))
@@ -521,12 +487,12 @@ async def test_a_finished_shift_queues_nothing_further():
 
     await handler(_ctx(task))
 
-    assert not [sql for sql, _ in db.connection.calls if "INSERT INTO" in sql], \
+    assert not [sql for sql, _ in db.connection.calls if "INSERT INTO" in sql], (
         "a complete pass re-enqueued itself, which is a loop with no end"
+    )
 
 
 async def test_a_shift_that_made_no_chunks_queues_nothing_further():
-    """Zero chunks and incomplete is a pass with nothing to do, not one to spin on."""
     db = FakeDatabase()
     runner = _runner(db)
     walk = _DrivenWalk(_Result(chunks=0, complete=False, should_continue=False))
@@ -538,18 +504,23 @@ async def test_a_shift_that_made_no_chunks_queues_nothing_further():
 
 
 async def test_a_blocked_shift_returns_without_re_enqueueing():
-    """Re-enqueuing a halted pass turns `halt` back into the retry loop it refuses."""
     db = FakeDatabase()
     runner = _runner(db)
-    walk = _DrivenWalk(_Result(
-        chunks=2, complete=False, should_continue=True, stopped="blocked",
-    ))
+    walk = _DrivenWalk(
+        _Result(
+            chunks=2,
+            complete=False,
+            should_continue=True,
+            stopped="blocked",
+        )
+    )
     task, handler = _shift_handler(runner, walk)
 
     await handler(_ctx(task))  # not an error: halting is a decision, not a failure
 
-    assert not [sql for sql, _ in db.connection.calls if "INSERT INTO" in sql], \
+    assert not [sql for sql, _ in db.connection.calls if "INSERT INTO" in sql], (
         "a blocked pass was re-enqueued, so halting would retry forever"
+    )
 
 
 async def test_a_failed_chunk_raises_so_the_retry_machinery_sees_it():
@@ -563,17 +534,16 @@ async def test_a_failed_chunk_raises_so_the_retry_machinery_sees_it():
 
 
 async def test_a_chunk_error_without_a_failed_verdict_is_not_raised():
-    """Both halves are required: an error the pass did not stop for is not a failure.
-
-    A pass that recorded an error and carried on (a retried chunk, say) reports
-    `error` without `stopped == "failed"`, and raising there would dead-letter a
-    shift that is still making progress.
-    """
     db = FakeDatabase()
     runner = _runner(db)
-    walk = _DrivenWalk(_Result(
-        error=RuntimeError("transient"), stopped=None, chunks=1, complete=False,
-    ))
+    walk = _DrivenWalk(
+        _Result(
+            error=RuntimeError("transient"),
+            stopped=None,
+            chunks=1,
+            complete=False,
+        )
+    )
     task, handler = _shift_handler(runner, walk)
 
     await handler(_ctx(task))  # no raise
@@ -582,7 +552,6 @@ async def test_a_chunk_error_without_a_failed_verdict_is_not_raised():
 
 
 async def test_a_shift_passes_the_supervisors_stopping_flag_to_the_pass():
-    """A shift has to notice a shutdown mid-chunk; without a supervisor it gets None."""
     import asyncio as _asyncio
 
     class Supervisor:
@@ -603,7 +572,6 @@ async def test_a_shift_passes_the_supervisors_stopping_flag_to_the_pass():
 
 
 async def test_a_recurring_pass_must_be_given_a_schedule():
-    """Nothing else would start the next cycle, and stopping quietly is worse."""
     runner = _runner(FakeDatabase())
     with pytest.raises(ValueError, match="re-derived frontier"):
         runner.drive(_DrivenWalk(_Result(), name="cycles", recurring=True))
@@ -626,14 +594,11 @@ async def test_the_same_pass_cannot_be_driven_twice_by_one_runner():
 
 
 def test_a_pass_task_name_keeps_the_tenant_that_scopes_it():
-    """Two tenants' copies of one pass are two tasks; one name would collide."""
     from wreath.jobs import _pass_task_name
 
     assert _pass_task_name("purge replays", "acme") == "pass_purge_replays_acme"
     assert _pass_task_name("purge replays", "") == "pass_purge_replays"
 
-
-# --- declaration refusals, none of which had ever been triggered --------------
 
 def test_the_runner_refuses_a_batch_below_one():
     with pytest.raises(ValueError, match="batch must be >= 1"):
@@ -641,7 +606,6 @@ def test_the_runner_refuses_a_batch_below_one():
 
 
 def test_the_runner_names_which_of_the_two_intervals_it_refuses():
-    """`lease` and `poll_interval` share a guard, so each must be shown to reach it."""
     for kw in ({"lease": 0}, {"poll_interval": 0}, {"poll_interval": -1}):
         with pytest.raises(ValueError, match="lease and poll_interval must be positive"):
             _runner(FakeDatabase(), **kw)
@@ -658,7 +622,6 @@ def test_a_task_refuses_negative_retries_and_a_non_positive_timeout():
 
 
 def test_a_task_name_that_is_not_an_identifier_is_refused_at_declaration():
-    """The name is interpolated into SQL, so it is checked where it is declared."""
     runner = _runner(FakeDatabase())
     with pytest.raises(ValueError, match="task name"):
         runner.task("send email")
@@ -667,7 +630,6 @@ def test_a_task_name_that_is_not_an_identifier_is_refused_at_declaration():
 
 
 async def test_enqueueing_an_unregistered_task_says_which_task_and_how_to_fix_it():
-    """A bare `KeyError` from the dict lookup below reads the same to `except`, not to a person."""
     runner = _runner(FakeDatabase())
     with pytest.raises(KeyError, match="unknown task"):
         await runner.enqueue("nope")
@@ -691,12 +653,6 @@ async def test_an_explicit_max_attempts_overrides_the_tasks_own():
 
 
 async def test_a_failed_verdict_without_an_error_is_not_a_failure():
-    """Both clauses are required, and `stopped == "failed"` alone is not enough.
-
-    A pass reports the verdict and the error separately; raising on the verdict
-    alone would dead-letter a shift whose error is `None`, and the message would
-    have nothing to name.
-    """
     db = FakeDatabase()
     runner = _runner(db)
     walk = _DrivenWalk(_Result(error=None, stopped="failed", chunks=1, complete=True))
@@ -706,8 +662,6 @@ async def test_a_failed_verdict_without_an_error_is_not_a_failure():
 
 
 async def test_a_pass_asking_to_continue_is_believed_even_with_nothing_to_show():
-    """`should_continue` alone, with no chunks and complete: the first shift of a
-    pass whose frontier is empty this cycle still has to hand off to the next."""
     db = FakeDatabase()
     runner = _runner(db)
     walk = _DrivenWalk(_Result(chunks=0, complete=True, should_continue=True))
@@ -715,23 +669,19 @@ async def test_a_pass_asking_to_continue_is_believed_even_with_nothing_to_show()
 
     await handler(_ctx(task))
 
-    assert [sql for sql, _ in db.connection.calls if "INSERT INTO" in sql], \
+    assert [sql for sql, _ in db.connection.calls if "INSERT INTO" in sql], (
         "a pass that asked to continue was dropped"
+    )
 
 
 async def test_driving_with_a_cron_registers_the_schedule_that_starts_each_cycle():
     runner = _runner(FakeDatabase())
     assert not runner._schedules
-    task = runner.drive(_DrivenWalk(_Result(), name="cycles", recurring=True),
-                        cron="*/5 * * * *")
-    assert [s.task for s in runner._schedules] == [task], \
-        "nothing would start the next cycle"
+    task = runner.drive(_DrivenWalk(_Result(), name="cycles", recurring=True), cron="*/5 * * * *")
+    assert [s.task for s in runner._schedules] == [task], "nothing would start the next cycle"
 
 
 async def test_a_drive_failure_is_recorded_on_the_ledger_as_its_repr():
-    """The ledger is the only place that survives the process, and `wreath passes
-    status` is where somebody looks -- so the error has to arrive as text, and a
-    successful drive has to arrive as nothing rather than as the string "None"."""
     runner = _runner(FakeDatabase())
     walk = _DrivenWalk(_Result())
 
@@ -742,8 +692,6 @@ async def test_a_drive_failure_is_recorded_on_the_ledger_as_its_repr():
 
 
 async def test_the_scheduler_enqueues_only_the_minute_its_cron_matches():
-    """`_tick_schedules` had never run: a schedule that never fires and one that
-    fires every tick are the same passing suite without this."""
     from datetime import datetime
 
     db = FakeDatabase()
@@ -763,11 +711,10 @@ async def test_the_scheduler_enqueues_only_the_minute_its_cron_matches():
     db.connection.calls.clear()
     db.connection.fetchval_script = [datetime(2026, 7, 30, 3, 30)]
     await runner._tick_schedules()
-    assert not [sql for sql, _ in db.connection.calls if "INSERT INTO" in sql], \
+    assert not [sql for sql, _ in db.connection.calls if "INSERT INTO" in sql], (
         "the schedule fired on a minute its cron does not match"
+    )
 
-
-# --- the worker loop, the claim bookkeeping, and the failure path --------------
 
 class _Progress:
     """Enough of a `ProgressRegistry` for `_report_terminal`."""
@@ -786,8 +733,6 @@ class _Progress:
 
 
 async def test_a_dead_lettered_job_reports_where_it_stopped_not_a_hundred():
-    """Only `done` is 100%. Reporting a failure at 100 tells a watching client the
-    work finished, which is the opposite of what happened."""
     progress = _Progress(percent=42.0)
     runner = _runner(FakeDatabase(), progress=progress)
 
@@ -832,8 +777,6 @@ async def test_cancelling_without_progress_still_succeeds(monkeypatch):
 
 
 async def test_a_failure_with_no_handler_falls_back_to_the_rows_own_budget():
-    """`_fail` is reached with `handler=None` when the task is not registered here
-    -- another release's task, or one removed since the row was enqueued."""
     db = FakeDatabase()
     runner = _runner(db)
 
@@ -848,8 +791,6 @@ async def test_a_failure_with_no_handler_falls_back_to_the_rows_own_budget():
 
 
 async def test_a_retry_with_no_handler_waits_no_backoff_it_cannot_compute():
-    """The backoff shape lives on the handler; with none there is nothing to read,
-    and inventing one would delay a job by a policy nobody declared."""
     db = FakeDatabase()
     runner = _runner(db)
 
@@ -870,7 +811,6 @@ async def test_a_retry_with_no_handler_waits_no_backoff_it_cannot_compute():
 
 
 async def test_a_handlers_attempt_budget_wins_over_the_rows():
-    """A row enqueued before `retries` was lowered must respect the current handler."""
     db = FakeDatabase()
     runner = _runner(db)
 
@@ -880,13 +820,12 @@ async def test_a_handlers_attempt_budget_wins_over_the_rows():
 
     handler = runner._tasks["send_receipt"]
     await runner._fail(_stale_job(attempts=0, max_attempts=99), "smtp down", handler)
-    assert "state='dead'" in db.connection.calls[0][0], \
+    assert "state='dead'" in db.connection.calls[0][0], (
         "the row's stale budget was used instead of the handler's"
+    )
 
 
 def test_discarding_a_claim_removes_that_job_and_not_merely_the_first():
-    """`_release_unstarted` hands back whatever is still listed, so a wrong removal
-    hands back a job that is already running -- two workers, one job."""
     runner = _runner(FakeDatabase())
     first, second = _stale_job(id=1), _stale_job(id=2)
     runner._claimed_not_started.extend([first, second])
@@ -899,29 +838,38 @@ def test_discarding_a_claim_removes_that_job_and_not_merely_the_first():
 
 
 def test_a_claim_row_with_no_args_becomes_an_empty_argument_list():
-    """`args` is JSONB and comes back `None` for a job enqueued with none."""
     from wreath.jobs import JobRunner
 
-    claim = JobRunner._row_to_claim({
-        "id": 3, "task": "t", "args": None, "tenant": None,
-        "attempts": 0, "max_attempts": 3, "fence": 1, "dedup_key": None,
-    })
+    claim = JobRunner._row_to_claim(
+        {
+            "id": 3,
+            "task": "t",
+            "args": None,
+            "tenant": None,
+            "attempts": 0,
+            "max_attempts": 3,
+            "fence": 1,
+            "dedup_key": None,
+        }
+    )
     assert claim.args == []
 
-    text = JobRunner._row_to_claim({
-        "id": 3, "task": "t", "args": '["a", 1]', "tenant": None,
-        "attempts": 0, "max_attempts": 3, "fence": 1, "dedup_key": None,
-    })
+    text = JobRunner._row_to_claim(
+        {
+            "id": 3,
+            "task": "t",
+            "args": '["a", 1]',
+            "tenant": None,
+            "attempts": 0,
+            "max_attempts": 3,
+            "fence": 1,
+            "dedup_key": None,
+        }
+    )
     assert text.args == ["a", 1]  # a driver that hands back JSON as text
 
 
 async def test_a_worker_with_nothing_to_claim_waits_instead_of_re_querying():
-    """The park is the difference between polling and hammering the database.
-
-    Without it the loop re-issues the claim as fast as the event loop will let
-    it -- which is not a hang a test can see, so this bounds the number of
-    queries rather than the time.
-    """
     import asyncio as _asyncio
 
     class EmptyDatabase(FakeDatabase):
@@ -954,14 +902,6 @@ async def test_a_worker_with_nothing_to_claim_waits_instead_of_re_querying():
 
 
 async def test_a_worker_asked_to_stop_does_not_start_the_rest_of_its_batch():
-    """A batch is claimed together and run one at a time; a stop between two jobs
-    must leave the rest for `_release_unstarted` rather than running them anyway.
-
-    The claim is served once and then bounded: a worker that never reaches the
-    handler never sets `stopping` either, and this loop would run until the
-    mutation deadline instead of failing. The bound is on the number of claims
-    rather than on time, so it decides the same way on a slow machine.
-    """
     import asyncio as _asyncio
 
     stopping = _asyncio.Event()
@@ -978,8 +918,16 @@ async def test_a_worker_asked_to_stop_does_not_start_the_rest_of_its_batch():
 
     db = BatchDatabase()
     rows = [
-        {"id": i, "task": "send", "args": [], "tenant": None,
-         "attempts": 0, "max_attempts": 3, "fence": 1, "dedup_key": None}
+        {
+            "id": i,
+            "task": "send",
+            "args": [],
+            "tenant": None,
+            "attempts": 0,
+            "max_attempts": 3,
+            "fence": 1,
+            "dedup_key": None,
+        }
         for i in (1, 2, 3)
     ]
 
@@ -1015,8 +963,6 @@ async def test_a_worker_asked_to_stop_does_not_start_the_rest_of_its_batch():
 
 
 async def test_draining_gives_up_at_its_deadline_rather_than_waiting_out_a_hung_handler():
-    """`drain` is called with a deadline by the supervisor; a handler that never
-    returns must not hold the shutdown open past it."""
     import asyncio as _asyncio
 
     runner = _runner(FakeDatabase())
@@ -1028,9 +974,6 @@ async def test_draining_gives_up_at_its_deadline_rather_than_waiting_out_a_hung_
         await _asyncio.wait_for(runner.drain(loop.time() - 1.0), timeout=1.0)
     finally:
         forever.cancel()
-
-
-# --- priority and coalescing ----------------------------------------------------------
 
 
 async def test_priority_rides_the_row_and_orders_the_claim():
@@ -1120,12 +1063,6 @@ async def test_the_claim_is_ordered_by_priority_then_run_at():
 
 
 async def test_the_claim_degrades_when_the_column_is_absent():
-    """A schema without the version-3 column must not stop the queue.
-
-    Naming a missing column in the claim would fail every poll, which turns a
-    schema step nobody has applied yet into an outage rather than a feature
-    that is not there.
-    """
     db = FakeDatabase()
     runner = _runner(db)
     runner._columns["priority"] = False
@@ -1159,11 +1096,6 @@ async def test_a_priority_against_a_schema_without_the_column_is_refused():
 
 
 async def test_a_default_enqueue_never_names_priority_and_never_probes():
-    """The common path pays nothing for a column it does not use.
-
-    The column has a server-side DEFAULT, so omitting it writes the same row --
-    and probing would put a catalog read on every first enqueue.
-    """
     db = FakeDatabase()
     runner = _runner(db)
 
@@ -1281,18 +1213,7 @@ async def test_an_armed_reclaim_requests_the_fields_needed_for_a_recording():
     assert "jsonb_array_length(args) AS argument_count" in sql
 
 
-# --- worker identity ------------------------------------------------------------------
-
-
 def test_two_runners_on_one_queue_have_distinct_owners():
-    """`owner` used to be the queue name, so every worker on a queue shared it.
-
-    Correctness never depended on it -- the fence is what stops a superseded
-    worker's bookkeeping landing -- but it meant `owner` answered "which queue",
-    a question the `queue` column already answers, and an incident could not ask
-    which *process* held a job. Nothing read it back, which is why that went
-    unnoticed for as long as it did.
-    """
     first = _runner(FakeDatabase())
     second = _runner(FakeDatabase())
     assert first._worker_id != second._worker_id

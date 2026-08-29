@@ -1,5 +1,9 @@
 # From FastAPI and Alembic to Wreath-metal migrations
 
+For the operator sequence from drift detection through deployment and rollback, use
+[Migrations from detect to rollback](migration-workflow.md). This page goes deeper on
+tenant fleets, schema architecture, conversion passes and the metal artifact format.
+
 A SaaS migration is not only a change of web framework. Your database history,
 tenant boundaries, deployment locks, and recovery procedure already carry years
 of decisions. Wreath does not ask you to throw those decisions away. It gives
@@ -9,7 +13,8 @@ packed native operation instead of one Python orchestration loop per tenant.
 This page is the deep end: schema architecture, readiness policy, and fleet
 resolution. For the day-one translation of the rest of your stack — routes,
 dependencies, Pydantic models, SQLModel sessions, and the Alembic command
-mapping — start with [Coming from FastAPI](../from-fastapi/index.md).
+mapping — start with [Build an HTTP API](http-api.md) and the
+[command-line task map](cli.md).
 
 !!! warning "Implementation status"
 
@@ -673,7 +678,7 @@ Use four deployment phases:
    deployment decision transfer DDL authority.
 
 The practical checklist is in
-[Move a schema-per-tenant SaaS application from Alembic](../cookbook/recipes/fastapi-alembic-saas.md).
+[Follow the complete migration workflow](migration-workflow.md).
 
 ## Read the benchmark honestly
 
@@ -699,4 +704,4 @@ not benchmarked. That narrowness is intentional: the report may show
 control-plane overhead, but it must never imply that PostgreSQL locks, WAL, or
 table rewrites disappeared.
 
-**Reference:** [`wreath.migrations`](../reference/migrations.md).
+**Reference:** [`wreath.migrations`](../reference/data.md).

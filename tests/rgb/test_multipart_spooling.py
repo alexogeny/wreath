@@ -1,5 +1,3 @@
-"""Large uploads without holding them in memory (report 23: G-44)."""
-
 from __future__ import annotations
 
 import pytest
@@ -24,7 +22,7 @@ def _request(body: bytes, limits: RequestLimits | None = None, chunks: int = 1):
     pieces = [body[i::chunks] for i in range(chunks)] if chunks > 1 else [body]
     if chunks > 1:
         size = max(1, len(body) // chunks)
-        pieces = [body[i:i + size] for i in range(0, len(body), size)]
+        pieces = [body[i : i + size] for i in range(0, len(body), size)]
     queue = list(pieces)
 
     async def receive():
@@ -38,8 +36,10 @@ def _request(body: bytes, limits: RequestLimits | None = None, chunks: int = 1):
 
     return Request(
         {
-            "type": "http", "method": "POST", "path": "/",
-            "headers": [(b"content-type", b'multipart/form-data; boundary=BOUND')],
+            "type": "http",
+            "method": "POST",
+            "path": "/",
+            "headers": [(b"content-type", b"multipart/form-data; boundary=BOUND")],
         },
         receive,
         limits=limits or RequestLimits(),
@@ -101,21 +101,15 @@ class TestSpooledUploads:
         assert form.getlist("role") == ["admin"]
 
     async def test_a_mixed_form_keeps_both(self):
-        body = _multipart(
-            [("name", b"ann", None), ("upload", b"q" * (128 * 1024), "big.bin")]
-        )
+        body = _multipart([("name", b"ann", None), ("upload", b"q" * (128 * 1024), "big.bin")])
         form = await _request(body, RequestLimits(spool_max_bytes=4096)).form()
         assert form["name"] == "ann"
         assert form.files["upload"].size == 128 * 1024
 
     async def test_the_aggregate_memory_bound_ignores_spooled_bytes(self):
-        """The point of spooling: an upload past `max_form_memory_bytes` no
-        longer has to be refused, because it is not in memory."""
         payload = b"w" * (2 * 1024 * 1024)
         body = _multipart([("upload", payload, "big.bin")])
-        limits = RequestLimits(
-            spool_max_bytes=64 * 1024, max_form_memory_bytes=256 * 1024
-        )
+        limits = RequestLimits(spool_max_bytes=64 * 1024, max_form_memory_bytes=256 * 1024)
         form = await _request(body, limits).form()
         assert form.files["upload"].size == len(payload)
 
@@ -130,9 +124,7 @@ class TestSpooledUploads:
     async def test_a_body_arriving_in_pieces_parses_the_same(self):
         payload = b"p" * (128 * 1024)
         body = _multipart([("name", b"ann", None), ("upload", payload, "big.bin")])
-        form = await _request(
-            body, RequestLimits(spool_max_bytes=4096), chunks=17
-        ).form()
+        form = await _request(body, RequestLimits(spool_max_bytes=4096), chunks=17).form()
         assert form["name"] == "ann"
         assert form.files["upload"].read() == payload
 

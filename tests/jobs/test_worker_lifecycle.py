@@ -1,11 +1,3 @@
-"""Worker state-machine coverage (claim/complete/fail/run) over a fake driver.
-
-These exercise the fencing + retry/dead-letter branches a real DB would
-otherwise be needed for, by driving the JobRunner methods directly against a
-connection that records SQL and returns canned RETURNING rows. The end-to-end
-integration (real SKIP-LOCKED contention, lease expiry) stays DSN-gated.
-"""
-
 from __future__ import annotations
 
 import json
@@ -63,15 +55,22 @@ def _runner(conn: FakeConn, **kw: Any) -> JobRunner:
 
 
 def _job(**kw: Any) -> _Claimed:
-    base = dict(id=5, task="t", args=[], tenant="", attempts=0, max_attempts=6,
-                fence=1, key=None)
+    base = dict(id=5, task="t", args=[], tenant="", attempts=0, max_attempts=6, fence=1, key=None)
     base.update(kw)
     return _Claimed(**base)  # type: ignore[arg-type]
 
 
 async def test_claim_parses_rows_and_emits_skip_locked_with_fence_bump() -> None:
-    row = {"id": 5, "task": "send", "args": json.dumps(["o1"]), "tenant": "",
-           "attempts": 0, "max_attempts": 6, "fence": 3, "dedup_key": None}
+    row = {
+        "id": 5,
+        "task": "send",
+        "args": json.dumps(["o1"]),
+        "tenant": "",
+        "attempts": 0,
+        "max_attempts": 6,
+        "fence": 3,
+        "dedup_key": None,
+    }
     conn = FakeConn(fetch=[row])
     claimed = await _runner(conn)._claim(1)
     assert len(claimed) == 1
@@ -149,7 +148,6 @@ async def test_run_unregistered_task_dead_letters() -> None:
     assert "state='dead'" in conn.calls[-1][0]
 
 
-# --- runtime bounds ----------------------------------------------------------
 # A handler that outruns its lease is reclaimed by the sweeper *while it is still
 # running*, so a second worker starts a concurrent copy and the first one's
 # fenced completion lands on nothing. `drive()` already refuses a pass whose
@@ -184,7 +182,6 @@ async def test_a_handler_that_outruns_its_deadline_is_cancelled_and_retried() ->
 
 
 async def test_a_handler_deadline_defaults_to_inside_the_lease() -> None:
-    """A default that could exceed the lease would reintroduce the duplicate."""
     conn = FakeConn()
     runner = _runner(conn, lease=30.0)
 

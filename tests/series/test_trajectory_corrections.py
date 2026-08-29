@@ -1,29 +1,3 @@
-"""Slice 6: a derived spatial measure that respects late data.
-
-A collar buffers three days out of satellite range and then dumps; a van
-backfills after a dead zone. The fixes land *behind* the watermark, and they
-change a distance that has already been reported.
-
-Wreath's answer to a late row is already written down: the settled value stays
-immutable and the difference is recorded beside it, folded in on read. What
-this file establishes is that the rule extends to a **path** measure, where a
-late fix is not simply another row -- it splits a leg in two, so its
-contribution is not "what that row measures" but "what the whole path measures
-now, minus what it measured then".
-
-Two findings are pinned here because they are properties of the geometry rather
-than of the implementation, and neither is obvious:
-
-* **Distance is monotone under insertion.** A fix landing between two others
-  replaces one leg with two, and the triangle inequality holds on a sphere, so
-  the total can only rise. A correction to a sealed distance is therefore never
-  negative, which is a real check on a reconcile that claims otherwise.
-* **Speed is not additively correctable, for the same reason an average is not.**
-  It is a ratio whose denominator also moves, so a correction must carry the
-  replacement rather than a difference -- which is exactly the split
-  `difference` already makes on `has_identity`.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -58,11 +32,6 @@ BASE = [
 
 class TestAWindowedDistanceAddsUp:
     def test_the_windows_partition_the_whole_distance(self):
-        """The anchor property, which is the reason `between` takes one.
-
-        Without it every leg crossing midnight is lost, and each day still
-        looks plausible on its own.
-        """
         path = Trajectory(BASE)
         monday = path.between(MONDAY, TUESDAY).distance
         tuesday = path.between(TUESDAY, WEDNESDAY).distance
@@ -98,15 +67,6 @@ class TestAWindowedDistanceAddsUp:
         ],
     )
     def test_a_naive_bound_is_refused(self, start, end):
-        """Both bounds, and the refusal named rather than merely raised.
-
-        The first version of this asserted `Exception` matching "aware", which
-        had no teeth: with the guard removed, comparing a naive bound to an
-        aware fix raises `TypeError: can't compare offset-naive and offset-aware
-        datetimes`, which also matches. A mutation pass removed the guard and
-        nothing objected. It now pins the type and the sentence, so the guard is
-        what is being tested rather than datetime's own error.
-        """
         path = Trajectory(BASE)
         with pytest.raises(GeospatialError, match="between\\(\\) takes aware timestamps"):
             path.between(start, end)
@@ -121,9 +81,7 @@ class TestAWindowedDistanceAddsUp:
         lattice = grid(BoundingBox(-29.5, -28.5, 149.5, 150.5), metres=20_000)
         window = path.between(MONDAY, WEDNESDAY)
         expected_cells = {
-            found
-            for _when, point in window.fixes
-            if (found := lattice.index_of(point)) is not None
+            found for _when, point in window.fixes if (found := lattice.index_of(point)) is not None
         }
         cells, speed = path.grid_summary(MONDAY, WEDNESDAY, lattice)
         assert set(cells) == expected_cells
@@ -134,9 +92,7 @@ class TestAWindowedDistanceAddsUp:
         lattice = grid(BoundingBox(-29.5, -28.5, 149.5, 150.5), metres=20_000)
         cells, speed = path.grid_summary(TUESDAY, WEDNESDAY, lattice)
         window = path.between(TUESDAY, WEDNESDAY)
-        assert set(cells) == {
-            lattice.index_of(point) for _when, point in window.fixes
-        }
+        assert set(cells) == {lattice.index_of(point) for _when, point in window.fixes}
         assert speed == pytest.approx(window.speed)
 
     def test_grid_summary_keeps_only_the_identical_latest_window(self):
@@ -171,7 +127,6 @@ class TestATrajectoryRefusesWhatItCannotMeasure:
             Trajectory(naive)
 
     def test_the_refusal_names_the_offending_fix(self):
-        """Position, not just presence: one bad fix among good ones."""
         with pytest.raises(GeospatialError, match=r"fix 1 has a timestamp"):
             Trajectory([BASE[0], (datetime.datetime(2026, 3, 3, 0), BASE[1][1])])
 
@@ -180,14 +135,6 @@ class TestATrajectoryRefusesWhatItCannotMeasure:
             Trajectory([(at(MONDAY, 0),)])
 
     def test_a_fix_with_no_length_at_all_is_refused_by_name(self):
-        """`isinstance` before `len`, and that order is the whole guard.
-
-        A wrong length is the case a reader thinks of; a fix that is not a
-        sequence is the one that arrives from real code -- a bare timestamp, a
-        row object, a `None` from a query that found nothing. Measuring it
-        first raises `TypeError: object of type 'X' has no len()`, which names
-        neither the fix nor what it should have been.
-        """
         with pytest.raises(GeospatialError, match=r"fix 0 must be a \(timestamp"):
             Trajectory([at(MONDAY, 0)])
 
@@ -195,18 +142,12 @@ class TestATrajectoryRefusesWhatItCannotMeasure:
             Trajectory([BASE[0], None])
 
     def test_a_fix_whose_position_is_not_a_coordinate_is_refused(self):
-        """The message names the type it got, so a swapped pair is diagnosable."""
         with pytest.raises(GeospatialError, match="must carry a Coordinate, got tuple"):
             Trajectory([(at(MONDAY, 0), (-29.0, 150.0))])
 
 
 class TestDistanceIsMonotoneUnderALateFix:
     def test_a_late_fix_inside_the_path_can_only_lengthen_it(self):
-        """The triangle inequality, asserted rather than assumed.
-
-        This is what makes a distance correction always non-negative, and it is
-        the property a reconcile that produced a negative delta would violate.
-        """
         before = Trajectory(BASE).distance
         late = fix(at(MONDAY, 6), -29.05, 150.05)  # off the straight line
         after = Trajectory([*BASE, late]).distance
@@ -253,9 +194,7 @@ class TestACorrectionReachesTheRecomputedTruth:
         path = Trajectory(BASE)
         sealed = {"distance": path.between(MONDAY, TUESDAY).distance}
         late = fix(at(MONDAY, 6), -29.20, 150.05)
-        recomputed = {
-            "distance": Trajectory([*BASE, late]).between(MONDAY, TUESDAY).distance
-        }
+        recomputed = {"distance": Trajectory([*BASE, late]).between(MONDAY, TUESDAY).distance}
 
         delta = difference(sealed, recomputed, measures)
         # A plain number, not a {"set": ...} replacement: distance is additive,
@@ -270,9 +209,7 @@ class TestACorrectionReachesTheRecomputedTruth:
         # The late fix lands on Tuesday, so Monday is unchanged and a reconcile
         # over it must write nothing at all rather than a row of zeroes.
         late = fix(at(TUESDAY, 6), -29.20, 150.25)
-        recomputed = {
-            "distance": Trajectory([*BASE, late]).between(MONDAY, TUESDAY).distance
-        }
+        recomputed = {"distance": Trajectory([*BASE, late]).between(MONDAY, TUESDAY).distance}
         assert difference(sealed, recomputed, measures) is None
 
     def test_the_sealed_value_is_never_mutated(self):
@@ -280,9 +217,7 @@ class TestACorrectionReachesTheRecomputedTruth:
         sealed = {"distance": Trajectory(BASE).between(MONDAY, TUESDAY).distance}
         original = dict(sealed)
         late = fix(at(MONDAY, 6), -29.20, 150.05)
-        recomputed = {
-            "distance": Trajectory([*BASE, late]).between(MONDAY, TUESDAY).distance
-        }
+        recomputed = {"distance": Trajectory([*BASE, late]).between(MONDAY, TUESDAY).distance}
         folded = fold(sealed, difference(sealed, recomputed, measures))
         assert sealed == original
         assert folded is not sealed
@@ -290,21 +225,11 @@ class TestACorrectionReachesTheRecomputedTruth:
 
 class TestSpeedCorrectsByReplacementNotDifference:
     def test_a_ratio_carries_the_answer_rather_than_a_delta(self):
-        """Speed is `avg`-shaped, and the existing split already knows it.
-
-        `difference` decides additive-versus-replacement on
-        `has_identity`, and a mean speed has no identity element for the
-        same reason an average does not: the denominator moves too. Adding a
-        delta to a stale ratio would produce a number that is not a speed of
-        anything.
-        """
         measures = (("speed", avg(_column())),)
         path = Trajectory(BASE)
         sealed = {"speed": path.between(MONDAY, TUESDAY).speed}
         late = fix(at(MONDAY, 6), -29.20, 150.05)
-        recomputed = {
-            "speed": Trajectory([*BASE, late]).between(MONDAY, TUESDAY).speed
-        }
+        recomputed = {"speed": Trajectory([*BASE, late]).between(MONDAY, TUESDAY).speed}
 
         delta = difference(sealed, recomputed, measures)
         assert delta is not None

@@ -1,11 +1,3 @@
-"""Declaration-time behaviour for partial indexes.
-
-Everything a partial index refuses, it refuses here -- while a registry compiles,
-never at request time. The refusals are not fussiness: each one names a predicate
-whose PostgreSQL normal form wreath cannot reproduce, and an index whose declared
-text disagrees with the catalog's is drift that ``detect`` reports forever.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -52,9 +44,7 @@ def test_in_renders_as_any_array_because_that_is_how_postgres_deparses_it() -> N
 
 
 def test_a_conjunction_keeps_each_operand_parenthesised() -> None:
-    rendered = render_predicate(
-        all_of(eq("state", "ready"), eq("tries", 0)), COLUMNS, "S"
-    )
+    rendered = render_predicate(all_of(eq("state", "ready"), eq("tries", 0)), COLUMNS, "S")
     assert rendered == "((state = 'ready'::text) AND (tries = 0))"
 
 
@@ -108,7 +98,6 @@ def test_an_unknown_column_is_refused() -> None:
 
 
 def test_a_type_whose_normal_form_is_unpredictable_is_refused_by_name() -> None:
-    """timestamptz reformats its literal and casts it -- not reproducible here."""
     with pytest.raises(DeclarationError, match="timestamptz"):
         render_predicate(eq("seen_at", "2026-01-01"), COLUMNS, "Sample")
 
@@ -154,7 +143,6 @@ def test_the_predicate_reaches_the_spec_as_rendered_sql() -> None:
 
 
 def test_a_changed_predicate_moves_the_model_fingerprint() -> None:
-    """Otherwise a WHERE could be edited and no migration would be generated."""
 
     def build(value: str) -> bytes:
         namespace: dict = {}

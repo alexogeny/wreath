@@ -51,9 +51,7 @@ class LambdaAdapter:
         self.close()
 
 
-def _scope(
-    event: Mapping[str, Any], context: Any
-) -> tuple[str, dict[str, Any], bytes]:
+def _scope(event: Mapping[str, Any], context: Any) -> tuple[str, dict[str, Any], bytes]:
     version = str(event.get("version", "1.0"))
     if version not in {"1.0", "2.0"}:
         raise LambdaEventError(
@@ -87,9 +85,7 @@ def _scope(
         elif isinstance(decoded_path, str):
             path = decoded_path
         else:
-            raise LambdaEventError(
-                "payload v2 requestContext http path must be a string"
-            )
+            raise LambdaEventError("payload v2 requestContext http path must be a string")
         query = str(event.get("rawQueryString", ""))
         source_ip = str(http.get("sourceIp", ""))
         header_pairs = _v2_headers(event)
@@ -146,9 +142,7 @@ def _text(mapping: Mapping[str, Any], key: str) -> str:
 
 
 def _header(name: Any, value: Any) -> tuple[bytes, bytes]:
-    return _encode_http_header(
-        name, value, owner="Lambda", error_type=LambdaEventError
-    )
+    return _encode_http_header(name, value, owner="Lambda", error_type=LambdaEventError)
 
 
 def _v2_headers(event: Mapping[str, Any]) -> tuple[tuple[bytes, bytes], ...]:
@@ -182,8 +176,11 @@ def _v1_query(event: Mapping[str, Any]) -> str:
     multiple = event.get("multiValueQueryStringParameters")
     if isinstance(multiple, Mapping):
         return urlencode(
-            [(str(name), str(value)) for name, values in multiple.items()
-             for value in (values if isinstance(values, list) else [values])]
+            [
+                (str(name), str(value))
+                for name, values in multiple.items()
+                for value in (values if isinstance(values, list) else [values])
+            ]
         )
     query = event.get("queryStringParameters")
     return urlencode(query) if isinstance(query, Mapping) else ""
@@ -193,9 +190,7 @@ def _response(
     version: str, status: int, headers: tuple[tuple[bytes, bytes], ...], body: bytes
 ) -> dict[str, Any]:
     decoded = [(name.decode("latin-1"), value.decode("latin-1")) for name, value in headers]
-    content_type = next(
-        (value for name, value in decoded if name.lower() == "content-type"), ""
-    )
+    content_type = next((value for name, value in decoded if name.lower() == "content-type"), "")
     textual = content_type.startswith("text/") or any(
         marker in content_type for marker in ("json", "xml", "javascript", "form-urlencoded")
     )
@@ -223,13 +218,9 @@ def _response(
             if normalized != "set-cookie":
                 ordinary_names.setdefault(normalized, name)
                 ordinary[normalized] = (
-                    value
-                    if normalized not in ordinary
-                    else f"{ordinary[normalized]},{value}"
+                    value if normalized not in ordinary else f"{ordinary[normalized]},{value}"
                 )
-        result["headers"] = {
-            ordinary_names[name]: value for name, value in ordinary.items()
-        }
+        result["headers"] = {ordinary_names[name]: value for name, value in ordinary.items()}
         if cookie_values:
             result["cookies"] = cookie_values
     else:

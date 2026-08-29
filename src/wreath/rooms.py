@@ -94,8 +94,6 @@ class RoomRegistry:
         # the room name in the payload and the local fan-out.
         self._bridge = BusBridge(bus, channel=channel, apply=self._apply)
 
-    # -- membership ----------------------------------------------------------
-
     async def join(self, room: str, websocket: Any) -> None:
         """Add `websocket` to `room` (idempotent).
 
@@ -147,8 +145,6 @@ class RoomRegistry:
         leaves, so it tracks local membership rather than rooms in existence.
         """
         return sorted(self._rooms)
-
-    # -- broadcast -----------------------------------------------------------
 
     @property
     def grade_errors(self) -> int:
@@ -226,9 +222,7 @@ class RoomRegistry:
         # partly happened. Nothing in `_bus_payload` raises today; the ordering
         # is what keeps that true for whoever edits it next.
         remote = (
-            self._bus_payload(room, payload)
-            if self._bridge.attached and grade is None
-            else None
+            self._bus_payload(room, payload) if self._bridge.attached and grade is None else None
         )
         delivered = await self._deliver_local(room, payload, grade, render)
         if remote is not None:
@@ -298,9 +292,7 @@ class RoomRegistry:
         if marker is not None:
             # `dependency_id` carries the member count, so a slow broadcast can
             # be told apart from a merely large one.
-            marker(
-                _PH_WS_FANOUT, delivered, _COV_PYTHON, _monotonic_ns() - started
-            )
+            marker(_PH_WS_FANOUT, delivered, _COV_PYTHON, _monotonic_ns() - started)
         return delivered
 
     async def _deliver_graded(
@@ -406,8 +398,6 @@ class RoomRegistry:
         else:
             return
         await self._deliver_local(room, body)
-
-    # -- introspection -------------------------------------------------------
 
     def snapshot(self) -> dict[str, int]:
         """Room name -> local member count. For health and debug endpoints.

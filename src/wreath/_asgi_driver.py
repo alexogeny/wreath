@@ -23,9 +23,7 @@ def _encode_http_header(
     try:
         return str(name).lower().encode("ascii"), str(value).encode("latin-1")
     except UnicodeEncodeError as exc:
-        raise error_type(
-            f"{owner} header {name!r} is not HTTP Latin-1"
-        ) from exc
+        raise error_type(f"{owner} header {name!r} is not HTTP Latin-1") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,9 +64,7 @@ class WarmASGIDriver:
     def invoke(self, scope: dict[str, Any], body: bytes) -> ASGIResponse:
         with self._lock:
             if self._closed:
-                raise RuntimeError(
-                    f"{self._owner} is closed; construct a new adapter"
-                )
+                raise RuntimeError(f"{self._owner} is closed; construct a new adapter")
             if not self._started:
                 try:
                     self._runner.run(self._startup())
@@ -103,8 +99,7 @@ class WarmASGIDriver:
             return
         if reply.get("type") == "lifespan.startup.failed":
             raise RuntimeError(
-                f"{self._owner} ASGI lifespan startup failed: "
-                f"{reply.get('message', '')}"
+                f"{self._owner} ASGI lifespan startup failed: {reply.get('message', '')}"
             )
         if reply.get("type") != "lifespan.startup.complete":
             raise RuntimeError(
@@ -138,17 +133,11 @@ class WarmASGIDriver:
             self._from_app = None
             return None
         if lifespan_task.cancelled():
-            raise RuntimeError(
-                f"ASGI app was cancelled during {self._owner} lifespan {phase}"
-            )
+            raise RuntimeError(f"ASGI app was cancelled during {self._owner} lifespan {phase}")
         error = lifespan_task.exception()
         if error is not None:
-            raise RuntimeError(
-                f"ASGI app raised during {self._owner} lifespan {phase}"
-            ) from error
-        raise RuntimeError(
-            f"ASGI app ended without lifespan.{phase}.complete or .failed"
-        )
+            raise RuntimeError(f"ASGI app raised during {self._owner} lifespan {phase}") from error
+        raise RuntimeError(f"ASGI app ended without lifespan.{phase}.complete or .failed")
 
     async def _invoke(self, scope: dict[str, Any], body: bytes) -> ASGIResponse:
         sent_request = False
@@ -197,8 +186,7 @@ class WarmASGIDriver:
             await self._lifespan_task
         if reply.get("type") == "lifespan.shutdown.failed":
             raise RuntimeError(
-                f"{self._owner} ASGI lifespan shutdown failed: "
-                f"{reply.get('message', '')}"
+                f"{self._owner} ASGI lifespan shutdown failed: {reply.get('message', '')}"
             )
         if reply.get("type") != "lifespan.shutdown.complete":
             raise RuntimeError(

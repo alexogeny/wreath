@@ -7,8 +7,7 @@
  * path: the writer checks capacity once and either publishes or drops+counts.
  *
  * This header is the C runtime surface. The wire schema it emits is defined by
- * flight_schema.h (the Python-mirrored cell layouts). See
- * docs/plans/native-flight-recorder-stage-1.md.
+ * flight_schema.h (the Python-mirrored cell layouts).
  */
 #ifndef WREATH_FLIGHT_H
 #define WREATH_FLIGHT_H

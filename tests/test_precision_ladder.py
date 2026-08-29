@@ -1,11 +1,3 @@
-"""Slice 2: precision as an authorization outcome, not a verdict.
-
-A withheld field is a boolean. This is the same idea with a scale: exact for a
-ranger, 1 km for a partner, 10 km for a volunteer, absent for the public, and
-the policy engine chooses. The two properties worth attacking are that the
-degradation cannot be averaged away and cannot be bypassed.
-"""
-
 from __future__ import annotations
 
 import math
@@ -18,27 +10,13 @@ from wreath.geospatial import Coordinate, distance
 TOWN = Coordinate(lat=-23.6980, lon=133.8807)
 
 
-# --- the grid ----------------------------------------------------------------
-
-
 def test_coarsening_is_a_pure_function_of_the_point_and_the_cell():
-    """The non-reversibility property, stated as determinism.
-
-    An attacker who can ask repeatedly learns the cell and never more. The
-    alternative -- per-request jitter -- averages to the true position, so the
-    absence of randomness here *is* the security control.
-    """
     first = coarsen(TOWN, 10_000)
     for _ in range(50):
         assert coarsen(TOWN, 10_000) == first
 
 
 def test_repeated_observations_cannot_be_averaged_toward_the_truth():
-    """The attack the grid defeats, run as an attack.
-
-    Averaging a thousand answers must land on the *cell*, not on the point. A
-    jittered implementation would converge on TOWN and fail this.
-    """
     answers = [coarsen(TOWN, 10_000) for _ in range(1_000)]
     mean_lat = sum(c.lat for c in answers) / len(answers)
     mean_lon = sum(c.lon for c in answers) / len(answers)
@@ -51,7 +29,6 @@ def test_repeated_observations_cannot_be_averaged_toward_the_truth():
 
 
 def test_neighbouring_points_inside_one_cell_report_the_same_place():
-    """What "10 km precision" has to mean to be worth anything."""
     a = coarsen(Coordinate(lat=-23.6980, lon=133.8807), 10_000)
     b = coarsen(Coordinate(lat=-23.7020, lon=133.8850), 10_000)
     assert a == b
@@ -64,12 +41,6 @@ def test_a_coarser_cell_never_reveals_more_than_a_finer_one():
 
 
 def test_the_cell_is_at_least_the_requested_size_at_high_latitude():
-    """The reason longitude is scaled by cos(latitude).
-
-    An equator-sized longitude step at latitude 60 makes a cell half as wide on
-    the ground as promised -- revealing *more* precision than was granted, which
-    is the unsafe direction to be wrong in.
-    """
     for lat in (0.0, 45.0, 60.0, 75.0):
         point = Coordinate(lat=lat, lon=10.0)
         cell = coarsen(point, 10_000)
@@ -81,7 +52,6 @@ def test_the_cell_is_at_least_the_requested_size_at_high_latitude():
 
 
 def test_a_point_near_the_pole_collapses_longitude_rather_than_lying():
-    """A cell that would span the globe reports the parallel, not a fake column."""
     cell = coarsen(Coordinate(lat=89.9999, lon=133.0), 100_000)
     assert cell.lon == 0.0
 
@@ -97,7 +67,6 @@ def test_coarsening_refuses_a_non_numeric_cell():
 
 
 def test_the_result_is_always_a_valid_coordinate():
-    """Rounding must not push a pole or the antimeridian out of range."""
     for lat in (-90.0, -89.9, 0.0, 89.9, 90.0):
         for lon in (-180.0, -179.9, 0.0, 179.9, 180.0):
             cell = coarsen(Coordinate(lat=lat, lon=lon), 50_000)
@@ -105,13 +74,8 @@ def test_the_result_is_always_a_valid_coordinate():
             assert -180.0 <= cell.lon <= 180.0
 
 
-# --- the ladder --------------------------------------------------------------
-
-
 def test_a_ladder_declares_its_actions_finest_first():
-    ladder = PrecisionLadder(
-        ("read_exact", None), ("read_fine", 1_000), ("read_coarse", 10_000)
-    )
+    ladder = PrecisionLadder(("read_exact", None), ("read_fine", 1_000), ("read_coarse", 10_000))
     assert ladder.actions() == ("read_exact", "read_fine", "read_coarse")
 
 
@@ -170,11 +134,7 @@ def test_apply_passes_a_missing_point_through():
     assert ladder.apply(None, 10_000) is None
 
 
-# --- refusal clauses the mutation pass showed were unexercised ----------------
-
-
 def test_a_boolean_resolution_is_refused_rather_than_read_as_one_metre():
-    """`True` is an `int` in Python, so a bool must be refused by name."""
     with pytest.raises(ValueError, match="numeric metres"):
         PrecisionLadder(("a", True))
 

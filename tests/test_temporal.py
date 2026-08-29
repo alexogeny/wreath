@@ -1,18 +1,3 @@
-"""Time that means the same thing at every boundary.
-
-Old code reaches for `arrow` or `pendulum` in nearly every module, and time
-ends up meaning something slightly different at each surface: the ORM hands
-back a `datetime`, something wraps it, the serializer calls `.isoformat()`, and
-"3 hours ago" gets built by hand in a template. Five conventions, and the drift
-between them is invisible until a client reads a naive timestamp as UTC.
-
-Wreath cannot take `arrow` as a dependency -- the core is dependency-free by
-rule -- so `wreath.temporal` is both the replacement and the chance to settle
-the question once. These tests pin the two properties that make it worth
-having: an `Instant` is *always* zone-aware, and the relative formatter takes a
-locale so i18n later is a parameter rather than a search for every call site.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -45,18 +30,13 @@ from wreath.temporal import (
 SYDNEY = "Australia/Sydney"
 
 
-# --- an instant is always aware -------------------------------------------------
-
-
 def test_an_instant_is_a_datetime() -> None:
-    """So the ORM, comparisons, and arithmetic all keep working unchanged."""
     moment = Instant.parse("2026-07-26T09:30:00+00:00")
     assert isinstance(moment, datetime.datetime)
     assert moment.year == 2026 and moment.hour == 9
 
 
 def test_a_naive_string_is_refused_rather_than_assumed_to_be_utc() -> None:
-    """Assuming UTC is the bug this type exists to prevent."""
     with pytest.raises(TemporalError, match="offset"):
         Instant.parse("2026-07-26T09:30:00")
 
@@ -67,7 +47,6 @@ def test_a_naive_datetime_is_refused() -> None:
 
 
 def test_a_naive_datetime_can_be_placed_in_a_zone_explicitly() -> None:
-    """Explicit is fine; implicit is what is refused."""
     moment = Instant.of(datetime.datetime(2026, 7, 26, 9, 30), assume=SYDNEY)
     assert moment.utcoffset() is not None
     assert moment.tzinfo is not None
@@ -88,9 +67,6 @@ def test_now_can_be_taken_in_a_named_zone() -> None:
     assert now(SYDNEY).tzinfo == ZoneInfo(SYDNEY)
 
 
-# --- parsing and formatting -----------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "text",
     [
@@ -101,7 +77,6 @@ def test_now_can_be_taken_in_a_named_zone() -> None:
     ],
 )
 def test_the_iso_forms_a_client_actually_sends_all_parse(text: str) -> None:
-    """`Z` is the one stdlib used to refuse and every JSON client emits."""
     assert parse(text).tzinfo is not None
 
 
@@ -111,7 +86,6 @@ def test_iso_output_round_trips() -> None:
 
 
 def test_iso_output_normalises_utc_to_an_offset() -> None:
-    """One spelling on the wire, so two services never disagree about `Z`."""
     assert parse("2026-07-26T09:30:00Z").iso() == "2026-07-26T09:30:00+00:00"
 
 
@@ -122,17 +96,14 @@ def test_rubbish_is_refused_with_the_text_in_the_message() -> None:
 
 def test_a_non_string_is_refused() -> None:
     with pytest.raises(TemporalError):
-        parse(1753520000)          # type: ignore[arg-type]
-
-
-# --- zones ----------------------------------------------------------------------
+        parse(1753520000)  # type: ignore[arg-type]
 
 
 def test_converting_between_zones_keeps_the_same_instant() -> None:
     utc = parse("2026-07-26T09:30:00+00:00")
     sydney = utc.to(SYDNEY)
-    assert sydney == utc                       # the same moment
-    assert sydney.hour != utc.hour             # a different wall clock
+    assert sydney == utc  # the same moment
+    assert sydney.hour != utc.hour  # a different wall clock
 
 
 def test_an_unknown_zone_says_so_by_name() -> None:
@@ -142,9 +113,6 @@ def test_an_unknown_zone_says_so_by_name() -> None:
 
 def test_a_known_zone_resolves() -> None:
     assert zone(SYDNEY) == ZoneInfo(SYDNEY)
-
-
-# --- durations ------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -159,7 +127,6 @@ def test_a_known_zone_resolves() -> None:
     ],
 )
 def test_iso_durations_parse(text: str, seconds: int) -> None:
-    """stdlib has no ISO-8601 duration parser, and config files are full of them."""
     assert parse_duration(text) == datetime.timedelta(seconds=seconds)
 
 
@@ -175,10 +142,7 @@ def test_a_zero_duration_is_not_the_empty_string() -> None:
 
 def test_a_malformed_duration_is_refused() -> None:
     with pytest.raises(TemporalError, match="P1Y"):
-        parse_duration("P1Y")      # years are not a fixed number of seconds
-
-
-# --- the relative formatter ------------------------------------------------------
+        parse_duration("P1Y")  # years are not a fixed number of seconds
 
 
 @pytest.mark.parametrize(
@@ -209,19 +173,14 @@ def test_the_past_reads_the_way_a_person_would_say_it(
         (datetime.timedelta(days=1), "tomorrow"),
     ],
 )
-def test_the_future_reads_the_same_way(
-    delta: datetime.timedelta, expected: str
-) -> None:
+def test_the_future_reads_the_same_way(delta: datetime.timedelta, expected: str) -> None:
     reference = parse("2026-07-26T09:30:00+00:00")
     assert relative(reference + delta, now=reference) == expected
 
 
 def test_the_singular_is_not_1_minutes() -> None:
-    """The detail every hand-rolled formatter gets wrong on the first pass."""
     reference = parse("2026-07-26T09:30:00+00:00")
-    assert "1 minutes" not in relative(
-        reference - datetime.timedelta(minutes=1), now=reference
-    )
+    assert "1 minutes" not in relative(reference - datetime.timedelta(minutes=1), now=reference)
 
 
 def test_relative_is_available_on_the_instant_itself() -> None:
@@ -231,23 +190,17 @@ def test_relative_is_available_on_the_instant_itself() -> None:
 
 
 def test_a_naive_reference_is_refused() -> None:
-    """Comparing an aware instant to a naive `now` is a TypeError waiting to fire."""
     with pytest.raises(TemporalError, match="offset"):
         relative(now(), now=datetime.datetime(2026, 7, 26, 9, 30))
 
 
-# --- the locale seam --------------------------------------------------------------
-
-
 def test_the_formatter_takes_a_locale() -> None:
-    """i18n later must be a parameter, not a hunt for every call site."""
     reference = parse("2026-07-26T09:30:00+00:00")
     earlier = reference - datetime.timedelta(hours=3)
     assert relative(earlier, now=reference, locale="en") == "3 hours ago"
 
 
 def test_an_unknown_locale_falls_back_rather_than_failing() -> None:
-    """A missing translation must render English, never 500 a page."""
     reference = parse("2026-07-26T09:30:00+00:00")
     earlier = reference - datetime.timedelta(hours=3)
     assert relative(earlier, now=reference, locale="qq-ZZ") == "3 hours ago"
@@ -257,9 +210,6 @@ def test_a_regional_locale_uses_its_base_language() -> None:
     reference = parse("2026-07-26T09:30:00+00:00")
     earlier = reference - datetime.timedelta(hours=3)
     assert relative(earlier, now=reference, locale="en-AU") == "3 hours ago"
-
-
-# --- format_duration must be a faithful inverse (design 22 item 17) --------------
 
 
 @pytest.mark.parametrize(
@@ -277,33 +227,24 @@ def test_a_regional_locale_uses_its_base_language() -> None:
     ],
 )
 def test_a_duration_round_trips_exactly(delta: datetime.timedelta) -> None:
-    """`total_seconds()` is a float and `%g` rounds to six significant digits,
-    so sub-second and very large durations used to come back changed -- or not
-    come back at all."""
     assert parse_duration(format_duration(delta)) == delta
 
 
 def test_a_sub_second_duration_is_not_scientific_notation() -> None:
-    """`PT1e-06S` is what `%g` produced, and `parse_duration` refuses it."""
     assert format_duration(datetime.timedelta(microseconds=1)) == "PT0.000001S"
 
 
 def test_format_duration_never_emits_years_or_months() -> None:
-    """The asymmetry design 22 item 17 asked about: `parse_duration` rejects
-    years and months, so the formatter must never emit one."""
     for days in (0, 1, 31, 365, 4000, 999999999):
         head = format_duration(datetime.timedelta(days=days)).split("T")[0]
         assert "Y" not in head and "M" not in head
 
 
-# --- the property sweep ----------------------------------------------------------
-#
 # `format_duration` was broken for 19254 of 20012 durations and survived because
 # its only round-trip test used `timedelta(hours=2, minutes=5)` -- whole minutes,
 # the one shape `%g` renders cleanly. One well-chosen example passing forever is
 # the failure mode, so every remaining pair is swept over a domain built out of
 # the edges rather than out of the typical case.
-#
 # The fast samples below run in the default suite. The full sweeps carry
 # `@pytest.mark.fuzz` and run under `pytest -m ''`, because the default marks
 # have to stay at ~3.5s.
@@ -337,9 +278,7 @@ def _sweep_instants() -> list[Instant]:
         for month, day, hour in [(1, 1, 0), (4, 6, 2), (6, 15, 13), (10, 5, 2), (12, 31, 23)]:
             for micro in _SWEEP_MICROS:
                 for fold in (0, 1):
-                    out.append(
-                        Instant(2025, month, day, hour, 30, 7, micro, tz, fold=fold)
-                    )
+                    out.append(Instant(2025, month, day, hour, 30, 7, micro, tz, fold=fold))
     for tz in (datetime.UTC, ZoneInfo("Pacific/Auckland"), ZoneInfo("Asia/Kathmandu")):
         for year in (1, 2, 1970, 2000, 9998, 9999):
             for micro in (0, 1, 999999):
@@ -350,38 +289,28 @@ def _sweep_instants() -> list[Instant]:
 @pytest.mark.parametrize(
     ("year", "month", "day", "hour", "micro", "zone_name", "fold"),
     [
-        (2025, 4, 6, 2, 0, "Pacific/Auckland", 1),      # the ambiguous hour, second pass
+        (2025, 4, 6, 2, 0, "Pacific/Auckland", 1),  # the ambiguous hour, second pass
         (2025, 4, 6, 2, 999999, "Pacific/Auckland", 0),  # the ambiguous hour, first pass
-        (2025, 9, 28, 2, 1, "Pacific/Auckland", 0),      # the hour that does not exist
+        (2025, 9, 28, 2, 1, "Pacific/Auckland", 0),  # the hour that does not exist
         (2025, 6, 15, 13, 123456, "Asia/Kathmandu", 0),  # +05:45
-        (2025, 6, 15, 13, 1, "Pacific/Chatham", 0),      # +12:45
-        (1, 1, 1, 12, 0, "UTC", 0),                      # datetime.min's year
-        (9999, 12, 31, 23, 999999, "UTC", 0),            # datetime.max's year
+        (2025, 6, 15, 13, 1, "Pacific/Chatham", 0),  # +12:45
+        (1, 1, 1, 12, 0, "UTC", 0),  # datetime.min's year
+        (9999, 12, 31, 23, 999999, "UTC", 0),  # datetime.max's year
     ],
 )
 def test_an_instant_round_trips_through_iso(
     year: int, month: int, day: int, hour: int, micro: int, zone_name: str, fold: int
 ) -> None:
-    """The edges the duration bug taught us to check: sub-second precision, both
-    sides of a DST transition, fractional offsets, and the calendar extremes.
-
-    Compared as absolute moments rather than with `==`: a parsed value carries a
-    fixed offset rather than the original `ZoneInfo`, and PEP 495 makes a
-    datetime inside an ambiguous hour compare unequal across zones on purpose.
-    """
     moment = Instant(year, month, day, hour, 30, 7, micro, ZoneInfo(zone_name), fold=fold)
     assert Instant.parse(format_iso(moment)).timestamp() == moment.timestamp()
 
 
 def test_builtin_datetime_iso_formatter_matches_the_stdlib_definition() -> None:
-    """The native request path is held to an implementation-independent oracle."""
     zones = (
         None,
         datetime.UTC,
         datetime.timezone(datetime.timedelta(hours=5, minutes=30)),
-        datetime.timezone(
-            -datetime.timedelta(hours=3, seconds=1, microseconds=2)
-        ),
+        datetime.timezone(-datetime.timedelta(hours=3, seconds=1, microseconds=2)),
     )
     values = [
         datetime.datetime(year, 2, 3, 4, 5, 6, microsecond, tzinfo=tz)
@@ -391,7 +320,11 @@ def test_builtin_datetime_iso_formatter_matches_the_stdlib_definition() -> None:
     ]
     values.extend(
         datetime.datetime(
-            2026, 4, 5, 2, 30,
+            2026,
+            4,
+            5,
+            2,
+            30,
             tzinfo=ZoneInfo(SYDNEY),
             fold=fold,
         )
@@ -406,9 +339,7 @@ def test_builtin_datetime_iso_formatter_matches_the_stdlib_definition() -> None:
     )
 
     assert len(values) == 84
-    assert [format_iso(value) for value in values] == [
-        value.isoformat() for value in values
-    ]
+    assert [format_iso(value) for value in values] == [value.isoformat() for value in values]
 
 
 def test_datetime_subclasses_keep_their_isoformat_override() -> None:
@@ -421,21 +352,14 @@ def test_datetime_subclasses_keep_their_isoformat_override() -> None:
 
 @pytest.mark.fuzz
 def test_every_instant_in_the_sweep_round_trips_through_iso() -> None:
-    """754 aware moments, and the count is asserted so a domain that quietly
-    shrinks fails loudly rather than passing on less."""
     values = _sweep_instants()
     assert len(values) == 754
-    bad = [
-        v for v in values
-        if Instant.parse(format_iso(v)).timestamp() != v.timestamp()
-    ]
+    bad = [v for v in values if Instant.parse(format_iso(v)).timestamp() != v.timestamp()]
     assert bad == []
 
 
 @pytest.mark.fuzz
 def test_every_instant_in_the_sweep_survives_the_json_path() -> None:
-    """An instant that encodes and cannot be read back is the same defect one
-    layer up -- `jsonable` is what the response path actually calls."""
     values = _sweep_instants()
     bad = []
     for value in values:
@@ -447,8 +371,6 @@ def test_every_instant_in_the_sweep_survives_the_json_path() -> None:
 
 @pytest.mark.fuzz
 def test_the_duration_sweep_is_exact_across_the_whole_range() -> None:
-    """33033 durations: the resolution, both extremes, every microsecond shape,
-    and a seeded random fill. This is the sweep that found the `%g` bug."""
     values = [
         datetime.timedelta(0),
         datetime.timedelta.max,
@@ -470,12 +392,7 @@ def test_the_duration_sweep_is_exact_across_the_whole_range() -> None:
     assert bad == []
 
 
-# --- what `floor`/`end_of` do NOT promise, pinned so it stays a decision ----------
-
-
 def test_a_bucket_brackets_the_moment_it_was_asked_about() -> None:
-    """`floor(v) <= v < end_of(v)` -- the property sealing depends on, since a
-    bucket must not close before a row that belongs to it."""
     tz = ZoneInfo(SYDNEY)
     moment = Instant(2025, 6, 15, 13, 47, 3, 250000, tz)
     for width in (Minute, Hour, Day, Week, Month, Quarter, Year):
@@ -484,27 +401,6 @@ def test_a_bucket_brackets_the_moment_it_was_asked_about() -> None:
 
 
 def test_a_bucket_does_not_bracket_the_first_pass_of_an_ambiguous_hour() -> None:
-    """A limit of the calendar, not of this module -- and PostgreSQL shares it.
-
-    When a zone puts its clocks back, one local hour happens twice, so a single
-    local time names two instants. A bucket start can only *be* one of them,
-    and values at the other one therefore fall outside their own bucket. There
-    is no resolution that avoids this; there is only a choice of which pass to
-    strand.
-
-    `floor` resolves to the **later** candidate because `AT TIME ZONE` does
-    (see `from_wall_clock`), so it is the *first* pass that is stranded. The
-    live-PostgreSQL check in `tests/postgres/test_series_integration.py`
-    measures both engines over the same inputs and they fail on exactly the
-    same values -- 9 zones, both transition directions, every bucket unit -- so
-    matching `date_trunc` is what this buys, and the stranding is the price
-    both engines pay.
-
-    An earlier revision resolved to the *first* candidate, which stranded the
-    second pass instead **and disagreed with `date_trunc`** for every value in
-    it. That is the failure worth avoiding: a settled row filed under a bucket
-    `generate_series` never emits disappears from every later read.
-    """
     tz = ZoneInfo("Pacific/Auckland")
     first_pass = Instant(2025, 4, 6, 2, 30, 0, 0, tz, fold=0)
     second_pass = Instant(2025, 4, 6, 2, 30, 0, 0, tz, fold=1)

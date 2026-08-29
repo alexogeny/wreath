@@ -42,7 +42,6 @@ __all__ = [
     "vapid_headers",
 ]
 
-# --- NIST P-256 -------------------------------------------------------------
 
 #: The curve constants, group law and scalar multiplication share the curve
 #: library with `_auth/_ecverify` and `_dkim`. What
@@ -109,7 +108,6 @@ def _encode_point(point: Point) -> bytes:
     return b"\x04" + x.to_bytes(32, "big") + y.to_bytes(32, "big")
 
 
-# --- AES-128-GCM -----------------------------------------------------------
 # The complete cipher and authentication loops live in `_native/aesgcm.c`.
 # Its scalar kernel is always present; AES-NI/PCLMULQDQ replaces it per
 # call on capable x86 processors.
@@ -141,9 +139,7 @@ def _check_gcm_parameters(key: bytes, nonce: bytes, length: int) -> None:
         )
 
 
-def aes128gcm_encrypt(
-    key: bytes, nonce: bytes, plaintext: bytes, aad: bytes = b""
-) -> bytes:
+def aes128gcm_encrypt(key: bytes, nonce: bytes, plaintext: bytes, aad: bytes = b"") -> bytes:
     """AES-128-GCM; returns ciphertext || 16-byte tag.
 
     Pinned against NIST SP 800-38D vectors and OpenSSL outputs by
@@ -157,9 +153,7 @@ def aes128gcm_encrypt(
     return _core.aes128gcm_encrypt(key, nonce, plaintext, aad)
 
 
-def aes128gcm_decrypt(
-    key: bytes, nonce: bytes, message: bytes, aad: bytes = b""
-) -> bytes:
+def aes128gcm_decrypt(key: bytes, nonce: bytes, message: bytes, aad: bytes = b"") -> bytes:
     """The plaintext of `ciphertext || tag`, or a refusal.
 
     Not used to deliver a push -- the recipient is a browser -- and here because
@@ -180,15 +174,9 @@ def aes128gcm_decrypt(
     return plaintext
 
 
-# --- HKDF (RFC 5869) --------------------------------------------------------
-
-
 def _hkdf(salt: bytes, ikm: bytes, info: bytes, length: int) -> bytes:
     prk = hmac.new(salt, ikm, hashlib.sha256).digest()
     return hmac.new(prk, info + b"\x01", hashlib.sha256).digest()[:length]
-
-
-# --- ECDSA P-256 signing ----------------------------------------------------
 
 
 def _ecdsa_sign(private: int, digest: bytes) -> bytes:
@@ -207,16 +195,11 @@ def _ecdsa_sign(private: int, digest: bytes) -> bytes:
     # the private key, and the loop is the specified handling rather than
     # defensive padding.
     while True:
-        nonce = hmac.new(
-            b"wreath-webpush-nonce", seed, hashlib.sha512
-        ).digest()
+        nonce = hmac.new(b"wreath-webpush-nonce", seed, hashlib.sha512).digest()
         signature = _core.curve_p256_sign(private, digest, nonce)
         if signature is not None:
             return signature
         seed = hashlib.sha256(seed).digest()
-
-
-# --- VAPID ------------------------------------------------------------------
 
 
 #: The shared encoder. This was a local copy of the stdlib chain, with the
@@ -309,9 +292,6 @@ def vapid_headers(
     signature = _ecdsa_sign(keys.private, hashlib.sha256(signing_input).digest())
     token = f"{header}.{claims}.{_b64(signature)}"
     return {"Authorization": f"vapid t={token}, k={keys.application_server_key}"}
-
-
-# --- subscriptions and encryption -------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)

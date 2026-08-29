@@ -1,15 +1,3 @@
-"""What ``wreath port`` tells CI, and what emit mode does with a file it cannot read.
-
-Two follow-ons from the robustness pass. The report renderings learned to say
-"n/a" and ``null`` when nothing was recognized, but the process still said "fine"
-— and CI reads the process, not the markdown. And the emit path still had the
-unguarded read that the analysis path had just lost.
-
-The codes follow the house convention (``wreath docs``, ``wreath inspect``):
-``2`` never got started, ``1`` ran with something to report, ``0`` ran clean.
-The two tests that carry the convention are the already-ported tree exiting
-``0`` and the wrong directory exiting ``2`` — everything else is detail.
-"""
 from argparse import Namespace
 from pathlib import Path
 
@@ -69,11 +57,13 @@ def _report_args(*roots: Path) -> Namespace:
 
 
 def _emit_args(*roots: Path, output: Path) -> Namespace:
-    return Namespace(source=[str(r) for r in roots], output=str(output),
-                     in_place=False, force=False, as_json=False)
-
-
-# -- report mode: 2 never started, 1 has something to say, 0 is clean ---------
+    return Namespace(
+        source=[str(r) for r in roots],
+        output=str(output),
+        in_place=False,
+        force=False,
+        as_json=False,
+    )
 
 
 def test_a_clean_port_exits_zero(tmp_path, capsys):
@@ -84,9 +74,6 @@ def test_a_clean_port_exits_zero(tmp_path, capsys):
 
 
 def test_an_already_ported_tree_exits_zero(tmp_path, capsys):
-    """The point of the convention. A tree with no FastAPI left in it recognizes
-    nothing — and that is a *successful* run with nothing to do, not a failure.
-    Anyone re-running `wreath port` as a regression check must see green."""
     root = _tree(tmp_path, "plain", maths="def herd_size(n):\n    return n * 2\n")
 
     code = execute(_report_args(root))
@@ -100,8 +87,6 @@ def test_an_already_ported_tree_exits_zero(tmp_path, capsys):
 
 
 def test_a_directory_with_nothing_to_analyze_exits_two(tmp_path, capsys):
-    """The other half: nothing was analyzed at all, which in practice means the
-    path is wrong. `files_analyzed` is what separates this from the case above."""
     root = _tree(tmp_path, "empty")
 
     code = execute(_report_args(root))
@@ -112,7 +97,6 @@ def test_a_directory_with_nothing_to_analyze_exits_two(tmp_path, capsys):
 
 
 def test_unsupported_constructs_exit_one(tmp_path, capsys):
-    """The original contract: a pipeline gating on 1 keeps working."""
     root = _tree(tmp_path, "app", main=_UNSUPPORTED_APP)
 
     code = execute(_report_args(root))
@@ -125,8 +109,6 @@ def test_unsupported_constructs_exit_one(tmp_path, capsys):
 
 
 def test_a_skipped_file_is_work_remaining(tmp_path, capsys):
-    """A file that could not be read is left for a human, so it is 1 — even
-    though everything the run *did* read translated cleanly."""
     root = _tree(tmp_path, "app", main=_APP)
     (root / "dangling.py").symlink_to(root / "no_such_file.py")
 
@@ -141,9 +123,6 @@ def test_a_skipped_file_is_work_remaining(tmp_path, capsys):
 
 
 def test_unsupported_and_skipped_together_are_still_one(tmp_path, capsys):
-    """Both conditions collapse into the same code. The report is what tells you
-    which you have — and it says so, because a count over a partial tree is a
-    lower bound rather than a count."""
     root = _tree(tmp_path, "app", main=_UNSUPPORTED_APP)
     (root / "dangling.py").symlink_to(root / "no_such_file.py")
 
@@ -157,16 +136,11 @@ def test_unsupported_and_skipped_together_are_still_one(tmp_path, capsys):
 
 
 def test_the_exit_codes_are_distinct():
-    """Three states, three codes — collapsing any two loses the distinction."""
     assert len({EXIT_OK, EXIT_WORK_REMAINS, EXIT_NOT_RUN}) == 3
     assert (EXIT_OK, EXIT_WORK_REMAINS, EXIT_NOT_RUN) == (0, 1, 2)
 
 
-# -- emit mode: one bad source does not end the run ---------------------------
-
-
 def test_emit_survives_a_source_it_cannot_read(tmp_path):
-    """The defect: `wreath port --output` died on the first unreadable file."""
     root = _tree(tmp_path, "app", main=_APP, other=_APP)
     (root / "dangling.py").symlink_to(root / "no_such_file.py")
     out = tmp_path / "ported"
@@ -202,11 +176,6 @@ def test_emit_records_a_source_that_is_not_utf8(tmp_path):
 
 
 def test_a_failure_is_not_a_skip(tmp_path):
-    """`skipped` means 'correctly left alone'; `failed` means 'never got there'.
-
-    Folding them together would make an already-ported tree indistinguishable
-    from one where every file failed to read.
-    """
     root = _tree(tmp_path, "app", main=_APP)
     out = tmp_path / "ported"
 
@@ -219,8 +188,6 @@ def test_a_failure_is_not_a_skip(tmp_path):
 
 
 def test_an_unwritable_destination_is_fatal(tmp_path):
-    """A source that cannot be read costs one file; a destination that cannot be
-    written condemns every remaining one, so it must not be swallowed."""
     root = _tree(tmp_path, "app", main=_APP)
     out = tmp_path / "ported"
     out.mkdir()
@@ -253,7 +220,6 @@ def test_emit_mode_exits_zero_when_every_file_was_ported(tmp_path, capsys):
 
 
 def test_emit_mode_exits_two_when_there_was_nothing_to_emit(tmp_path, capsys):
-    """Same question as report mode's `2`: did you point me at anything?"""
     root = _tree(tmp_path, "empty")
     out = tmp_path / "ported"
 
@@ -264,8 +230,6 @@ def test_emit_mode_exits_two_when_there_was_nothing_to_emit(tmp_path, capsys):
 
 
 def test_emit_mode_re_run_over_an_unchanged_tree_is_clean(tmp_path, capsys):
-    """Everything skipped is not the same as nothing found — the second run
-    touched every file and decided each needed no work, which is `0`."""
     root = _tree(tmp_path, "app", main=_APP)
     out = tmp_path / "ported"
 

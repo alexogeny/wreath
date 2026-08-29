@@ -1,9 +1,5 @@
 /* PolicyRouteTable: Wreath's one-pass policy matcher.
  *
- * The bitset design was measured against the former decision-tree router on
- * CPU and resident memory before becoming the sole request path. See
- * docs/plans/bitset-routing.md for the design and evidence.
- *
  * The idea: inside one (method, segment-count) group, index the routes
  * 0..N-1 in priority order and precompile, per segment position, a bitset per
  * distinct literal value plus a bitset of the routes carrying a parameter

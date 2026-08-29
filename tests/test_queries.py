@@ -1,9 +1,3 @@
-"""Declared, named reads: `wreath.queries`.
-
-Runs against the ORM suite's scriptable fake driver (`tests/orm/conftest.py`),
-so these exercise the real compiler, plan cache, and session without a database.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -46,9 +40,6 @@ class Users(Queries[User]):
 
 def scripted(session) -> None:
     session.registry.database.connection.script("FROM", [user_row(1), user_row(2)])
-
-
-# -- the surface ---------------------------------------------------------------
 
 
 async def test_declared_query_binds_its_parameter(session):
@@ -124,7 +115,6 @@ async def test_related_column_parameter_joins_and_binds(session):
 
 
 async def test_constants_and_parameters_mix_in_one_declaration(session):
-    """Only the parameterised part is rebuilt; the constants are declared once."""
 
     class Mixed(Queries[User]):
         matching = query(
@@ -139,9 +129,6 @@ async def test_constants_and_parameters_mix_in_one_declaration(session):
     assert args == (1, 2, 3, "A")
 
 
-# -- the plan cache -----------------------------------------------------------
-
-
 async def test_one_shape_per_declaration_however_many_calls(session):
     scripted(session)
     users = Users(session)
@@ -151,9 +138,7 @@ async def test_one_shape_per_declaration_however_many_calls(session):
     assert session.registry.cached_plan_count == before + 1
 
 
-async def test_a_declaration_derives_its_shape_only_once_per_registry(
-    session, monkeypatch
-):
+async def test_a_declaration_derives_its_shape_only_once_per_registry(session, monkeypatch):
     scripted(session)
     calls = 0
     original = orm_compiler.shape_of
@@ -179,7 +164,6 @@ def test_a_declaration_keys_identically_to_the_hand_written_query(registry):
 
 
 def test_a_leaked_placeholder_cannot_be_compiled(registry):
-    """A declaration bypassed rather than bound must fail, not run half-bound."""
     unbound = Select.build(User, ()).where(User.name == Param("name"))
     with pytest.raises(ORMError):
         shape_of(registry, unbound)
@@ -189,9 +173,6 @@ def test_a_bound_select_is_an_ordinary_select(registry):
     bound = Users.named.bind(name="A")
     assert isinstance(bound, Select)
     assert bound.model is User
-
-
-# -- declaration-time validation ----------------------------------------------
 
 
 def test_a_foreign_column_fails_at_class_definition():
@@ -261,9 +242,6 @@ def test_an_unclaimed_declaration_cannot_be_bound():
         query(User.name == Param("name")).bind(name="A")
 
 
-# -- per-call validation ------------------------------------------------------
-
-
 async def test_a_missing_parameter_is_reported_by_name(session):
     with pytest.raises(TypeError, match="missing parameter 'name'"):
         await Users(session).named()
@@ -290,9 +268,6 @@ async def test_count_uses_the_declared_filters(session):
     sql, args = session.registry.database.connection.calls[-1]
     assert sql.startswith("SELECT COUNT(*)")
     assert args == ("A",)
-
-
-# -- naming -------------------------------------------------------------------
 
 
 def test_a_declaration_knows_its_own_name():

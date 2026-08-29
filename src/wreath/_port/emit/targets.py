@@ -185,9 +185,6 @@ def _grouped_imports(names):
 _KW_RENAME = {"ge": "minimum", "le": "maximum"}
 _KW_KEEP = frozenset({"alias"})
 _MARKERS = frozenset({"Query", "Path", "Header", "Cookie", "Form", "File"})
-# Marker keywords that only wrote prose into the generated API documentation.
-# Wreath has no slot for them and nothing behaves differently without them, so
-# they go quietly: 70 of the 72 notes this used to write said "description".
 _MARKER_DOC_KWARGS = frozenset(
     {
         "description",
@@ -227,7 +224,6 @@ _ORMAR_TYPE = {
 # has nowhere to put them and nothing depends on them, so they are dropped
 # without a note. A `description=` on nearly every column, each one asking a
 # human to look at it, is how a real finding gets buried.
-#
 # `name=` is deliberately NOT here: on an ormar column it renames the *database*
 # column, which is the opposite of documentation.
 _ORMAR_DOC_KWARGS = frozenset(
@@ -245,8 +241,11 @@ _SA_ELEM_TYPE = {"String": "Text", "Text": "Text", "Integer": "Int64", "Boolean"
 # wreath PgType name -> the Python annotation for a FK column of that PK type.
 _DJANGO_PYANN = {
     "Uuid": "uuid.UUID",
-    "Int16": "int", "Int32": "int", "Int64": "int",
-    "Varchar": "str", "Text": "str",
+    "Int16": "int",
+    "Int32": "int",
+    "Int64": "int",
+    "Varchar": "str",
+    "Text": "str",
     "Bool": "bool",
     "Float64": "float",
     "Numeric": "decimal.Decimal",

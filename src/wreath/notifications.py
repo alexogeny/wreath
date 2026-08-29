@@ -401,9 +401,6 @@ class Notifications:
         return window is None or len(window) < self._rate_limit
 
 
-# --- channels ---------------------------------------------------------------
-
-
 @runtime_checkable
 class MessageSender(Protocol):
     """The part of `wreath._userkit.EmailSender` this channel needs."""

@@ -2,8 +2,8 @@ name: publish
 
 # Cut a versioned release from the exact main commit that passed `ci`.
 #
-#   1. detect  - Is the pyproject version a valid PEP 440 version, newer than
-#                the last version tag, and does it have release notes?
+#   1. detect  - Is the pyproject version a valid PEP 440 version and newer than
+#                the last version tag?
 #                Emits `bumped`, `version`, and the validated commit SHA. The
 #                last PEP 440 tag is the baseline, so a follow-up fix can resume
 #                an unpublished version without touching pyproject.toml again.
@@ -16,9 +16,9 @@ name: publish
 #                job. The event is accepted only from this repository's
 #                successful push run on main.
 #   2. release - (environment: publish) Guard against a duplicate tag, require a
-#                docs/release_notes/<version>.md file, then cut the
+#                version, then cut the
 #                `release/vX.Y.Z` branch from the release commit, push the
-#                `vX.Y.Z` tag, and create the GitHub Release from the notes.
+#                `vX.Y.Z` tag, and create the GitHub Release with generated notes.
 #   3. wheels  - Build and smoke-test the portable wheel on native Linux,
 #                macOS and Windows runners. Then build the Linux io_uring and
 #                HTTP/3 companion wheels selected by extras. `release` needs all
@@ -180,16 +180,6 @@ jobs:
             if [ "$comparison" -eq 0 ]; then
               note "\`$latest_tag\` exists without a GitHub Release; resuming **$version** at this CI-tested commit."
             fi
-          fi
-
-          # Checked here as well as in `release`, because `release` sits behind
-          # the `publish` environment: leaving this as the only check means a
-          # missing notes file is reported only after whatever approval that
-          # gate requires, which is the slowest possible moment to learn it.
-          notes="docs/release_notes/$version.md"
-          if [ ! -f "$notes" ]; then
-            echo "::error::missing $notes -- run the release-notes skill before bumping the version"
-            exit 1
           fi
 
           echo "bumped=true" >> "$GITHUB_OUTPUT"
@@ -364,15 +354,6 @@ jobs:
           echo "::warning::$tag exists at $existing but was never released; moving it to $RELEASE_SHA"
           echo "RETAG=1" >> "$GITHUB_ENV"
 
-      - name: Require release notes
-        run: |
-          set -euo pipefail
-          notes="docs/release_notes/$VERSION.md"
-          if [ ! -f "$notes" ]; then
-            echo "::error::missing $notes — run the release-notes skill to generate it before bumping the version"
-            exit 1
-          fi
-
       - name: Configure git identity
         run: |
           git config user.name "github-actions[bot]"
@@ -415,7 +396,7 @@ jobs:
           # is unused anyway once the tag exists, which the previous step
           # guarantees. --verify-tag makes that guarantee explicit: fail if the
           # tag is somehow absent rather than silently creating a second one.
-          args=(--title "$tag" --notes-file "docs/release_notes/$VERSION.md" --verify-tag)
+          args=(--title "$tag" --generate-notes --verify-tag)
           if [ "${PRERELEASE:-false}" = "true" ]; then
             args+=(--prerelease)
           fi

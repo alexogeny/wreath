@@ -1,5 +1,3 @@
-"""A place to cancel a token before it expires (report 23: B-13)."""
-
 from __future__ import annotations
 
 import base64
@@ -14,9 +12,7 @@ _SECRET = b"k" * 32
 
 def _token(claims: dict) -> str:
     def segment(payload: dict) -> str:
-        return base64.urlsafe_b64encode(
-            json.dumps(payload).encode()
-        ).rstrip(b"=").decode("ascii")
+        return base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode("ascii")
 
     signing_input = f"{segment({'alg': 'HS256'})}.{segment(claims)}".encode("ascii")
     signature = hmac.new(_SECRET, signing_input, sha256).digest()
@@ -47,7 +43,7 @@ class TestRevocationHook:
 
     def test_a_revoked_token_does_not_verify(self):
         token = _token({"sub": "u1", "jti": "abc"})
-        assert _verify(token) is not None            # valid without the hook
+        assert _verify(token) is not None  # valid without the hook
         assert _verify(token, revoked=lambda claims: claims.get("jti") == "abc") is None
 
     def test_an_unrevoked_token_still_verifies(self):
@@ -67,8 +63,6 @@ class TestRevocationHook:
         assert seen and seen[0]["sid"] == "session-9"
 
     def test_a_hook_that_raises_denies(self):
-        """A revocation store that is down must not admit the token it was
-        asked about -- that is the one direction this check cannot fail in."""
         token = _token({"sub": "u1", "jti": "abc"})
 
         def revoked(claims):

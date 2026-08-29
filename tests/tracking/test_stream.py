@@ -1,22 +1,3 @@
-"""Stage six: a gRPC client streams positions and they land.
-
-The last stage of the example, and the one whose value is *not* a new feature:
-`tracking.rpc` puts a second transport in front of the same `accept()` the REST
-relay uses, so what these tests have to prove is that it is genuinely the same
-landing — the rows, the per-position rejection counting, the idempotent retry
-and the live-map broadcast all behave as they do over `POST`.
-
-**Driven through a synthetic HTTP/2 scope, not a socket.** `wreath.grpc` runs on
-the ordinary ASGI path — its whole design note is that the native HTTP/2 server
-already carried the hard part — so a scope declaring `http_version: "2"` reaches
-exactly the code a real client reaches, without TLS, a certificate, or the
-`network` mark. Interop against Google's `grpcio` is proved once, for the
-framework, in `tests/test_grpc_interop.py`; repeating it here would test gRPC
-rather than the example. What is *not* skipped is the transport refusal, which
-has its own test below, because "gRPC needs HTTP/2" is a claim the example's
-documentation makes.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -188,17 +169,8 @@ async def app():
             await connection.close()
 
 
-# -- the stream lands ---------------------------------------------------------
-
-
 @skip_without_database
 async def test_a_streamed_walk_lands_the_same_rows_a_batch_would(app) -> None:
-    """Stage six's own row, and the assertion that carries it.
-
-    Five positions streamed one frame at a time; five rows, and a receipt saying
-    so. The numbers are the batch tests' numbers because the transport is the
-    only thing that changed.
-    """
     sent = await call(app, stream_of(*(position(s, *WALK[s]) for s in range(5))))
     assert trailers(sent).get("grpc-status") == "0", trailers(sent)
 
@@ -210,12 +182,6 @@ async def test_a_streamed_walk_lands_the_same_rows_a_batch_would(app) -> None:
 
 @skip_without_database
 async def test_the_frames_do_not_have_to_arrive_whole(app) -> None:
-    """A stream is bytes, not messages.
-
-    The five frames are delivered in twenty ASGI chunks with boundaries falling
-    wherever the arithmetic puts them -- mid-prefix, mid-message. A reader that
-    assumed one chunk was one frame would pass every other test in this file.
-    """
     sent = await call(app, stream_of(*(position(s, *WALK[s]) for s in range(5))), chunks=20)
     assert trailers(sent).get("grpc-status") == "0", trailers(sent)
     assert receipt_of(sent).accepted == 5
@@ -223,8 +189,6 @@ async def test_the_frames_do_not_have_to_arrive_whole(app) -> None:
 
 @skip_without_database
 async def test_one_impossible_position_is_counted_rather_than_fatal(app) -> None:
-    """The same rule the batch path has: a corrupt almanac on one collar must
-    not lose the other four readings."""
     walk = [position(step, *WALK[step]) for step in range(4)]
     walk.append(position(4, 91.0, 36.0))
     sent = await call(app, stream_of(*walk))
@@ -237,15 +201,6 @@ async def test_one_impossible_position_is_counted_rather_than_fatal(app) -> None
 
 @skip_without_database
 async def test_a_replayed_stream_lands_nothing_twice(app) -> None:
-    """Idempotency is the schema's, not the transport's: `(collar_id,
-    recorded_at)` with `ON CONFLICT DO NOTHING`. A station whose acknowledgement
-    was lost re-sends the spool, and it must cost nothing.
-
-    The receipt still says five, exactly as the `POST` path's does -- `accepted`
-    answers "is this data safely with you", which is the question the station
-    is asking, and not "how many rows did I insert". So the row count is what
-    proves it, read back through the REST track endpoint.
-    """
     from wreath.testing import TestClient
 
     body = stream_of(*(position(step, *WALK[step]) for step in range(5)))
@@ -262,14 +217,6 @@ async def test_a_replayed_stream_lands_nothing_twice(app) -> None:
 async def test_a_stream_that_sends_nothing_is_an_empty_receipt_not_an_error(
     app,
 ) -> None:
-    """Deliberately the same answer the `POST` path gives an empty batch.
-
-    A station that connected and had nothing to say did nothing wrong, and
-    `accept()` returns a zero receipt rather than raising. It would have been
-    easy to refuse here instead -- and that would be the second ingest this
-    module exists not to be, differing from REST on a rule neither transport
-    owns.
-    """
     sent = await call(app, b"")
     assert trailers(sent).get("grpc-status") == "0", trailers(sent)
     receipt = receipt_of(sent)
@@ -279,27 +226,14 @@ async def test_a_stream_that_sends_nothing_is_an_empty_receipt_not_an_error(
 
 @skip_without_database
 async def test_a_stream_that_names_no_relay_is_refused_as_an_argument(app) -> None:
-    """`IngestRefused` becomes `INVALID_ARGUMENT`, never a retryable code.
-
-    The distinction is the whole reason the mapping is written down: a station
-    told `UNAVAILABLE` retries forever at the rate its spool refills, which is
-    the gRPC form of the 500-instead-of-400 failure stage one already argued
-    about.
-    """
     sent = await call(app, stream_of(position(0, *WALK[0])), relay=None)
     found = trailers(sent)
     assert found.get("grpc-status") == str(int(Status.INVALID_ARGUMENT)), found
     assert "relay" in found.get("grpc-message", ""), found
 
 
-# -- the constraint the guide states ------------------------------------------
-
-
 @skip_without_database
 async def test_a_call_over_http1_is_refused_naming_the_transport(app) -> None:
-    """gRPC rides HTTP/2 for trailers, and wreath negotiates h2 through ALPN, so
-    a deployment behind another ASGI server cannot reach this service. The
-    example's page says so; this is what makes that statement checkable."""
     sent = await call(app, stream_of(position(0, *WALK[0])), http_version="1.1")
     found = trailers(sent)
     assert found.get("grpc-status") == str(int(Status.UNIMPLEMENTED)), found
@@ -308,8 +242,6 @@ async def test_a_call_over_http1_is_refused_naming_the_transport(app) -> None:
 
 @skip_without_database
 async def test_the_rest_relay_still_answers(app) -> None:
-    """A second transport must not remove the first. The REST route is what a
-    deployment on somebody else's ASGI server keeps using."""
     from tracking.wire import MEDIA_TYPE, PositionBatch
 
     from wreath.testing import TestClient
@@ -330,12 +262,6 @@ async def test_the_rest_relay_still_answers(app) -> None:
 
 
 def test_the_streaming_frame_helpers_round_trip() -> None:
-    """No database: the framing this file builds by hand is wreath's own.
-
-    Worth its own test because every assertion above rests on `stream_of`
-    producing what a real client produces -- if it did not, the suite would be
-    green about a wire format nobody speaks.
-    """
     messages = [position(step, *WALK[step]) for step in range(3)]
     assert [decode(Position, f) for f in frames_in(stream_of(*messages))] == messages
     # And a boundary anywhere still reassembles, which is the property the

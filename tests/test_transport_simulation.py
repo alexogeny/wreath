@@ -1,5 +1,3 @@
-"""Interactive transport simulation composes replay, faults, and Flight."""
-
 from __future__ import annotations
 
 import importlib
@@ -29,9 +27,7 @@ from wreath.websocket import WebSocket
 NativeHttpProtocol = importlib.import_module("wreath._native._server").HttpProtocol
 flight = importlib.import_module("wreath._native._flight")
 
-PROTOCOLS = (
-    pytest.param(NativeHttpProtocol, id="native"),
-)
+PROTOCOLS = (pytest.param(NativeHttpProtocol, id="native"),)
 
 
 class AbortingProtocol:
@@ -167,9 +163,7 @@ def test_websocket_peer_decodes_many_packed_frames_without_retaining_wire() -> N
 
     decoded = peer._decode(wire)
 
-    assert [frame.payload for frame in decoded] == [
-        bytes((index & 255,)) for index in range(512)
-    ]
+    assert [frame.payload for frame in decoded] == [bytes((index & 255,)) for index in range(512)]
     assert peer._frame_buffer == b""
 
 

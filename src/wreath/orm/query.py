@@ -101,9 +101,7 @@ class Select:
         """Add predicates; repeated calls and multiple arguments combine with AND."""
         for item in predicates:
             if not isinstance(item, Predicate):
-                raise TypeError(
-                    f"where() takes SQL predicates such as User.id == 1, got {item!r}"
-                )
+                raise TypeError(f"where() takes SQL predicates such as User.id == 1, got {item!r}")
             # One type test for both refusals, and only then the operator
             # lookups: `where()` runs per query, and this is the guard, not the
             # common case. Two `isinstance` calls here cost a measurable
@@ -159,8 +157,7 @@ class Select:
         for item in load_options:
             if not isinstance(item, LoadOption):
                 raise TypeError(
-                    "include() takes load options such as User.posts.selectin(), "
-                    f"got {item!r}"
+                    f"include() takes load options such as User.posts.selectin(), got {item!r}"
                 )
         return self._replace(includes=self.includes + tuple(load_options))
 
@@ -254,9 +251,7 @@ def where_fields(model: type, values: dict[str, Any]) -> tuple[Predicate, ...]:
 
 def _check_field(model: type, field: Any) -> ColumnExpr:
     if not isinstance(field, ColumnExpr):
-        raise TypeError(
-            f"select() takes model columns such as {model.__name__}.id, got {field!r}"
-        )
+        raise TypeError(f"select() takes model columns such as {model.__name__}.id, got {field!r}")
     if field.column.owner is not model:
         raise DeclarationError(
             f"{getattr(field.column.owner, '__name__', '?')}."

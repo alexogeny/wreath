@@ -78,7 +78,6 @@ LOCKS: dict[str, tuple[str, str, str, str]] = {
 }
 
 CACHING: dict[str, tuple[str, str, str, str]] = {
-    # -- caching --------------------------------------------------------------
     "cache.store": (
         "cache",
         "other",
@@ -94,8 +93,6 @@ CACHING: dict[str, tuple[str, str, str, str]] = {
 }
 
 TIME: dict[str, tuple[str, str, str, str]] = {
-    # -- time -----------------------------------------------------------------
-    #
     # `wreath.temporal` shipped, so arrow stops being a dependency you have to
     # replace with hand-rolled stdlib and becomes a rename. The catalog said "do
     # not wait for it" while it was designed-not-shipped; leaving that in place
@@ -115,7 +112,6 @@ TIME: dict[str, tuple[str, str, str, str]] = {
 }
 
 EXTERNAL: dict[str, tuple[str, str, str, str]] = {
-    # -- libraries that are not framework features ----------------------------
     "ext.pandas": (
         "external",
         "other",

@@ -93,15 +93,13 @@ def _literal(value: object, kind: str, column: str, model: str) -> str:
     if kind == "text":
         if not isinstance(value, str):
             raise DeclarationError(
-                f"{model} index predicate on text column {column!r} needs a str, "
-                f"got {value!r}"
+                f"{model} index predicate on text column {column!r} needs a str, got {value!r}"
             )
         return "'" + value.replace("'", "''") + "'::text"
     if kind == "integer":
         if isinstance(value, bool) or not isinstance(value, int):
             raise DeclarationError(
-                f"{model} index predicate on integer column {column!r} needs an int, "
-                f"got {value!r}"
+                f"{model} index predicate on integer column {column!r} needs an int, got {value!r}"
             )
         return str(value)
     if not isinstance(value, bool):
@@ -117,8 +115,7 @@ def _column(column: str, spec_columns: dict, model: str) -> Any:
     item = spec_columns.get(column)
     if item is None:
         raise DeclarationError(
-            f"{model} index predicate names unknown column {column!r}; "
-            "declare it as a column first"
+            f"{model} index predicate names unknown column {column!r}; declare it as a column first"
         )
     return item
 

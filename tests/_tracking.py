@@ -1,21 +1,3 @@
-"""Shared fixture machinery for the tracking example's database tests.
-
-Five suites build the same schema the same way — replay the shipped migration
-artifact, add the tables wreath owns, seed it, hand it back, drop it — and
-without this they would have five copies of the path constant and the replay
-loop. One copy, here, in the `tests/_name.py` style the repository already uses
-for `_camera_trap`, `_replaydrive` and `_pgfidelity`: `tests/` is on `sys.path`,
-so these import as plain modules rather than through a package.
-
-The artifact names its schema literally, which is correct for the thing it is —
-a migration somebody applies to production. The tests need it somewhere else,
-because they run in a per-worker namespace, so `statements()` rewrites the one
-token. That substitution is confined to these fixtures on purpose: rewriting the
-artifact, or teaching the migration system to parameterise a schema it
-deliberately hard-codes, would change what the artifact *is* to make a test
-easier.
-"""
-
 from __future__ import annotations
 
 import pathlib
@@ -44,9 +26,7 @@ def statements() -> list[str]:
     return [line.rstrip().rstrip(";") for line in text.splitlines() if line.strip()]
 
 
-async def build_schema(
-    connection: Any, *, seed_rows: bool = True, fixes: bool = True
-) -> None:
+async def build_schema(connection: Any, *, seed_rows: bool = True, fixes: bool = True) -> None:
     """Drop, recreate and populate the example's schema on `connection`.
 
     `DROP ... CASCADE` first rather than `CREATE ... IF NOT EXISTS`: a leftover
@@ -79,7 +59,6 @@ async def build_schema(
     # fixtures build a schema directly rather than driving a lifespan, so the
     # same claim is applied here -- through the public `SettledStore`, the way
     # the bus above uses its own `component()`.
-    #
     # Applied for every fixture rather than only the sealing suite, because the
     # daily-chart route reads a sealed view: a suite that did not create them
     # passed only on a database where another suite already had, which is a

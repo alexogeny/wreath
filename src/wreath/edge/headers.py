@@ -12,29 +12,33 @@ from __future__ import annotations
 from wreath._native import _edge
 
 #: RFC 9110 §7.6.1. Never forwarded in either direction.
-HOP_BY_HOP: frozenset[bytes] = frozenset({
-    b"connection",
-    b"keep-alive",
-    b"proxy-authenticate",
-    b"proxy-authorization",
-    b"te",
-    b"trailer",
-    b"transfer-encoding",
-    b"upgrade",
-})
+HOP_BY_HOP: frozenset[bytes] = frozenset(
+    {
+        b"connection",
+        b"keep-alive",
+        b"proxy-authenticate",
+        b"proxy-authorization",
+        b"te",
+        b"trailer",
+        b"transfer-encoding",
+        b"upgrade",
+    }
+)
 
 #: Fields this proxy writes itself. A client that sends one does not get to
 #: decide what the next hop believes: `x-forwarded-for` is an audit trail and an
 #: authorization input in many deployments, so an inbound value is *replaced*,
 #: never appended to. Appending is the classic spoof -- the attacker writes the
 #: first element and every parser that reads "the client" reads theirs.
-OWNED: frozenset[bytes] = frozenset({
-    b"forwarded",
-    b"x-forwarded-for",
-    b"x-forwarded-host",
-    b"x-forwarded-proto",
-    b"via",
-})
+OWNED: frozenset[bytes] = frozenset(
+    {
+        b"forwarded",
+        b"x-forwarded-for",
+        b"x-forwarded-host",
+        b"x-forwarded-proto",
+        b"via",
+    }
+)
 
 
 #: Everything dropped on every message, unioned once at import. The
@@ -123,7 +127,7 @@ def append_forwarded(
     forwarded.append((b"x-forwarded-proto", scheme.encode("latin-1")))
     if host:
         forwarded.append((b"x-forwarded-host", host))
-    parts = [f'proto={scheme}']
+    parts = [f"proto={scheme}"]
     if client:
         parts.insert(0, f'for="{client}"')
     if host:

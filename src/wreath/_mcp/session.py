@@ -188,9 +188,7 @@ class SessionStore:
         # `publish` when nothing is watching, which is what a bare store in a
         # test wants.
         self._publish: Callable[[Session, bytes], bool] = (
-            (lambda session, payload: session.publish(payload))
-            if publish is None
-            else publish
+            (lambda session, payload: session.publish(payload)) if publish is None else publish
         )
         self._sessions: dict[str, Session] = {}
         self._subscribers: dict[str, dict[str, Session]] = {}
@@ -250,9 +248,7 @@ class SessionStore:
         )
         self._sessions[session.id] = session
         if self._idle_seconds is not None:
-            self._next_sweep = min(
-                self._next_sweep, moment + self._idle_seconds
-            )
+            self._next_sweep = min(self._next_sweep, moment + self._idle_seconds)
         return session
 
     def get(self, identifier: str, *, now: float | None = None) -> Session | None:
@@ -301,16 +297,11 @@ class SessionStore:
         moment = time.monotonic() if now is None else now
         if not force and moment < self._next_sweep:
             return 0
-        stale = [
-            session for session in self._sessions.values() if self._expired(session, moment)
-        ]
+        stale = [session for session in self._sessions.values() if self._expired(session, moment)]
         for session in stale:
             self._collect(session)
         self._next_sweep = min(
-            (
-                session.last_seen + idle_seconds
-                for session in self._sessions.values()
-            ),
+            (session.last_seen + idle_seconds for session in self._sessions.values()),
             default=float("inf"),
         )
         return len(stale)
@@ -356,9 +347,7 @@ def _cancel_all(session: Session) -> None:
     # a line later -- neither order alone covers both, because a request may be
     # outstanding from a resource read that is not in `in_flight` at all.
     if session.channel is not None:
-        session.channel.fail_all(
-            "the MCP session ended while this request was outstanding"
-        )
+        session.channel.fail_all("the MCP session ended while this request was outstanding")
     for task in list(session.in_flight.values()):
         task.cancel()
     session.in_flight.clear()

@@ -1,13 +1,4 @@
-"""The durable-jobs and messaging coordinator core.
-
-Everything here is deterministic, allocation-light, and free of I/O, so it can be
-unit-tested without a database.
-
-TODO(native-queue): the state-machine validator, backoff arithmetic, and dedup
-hashing are the concerns design 01 earmarks for `_native/_queue/` (envelope /
-jobstate / backoff / dedup). They are Python for this cut and can move without
-changing the coordinator API.
-"""
+"""Durable-jobs and messaging coordinator primitives."""
 
 from __future__ import annotations
 
@@ -17,21 +8,6 @@ from typing import Final
 
 from ._pgname import validate_identifier as validate_identifier
 from .temporal import Recurrence
-
-# --- job/message lifecycle state machine -----------------------------------
-#
-# `ready` -> `leased` (a worker claims it) -> `done` | `failed` (retry,
-# back to `ready`) | `dead` (attempts exhausted). `leased` -> `ready` is
-# the lease-expiry reclaim path.
-#
-# This table is the *reference* for that lifecycle, not a runtime gate. The
-# coordinators enforce it in SQL -- every transition is an UPDATE with
-# `WHERE id=$1 AND fence=$2`, so a fenced or stale worker's move simply
-# matches no row -- which is the only place it can be enforced correctly, since
-# two workers can disagree about the current state but not about what the row
-# says. `valid_transition`/`check_transition` exist for callers reasoning about
-# the machine (and for the tests that pin it); this comment used to claim they
-# were checked on every worker transition, and nothing called them.
 
 READY: Final = "ready"
 LEASED: Final = "leased"
@@ -43,14 +19,12 @@ STATES: Final = frozenset({READY, LEASED, DONE, FAILED, DEAD})
 
 _TRANSITIONS: Final[dict[str, frozenset[str]]] = {
     READY: frozenset({LEASED}),
-    # A leased item completes, goes back to ready for retry, or dies.
     LEASED: frozenset({DONE, READY, DEAD}),
-    # Terminal-ish: failed is a transient label a retry leaves via ready; done
-    # and dead are absorbing.
     FAILED: frozenset({READY, DEAD}),
     DONE: frozenset(),
     DEAD: frozenset(),
 }
+
 
 class TransitionError(ValueError):
     """An illegal job/message state transition was attempted."""
@@ -68,8 +42,6 @@ def check_transition(old: str, new: str) -> None:
     if not valid_transition(old, new):
         raise TransitionError(f"illegal job transition: {old!r} -> {new!r}")
 
-
-# --- retry backoff ----------------------------------------------------------
 
 BackoffKind = str  # "exp" | "linear" | "fixed"
 
@@ -99,7 +71,7 @@ def compute_backoff(
     elif kind == "exp":
         # base * factor**(attempt-1), guarded against overflow at large attempts.
         exponent = min(attempt - 1, 32)
-        delay = base * (factor ** exponent)
+        delay = base * (factor**exponent)
     else:
         raise ValueError(f"unknown backoff kind: {kind!r}")
     delay = min(delay, cap)
@@ -118,9 +90,6 @@ def _default_jitter() -> float:
     return random.random()
 
 
-# --- idempotency / dedup ----------------------------------------------------
-
-
 def dedup_key(scope: str, key: str) -> str:
     """A stable idempotency key for `(scope, key)`.
 
@@ -133,8 +102,6 @@ def dedup_key(scope: str, key: str) -> str:
     )
     return digest.hexdigest()
 
-
-# --- NOTIFY payload bounds --------------------------------------------------
 
 # PostgreSQL caps a NOTIFY payload at 8000 bytes; leave headroom for the channel
 # envelope so an ephemeral publish that would be truncated is rejected up front
@@ -154,8 +121,6 @@ def check_notify_payload(payload: bytes) -> None:
         )
 
 
-# --- minimal 5-field cron ---------------------------------------------------
-#
 # Standard `minute hour day-of-month month day-of-week` with `*`, lists
 # (`1,2`), ranges (`1-5`), and steps (`*/5`, `0-30/10`). No named months
 # or special strings — enough for scheduled jobs without a cron dependency.

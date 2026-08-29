@@ -65,7 +65,7 @@ _SCALARS: dict[Any, TypeRef] = {
     str: STRING,
     Instant: DATE_TIME,
     Coordinate: TypeRef("coordinate", name="coordinate"),
-    datetime.datetime: DATE_TIME,   # before `date`: datetime subclasses it
+    datetime.datetime: DATE_TIME,  # before `date`: datetime subclasses it
     datetime.date: DATE,
     UUID: TypeRef("string", name="uuid"),
     Decimal: TypeRef("string", name="decimal"),
@@ -80,14 +80,51 @@ def _binding_field_metadata(items: tuple[Any, ...]) -> Any | None:
         if isinstance(item, BindingField):
             return item
     return None
+
+
 _JS_KEYWORDS = frozenset(
     {
-        "break", "case", "catch", "class", "const", "continue", "debugger",
-        "default", "delete", "do", "else", "enum", "export", "extends", "false",
-        "finally", "for", "function", "if", "import", "in", "instanceof", "new",
-        "null", "return", "super", "switch", "this", "throw", "true", "try",
-        "typeof", "var", "void", "while", "with", "let", "static", "yield",
-        "await", "async",
+        "break",
+        "case",
+        "catch",
+        "class",
+        "const",
+        "continue",
+        "debugger",
+        "default",
+        "delete",
+        "do",
+        "else",
+        "enum",
+        "export",
+        "extends",
+        "false",
+        "finally",
+        "for",
+        "function",
+        "if",
+        "import",
+        "in",
+        "instanceof",
+        "new",
+        "null",
+        "return",
+        "super",
+        "switch",
+        "this",
+        "throw",
+        "true",
+        "try",
+        "typeof",
+        "var",
+        "void",
+        "while",
+        "with",
+        "let",
+        "static",
+        "yield",
+        "await",
+        "async",
     }
 )
 
@@ -216,9 +253,7 @@ class _ModelRegistry:
         return name
 
     def models(self) -> tuple[Model, ...]:
-        return tuple(
-            model for _name, model in sorted(self._models.items()) if model is not None
-        )
+        return tuple(model for _name, model in sorted(self._models.items()) if model is not None)
 
 
 class _Builder:
@@ -346,7 +381,7 @@ class _Builder:
         if dataclasses.is_dataclass(annotation):
             try:
                 hints = typing.get_type_hints(annotation, include_extras=True)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 hints = {}
             fields: list[Field] = []
             for declared in dataclass_field_image(annotation, hints, fallback=Any):
@@ -387,7 +422,7 @@ class _Builder:
         columns = annotation.__wreath_columns__
         try:
             hints = typing.get_type_hints(annotation, include_extras=True)
-        except (NameError, TypeError):
+        except NameError, TypeError:
             # Search derived declarations before their bases without copying
             # every inherited annotation into a repeatedly grown dictionary.
             hints = ChainMap(
@@ -399,16 +434,16 @@ class _Builder:
             if typing.get_origin(annotation_type) is Mapped:
                 annotation_type = typing.get_args(annotation_type)[0]
             required = not column.nullable and column.default is MISSING
-            fields.append(
-                Field(column.python_name, self.type_ref(annotation_type), required)
-            )
+            fields.append(Field(column.python_name, self.type_ref(annotation_type), required))
         return fields
 
 
 def _annotation_name(annotation: Any) -> str:
-    return getattr(annotation, "__qualname__", None) or getattr(
-        annotation, "__name__", None
-    ) or repr(annotation)
+    return (
+        getattr(annotation, "__qualname__", None)
+        or getattr(annotation, "__name__", None)
+        or repr(annotation)
+    )
 
 
 def _is_wreath_model(annotation: Any) -> bool:
@@ -433,9 +468,7 @@ def _operation_behaviours(app: Any, definition: Any, method: str) -> tuple[str, 
     from ..openapi import _collect_contracts
 
     contracts = _collect_contracts(app, definition, method)
-    return tuple(
-        sorted({name for contract in contracts for name in contract.behaviours})
-    )
+    return tuple(sorted({name for contract in contracts for name in contract.behaviours}))
 
 
 def build_api_model(
@@ -491,9 +524,7 @@ def build_api_model(
 
     # Operation-id collisions are always fatal; unsupported annotations are
     # fatal only under strict generation.
-    fatal = id_diagnostics + (
-        () if allow_unknown else tuple(builder.diagnostics)
-    )
+    fatal = id_diagnostics + (() if allow_unknown else tuple(builder.diagnostics))
     if fatal:
         raise TypegenError(fatal)
 
@@ -594,9 +625,7 @@ def _series_shape(variable: str, declaration: Any) -> SeriesShape:
         bucket=declaration._bucket.name if series else None,
         grouped=declaration.group is not None,
         compares=(
-            declaration._compare.name
-            if series and declaration._compare is not None
-            else None
+            declaration._compare.name if series and declaration._compare is not None else None
         ),
         events=bool(series and declaration._events is not None),
     )
@@ -612,15 +641,11 @@ def _operation_shape(
         for segment in definition.path.split("/"):
             if segment.startswith("{") and segment.endswith("}"):
                 name = segment[1:-1].split(":", 1)[0]
-                parameters.append(
-                    Parameter(name, name, "path", STRING, True)
-                )
+                parameters.append(Parameter(name, name, "path", STRING, True))
         return parameters, None, None, builder.type_ref(return_annotation)
 
     for python_name, alias, annotation in spec.path_params:
-        parameters.append(
-            Parameter(python_name, alias, "path", builder.type_ref(annotation), True)
-        )
+        parameters.append(Parameter(python_name, alias, "path", builder.type_ref(annotation), True))
     for location, bindings in (
         ("query", spec.query_params),
         ("header", spec.header_params),

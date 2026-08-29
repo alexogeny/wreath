@@ -61,9 +61,7 @@ def test_column_batch_decode_matches_builtin_values_and_record_lookup() -> None:
             ),
             3,
         )
-    plan = native._compile_decoder_plan(
-        (16, 23, 25), (1, 1, 1), ("enabled", "number", "label")
-    )
+    plan = native._compile_decoder_plan((16, 23, 25), (1, 1, 1), ("enabled", "number", "label"))
 
     first = native._decode_field_tape(plan, tape, "fetch", 256)
     second = native._decode_field_tape(plan, tape, "fetch", 256)
@@ -123,9 +121,7 @@ def test_fetchrow_decodes_directly_without_result_list() -> None:
 def test_fetch_batch_owns_decoded_cells_until_python_observes_a_row() -> None:
     tape = native._FieldTape(2)
     for value in range(12):
-        tape.append(
-            _data_row((struct.pack("!i", value), f"value-{value}".encode())), 2
-        )
+        tape.append(_data_row((struct.pack("!i", value), f"value-{value}".encode())), 2)
     plan = native._compile_decoder_plan((23, 25), (1, 1), ("number", "label"))
     before = native._record_allocation_count()
 
@@ -195,13 +191,9 @@ def test_fetch_batch_final_flush_extends_the_operation_owned_batch() -> None:
 
     tape = native._FieldTape(2)
     for value in range(300):
-        tape.append(
-            _data_row((struct.pack("!i", value), f"value-{value}".encode())), 2
-        )
+        tape.append(_data_row((struct.pack("!i", value), f"value-{value}".encode())), 2)
     operation = SimpleNamespace(
-        decoder_plan=native._compile_decoder_plan(
-            (23, 25), (1, 1), ("number", "label")
-        ),
+        decoder_plan=native._compile_decoder_plan((23, 25), (1, 1), ("number", "label")),
         dest=None,
         discarded=False,
         error=None,
@@ -323,11 +315,10 @@ async def test_large_native_result_releases_slabs_at_batch_boundaries(
         await connection.close()
 
 
-# --- cursor-based tape consumption ------------------------------------------
-#
 # Consuming rows advances logical cursors instead of shifting every surviving
 # ref and rebasing every owner index. Physical storage is reclaimed by
 # occasional compaction, so these drive enough rows to cross it repeatedly.
+
 
 @requires_native
 def test_consume_one_row_at_a_time_decodes_every_value() -> None:
@@ -335,16 +326,16 @@ def test_consume_one_row_at_a_time_decodes_every_value() -> None:
     tape = native._FieldTape(3)
     for value in range(rows):
         tape.append(
-            _data_row((
-                b"\x01" if value % 2 else b"\x00",
-                struct.pack("!i", value),
-                f"value-{value}".encode(),
-            )),
+            _data_row(
+                (
+                    b"\x01" if value % 2 else b"\x00",
+                    struct.pack("!i", value),
+                    f"value-{value}".encode(),
+                )
+            ),
             3,
         )
-    plan = native._compile_decoder_plan(
-        (16, 23, 25), (1, 1, 1), ("enabled", "number", "label")
-    )
+    plan = native._compile_decoder_plan((16, 23, 25), (1, 1, 1), ("enabled", "number", "label"))
     seen = []
     while tape.row_count:
         batch = native._decode_field_tape(plan, tape, "fetch", 1)  # crosses compaction
@@ -361,7 +352,6 @@ def test_consume_one_row_at_a_time_decodes_every_value() -> None:
 
 @requires_native
 def test_tape_is_reusable_after_a_cursor_drain() -> None:
-    """A drained tape resets both cursors and accepts a fresh batch."""
     plan = native._compile_decoder_plan((23,), (1,), ("n",))
     tape = native._FieldTape(1)
     for value in range(3000):
@@ -394,12 +384,6 @@ def test_partial_consume_then_batch_consume_keeps_order() -> None:
 
 @requires_native
 def test_owner_slabs_stay_alive_while_their_rows_survive() -> None:
-    """A consumed prefix must not release a slab a surviving field still needs.
-
-    Each append here owns its own payload, so owner lifetime is observable: the
-    surviving rows must still decode to their exact values after the earlier
-    ones are consumed and compaction has moved the owner base.
-    """
     plan = native._compile_decoder_plan((25,), (1,), ("label",))
     tape = native._FieldTape(1)
     total = 400

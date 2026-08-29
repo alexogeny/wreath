@@ -450,7 +450,7 @@ def _http_date_delay(text: str) -> float | None:
 
     try:
         when = parsedate_to_datetime(text)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     if when is None:
         return None
@@ -477,10 +477,8 @@ class RedirectPolicy:
     The client is pinned to one origin: its pool, its TLS context, its
     destination policy, and its rate and retry budgets all belong to that
     origin, and following a hop off it would run the new origin's requests
-    under the old one's everything. A `RedirectPolicy` therefore has no
-    cross-origin flag -- one existed, and both of its values refused the hop,
-    which read as a supported behaviour that was never implemented. Reaching
-    another origin means constructing a client for it.
+    under the old one's everything. `RedirectPolicy` has no cross-origin flag;
+    reaching another origin requires a client configured for that origin.
 
     Args:
         enabled: Follow 3xx responses. When False they are returned unchanged.
@@ -677,8 +675,16 @@ class _StreamContext:
     whole block.
     """
 
-    __slots__ = ("_body", "_client", "_connection", "_headers", "_method",
-                 "_minor", "_response_headers", "_target")
+    __slots__ = (
+        "_body",
+        "_client",
+        "_connection",
+        "_headers",
+        "_method",
+        "_minor",
+        "_response_headers",
+        "_target",
+    )
 
     def __init__(
         self,
@@ -738,9 +744,7 @@ class _StreamContext:
             headers=tuple(headers),
             http_version=f"1.{minor}",
             reason=reason,
-            _chunks=client._iter_body(
-                connection.reader, self._method, status, headers
-            ),
+            _chunks=client._iter_body(connection.reader, self._method, status, headers),
         )
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
@@ -822,9 +826,7 @@ class ClientResponse:
         A header sent more than once resolves to the first occurrence; iterate
         `headers` for the rest, which matters for `Set-Cookie`.
         """
-        return cast(
-            bytes | None, _native_core.find_header(self.headers, name.lower())
-        )
+        return cast(bytes | None, _native_core.find_header(self.headers, name.lower()))
 
     def raise_for_status(self) -> None:
         """Raise `ClientError` when the status is 400 or above; otherwise return None.
@@ -1109,7 +1111,7 @@ class HTTPClient:
         for connection in idle:
             try:
                 await connection.writer.wait_closed()
-            except (ConnectionError, OSError):
+            except ConnectionError, OSError:
                 pass
 
         drain_timeout = self._timeout.total or self._timeout.response_body
@@ -1125,7 +1127,7 @@ class HTTPClient:
             for connection in active:
                 try:
                     await connection.writer.wait_closed()
-                except (ConnectionError, OSError):
+                except ConnectionError, OSError:
                     pass
 
     def counters(self) -> Any:
@@ -1148,9 +1150,7 @@ class HTTPClient:
 
     def snapshot(self) -> ClientSnapshot:
         """A `ClientSnapshot` of the pool right now. Synchronous, never blocks."""
-        native_requests, native_reused = _client_codec.counter_snapshot(
-            self._native_counters
-        )
+        native_requests, native_reused = _client_codec.counter_snapshot(self._native_counters)
         return ClientSnapshot(
             active=len(self._active),
             idle=len(self._idle),
@@ -1296,10 +1296,7 @@ class HTTPClient:
                 and self._retry is _DEFAULT_RETRY
                 and self._redirect is _DEFAULT_REDIRECT
                 and self._rate_bucket is None
-                and (
-                    not self._trace.propagate
-                    or _telemetry.outbound_context.get(None) is None
-                )
+                and (not self._trace.propagate or _telemetry.outbound_context.get(None) is None)
             ):
                 native = _client_codec.request_default(
                     self,
@@ -1316,7 +1313,10 @@ class HTTPClient:
                 if native is not None:
                     return await cast(Awaitable[ClientResponse], native)
             return await self._request_timed(
-                method, target, headers=headers, body=body,
+                method,
+                target,
+                headers=headers,
+                body=body,
                 idempotency_key=idempotency_key,
             )
         # Forensic dependency capture rides inside the phase gate (Detailed-armed
@@ -1340,13 +1340,15 @@ class HTTPClient:
         response = None
         try:
             response = await self._request_timed(
-                method, target, headers=headers, body=body,
+                method,
+                target,
+                headers=headers,
+                body=body,
                 idempotency_key=idempotency_key,
             )
             return response
         finally:
-            marker(_PH_HTTP_CLIENT, self._flight_dep_id, _COV_EXTERNAL,
-                   _monotonic_ns() - start)
+            marker(_PH_HTTP_CLIENT, self._flight_dep_id, _COV_EXTERNAL, _monotonic_ns() - start)
             if capture is not None and response is not None and response.body:
                 capture(_CAP_OUTBOUND_RESPONSE, response.body)
             if capture is not None and response is not None:
@@ -1564,9 +1566,7 @@ class HTTPClient:
         if self._retry.attempts == 1 and self._rate_bucket is None:
             return await self._request_once(method, request_bytes)
         retryable = (
-            not self._retry.idempotent_only
-            or method in _IDEMPOTENT
-            or idempotency_key is not None
+            not self._retry.idempotent_only or method in _IDEMPOTENT or idempotency_key is not None
         )
         attempts = self._retry.attempts if retryable else 1
         last_error: ClientError | None = None
@@ -1615,9 +1615,7 @@ class HTTPClient:
                 and port == self._port
             )
             if not same_origin:
-                raise RedirectError(
-                    "cross-origin redirects require a separately configured client"
-                )
+                raise RedirectError("cross-origin redirects require a separately configured client")
             target = parsed.path or "/"
             return f"{target}?{parsed.query}" if parsed.query else target
         joined = urljoin(current, value)
@@ -1647,9 +1645,7 @@ class HTTPClient:
             return cast(Awaitable[ClientResponse], native)
         return self._request_once_python(method, request)
 
-    async def _request_once_python(
-        self, method: str, request: bytes
-    ) -> ClientResponse:
+    async def _request_once_python(self, method: str, request: bytes) -> ClientResponse:
         connection = await self._acquire()
         reusable = False
         try:
@@ -1731,7 +1727,7 @@ class HTTPClient:
         connection.writer.close()
         try:
             await connection.writer.wait_closed()
-        except (ConnectionError, OSError):
+        except ConnectionError, OSError:
             pass
         raise ClientClosed(f"HTTP client {self._name!r} closed while connecting")
 
@@ -1787,9 +1783,7 @@ class HTTPClient:
         if delay:
             await asyncio.sleep(delay)
         family, _socket_type, _protocol, _canonical, sockaddr = address_info
-        timeout = self._timeout.connect + (
-            self._timeout.tls if ssl_context is not None else 0
-        )
+        timeout = self._timeout.connect + (self._timeout.tls if ssl_context is not None else 0)
         # The stream owns its receive buffer and exposes StreamReader-shaped
         # awaitable reads. On the metal loop wire bytes never cross into Python
         # per read.
@@ -1821,8 +1815,7 @@ class HTTPClient:
 
         tls = self._tls
         try:
-            return metal_tls_client_context(
-                cafile=tls.cafile, capath=tls.capath, verify=tls.verify)
+            return metal_tls_client_context(cafile=tls.cafile, capath=tls.capath, verify=tls.verify)
         except RuntimeError:
             # The extension is absent -- the metal tier is Linux-only. Fall
             # through to the portable context rather than refusing https.
@@ -1852,9 +1845,7 @@ class HTTPClient:
         winner: _Connection | None = None
         try:
             while pending:
-                done, pending = await asyncio.wait(
-                    pending, return_when=asyncio.FIRST_COMPLETED
-                )
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
                 for task in done:
                     try:
                         connection = task.result()
@@ -1924,7 +1915,7 @@ class HTTPClient:
             connection.writer.close()
             try:
                 await connection.writer.wait_closed()
-            except (ConnectionError, OSError):
+            except ConnectionError, OSError:
                 pass
 
     async def _iter_body(
@@ -1988,9 +1979,7 @@ class HTTPClient:
             if size == 0:
                 trailer_bytes = 0
                 while True:
-                    trailer = await _timed(
-                        reader.readuntil(b"\r\n"), self._timeout.response_body
-                    )
+                    trailer = await _timed(reader.readuntil(b"\r\n"), self._timeout.response_body)
                     trailer_bytes += len(trailer)
                     if trailer_bytes > self._limits.max_response_header_bytes:
                         raise ProtocolError("response trailers exceed configured limit")
@@ -2021,9 +2010,7 @@ class HTTPClient:
         """
         while True:
             try:
-                head = await _timed(
-                    reader.readuntil(b"\r\n\r\n"), self._timeout.response_headers
-                )
+                head = await _timed(reader.readuntil(b"\r\n\r\n"), self._timeout.response_headers)
             except TimeoutError as error:
                 raise ResponseTimeout("timed out reading response headers") from error
             except asyncio.LimitOverrunError as error:
@@ -2129,9 +2116,7 @@ class HTTPClient:
             if length > self._limits.max_response_bytes:
                 raise ResponseTooLarge("response body exceeds configured limit")
             try:
-                body = await _timed(
-                    reader.readexactly(length), self._timeout.response_body
-                )
+                body = await _timed(reader.readexactly(length), self._timeout.response_body)
             except TimeoutError as error:
                 raise ResponseTimeout("timed out reading response body") from error
             self._reject_buffered_extra(reader)
@@ -2165,25 +2150,19 @@ class HTTPClient:
         total = 0
         while True:
             try:
-                line = await _timed(
-                    reader.readuntil(b"\r\n"), self._timeout.response_body
-                )
+                line = await _timed(reader.readuntil(b"\r\n"), self._timeout.response_body)
             except TimeoutError as error:
                 raise ResponseTimeout("timed out reading response chunk") from error
             if len(line) > 1024:
                 raise ProtocolError("response chunk line exceeds limit")
             size_data = line[:-2].split(b";", 1)[0]
-            if not size_data or any(
-                byte not in b"0123456789abcdefABCDEF" for byte in size_data
-            ):
+            if not size_data or any(byte not in b"0123456789abcdefABCDEF" for byte in size_data):
                 raise ProtocolError("invalid response chunk size")
             size = int(size_data, 16)
             if size == 0:
                 trailer_bytes = 0
                 while True:
-                    trailer = await _timed(
-                        reader.readuntil(b"\r\n"), self._timeout.response_body
-                    )
+                    trailer = await _timed(reader.readuntil(b"\r\n"), self._timeout.response_body)
                     trailer_bytes += len(trailer)
                     if trailer_bytes > self._limits.max_response_header_bytes:
                         raise ProtocolError("response trailers exceed configured limit")
@@ -2199,9 +2178,7 @@ class HTTPClient:
             if total > self._limits.max_response_bytes:
                 raise ResponseTooLarge("response body exceeds configured limit")
             try:
-                chunk = await _timed(
-                    reader.readexactly(size + 2), self._timeout.response_body
-                )
+                chunk = await _timed(reader.readexactly(size + 2), self._timeout.response_body)
             except TimeoutError as error:
                 raise ResponseTimeout("timed out reading response chunk") from error
             if chunk[-2:] != b"\r\n":

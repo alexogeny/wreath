@@ -1,18 +1,3 @@
-"""Records made from a thread that must not write to the ring.
-
-The ring is single-writer by construction: `ring_publish` reads the head, copies
-a cell, and stores the head back with no interlock, because exactly one thread
-does it. A `wreath.jobs` worker or a thread-pool task calling a log site is a
-second writer, and two of them interleaved do not merely lose a record -- they
-overwrite one and advance the head anyway, corrupting every cell after it.
-
-So an off-loop record takes a counted slow path: staged in a bounded queue,
-published by the loop on its next drain, flagged `off-loop` so a reader can tell
-a late record from a reordered one, and dropped-with-a-count when the stage is
-full. These tests hold that shape, including the parts that only matter when
-something is already going wrong.
-"""
-
 from __future__ import annotations
 
 import threading
@@ -78,11 +63,6 @@ def test_a_record_from_another_thread_is_staged_rather_than_published() -> None:
 
 
 def test_the_native_emitter_is_refused_off_the_loop() -> None:
-    """The fast path is a ring write; off the loop it must not be taken.
-
-    A native emitter that ran here would pack straight into a ring slot from the
-    wrong thread, which is the exact corruption the slow path exists to prevent.
-    """
     _flight = pytest.importorskip("wreath._native._flight", exc_type=ImportError)
     recorder = _flight.Recorder(_flight.MODE_PULSE, ring_records=64, active_requests=8)
     runtime = log.LogRuntime(
@@ -123,11 +103,13 @@ def test_a_full_stage_drops_and_counts_rather_than_growing() -> None:
 
 
 def test_an_overflowing_stage_keeps_the_oldest_records() -> None:
-    """Same rule as the request buffer: a burst is legible from its beginning."""
     stage = OffLoopStage(capacity=2)
     for index in range(5):
-        stage.stage(LogCell(request_id=0, site_id=1, severity=Severity.INFO,
-                            args=(), dropped_siblings=index))
+        stage.stage(
+            LogCell(
+                request_id=0, site_id=1, severity=Severity.INFO, args=(), dropped_siblings=index
+            )
+        )
     held = stage.drain()
     assert [cell.dropped_siblings for cell in held] == [0, 1]
     assert stage.dropped == 3
@@ -147,12 +129,6 @@ def test_draining_twice_is_harmless() -> None:
 
 
 def test_a_runtime_without_a_bound_writer_publishes_from_any_thread() -> None:
-    """A sink that is not a ring has no single-writer rule to keep.
-
-    Every test capture, every plain-callable sink, and every process that never
-    booted a server is in this state, and paying for a thread check there would
-    be a tax on the common case to serve the rare one.
-    """
     written: list[LogCell] = []
     runtime = log.LogRuntime(written.append, level=log.INFO)
     assert runtime.off_loop is None
@@ -191,12 +167,6 @@ def test_concurrent_threads_all_stage_without_losing_a_record() -> None:
 
 
 def test_a_buffered_record_promoted_off_the_loop_still_takes_the_slow_path() -> None:
-    """Promotion republishes held records, and it can happen anywhere.
-
-    A job that opens a log scope, holds DEBUG records and then fails is the case
-    this covers: the promotion runs on the worker thread, so every record it
-    publishes has to be staged rather than written.
-    """
     written: list[LogCell] = []
     runtime = _runtime(written, capacity=16)
     previous = log.install(runtime)

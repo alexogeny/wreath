@@ -39,7 +39,6 @@ if TYPE_CHECKING:
     # `wreath/__init__` eagerly imported `.app` first, because that finished
     # this module before anything could ask `._auth` for it; entering through
     # `from wreath import Request` or `import wreath.request` does not.
-    #
     # `Identity` appears only in annotations here and this module has postponed
     # evaluation, so there is nothing to import at runtime. Twenty-four modules
     # import `Request` from here and the rest of that graph is untouched --
@@ -115,8 +114,7 @@ class RequestLimits:
     #:
     #: There is deliberately no `max_headers` beside it. The header *count* is
     #: already bounded by every server's frame limits, and enforcing a second
-    #: bound here cost a crossing in `pre_activation` -- the number
-    #: `docs/agents/request-boundary-baseline.json` asks changes to protect.
+    #: bound here cost a crossing in `pre_activation`.
     #: The cookie bound is the one that pays for itself, because it guards a
     #: parse rather than a length.
     max_cookie_bytes: int = 16 * 1024
@@ -153,6 +151,7 @@ class RequestLimits:
 
 
 DEFAULT_LIMITS = RequestLimits()
+
 
 class UploadedFile:
     """One file field from a multipart form.
@@ -328,9 +327,11 @@ class FormData:
         """
         self.fields = fields
         self.files = files
-        self._all = all_values if all_values is not None else {
-            name: [value] for name, value in fields.items()
-        }
+        self._all = (
+            all_values
+            if all_values is not None
+            else {name: [value] for name, value in fields.items()}
+        )
 
     def getlist(self, name: str) -> list[str]:
         """Every value submitted under `name`, in order. Empty when there is none.
@@ -378,9 +379,7 @@ class FormData:
 
 
 #: RFC 2046 §5.1.1: 1..70 characters from this set, not ending in a space.
-_BOUNDARY_CHARS = (
-    b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'()+_,-./:=? "
-)
+_BOUNDARY_CHARS = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'()+_,-./:=? "
 
 
 def _valid_boundary(value: bytes) -> bool:
@@ -411,6 +410,7 @@ def _multipart_boundary(content_type: bytes) -> bytes | None:
             return value if _valid_boundary(value) else None
     return None
 
+
 async def _stream_multipart(
     chunks: AsyncIterator[bytes], boundary: bytes, limits: RequestLimits
 ) -> FormData:
@@ -437,9 +437,7 @@ async def _stream_multipart(
         nonlocal headers, field_name, filename, part_data, part_spool, part_size
         headers, parsed_name, filename = _core.multipart_part_info(header_block)
         if not parsed_name:
-            raise ValueError(
-                "multipart Content-Disposition needs a non-empty form-data name"
-            )
+            raise ValueError("multipart Content-Disposition needs a non-empty form-data name")
         field_name = parsed_name
         part_data = bytearray()
         part_spool = None
@@ -627,8 +625,7 @@ class Request:
         succeeded, for an anomaly the framework cannot see.
 
         Outside a configured recorder this returns an inert stand-in, so the
-        call is always safe and never needs a guard. See
-        `wreath.logging` and `docs/guides/logging.md`.
+        call is always safe and never needs a guard.
         """
         from .logging import current_scope
 
@@ -878,9 +875,7 @@ class Request:
             raise RuntimeError("request scope is unavailable")
         return scope.get("scheme", "http")
 
-    def _set_client(
-        self, client: tuple[str, int | None], *, source: str = "socket"
-    ) -> None:
+    def _set_client(self, client: tuple[str, int | None], *, source: str = "socket") -> None:
         # ProxyPolicy rewrites the peer from X-Forwarded-For. The
         # write goes to the context when one backs this request so the ASGI
         # scope is never materialized just to carry it.
@@ -971,9 +966,7 @@ class Request:
         # allocating the joined value; first-line-only creates proxy/app auth
         # ambiguity and silently drops CSRF/session cookies.
         context = self._context
-        native_parse = (
-            None if context is None else getattr(context, "_parse_cookies", None)
-        )
+        native_parse = None if context is None else getattr(context, "_parse_cookies", None)
         if native_parse is None:
             parsed: dict[str, str] = _core.parse_cookie_headers(
                 self.headers,
@@ -1024,7 +1017,7 @@ class Request:
             headers = self.headers
             headers[:] = [pair for pair in headers if pair[0] not in wanted]
         header_map = self._header_map
-        if header_map is not None:
+        if header_map is not None and header_map is not context:
             for name in names:
                 header_map.pop(name, None)
 
@@ -1048,14 +1041,8 @@ class Request:
         header_map = self._header_map
         if header_map is None:
             context = self._context
-            native_index = (
-                None if context is None else getattr(context, "_header_index", None)
-            )
-            header_map = (
-                build_header_map(self.headers)
-                if native_index is None
-                else native_index()
-            )
+            native_index = None if context is None else getattr(context, "_header_index", None)
+            header_map = build_header_map(self.headers) if native_index is None else native_index()
             self._header_map = header_map
             self._header_scanned = True
         return header_map
@@ -1250,9 +1237,7 @@ class Request:
         limit = self._limits.max_body_bytes
         expected = self._take_body_check()
         body_check = (
-            None
-            if expected is None
-            else (new_hash(expected[0].replace("-", "")), expected[1])
+            None if expected is None else (new_hash(expected[0].replace("-", "")), expected[1])
         )
         try:
             while True:

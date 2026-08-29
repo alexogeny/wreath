@@ -35,9 +35,7 @@ class _Users(Queries[TracedUser]):
 
 def _registry() -> Registry:
     database = _ScriptedDatabase()
-    database.connection.script(
-        "users", [[1, "a@b.c", "A", datetime.datetime(2024, 1, 1)]]
-    )
+    database.connection.script("users", [[1, "a@b.c", "A", datetime.datetime(2024, 1, 1)]])
     return Registry(database, [TracedUser, TracedPost], validate_schema="off")
 
 
@@ -99,9 +97,7 @@ def main() -> int:
             "warmup": args.warmup,
         },
         "result": result,
-        "samples_us": {
-            arm.label: [round(sample, 6) for sample in arm.samples] for arm in arms
-        },
+        "samples_us": {arm.label: [round(sample, 6) for sample in arm.samples] for arm in arms},
     }
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)

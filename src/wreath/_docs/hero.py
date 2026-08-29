@@ -30,6 +30,7 @@ _OPEN = "```hero"
 #: list. Four is not a limit anyone will hit -- it is the point at which a hero
 #: has stopped choosing.
 _MAX_ACTIONS = 4
+_MAX_SIGNALS = 6
 
 
 def title_of(tokens: dict[str, str]) -> str:
@@ -48,6 +49,7 @@ restore = _fenced.restore
 def _render(config: list[str]) -> str:
     fields: dict[str, str] = {}
     actions: list[tuple[str, str]] = []
+    signals: list[str] = []
     for line in config:
         key, sep, value = line.partition(":")
         if not sep:
@@ -57,10 +59,13 @@ def _render(config: list[str]) -> str:
             label, arrow, href = value.partition("->")
             if arrow and len(actions) < _MAX_ACTIONS:
                 actions.append((label.strip(), href.strip()))
+        elif key == "signal" and len(signals) < _MAX_SIGNALS:
+            signals.append(value)
         else:
             fields[key] = value
 
-    parts = ['<div class="hero">']
+    wide = fields.get("wide", "").lower() in {"1", "true", "yes"}
+    parts = [f'<div class="hero{" wide" if wide else ""}">']
     if eyebrow := fields.get("eyebrow"):
         parts.append(f'<p class="hero-eyebrow">{_esc(eyebrow)}</p>')
     # The headline is an `<h1>`, not a styled paragraph: it is the page's real
@@ -69,11 +74,18 @@ def _render(config: list[str]) -> str:
         parts.append(f'<h1 class="hero-title" id="{_slug(title)}">{_esc(title)}</h1>')
     if lede := fields.get("lede"):
         parts.append(f'<p class="hero-lede">{_esc(lede)}</p>')
+    if signals:
+        parts.append(
+            '<div class="hero-signals">'
+            + "".join(f'<span>{_esc(signal)}</span>' for signal in signals)
+            + "</div>"
+        )
     if actions:
         links = "".join(
             f'<a class="hero-action{" primary" if index == 0 else ""}" '
             f'href="{_esc(href)}">{_esc(label)}</a>'
-            for index, (label, href) in enumerate(actions))
+            for index, (label, href) in enumerate(actions)
+        )
         parts.append(f'<p class="hero-actions">{links}</p>')
     parts.append("</div>")
     return "".join(parts)
@@ -86,8 +98,6 @@ def _slug(text: str) -> str:
 
 
 def _esc(text: str) -> str:
-    return (text.replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;").replace('"', "&quot;"))
-
-
-
+    return (
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    )

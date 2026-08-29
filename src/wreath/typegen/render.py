@@ -1,16 +1,8 @@
-"""The renderer typegen uses.
+"""Select the deterministic Python renderer used by type generation.
 
-There is one, and this module is what is left of the seam that used to choose
-between it and an optional C renderer. That renderer was never built, and its
-absence is now a decision rather than a pending one: rendering a client is a cold
-path reached from `wreath typegen`, run by a developer occasionally rather than
-by a request, and `typescript_renderer` already assembles output linearly with a
-single join. See its module docstring.
-
-`select_renderers` survives its own selection because two callers read the
-backend name it returns, and because a future `_core.typegen_*` would want
-somewhere to land -- but a build without one is not a gap, and `"pure"` is no
-longer the other half of anything.
+Client rendering is a cold developer-tool path. `typescript_renderer` assembles
+output linearly with a single join, and `select_renderers` returns it with the
+backend name consumed by the CLI and generated-file metadata.
 """
 
 from __future__ import annotations

@@ -1,5 +1,3 @@
-"""The native GIL linter must demonstrate every rule."""
-
 from __future__ import annotations
 
 from wreath._devtools.native_gil_lint import scan_text
@@ -48,11 +46,6 @@ static int broken(int fd, char *buffer) {
 
 
 def test_struct_member_call_named_like_a_syscall_is_not_blocking_io() -> None:
-    """`capi->write(...)` dispatches through a function pointer, not to write(2).
-
-    A POSIX syscall is always called by bare name, so a member call can never be
-    one -- and the metal transport's egress path is exactly this shape.
-    """
     assert "NG002" not in codes("""
 static int fused(WreathTransportCAPI *capi, PyObject *transport, PyObject *data) {
     if (capi->write(transport, data) < 0) {

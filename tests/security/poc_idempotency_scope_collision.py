@@ -1,15 +1,3 @@
-"""PoC: replay an idempotent response across authenticated principals.
-
-Run from the repository root::
-
-    uv run python tests/security/poc_idempotency_scope_collision.py
-
-The script binds only to loopback and drives Wreath through the metal event
-loop and native HTTP/1 server.  On a vulnerable build, spaces in a decoded path
-and principal id shift the delimiter in the idempotency scope, so the second
-principal receives the first principal's stored response.
-"""
-
 from __future__ import annotations
 
 import asyncio

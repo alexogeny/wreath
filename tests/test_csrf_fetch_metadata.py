@@ -1,11 +1,3 @@
-"""Fetch Metadata is the primary CSRF check; the token is the fallback.
-
-These tests are written around the *refusals*. A suite that only shows the fast
-path passing is satisfied by deleting the check entirely, which is the shape
-this repository keeps finding -- so every allow here has a matching deny, and
-`test_the_refusals_are_not_vacuous` fails if the header check stops rejecting.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -52,19 +44,9 @@ def _vary(response: Response) -> bytes | None:
     return next((v for n, v in response.headers if n == b"vary"), None)
 
 
-# --- the refusals ------------------------------------------------------------
-
-
 @pytest.mark.parametrize("site", [b"cross-site", b"same-site"])
 @pytest.mark.asyncio
 async def test_an_unsafe_request_from_another_site_is_refused(site: bytes) -> None:
-    """`same-site` is refused as firmly as `cross-site`.
-
-    It means a *different subdomain*, which is a different security origin --
-    and a sibling-subdomain takeover is exactly the attack that distinction
-    exists to stop. Go's `CrossOriginProtection` refuses it too. Accepting it
-    would make the header check weaker than the token check it fronts.
-    """
     middleware = CsrfPolicy(SECRET)
     response = await middleware._ingress(_unsafe(site))
     assert response is not None
@@ -74,11 +56,6 @@ async def test_an_unsafe_request_from_another_site_is_refused(site: bytes) -> No
 
 @pytest.mark.asyncio
 async def test_a_garbage_sec_fetch_site_is_refused_not_ignored() -> None:
-    """An unrecognised value must not fall through to the token path.
-
-    Falling through would let an attacker who can set one header downgrade the
-    check to whichever path they prefer.
-    """
     middleware = CsrfPolicy(SECRET)
     response = await middleware._ingress(_unsafe(b"same-orig"))
     assert response is not None and response.status == 403
@@ -87,13 +64,9 @@ async def test_a_garbage_sec_fetch_site_is_refused_not_ignored() -> None:
 @pytest.mark.parametrize("site", [b"same-origin", b"none"])
 @pytest.mark.asyncio
 async def test_an_unsafe_same_origin_request_passes_without_any_token(site: bytes) -> None:
-    """The saving: no cookie, no header, no HMAC, and it is allowed."""
     middleware = CsrfPolicy(SECRET)
     assert await middleware._ingress(_unsafe(site)) is None
     assert middleware.cross_site_refusals == 0
-
-
-# --- the fallback still works, unchanged -------------------------------------
 
 
 @pytest.mark.asyncio
@@ -124,9 +97,6 @@ async def test_a_legacy_client_with_a_valid_token_is_admitted() -> None:
     assert await middleware._ingress(unsafe) is None
 
 
-# --- the safe path, where the cost was ---------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_safe_request_with_the_header_mints_nothing() -> None:
     middleware = CsrfPolicy(SECRET)
@@ -138,11 +108,6 @@ async def test_a_safe_request_with_the_header_mints_nothing() -> None:
 
 @pytest.mark.asyncio
 async def test_csrf_token_still_works_for_a_modern_browser() -> None:
-    """The public API is unchanged: a handler that asks gets a token.
-
-    Minting moved to the caller that wanted one, instead of being paid by every
-    request that did not. The cookie is still written.
-    """
     middleware = CsrfPolicy(SECRET)
     safe = _request("GET", [(b"host", b"example.test"), (b"sec-fetch-site", b"same-origin")])
     assert await middleware._ingress(safe) is None
@@ -158,7 +123,6 @@ async def test_csrf_token_still_works_for_a_modern_browser() -> None:
 
 @pytest.mark.asyncio
 async def test_a_token_minted_on_demand_is_accepted_by_the_fallback() -> None:
-    """End to end: the lazily minted token really works as a token."""
     middleware = CsrfPolicy(SECRET)
     safe = _request("GET", [(b"host", b"example.test"), (b"sec-fetch-site", b"same-origin")])
     await middleware._ingress(safe)
@@ -176,9 +140,6 @@ async def test_a_token_minted_on_demand_is_accepted_by_the_fallback() -> None:
     assert await middleware._ingress(legacy) is None
 
 
-# --- Vary --------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_response_whose_cookie_turned_on_the_header_varies_on_it() -> None:
     middleware = CsrfPolicy(SECRET)
@@ -191,11 +152,6 @@ async def test_a_response_whose_cookie_turned_on_the_header_varies_on_it() -> No
 
 @pytest.mark.asyncio
 async def test_vary_is_merged_not_overwritten() -> None:
-    """A `Vary` another middleware set must survive.
-
-    `cors.py` shipped the mirror-image defect today -- appending only when there
-    was no `Vary` at all -- so this is pinned rather than assumed.
-    """
     middleware = CsrfPolicy(SECRET)
     safe = _request("GET", [(b"host", b"example.test"), (b"sec-fetch-site", b"same-origin")])
     await middleware._ingress(safe)
@@ -216,16 +172,8 @@ async def test_a_legacy_response_does_not_vary_on_a_header_it_never_read() -> No
     assert _vary(response) is None
 
 
-# --- the guard on the guard --------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_the_refusals_are_not_vacuous() -> None:
-    """Prove a refusal test can fail, by widening the accepted set.
-
-    Without this, every deny above would still pass if `_TRUSTED_SITES` grew to
-    admit everything -- the check would be gone and the suite green.
-    """
     from wreath.policy import csrf as csrf_module
 
     middleware = CsrfPolicy(SECRET)
@@ -246,14 +194,10 @@ async def test_the_refusals_are_not_vacuous() -> None:
 
 @pytest.mark.asyncio
 async def test_a_clean_run_leaves_the_refusal_counter_at_zero() -> None:
-    """Otherwise "the counter moved" proves nothing."""
     middleware = CsrfPolicy(SECRET)
     await middleware._ingress(_unsafe(b"same-origin"))
     await middleware._ingress(_request("GET", [(b"sec-fetch-site", b"same-origin")]))
     assert middleware.cross_site_refusals == 0
-
-
-# --- what a handler on the trusted-unsafe path can ask for -------------------
 
 
 @pytest.mark.parametrize("site", [b"same-origin", b"none"])
@@ -261,15 +205,6 @@ async def test_a_clean_run_leaves_the_refusal_counter_at_zero() -> None:
 async def test_a_handler_can_still_mint_a_token_on_a_trusted_unsafe_request(
     site: bytes,
 ) -> None:
-    """The ordinary re-render-the-form pattern, on every browser since 2023.
-
-    A `POST` that fails validation and re-renders its form calls
-    `csrf_token(request)` for the new form. On the Fetch Metadata path that
-    request passed no token check, so `_STATE_TOKEN` is absent -- and the branch
-    recorded no minter either, so `csrf_token` raised `RuntimeError` and the
-    handler answered 500. Not attacker-driven: a self-inflicted outage on the
-    exact clients the header path was added for.
-    """
     middleware = CsrfPolicy(SECRET)
     request = _unsafe(site)
     assert await middleware._ingress(request) is None
@@ -278,7 +213,6 @@ async def test_a_handler_can_still_mint_a_token_on_a_trusted_unsafe_request(
 
 @pytest.mark.asyncio
 async def test_a_refused_cross_site_request_prepares_no_minter() -> None:
-    """The control: only a request that was *allowed* gets one."""
     middleware = CsrfPolicy(SECRET)
     request = _unsafe(b"cross-site")
     assert (await middleware._ingress(request)) is not None

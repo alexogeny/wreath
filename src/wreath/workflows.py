@@ -183,8 +183,6 @@ class InMemoryWorkflowStore:
     async def load(self, key: str) -> dict[str, Any] | None:
         return self._instances.get(key)
 
-
-
     async def complete_step(self, key: str, name: str, result: Any) -> None:
         self._instances[key]["results"][name] = result
 
@@ -260,9 +258,7 @@ class PostgresWorkflowStore:
         return self._trace_column
 
     @classmethod
-    def schema_sql(
-        cls, *, schema: str = DEFAULT_SCHEMA, table: str = DEFAULT_TABLE
-    ) -> str:
+    def schema_sql(cls, *, schema: str = DEFAULT_SCHEMA, table: str = DEFAULT_TABLE) -> str:
         """DDL for the instance and step tables, semicolon-joined.
 
         `CREATE SCHEMA` is emitted; `CREATE EXTENSION` is not, and neither is any
@@ -650,13 +646,23 @@ class Workflow:
                 completed=list(record.get("results") or {}),
             )
         return await self._execute(
-            store=store, key=key, record=record, compensate=True, progress=progress,
+            store=store,
+            key=key,
+            record=record,
+            compensate=True,
+            progress=progress,
             recorder=recorder,
         )
 
     async def _execute(
-        self, *, store: Any, key: str, record: dict[str, Any], compensate: bool,
-        progress: Any, recorder: Any = None,
+        self,
+        *,
+        store: Any,
+        key: str,
+        record: dict[str, Any],
+        compensate: bool,
+        progress: Any,
+        recorder: Any = None,
     ) -> Outcome:
         """Bind the instance's trace, then execute under it.
 
@@ -688,8 +694,15 @@ class Workflow:
             _telemetry.outbound_context.reset(token)
 
     async def _execute_bound(
-        self, *, store: Any, key: str, record: dict[str, Any], compensate: bool,
-        progress: Any, recorder: Any = None, trace_context: str = "",
+        self,
+        *,
+        store: Any,
+        key: str,
+        record: dict[str, Any],
+        compensate: bool,
+        progress: Any,
+        recorder: Any = None,
+        trace_context: str = "",
     ) -> Outcome:
         results: dict[str, Any] = dict(record.get("results") or {})
         context = StepContext(key=key, workflow=self.name, results=results)
@@ -704,11 +717,7 @@ class Workflow:
                 continue
             witness = None
             try:
-                if (
-                    recorder is None
-                    and step.query_budget is None
-                    and not _nplusone.WATCHING
-                ):
+                if recorder is None and step.query_budget is None and not _nplusone.WATCHING:
                     # The usual production shape asked for neither recording nor
                     # query observation. Keep it out of two null context managers,
                     # an Origin allocation and a StepWitness/list copy per step.
@@ -717,9 +726,12 @@ class Workflow:
                     witness = _StepWitness(
                         self, recorder, key, step, index, completed, trace_context
                     )
-                    with witness.observing(), _nplusone.scope_for(
-                        _nplusone.Origin(kind="step", label=step.name, identifier=key),
-                        budget=step.query_budget,
+                    with (
+                        witness.observing(),
+                        _nplusone.scope_for(
+                            _nplusone.Origin(kind="step", label=step.name, identifier=key),
+                            budget=step.query_budget,
+                        ),
                     ):
                         results[step.name] = await _call(step.run, context)
             except BaseException as error:
@@ -780,9 +792,7 @@ class Workflow:
                 continue
             try:
                 with _nplusone.scope_for(
-                    _nplusone.Origin(
-                        kind="step", label=f"{step.name}:compensate", identifier=key
-                    ),
+                    _nplusone.Origin(kind="step", label=f"{step.name}:compensate", identifier=key),
                     budget=step.query_budget,
                 ):
                     await _call(step.compensate, context)
@@ -815,8 +825,14 @@ class _StepWitness:
     """
 
     __slots__ = (
-        "_completed", "_key", "_position", "_recorder", "_step", "_trace",
-        "_workflow", "trace",
+        "_completed",
+        "_key",
+        "_position",
+        "_recorder",
+        "_step",
+        "_trace",
+        "_workflow",
+        "trace",
     )
 
     def __init__(
@@ -867,12 +883,6 @@ class _StepWitness:
             instance=self._key,
         ):
             return
-        # Never None here: `write` has already returned when there is no
-        # recorder, and `observing()` -- which `_execute_bound` always enters
-        # around the step -- makes a trace whenever there is one. The `trace is
-        # None` arm that used to be here was unreachable, and a mutation run
-        # found it by taking both of its branches with nothing to tell them
-        # apart.
         trace = self.trace
         recorder.write(
             WorkflowStepRecord(
@@ -893,9 +903,7 @@ class _StepWitness:
             trace,
         )
 
-    def _outcome(
-        self, error: BaseException | None, chain: Sequence[tuple[str, str]]
-    ) -> Any:
+    def _outcome(self, error: BaseException | None, chain: Sequence[tuple[str, str]]) -> Any:
         """Which of the three outcomes this step reached.
 
         `compensation_failed` outranks `raised` when both are true, and that

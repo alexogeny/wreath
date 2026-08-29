@@ -12,7 +12,6 @@ from .ormar import _OrmarModels
 
 
 class _ClassRewrite(_ModelRewrite, _DjangoModels, _OrmarModels):
-    # -- classes (Pydantic DTOs / ORM / custom middleware) -----------------------
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         if node.bases and any(
             self.imports.origin(base).endswith("models.Model") for base in node.bases
@@ -30,9 +29,7 @@ class _ClassRewrite(_ModelRewrite, _DjangoModels, _OrmarModels):
             if origin.split(".")[-1] == "as_form":
                 # translated: whole-model Annotated[Model, Form()] replaces it
                 self._delete_decorator(dec)
-            elif origin == "strawberry.type" and _plain_graphql_dataclass(
-                self.imports, node
-            ):
+            elif origin == "strawberry.type" and _plain_graphql_dataclass(self.imports, node):
                 self._delete_decorator(dec)
                 self.needs_dataclass = True
                 indent = self.buf.line_indent(node.lineno)
@@ -41,8 +38,7 @@ class _ClassRewrite(_ModelRewrite, _DjangoModels, _OrmarModels):
             isinstance(base, ast.Call)
             and isinstance(base.func, ast.Attribute)
             and base.func.attr == "get_pydantic"
-            and pydantic_projection_rule(base.func, self._parents)
-            == "pydantic.get_pydantic_exact"
+            and pydantic_projection_rule(base.func, self._parents) == "pydantic.get_pydantic_exact"
             for base in node.bases
         )
         if projection_base:

@@ -91,10 +91,8 @@ class InvalidToken(JwtError):
     """A token could not be constructed for signing (not raised on verify)."""
 
 
-# ---------------------------------------------------------------------------
 # Algorithm registry. ES*/EdDSA are intentionally absent from this cut and must
 # raise rather than silently pass; the structure leaves room to add them later.
-# ---------------------------------------------------------------------------
 
 _HS = {"HS256": "sha256", "HS384": "sha384", "HS512": "sha512"}
 _RS = {"RS256": "sha256", "RS384": "sha384", "RS512": "sha512"}
@@ -126,9 +124,7 @@ _DIGEST_INFO = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Keys. Each key knows the one family it may be used with.
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,9 +228,6 @@ def key_from_pem(pem: str | bytes) -> RsaPublicKey:
     return RsaPublicKey(n, e)
 
 
-# ---- minimal DER reader (RSA public keys only) ----------------------------
-
-
 def _der_read_tlv(data: bytes, pos: int) -> tuple[int, bytes, int]:
     """Return (tag, value_bytes, next_pos) for the TLV at `pos`."""
     tag = data[pos]
@@ -277,11 +270,9 @@ def _rsa_public_from_der(der: bytes, kind: str) -> tuple[int, int]:
     return _der_int(n_bytes), _der_int(e_bytes)
 
 
-# ---------------------------------------------------------------------------
 # Primitive helpers. Parsing, HS verification and claim validation are `jose.c`;
 # RSA, EC and Ed25519 verification are Python over the stdlib -- see the module
 # docstring for why each is where it is.
-# ---------------------------------------------------------------------------
 
 
 def _parse_compact(token: str) -> tuple[dict[str, Any], dict[str, Any], bytes, bytes]:
@@ -315,9 +306,6 @@ def _verify_hs(alg: str, secret: bytes, signing_input: bytes, signature: bytes) 
     return bool(_native_hs(digestmod, secret, signing_input, signature))
     expected = hmac.new(secret, signing_input, digestmod).digest()
     return hmac.compare_digest(expected, signature)
-
-
-# ---- RSA verification (PKCS#1/PSS) ----------------------------------------
 
 
 def _verify_rs(key: RsaPublicKey, hash_name: str, signing_input: bytes, signature: bytes) -> bool:
@@ -364,9 +352,7 @@ def _verify_signature(
     return _verify_rs(key, hash_name, signing_input, signature)
 
 
-# ---------------------------------------------------------------------------
 # Identity mapping and the public verifier.
-# ---------------------------------------------------------------------------
 
 
 def default_identity(claims: Mapping[str, Any]) -> Identity:
@@ -564,9 +550,7 @@ def verify_jwt(
         return None
 
 
-# ---------------------------------------------------------------------------
 # small construction-time helpers
-# ---------------------------------------------------------------------------
 
 
 def _freeze_algorithms(algorithms: Iterable[str]) -> frozenset[str]:

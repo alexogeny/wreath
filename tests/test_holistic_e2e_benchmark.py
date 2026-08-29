@@ -1,5 +1,3 @@
-"""The maximal instruction target remains a working declarative application."""
-
 from __future__ import annotations
 
 from compression import zstd
@@ -95,9 +93,7 @@ async def test_holistic_target_reaches_template_egress(monkeypatch: Any) -> None
     assert headers[b"cache-control"] == b"private, no-store"
     assert b"wreath_state=" in headers[b"set-cookie"]
     compressed = b"".join(
-        message.get("body", b"")
-        for message in sent
-        if message["type"] == "http.response.body"
+        message.get("body", b"") for message in sent if message["type"] == "http.response.body"
     )
     body = zstd.decompress(compressed)
     assert b"Quarterly &lt;report&gt;" in body

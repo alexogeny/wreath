@@ -153,9 +153,7 @@ def expose_routes(
     effective = (
         {
             id(definition): requirement
-            for definition, requirement in zip(
-                image.routes(), image.requirements(), strict=True
-            )
+            for definition, requirement in zip(image.routes(), image.requirements(), strict=True)
         }
         if image is not None
         else {}
@@ -172,9 +170,7 @@ def expose_routes(
             # exactly what the application does before it enforces them, so the
             # two cannot come to different conclusions.
             requirement=effective.get(id(definition))
-            or merge_requirements(
-                definition.requirement, requirement_for(definition.endpoint)
-            ),
+            or merge_requirements(definition.requirement, requirement_for(definition.endpoint)),
             route=definition.path,
         )
         mcp._registry.add(tool)

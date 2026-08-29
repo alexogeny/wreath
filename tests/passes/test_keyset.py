@@ -1,11 +1,3 @@
-"""The keyset half: the SQL shape it emits, and the four refusals that keep it sound.
-
-Every refusal here is a data-loss or a never-terminates bug that the declaration
-can see. The tests assert the message names the fix, not just that something
-raised -- an error that does not say what to do next is a stack trace with better
-manners.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -19,9 +11,6 @@ from wreath.passes import Key, PassDeclarationError
 
 def _keys(*items: Key) -> tuple[Key, ...]:
     return items
-
-
-# --- the shape of the comparison ---------------------------------------------
 
 
 def test_a_composite_key_is_one_row_comparison_not_expanded_ors():
@@ -70,9 +59,6 @@ def test_the_order_clause_can_be_read_from_either_end():
     # Reversing is how the last key still inside a range is found in one index
     # descent rather than by counting rows.
     assert keyset.order_clause(keys, reverse=True) == "expires DESC, key DESC"
-
-
-# --- the refusals -------------------------------------------------------------
 
 
 def test_a_mixed_direction_key_is_refused_because_a_row_comparison_has_no_such_form():
@@ -162,14 +148,9 @@ def test_a_clock_frontier_over_a_non_timestamp_key_is_refused():
     assert "must be a timestamp" in str(error.value).replace("\n", " ")
 
 
-@pytest.mark.parametrize(
-    "sql_type", ["timestamptz", "timestamp", "timestamp with time zone"]
-)
+@pytest.mark.parametrize("sql_type", ["timestamptz", "timestamp", "timestamp with time zone"])
 def test_every_timestamp_spelling_satisfies_a_clock_frontier(sql_type):
     keyset.refuse_unclocked_key(_keys(Key("expires", sql_type, indexed=True)), table="t")
-
-
-# --- cursors ------------------------------------------------------------------
 
 
 def test_a_cursor_round_trips_through_the_ledgers_json():

@@ -1,14 +1,3 @@
-"""The boundary in front of an MCP endpoint: who may reach it, and do what.
-
-A tool is a callable a persuadable third party can invoke with arguments of its
-choosing, so the assertions here are the ones that decide whether it is safe to
-point at anything real. The load-bearing one is audience binding: a token that
-verifies perfectly, from an issuer this server trusts, and was minted for a
-*different* resource, must be refused. That is the confused-deputy failure the
-protected-resource specification exists to prevent, and it is the one an
-endpoint can fail without any symptom until it is exploited.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -127,9 +116,6 @@ async def call(client: TestClient, session: str, bearer: str, params: dict) -> T
     )
 
 
-# -- the metadata document --------------------------------------------------
-
-
 async def test_protected_resource_metadata_is_served_without_a_token() -> None:
     app, mcp = build()
     assert mcp.metadata_path == METADATA_PATH
@@ -146,15 +132,6 @@ async def test_protected_resource_metadata_is_served_without_a_token() -> None:
 
 
 async def test_metadata_omits_the_scope_list_when_there_is_none() -> None:
-    """An absent key and an empty list say different things to a client.
-
-    RFC 9728 lets a resource omit `scopes_supported`, which means "unspecified";
-    publishing `[]` means "this resource accepts no scopes", and a client that
-    reads it literally has nothing it can ask the authorization server for. The
-    guard that keeps the key out was never exercised -- every test built an
-    `MCPAuth` with scopes -- so serving `[]` to every unscoped deployment would
-    have passed.
-    """
     app = Wreath()
     MCP(app, name="camera-trap", version="1.0.0", auth=protection(scopes_supported=()))
     async with TestClient(app) as client:
@@ -166,29 +143,14 @@ async def test_metadata_omits_the_scope_list_when_there_is_none() -> None:
 
 
 async def test_an_audience_claim_that_is_a_list_is_read_as_a_set() -> None:
-    """`aud` is a string *or* an array in RFC 7519, and only one was tested.
-
-    A token minted for several resources is the ordinary shape from an
-    authorization server that fronts more than one API, and it must bind here
-    exactly as a bare string does.
-    """
     app, _ = build()
     bearer = token(audience=[RESOURCE, "https://other.example/api"])
     async with TestClient(app) as client:
-        accepted = await call(
-            client, await session_for(client, bearer), bearer, {"name": "greet"}
-        )
+        accepted = await call(client, await session_for(client, bearer), bearer, {"name": "greet"})
         assert "error" not in accepted.json(), accepted.json()
 
 
 async def test_an_audience_claim_of_the_wrong_shape_matches_nothing() -> None:
-    """Not a string, not a list: an empty set, and therefore a refusal.
-
-    `frozenset(entry for entry in value ...)` is happy to iterate a mapping --
-    it would yield the *keys* -- so a claim shaped `{"aud": {"https://api...":
-    1}}` would bind the audience by its key if the shape check were dropped.
-    An integer would raise `TypeError` out of the middle of authentication.
-    """
     from wreath._mcp.auth import _audience_of
 
     assert _audience_of({"aud": [RESOURCE, 7, None]}) == frozenset((RESOURCE,))
@@ -221,9 +183,6 @@ def test_metadata_needs_somewhere_to_send_a_client() -> None:
         MCPAuth(resource=RESOURCE, authorization_servers=())
     with pytest.raises(ValueError, match="resource"):
         MCPAuth(resource="", authorization_servers=(ISSUER,))
-
-
-# -- the challenge ----------------------------------------------------------
 
 
 async def test_a_missing_token_gets_a_challenge_naming_the_metadata_url() -> None:
@@ -262,16 +221,7 @@ async def test_the_challenge_is_on_every_method() -> None:
             )
 
 
-# -- audience binding -------------------------------------------------------
-
-
 async def test_a_token_minted_for_another_resource_is_rejected() -> None:
-    """The confused deputy, and the whole reason the metadata document exists.
-
-    The signature is valid, the issuer is trusted, and the token has not
-    expired. It was simply minted for somebody else's MCP server, and a user
-    persuaded into consenting there must not thereby have consented here.
-    """
     app, _ = build()
     async with TestClient(app) as client:
         response = await initialize(client, token(audience="https://other.example/mcp"))
@@ -291,9 +241,7 @@ async def test_a_token_with_no_audience_at_all_is_rejected() -> None:
 async def test_a_token_naming_this_resource_among_several_is_accepted() -> None:
     app, _ = build()
     async with TestClient(app) as client:
-        response = await initialize(
-            client, token(audience=["https://other.example/mcp", RESOURCE])
-        )
+        response = await initialize(client, token(audience=["https://other.example/mcp", RESOURCE]))
         assert response.status == 200
 
 
@@ -345,9 +293,6 @@ async def test_a_session_belongs_to_the_subject_that_opened_it() -> None:
         stolen = await call(client, session, token(subject="grace"), {"name": "greet"})
         assert stolen.status == 401
         assert "did not open this MCP session" in stolen.json()["error"]["message"]
-
-
-# -- Cedar-gated tools ------------------------------------------------------
 
 
 class Engine:
@@ -458,7 +403,6 @@ async def test_a_gated_tool_with_no_authorizer_fails_closed() -> None:
 
 
 async def test_a_resource_resolver_sees_the_call_arguments() -> None:
-    """A route resolves its resource from the path; a tool has no path."""
     seen: list[object] = []
 
     class Recording:
@@ -535,9 +479,6 @@ def test_a_resource_without_an_action_gates_nothing_and_says_so() -> None:
             return {}
 
 
-# -- per-tool rate limits ---------------------------------------------------
-
-
 async def test_a_tool_is_bounded_per_caller() -> None:
     app = Wreath()
     mcp = MCP(app, name="x", version="1.0.0", auth=protection())
@@ -596,14 +537,6 @@ def test_a_rate_limit_that_is_not_a_limit_is_refused() -> None:
 
 
 def test_a_burst_below_one_is_refused_and_a_burst_below_the_limit_is_not() -> None:
-    """`burst` was the one bound of the three nothing had ever passed a value to.
-
-    Zero is the interesting number: `capacity` is `burst` when it is set, so a
-    burst of nought is a bucket that can never hold a token and every call to
-    the tool refuses -- a rate limit that reads as configured and is an outage.
-    `None` (unset) and a burst *smaller than the limit* both stay legal, which
-    is what stops this refusal from being a blanket one.
-    """
     with pytest.raises(ValueError, match="burst must be at least 1"):
         ToolRateLimit(5, 60.0, 0)
     with pytest.raises(ValueError, match="burst must be at least 1"):

@@ -1,16 +1,3 @@
-"""Stage 3 of first-class logging: projection, the writer thread, and sinks.
-
-The request path publishes a cell and returns. Everything readable about that
-record -- joining it to its trace, rendering the template, writing bytes -- is
-work this stage moves off that path and behind a bounded hand-off, so a stalled
-disk can never reach a handler.
-
-The isolation being tested is the same shape `_export.py` already uses: offer to
-a bounded queue that drops and counts, drain on a dedicated thread, and wrap
-every sink call so a raising writer increments a counter instead of stopping the
-pipeline.
-"""
-
 from __future__ import annotations
 
 import json
@@ -75,9 +62,6 @@ def _site(runtime: log.LogRuntime) -> log.LogEvent:
     )
 
 
-# --- projection: joining a record to its trace ------------------------------
-
-
 def _recorder() -> FakeRecorder:
     return FakeRecorder()
 
@@ -101,9 +85,7 @@ def test_a_log_record_joins_its_trace_by_request_id(runtime: log.LogRuntime) -> 
         bytes_in=0,
         bytes_out=0,
     ).encode()
-    record = fs.LogCell(
-        request_id=request_id, site_id=1, severity=fs.Severity.WARN
-    ).encode()
+    record = fs.LogCell(request_id=request_id, site_id=1, severity=fs.Severity.WARN).encode()
     _publish(recorder, [completion, record])
 
     projector.poll()  # ingest
@@ -116,7 +98,6 @@ def test_a_log_record_joins_its_trace_by_request_id(runtime: log.LogRuntime) -> 
 def test_a_record_arriving_after_its_completion_still_joins(
     runtime: log.LogRuntime,
 ) -> None:
-    """The quiet-cycle rule must cover log cells exactly as it covers phases."""
     recorder = _recorder()
     projector = Projector(recorder)
     request_id = 7
@@ -149,8 +130,6 @@ def test_a_record_arriving_after_its_completion_still_joins(
 def test_an_unscoped_record_is_delivered_without_a_trace(
     runtime: log.LogRuntime,
 ) -> None:
-    """Startup, shutdown and background records join to nothing and must not be
-    held hostage waiting for a completion that will never arrive."""
     recorder = _recorder()
     seen: list[ProjectedLog] = []
     projector = Projector(recorder, on_log=seen.append)
@@ -184,12 +163,8 @@ def test_a_scoped_record_reaches_the_hook_with_its_correlation(
                 bytes_out=0,
                 flags=fs.FLAG_HAS_CORRELATION,
             ).encode(),
-            fs.CorrelationCell(
-                request_id=request_id, trace_id=(1 << 64) | 2, span_id=3
-            ).encode(),
-            fs.LogCell(
-                request_id=request_id, site_id=6, severity=fs.Severity.INFO
-            ).encode(),
+            fs.CorrelationCell(request_id=request_id, trace_id=(1 << 64) | 2, span_id=3).encode(),
+            fs.LogCell(request_id=request_id, site_id=6, severity=fs.Severity.INFO).encode(),
         ],
     )
     projector.poll()
@@ -203,7 +178,6 @@ def test_a_scoped_record_reaches_the_hook_with_its_correlation(
 def test_records_whose_completion_never_arrives_are_counted(
     runtime: log.LogRuntime,
 ) -> None:
-    """A record must never vanish silently; an orphan is a counted outcome."""
     recorder = _recorder()
     projector = Projector(recorder)
     _publish(
@@ -214,9 +188,6 @@ def test_records_whose_completion_never_arrives_are_counted(
     projector.poll()
     projector.poll()
     assert projector.snapshot().loss.orphan_log >= 1
-
-
-# --- the bounded hand-off ---------------------------------------------------
 
 
 def _projected(site_id: int = 1, severity: fs.Severity = fs.Severity.INFO) -> ProjectedLog:
@@ -287,9 +258,6 @@ def test_stop_flushes_what_is_queued(runtime: log.LogRuntime) -> None:
     pipeline.on_log(_projected())
     pipeline.stop()
     assert len(written) == 1
-
-
-# --- renderers --------------------------------------------------------------
 
 
 def test_text_renderer_shows_severity_and_the_rendered_message(

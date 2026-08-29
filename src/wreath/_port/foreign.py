@@ -78,10 +78,20 @@ _DJANGO_TYPE = {
 # depends on them, so they go without a note -- the same treatment ormar's
 # `description=` gets, and for the same reason: a note on every column buries
 # the ones that matter.
-_DJANGO_DOC_KWARGS = frozenset({
-    "blank", "verbose_name", "help_text", "editable", "error_messages",
-    "related_name", "related_query_name", "validators", "choices", "db_comment",
-})
+_DJANGO_DOC_KWARGS = frozenset(
+    {
+        "blank",
+        "verbose_name",
+        "help_text",
+        "editable",
+        "error_messages",
+        "related_name",
+        "related_query_name",
+        "validators",
+        "choices",
+        "db_comment",
+    }
+)
 
 
 _HTTP = frozenset({"get", "post", "put", "patch", "delete", "head", "options", "route"})
@@ -97,10 +107,17 @@ _TORNADO_HANDLERS = ("RequestHandler",)
 _TORNADO_SOCKETS = ("WebSocketHandler",)
 _DRF_BASES = ("ViewSet", "APIView", "GenericAPIView", "Serializer", "ModelSerializer")
 
-_FLASK_HOOKS = frozenset({
-    "before_request", "after_request", "teardown_request", "errorhandler",
-    "before_app_request", "context_processor", "teardown_appcontext",
-})
+_FLASK_HOOKS = frozenset(
+    {
+        "before_request",
+        "after_request",
+        "teardown_request",
+        "errorhandler",
+        "before_app_request",
+        "context_processor",
+        "teardown_appcontext",
+    }
+)
 #: Parameter names that are the framework's own objects in a handler or view.
 #: A convention rather than a resolution: `request` in an aiohttp handler is a
 #: web.Request and nothing in the signature says so. Scoped to parameters of a
@@ -201,18 +218,13 @@ def blueprint_router(call: ast.Call) -> tuple[str, str | None] | None:
     for keyword in call.keywords:
         if keyword.arg != "url_prefix":
             return None
-        if not (
-            isinstance(keyword.value, ast.Constant)
-            and isinstance(keyword.value.value, str)
-        ):
+        if not (isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str)):
             return None
         prefix = keyword.value.value
     return name, prefix
 
 
-def _blueprint_translates(
-    call: ast.Call, bound_to: str | None, hooked: frozenset[str]
-) -> bool:
+def _blueprint_translates(call: ast.Call, bound_to: str | None, hooked: frozenset[str]) -> bool:
     """A Blueprint is a `Router` only while it is nothing but routes.
 
     `url_prefix` and the name carry across. A `before_request` or `errorhandler`
@@ -287,8 +299,7 @@ def route_translates(dec: ast.expr, attr: str, framework: str, node) -> bool:
     if pattern is None:
         return False
     if any(
-        keyword.arg not in ("methods", "method", "name", "endpoint")
-        for keyword in dec.keywords
+        keyword.arg not in ("methods", "method", "name", "endpoint") for keyword in dec.keywords
     ):
         return False
     if route_methods(attr, dec) is None:
@@ -326,9 +337,7 @@ def _redirect_status(name: str, call: ast.Call) -> int | None:
         return named
     if name != "redirect" or not call.args:
         return None
-    given = next(
-        (keyword.value for keyword in call.keywords if keyword.arg == "code"), None
-    )
+    given = next((keyword.value for keyword in call.keywords if keyword.arg == "code"), None)
     if given is None and len(call.args) > 1:
         given = call.args[1]
     if given is None:
@@ -637,7 +646,6 @@ def foreign_findings(
     }
 
     for node in ast.walk(tree):
-        # -- decorators ------------------------------------------------------
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             for dec in node.decorator_list:
                 name = _callee(dec)
@@ -647,9 +655,7 @@ def foreign_findings(
                     framework = (
                         "flask" if flask else "bottle" if bottle else "aiohttp" if aio else ""
                     )
-                    if framework and not patched and route_translates(
-                        dec, name, framework, node
-                    ):
+                    if framework and not patched and route_translates(dec, name, framework, node):
                         emit("port.route.method", line)
                     elif flask:
                         emit("foreign.flask.route", line)
@@ -668,7 +674,6 @@ def foreign_findings(
                 elif pyramid and name in ("view_config", "subscriber", "view_defaults"):
                     emit("foreign.pyramid.view", line)
 
-        # -- classes ---------------------------------------------------------
         if isinstance(node, ast.ClassDef):
             bases = _base_names(node)
             is_socket = tornado and node.name in sockets
@@ -719,13 +724,11 @@ def foreign_findings(
                     ):
                         emit("foreign.pyramid.acl", child.lineno)
 
-        # -- assignments -----------------------------------------------------
         if isinstance(node, ast.Assign) and pyramid:
             for target in node.targets:
                 if isinstance(target, ast.Name) and target.id == "__acl__":
                     emit("foreign.pyramid.acl", node.lineno)
 
-        # -- calls -----------------------------------------------------------
         if isinstance(node, ast.Call):
             name = _callee(node)
             dotted = _dotted(node.func)
@@ -754,9 +757,7 @@ def foreign_findings(
             elif flask and name == "Blueprint":
                 emit(
                     "port.router.new"
-                    if _blueprint_translates(
-                        node, bound_names.get(id(node)), hooked_routers
-                    )
+                    if _blueprint_translates(node, bound_names.get(id(node)), hooked_routers)
                     else "foreign.flask.blueprint",
                     node.lineno,
                 )
@@ -766,8 +767,13 @@ def foreign_findings(
                 emit("foreign.bottle.app", node.lineno)
             elif aio and not patched and name == "RouteTableDef":
                 emit("port.router.new", node.lineno)
-            elif name in ("register_blueprint", "add_routes") and (flask or aio) \
-                    and not patched and len(node.args) == 1 and not node.keywords:
+            elif (
+                name in ("register_blueprint", "add_routes")
+                and (flask or aio)
+                and not patched
+                and len(node.args) == 1
+                and not node.keywords
+            ):
                 emit("port.router.include", node.lineno)
             elif aio and name.startswith("add_") and ".router." in f"{dotted}.":
                 emit("foreign.aiohttp.route_dynamic", node.lineno)
@@ -783,10 +789,16 @@ def foreign_findings(
                 emit("foreign.tornado.routes", node.lineno)
             elif tornado and name in ("PeriodicCallback", "add_timeout", "call_later"):
                 emit("foreign.tornado.periodic", node.lineno)
-            elif tornado and name == "define" and (
-                "options" in dotted
-                or (imports is not None
-                    and imports.origin(node.func).startswith("tornado.options"))
+            elif (
+                tornado
+                and name == "define"
+                and (
+                    "options" in dotted
+                    or (
+                        imports is not None
+                        and imports.origin(node.func).startswith("tornado.options")
+                    )
+                )
             ):
                 # `from tornado.options import define` is the spelling Tornado's
                 # own documentation uses, and it leaves nothing but `define` at
@@ -812,7 +824,6 @@ def foreign_findings(
             ):
                 emit("orm.transaction.atomic", node.lineno)
 
-        # -- attribute reads --------------------------------------------------
         if isinstance(node, ast.Attribute):
             dotted = _dotted(node)
             if aio and node.attr in _AIOHTTP_LIFECYCLE:
@@ -822,7 +833,6 @@ def foreign_findings(
             elif flask and dotted.startswith(("g.", "current_app.")):
                 emit("foreign.flask.proxy", node.lineno)
 
-        # -- subscripted app state -------------------------------------------
         if (
             aio
             and isinstance(node, ast.Subscript)
@@ -847,8 +857,11 @@ def foreign_findings(
             if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             bound = {
-                a.arg for a in list(func.args.args) + list(func.args.posonlyargs)
-                + list(func.args.kwonlyargs) if a.arg in param_names
+                a.arg
+                for a in list(func.args.args)
+                + list(func.args.posonlyargs)
+                + list(func.args.kwonlyargs)
+                if a.arg in param_names
             }
             if not bound:
                 continue

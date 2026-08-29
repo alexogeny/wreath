@@ -33,8 +33,7 @@ def _is_lifespan(node, lifespan_names, imports: _Imports) -> bool:
     return (
         len(parameters) == 1
         and parameters[0].annotation is not None
-        and imports.origin(parameters[0].annotation).split(".")[-1]
-        in ("FastAPI", "Starlette")
+        and imports.origin(parameters[0].annotation).split(".")[-1] in ("FastAPI", "Starlette")
     )
 
 
@@ -65,19 +64,21 @@ def lifespan_shape(node) -> tuple[str, str]:
       functions, so that name needs somewhere to live.
     """
     yields = [
-        (index, statement) for index, statement in enumerate(node.body)
+        (index, statement)
+        for index, statement in enumerate(node.body)
         if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Yield)
     ]
     if len(yields) != 1:
         nested = any(isinstance(n, ast.Yield) for n in ast.walk(node))
         return "lifespan.ctx", (
             "the yield is inside a try/async with, so the shutdown half is that block's exit"
-            if nested else "no top-level yield to split at"
+            if nested
+            else "no top-level yield to split at"
         )
     index, statement = yields[0]
     if statement.value.value is not None:  # type: ignore[union-attr]
         return "lifespan.ctx", "the yield hands a value to the framework; put it on app.state"
-    crossing = _names_crossing(node.body[:index], node.body[index + 1:])
+    crossing = _names_crossing(node.body[:index], node.body[index + 1 :])
     if crossing:
         return "lifespan.ctx", (
             "startup makes " + ", ".join(crossing) + " and shutdown uses them, so they need a "
@@ -97,7 +98,9 @@ def _names_crossing(before: list[ast.stmt], after: list[ast.stmt]) -> list[str]:
                     seen.add(node.id)
                     bound.append(node.id)
     read = {
-        node.id for statement in after for node in ast.walk(statement)
+        node.id
+        for statement in after
+        for node in ast.walk(statement)
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
     }
     return [name for name in bound if name in read]

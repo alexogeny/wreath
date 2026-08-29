@@ -22,13 +22,13 @@ BACKGROUND: dict[str, tuple[str, str, str, str]] = {
         "background",
         "other",
         TRANSLATED,
-        "@x.task(...) becomes @x.task(\"<name>\", ...) on a JobRunner: max_retries is retries, time_limit is timeout, default_retry_delay is backoff_base with backoff=\"fixed\", and the handler gains the ctx first parameter wreath passes every job. The body moves across as it is.",
+        '@x.task(...) becomes @x.task("<name>", ...) on a JobRunner: max_retries is retries, time_limit is timeout, default_retry_delay is backoff_base with backoff="fixed", and the handler gains the ctx first parameter wreath passes every job. The body moves across as it is.',
     ),
     "bg.celery.enqueue": (
         "background",
         "other",
         TRANSLATED,
-        "delay(...) and apply_async(args=[...]) both become await runner.enqueue(\"<task>\", *args). The arguments carry across positionally and nothing else about the call changes.",
+        'delay(...) and apply_async(args=[...]) both become await runner.enqueue("<task>", *args). The arguments carry across positionally and nothing else about the call changes.',
     ),
     "bg.asyncio_loop": (
         "background",

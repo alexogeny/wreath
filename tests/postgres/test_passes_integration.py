@@ -1,19 +1,3 @@
-"""Live-PostgreSQL checks for the two chunked-pass claims a fake cannot settle.
-
-Skipped unless ``WREATH_TEST_POSTGRES_DSN`` points at a throwaway database. The
-fake-driver suite in ``tests/passes/`` proves the shapes; these two prove the
-things only a real planner and a real lock manager can:
-
-* **the composite keyset really is one index scan** -- ``EXPLAIN``, not faith.
-  The whole complexity argument for keyset over ``OFFSET`` rests on it, and it
-  is exactly the sort of claim that stays true in a comment long after an
-  expanded ``OR`` has quietly replaced it with a bitmap-or over two scans;
-* **a chunk that cannot get its lock dies as a chunk failure**, on
-  ``statement_timeout``, rather than becoming the long-running transaction the
-  whole design exists to prevent. That is the failure mode that turns a
-  backfill into a stuck lease and then into two workers on one pass.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -68,8 +52,8 @@ async def database():
         "  herd_id bigint NOT NULL,\n"
         "  expires timestamptz NOT NULL\n"
         ");\n"
-        f'CREATE INDEX IF NOT EXISTS replays_expires_key_idx ON {_TABLE} (expires, key);\n'
-        f'CREATE INDEX IF NOT EXISTS replays_herd_key_idx ON {_TABLE} (herd_id, key)',
+        f"CREATE INDEX IF NOT EXISTS replays_expires_key_idx ON {_TABLE} (expires, key);\n"
+        f"CREATE INDEX IF NOT EXISTS replays_herd_key_idx ON {_TABLE} (herd_id, key)",
     )
     await _apply(db, f"TRUNCATE {_TABLE}")
     await _apply(db, f'TRUNCATE "{_SCHEMA}".passes')
@@ -124,16 +108,6 @@ async def _explain(connection, sql, *args):
 
 
 async def test_a_composite_keyset_really_is_one_index_scan(database):
-    """The complexity argument's first correctness condition, checked by the planner.
-
-    The discriminator is **`Index Cond` versus `Filter`**, not the scan node.
-    Both the row comparison and the expanded-OR form come back as an "Index Only
-    Scan" on this table, so asserting on the node name would have passed for the
-    regression it exists to catch. Only the row comparison reaches the index as a
-    *condition* -- the OR form is a filter, which means reading the whole index
-    and discarding, which is the `N` in the `OFFSET` arithmetic wearing a
-    different plan.
-    """
     await _seed(database, 500)
     connection = await database.acquire("write")
     try:
@@ -172,25 +146,24 @@ async def test_a_composite_keyset_really_is_one_index_scan(database):
 
 
 async def test_a_chunk_that_cannot_get_its_lock_fails_as_a_chunk(database):
-    """A lock wait must end the chunk, not extend the transaction past the lease."""
     await _seed(database, 100)
-    walk = _purge(units=Rows(
-        key=(
-            Key("expires", "timestamptz", indexed=True),
-            Key("key", "text", unique=True),
-        ),
-        limit=50,
-        within="250ms",
-    ))
+    walk = _purge(
+        units=Rows(
+            key=(
+                Key("expires", "timestamptz", indexed=True),
+                Key("key", "text", unique=True),
+            ),
+            limit=50,
+            within="250ms",
+        )
+    )
 
     # Hold a row the first chunk must delete, from another connection, for
     # longer than the chunk's own budget.
     blocker = await database.acquire("write")
     try:
         await blocker.execute("BEGIN")
-        await blocker.execute(
-            f"SELECT key FROM {_TABLE} ORDER BY expires, key LIMIT 1 FOR UPDATE"
-        )
+        await blocker.execute(f"SELECT key FROM {_TABLE} ORDER BY expires, key LIMIT 1 FOR UPDATE")
 
         started = asyncio.get_running_loop().time()
         result = await walk.run_shift(database, sleep=lambda _s: asyncio.sleep(0))
@@ -241,7 +214,6 @@ async def test_a_walk_over_a_real_table_finishes_and_leaves_nothing_behind(datab
 
 
 async def test_the_cursor_and_the_work_commit_together(database):
-    """A crash between them is the one thing one transaction per chunk rules out."""
     await _seed(database, 120)
     walk = _purge()
 
@@ -262,9 +234,6 @@ async def test_the_cursor_and_the_work_commit_together(database):
     assert remaining == 0
     assert units == 3
     assert result.complete is True
-
-
-# --- stage two and three, against a real planner -------------------------------
 
 
 async def test_the_dead_letter_table_is_created_by_the_same_ddl(database):
@@ -301,14 +270,6 @@ async def test_reltuples_answers_for_a_real_table(database):
 
 
 async def test_the_denominator_can_be_measured_more_than_once(database):
-    """The default denominator, called twice on one connection.
-
-    `$1::regclass` made PostgreSQL infer the *parameter* as `regclass`, which no
-    binary encoder here can write. The first execution survived it and every
-    later one raised, so a pass measured once and then failed forever -- and a
-    recurring pass re-measures every cycle. Only a real server infers the type,
-    so no fake could have caught it, and one call could not either.
-    """
     from wreath._passes.progress import Estimated
 
     await _seed(database, 40)
@@ -320,9 +281,7 @@ async def test_the_denominator_can_be_measured_more_than_once(database):
         third = await Estimated().measure(connection, table=_TABLE, keys=())
         # A table that is not there is None, not an exception: `to_regclass`
         # answers NULL where the cast would have raised.
-        missing = await Estimated().measure(
-            connection, table='"nope"."nope"', keys=()
-        )
+        missing = await Estimated().measure(connection, table='"nope"."nope"', keys=())
     finally:
         await database.release("write", connection)
 
@@ -359,17 +318,7 @@ async def test_a_requeued_unit_survives_a_round_trip_through_jsonb(database):
     assert status.pending == 1
 
 
-# --- the terminal gate --------------------------------------------------------
-
-
 async def test_validate_constraint_takes_only_share_update_exclusive(database):
-    """The claim §10.4 rests on, and the one a fake driver can never settle.
-
-    ``VALIDATE CONSTRAINT`` is worth reaching for only because it scans without
-    blocking reads or writes. If it took ``ACCESS EXCLUSIVE`` the whole argument
-    would invert: verification would be the outage the pass spent an hour of
-    chunking to avoid.
-    """
     await _apply(
         database,
         f"DROP TABLE IF EXISTS {_TABLE} CASCADE;\n"
@@ -433,14 +382,6 @@ async def test_a_constraint_that_does_not_hold_names_the_offending_row(database)
 
 
 async def test_a_bucketed_walk_agrees_with_date_trunc_on_a_real_server(database):
-    """Whether Python's bucket boundaries match the database's.
-
-    Deliberately an integration test rather than a claim in the guide: the
-    ordering of ``date_trunc`` against ``AT TIME ZONE`` is reasoned from
-    documented semantics everywhere else in this codebase, and reasoning is not
-    measurement. Auckland is the interesting zone because its transitions land
-    on dates the northern hemisphere never exercises.
-    """
     connection = await database.acquire("write")
     try:
         for moment in (
@@ -461,30 +402,19 @@ async def test_a_bucketed_walk_agrees_with_date_trunc_on_a_real_server(database)
         await database.release("write", connection)
 
 
-# --- the rewrite record, and the rule that it cannot be deleted ---------------
-
-
 async def _fact_state(database, *, fact):
     """What ``rewritten_columns`` says about *fact*, through the real driver."""
     from wreath._passes import ledger as _ledger
 
     connection = await database.acquire("write")
     try:
-        return await _ledger.rewritten_columns(
-            connection, schema=_SCHEMA, facts=(fact,)
-        )
+        return await _ledger.rewritten_columns(connection, schema=_SCHEMA, facts=(fact,))
     finally:
         await database.release("write", connection)
 
 
 @pytest.mark.asyncio
 async def test_the_rewrite_record_refuses_delete_update_and_truncate(database) -> None:
-    """The belt: a database rule, not a convention.
-
-    All three matter and ``TRUNCATE`` is the one that is easy to miss -- it does
-    not fire row-level triggers, so a guard written only as ``BEFORE DELETE``
-    leaves the whole record one ``TRUNCATE`` away from being gone.
-    """
     from wreath._passes.ledger import Ledger, rewrites_table_name
 
     fact = "column:app.treks.guarded_status"
@@ -493,9 +423,7 @@ async def test_the_rewrite_record_refuses_delete_update_and_truncate(database) -
     try:
         await ledger.seed(connection, chunk_limit=100, rewrites=fact)
         table = rewrites_table_name(_SCHEMA)
-        before = await connection.fetchval(
-            f"SELECT count(*) FROM {table} WHERE fact = $1", fact
-        )
+        before = await connection.fetchval(f"SELECT count(*) FROM {table} WHERE fact = $1", fact)
         assert before == 1, "seeding a re-encoding pass must write the record"
 
         for statement in (
@@ -507,9 +435,7 @@ async def test_the_rewrite_record_refuses_delete_update_and_truncate(database) -
         with pytest.raises(Exception, match="append-only"):
             await connection.execute(f"TRUNCATE {table}")
 
-        after = await connection.fetchval(
-            f"SELECT count(*) FROM {table} WHERE fact = $1", fact
-        )
+        after = await connection.fetchval(f"SELECT count(*) FROM {table} WHERE fact = $1", fact)
         assert after == 1, "the record survived every attempt to remove it"
     finally:
         await database.release("write", connection)
@@ -517,13 +443,6 @@ async def test_the_rewrite_record_refuses_delete_update_and_truncate(database) -
 
 @pytest.mark.asyncio
 async def test_a_purged_ledger_row_leaves_the_hazard_standing(database) -> None:
-    """The braces: what the refusal reads when the belt has been bypassed.
-
-    Three states, and the middle one is the whole point. "Never re-encoded" and
-    "re-encoded, then tidied up" are both an absent ledger row; only the record
-    tells them apart, and getting that wrong in the unsafe direction is a
-    downgrade that reports success over data it has silently stranded.
-    """
     from wreath._passes.ledger import Ledger, table_name
 
     fact = "column:app.treks.purged_status"
@@ -534,9 +453,7 @@ async def test_a_purged_ledger_row_leaves_the_hazard_standing(database) -> None:
         await ledger.seed(connection, chunk_limit=100, rewrites=fact)
 
         found = await _fact_state(database, fact=fact)
-        assert [(f.name, f.ledger_row_present) for f in found] == [
-            ("recode_purged", True)
-        ]
+        assert [(f.name, f.ledger_row_present) for f in found] == [("recode_purged", True)]
         assert await _fact_state(database, fact=untouched) == []
 
         # The purge job nobody has written yet, but plausibly will.
@@ -545,31 +462,22 @@ async def test_a_purged_ledger_row_leaves_the_hazard_standing(database) -> None:
         )
 
         found = await _fact_state(database, fact=fact)
-        assert [(f.name, f.ledger_row_present) for f in found] == [
-            ("recode_purged", False)
-        ], "the record must outlive the ledger row and keep the hazard"
-        assert (
-            await _fact_state(database, fact=untouched) == []
-        ), "a column nothing re-encoded stays downgradeable"
+        assert [(f.name, f.ledger_row_present) for f in found] == [("recode_purged", False)], (
+            "the record must outlive the ledger row and keep the hazard"
+        )
+        assert await _fact_state(database, fact=untouched) == [], (
+            "a column nothing re-encoded stays downgradeable"
+        )
     finally:
         await database.release("write", connection)
 
 
 @pytest.mark.asyncio
 async def test_every_schema_sql_statement_runs_on_its_own(database) -> None:
-    """Each statement must survive the ``;\\n`` split every caller performs.
-
-    The trigger function's body contains semicolons, so it is written on one
-    line for exactly this reason. A future edit that wraps it would split the
-    function in half and fail at apply time, which is the kind of breakage that
-    only shows up on someone's first deployment.
-    """
     from wreath.passes import schema_sql
 
     schema = f"wreath_test_split_probe_{_WORKER}"
-    statements = [
-        part.strip() for part in schema_sql(schema).split(";\n") if part.strip()
-    ]
+    statements = [part.strip() for part in schema_sql(schema).split(";\n") if part.strip()]
     assert len(statements) >= 7, "expected schema, three tables, a function, two triggers"
     connection = await database.acquire("write")
     try:

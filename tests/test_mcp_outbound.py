@@ -1,18 +1,3 @@
-"""Requests that go the other way: sampling, elicitation, roots, and reentrancy.
-
-Everything through stage 3 was a reply to something the client asked for. These
-three methods invert that, and the interesting failures are all about a tool
-that is awaiting the client while the client is awaiting that tool: it must be
-able to finish, it must not be able to park forever, cancelling the outer call
-must cancel the inner question, and ending the session must fail every awaiter
-rather than leave one holding a future nobody will complete.
-
-The shape of every test here is the same, and it is the shape a real client has:
-a `GET` stream open, a POST parked on a tool, and a *second* POST carrying the
-answer. If the server ran a call inline on the POST's own coroutine, the second
-POST would never be served and every one of these would hang.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -124,12 +109,8 @@ def build(**kwargs) -> tuple[Wreath, MCP]:
     return app, mcp
 
 
-async def call(
-    client: TestClient, session: str, payload: dict, **headers: str
-) -> TestResponse:
-    return await client.post(
-        "/mcp", json=payload, headers={"mcp-session-id": session, **headers}
-    )
+async def call(client: TestClient, session: str, payload: dict, **headers: str) -> TestResponse:
+    return await client.post("/mcp", json=payload, headers={"mcp-session-id": session, **headers})
 
 
 def tool_call(identifier: int, name: str, arguments: dict | None = None) -> dict:
@@ -139,11 +120,7 @@ def tool_call(identifier: int, name: str, arguments: dict | None = None) -> dict
     return {"jsonrpc": "2.0", "id": identifier, "method": "tools/call", "params": params}
 
 
-# -- sampling ---------------------------------------------------------------
-
-
 async def test_a_tool_may_ask_the_client_s_model_to_generate() -> None:
-    """The reentrant path, end to end: the answer arrives on a second POST."""
     app, mcp = build()
 
     @mcp.tool(description="Summarises a sighting.", sampling=True)
@@ -178,7 +155,6 @@ async def test_a_tool_may_ask_the_client_s_model_to_generate() -> None:
 
 
 async def test_a_tool_that_did_not_declare_sampling_may_not_sample() -> None:
-    """Off by default: putting words in the caller's model is a declaration."""
     app, mcp = build()
 
     @mcp.tool(description="Tries to sample without saying so.")
@@ -199,7 +175,6 @@ async def test_a_tool_that_did_not_declare_sampling_may_not_sample() -> None:
 
 
 async def test_sampling_is_cedar_gated_per_tool() -> None:
-    """The same authorizer, the same entity shapes, a second requirement."""
     from wreath.auth import BearerTokenBackend, Identity
     from wreath.authorization import CedarAuthorizer
 
@@ -232,9 +207,7 @@ async def test_sampling_is_cedar_gated_per_tool() -> None:
 
     async with TestClient(app) as client:
         session = await initialize(client)
-        answered = await call(
-            client, session, tool_call(2, "summarise"), authorization="Bearer t"
-        )
+        answered = await call(client, session, tool_call(2, "summarise"), authorization="Bearer t")
         result = answered.json()["result"]
         assert result["isError"] is True
         assert "may not 'Model::sample'" in result["content"][0]["text"]
@@ -245,7 +218,6 @@ async def test_sampling_is_cedar_gated_per_tool() -> None:
 
 
 async def test_the_sampling_gate_is_in_declared_actions() -> None:
-    """A model can reach it, so the one document that lists what a model can reach says so."""
     _, mcp = build()
 
     @mcp.tool(description="Summarises.", action="Note::read", sampling="Model::sample")
@@ -259,7 +231,6 @@ async def test_the_sampling_gate_is_in_declared_actions() -> None:
 
 
 async def test_sampling_spends_the_tool_s_own_rate_limit() -> None:
-    """One bucket per tool, and a sampling request is a draw on it like any other."""
     from wreath.mcp import ToolRateLimit
 
     app, mcp = build()
@@ -307,9 +278,7 @@ async def test_sampling_is_on_the_flight_recorder_like_a_call() -> None:
             )
             await asyncio.wait_for(parked, timeout=5)
         markers = [
-            log.attributes(cell)
-            for cell in records
-            if not cell.flags & fs.LOG_FLAG_EVENT_FIELDS
+            log.attributes(cell) for cell in records if not cell.flags & fs.LOG_FLAG_EVENT_FIELDS
         ]
 
     outcomes = [marker["outcome"] for marker in markers]
@@ -319,20 +288,6 @@ async def test_sampling_is_on_the_flight_recorder_like_a_call() -> None:
 
 
 async def test_a_gate_that_lives_only_on_sampling_still_names_the_caller() -> None:
-    """The gate decides about a caller, so the marker beside it must name one.
-
-    `_tools_call` resolves the identity only when the *tool* is gated or bounded,
-    which keeps an ungated tool from ever running the backend. A tool whose only
-    gate is on `sampling=` falls through that: the Cedar decision is made against
-    `User::ada` and the sampling marker used to say `anonymous` beside it.
-
-    The credentials are withheld from `initialize` on purpose. A session opened
-    by a caller the backend recognises binds `session.principal`, and after that
-    the ownership check re-resolves the identity on every message -- which would
-    hand this test its `ada` for free and leave the resolution inside `_sampling`
-    doing nothing observable. Anonymous `initialize` is the one shape where
-    `_sampling` is the only thing that can name the caller.
-    """
     from wreath import _flight_schema as fs
     from wreath import logging as log
     from wreath.auth import Identity
@@ -381,9 +336,7 @@ async def test_a_gate_that_lives_only_on_sampling_still_names_the_caller() -> No
             )
             await asyncio.wait_for(parked, timeout=5)
         markers = [
-            log.attributes(cell)
-            for cell in records
-            if not cell.flags & fs.LOG_FLAG_EVENT_FIELDS
+            log.attributes(cell) for cell in records if not cell.flags & fs.LOG_FLAG_EVENT_FIELDS
         ]
 
     sampled = next(marker for marker in markers if marker["outcome"] == "sampled")
@@ -411,9 +364,6 @@ async def test_a_client_that_never_advertised_sampling_is_refused_not_hung() -> 
         assert "did not advertise the 'sampling' capability" in result["content"][0]["text"]
 
 
-# -- elicitation ------------------------------------------------------------
-
-
 @dataclass
 class Confirm:
     reason: str
@@ -422,7 +372,6 @@ class Confirm:
 
 
 async def test_an_elicitation_asks_for_the_schema_the_binding_layer_derives() -> None:
-    """The requested schema is a tool's `inputSchema` derivation, over a dataclass."""
     app, mcp = build()
 
     @mcp.tool(description="Deletes a sighting, once someone says so.", elicitation=True)
@@ -532,7 +481,6 @@ async def test_a_form_mcp_cannot_carry_is_refused_with_the_field_named() -> None
 
 
 async def test_what_a_person_typed_is_recorded_under_the_same_redaction() -> None:
-    """A form is the *most* likely place a password arrives, so it is the test."""
     from wreath import _flight_schema as fs
     from wreath import logging as log
 
@@ -570,17 +518,7 @@ async def test_what_a_person_typed_is_recorded_under_the_same_redaction() -> Non
     assert secret not in repr(attached)
 
 
-# -- the elicitation gate ----------------------------------------------------
-
-
 async def test_a_tool_that_did_not_declare_elicitation_may_not_prompt() -> None:
-    """Off by default, and refused before a byte reaches the client.
-
-    A prompt renders inside a UI the person already trusts, so an undeclared
-    tool asking for `{"password": str}` is a phishing surface wearing that
-    client's chrome. "The user can decline" is precisely the control social
-    engineering defeats, which is why the deployment decides instead.
-    """
     app, mcp = build()
 
     @mcp.tool(description="Tries to prompt without saying so.")
@@ -603,7 +541,6 @@ async def test_a_tool_that_did_not_declare_elicitation_may_not_prompt() -> None:
 
 
 async def test_elicitation_true_works_with_no_authorizer_installed() -> None:
-    """The documented development shape, exactly as `sampling=True` is."""
     app, mcp = build()
 
     @mcp.tool(description="Asks, with no policy attached.", elicitation=True)
@@ -627,7 +564,6 @@ async def test_elicitation_true_works_with_no_authorizer_installed() -> None:
 
 
 async def test_elicitation_is_cedar_gated_per_tool() -> None:
-    """A denied prompt never reaches the client, and is a refusal not an error."""
     from wreath.auth import BearerTokenBackend, Identity
     from wreath.authorization import CedarAuthorizer
 
@@ -674,7 +610,6 @@ async def test_elicitation_is_cedar_gated_per_tool() -> None:
 
 
 async def test_the_elicitation_gate_is_in_declared_actions() -> None:
-    """Every tool that can put a prompt in front of a person, in one document."""
     _, mcp = build()
 
     @mcp.tool(description="Asks.", action="Note::read", elicitation="Form::ask")
@@ -688,7 +623,6 @@ async def test_the_elicitation_gate_is_in_declared_actions() -> None:
 
 
 async def test_elicitation_spends_the_tool_s_own_rate_limit() -> None:
-    """One bucket per tool: a tool that can re-prompt freely can wear someone down."""
     from wreath.mcp import ToolRateLimit
 
     app, mcp = build()
@@ -738,9 +672,7 @@ async def test_elicitation_is_on_the_flight_recorder_like_a_call() -> None:
             )
             await asyncio.wait_for(parked, timeout=5)
         markers = [
-            log.attributes(cell)
-            for cell in records
-            if not cell.flags & fs.LOG_FLAG_EVENT_FIELDS
+            log.attributes(cell) for cell in records if not cell.flags & fs.LOG_FLAG_EVENT_FIELDS
         ]
 
     outcomes = [marker["outcome"] for marker in markers]
@@ -750,15 +682,6 @@ async def test_elicitation_is_on_the_flight_recorder_like_a_call() -> None:
 
 
 async def test_a_gate_that_lives_only_on_elicitation_still_names_the_caller() -> None:
-    """The sampling claim, for the other outbound request, which had no test at all.
-
-    `_elicit` resolves the identity for the same reason `_sampling` does: a tool
-    gated only on `elicitation=` was neither gated nor bounded when `_tools_call`
-    looked, so nothing upstream ran the backend. Credentials are withheld from
-    `initialize` deliberately -- a bound session makes the ownership check resolve
-    the caller on every message afterwards, which would supply this `ada` from
-    somewhere else and leave the resolution inside `_elicit` unwatched.
-    """
     from wreath import _flight_schema as fs
     from wreath import logging as log
     from wreath.auth import Identity
@@ -808,9 +731,7 @@ async def test_a_gate_that_lives_only_on_elicitation_still_names_the_caller() ->
             )
             await asyncio.wait_for(parked, timeout=5)
         markers = [
-            log.attributes(cell)
-            for cell in records
-            if not cell.flags & fs.LOG_FLAG_EVENT_FIELDS
+            log.attributes(cell) for cell in records if not cell.flags & fs.LOG_FLAG_EVENT_FIELDS
         ]
 
     elicited = next(marker for marker in markers if marker["outcome"] == "elicited")
@@ -818,7 +739,6 @@ async def test_a_gate_that_lives_only_on_elicitation_still_names_the_caller() ->
 
 
 async def test_a_resource_reader_may_not_prompt_either() -> None:
-    """No declaration to read, so the same default-deny sampling already gives it."""
     app, mcp = build()
 
     @mcp.resource("camera://ridge", description="Tries to prompt.")
@@ -845,9 +765,6 @@ async def test_a_resource_reader_may_not_prompt_either() -> None:
         assert not len(_session_of(mcp, session).notifications)
 
 
-# -- reentrancy, timeouts and cancellation ----------------------------------
-
-
 async def test_a_client_that_never_answers_times_out_rather_than_pinning_the_session() -> None:
     app, mcp = build(limits=MCPLimits(client_request_seconds=0.05))
 
@@ -861,16 +778,15 @@ async def test_a_client_that_never_answers_times_out_rather_than_pinning_the_ses
 
     async with TestClient(app) as client:
         session = await initialize(client)
-        answered = await asyncio.wait_for(
-            call(client, session, tool_call(2, "ask")), timeout=5
-        )
+        answered = await asyncio.wait_for(call(client, session, tool_call(2, "ask")), timeout=5)
         result = answered.json()["result"]
         assert result["isError"] is True
         assert "did not answer" in result["content"][0]["text"]
         assert mcp.stats()["client_request_timeouts"] == 1
         # And the session is usable afterwards, which is the point of the bound.
-        assert (await call(client, session, {"jsonrpc": "2.0", "id": 3, "method": "ping"})
-                ).json()["result"] == {}
+        assert (await call(client, session, {"jsonrpc": "2.0", "id": 3, "method": "ping"})).json()[
+            "result"
+        ] == {}
 
 
 async def test_a_timed_out_request_tells_the_client_to_stop_working_on_it() -> None:
@@ -930,7 +846,6 @@ async def test_cancelling_the_outer_call_cancels_the_inner_request() -> None:
 
 
 async def test_ending_the_session_fails_every_pending_request() -> None:
-    """Otherwise a tool is left awaiting a future belonging to a session that is gone."""
     app, mcp = build()
     failed: list[str] = []
     entered = asyncio.Event()
@@ -960,19 +875,6 @@ async def test_ending_the_session_fails_every_pending_request() -> None:
 
 
 async def test_a_reader_parked_on_a_question_is_failed_when_the_session_ends() -> None:
-    """The case cancellation alone does not cover.
-
-    A `tools/call` runs in a task the session can cancel, so ending the session
-    would wake it either way. A `resources/read` does not: it runs on the POST's
-    own coroutine and is in nobody's `in_flight`, so if the pending table were
-    not failed explicitly this reader would await a future that no longer
-    belongs to a live session, for as long as the process runs.
-
-    The question it parks on is `roots/list` rather than an elicitation, because
-    a resource carries no `elicitation=` declaration and so may not prompt at
-    all -- a refusal would return immediately and this test would pass while
-    proving nothing.
-    """
     app, mcp = build()
     entered = asyncio.Event()
 
@@ -1042,15 +944,10 @@ async def test_the_pending_table_is_bounded() -> None:
     assert refusals and "max_pending_requests" in refusals[0]
 
 
-# -- roots ------------------------------------------------------------------
-
-
 def test_root_results_keep_only_absolute_file_uris() -> None:
     assert mcp_roots.root_paths(None) == ()
     assert mcp_roots.root_paths({"roots": "not-a-list"}) == ()
-    assert mcp_roots.root_paths(
-        {"roots": iter(({"uri": "file:///not-admitted"},))}
-    ) == ()
+    assert mcp_roots.root_paths({"roots": iter(({"uri": "file:///not-admitted"},))}) == ()
     assert mcp_roots.root_paths(
         {
             "roots": [
@@ -1083,11 +980,14 @@ def test_read_beneath_stops_at_eof(tmp_path) -> None:
     (tmp_path / "empty.txt").write_bytes(b"")
     root_fd = mcp_roots.open_root(tmp_path)
     try:
-        assert mcp_roots.read_beneath(
-            root_fd,
-            "empty.txt",
-            max_bytes=20,
-        ) == b""
+        assert (
+            mcp_roots.read_beneath(
+                root_fd,
+                "empty.txt",
+                max_bytes=20,
+            )
+            == b""
+        )
     finally:
         mcp_roots.os.close(root_fd)
 
@@ -1144,12 +1044,6 @@ async def test_a_client_root_confines_a_file_read(tmp_path) -> None:
 async def test_a_client_declaring_no_roots_cannot_read_the_server_root(
     tmp_path, declared_roots: list[dict[str, str]]
 ) -> None:
-    """An explicit empty root set is a boundary, not permission to read all.
-
-    A hostile client controls the ``roots/list`` answer.  Collapsing ``[]``
-    with "this client did not advertise roots" lets it remove the client-side
-    confinement while retaining access to every file beneath ``file_root``.
-    """
     (tmp_path / "private.txt").write_text("server secret")
     app, mcp = build(file_root=tmp_path)
 
@@ -1180,7 +1074,6 @@ async def test_a_client_declaring_no_roots_cannot_read_the_server_root(
 async def test_a_client_without_the_roots_capability_uses_only_the_server_root(
     tmp_path,
 ) -> None:
-    """No roots capability is distinct from an explicitly empty roots grant."""
     (tmp_path / "public.txt").write_text("server-owned")
     app, mcp = build(file_root=tmp_path)
 
@@ -1199,7 +1092,6 @@ async def test_a_client_without_the_roots_capability_uses_only_the_server_root(
 
 
 async def test_a_read_cannot_escape_the_server_s_root(tmp_path) -> None:
-    """`_fsguard`'s walk, reached through the MCP surface rather than reimplemented."""
     (tmp_path / "root").mkdir()
     (tmp_path / "outside.txt").write_text("secret")
     (tmp_path / "root" / "link.txt").symlink_to(tmp_path / "outside.txt")
@@ -1272,12 +1164,7 @@ async def test_list_changed_invalidates_the_cached_roots(tmp_path) -> None:
         assert live.roots is None
 
 
-# -- direction ---------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "method", ["sampling/createMessage", "elicitation/create", "roots/list"]
-)
+@pytest.mark.parametrize("method", ["sampling/createMessage", "elicitation/create", "roots/list"])
 async def test_a_client_that_posts_a_server_to_client_method_is_told_which_way_it_goes(
     method: str,
 ) -> None:

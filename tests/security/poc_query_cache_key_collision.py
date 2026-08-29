@@ -1,15 +1,3 @@
-"""PoC: leak a cached response through encoded query-delimiter collisions.
-
-Run from the repository root::
-
-    uv run python tests/security/poc_query_cache_key_collision.py
-
-The script binds only to loopback and drives Wreath through the metal event
-loop and native HTTP/1 server.  Two requests with different parsed query
-parameters collapse to the same documented ``query_params`` cache key on a
-vulnerable build, allowing the second caller to receive the first response.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -33,9 +21,7 @@ def _exchange(
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
             client.sendall(
-                b"GET "
-                + target
-                + b" HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+                b"GET " + target + b" HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
             )
             response = bytearray()
             while part := client.recv(4096):

@@ -1,20 +1,3 @@
-"""`numeric` is exact, and the sweep is what proves it.
-
-PostgreSQL's `numeric` exists to hold values binary floating point cannot. The
-codec landed it on `float` before this, so `Decimal("1.0000000000000000001")`
-and `...002` both arrived as `1.0` -- two distinct values collapsing onto one.
-That is a correctness defect rather than a rounding one: a chunked walk keying
-on such a column advances its cursor to a value *below* where it actually
-reached and skips every row in between.
-
-So the tests here are a property sweep rather than a handful of examples. A
-`format_duration` sweep earlier in this codebase found 19,254 failures in 20,012
-samples, in code whose one round-trip test used the single shape that happened
-to work. The domain below is chosen to include the shapes that break naive
-implementations: group boundaries, scale that must survive, exponents past
-float's reach, and the non-finite values `numeric` gained in PostgreSQL 14.
-"""
-
 from __future__ import annotations
 
 import os
@@ -89,7 +72,6 @@ NON_FINITE = [Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")]
 
 
 def test_the_binary_round_trip_is_exact_over_the_whole_domain() -> None:
-    """Every value survives encode->decode with its scale intact."""
     domain = _domain()
     failures = []
     for value in domain:
@@ -106,7 +88,6 @@ def test_the_binary_round_trip_is_exact_over_the_whole_domain() -> None:
 
 
 def test_a_value_float_cannot_hold_survives() -> None:
-    """The defect this codec exists to fix, stated as one assertion."""
     near = Decimal("1.0000000000000000001")
     far = Decimal("1.0000000000000000002")
     assert float(near) == float(far), "the premise: float collapses these"
@@ -114,7 +95,6 @@ def test_a_value_float_cannot_hold_survives() -> None:
 
 
 def test_scale_is_carried_not_inferred() -> None:
-    """`1.10` is a different numeric from `1.1`; dscale is what preserves it."""
     assert str(_decode_numeric(_encode_numeric(Decimal("1.10")))) == "1.10"
     assert str(_decode_numeric(_encode_numeric(Decimal("1.1")))) == "1.1"
 
@@ -129,29 +109,19 @@ def test_the_non_finite_values_round_trip(value: Decimal) -> None:
 
 
 def test_a_float_is_refused_rather_than_silently_converted() -> None:
-    """Accepting a float here would reinstate the collapse the type prevents."""
     with pytest.raises(TypeError, match="cannot hold a numeric exactly"):
         _encode_numeric(1.5)
 
 
 def test_a_negative_zero_goes_on_the_wire_as_postgresql_spells_it() -> None:
-    """`SELECT '-0'::numeric` is `0`; the codec must not invent a sign."""
     assert _encode_numeric(Decimal("-0")) == _encode_numeric(Decimal("0"))
 
 
 @pytest.mark.skipif(_native is None, reason="native extension not built")
 def test_both_codecs_agree_byte_for_byte() -> None:
-    """`_pgdriver` and `codec.c` encode identically and decode identically.
-
-    They are not alternatives -- the C `Connection` subclasses the Python one --
-    but a row can be decoded through either depending on which entry point the
-    read took, so a divergence is a value that changes with the call path.
-    """
     domain = [*_domain(), *NON_FINITE]
     encode_diff = [
-        v
-        for v in domain
-        if _encode_numeric_reference(v) != _native._encode_binary(v, 1700)
+        v for v in domain if _encode_numeric_reference(v) != _native._encode_binary(v, 1700)
     ]
     assert not encode_diff, f"{len(encode_diff)} encode divergences: {encode_diff[:5]}"
     decode_diff = []
@@ -165,7 +135,6 @@ def test_both_codecs_agree_byte_for_byte() -> None:
 
 @pytest.mark.skipif(_native is None, reason="native extension not built")
 def test_wide_coefficients_cross_the_native_boundary_once() -> None:
-    """Thousands of digits agree with the independent definition byte-for-byte."""
     digits = (1, 2, 3, 4, 0, 0, 9, 8) * 512
     value = Decimal((1, digits, -2051))
     expected = _encode_numeric_reference(value)
@@ -177,12 +146,6 @@ def test_wide_coefficients_cross_the_native_boundary_once() -> None:
 @_live
 @pytest.mark.asyncio
 async def test_the_round_trip_through_postgresql_is_exact() -> None:
-    """The sweep that a fake cannot run: real server, both wire formats.
-
-    A cold (unprepared) query binds and returns text format; a cached plan uses
-    binary. Both paths decode `numeric`, so both are swept here -- a codec that
-    only got one right would still hand a caller the wrong value half the time.
-    """
     database = Database("main", _DSN or "", pools={"write": PoolConfig(min_size=1, max_size=2)})
     await database.start()
     domain = [*_domain(), *NON_FINITE]
@@ -194,9 +157,7 @@ async def test_the_round_trip_through_postgresql_is_exact() -> None:
             failures = []
             for value in domain:
                 await connection.execute("DELETE FROM numeric_sweep")
-                await connection.execute(
-                    "INSERT INTO numeric_sweep (v) VALUES ($1)", value
-                )
+                await connection.execute("INSERT INTO numeric_sweep (v) VALUES ($1)", value)
                 back = await connection.fetchval("SELECT v FROM numeric_sweep")
                 if not isinstance(back, Decimal):
                     failures.append((value, back, "not a Decimal"))
@@ -215,7 +176,6 @@ async def test_the_round_trip_through_postgresql_is_exact() -> None:
 @_live
 @pytest.mark.asyncio
 async def test_avg_over_a_numeric_column_returns_a_decimal() -> None:
-    """The reported symptom: `avg()` handed raw bytes to every caller."""
     database = Database("main", _DSN or "", pools={"write": PoolConfig(min_size=1, max_size=2)})
     await database.start()
     try:
@@ -223,9 +183,7 @@ async def test_avg_over_a_numeric_column_returns_a_decimal() -> None:
         try:
             await connection.execute("DROP TABLE IF EXISTS numeric_avg")
             await connection.execute("CREATE TABLE numeric_avg (v numeric(30,10))")
-            await connection.execute(
-                "INSERT INTO numeric_avg (v) VALUES (1.0), (2.5)"
-            )
+            await connection.execute("INSERT INTO numeric_avg (v) VALUES (1.0), (2.5)")
             average = await connection.fetchval("SELECT avg(v) FROM numeric_avg")
             total = await connection.fetchval("SELECT sum(v) FROM numeric_avg")
             assert isinstance(average, Decimal), f"avg gave {type(average).__name__}"

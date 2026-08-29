@@ -1,11 +1,3 @@
-"""Controls `wreath mutant` found nobody was watching.
-
-Each test here exists because the sweep removed a clause and the suite stayed
-green. None of them was a security control -- those were killed -- but each is a
-place the admin quietly does the wrong thing to an operator mid-edit, which is
-how a generated admin loses trust.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -44,7 +36,6 @@ def counted_model() -> type:
 
 
 async def test_a_star_rule_covers_every_operation(account_model: type) -> None:
-    """`authorize={"*": ...}` is the whole-admin default, and nothing reached it."""
     from wreath._auth.requirements import requirement_for
 
     admin = Admin(
@@ -67,9 +58,6 @@ async def test_a_star_rule_covers_every_operation(account_model: type) -> None:
 async def test_an_empty_value_on_a_non_nullable_column_stays_empty(
     counted_model: type,
 ) -> None:
-    """Only a *nullable* column turns a cleared control into NULL. On a
-    non-nullable one the empty string must reach the ORM, so the refusal comes
-    from the column's own type rather than from a NULL nobody asked for."""
     row = counted_model(id=1, name="a", quantity=3)
     session = FakeSession({1: row})
     handlers = _handlers(counted_model, session)
@@ -83,10 +71,6 @@ async def test_an_empty_value_on_a_non_nullable_column_stays_empty(
 
 
 async def test_every_column_type_a_form_can_carry_round_trips() -> None:
-    """A form transports strings and the ORM stores typed values, and the ORM
-    does not parse -- it refuses `'4'` for an `int8`. Without a conversion step
-    every non-text column was uneditable and the admin answered 422 to a
-    correctly filled form. One case per type the map claims to handle."""
     import datetime
     import decimal
 
@@ -106,20 +90,23 @@ async def test_every_column_type_a_form_can_carry_round_trips() -> None:
     handlers = _handlers(Reading, FakeSession({1: row}))
 
     response = await handlers[("POST", "/admin/reading/{pk}/edit")](
-        Request(path_params={"pk": "1"}, form={
-            "label": "measured",
-            "count": "42",
-            "ratio": "1.5",
-            "amount": "10.25",
-            "day": "2026-08-03",
-            "at": "2026-08-03T12:00:00+00:00",
-        })
+        Request(
+            path_params={"pk": "1"},
+            form={
+                "label": "measured",
+                "count": "42",
+                "ratio": "1.5",
+                "amount": "10.25",
+                "day": "2026-08-03",
+                "at": "2026-08-03T12:00:00+00:00",
+            },
+        )
     )
 
     assert response.status == 303, response.body.decode()
     assert row.count == 42
     assert row.ratio == 1.5
-    assert row.amount == decimal.Decimal("10.25")   # not a float: numeric is exact
+    assert row.amount == decimal.Decimal("10.25")  # not a float: numeric is exact
     assert row.day == datetime.date(2026, 8, 3)
     assert row.at.year == 2026
 
@@ -147,8 +134,6 @@ async def test_an_unparseable_number_names_the_field_it_came_from() -> None:
 async def test_a_refused_submission_redraws_what_was_typed(
     counted_model: type,
 ) -> None:
-    """The form repopulates from the submission, not from the stored row -- an
-    operator who mistyped one field must not lose the other four."""
     row = counted_model(id=1, name="original", quantity=3)
     session = FakeSession({1: row})
     handlers = _handlers(counted_model, session)
@@ -162,9 +147,9 @@ async def test_a_refused_submission_redraws_what_was_typed(
 
     body = response.body.decode()
     assert response.status == 422
-    assert 'value="edited"' in body            # what they typed, kept
-    assert 'value="not-a-number"' in body      # including the bad one
-    assert "original" not in body              # not reverted to the stored row
+    assert 'value="edited"' in body  # what they typed, kept
+    assert 'value="not-a-number"' in body  # including the bad one
+    assert "original" not in body  # not reverted to the stored row
 
 
 async def test_a_refused_create_redraws_what_was_typed(counted_model: type) -> None:
@@ -181,8 +166,6 @@ async def test_a_refused_create_redraws_what_was_typed(counted_model: type) -> N
 
 
 async def test_a_create_form_starts_empty(counted_model: type) -> None:
-    """The other side of the branch above: with no instance and no submission,
-    every control is blank rather than carrying the last row's values."""
     handlers = _handlers(counted_model, FakeSession())
     body = (await handlers[("GET", "/admin/widget/new")](Request())).body.decode()
     assert 'value=""' in body
@@ -193,12 +176,10 @@ async def test_a_checked_box_is_redrawn_checked(account_model: type) -> None:
     handlers = _handlers(account_model, FakeSession({1: row}))
 
     body = (
-        await handlers[("GET", "/admin/account/{pk}/edit")](
-            Request(path_params={"pk": "1"})
-        )
+        await handlers[("GET", "/admin/account/{pk}/edit")](Request(path_params={"pk": "1"}))
     ).body.decode()
 
-    control = body[body.index('id="account-active"'):]
+    control = body[body.index('id="account-active"') :]
     assert " checked" in control[: control.index(">")]
 
 
@@ -207,12 +188,10 @@ async def test_an_unchecked_box_is_redrawn_unchecked(account_model: type) -> Non
     handlers = _handlers(account_model, FakeSession({1: row}))
 
     body = (
-        await handlers[("GET", "/admin/account/{pk}/edit")](
-            Request(path_params={"pk": "1"})
-        )
+        await handlers[("GET", "/admin/account/{pk}/edit")](Request(path_params={"pk": "1"}))
     ).body.decode()
 
-    control = body[body.index('id="account-active"'):]
+    control = body[body.index('id="account-active"') :]
     assert " checked" not in control[: control.index(">")]
 
 
@@ -225,18 +204,14 @@ async def test_the_sort_link_toggles_to_descending_when_already_ascending(
     ascending = (
         await handlers[("GET", "/admin/account/")](Request(query=b"sort=name"))
     ).body.decode()
-    unsorted = (
-        await handlers[("GET", "/admin/account/")](Request())
-    ).body.decode()
+    unsorted = (await handlers[("GET", "/admin/account/")](Request())).body.decode()
 
-    assert "sort=-name" in ascending      # already ascending -> offer descending
-    assert "sort=-name" not in unsorted   # not sorted -> offer ascending
+    assert "sort=-name" in ascending  # already ascending -> offer descending
+    assert "sort=-name" not in unsorted  # not sorted -> offer ascending
     assert "sort=name" in unsorted
 
 
 async def test_a_required_hint_names_the_requirement(account_model: type) -> None:
-    """The hint is a control's accessible description, so a wrong one is a
-    wrong instruction rather than a cosmetic slip."""
     handlers = _handlers(account_model, FakeSession())
     body = (await handlers[("GET", "/admin/account/new")](Request())).body.decode()
 

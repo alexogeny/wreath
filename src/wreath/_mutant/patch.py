@@ -79,7 +79,6 @@ def _unwrap(obj: Any) -> Any:
         # classmethod unmutatable, reported as an `error` outcome rather than as a
         # gap, which is the shape a blind spot takes when nobody counts it: 51
         # classmethods across 25 files contributed nothing to any score.
-        #
         # The `staticmethod | classmethod` branch is still reachable for an object
         # read straight out of a `__dict__`, so it stays.
         if isinstance(obj, MethodType):
@@ -148,8 +147,7 @@ def compile_scope(tree: ast.Module, qualname: str, filename: str) -> CodeType:
     future_imports = [
         statement
         for statement in tree.body
-        if isinstance(statement, ast.ImportFrom)
-        and statement.module == "__future__"
+        if isinstance(statement, ast.ImportFrom) and statement.module == "__future__"
     ]
     narrowed = ast.Module(body=[*future_imports, owner], type_ignores=[])
     return compile_module(narrowed, filename, locate=False)
@@ -260,7 +258,7 @@ class ValuePatch:
         old = self.current()
         try:
             return bool(old == self.value)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return False
 
     def apply(self) -> None:

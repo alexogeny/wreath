@@ -33,24 +33,35 @@ def add_infra_parser(commands: Any) -> None:
     )
     inferred.add_argument("target", help="application target as module:attribute")
     inferred.add_argument(
-        "--factory", action="store_true",
+        "--factory",
+        action="store_true",
         help="invoke the target as a zero-argument application factory",
     )
     inferred.add_argument(
-        "--settings", action="append", default=[], metavar="SPEC",
+        "--settings",
+        action="append",
+        default=[],
+        metavar="SPEC",
         help="a settings dataclass whose environment contract to check, as "
-             "module:Class or module:Class=PREFIX (repeatable)",
+        "module:Class or module:Class=PREFIX (repeatable)",
     )
     inferred.add_argument(
-        "--env", action="append", default=[], metavar="PATH",
+        "--env",
+        action="append",
+        default=[],
+        metavar="PATH",
         help="a dotenv file that supplies environment keys (repeatable)",
     )
     inferred.add_argument(
-        "--environ", action="store_true",
+        "--environ",
+        action="store_true",
         help="also treat this process's own environment as a supplier",
     )
     inferred.add_argument(
-        "--format", dest="infra_format", default="text", choices=("text", "json"),
+        "--format",
+        dest="infra_format",
+        default="text",
+        choices=("text", "json"),
         help="text (default) or json",
     )
     bundle = actions.add_parser(
@@ -65,15 +76,22 @@ def add_infra_parser(commands: Any) -> None:
     bundle.add_argument("--factory", action="store_true")
     bundle.add_argument("--force", action="store_true")
     bundle.add_argument(
-        "--settings", action="append", default=[], metavar="SPEC",
+        "--settings",
+        action="append",
+        default=[],
+        metavar="SPEC",
         help="settings dataclass as module:Class or module:Class=PREFIX (repeatable)",
     )
     bundle.add_argument(
-        "--env", action="append", default=[], metavar="PATH",
+        "--env",
+        action="append",
+        default=[],
+        metavar="PATH",
         help="dotenv supplier checked against the settings contract (repeatable)",
     )
     bundle.add_argument(
-        "--environ", action="store_true",
+        "--environ",
+        action="store_true",
         help="also treat this process's environment as a supplier",
     )
 

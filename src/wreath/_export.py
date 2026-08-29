@@ -124,9 +124,7 @@ class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
         try:
             redirected_origin = _otlp_origin(newurl)
         except ValueError as error:
-            raise DestinationRejected(
-                "cross-origin OTLP redirect was rejected"
-            ) from error
+            raise DestinationRejected("cross-origin OTLP redirect was rejected") from error
         if redirected_origin != self._origin:
             raise DestinationRejected("cross-origin OTLP redirect was rejected")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
@@ -199,9 +197,7 @@ class OtlpHttpExporter:
         self._encode = encode
         self._encoding = encoding
         self._headers = {"content-type": media_type, **(headers or {})}
-        self._opener = urllib.request.build_opener(
-            _SameOriginRedirectHandler(origin)
-        )
+        self._opener = urllib.request.build_opener(_SameOriginRedirectHandler(origin))
 
     def _post_body(self, url: str, body: bytes) -> None:
         req = urllib.request.Request(url, data=body, headers=self._headers, method="POST")  # noqa: S310 (configured OTLP endpoint)
@@ -371,11 +367,7 @@ class ExportPipeline:
         # queue would let a log burst evict the traces an operator came for.
         self._log_queue: BoundedLogQueue = BoundedLogQueue(queue_capacity)
         self._log_registry = log_registry
-        self._drain = DrainThread(
-            "wreath-flight-export", interval, self._tick, self._flush
-        )
-
-    # -- hook and lifecycle -------------------------------------------------
+        self._drain = DrainThread("wreath-flight-export", interval, self._tick, self._flush)
 
     def on_trace(self, trace: ProjectedTrace) -> None:
         """The projector's export hook: enqueue, dropping if the queue is full."""
@@ -394,9 +386,7 @@ class ExportPipeline:
         """Attach the call-site registry the OTLP mapping renders against."""
         self._log_registry = registry
 
-    def set_snapshot_provider(
-        self, provider: Callable[[], ProjectorSnapshot | None]
-    ) -> None:
+    def set_snapshot_provider(self, provider: Callable[[], ProjectorSnapshot | None]) -> None:
         """Attach the metrics source. The projector is built after the pipeline
         (it needs the pipeline's `on_trace`), so this wires the back-reference."""
         self._snapshot_provider = provider
@@ -426,8 +416,6 @@ class ExportPipeline:
         self._export_traces()
         self._export_logs()
         self._export_metrics()
-
-    # -- export steps -------------------------------------------------------
 
     def _export_traces(self) -> None:
         pending = self._queue.drain()
@@ -526,8 +514,6 @@ class ExportPipeline:
         except Exception:  # noqa: BLE001
             with self._lock:
                 self._metric_errors += 1
-
-    # -- introspection ------------------------------------------------------
 
     @property
     def queue(self) -> BoundedExportQueue:

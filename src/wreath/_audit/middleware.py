@@ -5,6 +5,7 @@ rules over outgoing `text/html` responses and logs findings — intended for loc
 development, not production. It never rewrites the response and swallows its own errors,
 so it can never change behaviour or break a response; the cost is only paid when mounted.
 """
+
 from __future__ import annotations
 
 import logging
@@ -43,8 +44,9 @@ class AuditMiddleware:
                 path = getattr(request, "path", "?")
                 self._logger.warning("wreath audit: %d a11y finding(s) on %s", len(findings), path)
                 for f in findings:
-                    self._logger.warning("  %s %s %s: %s",
-                                         f.severity.value, f.rule_id, f.location, f.message)
+                    self._logger.warning(
+                        "  %s %s %s: %s", f.severity.value, f.rule_id, f.location, f.message
+                    )
         except Exception:  # noqa: BLE001 — a dev aid must never break the response
             pass
         return response

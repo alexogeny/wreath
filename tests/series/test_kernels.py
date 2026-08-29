@@ -1,5 +1,3 @@
-"""Storage-neutral numeric kernels used after a series has been assembled."""
-
 from __future__ import annotations
 
 import datetime
@@ -141,9 +139,7 @@ class TestChartProjection:
         buckets = tuple(range(12))
         sparse = {
             ("alpha", False): {
-                bucket: {"count": bucket / 7}
-                for bucket in buckets
-                if bucket not in (3, 8)
+                bucket: {"count": bucket / 7} for bucket in buckets if bucket not in (3, 8)
             }
         }
         regular = project_chart(
@@ -174,27 +170,35 @@ class TestChartProjection:
 
     def test_prepared_data_keeps_only_its_latest_projection_shape(self):
         buckets = tuple(range(12))
-        sparse = {
-            ("alpha", False): {
-                bucket: {"count": bucket / 7} for bucket in buckets
-            }
-        }
+        sparse = {("alpha", False): {bucket: {"count": bucket / 7} for bucket in buckets}}
         prepared = ChartData(buckets, sparse, {"count": None})
-        first = prepared.project_chart_text(
-            downsample_rows=(0,), threshold=6, tick_target=5
-        )
+        first = prepared.project_chart_text(downsample_rows=(0,), threshold=6, tick_target=5)
 
-        assert prepared.project_chart_text(
-            downsample_rows=[0], threshold=6, tick_target=5
-        ) is first
+        assert prepared.project_chart_text(downsample_rows=[0], threshold=6, tick_target=5) is first
 
-        second = prepared.project_chart_text(
-            downsample_rows=(0,), threshold=7, tick_target=5
-        )
+        second = prepared.project_chart_text(downsample_rows=(0,), threshold=7, tick_target=5)
         assert second is not first
-        assert prepared.project_chart_text(
-            downsample_rows=(0,), threshold=6, tick_target=5
-        ) is not first
+        assert (
+            prepared.project_chart_text(downsample_rows=(0,), threshold=6, tick_target=5)
+            is not first
+        )
+
+    def test_prepared_data_can_project_without_retaining_the_result(self):
+        buckets = tuple(range(12))
+        sparse = {("alpha", False): {bucket: {"count": bucket / 7} for bucket in buckets}}
+        prepared = ChartData(buckets, sparse, {"count": None})
+
+        first = prepared.project_chart_text(
+            downsample_rows=(0,), threshold=6, tick_target=5, cache=False
+        )
+        plan = prepared._chart_plan_cache
+        second = prepared.project_chart_text(
+            downsample_rows=(0,), threshold=6, tick_target=5, cache=False
+        )
+
+        assert second == first
+        assert second is not first
+        assert prepared._chart_plan_cache is plan
 
     def test_it_matches_the_individual_data_kernels(self):
         buckets = tuple(range(9))

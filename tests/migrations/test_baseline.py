@@ -1,5 +1,3 @@
-"""Existing schemas become verified roots without application DDL replay."""
-
 from __future__ import annotations
 
 from typing import Any

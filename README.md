@@ -1,13 +1,8 @@
 <div align="center">
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/wreath-dark.png">
-  <img src="docs/assets/wreath-light.png" alt="Wreath" width="320">
-</picture>
-
 # Wreath
 
-**Many separate parts, gathered and woven until they hold a single shape.**
+**The Python web stack for the point where “just add a package” stops working.**
 
 [![Python 3.14+](https://img.shields.io/badge/Python-3.14%2B-2f855a?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![ASGI](https://img.shields.io/badge/ASGI-any_server-7c3aed?style=flat-square)](https://asgi.readthedocs.io/)
@@ -15,75 +10,105 @@
 ![Runtime dependencies: zero](https://img.shields.io/badge/runtime_dependencies-zero-16a34a?style=flat-square)
 [![License: MPL-2.0](https://img.shields.io/badge/license-MPL--2.0-64748b?style=flat-square)](https://github.com/alexogeny/wreath/blob/main/LICENSE)
 
-A Python 3.14-first ASGI framework, PostgreSQL stack, job system, policy engine,
-and native HTTP server. One package; no mandatory runtime dependencies.
+A Python 3.14-first ASGI framework with its own PostgreSQL stack, durable work,
+identity, policy, observability and native HTTP server. One coherent package;
+no mandatory runtime dependencies.
 
-**[Documentation](https://alexogeny.github.io/wreath/)** ·
-[Browse by task](https://alexogeny.github.io/wreath/map.html) ·
-[Install](https://alexogeny.github.io/wreath/getting-started/index.html) ·
+[Documentation](https://alexogeny.github.io/wreath/) ·
+[Build a serious API](https://alexogeny.github.io/wreath/stories/serious-api.html) ·
 [Issues](https://github.com/alexogeny/wreath/issues)
 
 </div>
 
 ---
 
-## One system. One obvious home.
+## Start with the application, not the integration backlog
 
-A production web service needs more than a router. It needs validation and data
-access. It also needs identity, policy, background work, observability, and a server.
-Wreath ships those parts together and names each module after the job it does:
-`wreath.pagination` paginates, `wreath.jobs` runs jobs, and `wreath.email` sends
-mail.
+A serious service needs validation, identity, PostgreSQL, policy, background work,
+observability and somewhere to run. In Wreath these are declarations over one
+application lifecycle, not middleware assembled around several competing request
+models.
 
-The imagery belongs to the name. The API stays literal.
+This route gets compiled binding, bounded fields, native JSON, replay-safe writes,
+request IDs, security headers and an OpenAPI operation from the same declarations:
 
 ```python
+from dataclasses import dataclass
+from typing import Annotated
+
 from wreath import Request, Wreath
+from wreath.binding import Body, Field
+from wreath.policy import HttpPolicy, IdempotencyPolicy
+from wreath.policy.request_id import RequestIdPolicy
+from wreath.policy.security import SecurityHeadersPolicy
 
-app = Wreath()
 
-@app.get("/hello/{name}")
-async def hello(request: Request, name: str) -> dict:
-    return {"hello": name}
+@dataclass
+class RunRequest:
+    prompt: Annotated[str, Field(min_length=3, max_length=2_000)]
+    model: Annotated[str, Field(min_length=2, max_length=80)]
+
+
+app = Wreath(
+    http_policy=HttpPolicy(
+        idempotency=IdempotencyPolicy(),
+        request_id=RequestIdPolicy(),
+        security_headers=SecurityHeadersPolicy(),
+    )
+)
+
+
+@app.post("/runs")
+async def create_run(
+    request: Request,
+    command: Annotated[RunRequest, Body()],
+) -> dict:
+    return {"state": "queued", "model": command.model, "prompt": command.prompt}
+
+
+app.enable_api_docs(environments=("development",), try_it_out=True)
 ```
 
 ```bash
-wreath run app:app          # native HTTP server
-wreath dev app:app          # native server with reload
-uvicorn app:app             # or any conforming ASGI server
+uv add wreath
+uv run wreath dev app:app
 ```
 
-Wreath is pre-1.0. Shipped surfaces are implemented and tested. Work that is
-named but not finished lives only in the
-[roadmap](https://alexogeny.github.io/wreath/reference/roadmap.html).
+The framework stays ordinary ASGI, so `uvicorn app:app` remains valid. The native
+server is available when you want Wreath's complete HTTP, telemetry and recording
+path.
 
-## Choose your route
+## Start where your system gets hard
 
-| You want to… | Start here |
+The documentation builds nine complete systems around the pressure that usually
+forces a second stack:
+
+| The pressure | Build the system |
 |---|---|
-| build your first service | [Installation and first app](https://alexogeny.github.io/wreath/getting-started/index.html) |
-| find one feature or concept | [Documentation map](https://alexogeny.github.io/wreath/map.html) |
-| complete a concrete task | [Cookbook](https://alexogeny.github.io/wreath/cookbook/index.html) |
-| look up a class or function | [API reference](https://alexogeny.github.io/wreath/reference/app.html) |
-| move from FastAPI, Pydantic, SQLModel, or Alembic | [Migration path](https://alexogeny.github.io/wreath/from-fastapi/index.html) |
-| evaluate the dependency or performance claim | [Capability map](https://alexogeny.github.io/wreath/capabilities.html) and [measurements](https://alexogeny.github.io/wreath/perf/index.html) |
+| prove the young framework has the serious surfaces already | [A secure product API with users, policy, PostgreSQL, jobs and measurements](https://alexogeny.github.io/wreath/stories/serious-api.html) |
+| coordinate chargers, vehicles and microgrids under contention | [A live energy depot](https://alexogeny.github.io/wreath/stories/energy-depot.html) |
+| assign durable agent work across every computer on an account | [A personal device fleet](https://alexogeny.github.io/wreath/stories/agent-fleet.html) |
+| run signed hooks, schedules and user code durably | [An automation backplane](https://alexogeny.github.io/wreath/stories/automation-backplane.html) |
+| give models useful tools without creating a weaker backend | [A governed MCP control room](https://alexogeny.github.io/wreath/stories/mcp-control-room.html) |
+| make SAML, SCIM, support access and deletion share one tenant boundary | [An enterprise control plane](https://alexogeny.github.io/wreath/stories/enterprise.html) |
+| analyse irregular series across late data and daylight saving | [A time-series laboratory](https://alexogeny.github.io/wreath/stories/time-series-lab.html) |
+| keep scarce inventory correct through retries and webhook redelivery | [A noon-drop storefront](https://alexogeny.github.io/wreath/stories/noon-drop.html) |
+| resume sync and uploads through unreliable field networks | [An offline operations service](https://alexogeny.github.io/wreath/stories/field-operations.html) |
 
-The published site keeps **Browse** in its header on every page. Search is
-`Ctrl K` or `/`.
+Underneath those stories are the conventional guides: [HTTP and OpenAPI](https://alexogeny.github.io/wreath/guides/http-api.html),
+[data and migrations](https://alexogeny.github.io/wreath/guides/migration-workflow.html),
+[CLI tasks](https://alexogeny.github.io/wreath/guides/cli.html), and the
+[production runbook](https://alexogeny.github.io/wreath/guides/deployment.html). The
+[camera-trap service](example/README.md) is the canonical runnable application.
+Wreath is pre-1.0; the [version, platform and upgrade contract](https://alexogeny.github.io/wreath/start/releases.html)
+states exactly what the current docs cover.
 
-## What ships
+## Performance claims come with the workload
 
-| Part of the service | Wreath owns |
-|---|---|
-| request path | ASGI application, routing, binding, validation, middleware, responses, OpenAPI, typed clients |
-| identity and policy | sessions, JWT and API keys, OAuth/OIDC, users, TOTP, passkeys, Cedar authorization |
-| data | native PostgreSQL driver, ORM, migrations, safe SQL, vector and full-text search, pagination |
-| long-running work | durable jobs, schedules, messaging, workflows, resumable streams, progress |
-| service boundaries | outbound HTTP, webhooks, MCP, object storage, signatures, provenance, email |
-| operations | native HTTP/1.1, HTTP/2 and HTTP/3 server, health, telemetry, logging, replay, testing |
-
-The full generated inventory says what each part replaces and links to its
-guide: [what you do not have to install](https://alexogeny.github.io/wreath/capabilities.html).
+Wreath moves repeated work to startup and byte-heavy work into owned native kernels.
+The comparisons below use retired userspace instructions, equivalent verified output,
+alternating samples and retained raw evidence. They do not turn one elapsed-time run
+into a throughput claim.
 
 ## Native gzip, shaped to the document
 
@@ -122,7 +147,7 @@ search limits: encode instructions fell **4.79%**, L1D misses **12.87%**, and
 LLC misses **52.07%** on the same corpus. The shipped balance retires 49.04
 encode instructions/byte with 91.62% L1D and 93.92% LLC hit rates; output is
 23.71% of input. No elapsed time, cycles, or IPC enters either result. The
-repository retains the [measurement data](docs/perf/data/gzip-native-instructions.json).
+repository retains its measurement data with the benchmark sources.
 
 ## One real request, all the way through
 
@@ -149,49 +174,24 @@ its width relative to the median, and the median directly:
 | Sanic: native server | 209.758M–216.695M | 3.28% | **211.290M** |
 | BlackSheep: Granian | 207.793M–211.982M | 2.00% | **209.515M** |
 
-The median hardware-counter account is:
+The cache result is clearest in absolute terms: optimized Wreath records
+**159,258 L2 misses per request**. The other stacks record 2.24–2.81 million—
+**14.06× to 17.65× more misses per request**.
 
-| Stack | Instructions | L1D hit / miss | L1I hit / miss | L2 demand hit / miss | L2 prefetch hit / miss | All L2 misses / kI |
-|---|---:|---:|---:|---:|---:|---:|
-| Wreath: format-aware gzip | **7,261,469** | 2,812,957 / 155,213 (94.77%) | 420,470 / 4,738 (98.89%) | 218,318 / 112,276 (66.04%) | 101,025 / 63,234 (61.50%) | 167,176 / 23.02 |
-| Wreath: DCZ + fragment gzip | **4,038,800** | 1,600,387 / 85,896 (94.91%) | 402,420 / 4,440 (98.91%) | 153,955 / 115,825 (57.07%) | 26,115 / 43,433 (37.55%) | 159,258 / 39.43 |
-| FastAPI: Uvicorn | **210,328,229** | 79,132,583 / 3,724,669 (95.50%) | 32,287,156 / 692,386 (97.90%) | 17,818,754 / 1,845,223 (90.62%) | 1,192,706 / 362,210 (76.71%) | 2,238,836 / 10.64 |
-| Sanic: native server | **211,289,930** | 79,422,207 / 3,707,624 (95.54%) | 32,124,452 / 691,043 (97.89%) | 17,586,395 / 2,126,588 (89.21%) | 1,129,875 / 570,852 (66.43%) | 2,811,521 / 13.31 |
-| BlackSheep: Granian | **209,514,762** | 78,703,071 / 3,649,008 (95.57%) | 31,556,106 / 673,125 (97.91%) | 17,474,065 / 2,175,424 (88.93%) | 1,223,612 / 472,673 (72.13%) | 2,592,360 / 12.37 |
+| Stack | Instructions / request | L2 misses / request | L2 misses / 1k instructions |
+|---|---:|---:|---:|
+| Wreath: DCZ + fragment gzip | **4,038,800** | **159,258** | 39.43 |
+| Wreath: format-aware gzip | **7,261,469** | **167,176** | 23.02 |
+| FastAPI: Uvicorn | 210,328,229 | 2,238,836 | 10.64 |
+| Sanic: native server | 211,289,930 | 2,811,521 | 13.31 |
+| BlackSheep: Granian | 209,514,762 | 2,592,360 | 12.37 |
 
-The denominators matter. An L1D percentage divides L1 data accesses; L1I
-divides instruction fetches. The two L2 percentages divide, separately, core
-demand requests and hardware-prefetch requests observed by
-[AMD's L2 events](https://docs.amd.com/r/en-US/57368-uProf-user-guide/4.6.3.-Performance-Metrics-for-AMD-EPYC-Zen-4-and-later-Core-Architecture-Processors).
-Neither is “the fraction of the L1 misses above that hit L2”, and combining
-demand with prefetch into one rate hides which population changed. “All L2
-misses / kI” therefore reports both the absolute median and misses per thousand
-retired instructions. The latter can rise when useful work is deleted: DCZ
-retires 44% fewer instructions than ordinary Wreath while its roughly fixed
-cache traffic is divided by a smaller instruction count.
-
-This is why Wreath's lower L2 percentage is not more L2 pressure. The optimized
-Wreath row records **159,258 total L2 misses per request**, versus
-BlackSheep's **2,592,360**—16.28× fewer—even though BlackSheep's demand hit
-percentage is higher. Moving work toward L1 means shrinking active data/code,
-eliminating copies, and keeping transient buffers contiguous; it does not mean
-optimizing the percentage itself. Every stack materializes only the eleven
-chart rows that reach the response. Wreath additionally reconciles consecutive
-measures from one series in one bucket walk, borrows exact numeric cells while
-their request owner stays alive, hashes each dense bucket and measure once into
-a call-owned lookup plan, and keeps row indices, values, presence bits and the
-LTTB selection workspace call-owned and contiguous. Coarse temporal counts skip
-zone reconstruction when the calendar gap alone proves the final bucket is
-before the end. Sparse-vector indices and values share one compact native
-allocation, while metrics insert first-seen exact integers directly and pay
-arbitrary-precision conversion only for duplicate sums. The ranker bounds and
-transforms its existing embedding in native workspace instead of building a
-Python score array; template emission borrows safe top-level scalars; and
-content-format dispatch no longer allocates normalized Python strings. Prepared
-template fragments can also carry policy-owned provenance, so gzip compresses
-only their dynamic edges and does not reread the full uncompressed stable
-suffix; ordinary byte bodies retain the exact comparison and safe
-full-compression fallback.
+The normalized Wreath ratio looks high because Wreath retires roughly 52× fewer
+instructions while some cache traffic remains fixed. Dividing that traffic by
+the much smaller instruction count raises misses per thousand instructions; it
+does **not** mean more cache misses per request. The retained samples include the
+full L1 and [AMD L2](https://docs.amd.com/r/en-US/57368-uProf-user-guide/4.6.3.-Performance-Metrics-for-AMD-EPYC-Zen-4-and-later-Core-Architecture-Processors)
+demand and prefetch counters.
 
 Format-aware Wreath retired **28.96× fewer instructions** than FastAPI in this
 run. The dictionary-aware configuration retired **52.08× fewer instructions**,
@@ -263,7 +263,7 @@ decomposition; the holistic request above is the headline system comparison.
 
 | Arm | Installed stack |
 |---|---|
-| Wreath | Wreath 0.3.3: metal server, binding, auth, startup-compiled Cedar, PostgreSQL, and HTTP client; no mandatory third-party runtime dependencies |
+| Wreath | Wreath 0.3.4: metal server, binding, auth, startup-compiled Cedar, PostgreSQL, and HTTP client; no mandatory third-party runtime dependencies |
 | FastAPI | FastAPI 0.139, Starlette, Pydantic/pydantic-core, Uvicorn, uvloop, httptools, `HTTPBearer`, `cedarpy`, `asyncpg`, `aiohttp`, NumPy, Jinja, protobuf, and msgspec |
 | Sanic | Sanic 25.12.1 native server, a hand-written msgspec success-path binding/auth adapter, `cedarpy`, `asyncpg`, `aiohttp`, NumPy, Jinja, and protobuf |
 | BlackSheep | BlackSheep 2.6.3 on Granian 2.7.9 ASGI/uvloop, plus the same success-path adapter and typed business stack as Sanic |
@@ -292,19 +292,19 @@ Reproduce it:
 uv sync --inexact --group benchmark
 uv run python -m benchmarks.bench_holistic_stack_instructions \
   --requests 30 --trials 5 --connections 8 --warmup 16 \
-  --output docs/perf/data/e2e-holistic-stack-instructions.json
+  --output benchmarks/baselines/e2e-holistic-stack-instructions.json
 
 # The cumulative framework-layer control
 uv run python -m benchmarks.bench_e2e_instructions \
   --requests 4000 --trials 5 --connections 32 --warmup 500 \
-  --output docs/perf/data/e2e-stack-instructions.json
+  --output benchmarks/baselines/e2e-stack-instructions.json
 ```
 
-The repository retains the holistic [raw samples](docs/perf/data/e2e-holistic-stack-instructions.json),
+The repository retains the holistic [raw samples](benchmarks/baselines/e2e-holistic-stack-instructions.json),
 [Wreath application](benchmarks/holistic_e2e.py),
 [FastAPI application](benchmarks/holistic_fastapi.py), and
 [counter harness](benchmarks/bench_holistic_stack_instructions.py), plus the
-[cumulative control samples](docs/perf/data/e2e-stack-instructions.json).
+[cumulative control samples](benchmarks/baselines/e2e-stack-instructions.json).
 
 ## Install
 
@@ -331,19 +331,12 @@ The same refusal applies to correctness. Unsupported declarations fail at
 startup. Hot-path complexity has executable probes. The test runner samples
 declared controls and asks whether the suite notices when one disappears.
 
-Read the [request path](https://alexogeny.github.io/wreath/internals/index.html)
-for the design and [performance](https://alexogeny.github.io/wreath/perf/index.html)
-for the numbers.
-
 ## Work on Wreath
 
 ```bash
 uv sync
 uv run wreath-check
-uv run wreath-check --docs
 uv run wreath test
 ```
 
-The repository's [`AGENTS.md`](AGENTS.md) is the engineering contract. The
-[agent cookbook](https://alexogeny.github.io/wreath/cookbook/agents/index.html)
-turns it into task-shaped routes through the tree.
+The repository's [`AGENTS.md`](AGENTS.md) is the engineering contract.

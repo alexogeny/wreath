@@ -17,7 +17,7 @@
  *   (6, item_plan)            LIST
  *   (7, value_plan)           DICT         string-keyed record
  *   (8, has_none, options, msg)  UNION
- *   (9, cls, fields)          DATACLASS    fields =
+ *   (9, cls, fields, known, positional) DATACLASS fields =
  *                             ((python_name, wire_name, plan, required), ...)
  *   (10, message)             UNSUPPORTED
  *   (11, child, comparisons, lengths, pattern)  FIELD
@@ -429,11 +429,22 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors,
             return Py_NewRef(value);
         }
         PyObject *fields = PyTuple_GET_ITEM(plan, 2);
+        PyObject *known = PyTuple_GET_ITEM(plan, 3);
         Py_ssize_t field_count = PyTuple_GET_SIZE(fields);
-        PyObject *kwargs = PyDict_New();
-        if (kwargs == NULL) {
-            return NULL;
+        int positional = PyObject_IsTrue(PyTuple_GET_ITEM(plan, 4));
+        if (positional < 0) return NULL;
+        PyObject **values = NULL;
+        PyObject *kwargs = NULL;
+        if (positional && field_count != 0) {
+            values = PyMem_Malloc((size_t)field_count * sizeof(*values));
+            if (values == NULL) return PyErr_NoMemory();
+            for (Py_ssize_t index = 0; index < field_count; index++) values[index] = NULL;
         }
+        else if (!positional) {
+            kwargs = PyDict_New();
+            if (kwargs == NULL) return NULL;
+        }
+        Py_ssize_t present_count = 0;
         for (Py_ssize_t index = 0; index < field_count; index++) {
             PyObject *field = PyTuple_GET_ITEM(fields, index);
             PyObject *name = PyTuple_GET_ITEM(field, 0);
@@ -441,104 +452,106 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors,
             PyObject *field_plan = PyTuple_GET_ITEM(field, 2);
             long required = PyLong_AsLong(PyTuple_GET_ITEM(field, 3));
             if (required == -1 && PyErr_Occurred()) {
-                Py_DECREF(kwargs);
-                return NULL;
+                goto dataclass_error;
             }
             PyObject *present = PyDict_GetItemWithError(value, wire_name); /* borrowed */
             if (present == NULL && PyErr_Occurred()) {
-                Py_DECREF(kwargs);
-                return NULL;
+                goto dataclass_error;
             }
             if (present != NULL) {
+                present_count++;
                 if (loc_push(loc, wire_name) < 0) {
-                    Py_DECREF(kwargs);
-                    return NULL;
+                    goto dataclass_error;
                 }
                 PyObject *validated = validate_node(field_plan, present, loc, errors,
                                                     steps);
                 loc_pop(loc);
-                if (validated == NULL) {
-                    Py_DECREF(kwargs);
-                    return NULL;
+                if (validated == NULL) goto dataclass_error;
+                if (positional) {
+                    values[index] = validated;
                 }
-                int rc = PyDict_SetItem(kwargs, name, validated);
-                Py_DECREF(validated);
-                if (rc < 0) {
-                    Py_DECREF(kwargs);
-                    return NULL;
+                else {
+                    int rc = PyDict_SetItem(kwargs, name, validated);
+                    Py_DECREF(validated);
+                    if (rc < 0) goto dataclass_error;
                 }
             }
             else if (required) {
                 if (loc_push(loc, wire_name) < 0) {
-                    Py_DECREF(kwargs);
-                    return NULL;
+                    goto dataclass_error;
                 }
                 int rc = emit(errors, loc, "field is required", "missing");
                 loc_pop(loc);
-                if (rc < 0) {
-                    Py_DECREF(kwargs);
-                    return NULL;
-                }
+                if (rc < 0) goto dataclass_error;
             }
         }
         /* Unexpected fields: any value key not named by a field. Iterated in
          * value's insertion order to match `wreath.binding._validate`. */
-        if (PyDict_GET_SIZE(value) > PyDict_GET_SIZE(kwargs)) {
-            /* Build the field-name set once (O(F)) so each value key is an O(1)
-             * membership test. The old per-key linear rescan of every field
-             * name was O(V*F) -- quadratic when a large body is validated
-             * against a wide schema. Mirrors pure _validate_dataclass, which
-             * builds the same `known` set. */
-            PyObject *known = PySet_New(NULL);
-            if (known == NULL) {
-                Py_DECREF(kwargs);
-                return NULL;
-            }
-            for (Py_ssize_t index = 0; index < field_count; index++) {
-                PyObject *wire_name = PyTuple_GET_ITEM(
-                    PyTuple_GET_ITEM(fields, index), 1);
-                if (PySet_Add(known, wire_name) < 0) {
-                    Py_DECREF(known);
-                    Py_DECREF(kwargs);
-                    return NULL;
-                }
-            }
+        if (PyDict_GET_SIZE(value) > present_count) {
             PyObject *key, *item;
             Py_ssize_t pos = 0;
             while (PyDict_Next(value, &pos, &key, &item)) {
                 int contains = PySet_Contains(known, key);
-                if (contains < 0) {
-                    Py_DECREF(known);
-                    Py_DECREF(kwargs);
-                    return NULL;
-                }
+                if (contains < 0) goto dataclass_error;
                 if (!contains) {
-                    if (loc_push(loc, key) < 0) {
-                        Py_DECREF(known);
-                        Py_DECREF(kwargs);
-                        return NULL;
-                    }
+                    if (loc_push(loc, key) < 0) goto dataclass_error;
                     int rc = emit(errors, loc, "unexpected field", "extra");
                     loc_pop(loc);
-                    if (rc < 0) {
-                        Py_DECREF(known);
-                        Py_DECREF(kwargs);
-                        return NULL;
-                    }
+                    if (rc < 0) goto dataclass_error;
                 }
             }
-            Py_DECREF(known);
         }
         /* Any error anywhere (shared list) means we cannot construct. A
          * negative step budget means validation was cut short mid-tree, so the
          * kwargs may be incomplete -- never construct from a truncated body. */
         if (PyList_GET_SIZE(errors) > 0 || *steps < 0) {
-            Py_DECREF(kwargs);
+            if (values != NULL) {
+                for (Py_ssize_t index = 0; index < field_count; index++) {
+                    Py_XDECREF(values[index]);
+                }
+                PyMem_Free(values);
+            }
+            Py_XDECREF(kwargs);
             return Py_NewRef(value);
         }
-        PyObject *instance = PyObject_VectorcallDict(cls, NULL, 0, kwargs);
-        Py_DECREF(kwargs);
+        PyObject *instance;
+        if (positional && present_count == field_count) {
+            instance = PyObject_Vectorcall(
+                cls, values, (size_t)field_count, NULL);
+        }
+        else {
+            if (kwargs == NULL) {
+                kwargs = PyDict_New();
+                if (kwargs == NULL) goto dataclass_error;
+                for (Py_ssize_t index = 0; index < field_count; index++) {
+                    if (values[index] == NULL) continue;
+                    PyObject *name = PyTuple_GET_ITEM(
+                        PyTuple_GET_ITEM(fields, index), 0);
+                    if (PyDict_SetItem(kwargs, name, values[index]) < 0) {
+                        goto dataclass_error;
+                    }
+                }
+            }
+            instance = PyObject_VectorcallDict(cls, NULL, 0, kwargs);
+        }
+        if (values != NULL) {
+            for (Py_ssize_t index = 0; index < field_count; index++) {
+                Py_XDECREF(values[index]);
+            }
+            PyMem_Free(values);
+        }
+        Py_XDECREF(kwargs);
         return instance;
+
+dataclass_error:
+        if (values != NULL) {
+            for (Py_ssize_t index = 0; index < field_count; index++) {
+                Py_XDECREF(values[index]);
+            }
+            PyMem_Free(values);
+        }
+        Py_XDECREF(kwargs);
+        return NULL;
     }
 
     case OP_UNSUPPORTED: {

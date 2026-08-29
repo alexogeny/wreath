@@ -1,5 +1,3 @@
-"""First-party purpose-scoped action tokens."""
-
 from __future__ import annotations
 
 import hmac
@@ -41,9 +39,7 @@ def test_token_is_purpose_and_context_bound_and_rotates_by_key_id() -> None:
     purposes = [TokenPurpose("invite", 60), TokenPurpose("verify", 30)]
     issuer = ActionTokens({"old": KEY_A}, current="old", purposes=purposes)
     token = issuer.issue("invite", "user-7", bound="org-2", now=100)
-    verifier = ActionTokens(
-        {"new": KEY_B, "old": KEY_A}, current="new", purposes=purposes
-    )
+    verifier = ActionTokens({"new": KEY_B, "old": KEY_A}, current="new", purposes=purposes)
     claims = verifier.verify("invite", token, bound="org-2", now=120)
     assert claims is not None
     assert claims.subject == "user-7" and claims.key_id == "old"
@@ -100,17 +96,13 @@ def test_token_purpose_refuses_each_invalid_declaration(name: object, ttl: objec
         TokenPurpose(cast("str", name), cast("int", ttl))
 
 
-@pytest.mark.parametrize(
-    "max_entries", [True, "2", 0], ids=("boolean", "string", "zero")
-)
+@pytest.mark.parametrize("max_entries", [True, "2", 0], ids=("boolean", "string", "zero"))
 def test_memory_ledger_refuses_each_invalid_capacity(max_entries: object) -> None:
     with pytest.raises(ValueError, match="positive integer"):
         MemoryTokenLedger(max_entries=cast("int", max_entries))
 
 
-@pytest.mark.parametrize(
-    "key_id", [1, "", "k" * 65], ids=("non-string", "empty", "long")
-)
+@pytest.mark.parametrize("key_id", [1, "", "k" * 65], ids=("non-string", "empty", "long"))
 def test_action_tokens_refuses_each_invalid_key_id(key_id: object) -> None:
     with pytest.raises(ValueError, match="key ids"):
         ActionTokens(
@@ -120,9 +112,7 @@ def test_action_tokens_refuses_each_invalid_key_id(key_id: object) -> None:
         )
 
 
-@pytest.mark.parametrize(
-    "secret", ["x" * 32, b"short"], ids=("non-bytes", "short")
-)
+@pytest.mark.parametrize("secret", ["x" * 32, b"short"], ids=("non-bytes", "short"))
 def test_action_tokens_refuses_each_invalid_secret(secret: object) -> None:
     with pytest.raises(ValueError, match="bytes of at least"):
         ActionTokens(
@@ -161,9 +151,7 @@ def test_action_tokens_refuses_each_invalid_token_size_limit(maximum: object) ->
         )
 
 
-@pytest.mark.parametrize(
-    "subject", [1, "", "s" * 1025], ids=("non-string", "empty", "long")
-)
+@pytest.mark.parametrize("subject", [1, "", "s" * 1025], ids=("non-string", "empty", "long"))
 def test_issue_refuses_each_invalid_subject(subject: object) -> None:
     tokens = ActionTokens(
         {"active": KEY_A}, current="active", purposes=[TokenPurpose("invite", 60)]
@@ -301,9 +289,7 @@ def test_verify_refuses_non_object_and_wrong_field_set_payloads() -> None:
         "token-id-type",
     ),
 )
-def test_verify_refuses_each_invalid_signed_claim(
-    changes: dict[str, object], now: int
-) -> None:
+def test_verify_refuses_each_invalid_signed_claim(changes: dict[str, object], now: int) -> None:
     purposes = [TokenPurpose("invite", 60), TokenPurpose("other", 60)]
     tokens = ActionTokens({"active": KEY_A}, current="active", purposes=purposes)
     token = tokens.issue("invite", "subject", now=100)

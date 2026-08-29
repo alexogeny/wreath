@@ -1,5 +1,3 @@
-"""Deterministic regressions for the Python-complexity audit (QPY-*)."""
-
 from __future__ import annotations
 
 import pytest
@@ -81,9 +79,6 @@ def test_normalize_default_scaling_is_linear() -> None:
     assert ratio < 2.6, ratio
 
 
-# -- hydration: key offsets are a function of shape, not of row count ---------
-
-
 def _fresh_registry(database: FakeDatabase) -> Registry:
     """A registry whose shape cache has never been filled.
 
@@ -99,13 +94,6 @@ def _fresh_registry(database: FakeDatabase) -> Registry:
 async def test_hydration_resolves_key_offsets_once_per_query(
     database: FakeDatabase,
 ) -> None:
-    """Doubling the rows must not double the key-mapping work.
-
-    `_hydrate` used to rebuild a `{python_name: index}` dict for every row,
-    which is O(rows x columns) of pure repetition on a mapping fixed by the
-    compiled projection. One resolution per query was the contract; it is now
-    one per shape, and the test below pins that separately.
-    """
 
     async def builds_for(rows: int) -> int:
         local = Session(_fresh_registry(database), "read")
@@ -125,14 +113,6 @@ async def test_hydration_resolves_key_offsets_once_per_query(
 async def test_hydration_resolves_key_offsets_once_per_shape(
     database: FakeDatabase,
 ) -> None:
-    """A second query of the same shape must resolve nothing.
-
-    Rebuilding per query is not free, and on the commonest read there is -- a
-    `fetch_one`, one row -- it cost more than the per-row work it saves:
-    measured 0.85-0.90x against not hoisting at all below five rows, against
-    1.37-1.42x above fifty. A shape's plan cannot change between queries, so it
-    is built once rather than tuned to a row count.
-    """
     registry = _fresh_registry(database)
 
     async def builds() -> int:
@@ -152,7 +132,6 @@ async def test_hydration_resolves_key_offsets_once_per_shape(
 async def test_joined_hydration_resolves_each_step_once_per_query(
     database: FakeDatabase,
 ) -> None:
-    """A joined shape always takes this path, and pays per step per row."""
 
     async def builds_for(rows: int) -> int:
         local = Session(_fresh_registry(database), "read")
@@ -176,18 +155,6 @@ async def test_joined_hydration_resolves_each_step_once_per_query(
 async def test_hydration_reads_column_metadata_once_per_query(
     database: FakeDatabase, session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The other half of the key-offset hoist above, on the same mapping.
-
-    `_pk_offsets` was lifted out of the per-row loop; the cell loop beside it
-    kept reading `item.index` -- a `@property` whose whole body is
-    `return self.column.index` -- twice per column per row, plus a
-    `PgType.from_wire` call that usually returns its argument unchanged. Both
-    are settled by the compiled projection, so both are O(rows x columns) of
-    Python frames for values that cannot change between rows.
-
-    Measured on 10,000 real rows: the Record path ran at 387,983 rows/s before
-    this was hoisted and 530,053 after, against the native hydrator's 1,943,738.
-    """
     from wreath.orm.schema import ColumnSpec
 
     reads = [0]
@@ -225,9 +192,7 @@ async def test_selectin_hydration_resolves_child_offsets_once(
     database: FakeDatabase, session: Session
 ) -> None:
     database.connection.script("users", [user_row(1), user_row(2)])
-    database.connection.script(
-        "posts", [post_row(10, 1), post_row(11, 1), post_row(12, 2)]
-    )
+    database.connection.script("posts", [post_row(10, 1), post_row(11, 1), post_row(12, 2)])
     with _count_key_map_builds() as counter:
         users = await session.fetch(User.select().include(User.posts.selectin()))
     assert len(users[0].posts) == 2
@@ -240,13 +205,6 @@ async def test_selectin_hydration_resolves_child_offsets_once(
 async def test_an_empty_result_resolves_nothing_and_stays_out_of_the_way(
     database: FakeDatabase, session: Session
 ) -> None:
-    """No rows means no resolution, and no new failure mode.
-
-    The primary-key check lives inside the offset resolution, so hoisting it
-    above the row loop unconditionally would let a projection missing its key
-    raise MappingError for a query that simply matched nothing. Keeping the
-    resolution behind the emptiness guard preserves the old behaviour exactly.
-    """
     database.connection.script("users", [])
     with _count_key_map_builds() as counter:
         assert await session.fetch(User.select()) == []

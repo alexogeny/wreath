@@ -13,7 +13,6 @@ def _function(source: str, name: str, next_name: str) -> str:
 
 
 def test_http1_complete_head_is_not_scanned_twice() -> None:
-    """A complete request head should have one delimiter scan across the call chain."""
     driver = (_NATIVE / "server_http1.c").read_text()
     parser = (_NATIVE / "http.c").read_text()
 
@@ -26,7 +25,6 @@ def test_http1_complete_head_is_not_scanned_twice() -> None:
 
 
 def test_http1_framing_does_not_walk_materialized_headers_again() -> None:
-    """Host and body framing should be collected while parser spans are hot."""
     driver = (_NATIVE / "server_http1.c").read_text()
     parser = (_NATIVE / "http.c").read_text()
     parse = _function(parser, "wreath_http_parse_request_parts", "wreath_http_parse_request")
@@ -37,7 +35,6 @@ def test_http1_framing_does_not_walk_materialized_headers_again() -> None:
 
 
 def test_http1_common_default_headers_are_one_contiguous_copy() -> None:
-    """Configured Server and Date fields should not be replayed pair by pair."""
     source = (_NATIVE / "server_http1.c").read_text()
     begin = _function(source, "begin_response_parts", "begin_response")
     start = begin.index("if (!has_date && !has_server)")
@@ -48,7 +45,6 @@ def test_http1_common_default_headers_are_one_contiguous_copy() -> None:
 
 
 def test_http1_reused_immutable_response_headers_skip_revalidation() -> None:
-    """Prepared response tuples should replay their validated native wire."""
     source = (_NATIVE / "server_http1.c").read_text()
     begin = _function(source, "begin_response_parts", "begin_response")
 
@@ -58,7 +54,6 @@ def test_http1_reused_immutable_response_headers_skip_revalidation() -> None:
 
 
 def test_http1_equivalent_dynamic_response_headers_reuse_validated_wire() -> None:
-    """Fresh Response lists with the same byte pairs should hit the cache."""
     source = (_NATIVE / "server_http1.c").read_text()
     begin = _function(source, "begin_response_parts", "begin_response")
 
@@ -67,7 +62,6 @@ def test_http1_equivalent_dynamic_response_headers_reuse_validated_wire() -> Non
 
 
 def test_eager_request_completion_does_not_cross_back_to_probe_task_state() -> None:
-    """The synchronous fast path should not need a Python Task.done() round trip."""
     source = (_NATIVE / "server_http1.c").read_text()
     spawn = _function(source, "spawn_app_task", "send_policy_reply")
 
@@ -77,7 +71,6 @@ def test_eager_request_completion_does_not_cross_back_to_probe_task_state() -> N
 
 
 def test_h3_scope_build_notes_host_inline_without_a_second_pass() -> None:
-    """The HTTP/3 scope builder must not rescan the copied headers to find host."""
     source = (_NATIVE / "http3_asgi.c").read_text()
     start = _function(source, "start_request", "end_headers_cb")
 
@@ -87,7 +80,6 @@ def test_h3_scope_build_notes_host_inline_without_a_second_pass() -> None:
 
 
 def test_scope_builders_do_not_allocate_the_host_name_per_request() -> None:
-    """Synthesizing host from :authority must reuse a cached name, not build one."""
     h2 = (_NATIVE / "server_http2.c").read_text()
     h3 = (_NATIVE / "http3_asgi.c").read_text()
     build_h2 = _function(h2, "build_h2_scope", "start_request")
@@ -102,7 +94,6 @@ def test_scope_builders_do_not_allocate_the_host_name_per_request() -> None:
 
 
 def test_well_known_name_matching_does_not_strlen_constants_per_request() -> None:
-    """Matching methods/header names must use compile-time lengths, not strlen."""
     source = (_NATIVE / "http.c").read_text()
     method = _function(source, "method_object", "header_name_object")
     header = _function(source, "header_name_object", "wreath_http_parse_request_parts")
@@ -112,7 +103,6 @@ def test_well_known_name_matching_does_not_strlen_constants_per_request() -> Non
 
 
 def test_default_bitset_router_matches_literals_without_python_segment_objects() -> None:
-    """The default matcher must compare literal UTF-8 slices without Unicode keys."""
     source = (_NATIVE / "policy_router.c").read_text()
     match = _function(source, "brt_match_impl", "brt_dispatch")
 
@@ -121,9 +111,8 @@ def test_default_bitset_router_matches_literals_without_python_segment_objects()
 
 
 def test_bitset_hot_methods_use_fastcall() -> None:
-    """The default router must not allocate argument tuples for each hot call."""
     source = (_NATIVE / "policy_router.c").read_text()
-    methods = source[source.index("static PyMethodDef brt_methods[]"):]
+    methods = source[source.index("static PyMethodDef brt_methods[]") :]
 
     for name in ("match", "classify", "resolve", "probe"):
         row = next(line for line in methods.splitlines() if f'{{"{name}"' in line)
@@ -131,7 +120,6 @@ def test_bitset_hot_methods_use_fastcall() -> None:
 
 
 def test_bitset_groups_are_compiled_before_the_first_match() -> None:
-    """A request must never compile a route group lazily."""
     source = (_NATIVE / "policy_router.c").read_text()
     match = _function(source, "brt_match_impl", "brt_dispatch")
 
@@ -139,7 +127,6 @@ def test_bitset_groups_are_compiled_before_the_first_match() -> None:
 
 
 def test_bitset_common_large_groups_do_not_spill_survivors_to_heap() -> None:
-    """Groups through 4096 routes should use bounded stack scratch."""
     source = (_NATIVE / "policy_router.c").read_text()
     size = re.search(r"uint64_t stack_words\[(\d+)\]", source)
 
@@ -149,7 +136,6 @@ def test_bitset_common_large_groups_do_not_spill_survivors_to_heap() -> None:
 
 
 def test_bitset_path_parameters_are_lazy_native_slices() -> None:
-    """Matching should not eagerly allocate a dict and Unicode object per capture."""
     source = (_NATIVE / "policy_router.c").read_text()
     build = _function(source, "build_match", "brt_match_impl")
 
@@ -158,7 +144,6 @@ def test_bitset_path_parameters_are_lazy_native_slices() -> None:
 
 
 def test_bitset_has_no_process_global_python_objects() -> None:
-    """The default router's cached objects must be held by module state."""
     source = (_NATIVE / "policy_router.c").read_text()
 
     assert "static PyObject *brt_zero" not in source
@@ -167,49 +152,42 @@ def test_bitset_has_no_process_global_python_objects() -> None:
 
 
 def test_http1_idle_keepalive_releases_spike_capacity() -> None:
-    """A large read must not pin its input allocation for the connection lifetime."""
     source = (_NATIVE / "server_http1.c").read_text()
 
     assert "shrink_idle_input_buffer" in source
 
 
 def test_http2_idle_connection_releases_spike_capacity() -> None:
-    """HTTP/2 must decay an oversized connection input allocation after draining."""
     source = (_NATIVE / "server_http2.c").read_text()
 
     assert "shrink_idle_input_buffer" in source
 
 
 def test_multipart_parser_does_not_copy_every_part_payload() -> None:
-    """Parsing a complete multipart body should not duplicate all payload bytes."""
     source = (_NATIVE / "multipart.c").read_text()
 
     assert "PyBytes_FromStringAndSize((const char *)body_start" not in source
 
 
 def test_http1_receive_queue_stores_native_descriptors() -> None:
-    """Buffered body chunks should not allocate a Python list entry and ASGI dict."""
     source = (_NATIVE / "server_http1.c").read_text()
 
     assert "PyList_Append(self->receive_queue" not in source
 
 
 def test_http2_receive_queue_stores_native_descriptors() -> None:
-    """Each HTTP/2 DATA frame should not become a separately queued Python object."""
     source = (_NATIVE / "server_http2.c").read_text()
 
     assert "PyList_Append(st->body_chunks" not in source
 
 
 def test_http3_response_queue_is_a_native_ack_ring() -> None:
-    """Acknowledgement bookkeeping should not retain a Python list geometry."""
     source = (_NATIVE / "http3_asgi.c").read_text()
 
     assert "PyList_Append(s->resp_chunks" not in source
 
 
 def test_http_parser_builds_asgi_headers_without_generic_python_calls() -> None:
-    """Portable ASGI needs Python pairs, but parsing must not call Python code."""
     source = (_NATIVE / "http.c").read_text()
     parse = _function(source, "wreath_http_parse_request_parts", "wreath_http_parse_request")
 
@@ -219,7 +197,6 @@ def test_http_parser_builds_asgi_headers_without_generic_python_calls() -> None:
 
 
 def test_hpack_hard_limit_reclaims_entries_and_capacity_immediately() -> None:
-    """A SETTINGS table reduction must not retain the old table watermark."""
     source = (_NATIVE / "server_hpack.c").read_text()
     setter = _function(source, "wreath_hpack_table_set_hard_max", "table_evict_to")
 
@@ -228,7 +205,6 @@ def test_hpack_hard_limit_reclaims_entries_and_capacity_immediately() -> None:
 
 
 def test_eager_http1_completion_only_allocates_a_task_after_suspension() -> None:
-    """The synchronous path completes inline; loop task ownership starts on yield."""
     source = (_NATIVE / "server_http1.c").read_text()
     spawn = _function(source, "spawn_app_task", "send_policy_reply")
 

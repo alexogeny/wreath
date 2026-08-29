@@ -78,8 +78,16 @@ PATTERN = frozenset({LIKE, ILIKE})
 #: Container and path operators. Safe unless they address the declared column.
 STRUCTURAL = frozenset(
     {
-        CONTAINS, CONTAINED_BY, HAS_KEY, HAS_ANY, HAS_ALL,
-        PATH_TEXT, PATH_JSON, OVERLAPS, ANY_EQ, ALL_EQ,
+        CONTAINS,
+        CONTAINED_BY,
+        HAS_KEY,
+        HAS_ANY,
+        HAS_ALL,
+        PATH_TEXT,
+        PATH_JSON,
+        OVERLAPS,
+        ANY_EQ,
+        ALL_EQ,
     }
 )
 
@@ -116,9 +124,8 @@ class TransitionalHazard:
 class ScanReport:
     """Everything the scan looked at, and what it concluded.
 
-    `examined` is carried because a report that counted only findings would
-    say "clean" when it looked at nothing -- the shape doc 19 found in
-    `coverage_overall()` returning `1.0` on an empty denominator.
+    `examined` distinguishes a clean result from a scan that inspected no
+    declarations. `scanned_nothing` makes that absence of evidence explicit.
     """
 
     column: str
@@ -161,8 +168,6 @@ class ScanReport:
         return ", ".join(parts)
 
 
-# -- the waiver registry ------------------------------------------------------
-#
 # Shaped after passes' `Declared`: a written reason, no `strict=False`, no
 # global off switch. The waiver attaches to the read that needs it rather than
 # to the migration, because a blanket waiver on a migration is indistinguishable
@@ -240,9 +245,6 @@ def waiver_for(target: Any, column: str, site: str | None = None) -> str | None:
     return None
 
 
-# -- naming -------------------------------------------------------------------
-
-
 def _column_key(column: Any) -> str:
     """`schema.table.column` for a model column or a column expression."""
     inner = getattr(column, "column", column)
@@ -276,9 +278,6 @@ def _literals(node: Any) -> tuple[list[Any], bool]:
         else:
             dynamic = True
     return values, dynamic
-
-
-# -- the lattice --------------------------------------------------------------
 
 
 def _monotone_note(mapping: dict[Any, Any]) -> str:
@@ -347,8 +346,7 @@ def _classify_binary(
             operation=f"structural operator ({operator})",
             verdict="refused",
             detail=(
-                "the operator addresses the value's structure, which the "
-                "conversion is changing"
+                "the operator addresses the value's structure, which the conversion is changing"
             ),
         )
     if operator in (EQ, NE):
@@ -432,9 +430,7 @@ def _walk(
             found.extend(_walk(operand, column, mapping, site, name))
     elif isinstance(node, UnaryExpr):
         if node.operator in (IS_NULL, IS_NOT_NULL):
-            if _is_target(node.operand, column) and (
-                None in mapping or None in mapping.values()
-            ):
+            if _is_target(node.operand, column) and (None in mapping or None in mapping.values()):
                 found.append(
                     TransitionalHazard(
                         site=site,
@@ -459,9 +455,6 @@ def _walk(
                 if isinstance(side, (BinaryExpr, BooleanExpr, UnaryExpr, InExpr)):
                     found.extend(_walk(side, column, mapping, site, name))
     return found
-
-
-# -- the three refusals that are not predicates -------------------------------
 
 
 def _ordering_hazards(
@@ -527,9 +520,6 @@ def _check_hazard(column: Any, name: str) -> TransitionalHazard | None:
     )
 
 
-# -- entry points -------------------------------------------------------------
-
-
 def scan_predicates(
     predicates: Any, column: Any, mapping: dict[Any, Any], *, site: str
 ) -> list[TransitionalHazard]:
@@ -564,9 +554,7 @@ def scan_view(
     name = _column_key(column)
     found = scan_predicates(getattr(view, "predicates", ()), column, mapping, site=site)
     reasons = {
-        "aggregate": (
-            "arithmetic over two encodings is meaningless even when both are numeric"
-        ),
+        "aggregate": ("arithmetic over two encodings is meaningless even when both are numeric"),
         "group": (
             "one logical group splits into two, so counts halve and a category "
             "appears to fork, with nothing raising"
@@ -650,9 +638,7 @@ def _apply_waivers(
     reason = waiver_for(target, column, site) if target is not None else None
     if reason is None:
         return found
-    return [
-        item if item.verdict == "rewritable" else _waive(item, reason) for item in found
-    ]
+    return [item if item.verdict == "rewritable" else _waive(item, reason) for item in found]
 
 
 def _waive(hazard: TransitionalHazard, reason: str) -> TransitionalHazard:
@@ -732,11 +718,15 @@ def scan_application(registry: Any = None, modules: Any = None) -> list[ScanRepo
     """
     import sys  # only this reader walks loaded modules
 
-    loaded = tuple(
-        module
-        for name, module in list(sys.modules.items())
-        if module is not None and not name.startswith(("wreath.", "_", "test"))
-    ) if modules is None else tuple(modules)
+    loaded = (
+        tuple(
+            module
+            for name, module in list(sys.modules.items())
+            if module is not None and not name.startswith(("wreath.", "_", "test"))
+        )
+        if modules is None
+        else tuple(modules)
+    )
     declarations = collect_declarations(loaded)
     queries, views = collect_populations(loaded)
     return [

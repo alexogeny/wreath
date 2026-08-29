@@ -52,11 +52,7 @@ class GoogleFunctionAdapter:
         if not isinstance(body, bytes):
             raise TypeError("Google HTTP request get_data() must return bytes")
         host = getattr(request, "host", None)
-        if (
-            isinstance(host, str)
-            and host
-            and not any(name == b"host" for name, _value in headers)
-        ):
+        if isinstance(host, str) and host and not any(name == b"host" for name, _value in headers):
             headers.append(_google_header("host", host))
         scheme = getattr(request, "scheme", None)
         if not isinstance(scheme, str) or not scheme:
@@ -79,8 +75,7 @@ class GoogleFunctionAdapter:
         }
         response = self._driver.invoke(scope, body)
         response_headers = [
-            (name.decode("latin-1"), value.decode("latin-1"))
-            for name, value in response.headers
+            (name.decode("latin-1"), value.decode("latin-1")) for name, value in response.headers
         ]
         return response.body, response.status, response_headers
 
@@ -110,12 +105,8 @@ def azure_function_app(
             "azure_function_app requires the optional 'azure-functions' package; "
             "install azure-functions in the deployment environment"
         ) from exc
-    return adapter(
-        app=app, http_auth_level=http_auth_level, function_name=function_name
-    )
+    return adapter(app=app, http_auth_level=http_auth_level, function_name=function_name)
 
 
 def _google_header(name: Any, value: Any) -> tuple[bytes, bytes]:
-    return _encode_http_header(
-        name, value, owner="Google HTTP", error_type=TypeError
-    )
+    return _encode_http_header(name, value, owner="Google HTTP", error_type=TypeError)

@@ -1,5 +1,3 @@
-"""Native packed schema images and deterministic merge diff."""
-
 from __future__ import annotations
 
 import hashlib
@@ -94,9 +92,7 @@ def data_row(object_id: int, parent_id: int, kind: int, signature: int) -> memor
     return memoryview(payload)
 
 
-def named_data_row(
-    schema: str, table: str, name: str, kind: int, signature: int
-) -> memoryview:
+def named_data_row(schema: str, table: str, name: str, kind: int, signature: int) -> memoryview:
     fields = (
         schema.encode(),
         table.encode(),
@@ -154,7 +150,10 @@ def test_registry_intent_compiles_to_the_same_native_name_and_signature_image() 
     tape = native._FieldTape(5)
     for schema, table, name, kind, signature in rows:
         fields = (
-            schema.encode(), table.encode(), name.encode(), struct.pack("!i", kind),
+            schema.encode(),
+            table.encode(),
+            name.encode(),
+            struct.pack("!i", kind),
             signature.encode(),
         )
         payload = bytearray(struct.pack("!H", len(fields)))
@@ -162,7 +161,8 @@ def test_registry_intent_compiles_to_the_same_native_name_and_signature_image() 
             payload += struct.pack("!I", len(field)) + field
         tape.append(memoryview(payload), 5)
     plan = native._compile_decoder_plan(
-        (25, 25, 25, 23, 25), (1, 1, 1, 1, 1),
+        (25, 25, 25, 23, 25),
+        (1, 1, 1, 1, 1),
         ("schema", "table", "name", "kind", "signature"),
     )
     builder = native._migration_catalog_builder()
@@ -341,26 +341,16 @@ def test_registry_plan_uses_column_names_for_reviewable_constraints() -> None:
 
     class Entry(Model, table="entries", schema="app"):
         id: Mapped[int] = column(Int64, primary_key=True)
-        account_id: Mapped[int] = column(
-            Int64, references=Account.id, index=True
-        )
+        account_id: Mapped[int] = column(Int64, references=Account.id, index=True)
 
     class Database:
         name = "main"
 
     registry = Registry(Database(), [Account, Entry], validate_schema="off")
-    plan = native._migration_plan_descriptors(
-        _registry_descriptor(registry), descriptor()
-    )
+    plan = native._migration_plan_descriptors(_registry_descriptor(registry), descriptor())
     planned = named_operations(plan)
-    constraint_names = {
-        operation[4]
-        for operation in planned
-        if operation[1] == CONSTRAINT
-    }
-    index_names = {
-        operation[4] for operation in planned if operation[1] == 4
-    }
+    constraint_names = {operation[4] for operation in planned if operation[1] == CONSTRAINT}
+    index_names = {operation[4] for operation in planned if operation[1] == 4}
 
     assert constraint_names == {
         "p:id:::",
@@ -369,8 +359,7 @@ def test_registry_plan_uses_column_names_for_reviewable_constraints() -> None:
     }
     assert index_names == {"i:account_id"}
     assert any(
-        sql
-        == 'create index "wreath_ea3fbb435d8399de" on "app"."entries" ("account_id");'
+        sql == 'create index "wreath_ea3fbb435d8399de" on "app"."entries" ("account_id");'
         for _flags, sql in sql_statements(native._migration_render_sql(plan))
     )
 
@@ -431,9 +420,7 @@ def test_native_sql_tape_renders_supported_column_alterations() -> None:
     desired = descriptor(
         ("app", "widgets", "name", COLUMN, "column\x1f25\x1f\x1f1\x1f\x1f\x1f'new'")
     )
-    actual = descriptor(
-        ("app", "widgets", "name", COLUMN, "column\x1f20\x1f\x1f0\x1f\x1f\x1f")
-    )
+    actual = descriptor(("app", "widgets", "name", COLUMN, "column\x1f20\x1f\x1f0\x1f\x1f\x1f"))
     plan = native._migration_plan_descriptors(desired, actual)
 
     assert sql_statements(native._migration_render_sql(plan)) == [
@@ -470,9 +457,7 @@ def test_native_ddl_block_refuses_manual_and_unapproved_destructive_work() -> No
     drop_sql = native._migration_render_sql(drop_plan)
     with pytest.raises(PermissionError, match="operation 1 is destructive"):
         native._migration_build_ddl_block(drop_sql, False)
-    assert 'drop table "app"."widgets";' in native._migration_build_ddl_block(
-        drop_sql, True
-    )
+    assert 'drop table "app"."widgets";' in native._migration_build_ddl_block(drop_sql, True)
 
     alter_plan = native._migration_plan_descriptors(
         descriptor(("app", "widgets", "id", COLUMN, "new")),
@@ -514,7 +499,10 @@ async def test_single_detection_returns_bounded_native_fingerprints_and_diff() -
             tape = native._FieldTape(5)
             for schema, table, name, kind, signature in rows:
                 fields = (
-                    schema.encode(), table.encode(), name.encode(), struct.pack("!i", kind),
+                    schema.encode(),
+                    table.encode(),
+                    name.encode(),
+                    struct.pack("!i", kind),
                     signature.encode(),
                 )
                 payload = bytearray(struct.pack("!H", 5))
@@ -522,7 +510,8 @@ async def test_single_detection_returns_bounded_native_fingerprints_and_diff() -
                     payload += struct.pack("!I", len(field)) + field
                 tape.append(memoryview(payload), 5)
             plan = native._compile_decoder_plan(
-                (25, 25, 25, 23, 25), (1, 1, 1, 1, 1),
+                (25, 25, 25, 23, 25),
+                (1, 1, 1, 1, 1),
                 ("schema", "table", "name", "kind", "signature"),
             )
             native._migration_decode_catalog(plan, tape, builder, 256)

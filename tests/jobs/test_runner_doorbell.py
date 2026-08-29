@@ -1,21 +1,3 @@
-"""The job runner's doorbell survives losing its LISTEN connection.
-
-`JobRunner` holds one connection for the life of the process so a `NOTIFY` on
-its queue channel wakes parked workers immediately instead of at the next poll.
-Correctness never depends on that notification arriving -- the workers also poll
--- so the failure is quiet by construction: lose the connection and the runner
-degrades to `poll_interval` latency, forever, with nothing to notice.
-
-The driver's `notifications()` iterator *ends* when the connection closes rather
-than raising, so a loop wrapped in `suppress(Exception)` returns having caught
-nothing at all. And wrapping the startup acquire in the same suppress meant a
-database that was down at boot left the process with no doorbell for its entire
-lifetime, not merely a degraded one.
-
-This mirrors `tests/messaging/test_doorbell_reconnect.py`, whose bus had the
-identical defect one tier up.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -172,16 +154,7 @@ async def _started(database: FakeDatabase) -> tuple[JobRunner, RunningSupervisor
     return runner, supervisor
 
 
-# --- the finding --------------------------------------------------------------
-
-
 async def test_a_dropped_listen_connection_comes_back() -> None:
-    """Drop the doorbell's connection and the runner takes another one.
-
-    Before the reconnect loop, `notifications()` simply ended, `_doorbell`
-    returned, and nothing ever spawned it again -- so every later NOTIFY was
-    lost and workers fell back to polling for the life of the process.
-    """
     database = FakeDatabase()
     runner, supervisor = await _started(database)
     try:
@@ -202,7 +175,6 @@ async def test_a_dropped_listen_connection_comes_back() -> None:
 
 
 async def test_a_reconnect_wakes_workers_again() -> None:
-    """The point of the doorbell: a NOTIFY on the new connection still wakes."""
     database = FakeDatabase()
     runner, supervisor = await _started(database)
     try:
@@ -224,7 +196,6 @@ async def test_a_reconnect_wakes_workers_again() -> None:
 
 
 async def test_the_outage_is_countable() -> None:
-    """A silent degradation is the complaint; a counter is the minimum answer."""
     database = FakeDatabase()
     runner, supervisor = await _started(database)
     try:
@@ -236,12 +207,6 @@ async def test_the_outage_is_countable() -> None:
 
 
 async def test_a_database_down_at_boot_still_gets_a_doorbell() -> None:
-    """The worse half: `start()` suppressed the acquire too.
-
-    Spawning the loop only on a successful connect meant a runner that came up
-    against a database that was down had no doorbell *at all*, for the entire
-    life of the process -- not a degraded one that recovers.
-    """
     database = FakeDatabase()
     database.acquire_error = ConnectionError("database is down")
     runner = JobRunner(database, name="events", concurrency=1)
@@ -259,11 +224,7 @@ async def test_a_database_down_at_boot_still_gets_a_doorbell() -> None:
         await supervisor.stop(runner)
 
 
-# --- the things a reconnect loop breaks ---------------------------------------
-
-
 async def test_a_clean_stop_during_backoff_does_not_hang() -> None:
-    """Shutdown must win a race with a pending reconnect sleep."""
     database = FakeDatabase()
     database.acquire_error = ConnectionError("database is down")
     runner = JobRunner(database, name="events", concurrency=1)
@@ -279,7 +240,6 @@ async def test_a_clean_stop_during_backoff_does_not_hang() -> None:
 
 
 async def test_a_clean_drain_releases_without_reconnecting() -> None:
-    """Shutdown closing the connection is not an outage."""
     database = FakeDatabase()
     runner, supervisor = await _started(database)
     assert await _until(lambda: len(database.listeners) >= 1)
@@ -293,14 +253,10 @@ async def test_a_clean_drain_releases_without_reconnecting() -> None:
     assert len(database.listeners) == 1, "the doorbell reopened on the way out"
 
 
-# --- the backoff ---------------------------------------------------------------
-
-
 def test_the_reconnect_backoff_grows_and_is_bounded() -> None:
-    """A database that is genuinely down must not become a reconnect storm."""
     delays = [_doorbell_delay(attempt) for attempt in range(1, 12)]
-    assert delays[0] < 0.2                          # a blip recovers immediately
-    assert delays[3] > delays[0]                    # ... and a real outage backs off
-    assert max(delays) <= 6.0                       # cap 5.0 + 20% jitter
+    assert delays[0] < 0.2  # a blip recovers immediately
+    assert delays[3] > delays[0]  # ... and a real outage backs off
+    assert max(delays) <= 6.0  # cap 5.0 + 20% jitter
     # Jittered, so a fleet of runners does not retry in lockstep.
     assert len({_doorbell_delay(9) for _ in range(20)}) > 1

@@ -25,6 +25,7 @@ from wreath.policy import (
     SecurityHeadersPolicy,
 )
 from wreath.response import Response, StreamingResponse
+from wreath.templates import Template
 from wreath.testing import TestClient
 
 
@@ -80,9 +81,7 @@ async def test_prepared_compression_ladder_is_dcz_fragment_then_format_gzip() ->
     first_member.decompress(fragment.body)
     assert first_member.unused_data.startswith(b"\x1f\x8b")
 
-    prepared_body = policy._gzip_fragment_body(
-        "application/json", prefix, suffix
-    )
+    prepared_body = policy._gzip_fragment_body("application/json", prefix, suffix)
     assert type(prepared_body) is bytes
     assert prepared_body == document
     prepared = Response(prepared_body, media_type=b"application/json")
@@ -121,6 +120,25 @@ async def test_prepared_compression_ladder_is_dcz_fragment_then_format_gzip() ->
     await policy.after(request(b":wrong:", b"dcz"), unavailable_only)
     assert b"content-encoding" not in dict(unavailable_only.headers)
     assert unavailable_only.body == document
+
+
+def test_prepared_fragment_can_render_dynamic_prefix_into_final_body() -> None:
+    template = Template.from_string("<h1>{{ title }}</h1>")
+    prefix = b"<h1>Wreath &amp; Co</h1>"
+    stable = b"<main>stable</main>"
+    policy = CompressionPolicy(minimum_size=0)
+    policy._configure_gzip_fragment(
+        "html",
+        prefix + stable,
+        prefix_bytes=len(prefix),
+        suffix_bytes=0,
+    )
+
+    body = policy._gzip_fragment_render(
+        "html", template, {"title": "Wreath & Co"}
+    )
+
+    assert body == prefix + stable
 
 
 @pytest.mark.asyncio
@@ -209,12 +227,6 @@ async def test_zstd_is_served_to_a_client_that_names_it() -> None:
 
 @pytest.mark.asyncio
 async def test_bare_wildcard_still_means_gzip_not_zstd() -> None:
-    """A client sending `*` and no list is likelier old than new.
-
-    RFC 9110 would let `*` stand for consent to zstd, but a client with no zstd
-    decoder would receive a body it cannot read and report it as corruption, not
-    as a negotiation failure. So the wildcard keeps meaning gzip.
-    """
     app = Wreath()
     app.configure_http_policy(HttpPolicy(compression=CompressionPolicy(minimum_size=16)))
 
@@ -244,12 +256,6 @@ async def test_client_preference_for_gzip_is_honoured_over_zstd() -> None:
 
 @pytest.mark.asyncio
 async def test_each_coding_gets_its_own_etag() -> None:
-    """Two encodings of one resource must never share a tag.
-
-    A shared cache keys on `Vary: Accept-Encoding`, and an origin that returned
-    one tag for both bodies is a cache one revalidation away from handing a zstd
-    body to a gzip-only client.
-    """
     app = Wreath()
     app.configure_http_policy(HttpPolicy(compression=CompressionPolicy(minimum_size=16)))
 
@@ -355,13 +361,6 @@ async def test_no_transform_and_incompressible_types_refuse_zstd_too() -> None:
 
 @pytest.mark.asyncio
 async def test_the_etag_suffix_lands_on_the_etag_and_not_a_neighbour() -> None:
-    """`wreath mutant` found the header scan's `name == b"etag"` test unasserted.
-
-    Forcing that comparison always-true rewrites whichever header comes *first* --
-    `content-type`, in practice -- with the encoded tag, and the existing tests
-    still passed because none of them looked at the other headers afterwards. The
-    result would be a response whose content type is a quoted ETag.
-    """
     app = Wreath()
     app.configure_http_policy(HttpPolicy(compression=CompressionPolicy(minimum_size=16)))
 
@@ -385,16 +384,6 @@ async def test_the_etag_suffix_lands_on_the_etag_and_not_a_neighbour() -> None:
 
 @pytest.mark.asyncio
 async def test_a_file_response_is_served_uncompressed(tmp_path) -> None:
-    """`FileResponse` is not a `Response` and not a `StreamingResponse`.
-
-    It falls to its own branch and is returned untouched, because the body only
-    exists as a file descriptor read while the response is being sent -- there
-    is nothing in memory to compress and no generator to wrap. The branch that
-    *does* wrap a generator is guarded by an `isinstance` check that nothing had
-    ever made answer False while `compress_streaming` was on, so deleting it
-    left every file served through this policy going into
-    `_compressed_stream`.
-    """
     from wreath.response import FileResponse
 
     served = tmp_path / "notes.txt"
@@ -419,14 +408,6 @@ async def test_a_file_response_is_served_uncompressed(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_compress_streaming_off_leaves_a_streaming_response_alone() -> None:
-    """The option is the second half of that branch, and it was never off.
-
-    Streaming compression trades a smaller transfer for a body whose length is
-    no longer known, which is a decision a deployment makes -- behind a proxy
-    that buffers, or in front of a client that needs `content-length`, the
-    answer is no. Every test set `compress_streaming` to its default of `True`,
-    so the clause could be deleted and the option would silently stop existing.
-    """
 
     async def source():
         yield b"chunk" * 500

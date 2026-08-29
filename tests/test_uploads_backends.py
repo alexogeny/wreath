@@ -1,10 +1,3 @@
-"""Upload state stores, assembly backends, admission, and the sweeper.
-
-`test_uploads_protocol.py` drives the wire; this drives the pieces underneath
-it — where in-progress state lives, how each backend assembles parts, what is
-refused before the first byte, and what reclaims an upload nobody finished.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -50,18 +43,9 @@ def _state(**kw) -> UploadState:
     return UploadState(**{**base, **kw})
 
 
-# --- the conditional advance ---------------------------------------------
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("factory", ["memory", "object"])
 async def test_advance_refuses_when_the_offset_moved_underneath(factory: str) -> None:
-    """The whole point of `advance` being conditional rather than a write.
-
-    Two appends racing on one upload both read offset 0. The first wins; the
-    second must lose, or it rewinds the offset and the next append lands in a
-    hole.
-    """
     objects = MemoryObjectStore()
     store = MemoryUploadStore() if factory == "memory" else ObjectUploadStore(objects)
     await store.create(_state())
@@ -80,12 +64,6 @@ async def test_advance_refuses_when_the_offset_moved_underneath(factory: str) ->
 @pytest.mark.asyncio
 @pytest.mark.parametrize("factory", ["memory", "object"])
 async def test_a_store_hands_out_independent_copies(factory: str) -> None:
-    """Mutating what `read` returned must not land in the store early.
-
-    Sharing the instance made the conditional advance compare the new offset
-    against itself, so every append was refused with 409 — a store that looks
-    correct in isolation and rejects everything in use.
-    """
     objects = MemoryObjectStore()
     store = MemoryUploadStore() if factory == "memory" else ObjectUploadStore(objects)
     await store.create(_state())
@@ -109,7 +87,6 @@ async def test_creating_the_same_upload_twice_is_refused() -> None:
 
 @pytest.mark.asyncio
 async def test_object_store_records_survive_a_second_worker() -> None:
-    """The reason `ObjectUploadStore` exists: resume on a worker that did not create."""
     objects = MemoryObjectStore()
     worker_a = resumable(objects, uploads=ObjectUploadStore(objects))
     worker_b = resumable(objects, uploads=ObjectUploadStore(objects))
@@ -119,9 +96,7 @@ async def test_object_store_records_survive_a_second_worker() -> None:
     app_b.include_router(worker_b.router("/uploads"))
 
     async with TestClient(app_a) as a, TestClient(app_b) as b:
-        created = await a.post(
-            "/uploads", headers={"upload-complete": "?0"}, content=b"half"
-        )
+        created = await a.post("/uploads", headers={"upload-complete": "?0"}, content=b"half")
         location = _location(created)
 
         resumed = await b.head(location)
@@ -141,20 +116,14 @@ async def test_object_store_records_survive_a_second_worker() -> None:
 
 @pytest.mark.asyncio
 async def test_memory_store_fails_closed_on_a_second_worker() -> None:
-    """Documented limitation, asserted so it stays a 404 and not a corruption."""
     objects = MemoryObjectStore()
     app_a, app_b = Wreath(), Wreath()
     app_a.include_router(resumable(objects).router("/uploads"))
     app_b.include_router(resumable(objects).router("/uploads"))
 
     async with TestClient(app_a) as a, TestClient(app_b) as b:
-        created = await a.post(
-            "/uploads", headers={"upload-complete": "?0"}, content=b"half"
-        )
+        created = await a.post("/uploads", headers={"upload-complete": "?0"}, content=b"half")
         assert (await b.head(_location(created))).status == 404
-
-
-# --- the in-flight guard --------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -165,9 +134,7 @@ async def test_a_second_append_in_flight_is_refused_not_interleaved() -> None:
     app.include_router(uploads.router("/uploads"))
 
     async with TestClient(app) as client:
-        created = await client.post(
-            "/uploads", headers={"upload-complete": "?0"}, content=b"ab"
-        )
+        created = await client.post("/uploads", headers={"upload-complete": "?0"}, content=b"ab")
         location = _location(created)
         upload_id = location.rsplit("/", 1)[-1]
 
@@ -187,16 +154,13 @@ async def test_a_second_append_in_flight_is_refused_not_interleaved() -> None:
 
 @pytest.mark.asyncio
 async def test_concurrent_appends_do_not_both_land() -> None:
-    """Two real requests at once: one 204, one 409, and the object is intact."""
     objects = MemoryObjectStore()
     uploads = resumable(objects)
     app = Wreath()
     app.include_router(uploads.router("/uploads"))
 
     async with TestClient(app) as client:
-        location = _location(
-            await client.post("/uploads", headers={"upload-complete": "?0"})
-        )
+        location = _location(await client.post("/uploads", headers={"upload-complete": "?0"}))
         both = await asyncio.gather(
             client.patch(
                 location,
@@ -214,12 +178,8 @@ async def test_concurrent_appends_do_not_both_land() -> None:
     assert statuses == [204, 409]
 
 
-# --- admission ------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_the_quota_predicate_refuses_before_the_bytes() -> None:
-    """The seam a metering subsystem fills, checked at the only useful moment."""
     seen: list[int | None] = []
 
     async def quota(request, declared):
@@ -245,14 +205,11 @@ async def test_key_for_chooses_the_final_object_key() -> None:
     objects = MemoryObjectStore()
     app = Wreath()
     app.include_router(
-        resumable(objects, key_for=lambda request, upload_id: "fixed/name.bin")
-        .router("/uploads")
+        resumable(objects, key_for=lambda request, upload_id: "fixed/name.bin").router("/uploads")
     )
 
     async with TestClient(app) as client:
-        await client.post(
-            "/uploads", headers={"upload-complete": "?1"}, content=b"payload"
-        )
+        await client.post("/uploads", headers={"upload-complete": "?1"}, content=b"payload")
 
     assert await objects.read("fixed/name.bin") == b"payload"
 
@@ -283,9 +240,7 @@ async def test_completion_enqueues_one_durable_job_keyed_by_the_upload() -> None
     )
 
     async with TestClient(app) as client:
-        created = await client.post(
-            "/uploads", headers={"upload-complete": "?1"}, content=b"done"
-        )
+        created = await client.post("/uploads", headers={"upload-complete": "?1"}, content=b"done")
         upload_id = _location(created).rsplit("/", 1)[-1]
 
     assert len(calls) == 1
@@ -316,9 +271,6 @@ async def test_an_incomplete_upload_enqueues_nothing() -> None:
     assert calls == []
 
 
-# --- sniffing -------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("prefix", "expected"),
     [
@@ -340,7 +292,6 @@ def test_sniff_recognises_only_unambiguous_signatures(prefix: bytes, expected) -
 
 @pytest.mark.asyncio
 async def test_a_declared_type_the_bytes_contradict_is_refused() -> None:
-    """The lie that matters: HTML served back from your origin as an image."""
     objects = MemoryObjectStore()
     app = Wreath()
     app.include_router(resumable(objects).router("/uploads"))
@@ -363,9 +314,7 @@ async def test_the_sniffed_type_is_what_gets_stored() -> None:
     app.include_router(resumable(objects).router("/uploads"))
 
     async with TestClient(app) as client:
-        await client.post(
-            "/uploads", headers={"upload-complete": "?1"}, content=PNG
-        )
+        await client.post("/uploads", headers={"upload-complete": "?1"}, content=PNG)
 
     key = [s.key async for s in objects.list(prefix="uploads/")][0]
     assert (await objects.stat(key)).content_type == "image/png"
@@ -385,9 +334,6 @@ async def test_sniffing_can_be_turned_off() -> None:
         )
 
     assert response.status == 201
-
-
-# --- the sweeper ----------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -425,7 +371,6 @@ def _much_later() -> float:
 
 @pytest.mark.asyncio
 async def test_sweep_counts_an_abort_it_could_not_finish() -> None:
-    """A sweeper that gives up silently leaves a bill nobody sees."""
 
     class BrokenStore(MemoryObjectStore):
         async def delete(self, key: str) -> None:
@@ -437,9 +382,7 @@ async def test_sweep_counts_an_abort_it_could_not_finish() -> None:
     app.include_router(uploads.router("/uploads"))
 
     async with TestClient(app) as client:
-        await client.post(
-            "/uploads", headers={"upload-complete": "?0"}, content=b"abandoned"
-        )
+        await client.post("/uploads", headers={"upload-complete": "?0"}, content=b"abandoned")
 
     assert await uploads.sweep(now=_much_later()) == 0
     assert uploads.aborted_uploads == 1
@@ -453,9 +396,7 @@ async def test_refused_appends_are_counted() -> None:
     app.include_router(uploads.router("/uploads"))
 
     async with TestClient(app) as client:
-        location = _location(
-            await client.post("/uploads", headers={"upload-complete": "?0"})
-        )
+        location = _location(await client.post("/uploads", headers={"upload-complete": "?0"}))
         await client.patch(
             location,
             headers={**PART, "upload-offset": "42", "upload-complete": "?1"},
@@ -463,9 +404,6 @@ async def test_refused_appends_are_counted() -> None:
         )
 
     assert uploads.refused_appends == 1
-
-
-# --- the S3 assembly backend ---------------------------------------------
 
 
 class FakeResp:
@@ -494,8 +432,13 @@ class FakeClient:
 def _s3(handler, **kw) -> tuple[S3ObjectStore, FakeClient]:
     client = FakeClient(handler)
     store = S3ObjectStore(
-        client, bucket="b", region="us-east-1", access_key="AKIAEXAMPLE",
-        secret_key="secretkey", host="b.s3.us-east-1.amazonaws.com", **kw,
+        client,
+        bucket="b",
+        region="us-east-1",
+        access_key="AKIAEXAMPLE",
+        secret_key="secretkey",
+        host="b.s3.us-east-1.amazonaws.com",
+        **kw,
     )
     return store, client
 
@@ -534,7 +477,6 @@ def _floor(store) -> int:
 
 
 def test_the_s3_backend_advertises_its_own_part_floor() -> None:
-    """5 MiB is S3's rule, so it is advertised rather than hidden."""
     store, _ = _s3(_s3_handler, part_size=8 * 1024 * 1024)
     uploads = resumable(store)
     assert uploads.limits.min_append_size == store._part_size
@@ -554,9 +496,7 @@ async def test_s3_assembly_uses_multipart_and_transfers_nothing_at_completion() 
     first, last = b"A" * _floor(store), b"tail"
 
     async with TestClient(app) as http:
-        created = await http.post(
-            "/uploads", headers={"upload-complete": "?0"}, content=first
-        )
+        created = await http.post("/uploads", headers={"upload-complete": "?0"}, content=first)
         location = _location(created)
         finished = await http.patch(
             location,
@@ -566,14 +506,13 @@ async def test_s3_assembly_uses_multipart_and_transfers_nothing_at_completion() 
         assert finished.status == 204
 
     methods = [(method, "partNumber" in target) for method, target, _ in client.calls]
-    assert ("POST", False) in methods            # initiate
-    assert methods.count(("PUT", True)) == 2     # one part per append
+    assert ("POST", False) in methods  # initiate
+    assert methods.count(("PUT", True)) == 2  # one part per append
     parts = [body for _, target, body in client.calls if "partNumber" in target]
     assert parts == [first, last]
     # Completion is one call carrying only the part manifest: no bytes move.
     completes = [
-        body for method, target, body in client.calls
-        if method == "POST" and "uploadId" in target
+        body for method, target, body in client.calls if method == "POST" and "uploadId" in target
     ]
     assert len(completes) == 1
     assert len(completes[0]) < 512
@@ -581,7 +520,6 @@ async def test_s3_assembly_uses_multipart_and_transfers_nothing_at_completion() 
 
 @pytest.mark.asyncio
 async def test_a_short_non_final_append_is_refused_by_the_s3_floor() -> None:
-    """The advertised floor is enforced, not merely advertised."""
     store, client = _s3(_s3_handler)
     app = Wreath()
     app.include_router(resumable(store).router("/uploads"))
@@ -592,7 +530,7 @@ async def test_a_short_non_final_append_is_refused_by_the_s3_floor() -> None:
         )
 
     assert response.status == 400
-    assert client.calls == []   # refused before a byte reached the bucket
+    assert client.calls == []  # refused before a byte reached the bucket
 
 
 @pytest.mark.asyncio
@@ -608,8 +546,7 @@ async def test_cancelling_an_s3_upload_aborts_the_multipart() -> None:
         assert (await http.delete(_location(created))).status == 204
 
     aborts = [
-        target for method, target, _ in client.calls
-        if method == "DELETE" and "uploadId" in target
+        target for method, target, _ in client.calls if method == "DELETE" and "uploadId" in target
     ]
     assert len(aborts) == 1
     assert store.orphaned_uploads == 0
@@ -617,7 +554,6 @@ async def test_cancelling_an_s3_upload_aborts_the_multipart() -> None:
 
 @pytest.mark.asyncio
 async def test_an_empty_s3_upload_is_a_plain_put() -> None:
-    """S3 refuses a completion with no parts, so zero bytes is a `PUT`."""
     store, client = _s3(_s3_handler)
     app = Wreath()
     app.include_router(resumable(store).router("/uploads"))

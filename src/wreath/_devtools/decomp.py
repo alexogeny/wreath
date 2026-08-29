@@ -45,9 +45,7 @@ def _build_stage_app(*, auth: bool, policy: bool, orm: bool) -> Any:
     from .sample_app import TracedPost, TracedUser, _Authorizer, _ScriptedDatabase
 
     database = _ScriptedDatabase()
-    database.connection.script(
-        "users", [[1, "a@b.c", "A", datetime.datetime(2024, 1, 1)]]
-    )
+    database.connection.script("users", [[1, "a@b.c", "A", datetime.datetime(2024, 1, 1)]])
     registry = Registry(database, [TracedUser, TracedPost], validate_schema="off")
 
     async def verify(token: str) -> Identity | None:
@@ -68,9 +66,7 @@ def _build_stage_app(*, auth: bool, policy: bool, orm: bool) -> Any:
             session = Session(registry, "read")
             try:
                 user = await session.fetch_one(
-                    TracedUser.select().where(
-                        TracedUser.id == int(request.path_params["user_id"])
-                    )
+                    TracedUser.select().where(TracedUser.id == int(request.path_params["user_id"]))
                 )
                 return {"id": user.id, "email": user.email, "name": user.name}
             finally:
@@ -138,9 +134,7 @@ def suite_orm(rounds: int, iterations: int) -> dict[str, Any]:
 
     print("\n== inside one ORM read (scripted database, no I/O) ==\n")
     database = _ScriptedDatabase()
-    database.connection.script(
-        "users", [[1, "a@b.c", "A", datetime.datetime(2024, 1, 1)]]
-    )
+    database.connection.script("users", [[1, "a@b.c", "A", datetime.datetime(2024, 1, 1)]])
     registry = Registry(database, [TracedUser, TracedPost], validate_schema="off")
     prebuilt = TracedUser.select().where(TracedUser.id == 1)
 
@@ -176,9 +170,7 @@ def suite_orm(rounds: int, iterations: int) -> dict[str, Any]:
             for _ in range(n):
                 session = Session(registry, "read")
                 try:
-                    await session.fetch_one(
-                        TracedUser.select().where(TracedUser.id == 1)
-                    )
+                    await session.fetch_one(TracedUser.select().where(TracedUser.id == 1))
                 finally:
                     await session.close()
 
@@ -278,22 +270,23 @@ def suite_calibrate(rounds: int, iterations: int) -> dict[str, Any]:
     measure_callables(arms, rounds=rounds, iterations=100_000)
     medians = {arm.label: arm.median for arm in arms}
     floor = abs(medians["await (never suspends)"] - medians["await (A/A)"])
-    await_cost = (
-        medians["await (never suspends)"] - medians["guarded sync call"]
-    ) * 1000
+    await_cost = (medians["await (never suspends)"] - medians["guarded sync call"]) * 1000
     print(f"  await (never suspends)   {medians['await (never suspends)'] * 1000:7.1f} ns")
     print(f"  guarded sync call        {medians['guarded sync call'] * 1000:7.1f} ns")
     print(f"  A/A floor                {floor * 1000:7.1f} ns")
     print(f"\n  a non-suspending await costs {await_cost:.1f} ns more than a sync call")
-    print(f"  14 hook calls/request (7 middleware x before+after) -> "
-          f"{14 * await_cost / 1000:.2f} us")
+    print(
+        f"  14 hook calls/request (7 middleware x before+after) -> {14 * await_cost / 1000:.2f} us"
+    )
 
     frame_ns = _calibrate_frames(rounds, iterations)
     print(f"\n  slope = {frame_ns:.1f} ns per Python frame")
-    print(f"  a fix removing 11 frames is worth ~{11 * frame_ns / 1000:.2f} us -- "
-          "usually below\n  a single A/B's floor, and still real. Track those with "
-          "`wreath-request-trace`,\n  whose counts are exact, and re-measure time once "
-          "several have landed.")
+    print(
+        f"  a fix removing 11 frames is worth ~{11 * frame_ns / 1000:.2f} us -- "
+        "usually below\n  a single A/B's floor, and still real. Track those with "
+        "`wreath-request-trace`,\n  whose counts are exact, and re-measure time once "
+        "several have landed."
+    )
     return {
         "ns_per_await": round(await_cost, 2),
         "ns_per_frame": round(frame_ns, 2),
@@ -306,6 +299,7 @@ def _frame_chain(depth: int) -> Any:
 
     current = leaf
     for _ in range(depth):
+
         def step(value: int, _previous: Any = current) -> int:
             return _previous(value)
 

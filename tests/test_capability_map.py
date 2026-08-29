@@ -1,5 +1,3 @@
-"""Mutation boundaries for the shared bounded capability owner."""
-
 from wreath._capability_map import CapabilityMap
 
 

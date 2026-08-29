@@ -1,29 +1,3 @@
-"""No native parser may mutate interpreter-global state.
-
-The anchored tests in `test_native_parity.py` compare what the C and the stdlib
-implementations *return*. That is a true assertion with a real subject, and it
-still could not see the defect this file exists for: `multipart.c` copied each
-part-header name into a `PyBytes` and lowercased it in place, and for a
-length-1 name `PyBytes_FromStringAndSize` hands back the interpreter's immortal
-single-character singleton rather than a fresh allocation. A part header of
-`A: v` rewrote `b"A"` to `b"a"` for the life of the process -- for every user of
-that object, in every library. Both implementations returned `b"a"`, so parity
-held while the interpreter was being corrupted underneath it.
-
-The divergence was never in the return value. It was in what the native path
-did on the way, so the guard here observes the interpreter itself rather than
-the result.
-
-Two traps are worth stating, because both make a check that cannot fail:
-
-* **Snapshot contents, not objects.** `before = bytes([c])` stores the very
-  singleton the parser is about to corrupt, and comparing it to itself succeeds
-  however wrong it has become. The snapshot must be a copy that does not share
-  storage -- `bytes(bytearray([c]))`.
-* **Assert the parser ran.** A guard around a call that raised before touching
-  anything passes for the wrong reason, so each case asserts its own outcome.
-"""
-
 from __future__ import annotations
 
 import json as stdlib_json
@@ -36,8 +10,6 @@ from wreath._native import _core
 native = pytest.mark.skipif(_core is None, reason="native extension not built")
 
 
-# --- the guard ------------------------------------------------------------
-#
 # CPython caches, and shares process-wide, the single-character `bytes` objects
 # and the small `int` objects. They are the reachable interpreter-global state a
 # parser can plausibly write through, because they are what the C API returns
@@ -101,17 +73,8 @@ def assert_no_interpreter_mutation(label: str, call: Callable[[], object]) -> ob
     return result
 
 
-# --- the regression this was built for ------------------------------------
-
-
 @native
 def test_a_one_letter_multipart_header_name_does_not_corrupt_bytes() -> None:
-    """The S1, at the parser boundary.
-
-    Every uppercase letter, so a partial fix that happens to spare `A` is still
-    red. `b"Q"` is asserted by name because the failure is easier to read than a
-    256-entry diff.
-    """
     headers = b"".join(bytes([c]) + b": v\r\n" for c in range(ord("A"), ord("Z") + 1))
     body = b"--b\r\n" + headers + b"\r\nx\r\n--b--\r\n"
 
@@ -134,12 +97,6 @@ def test_a_one_letter_multipart_header_name_does_not_corrupt_bytes() -> None:
 @native
 @pytest.mark.asyncio
 async def test_an_ordinary_upload_route_cannot_corrupt_the_interpreter() -> None:
-    """End to end, because that is how it was reachable.
-
-    Nothing exotic is required: a route that calls `request.form()` and a body
-    whose part headers are one letter each. The request succeeds and logs
-    nothing, which is what made this worth an S1 rather than a crash report.
-    """
     from wreath import Wreath
     from wreath.testing import TestClient
 
@@ -153,9 +110,7 @@ async def test_an_ordinary_upload_route_cannot_corrupt_the_interpreter() -> None
 
     letters = b"".join(bytes([c]) + b": v\r\n" for c in range(ord("A"), ord("Z") + 1))
     body = (
-        b"--boundary123\r\n"
-        + letters
-        + b'Content-Disposition: form-data; name="title"\r\n\r\n'
+        b"--boundary123\r\n" + letters + b'Content-Disposition: form-data; name="title"\r\n\r\n'
         b"hello\r\n"
         b"--boundary123--\r\n"
     )
@@ -176,14 +131,11 @@ async def test_an_ordinary_upload_route_cannot_corrupt_the_interpreter() -> None
 
 @native
 def test_multipart_still_lowercases_the_names_it_no_longer_mutates() -> None:
-    """The fix must not have bought safety by dropping the behaviour."""
-    body = b"--b\r\nContent-Disposition: form-data; name=\"f\"\r\nX-A: 1\r\n\r\nv\r\n--b--\r\n"
+    body = b'--b\r\nContent-Disposition: form-data; name="f"\r\nX-A: 1\r\n\r\nv\r\n--b--\r\n'
     names = [name for name, _ in _core.multipart_parse(body, b"b")[0][0]]
     assert names == [b"content-disposition", b"x-a"]
 
 
-# --- the class, across every native entry point that parses attacker bytes --
-#
 # Ordered by how directly the input is attacker-controlled. Size is deliberately
 # not the ordering: the 227-line multipart parser held the S1 while the 655-line
 # HPACK decoder was read in full and found clean.
@@ -198,15 +150,11 @@ _HOSTILE_HEADERS = b"".join(letter + b": v\r\n" for letter in _ONE_LETTER)
     [
         (
             "http_parse_request",
-            lambda: _core.http_parse_request(
-                b"GET / HTTP/1.1\r\n" + _HOSTILE_HEADERS + b"\r\n"
-            ),
+            lambda: _core.http_parse_request(b"GET / HTTP/1.1\r\n" + _HOSTILE_HEADERS + b"\r\n"),
         ),
         (
             "http_parse_response",
-            lambda: _core.http_parse_response(
-                b"HTTP/1.1 200 OK\r\n" + _HOSTILE_HEADERS + b"\r\n"
-            ),
+            lambda: _core.http_parse_response(b"HTTP/1.1 200 OK\r\n" + _HOSTILE_HEADERS + b"\r\n"),
         ),
         (
             "build_header_map",
@@ -246,9 +194,7 @@ _HOSTILE_HEADERS = b"".join(letter + b": v\r\n" for letter in _ONE_LETTER)
         ),
         (
             "ws_parse_frame",
-            lambda: _core.ws_parse_frame(
-                bytes([0x81, 0x81]) + b"\x00\x00\x00\x00" + b"A"
-            ),
+            lambda: _core.ws_parse_frame(bytes([0x81, 0x81]) + b"\x00\x00\x00\x00" + b"A"),
         ),
         (
             "ws_build_frame",
@@ -297,17 +243,6 @@ _HOSTILE_HEADERS = b"".join(letter + b": v\r\n" for letter in _ONE_LETTER)
     ],
 )
 def test_no_native_parser_mutates_interpreter_state(label, call) -> None:
-    """Every reachable native entry point that builds objects from raw bytes.
-
-    Each case feeds input engineered to produce length-1 results -- one-letter
-    header names, single-character keys and values, one-byte payloads -- because
-    that is the only length at which the singleton is returned instead of a
-    fresh allocation. A case that never produces a one-byte object proves
-    nothing, which is why the inputs look the way they do.
-
-    A parser that refuses its input is fine; the assertion is that the
-    interpreter is unchanged either way.
-    """
 
     def invoke() -> object:
         try:
@@ -320,18 +255,6 @@ def test_no_native_parser_mutates_interpreter_state(label, call) -> None:
 
 @native
 def test_the_guard_can_see_a_real_corruption() -> None:
-    """The guard's own red-before-green, kept permanently.
-
-    Every other case here passes when nothing is wrong, which is also what they
-    do when the helper has quietly stopped observing anything -- and the first
-    draft of `_singleton_violations` did exactly that, sampling a value it
-    rebuilt from scratch instead of the cache. So this drives a genuine
-    corruption through the C API and asserts the helper notices.
-
-    `ctypes` writes into the singleton's buffer the same way the defective
-    parser did, then puts it back. Nothing else in the process observes the
-    window, and the restore is asserted.
-    """
     import ctypes
 
     target = ord("A")

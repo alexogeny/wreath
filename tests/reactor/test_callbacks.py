@@ -1,7 +1,3 @@
-"""call_soon / call_soon_threadsafe ordering, handles, cancellation.
-
-RED until the native reactor exists. Oracle: stock asyncio.
-"""
 from __future__ import annotations
 
 import asyncio

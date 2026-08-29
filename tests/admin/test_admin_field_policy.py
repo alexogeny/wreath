@@ -1,11 +1,3 @@
-"""Per-field authorization, asserted at the **data** boundary.
-
-The plan is explicit about why: asserting that a withheld value is not
-*rendered* passes whichever branch fired, including a template that happened not
-to draw it. These tests capture the render context instead, so a value that
-reaches the template at all is a failure even if no page would have shown it.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -75,7 +67,8 @@ async def test_a_withheld_field_never_reaches_the_detail_context(
     monkeypatch.setattr("wreath._admin.registry.DETAIL_TEMPLATE", capture)
     session = FakeSession({1: _account(account_model)})
     handlers = _admin(
-        account_model, session,
+        account_model,
+        session,
         field_access={"email": FieldAccess(read="read_contact")},
     )
 
@@ -90,12 +83,12 @@ async def test_a_withheld_field_never_reaches_the_detail_context(
 async def test_a_permitted_field_does_reach_the_detail_context(
     account_model: type, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The falsifier for the test above: it must be able to go the other way."""
     capture = Capture()
     monkeypatch.setattr("wreath._admin.registry.DETAIL_TEMPLATE", capture)
     session = FakeSession({1: _account(account_model)})
     handlers = _admin(
-        account_model, session,
+        account_model,
+        session,
         field_access={"email": FieldAccess(read="read_contact")},
     )
 
@@ -112,7 +105,8 @@ async def test_a_withheld_field_never_reaches_the_list_context(
     monkeypatch.setattr("wreath._admin.registry.LIST_TEMPLATE", capture)
     session = FakeSession({1: _account(account_model)})
     handlers = _admin(
-        account_model, session,
+        account_model,
+        session,
         field_access={"email": FieldAccess(read="read_contact")},
     )
 
@@ -124,12 +118,12 @@ async def test_a_withheld_field_never_reaches_the_list_context(
 async def test_an_unreadable_field_is_absent_from_the_edit_form(
     account_model: type, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Unreadable implies unwritable: no control, and no value read for one."""
     capture = Capture()
     monkeypatch.setattr("wreath._admin.registry.FORM_TEMPLATE", capture)
     session = FakeSession({1: _account(account_model)})
     handlers = _admin(
-        account_model, session,
+        account_model,
+        session,
         field_access={"email": FieldAccess(read="read_contact", write="edit_contact")},
     )
 
@@ -139,7 +133,7 @@ async def test_an_unreadable_field_is_absent_from_the_edit_form(
     names = {field["name"] for field in capture.contexts[0]["fields"]}
     assert "email" not in names
     assert _SECRET not in capture.values()
-    assert "name" in names          # ungated columns are unaffected
+    assert "name" in names  # ungated columns are unaffected
 
 
 async def test_a_readable_but_unwritable_field_is_shown_and_not_editable(
@@ -150,7 +144,8 @@ async def test_a_readable_but_unwritable_field_is_shown_and_not_editable(
     monkeypatch.setattr("wreath._admin.registry.FORM_TEMPLATE", form)
     session = FakeSession({1: _account(account_model)})
     handlers = _admin(
-        account_model, session,
+        account_model,
+        session,
         field_access={"email": FieldAccess(write="edit_contact")},
     )
     authorizer = Authorizer()
@@ -166,14 +161,12 @@ async def test_a_readable_but_unwritable_field_is_shown_and_not_editable(
     assert "email" not in {field["name"] for field in form.contexts[0]["fields"]}
 
 
-async def test_an_unwritable_field_submitted_anyway_is_dropped(
-    account_model: type
-) -> None:
-    """The control that matters: the form is a suggestion, the filter is not."""
+async def test_an_unwritable_field_submitted_anyway_is_dropped(account_model: type) -> None:
     account = _account(account_model)
     session = FakeSession({1: account})
     handlers = _admin(
-        account_model, session,
+        account_model,
+        session,
         field_access={"email": FieldAccess(write="edit_contact")},
     )
 
@@ -192,12 +185,12 @@ async def test_an_unwritable_field_submitted_anyway_is_dropped(
 async def test_no_authorizer_withholds_every_declared_field(
     account_model: type, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A declared rule and nobody to evaluate it is a question, not a permit."""
     capture = Capture()
     monkeypatch.setattr("wreath._admin.registry.DETAIL_TEMPLATE", capture)
     session = FakeSession({1: _account(account_model)})
     handlers = _admin(
-        account_model, session,
+        account_model,
+        session,
         field_access={"email": FieldAccess(read="read_contact")},
     )
 
@@ -205,16 +198,12 @@ async def test_no_authorizer_withholds_every_declared_field(
     await handlers[("GET", "/admin/account/{pk}")](request)
 
     assert _SECRET not in capture.values()
-    assert "Ada" in capture.values()     # ungated columns still render
+    assert "Ada" in capture.values()  # ungated columns still render
 
 
 async def test_the_readable_and_writable_caches_do_not_share_a_slot(
     account_model: type, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The detail view asks about every shown column and the form asks about the
-    editable ones. Both are "read" resolutions over *different* column tuples, so
-    a cache keyed on `(admin, mode)` alone would let the first answer for the
-    second -- and the second would be a set computed over the wrong names."""
     from wreath._admin.fields import resolve_readable, resolve_writable
 
     session = FakeSession({1: _account(account_model)})
@@ -230,12 +219,20 @@ async def test_the_readable_and_writable_caches_do_not_share_a_slot(
     request = Request(authorizer=Authorizer("read_contact"))
 
     writable = await resolve_writable(
-        request, Authorizer("read_contact"), entry.field_access,
-        entry.editable, entry.resource, id(entry),
+        request,
+        Authorizer("read_contact"),
+        entry.field_access,
+        entry.editable,
+        entry.resource,
+        id(entry),
     )
     readable = await resolve_readable(
-        request, Authorizer("read_contact"), entry.field_access,
-        entry.columns, entry.resource, id(entry),
+        request,
+        Authorizer("read_contact"),
+        entry.field_access,
+        entry.columns,
+        entry.resource,
+        id(entry),
     )
 
     # `id` is shown and not editable, so the two sets must differ. Sharing a
@@ -245,16 +242,16 @@ async def test_the_readable_and_writable_caches_do_not_share_a_slot(
     assert readable >= writable
 
 
-async def test_one_authorization_call_per_action_per_request(
-    account_model: type
-) -> None:
-    """A list page must not ask `rows x fields` times for an answer it has."""
-    rows = {n: account_model(id=n, name=f"n{n}", email=f"e{n}", note=None, active=True)
-            for n in range(1, 11)}
+async def test_one_authorization_call_per_action_per_request(account_model: type) -> None:
+    rows = {
+        n: account_model(id=n, name=f"n{n}", email=f"e{n}", note=None, active=True)
+        for n in range(1, 11)
+    }
     session = FakeSession(rows)
     authorizer = Authorizer("read_contact")
     handlers = _admin(
-        account_model, session,
+        account_model,
+        session,
         field_access={
             "email": FieldAccess(read="read_contact"),
             "note": FieldAccess(read="read_contact"),

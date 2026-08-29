@@ -1,12 +1,3 @@
-"""A tool's `inputSchema` and the same handler's OpenAPI schema must agree.
-
-Their agreeing is what justifies reusing the binding layer instead of writing a
-second one. The two renderings differ in exactly one respect -- where
-a dataclass definition lives, `#/$defs/...` for a standalone JSON Schema against
-`#/components/schemas/...` for an OpenAPI document -- and every assertion here
-pins that difference so a future change to either renderer breaks loudly.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -106,9 +97,7 @@ def test_an_optional_scalar_is_a_union_with_null() -> None:
         return {}
 
     schema = tool_schema(search, name="search")
-    assert schema["properties"]["needle"] == {
-        "anyOf": [{"type": "string"}, {"type": "null"}]
-    }
+    assert schema["properties"]["needle"] == {"anyOf": [{"type": "string"}, {"type": "null"}]}
     assert "required" not in schema
 
 

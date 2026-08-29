@@ -1,6 +1,3 @@
-"""Worker survival, channel naming, and bus trust (report 23: R-13, R-14, R-18,
-R-20, R-26, R-27)."""
-
 from __future__ import annotations
 
 import asyncio
@@ -66,8 +63,14 @@ class TestWorkerSurvivesAnOutcomeFailure:
 
     async def test_a_job_worker_survives(self):
         row = {
-            "id": 1, "task": "t", "args": [], "tenant": "", "attempts": 0,
-            "max_attempts": 3, "fence": 1, "dedup_key": None,
+            "id": 1,
+            "task": "t",
+            "args": [],
+            "tenant": "",
+            "attempts": 0,
+            "max_attempts": 3,
+            "fence": 1,
+            "dedup_key": None,
         }
         database = _FailingCompletion(row)
         runner = JobRunner(database, name="work", poll_interval=0.01)
@@ -83,7 +86,7 @@ class TestWorkerSurvivesAnOutcomeFailure:
             supervisor.stopping.set()
 
         async with asyncio.timeout(2):
-            await runner._worker()      # must return, not raise
+            await runner._worker()  # must return, not raise
         assert ran == 1
 
     async def test_a_message_consumer_survives(self):
@@ -161,17 +164,11 @@ class TestBusBridgeTrust:
         return BusBridge(_Bus(), channel="c", apply=apply)
 
     async def test_an_untagged_payload_is_delivered_but_counted(self):
-        """R-13 is a *deliberate* trade-off, not a defect: delivering an
-        untagged payload is the shipped decision (see
-        `tests/test_busbridge.py::test_a_payload_with_no_origin_is_treated_as_foreign`).
-        What was missing is that a publisher which is not a bridge -- anything
-        with NOTIFY rights on the database -- drove invalidations, broadcasts,
-        and progress writes invisibly. It is now counted."""
         applied: list = []
         bridge = self._bridge(applied)
 
         class _Message:
-            payload = {"models": ["User"]}      # no origin tag
+            payload = {"models": ["User"]}  # no origin tag
 
         await bridge._receive(_Message())
         assert applied == [{"models": ["User"]}]

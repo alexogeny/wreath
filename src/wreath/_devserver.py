@@ -47,8 +47,10 @@ class ChildProcess(Protocol):
 
 
 def _pattern_matches(relative: str, name: str, patterns: Sequence[str]) -> bool:
-    return any(fnmatch.fnmatchcase(name, pattern) or fnmatch.fnmatchcase(relative, pattern)
-               for pattern in patterns)
+    return any(
+        fnmatch.fnmatchcase(name, pattern) or fnmatch.fnmatchcase(relative, pattern)
+        for pattern in patterns
+    )
 
 
 def _excluded_directory(relative: str, name: str, patterns: Sequence[str]) -> bool:
@@ -75,9 +77,7 @@ def _walk_files(
             continue
         with entries:
             for entry in entries:
-                relative = (
-                    f"{relative_parent}/{entry.name}" if relative_parent else entry.name
-                )
+                relative = f"{relative_parent}/{entry.name}" if relative_parent else entry.name
                 try:
                     if entry.is_symlink():
                         continue
@@ -239,13 +239,11 @@ def supervise(options: RunOptions) -> None:
         nonlocal stopping
         stopping = True
 
-    previous_handlers: dict[
-        int, Callable[[int, FrameType | None], object] | int | None
-    ] = {}
+    previous_handlers: dict[int, Callable[[int, FrameType | None], object] | int | None] = {}
     for signum in (signal.SIGINT, signal.SIGTERM):
         try:
             previous_handlers[signum] = signal.signal(signum, request_stop)
-        except (OSError, ValueError):
+        except OSError, ValueError:
             pass
 
     print(

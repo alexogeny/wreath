@@ -1,11 +1,3 @@
-"""The native HS verifier against `hmac.digest`, for every algorithm.
-
-`jose_verify_hs` answers HS256 from a cached key schedule (`hmac_sha256.h`) and
-HS384/HS512 through `hmac.digest`, because those use a 128-byte HMAC block that
-the cache does not model. Two arms verifying JWTs is a place for them to
-disagree, so these hold both to the same oracle rather than to each other.
-"""
-
 from __future__ import annotations
 
 import hmac
@@ -54,19 +46,12 @@ def test_a_signature_over_other_input_is_refused(digestmod: str, _size: int) -> 
     [b"", b"k", b"k" * 63, b"k" * 64, b"k" * 65, b"k" * 300, bytes(range(256))],
 )
 def test_hs256_agrees_with_hmac_for_any_key_length(key: bytes) -> None:
-    """The cached path's two branches: a key over the block, and one under it."""
     signature = hmac.digest(key, SIGNING_INPUT, "sha256")
 
     assert _verify()("sha256", key, SIGNING_INPUT, signature) is True
 
 
 def test_switching_keys_does_not_reuse_the_previous_schedule() -> None:
-    """The one failure mode caching the key schedule can introduce.
-
-    Interleaved and repeated: a cache that is merely stale survives a single
-    alternation, and a JWT verifier that accepts the wrong key is the worst
-    defect this file could miss.
-    """
     keys = [b"a" * 32, b"b" * 32, b"a" * 32, b"c" * 200, b"b" * 32, b"a" * 32]
 
     for key in keys:
@@ -77,7 +62,6 @@ def test_switching_keys_does_not_reuse_the_previous_schedule() -> None:
 
 
 def test_an_hs384_signature_does_not_verify_as_hs256() -> None:
-    """Algorithm confusion, across the seam between the two arms."""
     key = b"k" * 32
     signature = hmac.digest(key, SIGNING_INPUT, "sha384")
 

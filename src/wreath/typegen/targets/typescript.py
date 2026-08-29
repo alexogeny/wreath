@@ -26,9 +26,7 @@ def _camel(text: str) -> str:
     if not parts:
         return text
     head = parts[0]
-    return head[:1].lower() + head[1:] + "".join(
-        part[:1].upper() + part[1:] for part in parts[1:]
-    )
+    return head[:1].lower() + head[1:] + "".join(part[:1].upper() + part[1:] for part in parts[1:])
 
 
 def _tuplize(ref: TypeRef) -> tuple[Any, ...]:
@@ -42,8 +40,13 @@ def _param_interface_name(operation: Operation) -> str:
 def _client_params(operation: Operation) -> list[tuple[str, str, str, tuple[Any, ...], bool]]:
     # Cookies are server-managed for browser targets; excluded from the client.
     return [
-        (_camel(param.python_name), param.wire_name, param.location, _tuplize(param.type),
-         param.required)
+        (
+            _camel(param.python_name),
+            param.wire_name,
+            param.location,
+            _tuplize(param.type),
+            param.required,
+        )
         for param in operation.parameters
         if param.location in ("path", "query", "header")
     ]
@@ -107,9 +110,7 @@ def _permissions_module(api: ApiModel) -> str:
     for entry in api.permissions:
         resource = _pascal(entry.resource_type)
         union = " | ".join(f'"{action}"' for action in entry.actions)
-        flags = "\n".join(
-            f"  {permission_flag(action)}: boolean;" for action in entry.actions
-        )
+        flags = "\n".join(f"  {permission_flag(action)}: boolean;" for action in entry.actions)
         lines.append(
             f"export type {resource}Action = {union};\n\n"
             f"export interface {resource}Permissions {{\n{flags}\n}}\n\n"
@@ -174,8 +175,8 @@ def _permissions_hook_module() -> str:
     return (
         GENERATOR_HEADER
         + '\nimport { useQuery } from "@tanstack/react-query";\n'
-        + 'import {\n  fetchPermissions,\n  type PermissionMap,\n'
-        + "  type PermissionResource,\n} from \"./permissions\";\n\n"
+        + "import {\n  fetchPermissions,\n  type PermissionMap,\n"
+        + '  type PermissionResource,\n} from "./permissions";\n\n'
         + "/**\n"
         + " * What the signed-in caller may do to these rows, from the same Cedar\n"
         + " * policies the server enforces. There is no second copy of the rules.\n"
@@ -191,7 +192,7 @@ def _permissions_hook_module() -> str:
         + "    enabled: ids.length > 0,\n"
         + "  });\n"
         + "}\n\n"
-        + "/** The single-row form: `const { canEdit } = usePermission(url, \"Llama\", id);` */\n"
+        + '/** The single-row form: `const { canEdit } = usePermission(url, "Llama", id);` */\n'
         + "export function usePermission<R extends PermissionResource>(\n"
         + "  baseUrl: string,\n"
         + "  resource: R,\n"
@@ -285,7 +286,7 @@ def _series_module(api: ApiModel) -> str:
         "export interface SeriesSegment {\n"
         "  start: Instant;\n"
         "  end: Instant;\n"
-        "  /** `\"raw\"`, or the bucket name of the tier that served it. */\n"
+        '  /** `"raw"`, or the bucket name of the tier that served it. */\n'
         "  grain: string;\n"
         "}\n\n"
         "export interface AggregateRow<M extends string = string> {\n"
@@ -310,9 +311,7 @@ def _series_declaration(shape: Any) -> str:
     out = [f"/** Measures declared on `{shape.name}`. */\n"]
     out.append(f"export type {base}Measure = {names};\n\n")
     if shape.form == "aggregate":
-        out.append(
-            f"export type {base}Result = AggregateResult<{base}Measure>;\n\n"
-        )
+        out.append(f"export type {base}Result = AggregateResult<{base}Measure>;\n\n")
         return "".join(out)
 
     # A measure that fills has no nulls in its values; one that does not (an
@@ -321,9 +320,7 @@ def _series_declaration(shape: Any) -> str:
     arms = []
     for measure in shape.measures:
         cell = "number" if measure.fills else "number | null"
-        arms.append(
-            f'  | (SeriesData<{cell}> & {{ measure: "{measure.name}" }})'
-        )
+        arms.append(f'  | (SeriesData<{cell}> & {{ measure: "{measure.name}" }})')
     out.append(f"export type {base}Series =\n" + "\n".join(arms) + ";\n\n")
     detail = [f"bucket `{shape.bucket}`"]
     if shape.grouped:
@@ -359,7 +356,7 @@ def _index_module(
         lines.append(
             f"\nexport const defaultBaseUrl: string =\n"
             f"  (import.meta as unknown as {{ env?: Record<string, string> }}).env?."
-            f"{base_url_env} ?? \"\";\n"
+            f'{base_url_env} ?? "";\n'
         )
     return "".join(lines)
 
@@ -378,21 +375,21 @@ def _react_query_module(api: ApiModel) -> str:
     import_names = ",\n  ".join(names)
     lines = [
         GENERATOR_HEADER,
-        "\nimport { createContext, useContext } from \"react\";\n",
+        '\nimport { createContext, useContext } from "react";\n',
         "import {\n  useQuery,\n  useMutation,\n"
         "  type UseQueryOptions,\n  type UseMutationOptions,\n"
-        "} from \"@tanstack/react-query\";\n",
-        "import { WreathClient, WreathApiError } from \"./client\";\n",
+        '} from "@tanstack/react-query";\n',
+        'import { WreathClient, WreathApiError } from "./client";\n',
     ]
     if names:
-        lines.append(f"import type {{\n  {import_names},\n}} from \"./models\";\n")
+        lines.append(f'import type {{\n  {import_names},\n}} from "./models";\n')
     lines.append(
         "\nconst WreathClientContext = createContext<WreathClient | null>(null);\n"
         "export const WreathClientProvider = WreathClientContext.Provider;\n\n"
         "export function useWreathClient(): WreathClient {\n"
         "  const client = useContext(WreathClientContext);\n"
         "  if (client === null) {\n"
-        "    throw new Error(\"WreathClientProvider is missing from the tree\");\n"
+        '    throw new Error("WreathClientProvider is missing from the tree");\n'
         "  }\n"
         "  return client;\n"
         "}\n"
@@ -421,8 +418,7 @@ def _react_hook(operation: Operation, ts_type: Any) -> str:
     call_args = "parameters" if has_params else ""
     if is_query:
         args.append(
-            f'options?: Omit<UseQueryOptions<{response}, WreathApiError>, '
-            f'"queryKey" | "queryFn">'
+            f'options?: Omit<UseQueryOptions<{response}, WreathApiError>, "queryKey" | "queryFn">'
         )
         signature = ", ".join(args)
         return (
@@ -442,8 +438,7 @@ def _react_hook(operation: Operation, ts_type: Any) -> str:
     if body_ref is not None:
         call = (call_args + ", variables") if call_args else "variables"
     args.append(
-        f'options?: Omit<UseMutationOptions<{response}, WreathApiError, {var_type}>, '
-        f'"mutationFn">'
+        f'options?: Omit<UseMutationOptions<{response}, WreathApiError, {var_type}>, "mutationFn">'
     )
     signature = ", ".join(args)
     variables_param = "variables" if body_ref is not None else "_variables"

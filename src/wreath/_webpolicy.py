@@ -56,6 +56,7 @@ def normalize_origin(value: str, *, label: str) -> bytes:
     authority = host if port is None or port == default else f"{host}:{port}"
     return f"{scheme}://{authority}".encode("ascii")
 
+
 NO_TRANSFORM = _core.NO_TRANSFORM
 NO_STORE = _core.NO_STORE
 PRIVATE = _core.PRIVATE

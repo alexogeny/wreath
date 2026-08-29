@@ -69,9 +69,7 @@ def bearer_challenge(
         ("scope", scope),
         ("resource_metadata", resource_metadata),
     )
-    rendered = [
-        f"{name}={_quote(value)}" for name, value in parameters if value is not None
-    ]
+    rendered = [f"{name}={_quote(value)}" for name, value in parameters if value is not None]
     if rendered:
         parts.append(", ".join(rendered).encode("latin-1"))
     return b" ".join(parts)

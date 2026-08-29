@@ -1,10 +1,3 @@
-"""A target for `wreath doctor preflight`, loaded through the CLI by name.
-
-Deliberately ordinary: one public route and one settings model whose key nothing
-supplies. The CLI has to import a real module path, so this cannot be built
-inside the test that uses it.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass

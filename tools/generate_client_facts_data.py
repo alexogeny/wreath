@@ -232,24 +232,26 @@ def _ranges(path: Path, *, bits: int) -> list[Range]:
             start_text, end_text, country = row
             try:
                 family = socket.AF_INET if bits == 32 else socket.AF_INET6
-                start = int.from_bytes(socket.inet_pton(
-                    family,
-                    start_text,
-                ), "big")
-                end = int.from_bytes(socket.inet_pton(
-                    family,
-                    end_text,
-                ), "big")
+                start = int.from_bytes(
+                    socket.inet_pton(
+                        family,
+                        start_text,
+                    ),
+                    "big",
+                )
+                end = int.from_bytes(
+                    socket.inet_pton(
+                        family,
+                        end_text,
+                    ),
+                    "big",
+                )
             except OSError as exc:
-                raise ValueError(
-                    f"{path}:{line} needs valid IPv{bits} range endpoints"
-                ) from exc
+                raise ValueError(f"{path}:{line} needs valid IPv{bits} range endpoints") from exc
             if start > end:
                 raise ValueError(f"{path}:{line} range start exceeds its end")
             if len(country) != 2 or not country.isascii() or not country.isupper():
-                raise ValueError(
-                    f"{path}:{line} country must be two uppercase ASCII letters"
-                )
+                raise ValueError(f"{path}:{line} country must be two uppercase ASCII letters")
             rows.append((start, end, country))
     rows.sort()
     previous_end = -1
@@ -276,9 +278,9 @@ def _encode_geo(v4: set[Range], v6: set[Range]) -> bytes:
     if len(countries) > 255:
         raise ValueError("compact GeoIP format supports at most 255 countries")
     country_index = {country: index for index, country in enumerate(countries)}
-    encoded = bytearray(struct.pack(
-        "<4sBHH", b"WGD2", len(countries), len(ordered_v4), len(ordered_v6)
-    ))
+    encoded = bytearray(
+        struct.pack("<4sBHH", b"WGD2", len(countries), len(ordered_v4), len(ordered_v6))
+    )
     encoded.extend("".join(countries).encode("ascii"))
     previous_end = -1
     for start, end, country in ordered_v4:
@@ -300,11 +302,13 @@ def _encode_geo(v4: set[Range], v6: set[Range]) -> bytes:
 def build_geo(ipv4: Path, ipv6: Path) -> bytes:
     rows_v4 = _ranges(ipv4, bits=32)
     low_mask = (1 << 64) - 1
-    rows_v6 = [row for row in _ranges(ipv6, bits=128)
-               if row[0] & low_mask == 0 and row[1] & low_mask == low_mask]
+    rows_v6 = [
+        row
+        for row in _ranges(ipv6, bits=128)
+        if row[0] & low_mask == 0 and row[1] & low_mask == low_mask
+    ]
 
-    ranked_v6 = sorted(rows_v6, key=lambda row: (row[1] - row[0], row),
-                       reverse=True)
+    ranked_v6 = sorted(rows_v6, key=lambda row: (row[1] - row[0], row), reverse=True)
     chosen_v6: set[Range] = set()
     for row in ranked_v6:
         candidate = {*chosen_v6, row}
@@ -319,8 +323,7 @@ def build_geo(ipv4: Path, ipv6: Path) -> bytes:
         if previous is None or row[1] - row[0] > previous[1] - previous[0]:
             largest_per_country[country] = row
     chosen_v4 = set(largest_per_country.values())
-    ranked_v4 = sorted(rows_v4, key=lambda row: (row[1] - row[0], row),
-                       reverse=True)
+    ranked_v4 = sorted(rows_v4, key=lambda row: (row[1] - row[0], row), reverse=True)
     for row in ranked_v4:
         if row in chosen_v4:
             continue
@@ -331,9 +334,7 @@ def build_geo(ipv4: Path, ipv6: Path) -> bytes:
             break
     image = _encode_geo(chosen_v4, chosen_v6)
     if len(image) > MAX_GEO_BYTES:
-        raise ValueError(
-            f"Geo database is {len(image)} bytes; maximum is {MAX_GEO_BYTES}"
-        )
+        raise ValueError(f"Geo database is {len(image)} bytes; maximum is {MAX_GEO_BYTES}")
     return image
 
 
@@ -355,16 +356,16 @@ def build_ua() -> bytes:
         flags = mobile_bits | (4 if bot else 0)
         encoded.extend((len(raw),))
         encoded.extend(raw)
-        encoded.extend((
-            255 if browser is None else index[browser],
-            255 if platform is None else index[platform],
-            flags,
-            priority,
-        ))
-    if len(encoded) > MAX_UA_BYTES:
-        raise ValueError(
-            f"UA database is {len(encoded)} bytes; maximum is {MAX_UA_BYTES}"
+        encoded.extend(
+            (
+                255 if browser is None else index[browser],
+                255 if platform is None else index[platform],
+                flags,
+                priority,
+            )
         )
+    if len(encoded) > MAX_UA_BYTES:
+        raise ValueError(f"UA database is {len(encoded)} bytes; maximum is {MAX_UA_BYTES}")
     return bytes(encoded)
 
 

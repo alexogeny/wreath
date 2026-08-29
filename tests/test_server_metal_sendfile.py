@@ -1,19 +1,3 @@
-"""A file response leaves the metal tier over a real socket.
-
-`FileResponse` -- and so every route served by `wreath.staticfiles` -- hands the
-descriptor to `loop.sendfile`. asyncio decides how to send it by reading
-`_sendfile_compatible` off the transport, defaults that to *unsupported*, and
-raises rather than falling back. The native C transport is not one of asyncio's
-own, carried no such attribute, and every file response on `--loop metal` died
-with `RuntimeError: sendfile is not supported for transport ...` while the same
-route worked on every other tier.
-
-Nothing caught it because no test had ever put a file response and the metal
-loop in the same process: the file suites run on the default loop, and the
-metal suites serve JSON. This one crosses them, and asserts the bytes arrive
-rather than merely that nothing raised -- the failure mode was a 0-byte
-response, which an exception-only assertion would have called a pass.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -59,9 +43,7 @@ def _app(path: str) -> Wreath:
 
 async def _request(port: int, target: str) -> bytes:
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
-    writer.write(
-        f"GET {target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".encode()
-    )
+    writer.write(f"GET {target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".encode())
     await writer.drain()
     try:
         return await asyncio.wait_for(reader.read(-1), 5)
@@ -94,7 +76,6 @@ def sample(tmp_path):
 
 
 def test_file_response_over_metal(sample):
-    """The regression: the body arrives, not just the head."""
     response = _run_on(_metal_loop_or_skip(), sample, "/file")
     head, _, body = response.partition(b"\r\n\r\n")
     assert head.startswith(b"HTTP/1.1 200 OK"), response[:200]
@@ -111,25 +92,18 @@ def _comparable(response: bytes) -> tuple[list[bytes], bytes]:
     """
     head, _, body = response.partition(b"\r\n\r\n")
     lines = [
-        line for line in head.split(b"\r\n")
-        if not line.lower().startswith((b"date:", b"server:"))
+        line for line in head.split(b"\r\n") if not line.lower().startswith((b"date:", b"server:"))
     ]
     return lines, body
 
 
 def test_file_response_matches_the_default_loop(sample):
-    """Metal and stock send the same response.
-
-    Sending the file is the tier's job; what is sent is not, so any difference
-    between the two is a defect in the tier by definition.
-    """
     metal = _run_on(_metal_loop_or_skip(), sample, "/file")
     stock = _run_on(asyncio.new_event_loop(), sample, "/file")
     assert _comparable(metal) == _comparable(stock)
 
 
 def test_metal_still_serves_an_ordinary_response(sample):
-    """The sendfile path must not have disturbed the common one."""
     response = _run_on(_metal_loop_or_skip(), sample, "/json")
     assert response.startswith(b"HTTP/1.1 200 OK")
     assert response.endswith(b'{"ok":true}')

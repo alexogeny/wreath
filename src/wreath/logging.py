@@ -44,21 +44,8 @@ if DENIED:              # only where a benchmark says it pays
 Formatting is deferred: the record holds arguments, the registry holds the
 template, and `render` puts them together off the request path.
 
-**Published and request-buffered records are packed in C.** `wreath_nfr_log`
-writes a published record straight into a ring cell; a request buffer owns its
-held cells in native memory and materializes them only when the request promotes
-them. The Python packer remains for sinks without a ring and callers outside the
-loop. Which is which, and why, is written once: the head of the log-record section in
-`wreath._flight_schema`, immediately above `Severity`.
-`docs/plans/first-class-logging.md` is the longer form, with the measurements.
-
-Measured on CPython 3.14, 2026-07-28 (`benchmarks/bench_logging.py`; medians,
-interleaved arms, A/A floor): a two-argument `SITE(a, b)` costs **0.42us**
-against structlog's 2.59us and stdlib's 2.85-3.88us, and a *disabled*
-`DEBUG(...)` costs **0.07us**. Current instruction measurements for the
-request-owned buffer live with the performance report rather than this module.
-
-See `docs/guides/observability.md` and `docs/reference/logging.md`.
+Published and request-buffered records are packed in C. The Python packer
+remains for sinks without a ring and callers outside the loop.
 """
 
 from __future__ import annotations
@@ -183,9 +170,7 @@ Sink = Callable[[LogCell], None]
 #: dropped_siblings, specs, values, k0, k1) -> int`, where the returned int is
 #: `(type_mismatches << 1) | published`. Two answers in one int because the
 #: alternative is a tuple allocation on the request path.
-NativeEmitter = Callable[
-    [int, int, int, int, int, bytes, tuple[object, ...], int, int], int
-]
+NativeEmitter = Callable[[int, int, int, int, int, bytes, tuple[object, ...], int, int], int]
 
 
 class LogRuntime:
@@ -421,7 +406,6 @@ def testing_runtime(
         install(previous)
 
 
-
 #: The current request's log buffer, bound only inside `request_scope`. Read
 #: with `.get(None)`: a record outside a request pays one ContextVar lookup and
 #: a predicted branch, which is the same shape `_flight_markers` uses for phase
@@ -645,9 +629,7 @@ def request_scope(
     inert, never a leak and never a late publication.
     """
     runtime = _RUNTIME
-    buffer = RequestLogBuffer(
-        request_id, budget if budget is not None else runtime.scratch_budget
-    )
+    buffer = RequestLogBuffer(request_id, budget if budget is not None else runtime.scratch_budget)
     scope = RequestScope(buffer, field_budget)
     token = _SCRATCH.set(buffer)
     scope_token = _SCOPE.set(scope)
@@ -791,12 +773,8 @@ def begin_request(
     runtime = _RUNTIME
     if runtime.sink is None:
         return None
-    buffer = RequestLogBuffer(
-        request_id, budget if budget is not None else runtime.scratch_budget
-    )
-    scope = RequestScope(
-        buffer, field_budget if field_budget is not None else DEFAULT_FIELD_BUDGET
-    )
+    buffer = RequestLogBuffer(request_id, budget if budget is not None else runtime.scratch_budget)
+    scope = RequestScope(buffer, field_budget if field_budget is not None else DEFAULT_FIELD_BUDGET)
     _SCRATCH.set(buffer)
     _SCOPE.set(scope)
     return scope
@@ -854,9 +832,7 @@ def finish_request(*, promoted: bool) -> int:
     return scope.finish(promoted=promoted)
 
 
-def field(
-    name: str, type_: type, disposition: CaptureDisposition | None = None
-) -> LogField:
+def field(name: str, type_: type, disposition: CaptureDisposition | None = None) -> LogField:
     """Declare one argument of a call site.
 
     The declaration carries the name, the type, and the redaction disposition
@@ -929,9 +905,7 @@ class LogEvent:
                 k1,
             )
             return
-        if runtime.publish(
-            self.site, 0 if buffer is None else buffer.request_id, severity, args
-        ):
+        if runtime.publish(self.site, 0 if buffer is None else buffer.request_id, severity, args):
             # Packed straight into a ring cell in C.
             return
         packed: list[LogArg] = []
@@ -1110,7 +1084,7 @@ class StdlibBridge(_stdlib.Handler):
         severity = severity_from_stdlib(record.levelno)
         try:
             message = record.getMessage()
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             # A caller's own %-args are malformed. Their bug, not a reason to
             # lose the record: keep the template and say what happened.
             message = f"{record.msg!r} (unformattable args)"

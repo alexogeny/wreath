@@ -1,5 +1,3 @@
-"""The workflow-step reader distinguishes an empty clean file from a tear."""
-
 from __future__ import annotations
 
 import pytest

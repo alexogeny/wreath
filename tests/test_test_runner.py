@@ -1,10 +1,3 @@
-"""The pytest-compatible activity grid, including a real nested run.
-
-The subprocess test contains a deliberate failing test.  The outer assertion
-expects exit code 1 and a red outcome in the JSON report, which falsifies the
-reporting path rather than trusting a pretty all-green fixture.
-"""
-
 from __future__ import annotations
 
 import io
@@ -131,14 +124,14 @@ def test_duration_report_practical_tail_boundaries_are_inclusive() -> None:
 
 def test_render_is_a_stable_file_state_map_with_duration_statistics() -> None:
     activity = runner.RunActivity(workers=1)
-    activity.collect((
-        "tests/a/test_alpha.py::test_a",
-        "tests/b/test_beta.py::test_b",
-    ))
-    activity.start_test("tests/a/test_alpha.py::test_a")
-    activity.add_report(
-        _report("tests/a/test_alpha.py::test_a", "passed", "call", 0.25)
+    activity.collect(
+        (
+            "tests/a/test_alpha.py::test_a",
+            "tests/b/test_beta.py::test_b",
+        )
     )
+    activity.start_test("tests/a/test_alpha.py::test_a")
+    activity.add_report(_report("tests/a/test_alpha.py::test_a", "passed", "call", 0.25))
     activity.finish_test("tests/a/test_alpha.py::test_a")
 
     text = runner.render_activity(
@@ -387,8 +380,7 @@ def test_mutation_report_does_not_blame_candidate_files_for_a_survivor() -> None
 def test_mutation_event_stream_moves_only_killers_to_verified(tmp_path: Path) -> None:
     path = tmp_path / "events.jsonl"
     path.write_text(
-        '{"event":"planned","total":2}\n'
-        '{"event":"started","tests":["tests/test_policy.py"]}\n',
+        '{"event":"planned","total":2}\n{"event":"started","tests":["tests/test_policy.py"]}\n',
         encoding="utf-8",
     )
     state = runner._MutationEventState()
@@ -432,10 +424,7 @@ def test_mutation_event_stream_keeps_every_parallel_mutant_purple(
     assert (state.test_workers, state.mutant_workers) == (5, 3)
 
     with path.open("a", encoding="utf-8") as stream:
-        stream.write(
-            '{"event":"finished","ordinal":1,"outcome":"survived",'
-            '"killers":[]}\n'
-        )
+        stream.write('{"event":"finished","ordinal":1,"outcome":"survived","killers":[]}\n')
     runner._consume_mutation_events(path, state)
 
     assert state.mutating_files == set()
@@ -502,8 +491,8 @@ def test_session_finish_distinguishes_no_green_from_mutation_disabled() -> None:
     no_green_calls: list[str] = []
     no_green.renderer.defer = lambda: no_green_calls.append("defer")
     no_green.renderer.finish = lambda: no_green_calls.append("finish")
-    no_green.renderer.finish_with_mutation = (
-        lambda mutation: no_green_calls.append(f"mutation:{mutation.state}")
+    no_green.renderer.finish_with_mutation = lambda mutation: no_green_calls.append(
+        f"mutation:{mutation.state}"
     )
 
     no_green.pytest_sessionfinish(None, 1)
@@ -526,9 +515,7 @@ def test_session_finish_distinguishes_no_green_from_mutation_disabled() -> None:
     disabled_calls: list[str] = []
     disabled.renderer.defer = lambda: disabled_calls.append("defer")
     disabled.renderer.finish = lambda: disabled_calls.append("finish")
-    disabled.renderer.finish_with_mutation = (
-        lambda mutation: disabled_calls.append("mutation")
-    )
+    disabled.renderer.finish_with_mutation = lambda mutation: disabled_calls.append("mutation")
 
     disabled.pytest_sessionfinish(None, 0)
 
@@ -576,19 +563,6 @@ def _history_after(path: Path, samples: list[tuple[str, float]]) -> None:
 
 
 def test_a_test_that_stops_running_stops_carrying_its_old_weight(tmp_path: Path) -> None:
-    """A skip is a regime change, and a cumulative mean cannot follow one.
-
-    The Postgres-gated suites cost seconds against a real server and skip in
-    microseconds without `WREATH_TEST_POSTGRES_DSN`. `mean_seconds` averaged
-    every sample ever taken, so after 244 runs with a DSN those tests kept a
-    ~3.3s weight through every DSN-less run afterwards and would have needed
-    hundreds more to decay. Measured on the real history file: 446 skipped
-    tests carried 160.6s of scheduler weight against 0.383s of actual cost --
-    44% of everything the LPT scheduler was balancing on.
-
-    The dispatch weight is what this asserts, not the stored mean: the record
-    is history and stays honest about what those runs cost.
-    """
     path = tmp_path / "history.json"
     _history_after(path, [("passed", 3.3)] * 30 + [("skipped", 0.0004)])
 
@@ -599,25 +573,9 @@ def test_a_test_that_stops_running_stops_carrying_its_old_weight(tmp_path: Path)
 
 
 def test_a_weight_follows_a_lasting_change_in_what_a_test_costs(tmp_path: Path) -> None:
-    """The window is bounded, so a test that gets slower is believed.
-
-    An unbounded cumulative mean is not just wrong across a skip boundary; it
-    is unreachable in general. After 200 samples one new observation moves the
-    mean by 1/200th of the difference, so a test that doubles in cost is
-    scheduled at its old weight for the rest of the tree's life.
-
-    Stated against `_MEAN_WINDOW` rather than a fixed count, because the claim
-    is about the window existing and not about its size: one window's worth of
-    samples at a new cost must carry the weight more than halfway there. It
-    lands at 64% of the way (`1 - (1 - 1/20) ** 20`), so the margin is real
-    rather than a threshold fitted to the answer. Under the unbounded mean the
-    same 220 samples reach 0.27 -- 9% of the way, and falling with every run.
-    """
     path = tmp_path / "history.json"
     old, new = 0.1, 2.0
-    _history_after(
-        path, [("passed", old)] * 200 + [("passed", new)] * runner._MEAN_WINDOW
-    )
+    _history_after(path, [("passed", old)] * 200 + [("passed", new)] * runner._MEAN_WINDOW)
 
     test_weights, _ = runner._history_weights(path)
     weight = test_weights["tests/test_one.py::test_timing"]
@@ -636,9 +594,7 @@ def test_duration_history_prioritizes_expensive_tests_for_dynamic_dispatch() -> 
 
     ordered = sorted(
         nodeids,
-        key=lambda nodeid: runner._historical_weight(
-            nodeid, test_weights, file_weights
-        ),
+        key=lambda nodeid: runner._historical_weight(nodeid, test_weights, file_weights),
         reverse=True,
     )
 
@@ -717,7 +673,6 @@ def _scheduler(
 def test_the_heavy_head_goes_out_longest_first_and_one_at_a_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The half of the schedule that is worth deciding by hand."""
     collection = [
         "tests/test_a.py::quick_one",
         "tests/test_a.py::slowest",
@@ -741,14 +696,6 @@ def test_the_heavy_head_goes_out_longest_first_and_one_at_a_time(
 def test_the_cheap_tail_keeps_collection_order_and_travels_in_chunks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The other half, and the reason the whole list is not sorted.
-
-    Sorting fifteen thousand sub-millisecond tests by weight reorders them into
-    a sequence that shares no file with itself, and then pays a controller round
-    trip for each one. `LoadScheduling` sends consecutive runs precisely so a
-    worker's fixtures survive into the next test; below the cut that is worth
-    more than the placement.
-    """
     collection = [f"tests/test_{index // 10}.py::test_{index}" for index in range(200)]
     scheduler, nodes = _scheduler(monkeypatch, collection, workers=2)
     scheduler.schedule()
@@ -772,14 +719,6 @@ def test_the_cheap_tail_keeps_collection_order_and_travels_in_chunks(
 def test_an_xdist_group_is_handed_to_one_worker_whole(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`--dist loadgroup` never reaches xdist, so the mark is honoured here.
-
-    `pytest_xdist_make_scheduler` is `firstresult` and xdist's own
-    implementation is `trylast`, so this plugin wins and whatever it does *is*
-    the distribution policy. A group that scattered would be silent: the tests
-    would pass, having competed with each other for the machine, which is the
-    thing the mark exists to prevent.
-    """
     collection = [
         "tests/test_mutant.py::test_one@mutant_crud",
         "tests/test_fast.py::test_unrelated",
@@ -835,43 +774,40 @@ def test_auto_collection_sharding_requires_a_broad_history_backed_run(
     stamp = "2026-08-23T00:00:00+00:00"
     history = tmp_path / "history.json"
     history.write_text(
-        json.dumps({
-            "version": 1,
-            "runs": [{
-                "finished_at": stamp,
-                "counts": {"collected": len(modules)},
-            }],
-            "files": {
-                str(module.relative_to(tmp_path)): {
-                    "last_seen": stamp,
-                    "last_seconds": 1.0,
-                    "last_outcome": "passed",
-                }
-                for module in modules
-            },
-        }),
+        json.dumps(
+            {
+                "version": 1,
+                "runs": [
+                    {
+                        "finished_at": stamp,
+                        "counts": {"collected": len(modules)},
+                    }
+                ],
+                "files": {
+                    str(module.relative_to(tmp_path)): {
+                        "last_seen": stamp,
+                        "last_seconds": 1.0,
+                        "last_outcome": "passed",
+                    }
+                    for module in modules
+                },
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
 
-    shards = runner._prepare_collection_shards(
-        "auto", [], workers=2, history=history
-    )
+    shards = runner._prepare_collection_shards("auto", [], workers=2, history=history)
 
     assert len(shards) == len(modules)
-    assert runner._prepare_collection_shards(
-        "auto", [str(modules[0])], workers=2, history=history
-    ) == ()
-    for focused in (["-m", "fuzz"], ["--markexpr=fuzz"], ["-kneedle"]):
-        assert runner._prepare_collection_shards(
-            "auto", focused, workers=2, history=history
-        ) == ()
-    assert runner._prepare_collection_shards(
-        "auto", ["-m", ""], workers=2, history=history
+    assert (
+        runner._prepare_collection_shards("auto", [str(modules[0])], workers=2, history=history)
+        == ()
     )
-    assert runner._prepare_collection_shards(
-        "auto", [], workers=2, history=None
-    ) == ()
+    for focused in (["-m", "fuzz"], ["--markexpr=fuzz"], ["-kneedle"]):
+        assert runner._prepare_collection_shards("auto", focused, workers=2, history=history) == ()
+    assert runner._prepare_collection_shards("auto", ["-m", ""], workers=2, history=history)
+    assert runner._prepare_collection_shards("auto", [], workers=2, history=None) == ()
 
 
 def test_forced_collection_sharding_needs_no_timing_history(
@@ -881,14 +817,10 @@ def test_forced_collection_sharding_needs_no_timing_history(
     tests = tmp_path / "tests"
     tests.mkdir()
     for index in range(8):
-        (tests / f"test_{index}.py").write_text(
-            "def test_one(): pass\n", encoding="utf-8"
-        )
+        (tests / f"test_{index}.py").write_text("def test_one(): pass\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
 
-    shards = runner._prepare_collection_shards(
-        "sharded", [], workers=2, history=None
-    )
+    shards = runner._prepare_collection_shards("sharded", [], workers=2, history=None)
 
     assert len(shards) == 8
     assert {owner for _path, owner in shards} == {0, 1}
@@ -909,9 +841,7 @@ def test_collection_sharding_refuses_a_group_that_spans_modules(
     tests = tmp_path / "tests"
     tests.mkdir()
     grouped = (
-        "import pytest\n"
-        "pytestmark = pytest.mark.xdist_group(name='shared')\n"
-        "def test_one(): pass\n"
+        "import pytest\npytestmark = pytest.mark.xdist_group(name='shared')\ndef test_one(): pass\n"
     )
     for index in range(8):
         (tests / f"test_{index}.py").write_text(
@@ -924,15 +854,12 @@ def test_collection_sharding_refuses_a_group_that_spans_modules(
         ValueError,
         match="xdist_group 'shared' spans 2 modules.*collection replicated",
     ):
-        runner._prepare_collection_shards(
-            "sharded", [], workers=2, history=None
-        )
+        runner._prepare_collection_shards("sharded", [], workers=2, history=None)
 
 
 def test_a_parametrised_id_containing_an_at_sign_is_not_a_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`user@example.com` in a parameter is not an `xdist_group` name."""
     assert runner._xdist_group("tests/test_mail.py::test_to[a@b.com]") is None
     assert runner._xdist_group("tests/test_mutant.py::test_x@group") == "group"
     assert runner._xdist_group("tests/test_plain.py::test_y") is None
@@ -941,7 +868,6 @@ def test_a_parametrised_id_containing_an_at_sign_is_not_a_group(
 def test_historical_scheduler_refills_a_live_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A worker that finishes its head unit is given the next one, not starved."""
     collection = ["tests/test_a.py::one", "tests/test_a.py::two", "tests/test_a.py::three"]
     scheduler, nodes = _scheduler(
         monkeypatch,
@@ -1032,9 +958,7 @@ def test_mutation_sample_cache_round_trips_exact_selection_and_watch_lines(
     watched = {"/repo/shop/gate.py": frozenset({7, 8})}
     whole_files = frozenset({"/repo/shop/constants.py"})
 
-    runner._write_mutation_sample_cache(
-        path, key, selected, watched, whole_files
-    )
+    runner._write_mutation_sample_cache(path, key, selected, watched, whole_files)
 
     assert runner._read_mutation_sample_cache(path, key) == (
         selected,
@@ -1055,15 +979,17 @@ def test_test_command_forwards_unknown_pytest_arguments_in_order(
 
     monkeypatch.setattr(runner, "execute", fake_execute)
 
-    result = cli.main([
-        "test",
-        "--workers",
-        "1",
-        "-k",
-        "auth and not slow",
-        "tests/security",
-        "--maxfail=2",
-    ])
+    result = cli.main(
+        [
+            "test",
+            "--workers",
+            "1",
+            "-k",
+            "auth and not slow",
+            "tests/security",
+            "--maxfail=2",
+        ]
+    )
 
     assert result == 17
     assert received[0].workers == "1"
@@ -1108,9 +1034,7 @@ def test_test_command_refuses_removed_animated_grid_modes() -> None:
 
 
 def test_test_command_accepts_independent_mutation_and_fuzz_switches() -> None:
-    namespace = cli_parser.build_parser().parse_args(
-        ["test", "--mutant", "on", "--fuzz", "on"]
-    )
+    namespace = cli_parser.build_parser().parse_args(["test", "--mutant", "on", "--fuzz", "on"])
 
     assert namespace.mutant == "on"
     assert namespace.fuzz == "on"
@@ -1141,9 +1065,7 @@ def test_auto_fuzz_follows_the_mutation_switch(
 
 
 def test_fuzz_refuses_to_run_without_mutation_evidence() -> None:
-    namespace = cli_parser.build_parser().parse_args(
-        ["test", "--mutant", "off", "--fuzz", "on"]
-    )
+    namespace = cli_parser.build_parser().parse_args(["test", "--mutant", "off", "--fuzz", "on"])
 
     with pytest.raises(ValueError, match="--fuzz on requires mutation evidence"):
         runner.execute(namespace)
@@ -1204,9 +1126,9 @@ def test_fuzz_runs_exact_killers_from_each_gold_file() -> None:
         ]
     }
 
-    assert runner._mutation_gold_tests(
-        mutation, ("tests/test_first.py",)
-    ) == ("tests/test_first.py::test_guard",)
+    assert runner._mutation_gold_tests(mutation, ("tests/test_first.py",)) == (
+        "tests/test_first.py::test_guard",
+    )
 
 
 def test_live_fuzz_unlocks_when_five_percent_of_passed_files_are_gold() -> None:
@@ -1282,9 +1204,7 @@ def test_rerunning_a_killer_is_the_generic_fuzz_contract(
     )
     mutation = runner.MutationActivity(mode="sample", state="complete")
 
-    report, activity, status = runner._finish_fuzz_process(
-        process, mutation, renderer=None
-    )
+    report, activity, status = runner._finish_fuzz_process(process, mutation, renderer=None)
 
     assert status == 0
     assert activity.passed_files == frozenset({"tests/test_policy.py"})
@@ -1330,9 +1250,7 @@ def test_only_an_explicit_passing_fuzz_contract_earns_a_star(tmp_path: Path) -> 
     )
     mutation = runner.MutationActivity(mode="sample", state="complete")
 
-    report, activity, status = runner._finish_fuzz_process(
-        process, mutation, renderer=None
-    )
+    report, activity, status = runner._finish_fuzz_process(process, mutation, renderer=None)
 
     assert status == 0
     assert activity.passed_files == frozenset({"tests/test_policy.py"})
@@ -1429,9 +1347,7 @@ def test_fuzz_command_executes_killers_and_explicit_cases_in_each_gold_file(
         encoding="utf-8",
     )
     (tests / "test_slow.py").write_text(
-        "import time\n"
-        "def test_keeps_the_ordinary_pool_busy():\n"
-        "    time.sleep(2.0)\n",
+        "import time\ndef test_keeps_the_ordinary_pool_busy():\n    time.sleep(2.0)\n",
         encoding="utf-8",
     )
     report = tmp_path / "report.json"
@@ -1487,9 +1403,7 @@ def test_auto_mutation_workers_reclaim_idle_suite_slots_after_seal() -> None:
 
     assert "--reclaim-workers" in arguments
     assert arguments[arguments.index("--jobs") + 1] == "2"
-    assert arguments[arguments.index("--suite-workers") + 1] == str(
-        runner._resolve_workers("auto")
-    )
+    assert arguments[arguments.index("--suite-workers") + 1] == str(runner._resolve_workers("auto"))
 
 
 def test_native_mutation_engine_is_forwarded_to_wreath_mutant() -> None:
@@ -1503,9 +1417,7 @@ def test_native_mutation_engine_is_forwarded_to_wreath_mutant() -> None:
 
 
 def test_explicit_mutation_worker_limit_remains_literal_after_seal() -> None:
-    namespace = cli_parser.build_parser().parse_args(
-        ["test", "--mutant-workers", "1"]
-    )
+    namespace = cli_parser.build_parser().parse_args(["test", "--mutant-workers", "1"])
 
     arguments = runner._mutation_arguments(namespace)
 
@@ -1533,14 +1445,16 @@ def test_auto_test_workers_use_the_measured_eight_worker_cap(
 def test_test_command_refuses_invalid_runner_limits(
     argument: tuple[str, str], message: str, capsys: Any
 ) -> None:
-    result = cli.main([
-        "test",
-        *argument,
-        "--grid",
-        "never",
-        "--no-history",
-        "tests/test_response_media_type.py",
-    ])
+    result = cli.main(
+        [
+            "test",
+            *argument,
+            "--grid",
+            "never",
+            "--no-history",
+            "tests/test_response_media_type.py",
+        ]
+    )
 
     assert result == 2
     assert message in capsys.readouterr().err
@@ -1667,8 +1581,7 @@ def test_sharded_collection_imports_each_module_once_and_runs_every_test(
     assert document["counts"]["collected"] == 16
     assert document["counts"]["passed"] == 16
     import_counts = [
-        len(path.read_text(encoding="utf-8").splitlines())
-        for path in imports.iterdir()
+        len(path.read_text(encoding="utf-8").splitlines()) for path in imports.iterdir()
     ]
     assert import_counts == [1] * 8
 
@@ -1773,9 +1686,7 @@ def test_green_files_still_earn_mutation_confidence_beside_a_red_file(
 
     assert completed.returncode == 1, completed.stderr
     assert "■" in completed.stderr, completed.stderr
-    assert "evidence limited to green tests · 1 baseline failure(s) excluded" in (
-        completed.stderr
-    )
+    assert "evidence limited to green tests · 1 baseline failure(s) excluded" in (completed.stderr)
     document = json.loads(report_path.read_text(encoding="utf-8"))
     assert document["mutation"]["counts"]["killed"] == 1, document["mutation"]
     live = document["mutation"]["live"]
@@ -1787,9 +1698,7 @@ def test_green_files_still_earn_mutation_confidence_beside_a_red_file(
         assert live["cancelled_at_seal"] == 0
         assert live["first_started_seconds"] > 0
     assert document["mutation"]["verified_test_files"] == ["tests/test_policy.py"]
-    assert document["mutation"]["baseline"]["failures"] == [
-        "tests/test_zbroken.py::test_breaks"
-    ]
+    assert document["mutation"]["baseline"]["failures"] == ["tests/test_zbroken.py::test_breaks"]
     files = {row["path"]: row["outcome"] for row in document["files"]}
     assert files == {
         "tests/test_zbroken.py": "failed",

@@ -1,21 +1,3 @@
-"""Resuming a coroutine the native HTTP driver has already stepped once.
-
-`spawn_app_task` calls the application and steps the coroutine with
-`PyIter_Send` before it decides anything: a handler that never waits returns on
-that first step and the request owns no asyncio Task at all. When the first step
-*does* suspend, the half-run coroutine has to be handed to the loop -- and
-CPython's Task cannot adopt one, because its own first step would send `None`
-into a coroutine that is waiting for a future's result.
-
-Whatever bridges that gap has to behave exactly like the event loop it stands in
-for, and the part that is easy to get wrong and impossible to see is
-cancellation: every exception, `CancelledError` included, has to go *into* the
-coroutine so a disconnect cancels the query in flight rather than abandoning it.
-`tests/test_server_cancel_on_disconnect.py` and
-`tests/test_disconnect_cancels_query.py` prove that end to end through a socket;
-these prove the contract directly, where a mistake is legible.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -58,7 +40,6 @@ async def test_the_rest_of_the_coroutine_runs_and_its_value_comes_back(continuat
 
 @pytest.mark.asyncio
 async def test_several_suspensions_all_resume(continuation) -> None:
-    """The continuation is not a one-shot: a handler awaits more than once."""
     seen: list[int] = []
 
     async def work() -> int:
@@ -76,12 +57,6 @@ async def test_several_suspensions_all_resume(continuation) -> None:
 
 @pytest.mark.asyncio
 async def test_cancelling_the_task_raises_inside_the_coroutine(continuation) -> None:
-    """The distinct thing: the exception must arrive *in* the handler.
-
-    A continuation that merely let the task die would cancel the request and
-    leave the query running -- indistinguishable from this at the caller, and
-    the reason the assertion is on `caught` rather than on the task's state.
-    """
     caught: list[str] = []
 
     async def work() -> None:
@@ -101,7 +76,6 @@ async def test_cancelling_the_task_raises_inside_the_coroutine(continuation) -> 
 
 @pytest.mark.asyncio
 async def test_a_handler_may_catch_the_cancellation_and_still_answer(continuation) -> None:
-    """Cleanup-on-cancel is a handler's right, and the value still returns."""
 
     async def work() -> str:
         try:
@@ -144,7 +118,6 @@ async def test_an_exception_the_handler_raises_propagates_out_of_the_task(contin
 
 @pytest.mark.asyncio
 async def test_a_future_result_is_delivered_to_the_await_that_asked_for_it(continuation) -> None:
-    """The value has to arrive at the right suspension, not merely arrive."""
 
     async def work(first: asyncio.Future, second: asyncio.Future) -> tuple:
         return (await first, await second)
@@ -161,7 +134,6 @@ async def test_a_future_result_is_delivered_to_the_await_that_asked_for_it(conti
 
 @pytest.mark.asyncio
 async def test_closing_the_continuation_closes_the_coroutine_underneath(continuation) -> None:
-    """A dropped request must not leave the handler's `finally` unrun."""
     closed: list[str] = []
 
     async def work() -> None:
@@ -179,7 +151,6 @@ async def test_closing_the_continuation_closes_the_coroutine_underneath(continua
 
 @pytest.mark.asyncio
 async def test_it_is_a_coroutine_as_far_as_the_loop_is_concerned(continuation) -> None:
-    """`loop.create_task` refuses anything `asyncio.iscoroutine` rejects."""
 
     async def work() -> str:
         await asyncio.sleep(0)

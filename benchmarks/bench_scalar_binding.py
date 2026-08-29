@@ -150,17 +150,12 @@ def main() -> int:
         # floor includes a full round of drift.
         measure.Arm("control (untyped again)", _app_untyped()),
     ]
-    template = measure.scope(path="/items/42?limit=5&cursor=abc&q0=1&q1=2&q2=3&q3=4"
-                             "&q4=5&q5=6&q6=7&q7=8")
+    template = measure.scope(
+        path="/items/42?limit=5&cursor=abc&q0=1&q1=2&q2=3&q3=4&q4=5&q5=6&q6=7&q7=8"
+    )
 
-    asyncio.run(
-        measure.measure_apps(
-            arms, template, args.rounds, args.iterations, args.warmup
-        )
-    )
-    document = measure.report(
-        arms, "untyped (binder bypassed)", "control (untyped again)"
-    )
+    asyncio.run(measure.measure_apps(arms, template, args.rounds, args.iterations, args.warmup))
+    document = measure.report(arms, "untyped (binder bypassed)", "control (untyped again)")
     document.update(
         {
             "python": sys.version,

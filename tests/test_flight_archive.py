@@ -1,17 +1,3 @@
-"""The archival stream: every drained cell, filed as it leaves the ring.
-
-The ring file holds what was still in flight when a process died. It holds
-`ring_records` cells and then refuses, so anything older has to have been
-written down as it was drained -- which is what these `EVNT` chunks are. The two
-are complements: the archive is history, the ring file is the last moment.
-
-`WFR1Writer.write_events` existed from Stage 5 and nothing ever called it. These
-tests are the wiring, and the failure modes that wiring has to keep: a sink that
-cannot write degrades to counting rather than stalling the drain, and a drain
-that hands over something that is not whole cells is refused rather than filed
-as a chunk no reader can split.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -64,11 +50,6 @@ def test_drained_cells_are_filed_as_events(tmp_path) -> None:
 
 
 def test_the_archive_outlives_a_ring_that_has_already_wrapped(tmp_path) -> None:
-    """The point of having an archive at all.
-
-    A ring of four cannot hold ten requests. Drained between batches, all ten
-    reach the recording -- which is the history the ring file cannot carry.
-    """
     recorder = _flight.Recorder(_flight.MODE_PULSE, ring_records=4, active_requests=16)
     sink, path = _sink(tmp_path, recorder)
     projector = Projector(recorder, on_cells=sink.archive_cells)
@@ -98,12 +79,6 @@ def test_an_empty_drain_files_nothing(tmp_path) -> None:
 
 
 def test_a_failing_archive_is_counted_and_never_stalls_the_drain() -> None:
-    """The rule the export hook already follows, applied to the archive.
-
-    The cells have already happened. A sink that cannot file them must not stop
-    the drain that feeds trace assembly, the log writer and every exporter -- so
-    the failure is a counter, not an exception.
-    """
     recorder = _flight.Recorder(_flight.MODE_PULSE, ring_records=64, active_requests=16)
 
     def explode(_cells: bytes) -> None:
@@ -134,12 +109,6 @@ def test_a_degraded_sink_drops_and_counts_rather_than_raising(tmp_path) -> None:
 def test_a_partial_cell_degrades_rather_than_filing_an_unsplittable_chunk(
     tmp_path,
 ) -> None:
-    """`write_events` refuses a non-multiple of the cell size, and must.
-
-    A chunk a reader cannot split into cells is worse than a missing one: it
-    fails at read time, on a file someone opened because something else already
-    went wrong.
-    """
     recorder = _flight.Recorder(_flight.MODE_PULSE, ring_records=64, active_requests=16)
     sink, _path = _sink(tmp_path, recorder)
     try:

@@ -333,9 +333,7 @@ def generate_openapi(
                         parameters.append(parameter)
                 if spec.body is not None:
                     body_schema = schema(spec.body[1])
-                    body_content: dict[str, Any] = {
-                        "application/json": {"schema": body_schema}
-                    }
+                    body_content: dict[str, Any] = {"application/json": {"schema": body_schema}}
                     # `wreath.binding` reads a protobuf body for any `@message`
                     # annotation, and has since `_decode_protobuf_body` landed.
                     # A document that advertises only JSON understates what the
@@ -405,17 +403,12 @@ def generate_openapi(
             response: dict[str, Any] = {"description": definition.response_description}
             response_schema = schema(returns)
             if response_schema:
-                response["content"] = {
-                    definition.response_media_type: {"schema": response_schema}
-                }
+                response["content"] = {definition.response_media_type: {"schema": response_schema}}
                 # The same fact on the way out: a route whose return annotation
                 # is a `@message` negotiates protobuf, so the document says so.
                 # Only when the route has not overridden its media type -- an
                 # explicit `response_media_type` is a decision, not a default.
-                if (
-                    _is_message(returns)
-                    and definition.response_media_type == "application/json"
-                ):
+                if _is_message(returns) and definition.response_media_type == "application/json":
                     response["content"][_PROTOBUF_MEDIA] = {"schema": response_schema}
             operation_responses = {str(definition.status_code): response}
             for status, declared in definition.responses:
@@ -437,16 +430,12 @@ def generate_openapi(
                     if key in operation_responses:
                         continue
                     response_spec = (
-                        declared
-                        if isinstance(declared, ResponseSpec)
-                        else ResponseSpec(declared)
+                        declared if isinstance(declared, ResponseSpec) else ResponseSpec(declared)
                     )
                     from_tape: dict[str, Any] = {"description": response_spec.description}
                     tape_schema = schema(response_spec.model)
                     if tape_schema:
-                        from_tape["content"] = {
-                            response_spec.media_type: {"schema": tape_schema}
-                        }
+                        from_tape["content"] = {response_spec.media_type: {"schema": tape_schema}}
                     operation_responses[key] = from_tape
             for contract in contracts:
                 for status, header in contract.response_headers:
@@ -459,9 +448,7 @@ def generate_openapi(
                     if header.description:
                         entry["description"] = header.description
                     headers.setdefault(header.name, entry)
-            behaviours = sorted(
-                {name for contract in contracts for name in contract.behaviours}
-            )
+            behaviours = sorted({name for contract in contracts for name in contract.behaviours})
             if behaviours:
                 operation[BEHAVIOUR_EXTENSION] = behaviours
             operation["responses"] = operation_responses
@@ -511,12 +498,10 @@ def compare_openapi(
                 continue
             new_operation = new_path[method]
             old_parameters = {
-                (item["in"], item["name"]): item
-                for item in old_operation.get("parameters", ())
+                (item["in"], item["name"]): item for item in old_operation.get("parameters", ())
             }
             new_parameters = {
-                (item["in"], item["name"]): item
-                for item in new_operation.get("parameters", ())
+                (item["in"], item["name"]): item for item in new_operation.get("parameters", ())
             }
             for key, new_parameter in new_parameters.items():
                 old_parameter = old_parameters.get(key)
@@ -566,20 +551,6 @@ def compare_openapi(
     return tuple(changes)
 
 
-# Self-contained API-docs renderer. No CDN, no external assets: the page is
-# rendered from the same `ApiModel` that feeds the spec and the typed clients,
-# so the three can never drift. Every user-authored string is escaped; the only
-# `Markup` (unescaped) fragments are framework-generated.
-#
-# These tokens look like `_devtools/bench_report.py::_STYLE` and are not it. The
-# two stylesheets share **no** line, and of the eight custom-property names they
-# have in common, seven carry different values (`--paper` #0E141B vs #0D1116,
-# `--ink` #E7ECF1 vs #E6EAF0, and so on); each also declares tokens the other
-# does not. They are two palettes that were forked, not one copied twice, so
-# extracting a shared block would mean reconciling seven colours and changing
-# how one of the two pages renders -- a visual decision, not a de-duplication.
-# A stale "TODO: de-dup these" lived here and prompted exactly that merge; it is
-# recorded as measured instead.
 _DOCS_STYLE = """
 :root{--paper:#F6F7F9;--raise:#fff;--ink:#0E141B;--muted:#5A6672;--rule:#DDE2E8;
 --brass:#8A6416;--good:#0B6E4F;--bad:#A8341A;--accent:#00838F}
@@ -662,7 +633,7 @@ def _render_operation(operation: Any, escape: Any, try_it_out: bool) -> str:
     )
     if operation.summary:
         head += f" — {escape(operation.summary)}"
-    out = [f"<details><summary>{head}</summary><div class=\"op\">"]
+    out = [f'<details><summary>{head}</summary><div class="op">']
     if operation.description:
         out.append(f'<p class="desc">{escape(operation.description)}</p>')
     if operation.parameters:

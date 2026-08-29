@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 #: and every handler in the guides with it.
 #: The return type is `Awaitable[Any] | Any` because a handler may be `def` as
 #: well as `async def` -- dispatch calls it and awaits only what came back
-#: awaitable. See `docs/guides/routing.md#synchronous-handlers`.
+#: awaitable.
 Handler = Callable[..., Awaitable[Any] | Any]
 
 #: What the dispatcher calls once compilation has bound the extra parameters away.

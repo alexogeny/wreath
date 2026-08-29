@@ -1,35 +1,40 @@
-# `wreath.policy`
+---
+description: Public HTTP policy and middleware compilation APIs.
+keywords: API reference CORS CSRF sessions idempotency rate limit security compression deadlines
+---
 
-First-class HTTP policy is configured once on `Wreath`. Wreath's server compiles
-the fixed policy into native ingress and egress; a conforming external ASGI
-server uses the readable reference executor. These controls are not middleware
-and cannot be installed with `add_middleware()`.
+# First-class policy
+
+`HttpPolicy` composes request-wide decisions at application construction. The owning
+modules expose explicit policy values and the stores needed by distributed variants.
 
 ::: wreath.policy
 
-::: wreath.policy.cors
-
-::: wreath.policy.cache
+::: wreath.middleware.base
 
 ::: wreath.policy.admission
 
+::: wreath.policy.cache
+
 ::: wreath.policy.compression
+
+::: wreath.policy.cors
 
 ::: wreath.policy.csrf
 
 ::: wreath.policy.deadline
 
+::: wreath.policy.idempotency
+
 ::: wreath.policy.maintenance
 
 ::: wreath.policy.proxy
 
-::: wreath.policy.idempotency
-
 ::: wreath.policy.ratelimit
 
-::: wreath.policy.request_id
-
 ::: wreath.policy.request_decompression
+
+::: wreath.policy.request_id
 
 ::: wreath.policy.security
 
@@ -40,3 +45,5 @@ and cannot be installed with `add_middleware()`.
 ::: wreath.policy.timing
 
 ::: wreath.policy.traffic
+
+::: wreath.cache_control

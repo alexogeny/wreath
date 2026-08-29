@@ -44,87 +44,262 @@ from typing import Any, NamedTuple
 #: names one of these. The list is deliberately readable rather than clever: it
 #: is the vocabulary of access control, secrecy, and bounds. Widening it costs
 #: run time; narrowing it costs findings. It is printed by `--explain`.
-CONTROL_TOKENS: frozenset[str] = frozenset({
-    "admin", "allow", "audience", "authent", "authoriz", "backup", "bound",
-    "capab", "ceiling", "cert", "challenge", "claim", "cookie", "cors",
-    "credential", "csrf", "decrypt", "deny", "digest", "encrypt", "escape",
-    "expire", "exposure", "forbid", "grant", "guard", "hash", "hmac",
-    "identif", "identity", "issuer", "leeway", "limit", "mfa", "nonce",
-    "origin", "owner", "owns", "passcode", "password", "pending", "permiss",
-    "permit", "policy", "policies", "principal", "privileg", "quota",
-    "readonly", "redact", "refus", "reject", "replay", "requirement",
-    "revoke", "role", "rotate", "sandbox", "sanitiz", "scope", "secret",
-    "secure", "sensitive", "session", "signature", "skew", "sortable",
-    "stamp", "tenant", "throttle", "token", "totp", "traversal", "trust",
-    "unauthor", "verif", "webauthn", "withheld", "writable",
-})
+CONTROL_TOKENS: frozenset[str] = frozenset(
+    {
+        "admin",
+        "allow",
+        "audience",
+        "authent",
+        "authoriz",
+        "backup",
+        "bound",
+        "capab",
+        "ceiling",
+        "cert",
+        "challenge",
+        "claim",
+        "cookie",
+        "cors",
+        "credential",
+        "csrf",
+        "decrypt",
+        "deny",
+        "digest",
+        "encrypt",
+        "escape",
+        "expire",
+        "exposure",
+        "forbid",
+        "grant",
+        "guard",
+        "hash",
+        "hmac",
+        "identif",
+        "identity",
+        "issuer",
+        "leeway",
+        "limit",
+        "mfa",
+        "nonce",
+        "origin",
+        "owner",
+        "owns",
+        "passcode",
+        "password",
+        "pending",
+        "permiss",
+        "permit",
+        "policy",
+        "policies",
+        "principal",
+        "privileg",
+        "quota",
+        "readonly",
+        "redact",
+        "refus",
+        "reject",
+        "replay",
+        "requirement",
+        "revoke",
+        "role",
+        "rotate",
+        "sandbox",
+        "sanitiz",
+        "scope",
+        "secret",
+        "secure",
+        "sensitive",
+        "session",
+        "signature",
+        "skew",
+        "sortable",
+        "stamp",
+        "tenant",
+        "throttle",
+        "token",
+        "totp",
+        "traversal",
+        "trust",
+        "unauthor",
+        "verif",
+        "webauthn",
+        "withheld",
+        "writable",
+    }
+)
 _CONTROL_PATTERN = re.compile(
     "|".join(map(re.escape, sorted(CONTROL_TOKENS, key=len, reverse=True)))
 )
 
 #: Keywords that *are* a control when they appear at a call site. Dropping one
 #: is the source-level spelling of "this control was never declared".
-CONTROL_KEYWORDS: frozenset[str] = frozenset({
-    "action", "algorithms", "allow", "allow_list", "allowed", "audience",
-    "auth", "authenticated", "authorize", "authorizer", "burst",
-    "cancel_on_disconnect", "challenge", "cost",
-    "csrf", "dependencies", "elicitation", "exempt", "expose", "http_only",
-    "identify", "issuer", "key", "limit", "limits", "max_age", "middleware",
-    "object_authorizer", "origins", "personal", "policies", "policy",
-    "permissions", "rate_limit", "readonly", "require_user_verification",
-    "entitlements", "requirement", "resource", "roles", "rp_id", "same_site",
-    "sampling", "scope", "scopes", "second_factor", "secure", "sensitive",
-    "skew", "sortable_fields", "subject", "verifier", "window",
-    # The composed principal's controls (`wreath._auth.principal`). `scope=` and
-    # `organizations=`/`entitlements=` are declarations in exactly the sense this
-    # set means: dropping one is the source-level spelling of "the delegation
-    # never had a scope" or "this application never wired memberships in", and
-    # both are the mistake most likely to be made once and never noticed.
-    # `ttl=` needs no entry -- `LIMIT_TOKENS` already carries it, so a
-    # delegation's expiry is widened past reach by `declaration.widen-bound`.
-    "organizations",
-})
+CONTROL_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "action",
+        "algorithms",
+        "allow",
+        "allow_list",
+        "allowed",
+        "audience",
+        "auth",
+        "authenticated",
+        "authorize",
+        "authorizer",
+        "burst",
+        "cancel_on_disconnect",
+        "challenge",
+        "cost",
+        "csrf",
+        "dependencies",
+        "elicitation",
+        "exempt",
+        "expose",
+        "http_only",
+        "identify",
+        "issuer",
+        "key",
+        "limit",
+        "limits",
+        "max_age",
+        "middleware",
+        "object_authorizer",
+        "origins",
+        "personal",
+        "policies",
+        "policy",
+        "permissions",
+        "rate_limit",
+        "readonly",
+        "require_user_verification",
+        "entitlements",
+        "requirement",
+        "resource",
+        "roles",
+        "rp_id",
+        "same_site",
+        "sampling",
+        "scope",
+        "scopes",
+        "second_factor",
+        "secure",
+        "sensitive",
+        "skew",
+        "sortable_fields",
+        "subject",
+        "verifier",
+        "window",
+        # The composed principal's controls (`wreath._auth.principal`). `scope=` and
+        # `organizations=`/`entitlements=` are declarations in exactly the sense this
+        # set means: dropping one is the source-level spelling of "the delegation
+        # never had a scope" or "this application never wired memberships in", and
+        # both are the mistake most likely to be made once and never noticed.
+        # `ttl=` needs no entry -- `LIMIT_TOKENS` already carries it, so a
+        # delegation's expiry is widened past reach by `declaration.widen-bound`.
+        "organizations",
+    }
+)
 
 #: Keywords and constant names that are numeric ceilings. Widening one to
 #: `_WIDE` is the "limit that does not limit" mutation.
-LIMIT_TOKENS: frozenset[str] = frozenset({
-    "burst", "capacity", "ceiling", "chunk", "cost", "deadline", "depth",
-    "idle", "leeway", "limit", "max", "period", "quota", "rate", "seconds",
-    "size", "skew", "timeout", "ttl", "window",
-})
+LIMIT_TOKENS: frozenset[str] = frozenset(
+    {
+        "burst",
+        "capacity",
+        "ceiling",
+        "chunk",
+        "cost",
+        "deadline",
+        "depth",
+        "idle",
+        "leeway",
+        "limit",
+        "max",
+        "period",
+        "quota",
+        "rate",
+        "seconds",
+        "size",
+        "skew",
+        "timeout",
+        "ttl",
+        "window",
+    }
+)
 
 #: What a widened bound becomes. Large enough that nothing reaches it, small
 #: enough that arithmetic on it does not overflow a C `int` in the native paths.
 _WIDE = 1 << 40
 
 #: Names whose value is a deny-list: emptying one removes every refusal in it.
-DENY_TOKENS: frozenset[str] = frozenset({
-    "banned", "blocked", "denied", "deny", "deferred", "disallowed",
-    "forbidden", "refused", "reserved", "unsafe",
-})
+DENY_TOKENS: frozenset[str] = frozenset(
+    {
+        "banned",
+        "blocked",
+        "denied",
+        "deny",
+        "deferred",
+        "disallowed",
+        "forbidden",
+        "refused",
+        "reserved",
+        "unsafe",
+    }
+)
 
 #: Names whose value is a redaction pattern: a pattern that matches nothing
 #: redacts nothing.
-REDACTION_TOKENS: frozenset[str] = frozenset({
-    "sensitive", "secret", "redact", "private", "scrub", "mask",
-})
+REDACTION_TOKENS: frozenset[str] = frozenset(
+    {
+        "sensitive",
+        "secret",
+        "redact",
+        "private",
+        "scrub",
+        "mask",
+    }
+)
 
 #: A regex that can never match anything, for `value.disable-pattern`.
 _NEVER = re.compile(r"(?!x)x")
 
 #: Function names that read as "may this caller do this?". Their bodies become
 #: `return True`.
-PREDICATE_TOKENS: frozenset[str] = frozenset({
-    "allow", "authoriz", "belongs", "can_", "check", "eligible", "entitled",
-    "has_", "is_", "may_", "owns", "owned", "permit", "valid", "verif",
-})
+PREDICATE_TOKENS: frozenset[str] = frozenset(
+    {
+        "allow",
+        "authoriz",
+        "belongs",
+        "can_",
+        "check",
+        "eligible",
+        "entitled",
+        "has_",
+        "is_",
+        "may_",
+        "owns",
+        "owned",
+        "permit",
+        "valid",
+        "verif",
+    }
+)
 
 #: Call targets whose result establishes who the caller is. Deleting the call
 #: is how a control ends up keyed on something the caller mints for free.
-ESTABLISH_TOKENS: frozenset[str] = frozenset({
-    "authenticate", "authorize", "check", "identify", "refresh", "resolve",
-    "rotate", "touch", "validate", "verify",
-})
+ESTABLISH_TOKENS: frozenset[str] = frozenset(
+    {
+        "authenticate",
+        "authorize",
+        "check",
+        "identify",
+        "refresh",
+        "resolve",
+        "rotate",
+        "touch",
+        "validate",
+        "verify",
+    }
+)
 
 _IGNORED_IF_TESTS = ("TYPE_CHECKING", "__name__")
 
@@ -166,7 +341,6 @@ class _Context:
     scopes: dict[int, tuple[str, ...]] = field(default_factory=dict)
 
 
-# ---------------------------------------------------------------------------
 # tagging
 
 
@@ -212,7 +386,6 @@ def tag(tree: ast.Module) -> dict[int, tuple[str, ...]]:
     return scopes
 
 
-# ---------------------------------------------------------------------------
 # helpers
 
 
@@ -241,7 +414,7 @@ def _matches(names: set[str]) -> bool:
 def _short(node: ast.AST, width: int = 72) -> str:
     try:
         text = ast.unparse(node)
-    except (AttributeError, ValueError, TypeError):  # pragma: no cover
+    except AttributeError, ValueError, TypeError:  # pragma: no cover
         return "<unprintable>"
     text = " ".join(text.split())
     return text if len(text) <= width else text[: width - 1] + "…"
@@ -340,19 +513,39 @@ def _looks_like_a_route(node: ast.Call) -> bool:
 #: asked is still asked, and this table never overrides a real signature.
 _DECLARING_CALLS: dict[str, frozenset[str]] = {
     # `crud_router(model, opener, ...)` and the `app.crud(...)` sugar for it.
-    "crud": frozenset({
-        "authorize", "object_authorizer", "expose", "readonly", "exclude",
-        "operations", "page_size",
-    }),
-    "crud_router": frozenset({
-        "authorize", "object_authorizer", "expose", "readonly", "exclude",
-        "operations", "page_size",
-    }),
+    "crud": frozenset(
+        {
+            "authorize",
+            "object_authorizer",
+            "expose",
+            "readonly",
+            "exclude",
+            "operations",
+            "page_size",
+        }
+    ),
+    "crud_router": frozenset(
+        {
+            "authorize",
+            "object_authorizer",
+            "expose",
+            "readonly",
+            "exclude",
+            "operations",
+            "page_size",
+        }
+    ),
     # `@mcp.tool(...)`, and the resource/prompt declarations beside it.
-    "tool": frozenset({
-        "action", "resource", "rate_limit", "second_factor", "sampling",
-        "elicitation",
-    }),
+    "tool": frozenset(
+        {
+            "action",
+            "resource",
+            "rate_limit",
+            "second_factor",
+            "sampling",
+            "elicitation",
+        }
+    ),
     "resource": frozenset({"action", "rate_limit", "second_factor"}),
     "prompt": frozenset({"action", "rate_limit", "second_factor"}),
     # `wreath.graphql`'s per-field declarations. `GraphQL(authorizer=...)` was
@@ -377,10 +570,19 @@ _DECLARING_CALLS: dict[str, frozenset[str]] = {
 #: router`'s own docstring names the contract -- "metadata passed to a method
 #: decorator reaches `RouteDefinition` unchanged, so `roles=`, `dependencies=`
 #: and `rate_limit=` are enforced by the same tape as any REST route".
-_GRPC_METHOD_CONTROLS: frozenset[str] = frozenset({
-    "action", "authorize", "dependencies", "middleware", "permissions",
-    "rate_limit", "requirement", "roles", "second_factor",
-})
+_GRPC_METHOD_CONTROLS: frozenset[str] = frozenset(
+    {
+        "action",
+        "authorize",
+        "dependencies",
+        "middleware",
+        "permissions",
+        "rate_limit",
+        "requirement",
+        "roles",
+        "second_factor",
+    }
+)
 
 for _grpc_call in ("unary", "server_stream", "client_stream", "bidi"):
     _DECLARING_CALLS[_grpc_call] = _GRPC_METHOD_CONTROLS
@@ -399,7 +601,7 @@ def _declared_controls(node: ast.Call) -> frozenset[str] | None:
 def _defaulted_keywords(callee: Any) -> frozenset[str] | None:
     try:
         signature = inspect.signature(callee)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     names: set[str] = set()
     variadic = False
@@ -421,7 +623,6 @@ def _defaulted_keywords(callee: Any) -> frozenset[str] | None:
     return frozenset(names)
 
 
-# ---------------------------------------------------------------------------
 # transforms (each returns a *new* node for the tagged one)
 
 
@@ -567,7 +768,6 @@ def _rewrite_string(new: str) -> Callable[[ast.AST], ast.AST]:
     return mutate
 
 
-# ---------------------------------------------------------------------------
 # the operators
 
 
@@ -598,8 +798,7 @@ def _predicate_operators(context: _Context) -> Iterator[Candidate]:
                 for index, operand in enumerate(node.values):
                     yield Candidate(
                         operator="predicate.drop-operand",
-                        control=f"clause `{_short(operand, 56)}` in a compound "
-                                f"{joiner} condition",
+                        control=f"clause `{_short(operand, 56)}` in a compound {joiner} condition",
                         line=getattr(operand, "lineno", node.lineno),
                         scope=scope,
                         node_id=node_id,
@@ -633,7 +832,7 @@ def _predicate_operators(context: _Context) -> Iterator[Candidate]:
                     yield Candidate(
                         operator="expression.take-branch",
                         control=f"the choice in `{_short(node, 56)}` "
-                                f"(always `{_short(branch, 32)}`)",
+                        f"(always `{_short(branch, 32)}`)",
                         line=node.lineno,
                         scope=scope,
                         node_id=node_id,
@@ -689,14 +888,15 @@ def _predicate_operators(context: _Context) -> Iterator[Candidate]:
                 if not isinstance(call, ast.Call):
                     continue
                 target = call.func
-                name = target.attr if isinstance(target, ast.Attribute) else getattr(
-                    target, "id", "")
+                name = (
+                    target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")
+                )
                 if not any(token in name.lower() for token in ESTABLISH_TOKENS):
                     continue
                 yield Candidate(
                     operator="guard.drop-statement",
                     control=f"the call `{_short(node.value, 56)}` that establishes "
-                            f"what a later check reads",
+                    f"what a later check reads",
                     line=node.lineno,
                     scope=scope,
                     node_id=node_id,
@@ -776,7 +976,7 @@ def _declaration_operators(context: _Context) -> Iterator[Candidate]:
                 yield Candidate(
                     operator="declaration.widen-bound",
                     control=f"the bound `{name}={keyword.value.value}` on "
-                            f"`{label}(...)` (widened past reach)",
+                    f"`{label}(...)` (widened past reach)",
                     line=keyword.value.lineno,
                     scope=scope,
                     node_id=node_id,
@@ -836,8 +1036,9 @@ def _add_keyword(name: str, value: str) -> Callable[[ast.AST], ast.AST]:
         call = _want(node, ast.Call)
         call.keywords = [
             *call.keywords,
-            ast.keyword(arg=name, value=ast.Tuple(elts=[ast.Constant(value=value)],
-                                                  ctx=ast.Load())),
+            ast.keyword(
+                arg=name, value=ast.Tuple(elts=[ast.Constant(value=value)], ctx=ast.Load())
+            ),
         ]
         return call
 
@@ -890,9 +1091,7 @@ def _expose_operators(
     withheld = sensitive_fields(model)
     if not withheld:
         return
-    index = next(
-        (i for i, k in enumerate(node.keywords) if k.arg == "expose"), None
-    )
+    index = next((i for i, k in enumerate(node.keywords) if k.arg == "expose"), None)
     already: set[str] = set()
     if index is not None:
         value = node.keywords[index].value
@@ -907,13 +1106,14 @@ def _expose_operators(
         yield Candidate(
             operator="crud.expose-sensitive",
             control=f"`{column}` is withheld by `{label}(...)` "
-                    f"(exposed, so it reaches every response)",
+            f"(exposed, so it reaches every response)",
             line=node.lineno,
             scope=scope,
             node_id=node_id,
             watch=(node.lineno, node.func.lineno),
             mutate=(
-                _add_sequence_element(index, column) if index is not None
+                _add_sequence_element(index, column)
+                if index is not None
                 else _add_keyword("expose", column)
             ),
         )
@@ -949,7 +1149,7 @@ def _mapping_entry_operators(
                 yield Candidate(
                     operator="crud.drop-operation-authorize",
                     control=f"the `{operation}` entry of `{name}=` on "
-                            f"`{label}(...)` (that operation falls back)",
+                    f"`{label}(...)` (that operation falls back)",
                     line=getattr(key, "lineno", node.lineno),
                     scope=scope,
                     node_id=node_id,
@@ -963,14 +1163,13 @@ def _mapping_entry_operators(
                     refusal = entry.func.attr == _REFUSAL_ACCESS
                     yield Candidate(
                         operator=(
-                            "crud.permit-refused-operation" if refusal
-                            else "crud.widen-access"
+                            "crud.permit-refused-operation" if refusal else "crud.widen-access"
                         ),
                         control=(
                             f"the `{operation}` refusal `{_short(entry, 32)}` "
                             f"(turned into a `{_PERMISSIVE_ACCESS}` permit)"
-                            if refusal else
-                            f"the `{operation}` rule `{_short(entry, 32)}` "
+                            if refusal
+                            else f"the `{operation}` rule `{_short(entry, 32)}` "
                             f"(widened to `{_PERMISSIVE_ACCESS}`)"
                         ),
                         line=getattr(entry, "lineno", node.lineno),
@@ -982,14 +1181,12 @@ def _mapping_entry_operators(
 
         elif name in _SEQUENCE_CONTROLS and isinstance(value, ast.Tuple | ast.List):
             for position, element in enumerate(value.elts):
-                if not isinstance(element, ast.Constant) or not isinstance(
-                    element.value, str
-                ):
+                if not isinstance(element, ast.Constant) or not isinstance(element.value, str):
                     continue
                 yield Candidate(
                     operator="crud.unprotect-column",
                     control=f"`{element.value}` in `{name}=` on `{label}(...)` "
-                            f"(that column alone loses its protection)",
+                    f"(that column alone loses its protection)",
                     line=getattr(element, "lineno", node.lineno),
                     scope=scope,
                     node_id=node_id,
@@ -1090,12 +1287,21 @@ def _cedar_offer(
     def offer(operator: str, control: str, replacement: str) -> Candidate:
         if scope:
             return Candidate(
-                operator=operator, control=control, line=line, scope=scope,
-                node_id=node_id, mutate=_rewrite_string(replacement),
+                operator=operator,
+                control=control,
+                line=line,
+                scope=scope,
+                node_id=node_id,
+                mutate=_rewrite_string(replacement),
             )
         return Candidate(
-            operator=operator, control=control, line=line, scope=(),
-            kind="value", value_path=(name or "",), value=replacement,
+            operator=operator,
+            control=control,
+            line=line,
+            scope=(),
+            kind="value",
+            value_path=(name or "",),
+            value=replacement,
         )
 
     return offer
@@ -1228,8 +1434,10 @@ def _value_operators(context: _Context) -> Iterator[Candidate]:
                     value_path=(name,),
                     value=_NEVER,
                 )
-            elif isinstance(live, frozenset | set | tuple) and live and any(
-                token in lowered for token in DENY_TOKENS
+            elif (
+                isinstance(live, frozenset | set | tuple)
+                and live
+                and any(token in lowered for token in DENY_TOKENS)
             ):
                 yield Candidate(
                     operator="value.empty-denylist",

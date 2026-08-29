@@ -1,12 +1,3 @@
-"""`wreath infra infer` derives, and never guesses, connects, or imports an SDK.
-
-Two of these assert something no other test in the tree does: that inference
-imports no cloud SDK, and that it opens no socket. Both are properties that are
-easy to lose accidentally later -- one `import boto3` in a helper, one "let me
-just check the bucket exists" -- and neither shows up as a failure anywhere
-else, because the wrong version still prints a plan.
-"""
-
 from __future__ import annotations
 
 import contextlib
@@ -51,9 +42,6 @@ def plan_for(app: Wreath, **kwargs: object) -> InfrastructurePlan:
     return infer(app, application="trek.app:app", **kwargs)  # type: ignore[arg-type]
 
 
-# --- databases -------------------------------------------------------------
-
-
 def test_a_registered_database_is_derived_with_its_endpoint_and_pools() -> None:
     plan = plan_for(build())
     (database,) = plan.databases
@@ -80,8 +68,12 @@ def test_a_registered_database_is_derived_with_its_endpoint_and_pools() -> None:
         # No database in the path: the role's own name is used.
         ("postgresql://trek@db.internal:5432/", "db.internal:5432", "", "trek"),
         # A pooler in front of it, which is the port a rule has to open.
-        ("postgresql://trek@pgbouncer.internal:6432/trek", "pgbouncer.internal:6432",
-         "trek", "trek"),
+        (
+            "postgresql://trek@pgbouncer.internal:6432/trek",
+            "pgbouncer.internal:6432",
+            "trek",
+            "trek",
+        ),
     ],
 )
 def test_a_dsn_is_split_without_inventing_what_it_omits(
@@ -124,7 +116,6 @@ def test_a_listen_doorbell_is_counted_against_the_pool_it_holds() -> None:
 
 
 def test_a_doorbell_is_counted_against_the_workload_it_actually_uses() -> None:
-    """A read-workload runner must not be subtracted from the write pool."""
     app = build()
     app.jobs("ingest", database="main", workload="read")
     (database,) = plan_for(app).databases
@@ -149,7 +140,6 @@ def test_a_pool_filled_by_its_own_doorbell_is_a_gap() -> None:
 
 
 def test_a_component_is_attributed_to_the_database_its_runner_named() -> None:
-    """The framework's own attribution cannot do this; see `_component_owners`."""
     app = build(main=DSN, analytics="postgresql://trek@warehouse.internal:5432/trek")
     app.jobs("ingest", database="analytics")
     plan = plan_for(app)
@@ -162,7 +152,6 @@ def test_a_component_is_attributed_to_the_database_its_runner_named() -> None:
 
 
 def test_two_queues_claiming_one_component_report_it_once() -> None:
-    """Both runners own the same `jobs` table; the plan is a set of tables."""
     app = build()
     app.jobs("ingest", database="main")
     app.jobs("reports", database="main")
@@ -203,7 +192,6 @@ def test_a_holder_with_no_database_of_its_own_falls_back_to_the_only_one() -> No
 
 
 def test_two_databases_make_that_fallback_ambiguous_and_that_is_a_gap() -> None:
-    """Guessing would create the tables beside a subsystem reading the other one."""
     app = _with_durable_inbox(
         build(main=DSN, archive="postgresql://trek@warehouse.internal:5432/archive")
     )
@@ -218,12 +206,6 @@ def test_two_databases_make_that_fallback_ambiguous_and_that_is_a_gap() -> None:
 
 
 def test_a_subsystem_with_no_database_anywhere_claims_nothing() -> None:
-    """With no `app.postgres` at all there is nothing for the tables to belong to.
-
-    That is vacuous rather than degraded -- there is no database in which the
-    table could be missing -- so the claim is dropped rather than attributed to
-    a database that does not exist.
-    """
     plan = plan_for(_with_durable_inbox(Wreath()))
     assert plan.databases == ()
     assert [gap for gap in plan.gaps if gap.kind is GapKind.UNDERIVABLE] == []
@@ -232,23 +214,11 @@ def test_a_subsystem_with_no_database_anywhere_claims_nothing() -> None:
 
 
 def test_the_framework_makes_the_same_attribution() -> None:
-    """The framework now reads `app.jobs(database=)` the way inference does.
-
-    It used to look for `_database`/`database` on the holder, and `JobRunner`
-    calls its database `_db`, so the explicit `app.jobs(database="analytics")`
-    was not consulted at all: a second database made the lookup ambiguous and
-    this raised "cannot tell which database". Both walks now agree, and agree
-    with the declaration, so the queue's tables land in `analytics` and nothing
-    is created beside `main`.
-    """
     app = build(main=DSN, analytics="postgresql://trek@warehouse.internal:5432/trek")
     app.jobs("ingest", database="analytics")
     grouped = app._components_by_database(app.schema_components())
     assert list(grouped) == [app._databases["analytics"]]
     assert [claim.name for claim in grouped[app._databases["analytics"]]] == ["jobs"]
-
-
-# --- object storage --------------------------------------------------------
 
 
 def test_a_local_object_store_requires_a_volume(tmp_path: Path) -> None:
@@ -282,15 +252,16 @@ def test_an_s3_object_store_requires_a_bucket_and_a_lifecycle_rule() -> None:
 def test_a_secret_key_never_reaches_the_plan() -> None:
     app = build()
     app.objects(
-        "cards", backend="s3", bucket="trek-cards", region="eu-west-2",
-        access_key="AKIAEXAMPLE", secret_key="a-real-looking-secret",
+        "cards",
+        backend="s3",
+        bucket="trek-cards",
+        region="eu-west-2",
+        access_key="AKIAEXAMPLE",
+        secret_key="a-real-looking-secret",
     )
     plan = plan_for(app)
     assert "a-real-looking-secret" not in render_json(plan)
     assert "AKIAEXAMPLE" not in render_json(plan)
-
-
-# --- egress ----------------------------------------------------------------
 
 
 def test_egress_is_derived_from_the_origin_a_client_is_pinned_to() -> None:
@@ -322,8 +293,12 @@ def test_a_destination_policy_is_the_egress_rule_it_already_declares() -> None:
 def test_an_s3_store_contributes_its_own_egress_rule() -> None:
     app = build()
     app.objects(
-        "cards", backend="s3", bucket="trek-cards", region="eu-west-2",
-        access_key="AKIAEXAMPLE", secret_key="secret",
+        "cards",
+        backend="s3",
+        bucket="trek-cards",
+        region="eu-west-2",
+        access_key="AKIAEXAMPLE",
+        secret_key="secret",
     )
     (rule,) = plan_for(app).egress
     assert rule.origin == "https://trek-cards.s3.eu-west-2.amazonaws.com"
@@ -333,9 +308,6 @@ def test_an_s3_store_contributes_its_own_egress_rule() -> None:
 def test_no_client_says_so_rather_than_printing_nothing() -> None:
     text = render_text(plan_for(build()))
     assert "none: this application pins no outbound HTTP client." in text
-
-
-# --- the listener ----------------------------------------------------------
 
 
 def test_the_listener_counts_the_routes_the_application_compiled() -> None:
@@ -355,9 +327,6 @@ def test_the_listener_counts_the_routes_the_application_compiled() -> None:
     assert listener.websocket_routes == 0
 
 
-# --- the row a reader will not believe -------------------------------------
-
-
 def test_every_shared_subsystem_is_listed_whether_or_not_it_is_used() -> None:
     plan = plan_for(build())
     modules = [row.module for row in plan.subsystems]
@@ -373,8 +342,7 @@ def test_every_shared_subsystem_is_listed_whether_or_not_it_is_used() -> None:
     ):
         assert expected in modules
     assert all(
-        row.backing.startswith("PostgreSQL")
-        or row.backing in {"in-process memory"}
+        row.backing.startswith("PostgreSQL") or row.backing in {"in-process memory"}
         for row in plan.subsystems
     ), [row.backing for row in plan.subsystems]
 
@@ -477,16 +445,6 @@ def test_a_middleware_owned_table_is_reported_as_the_same_postgresql() -> None:
 
 
 def test_the_framework_collects_a_middleware_owned_table() -> None:
-    """`Wreath.schema_components` walks middleware, and now the middleware answer.
-
-    The walk was repaired to reach the middleware, but the shipped limiter,
-    idempotency and session middleware still exposed neither `component()` nor
-    `schema_owners`, so it found nothing on them and `wreath_rate_limit`,
-    `wreath_idempotency` and `wreath_session` were emitted by
-    `wreath schema sql` and applied by nothing. A middleware owns no tables
-    itself, so it answers `schema_owners` with the store that does, and the
-    claim is attributed to the store's own database.
-    """
     from wreath.policy import HttpPolicy
     from wreath.policy.ratelimit import PostgresRateLimitStore, RateLimitPolicy
 
@@ -499,9 +457,6 @@ def test_the_framework_collects_a_middleware_owned_table() -> None:
     assert [claim.name for claim in app.schema_components()] == ["ratelimit"]
     grouped = app._components_by_database(app.schema_components())
     assert list(grouped) == [app._databases["main"]]
-
-
-# --- the settings contract, which is why this stage exists ------------------
 
 
 @dataclass
@@ -520,12 +475,6 @@ class Settings:
 
 
 def test_settings_keys_are_the_keys_environment_bind_actually_reads() -> None:
-    """Falsifies the derivation against the binder rather than restating it.
-
-    Binding with exactly the derived required keys must succeed, and dropping
-    any one of them must fail *naming that key*. A second hand-written copy of
-    the naming rule would pass a test that only compared it with itself.
-    """
     derived = settings_keys(Settings, prefix="TREK")
     required = {key.key: "x" for key in derived if key.required}
     required["TREK_DATABASE__PORT"] = "5432"
@@ -566,15 +515,12 @@ def test_a_settings_field_with_no_supplier_is_a_gap_named_by_key() -> None:
 
 
 def test_a_defaulted_field_is_supplied_by_its_own_default() -> None:
-    (contract,) = plan_for(
-        build(), settings=[(Settings, "trek.config:Settings", "TREK")]
-    ).settings
+    (contract,) = plan_for(build(), settings=[(Settings, "trek.config:Settings", "TREK")]).settings
     debug = next(key for key in contract.keys if key.field == "debug")
     assert debug.supplied_by == "default"
 
 
 def test_a_supplied_key_beats_the_fields_own_default() -> None:
-    """`debug` has a default *and* a supplier; the report must name the supplier."""
     (contract,) = plan_for(
         build(),
         settings=[(Settings, "trek.config:Settings", "TREK")],
@@ -625,7 +571,6 @@ def test_a_supplied_key_no_field_reads_is_reported_too() -> None:
 
 
 def test_an_unread_key_needs_a_contract_to_be_unread_against() -> None:
-    """Without a settings model nothing is known to read anything, so nothing is unread."""
     plan = plan_for(
         build(),
         supplied={"TREK_DNS": "deploy.env"},
@@ -641,7 +586,6 @@ def test_no_settings_model_says_the_contract_is_unchecked() -> None:
 
 
 def test_the_unchecked_notes_disappear_once_both_halves_are_given() -> None:
-    """A note that is printed unconditionally is a note nobody reads."""
     plan = plan_for(
         build(),
         settings=[(Settings, "trek.config:Settings", "TREK")],
@@ -657,9 +601,6 @@ def test_a_missing_supplier_is_called_out_rather_than_left_implicit() -> None:
     assert any("No environment supplier was named" in note for note in plan.notes)
 
 
-# --- the plan is data first, a rendering second ----------------------------
-
-
 def test_the_plan_is_a_frozen_dataclass_tree() -> None:
     plan = plan_for(build())
     assert dataclasses.is_dataclass(plan)
@@ -672,9 +613,7 @@ def test_json_carries_the_derived_available_connections() -> None:
     app.jobs("ingest", database="main")
     data = json.loads(render_json(plan_for(app)))
     write = next(
-        budget
-        for budget in data["databases"][0]["budgets"]
-        if budget["workload"] == "write"
+        budget for budget in data["databases"][0]["budgets"] if budget["workload"] == "write"
     )
     assert write["held"] == 1
     assert write["available"] == 9
@@ -686,12 +625,6 @@ def test_infer_refuses_something_that_is_not_an_application() -> None:
 
 
 def test_infer_refuses_a_half_shaped_impostor() -> None:
-    """Both halves of the shape check earn their place.
-
-    A module that happens to bind `_databases`, or an application class that
-    has not compiled its schema surface, would otherwise fail much later with a
-    `KeyError` on a private attribute rather than a sentence naming the target.
-    """
 
     class OnlyDatabases:
         _databases: dict[str, object] = {}
@@ -703,9 +636,6 @@ def test_infer_refuses_a_half_shaped_impostor() -> None:
     for impostor in (OnlyDatabases(), OnlyComponents()):
         with pytest.raises(TypeError, match="not a built wreath application"):
             infer(impostor, application="nope:app")
-
-
-# --- the two properties that are easy to lose later ------------------------
 
 
 _FORBIDDEN_SDKS = (
@@ -722,12 +652,6 @@ _FORBIDDEN_SDKS = (
 
 
 def test_inference_imports_no_cloud_sdk() -> None:
-    """A fresh interpreter that imports `wreath.infra` and nothing else.
-
-    In-process this would pass for the wrong reason as soon as any other test in
-    the session has imported one of these, so it runs somewhere nothing else has
-    been imported.
-    """
     program = (
         "import sys, json\n"
         "import wreath.infra, wreath.infra.cli\n"
@@ -741,7 +665,6 @@ def test_inference_imports_no_cloud_sdk() -> None:
 
 
 def test_inference_makes_no_network_call(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every way to reach the network raises, and a full inference still runs."""
 
     def refuse(*args: object, **kwargs: object) -> None:
         raise AssertionError("wreath infra infer must not touch the network")
@@ -754,8 +677,12 @@ def test_inference_makes_no_network_call(monkeypatch: pytest.MonkeyPatch) -> Non
     app.messaging("events", database="main")
     app.http_client("forage", base_url="https://forage.example.com")
     app.objects(
-        "cards", backend="s3", bucket="trek-cards", region="eu-west-2",
-        access_key="AKIAEXAMPLE", secret_key="secret",
+        "cards",
+        backend="s3",
+        bucket="trek-cards",
+        region="eu-west-2",
+        access_key="AKIAEXAMPLE",
+        secret_key="secret",
     )
     plan = plan_for(app, settings=[(Settings, "trek.config:Settings", "TREK")])
     assert render_text(plan)
@@ -763,19 +690,6 @@ def test_inference_makes_no_network_call(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_inference_reports_the_series_and_entity_tables_it_used_to_miss() -> None:
-    """Every registry `Wreath.schema_holders` walks reaches the plan.
-
-    Inference used to keep its own copy of the holder list, and that copy was
-    missing the `_series_stores` and `_entity_registries` limbs, so a settled
-    series' tables were absent from the plan for an application that really did
-    create them. The plan under-reported what a DBA had to provision, which is
-    the one direction that matters.
-
-    The expected set is written out rather than compared against
-    `app.schema_components()`. Both sides read `schema_holders` now, so
-    comparing them is a tautology that passes however wrong the list gets --
-    a literal is the only spelling that can still go red.
-    """
     app = build()
     app.jobs("ingest", database="main")
     app.messaging("events", database="main")
@@ -789,13 +703,6 @@ def test_inference_reports_the_series_and_entity_tables_it_used_to_miss() -> Non
 
 
 def test_a_series_store_is_attributed_to_the_database_it_settles_on() -> None:
-    """Two databases, and the series tables land in the declared one.
-
-    The attribution used to guess among `_db`, `_database` and `database` on
-    whatever object held the claim. It now reads the declaration the application
-    recorded, so an app with more than one database gets the right answer rather
-    than the single-database fallback -- which does not exist here.
-    """
     app = build(main=DSN, analytics=REPLICA)
     app.series(database="analytics")
 

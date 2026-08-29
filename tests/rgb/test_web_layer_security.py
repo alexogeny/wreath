@@ -1,6 +1,3 @@
-"""CORS, rate limiting, forwarding headers, and gating (report 23: R-48, R-52,
-R-54, R-55, R-57, R-58)."""
-
 from __future__ import annotations
 
 import pytest
@@ -50,9 +47,7 @@ class TestCorsCredentialReflection:
         )
 
     def test_named_origins_with_credentials_are_still_allowed(self):
-        middleware = CorsPolicy(
-            allow_origins=["https://app.example"], allow_credentials=True
-        )
+        middleware = CorsPolicy(allow_origins=["https://app.example"], allow_credentials=True)
         assert middleware._origin_header("https://app.example") == (
             b"access-control-allow-origin",
             b"https://app.example",
@@ -176,9 +171,7 @@ class TestRateLimitKeyIsRequired:
     async def test_an_exempt_request_is_still_exempt(self):
         from wreath.policy.ratelimit import RateLimitPolicy
 
-        middleware = RateLimitPolicy(
-            limit=1, window=60.0, exempt=lambda request: True
-        )
+        middleware = RateLimitPolicy(limit=1, window=60.0, exempt=lambda request: True)
 
         class _NoClient:
             method = "GET"

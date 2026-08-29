@@ -1,28 +1,3 @@
-"""Seams between subsystems that were built without sight of each other.
-
-Four features landed in one day -- an MCP server, second factors, Postgres-native
-retrieval, and a generated capability map -- each written by someone who could
-not see the others. Every test here joins two of them, and each one exists
-because the composition was *implied* by the code and asserted by nobody, which
-is the state in which a composition quietly stops working.
-
-Two claims are proved here:
-
-* **Step-up reaches an MCP tool.** `Tool.requirement` is a whole
-  `AuthRequirement`, and `AuthRequirement.second_factor` is what
-  `wreath.auth.second_factor` writes onto a route. A route behind step-up that
-  is exposed with `expose_routes` is therefore behind step-up as a tool -- and
-  the *claim key* `wreath.users` stamps on the session is the one
-  `wreath._mcp.server` reads, across three modules that never mention each other.
-* **A retrieval tool is one tool.** A hybrid `Queries` fusion over pgvector and
-  a `tsvector`, exposed as an MCP tool, gated on a Cedar action, bounded by a
-  per-caller rate limit, and recorded on the Flight Recorder -- all of which are
-  properties the tool inherits rather than properties its handler implements.
-
-`docs/plans/cross-feature-integration.md` records the seams that do *not* hold
-up, and why, so this file is only the half that does.
-"""
-
 from __future__ import annotations
 
 import os
@@ -47,9 +22,6 @@ from wreath.queries import Param, Queries, fuse, query
 from wreath.testing import TestClient
 
 NOW = 1_700_000_000.0
-
-
-# -- the MCP harness, shared -------------------------------------------------
 
 
 def _session_id(response: Any) -> str:
@@ -131,12 +103,6 @@ def stepup_app(identity: Identity | None) -> tuple[Wreath, MCP, list[str]]:
 
 
 def test_a_step_up_route_carries_its_window_onto_the_tool() -> None:
-    """The compiled requirement, before any request touches it.
-
-    `expose_routes` merges the route's inherited requirement with the endpoint's
-    own decorators, so the seam is visible statically: if `@second_factor` ever
-    stopped producing an `AuthRequirement`, this fails without needing a caller.
-    """
     _, mcp, _ = stepup_app(None)
     tool = next(entry for entry in mcp.tools if entry.name == "purge_sightings")
     assert tool.requirement.second_factor == 300.0
@@ -144,7 +110,6 @@ def test_a_step_up_route_carries_its_window_onto_the_tool() -> None:
 
 
 async def test_a_caller_who_never_proved_a_factor_cannot_call_the_tool() -> None:
-    """A bearer identity has no stamp, and an absent stamp is a refusal."""
     app, mcp, ran = stepup_app(Identity(id="ada", claims={"sub": "ada"}))
     async with TestClient(app) as client:
         session = await initialize(client)
@@ -170,11 +135,8 @@ async def test_a_caller_who_proved_a_factor_recently_may_call_it() -> None:
 
 
 async def test_a_factor_proved_too_long_ago_is_refused() -> None:
-    """Recency is the whole point: holding a factor is not having proved one."""
     stale = int(time.time()) - 400
-    app, mcp, ran = stepup_app(
-        Identity(id="ada", claims={"sub": "ada", "second_factor_at": stale})
-    )
+    app, mcp, ran = stepup_app(Identity(id="ada", claims={"sub": "ada", "second_factor_at": stale}))
     async with TestClient(app) as client:
         session = await initialize(client)
         answer = await call_tool(client, session, "purge_sightings", {})
@@ -183,14 +145,6 @@ async def test_a_factor_proved_too_long_ago_is_refused() -> None:
 
 
 async def test_the_stamp_wreath_users_writes_is_the_claim_the_tool_reads() -> None:
-    """The whole path, across three modules that never mention each other.
-
-    `wreath.users.second_factor_router` writes `second_factor_at` onto the
-    session principal; `SessionIdentityBackend` copies the principal into
-    `Identity.claims`; `wreath._mcp.server` reads it back through
-    `second_factor_age`. Nothing in the tree asserts that those three agree on
-    the key, and a rename in any one of them would be silent everywhere else.
-    """
     ran: list[str] = []
     app = Wreath()
     app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
@@ -260,14 +214,6 @@ class _AgeEngine:
 
 
 async def test_a_cedar_gated_tool_sees_the_second_factor_age_in_its_context() -> None:
-    """The other half of the seam, and the more expressive one.
-
-    `CedarAuthorizer`'s default context mapper publishes `second_factor_age`,
-    and the MCP server runs policies through the *same* authorizer as a route --
-    so a policy of the form `when { context.second_factor_age <= 300 }` gates a
-    tool with no MCP-specific code anywhere. The key is absent rather than a
-    sentinel when no factor was proved, which is what makes it fail closed.
-    """
     engine = _AgeEngine(window=300)
 
     def build(identity: Identity) -> tuple[Wreath, MCP, list[str]]:
@@ -331,13 +277,6 @@ def declared_stepup_app(
 
 
 def test_a_declared_tool_can_ask_for_step_up_of_its_own() -> None:
-    """`second_factor=` compiles to the requirement `@second_factor` produces.
-
-    Before this keyword existed, step-up reached a tool only by exposing a route
-    that already carried it, so "this tool deletes things, ask for the code
-    again" required inventing a route to hang it on. The compiled requirement is
-    checked statically here, and enforced in the three tests below.
-    """
     _, mcp, _ = declared_stepup_app(None)
     tool = next(entry for entry in mcp.tools if entry.name == "purge_sightings")
     assert tool.requirement.second_factor == 300.0
@@ -369,7 +308,6 @@ async def test_a_declared_step_up_tool_admits_a_caller_who_proved_one() -> None:
 
 
 async def test_a_declared_step_up_tool_refuses_a_stale_factor() -> None:
-    """Recency, on the declared path as much as on the exposed one."""
     app, _, ran = declared_stepup_app(
         Identity(id="ada", claims={"sub": "ada", "second_factor_at": int(time.time()) - 400})
     )
@@ -381,14 +319,6 @@ async def test_a_declared_step_up_tool_refuses_a_stale_factor() -> None:
 
 
 def test_an_exposed_route_keeps_the_shorter_window_the_tool_declares() -> None:
-    """Merging adds, in both directions.
-
-    `expose_routes` hands the route's requirement to `build_tool`, and a
-    `second_factor=` on the declaration must not be able to *relax* what the
-    route already asked for -- nor the other way round. Both orders end at the
-    minimum, because that is what `merge_requirements` promises and this is the
-    one call site that could have applied the keyword after the merge.
-    """
     app = Wreath()
 
     @app.delete("/sightings", tags=("sightings",))
@@ -410,7 +340,6 @@ def test_an_exposed_route_keeps_the_shorter_window_the_tool_declares() -> None:
 
 
 def test_a_window_that_can_never_be_satisfied_is_refused() -> None:
-    """Zero is a typo, not a policy of never admitting anyone."""
     app = Wreath()
     mcp = MCP(app, name="camera-trap", version="1.0.0")
 
@@ -425,7 +354,6 @@ def test_a_window_that_can_never_be_satisfied_is_refused() -> None:
 # ===========================================================================
 # The caller, resolved before the controls that name them
 # ===========================================================================
-#
 # An endpoint with no `MCPAuth` and an `app.configure_auth(...)` backend is the
 # configuration `expose_routes` exists for, and on it the identity is resolved
 # lazily -- inside `_authorize`, which runs *after* the rate limit is charged
@@ -448,13 +376,6 @@ def _allow_everything() -> CedarAuthorizer:
 
 
 async def test_a_fresh_session_does_not_reset_a_tools_ceiling() -> None:
-    """A per-tool ceiling is per *caller*, and `initialize` is free.
-
-    `_throttle` keys the bucket on the verified subject when there is one and on
-    the session otherwise. A model opens a session per turn, so a bucket keyed on
-    the session is no bucket at all: the ceiling of one call an hour admitted six
-    before the caller was resolved ahead of the charge.
-    """
     ran: list[str] = []
     app = Wreath()
     app.configure_auth(_Backend(Identity(id="ada", claims={"sub": "ada"})))
@@ -469,8 +390,7 @@ async def test_a_fresh_session_does_not_reset_a_tools_ceiling() -> None:
     async with TestClient(app) as client:
         first = await call_tool(client, await initialize(client), "scan", {})
         refusals = [
-            refusal(await call_tool(client, await initialize(client), "scan", {}))
-            for _ in range(5)
+            refusal(await call_tool(client, await initialize(client), "scan", {})) for _ in range(5)
         ]
 
     assert first["result"]["structuredContent"] == {"scanned": True}
@@ -493,21 +413,6 @@ class _HeaderBackend:
 
 
 async def test_withholding_credentials_from_initialize_does_not_reset_the_ceiling() -> None:
-    """The case the session-ownership check cannot cover, and the only test that does.
-
-    `_owns` re-resolves the caller on every message -- but only when the session
-    has a principal to compare against. A session opened *without* credentials
-    binds nobody, so `_owns` short-circuits to `True` and resolves no identity at
-    all. A caller who holds a token and simply does not send it on `initialize`
-    therefore reaches `tools/call` unidentified, and the bucket keys on a session
-    id that `initialize` mints for free.
-
-    The eager `await self._identify(request)` at the top of `_tools_call` is what
-    closes that, and this is the shape that proves it: the test above authenticates
-    every request, including `initialize`, so `_owns` has already done the work
-    there and the eager resolution is redundant on that path. Delete the eager
-    call with only that test watching and six calls get through a ceiling of one.
-    """
     ran: list[str] = []
     app = Wreath()
     app.configure_auth(_HeaderBackend())
@@ -524,9 +429,7 @@ async def test_withholding_credentials_from_initialize_does_not_reset_the_ceilin
         first = await call_tool(client, await initialize(client), "scan", {}, **{"x-token": "ada"})
         refusals = [
             refusal(
-                await call_tool(
-                    client, await initialize(client), "scan", {}, **{"x-token": "ada"}
-                )
+                await call_tool(client, await initialize(client), "scan", {}, **{"x-token": "ada"})
             )
             for _ in range(5)
         ]
@@ -539,12 +442,6 @@ async def test_withholding_credentials_from_initialize_does_not_reset_the_ceilin
 
 
 async def test_the_marker_names_the_caller_the_request_authenticated() -> None:
-    """`principal` is "the subject the caller's own token asserts", or it is nothing.
-
-    The marker exists so an operator can answer "on whose behalf" six months
-    later. On an endpoint with no `MCPAuth` it used to answer "anonymous" for a
-    caller the very same request authenticated and then authorized as `ada`.
-    """
     app = Wreath()
     app.configure_auth(_Backend(Identity(id="ada", claims={"sub": "ada"})), _allow_everything())
     mcp = MCP(app, name="notebook", version="1.0.0")
@@ -564,9 +461,7 @@ async def test_the_marker_names_the_caller_the_request_authenticated() -> None:
             answer = await call_tool(client, session, "search_notes", {"terms": "llamas"})
         scope.finish(promoted=True)
         markers = [
-            log.attributes(cell)
-            for cell in records
-            if not cell.flags & fs.LOG_FLAG_EVENT_FIELDS
+            log.attributes(cell) for cell in records if not cell.flags & fs.LOG_FLAG_EVENT_FIELDS
         ]
 
     assert answer["result"]["structuredContent"] == {"caller": "ada"}
@@ -593,9 +488,7 @@ class Note(Model, table="notes", schema=_SCHEMA):
     title: Mapped[str] = column(Text)
     body: Mapped[str] = column(Text)
     embedding: Mapped[list] = column(Vector(3))
-    search: Mapped[bytes] = column(
-        TsVector("english", sources=("title", "body")), index="gin"
-    )
+    search: Mapped[bytes] = column(TsVector("english", sources=("title", "body")), index="gin")
 
 
 class Notes(Queries[Note]):
@@ -651,9 +544,7 @@ async def notes() -> Any:
             "   to_tsvector('english', coalesce(title,'') || ' ' || coalesce(body,''))"
             " ) stored not null)"
         )
-        await connection.execute(
-            f'CREATE INDEX ON "{_SCHEMA}"."notes" USING gin (search)'
-        )
+        await connection.execute(f'CREATE INDEX ON "{_SCHEMA}"."notes" USING gin (search)')
         for identifier, title, body, embedding in _ROWS:
             await connection.execute(
                 f'INSERT INTO "{_SCHEMA}"."notes" (id, title, body, embedding) '
@@ -733,13 +624,6 @@ def retrieval_app(
 @_live
 @pytest.mark.database
 async def test_a_hybrid_search_is_reachable_as_one_mcp_tool(notes: Any) -> None:
-    """The composition, end to end, against a real PostgreSQL.
-
-    `[2, 1, 4, 3]` is the fused order neither half produces alone -- pinned in
-    `tests/orm/test_hybrid_search.py` against hand-computed reciprocal-rank
-    scores -- so this asserts the ranking survived the whole MCP round trip and
-    not merely that some rows came back.
-    """
     app, mcp, _ = retrieval_app(notes, Identity(id="ada"))
     async with TestClient(app) as client:
         session = await initialize(client)
@@ -760,11 +644,6 @@ async def test_a_hybrid_search_is_reachable_as_one_mcp_tool(notes: Any) -> None:
 async def test_the_retrieval_tool_is_behind_the_same_cedar_decision_as_a_route(
     notes: Any,
 ) -> None:
-    """The gate is a declaration on the tool, not a check in the handler.
-
-    The same server exposes a second tool the policy refuses, so this is about
-    the decision and not about the authorizer being wired at all.
-    """
     app, mcp, engine = retrieval_app(notes, Identity(id="ada"))
     async with TestClient(app) as client:
         session = await initialize(client)
@@ -781,12 +660,6 @@ async def test_the_retrieval_tool_is_behind_the_same_cedar_decision_as_a_route(
 @_live
 @pytest.mark.database
 async def test_the_retrieval_tool_can_be_bounded_per_caller(notes: Any) -> None:
-    """A search is the expensive tool on the server, and the bound is a keyword.
-
-    A model does not click. One `rate_limit=` on the declaration is the whole
-    difference between a retrieval tool and a way to make an application run
-    unbounded vector scans.
-    """
     app, mcp, _ = retrieval_app(
         notes, Identity(id="ada"), rate_limit=ToolRateLimit(limit=1, window=3600.0)
     )
@@ -804,12 +677,6 @@ async def test_the_retrieval_tool_can_be_bounded_per_caller(notes: Any) -> None:
 @_live
 @pytest.mark.database
 async def test_the_search_the_model_asked_for_is_on_the_audit_trail(notes: Any) -> None:
-    """What a retrieval tool is asked for is the fact an audit needs six months on.
-
-    The terms ride the canonical log line under `mcp.arg.`, fingerprinted rather
-    than raw by `wreath.logging`'s deny-by-default rule -- which still answers
-    "was this the same query" without publishing what somebody searched for.
-    """
     app, _, _ = retrieval_app(notes, Identity(id="ada"))
     with log.testing_runtime() as records, log.request_scope(request_id=11) as scope:
         async with TestClient(app) as client:
@@ -824,9 +691,7 @@ async def test_the_search_the_model_asked_for_is_on_the_audit_trail(notes: Any) 
         from wreath import _flight_schema as fs
 
         markers = [
-            log.attributes(cell)
-            for cell in records
-            if not cell.flags & fs.LOG_FLAG_EVENT_FIELDS
+            log.attributes(cell) for cell in records if not cell.flags & fs.LOG_FLAG_EVENT_FIELDS
         ]
         fields: dict[str, Any] = {}
         for cell in records:

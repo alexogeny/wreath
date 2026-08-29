@@ -186,7 +186,7 @@ def _check_columns(columns: tuple[str, ...], where: str) -> None:
     for name in columns:
         if not isinstance(name, str) or not name:
             raise DeclarationError(
-                f"{where} takes column-name strings such as \"user_id\", got {name!r}"
+                f'{where} takes column-name strings such as "user_id", got {name!r}'
             )
     if len(set(columns)) != len(columns):
         raise DeclarationError(f"{where} names the same column twice")

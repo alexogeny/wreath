@@ -1,16 +1,3 @@
-"""Feature flags as Cedar context.
-
-A flag and a policy are two decision points answering one question -- *may this
-caller do this now?* -- and separately they drift. Exposed as context, the flag
-becomes an input to the one decision the authorizer already makes.
-
-The representation is a **set of enabled names**, never a map. A map invites
-`context.flags["x"] == false`, which reads as "explicitly off" when it may mean
-"no such flag"; an authorization expression that cannot tell those apart will
-eventually permit something by typo. Absent from the set means false, and deny
-is the safe direction.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -39,6 +26,7 @@ MANIFEST_POLICY = """
 permit(principal in Role::"rider", action == Action::"Llama::read", resource)
 when { context.flags.contains("new_ui") };
 """
+
 
 class CountingFlags(FeatureFlags):
     """A `FeatureFlags` that records each resolution, to prove there is only one."""
@@ -170,9 +158,6 @@ def build(
     return app
 
 
-# --- the representation -------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_an_enabled_flag_is_in_the_context_set_and_the_policy_permits() -> None:
     app = build(flags=FeatureFlags({"new_ui": "on"}))
@@ -236,12 +221,6 @@ class LegacyOpaqueFlags:
 
 @pytest.mark.asyncio
 async def test_a_flag_nobody_configured_is_absent_rather_than_false() -> None:
-    """Absence is the whole argument for a set over a map.
-
-    `contains` on a name the provider never held is false, exactly as it is for
-    a name configured off -- so a typo in a policy denies rather than permitting
-    whatever a map's missing key happened to compare as.
-    """
     with pytest.warns(RuntimeWarning, match="cannot enumerate"):
         app = build(flags=OpaqueFlags({"other_flag"}))
 
@@ -260,29 +239,12 @@ async def test_original_boolean_provider_uses_the_same_cedar_resolution_path() -
 
 @pytest.mark.asyncio
 async def test_no_provider_at_all_yields_an_empty_set_and_denies() -> None:
-    """An application that never configured flags still evaluates flag policies.
-
-    The set is empty rather than the key being missing, which is what makes the
-    answer a denial rather than an evaluation accident.
-    """
     app = build(flags=None)
 
     assert (await invoke(app, "alice"))["status"] == 403
 
 
-# --- the empty set is the fail-closed choice, not a convenience ---------------
-
-
 def test_an_absent_flags_key_lets_an_unless_forbid_fail_open() -> None:
-    """Why the authorizer always supplies `flags`, even with no provider.
-
-    This is the engine's behaviour, pinned as a regression guard: with no
-    `flags` in the context at all, `forbid ... unless { flags.contains(...) }`
-    is **skipped** and the request is allowed. An empty set makes the same
-    policy deny. So an absent key is not a neutral default -- it silently
-    disables every `unless`-shaped flag forbid, which is precisely the shape a
-    kill-switch is written in.
-    """
     engine = CedarPolicies(
         'permit(principal, action == Action::"read", resource);'
         'forbid(principal, action == Action::"read", resource)'
@@ -302,24 +264,13 @@ def test_an_absent_flags_key_lets_an_unless_forbid_fail_open() -> None:
     assert empty.allowed is False, "an empty set stands the forbid -- fails closed"
 
 
-# --- resolved once per request ------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_the_provider_is_asked_once_however_many_policies_evaluate() -> None:
-    """A route behind several evaluations must not re-bucket between them.
-
-    The manifest endpoint asks the authorizer once per (resource type, action),
-    so one request drives many evaluations through one `CedarAuthorizer`. The
-    provider must see exactly one resolution regardless.
-    """
     counter = CountingFlags({"new_ui": "on"})
     app = manifest_app(counter)
 
     async with TestClient(app) as client:
-        response = await client.acting_as("alice", roles=["rider"]).get(
-            "/permissions/manifest"
-        )
+        response = await client.acting_as("alice", roles=["rider"]).get("/permissions/manifest")
 
     assert response.status == 200
     assert counter.evaluations > 1, (
@@ -330,19 +281,11 @@ async def test_the_provider_is_asked_once_however_many_policies_evaluate() -> No
 
 @pytest.mark.asyncio
 async def test_a_percentage_rollout_answers_the_same_way_all_request_long() -> None:
-    """The determinism the whole design rests on.
-
-    A percentage flag re-bucketed per policy could put one caller inside the
-    rollout for a `permit` and outside it for a `forbid`. Resolving once makes
-    that unrepresentable; this asserts the resolved set is one value, reused.
-    """
     counter = CountingFlags({"rollout": "50%"})
     app = manifest_app(counter, source=ROLLOUT_POLICY)
 
     async with TestClient(app) as client:
-        response = await client.acting_as("alice", roles=["rider"]).get(
-            "/permissions/manifest"
-        )
+        response = await client.acting_as("alice", roles=["rider"]).get("/permissions/manifest")
 
     assert response.status == 200
     assert counter.evaluations > 1, (
@@ -354,46 +297,27 @@ async def test_a_percentage_rollout_answers_the_same_way_all_request_long() -> N
     )
 
 
-# --- validated where it is written --------------------------------------------
-
-
 def test_a_policy_naming_an_unknown_flag_is_refused_at_startup() -> None:
-    """The likeliest mistake, made loud.
-
-    A misspelled name is simply absent from the set, so the condition is false
-    and the policy denies forever with nothing to see. Refusing at startup turns
-    that into a boot failure naming the flag.
-    """
     with pytest.raises(ValueError, match="new_iu"):
         CedarAuthorizer(
             engine=CedarPolicies(
-                'permit(principal, action, resource)'
-                ' when { context.flags.contains("new_iu") };'
+                'permit(principal, action, resource) when { context.flags.contains("new_iu") };'
             ),
             flags=FeatureFlags({"new_ui": "on"}),
         )
 
 
 def test_a_provider_that_cannot_enumerate_is_warned_about_not_guessed_at() -> None:
-    """Half a condition is knowable, so say so where it is written.
-
-    An external provider may not be able to list its vocabulary without a
-    network call. Refusing on a guess would break a working deployment; staying
-    silent would hide the same typo the branch above catches.
-    """
     with pytest.warns(RuntimeWarning, match="cannot enumerate"):
         CedarAuthorizer(
             engine=CedarPolicies(
-                'permit(principal, action, resource)'
-                ' when { context.flags.contains("anything") };'
+                'permit(principal, action, resource) when { context.flags.contains("anything") };'
             ),
             flags=OpaqueFlags(set()),
         )
 
 
 def test_a_policy_set_naming_no_flag_is_never_warned_about() -> None:
-    """The overwhelmingly common app must not pay a warning for a feature it
-    does not use."""
     import warnings as _warnings
 
     with _warnings.catch_warnings():
@@ -405,17 +329,12 @@ def test_a_policy_set_naming_no_flag_is_never_warned_about() -> None:
 
 
 def test_every_referenced_name_is_found_wherever_it_is_written() -> None:
-    """`contains` is legal anywhere an expression is, so the walk is generic.
-
-    A visitor that knew only the top-level shapes would validate half a policy
-    set and silently pass the rest.
-    """
     engine = CedarPolicies(
-        'permit(principal, action, resource) when {'
+        "permit(principal, action, resource) when {"
         '  context.flags.contains("top")'
         '  && (context.flags.contains("nested") || context.method == "GET")'
-        '};'
-        'forbid(principal, action, resource)'
+        "};"
+        "forbid(principal, action, resource)"
         ' unless { context.flags.containsAny(["either", "or"]) };'
     )
 
@@ -423,33 +342,23 @@ def test_every_referenced_name_is_found_wherever_it_is_written() -> None:
 
 
 def test_a_policy_set_reading_flags_opaquely_reports_that_it_cannot_enumerate() -> None:
-    """`isEmpty()` names no flag, so the referenced set is not the whole story.
+    assert (
+        CedarPolicies(
+            "permit(principal, action, resource) when { context.flags.isEmpty() };"
+        ).referenced_flags()
+        is None
+    )
 
-    The authorizer resolves only the names a policy set references, which is
-    exact when every reference is a literal and *wrong* when one is not: under
-    `context.flags.isEmpty()` an unreferenced flag that is on still has to make
-    the set non-empty. Reporting `None` is how the engine says "you need them
-    all", and is what keeps the optimisation from changing an answer.
-    """
-    assert CedarPolicies(
-        'permit(principal, action, resource) when { context.flags.isEmpty() };'
-    ).referenced_flags() is None
-
-    assert CedarPolicies(
-        'permit(principal, action, resource)'
-        ' when { context.flags.contains(context.method) };'
-    ).referenced_flags() is None
+    assert (
+        CedarPolicies(
+            "permit(principal, action, resource) when { context.flags.contains(context.method) };"
+        ).referenced_flags()
+        is None
+    )
 
 
 @pytest.mark.asyncio
 async def test_an_opaque_flag_read_still_sees_a_flag_no_policy_names() -> None:
-    """The behaviour the report above protects, end to end.
-
-    And it happens *silently*: an enumerable provider can supply every flag, so
-    the opaque read costs a full resolution and nothing else. The warning is
-    reserved for the case where nothing can be resolved at all, or it would fire
-    for a working configuration and stop being read.
-    """
     import warnings as _warnings
 
     with _warnings.catch_warnings():
@@ -458,7 +367,7 @@ async def test_an_opaque_flag_read_still_sees_a_flag_no_policy_names() -> None:
             flags=FeatureFlags({"unnamed": "on"}),
             source=(
                 'permit(principal, action == Action::"read", resource)'
-                ' when { !context.flags.isEmpty() };'
+                " when { !context.flags.isEmpty() };"
             ),
         )
 
@@ -466,12 +375,6 @@ async def test_an_opaque_flag_read_still_sees_a_flag_no_policy_names() -> None:
 
 
 def test_no_provider_is_neither_refused_nor_warned_about() -> None:
-    """Deciding not to configure flags is a decision, not a mistake.
-
-    Every flag test denies, which is documented and safe, so a policy set that
-    reads flags against no provider must boot in silence -- warning here would
-    train the reader to ignore the warning that means something.
-    """
     import warnings as _warnings
 
     with _warnings.catch_warnings():
@@ -480,12 +383,6 @@ def test_no_provider_is_neither_refused_nor_warned_about() -> None:
 
 
 def test_the_rollout_subject_is_the_principal_not_the_anonymous_bucket() -> None:
-    """A percentage flag must bucket per caller, and identically to a handler.
-
-    Every anonymous caller shares one bucket, so if the authorizer forgot to
-    pass the identity, a rollout would be all-or-nothing for signed-in users
-    too -- and would disagree with `flags_dependency` in the same request.
-    """
     from wreath._auth.cedar import request_flags
 
     seen: list[Any] = []
@@ -498,8 +395,11 @@ def test_the_rollout_subject_is_the_principal_not_the_anonymous_bucket() -> None
     class FakeRequest:
         def __init__(self, identity: Any) -> None:
             self.identity = identity
-            self.state = type("S", (), {"get": lambda s, k, default=None: default,
-                                        "__setattr__": object.__setattr__})()
+            self.state = type(
+                "S",
+                (),
+                {"get": lambda s, k, default=None: default, "__setattr__": object.__setattr__},
+            )()
 
     request_flags(FakeRequest(Identity("alice")), Recording(), frozenset({"f"}))
     request_flags(FakeRequest(None), Recording(), frozenset({"f"}))
@@ -510,12 +410,6 @@ def test_the_rollout_subject_is_the_principal_not_the_anonymous_bucket() -> None
 
 @pytest.mark.asyncio
 async def test_the_eager_path_keeps_only_the_flags_that_are_on() -> None:
-    """The `isEmpty()` fallback resolves every flag, and must still filter.
-
-    Without the filter every *configured* flag would land in the set, so a flag
-    explicitly turned off would read as on -- the exact inversion the whole
-    feature exists to get right.
-    """
     app = build(
         flags=FeatureFlags({"live": "on", "dark": "off"}),
         source=(
@@ -529,12 +423,6 @@ async def test_the_eager_path_keeps_only_the_flags_that_are_on() -> None:
 
 @pytest.mark.asyncio
 async def test_a_provider_that_can_neither_enumerate_nor_be_asked_gives_nothing() -> None:
-    """The one combination with no answer available, and it denies.
-
-    An opaque provider can only answer names it is given, and an `isEmpty()`
-    policy supplies none -- so nothing can be resolved. The set is empty and the
-    policy denies, rather than the request erroring or the flags being guessed.
-    """
     with pytest.warns(RuntimeWarning, match="every flag test will deny"):
         app = build(
             flags=OpaqueFlags({"live"}),
@@ -549,12 +437,6 @@ async def test_a_provider_that_can_neither_enumerate_nor_be_asked_gives_nothing(
 
 @pytest.mark.asyncio
 async def test_an_engine_that_cannot_introspect_falls_back_to_every_flag() -> None:
-    """An outside evaluator must not have its flag vocabulary guessed at.
-
-    `referenced_flags` is optional, so an engine without it reports nothing
-    knowable and the authorizer resolves the provider's whole set. A short list
-    there would silently drop a flag the foreign policy set actually reads.
-    """
     class Opaque:
         """A `CedarEngine` with no introspection, permitting only on a flag."""
 
@@ -575,24 +457,15 @@ async def test_an_engine_that_cannot_introspect_falls_back_to_every_flag() -> No
     assert (await invoke(app, "alice"))["status"] == 200
 
 
-# --- the manifest cannot serve chrome for a flag that has since flipped -------
-
-
 @pytest.mark.asyncio
 async def test_the_manifest_etag_moves_when_a_flag_flips() -> None:
-    """A flag flip changes the answer, so it must move the tag.
-
-    Without this a client holds a manifest drawn for the old flag state and
-    keeps revalidating it successfully -- chrome for something now denied, with
-    no event that could ever correct it.
-    """
     flags = CountingFlags({"new_ui": "on"})
     app = manifest_app(flags)
 
     async with TestClient(app) as client:
         rider = client.acting_as("alice", roles=["rider"])
         before = await rider.get("/permissions/manifest")
-        flags._values["new_ui"] = "off"          # the flip
+        flags._values["new_ui"] = "off"  # the flip
         after = await rider.get("/permissions/manifest")
 
     assert before.status == 200 and after.status == 200

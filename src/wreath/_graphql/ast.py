@@ -110,6 +110,4 @@ class Document:
             raise KeyError(name)
         if len(self.operations) == 1:
             return self.operations[0]
-        raise ValueError(
-            "this document defines several operations; name the one to run"
-        )
+        raise ValueError("this document defines several operations; name the one to run")

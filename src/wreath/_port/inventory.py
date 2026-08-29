@@ -591,9 +591,7 @@ class MigrationInventory:
             "retired": 0,
         }
         for project in self.projects:
-            counts = project.effective_counts(
-                migration_strategy=self.migration_strategy
-            )
+            counts = project.effective_counts(migration_strategy=self.migration_strategy)
             totals["translated"] += counts["translated"]
             totals["needs_review"] += counts["needs_review"]
             totals["unsupported"] += counts["unsupported"]

@@ -149,8 +149,7 @@ async def _answer(app: Wreath, template: dict[str, Any]) -> tuple[int, Any, byte
                 for k, v in (message.get("headers") or [])
                 # Minted per request by design, so equal-by-shape is the most
                 # that can be asserted about them.
-                if (name := _text(k).lower())
-                not in ("date", "x-request-id", "server-timing")
+                if (name := _text(k).lower()) not in ("date", "x-request-id", "server-timing")
             )
         body += _raw(message.get("body") or b"")
     return status, headers, body

@@ -1,5 +1,3 @@
-"""Deterministic regression for nested router composition complexity (QPY-003)."""
-
 from __future__ import annotations
 
 import wreath.router as router_module

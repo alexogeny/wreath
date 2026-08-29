@@ -1,9 +1,3 @@
-"""The two deferred-migration shapes, and the pass each derives.
-
-Declaration-time only: every refusal here is a startup error rather than a
-half-converted table, which is the point of a declaration being a value.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -15,9 +9,6 @@ from wreath.passes import Sql
 MAPPING = {"1": "planned", "2": "walking", "3": "done"}
 
 
-# -- Shape A: Recode ----------------------------------------------------------
-
-
 def test_a_recode_names_the_column_it_converts() -> None:
     decl = Recode(User.name, mapping=MAPPING)
     assert decl.converts == "public.users.name"
@@ -25,22 +16,12 @@ def test_a_recode_names_the_column_it_converts() -> None:
 
 
 def test_a_recode_derives_a_bounded_walk_with_no_gate() -> None:
-    """Shape A adds no column, so nothing narrows later and nothing waits."""
     walk = Recode(User.name, mapping=MAPPING).build()
     assert walk.name == "recode_public_users_name"
     assert walk.gate is None
 
 
 def test_the_walk_only_touches_rows_still_holding_an_old_value() -> None:
-    """Re-running a chunk is a no-op because the predicate excludes converted rows.
-
-    One placeholder per mapped value rather than one bound array. ``= ANY(?)``
-    is the tidier spelling and it does not survive contact with the driver: a
-    parameter's type is inferred from its Python value and there is no case for
-    ``list``, so the array form raised ``unsupported PostgreSQL value type`` the
-    first time this walk reached a real server. Asserted on the shape here
-    because a fake cannot notice the difference.
-    """
     walk = Recode(User.name, mapping=MAPPING).build()
     where = walk.work.where
     assert isinstance(where, Sql)
@@ -62,13 +43,11 @@ def test_a_mapping_is_required() -> None:
 
 
 def test_a_non_invertible_mapping_is_refused() -> None:
-    """Two old values to one new one cannot be widened back."""
     with pytest.raises(DeferredDeclarationError, match="invertible"):
         Recode(User.name, mapping={"1": "done", "2": "done"})
 
 
 def test_a_value_on_both_sides_is_refused() -> None:
-    """The walk could not tell a converted row from an unconverted one."""
     with pytest.raises(DeferredDeclarationError, match="both sides"):
         Recode(User.name, mapping={"1": "2", "2": "3"})
 
@@ -88,11 +67,7 @@ def test_a_recode_must_name_a_model_column() -> None:
         Recode("name", mapping=MAPPING)
 
 
-# -- Shape B: Retype ----------------------------------------------------------
-
-
 def test_a_retype_publishes_a_fact_about_the_old_column() -> None:
-    """The fact names the column a later migration will narrow, not the new one."""
     decl = Retype(User.name, into="name_next", using="upper(name)")
     assert decl.publishes == "column:public.users.name"
 
@@ -105,7 +80,6 @@ def test_a_retype_derives_a_gate_that_publishes() -> None:
 
 
 def test_the_gate_verifies_with_the_constraint_the_swap_will_add() -> None:
-    """Proven and later enforced are the same predicate, so a wrong walk cannot pass."""
     walk = Retype(User.name, into="name_next", using="upper(name)").build()
     assert walk.gate.verify.name == "name_next_present"
     assert walk.gate.verify.check_ == "name_next IS NOT NULL"
@@ -118,7 +92,6 @@ def test_the_walk_fills_only_unconverted_rows() -> None:
 
 
 def test_verification_does_not_reuse_the_walks_predicate() -> None:
-    """Doc 20 §10.3: the walk says "still needs converting", the gate says "none lack it"."""
     walk = Retype(User.name, into="name_next", using="upper(name)").build()
     assert walk.work.where.text == "name_next IS NULL"
     assert walk.gate.verify.check_ == "name_next IS NOT NULL"
@@ -140,9 +113,6 @@ def test_a_retype_has_nothing_to_scan_and_says_why() -> None:
     assert "no re-encode window" in report.explain()
 
 
-# -- shared -------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("chunk", [0, -1, True], ids=["zero", "negative", "bool"])
 def test_a_bad_chunk_size_is_refused(chunk) -> None:
     with pytest.raises(DeferredDeclarationError, match="positive int"):
@@ -150,12 +120,6 @@ def test_a_bad_chunk_size_is_refused(chunk) -> None:
 
 
 def test_a_keyless_model_never_reaches_the_deferred_layer() -> None:
-    """The ORM refuses one at declaration, so the walk's own check is defensive.
-
-    Recorded rather than deleted: `_primary_key` still refuses, because it reads
-    `__wreath_columns__` rather than a validated spec and a future caller could
-    hand it something the model metaclass never saw.
-    """
     from wreath.orm import Mapped, Model, column
     from wreath.orm.errors import DeclarationError
     from wreath.orm.types import Text
@@ -174,8 +138,6 @@ def test_a_composite_primary_key_pages_by_the_whole_key() -> None:
 
 
 def test_the_ceiling_states_the_precondition_rather_than_switching_off_the_check() -> None:
-    """`at_launch` refuses a key it cannot prove monotone; a deferred migration
-    supplies the sentence that makes it sound, naming the primitive's own rule."""
     from wreath._migrations.deferred import PRECONDITION
 
     walk = Recode(User.name, mapping=MAPPING).build()
@@ -183,11 +145,7 @@ def test_the_ceiling_states_the_precondition_rather_than_switching_off_the_check
     assert "converts the past" in PRECONDITION
 
 
-# -- the strict entry point ---------------------------------------------------
-
-
 def test_a_scan_that_looked_at_nothing_refuses_rather_than_reporting_clean() -> None:
-    """Doc 19's empty-denominator bug must not come back wearing a new hat."""
     from wreath.migrations import TransitionalContractUnproven, scan_transitional_reads
 
     with pytest.raises(TransitionalContractUnproven, match="nothing was scanned"):
@@ -218,7 +176,6 @@ def test_a_clean_scan_returns_the_report() -> None:
 
 
 def test_a_retype_passes_the_strict_gate_with_nothing_to_scan() -> None:
-    """Shape B has no re-encode window, so an empty report is the right answer."""
     from wreath.migrations import scan_transitional_reads
 
     report = scan_transitional_reads(Retype(User.name, into="name_next", using="upper(name)"))

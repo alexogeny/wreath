@@ -77,13 +77,21 @@ async def test_repeated_response_header_value_order_remains_observable() -> None
 
 def test_the_json_corpus_refuses_ambiguous_bodies(tmp_path) -> None:
     path = tmp_path / "cases.json"
-    path.write_text(json.dumps({"cases": [{
-        "name": "create",
-        "method": "POST",
-        "path": "/items",
-        "body": "{}",
-        "body_base64": "e30=",
-    }]}))
+    path.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {
+                        "name": "create",
+                        "method": "POST",
+                        "path": "/items",
+                        "body": "{}",
+                        "body_base64": "e30=",
+                    }
+                ]
+            }
+        )
+    )
     with pytest.raises(ValueError, match="body or body_base64, not both"):
         load_cases(path)
 
@@ -98,9 +106,7 @@ def test_request_cases_refuse_headers_the_test_client_cannot_preserve() -> None:
         )
 
 
-def test_the_cli_exits_one_and_names_a_runtime_difference(
-    tmp_path, monkeypatch, capsys
-) -> None:
+def test_the_cli_exits_one_and_names_a_runtime_difference(tmp_path, monkeypatch, capsys) -> None:
     module = tmp_path / "port_verify_apps.py"
     module.write_text(
         "from wreath import Wreath\n"
@@ -116,14 +122,16 @@ def test_the_cli_exits_one_and_names_a_runtime_difference(
     monkeypatch.syspath_prepend(str(tmp_path))
     importlib.invalidate_caches()
     try:
-        code = main([
-            "port",
-            "--verify",
-            "port_verify_apps:source",
-            "port_verify_apps:candidate",
-            "--cases",
-            str(cases),
-        ])
+        code = main(
+            [
+                "port",
+                "--verify",
+                "port_verify_apps:source",
+                "port_verify_apps:candidate",
+                "--cases",
+                str(cases),
+            ]
+        )
     finally:
         sys.modules.pop("port_verify_apps", None)
     assert code == 1

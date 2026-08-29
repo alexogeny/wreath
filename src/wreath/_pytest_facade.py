@@ -65,9 +65,7 @@ class ExceptionInfo[ExceptionT: BaseException]:
         return self.value.__traceback__
 
 
-class _RaisesContext[ExceptionT: BaseException](
-    AbstractContextManager[ExceptionInfo[ExceptionT]]
-):
+class _RaisesContext[ExceptionT: BaseException](AbstractContextManager[ExceptionInfo[ExceptionT]]):
     def __init__(
         self,
         expected: type[ExceptionT] | tuple[type[ExceptionT], ...],
@@ -252,9 +250,7 @@ class _MarkNamespace:
             explicit_ids = None
         else:
             id_factory = None
-            explicit_ids = (
-                tuple(cast("Iterable[str | None]", ids)) if ids is not None else None
-            )
+            explicit_ids = tuple(cast("Iterable[str | None]", ids)) if ids is not None else None
         if explicit_ids is not None and len(explicit_ids) != len(raw_values):
             raise ValueError("pytest.mark.parametrize ids must match the number of values")
         normalized: list[Parameter] = []
@@ -377,7 +373,7 @@ def _approximately_equal(
     try:
         left = float(actual)
         right = float(expected)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return actual == expected
     if nan_ok and math.isnan(left) and math.isnan(right):
         return True
@@ -465,9 +461,11 @@ class MonkeyPatch:
         previous = getattr(target, name, None)
         builtins.setattr(target, name, value)
         self._undo.append(
-            lambda: builtins.setattr(target, name, previous)
-            if existed
-            else builtins.delattr(target, name)
+            lambda: (
+                builtins.setattr(target, name, previous)
+                if existed
+                else builtins.delattr(target, name)
+            )
         )
 
     def setitem(self, mapping: Any, name: Any, value: Any) -> None:

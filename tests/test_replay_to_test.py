@@ -1,17 +1,3 @@
-"""A recorded request, turned into a runnable regression test.
-
-The gap this closes: an incident produces a recording, and a recording is only
-useful while someone is looking at it. Turning one into a test is twenty minutes
-of transcribing headers by hand, so it usually does not happen, and the same bug
-comes back.
-
-Wreath records the request, owns the pipeline that served it, and ships the test
-client that can drive it again -- so the transcription is a function. What comes
-out is a *characterisation* test: it asserts what this request does today. Run it
-against the broken build and it encodes the bug; run it after the fix and it
-locks the fix in. The tool does not know which you meant, and says so.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -62,9 +48,6 @@ POST = (
 )
 
 
-# --- reading the request back out ---------------------------------------------
-
-
 def test_the_request_line_survives_the_recording() -> None:
     request = recorded_request(_recording(GET))
     assert request.method == "GET"
@@ -88,7 +71,6 @@ def test_a_body_is_read_to_its_content_length() -> None:
 
 
 def test_a_request_split_across_segments_is_reassembled() -> None:
-    """A real connection does not deliver a request in one read."""
     request = recorded_request(_recording(POST[:20], POST[20:45], POST[45:]))
     assert request.path == "/llamas"
     assert request.body == b'{"name": "Bea"}\n'
@@ -122,24 +104,15 @@ def test_a_truncated_request_is_refused_rather_than_guessed() -> None:
 
 
 def test_a_body_shorter_than_its_content_length_is_refused() -> None:
-    truncated = (
-        b"POST /llamas HTTP/1.1\r\nhost: x\r\ncontent-length: 99\r\n\r\n{}"
-    )
+    truncated = b"POST /llamas HTTP/1.1\r\nhost: x\r\ncontent-length: 99\r\n\r\n{}"
     with pytest.raises(ReplayError, match="incomplete"):
         recorded_request(_recording(truncated))
 
 
 def test_chunked_encoding_is_refused_by_name() -> None:
-    """Better a clear refusal than a test asserting a body we mis-decoded."""
-    chunked = (
-        b"POST /llamas HTTP/1.1\r\nhost: x\r\n"
-        b"transfer-encoding: chunked\r\n\r\n0\r\n\r\n"
-    )
+    chunked = b"POST /llamas HTTP/1.1\r\nhost: x\r\ntransfer-encoding: chunked\r\n\r\n0\r\n\r\n"
     with pytest.raises(ReplayError, match="chunked"):
         recorded_request(_recording(chunked))
-
-
-# --- generating the test ------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -175,9 +148,7 @@ async def test_generation_replays_the_query_when_observing_the_response() -> Non
     async def echo(request) -> dict:
         return {"query": request.query_string.decode("latin-1")}
 
-    recording = _recording(
-        b"GET /echo?mode=deep HTTP/1.1\r\nhost: example.test\r\n\r\n"
-    )
+    recording = _recording(b"GET /echo?mode=deep HTTP/1.1\r\nhost: example.test\r\n\r\n")
     source = await generate_test(app, recording, target="echo.app:app")
 
     response_assertion = source.split("assert response.body ==", 1)[1]
@@ -229,7 +200,6 @@ async def test_the_generated_test_asserts_the_observed_body() -> None:
 
 @pytest.mark.asyncio
 async def test_the_generated_test_is_actually_runnable() -> None:
-    """The whole promise. A test that does not run is a transcription exercise."""
     import sys
     import types
 
@@ -237,15 +207,11 @@ async def test_the_generated_test_is_actually_runnable() -> None:
     module.app = _app()
     sys.modules["herd_generated_app"] = module
     try:
-        source = await generate_test(
-            _app(), _recording(GET), target="herd_generated_app:app"
-        )
+        source = await generate_test(_app(), _recording(GET), target="herd_generated_app:app")
         namespace: dict = {}
         exec(compile(source, "generated_test.py", "exec"), namespace)  # noqa: S102 - executing the generated test is what this asserts
-        test = next(
-            value for name, value in namespace.items() if name.startswith("test_")
-        )
-        await test()                       # must pass, not merely import
+        test = next(value for name, value in namespace.items() if name.startswith("test_"))
+        await test()  # must pass, not merely import
     finally:
         del sys.modules["herd_generated_app"]
 
@@ -282,7 +248,6 @@ async def test_an_explicit_name_wins() -> None:
 
 @pytest.mark.asyncio
 async def test_the_generated_test_says_where_it_came_from() -> None:
-    """Someone reading it in six months needs to know it was not hand-written."""
     source = await generate_test(
         _app(), _recording(GET), target="herd.app:app", origin="herd-incident.wtr1"
     )
@@ -318,17 +283,7 @@ async def test_a_malformed_generated_test_target_is_refused() -> None:
         await generate_test(_app(), _recording(GET), target="herd.app:bad:name")
 
 
-# --- a connection that carried more than one request (design 22 item 18) -----
-
-
 def test_a_pipelined_recording_is_refused_rather_than_half_tested():
-    """Two requests on one keep-alive connection must not silently become one.
-
-    `recorded_request` joins every DATA segment and parses one request, so the
-    second request's bytes were dropped past `content-length` without a word --
-    generating a regression test that covers half of what was recorded. Refused
-    for the same reason a chunked body is.
-    """
     with pytest.raises(ReplayError) as caught:
         recorded_request(_recording(GET + POST))
 
@@ -345,22 +300,18 @@ def test_the_dropped_bytes_are_counted_in_the_refusal():
 
 
 def test_pipelining_is_caught_when_split_across_reads():
-    """A real capture splits mid-request; the join must not hide the second one."""
     joined = GET + POST
     with pytest.raises(ReplayError):
         recorded_request(_recording(joined[:20], joined[20:]))
 
 
 def test_a_single_request_with_a_trailing_newline_is_still_accepted():
-    """Not everything past the body is another request."""
     request = recorded_request(_recording(POST + b"\r\n"))
 
     assert request.method == "POST"
     assert request.body == b'{"name": "Bea"}\n'
 
 
-# --- every refusal it advertises, and nothing it does not --------------------
-#
 # `recorded_request` refuses rather than guesses, which only means something if
 # every refusal is reachable. The table below is checked against the number of
 # `raise ReplayError` sites in the function itself, so adding a refusal without
@@ -400,13 +351,6 @@ def test_every_advertised_refusal_actually_fires(case: str, payload) -> None:
 
 
 def test_the_refusal_table_covers_every_refusal_in_the_function() -> None:
-    """A coverage gate that cannot drift, because it reads the code.
-
-    Three of this repository's seven "checks with nothing to check" were
-    refusals nobody had ever seen fire. Counting the `raise` sites in
-    `recorded_request` and comparing them with the cases above means a new
-    refusal ships with a case for it or turns this red.
-    """
     import inspect
 
     from wreath.replay import recorded_request as function
@@ -419,14 +363,9 @@ def test_the_refusal_table_covers_every_refusal_in_the_function() -> None:
 
 
 def test_a_recording_it_does_not_refuse_is_read_correctly() -> None:
-    """The control the table needs. A `recorded_request` that refused
-    everything would satisfy all seven cases above."""
     request = recorded_request(_recording(POST))
     assert (request.method, request.path) == ("POST", "/llamas")
     assert request.body == b'{"name": "Bea"}\n'
-
-
-# --- the headers the generator drops, and the ones it must not ---------------
 
 
 HOP_BY_HOP = (
@@ -442,14 +381,6 @@ HOP_BY_HOP = (
 
 @pytest.mark.asyncio
 async def test_transport_headers_are_dropped_from_the_generated_call() -> None:
-    """`host`, `content-length` and `connection` are the test client's business.
-
-    Carrying them into the generated call would assert on transport rather than
-    on behaviour: `TestClient` sets its own `host`, computes its own framing,
-    and a pinned `connection: keep-alive` would make the test fail the day the
-    client changed how it pools. The rule is in `wreath.replay`'s docstring and
-    in the subsystem manifest; this is where it is enforced.
-    """
     source = await generate_test(_app(), _recording(HOP_BY_HOP), target="herd.app:app")
     assert "'host'" not in source
     assert "'content-length'" not in source
@@ -458,8 +389,6 @@ async def test_transport_headers_are_dropped_from_the_generated_call() -> None:
 
 @pytest.mark.asyncio
 async def test_every_other_header_survives_into_the_generated_call() -> None:
-    """The other half, without which the test above passes for a generator that
-    drops every header."""
     source = await generate_test(_app(), _recording(HOP_BY_HOP), target="herd.app:app")
     assert "'accept': 'application/json'" in source
     assert "'x-request-id': '9f51'" in source
@@ -467,18 +396,10 @@ async def test_every_other_header_survives_into_the_generated_call() -> None:
 
 @pytest.mark.asyncio
 async def test_a_header_named_like_a_dropped_one_is_kept() -> None:
-    """The drop is by exact name. `x-connection` is not `connection`, and a
-    prefix or substring match would quietly delete a caller's header."""
-    raw = (
-        b"GET /llamas/7 HTTP/1.1\r\nhost: x\r\n"
-        b"x-connection: pooled\r\nhost-region: eu\r\n\r\n"
-    )
+    raw = b"GET /llamas/7 HTTP/1.1\r\nhost: x\r\nx-connection: pooled\r\nhost-region: eu\r\n\r\n"
     source = await generate_test(_app(), _recording(raw), target="herd.app:app")
     assert "'x-connection': 'pooled'" in source
     assert "'host-region': 'eu'" in source
-
-
-# --- record -> generate -> run -> the same observation -----------------------
 
 
 async def _run_generated(source: str, app_factory) -> None:
@@ -500,14 +421,6 @@ async def _run_generated(source: str, app_factory) -> None:
 
 @pytest.mark.asyncio
 async def test_the_generated_test_asserts_what_the_client_actually_observes() -> None:
-    """The round trip, closed: record, generate, run, and the same answer.
-
-    Not "it produces a file that imports". The generated assertion has to be the
-    observation a direct `TestClient` call makes for the same request, or the
-    tool has transcribed something other than what happened -- which is the one
-    failure mode that would make every generated regression test worthless
-    while all of them passed.
-    """
     from wreath.testing import TestClient
 
     async with TestClient(_app()) as client:
@@ -521,13 +434,6 @@ async def test_the_generated_test_asserts_what_the_client_actually_observes() ->
 
 @pytest.mark.asyncio
 async def test_the_generated_assertion_fails_when_the_behaviour_changes() -> None:
-    """Proof the assertion is load-bearing rather than decorative.
-
-    A characterisation test that passes against a *different* application is not
-    a characterisation of anything. Generated against one app and run against
-    one that answers differently, it must fail -- and this is the only way to
-    know the generated `assert` is comparing something real.
-    """
     source = await generate_test(_app(), _recording(GET), target="herd_roundtrip_app:app")
 
     def changed() -> Wreath:
@@ -545,12 +451,6 @@ async def test_the_generated_assertion_fails_when_the_behaviour_changes() -> Non
 
 @pytest.mark.asyncio
 async def test_a_generated_test_is_stable_across_regenerations() -> None:
-    """Two generations of the same recording produce the same source.
-
-    A generator whose output varied -- header order, dict ordering, a timestamp
-    -- would show up as a diff on every regeneration, and a file that always
-    diffs is a file nobody reads.
-    """
     first = await generate_test(_app(), _recording(POST), target="herd.app:app")
     second = await generate_test(_app(), _recording(POST), target="herd.app:app")
     assert first == second

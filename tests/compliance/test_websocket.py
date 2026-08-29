@@ -1,12 +1,3 @@
-"""WebSocket compliance (RFC 6455), codified.
-
-The close-code rule is enforced in Python (`WebSocket.close`). The wire-level
-MUSTs — a client frame must be masked (else close 1002), text/close payloads
-must be valid UTF-8 (else 1007), control frames must be ≤125 bytes and not
-fragmented, reserved opcodes/RSV bits close 1002 — are enforced in the native
-protocol and covered by tests/test_server_websocket.py; this file pins the
-Python-visible contract.
-"""
 from __future__ import annotations
 
 import pytest

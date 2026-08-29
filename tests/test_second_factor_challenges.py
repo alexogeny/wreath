@@ -1,17 +1,3 @@
-"""Single-use second-factor challenges on `wreath.store`.
-
-A ceremony challenge is consumed exactly once, by the user who began it. The
-property that matters is *atomic* consumption: a read followed by a delete lets
-two concurrent completions both conclude they were first, which is precisely
-what a single-use challenge exists to prevent. So the tests that carry this
-file are the concurrency ones, and they need a real PostgreSQL -- a sequential
-simulation proves nothing about a race.
-
-The user binding is part of the consuming statement rather than a check after
-it. Checking after consuming would let anyone holding a handle burn the
-rightful user's ceremony, which is a denial of service on someone else's login.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -44,9 +30,6 @@ def _table(suffix: str = "chal") -> str:
     return f"w2fa_{worker}_{suffix}"
 
 
-# --- the declaration, no database --------------------------------------------
-
-
 async def test_the_declaration_names_its_table_and_payload() -> None:
     declaration = challenge_declaration(table=_table())
     statements = declaration.statements()
@@ -56,15 +39,9 @@ async def test_the_declaration_names_its_table_and_payload() -> None:
 
 
 async def test_the_declaration_offers_a_schema_component() -> None:
-    """Wreath owns its own furniture: this table never enters a user's artifact."""
-    component = challenge_declaration(table=_table()).schema_claim(
-        "second_factor_challenges"
-    )
+    component = challenge_declaration(table=_table()).schema_claim("second_factor_challenges")
     assert component.name == "second_factor_challenges"
     assert any(step.version == 1 for step in component.steps)
-
-
-# --- the in-memory twin -------------------------------------------------------
 
 
 async def test_memory_consumes_a_challenge_exactly_once() -> None:
@@ -76,7 +53,6 @@ async def test_memory_consumes_a_challenge_exactly_once() -> None:
 
 
 async def test_memory_refuses_another_user_without_consuming() -> None:
-    """The rightful user's ceremony survives someone else's attempt on it."""
     store = MemoryChallengeStore()
     await store.put("h1", user_id="u1", kind="webauthn-register", payload={"c": "x"}, ttl=60)
     assert await store.consume("h1", user_id="u2", kind="webauthn-register") is None
@@ -84,7 +60,6 @@ async def test_memory_refuses_another_user_without_consuming() -> None:
 
 
 async def test_memory_refuses_another_kind_without_consuming() -> None:
-    """A registration challenge must not answer an assertion."""
     store = MemoryChallengeStore()
     await store.put("h1", user_id="u1", kind="webauthn-register", payload={"c": "x"}, ttl=60)
     assert await store.consume("h1", user_id="u1", kind="webauthn-assert") is None
@@ -100,7 +75,6 @@ async def test_memory_refuses_an_expired_challenge() -> None:
 
 
 async def test_memory_peek_reads_without_consuming() -> None:
-    """`peek` is the non-consuming read, and it must leave the row spendable."""
     store = MemoryChallengeStore()
     await store.put("h1", user_id="u1", kind="totp-enrolment", payload={"s": "x"}, ttl=60)
     row = await store.peek("h1")
@@ -112,8 +86,6 @@ async def test_memory_peek_reads_without_consuming() -> None:
 
 
 async def test_memory_peek_answers_none_for_absent_and_expired() -> None:
-    """The two cases a caller must not tell apart from each other, only from
-    "it exists and is not yours"."""
     ticks = [0.0]
     store = MemoryChallengeStore(clock=lambda: ticks[0])
     assert await store.peek("nope") is None
@@ -123,9 +95,6 @@ async def test_memory_peek_answers_none_for_absent_and_expired() -> None:
 
 
 async def test_memory_peek_does_not_apply_the_binding() -> None:
-    """It reports who the row belongs to; it never decides whether you may have
-    it. That is `consume`'s job, and keeping them apart is what makes `peek`
-    safe to call after a refusal purely to choose an error code."""
     store = MemoryChallengeStore()
     await store.put("h1", user_id="u1", kind="k", payload={"c": "x"}, ttl=60)
     row = await store.peek("h1")
@@ -134,7 +103,6 @@ async def test_memory_peek_does_not_apply_the_binding() -> None:
 
 
 async def test_memory_peek_mutation_does_not_reach_the_stored_row() -> None:
-    """A caller editing what it read must not edit what is still stored."""
     store = MemoryChallengeStore()
     await store.put("h1", user_id="u1", kind="k", payload={"c": "x"}, ttl=60)
     row = await store.peek("h1")
@@ -151,22 +119,12 @@ async def test_memory_discards_a_challenge() -> None:
 
 
 async def test_memory_consumption_is_atomic_across_concurrent_tasks() -> None:
-    """Synchronous between the read and the delete, so no task interleaves.
-
-    This is the in-process counterpart of the single DELETE the PostgreSQL twin
-    uses; it is weaker evidence than the database race below, because a single
-    event loop cannot interleave without an await, but it is the property the
-    memory store is claiming and so it is worth pinning.
-    """
     store = MemoryChallengeStore()
     await store.put("h1", user_id="u1", kind="webauthn-register", payload={"c": "x"}, ttl=60)
     results = await asyncio.gather(
         *(store.consume("h1", user_id="u1", kind="webauthn-register") for _ in range(16))
     )
     assert sum(1 for r in results if r is not None) == 1
-
-
-# --- against a live database --------------------------------------------------
 
 
 async def _database():
@@ -208,9 +166,7 @@ async def test_postgres_consumes_a_challenge_exactly_once() -> None:
     table = _table("once")
     db, store = await _store(table)
     try:
-        await store.put(
-            "h1", user_id="u1", kind="webauthn-register", payload={"c": "x"}, ttl=60
-        )
+        await store.put("h1", user_id="u1", kind="webauthn-register", payload={"c": "x"}, ttl=60)
         assert await store.consume("h1", user_id="u1", kind="webauthn-register") == {"c": "x"}
         assert await store.consume("h1", user_id="u1", kind="webauthn-register") is None
     finally:
@@ -222,9 +178,7 @@ async def test_postgres_refuses_another_user_without_consuming() -> None:
     table = _table("user")
     db, store = await _store(table)
     try:
-        await store.put(
-            "h1", user_id="u1", kind="webauthn-register", payload={"c": "x"}, ttl=60
-        )
+        await store.put("h1", user_id="u1", kind="webauthn-register", payload={"c": "x"}, ttl=60)
         assert await store.consume("h1", user_id="u2", kind="webauthn-register") is None
         # Still there for whoever began it -- the attempt cost them nothing.
         assert await store.consume("h1", user_id="u1", kind="webauthn-register") == {"c": "x"}
@@ -237,9 +191,7 @@ async def test_postgres_peek_reads_without_consuming() -> None:
     table = _table("peek")
     db, store = await _store(table)
     try:
-        await store.put(
-            "h1", user_id="u1", kind="totp-enrolment", payload={"s": "x"}, ttl=60
-        )
+        await store.put("h1", user_id="u1", kind="totp-enrolment", payload={"s": "x"}, ttl=60)
         row = await store.peek("h1")
         assert row is not None
         assert (row.user_id, row.kind, row.payload) == ("u1", "totp-enrolment", {"s": "x"})
@@ -252,8 +204,6 @@ async def test_postgres_peek_reads_without_consuming() -> None:
 
 @requires_db
 async def test_postgres_peek_refuses_an_expired_row_like_consume_does() -> None:
-    """Same deadline, same clock source -- otherwise `peek` would report a row
-    that `consume` has already decided is gone, and the error code would lie."""
     table = _table("peekexp")
     db, store = await _store(table)
     try:
@@ -270,9 +220,7 @@ async def test_postgres_refuses_an_expired_challenge_and_purges_it() -> None:
     table = _table("exp")
     db, store = await _store(table)
     try:
-        await store.put(
-            "h1", user_id="u1", kind="webauthn-register", payload={"c": "x"}, ttl=0.001
-        )
+        await store.put("h1", user_id="u1", kind="webauthn-register", payload={"c": "x"}, ttl=0.001)
         await asyncio.sleep(0.05)
         assert await store.consume("h1", user_id="u1", kind="webauthn-register") is None
         assert await store.purge_count() == 1
@@ -282,19 +230,10 @@ async def test_postgres_refuses_an_expired_challenge_and_purges_it() -> None:
 
 @requires_db
 async def test_two_simultaneous_completions_leave_exactly_one_winner() -> None:
-    """The test this plan exists for.
-
-    Sixteen tasks race for one challenge against a real PostgreSQL, each on its
-    own pooled connection. Exactly one DELETE can return a row; the other
-    fifteen are refused as replays. A read-then-delete implementation fails
-    this, which is why it is written against the database rather than simulated.
-    """
     table = _table("race")
     db, store = await _store(table)
     try:
-        await store.put(
-            "h1", user_id="u1", kind="webauthn-register", payload={"c": "x"}, ttl=60
-        )
+        await store.put("h1", user_id="u1", kind="webauthn-register", payload={"c": "x"}, ttl=60)
         results = await asyncio.gather(
             *(store.consume("h1", user_id="u1", kind="webauthn-register") for _ in range(16))
         )

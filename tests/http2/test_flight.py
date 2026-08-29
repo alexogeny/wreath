@@ -1,5 +1,3 @@
-"""Stage 1: the native HTTP/2 protocol emits a Pulse completion per stream."""
-
 from __future__ import annotations
 
 import asyncio
@@ -30,8 +28,7 @@ async def _ok_app(scope: dict, receive: Any, send: Any) -> None:
 async def _drive(recorder, app=_ok_app, streams=(1,)):
     loop = asyncio.get_event_loop()
     transport = FakeTransport()
-    protocol = Http2Protocol(app, ServerConfig(protocols=("h2",)), loop, set(),
-                             recorder=recorder)
+    protocol = Http2Protocol(app, ServerConfig(protocols=("h2",)), loop, set(), recorder=recorder)
     protocol.connection_made(transport)
     await _settle()
     protocol.data_received(support.PREFACE)
@@ -39,8 +36,9 @@ async def _drive(recorder, app=_ok_app, streams=(1,)):
     await _settle()
     for sid in streams:
         protocol.data_received(
-            support.build_headers_frame(sid, support.request_headers(
-                method=b"GET", path=b"/x", authority=b"example.com"))
+            support.build_headers_frame(
+                sid, support.request_headers(method=b"GET", path=b"/x", authority=b"example.com")
+            )
         )
         await _settle()
     return protocol
@@ -96,16 +94,16 @@ async def test_h2_route_attribution_stamps_metadata_ids() -> None:
     loop = asyncio.get_event_loop()
     transport = FakeTransport()
     rec = _flight.Recorder(_flight.MODE_PULSE, ring_records=64, active_requests=16)
-    protocol = Http2Protocol(app, ServerConfig(protocols=("h2",)), loop, set(),
-                             recorder=rec)
+    protocol = Http2Protocol(app, ServerConfig(protocols=("h2",)), loop, set(), recorder=rec)
     protocol.connection_made(transport)
     await _settle()
     protocol.data_received(support.PREFACE)
     protocol.data_received(support.encode_settings({}))
     await _settle()
     protocol.data_received(
-        support.build_headers_frame(1, support.request_headers(
-            method=b"GET", path=b"/widgets/42", authority=b"example.com"))
+        support.build_headers_frame(
+            1, support.request_headers(method=b"GET", path=b"/widgets/42", authority=b"example.com")
+        )
     )
     await _settle()
 
@@ -132,9 +130,7 @@ async def test_h2_native_ai_refusal_is_a_structured_completion() -> None:
     loop = asyncio.get_event_loop()
     transport = FakeTransport()
     rec = _flight.Recorder(_flight.MODE_PULSE, ring_records=64, active_requests=16)
-    protocol = Http2Protocol(
-        app, ServerConfig(protocols=("h2",)), loop, set(), recorder=rec
-    )
+    protocol = Http2Protocol(app, ServerConfig(protocols=("h2",)), loop, set(), recorder=rec)
     protocol.connection_made(transport)
     await _settle()
     protocol.data_received(support.PREFACE)
@@ -143,9 +139,7 @@ async def test_h2_native_ai_refusal_is_a_structured_completion() -> None:
     protocol.data_received(
         support.build_headers_frame(
             1,
-            support.request_headers(
-                path=b"/", extra=[(b"user-agent", b"GPTBot/1.0")]
-            ),
+            support.request_headers(path=b"/", extra=[(b"user-agent", b"GPTBot/1.0")]),
         )
     )
     await _settle()
@@ -218,8 +212,7 @@ async def test_h2_native_refusal_resets_open_request_without_closing_connection(
     emitted = frames.frames()
     assert not [frame for frame in emitted if frame.type == support.GOAWAY]
     resets = [
-        frame for frame in emitted
-        if frame.type == support.RST_STREAM and frame.stream_id == 1
+        frame for frame in emitted if frame.type == support.RST_STREAM and frame.stream_id == 1
     ]
     assert resets
     assert int.from_bytes(resets[0].payload, "big") == support.NO_ERROR

@@ -1,32 +1,3 @@
-"""`_native/protobuf.c` against the protobuf wire format, byte for byte.
-
-This used to assert that two Wreath codecs produced identical bytes, which two
-codecs written from one reading of the format do happily while emitting bytes no
-peer accepts. `_wire` below is instead an encoder written straight from the
-specification — tag byte, varint, zigzag, little-endian fixed, length prefix —
-and every scalar case asserts the codec emits exactly what it produces.
-
-The rules `_wire` encodes, from <https://protobuf.dev/programming-guides/encoding/>:
-
-* a field is `(number << 3) | wire_type`, itself a varint;
-* wire types are 0 varint, 1 64-bit LE, 2 length-delimited, 5 32-bit LE;
-* a varint is base-128 little-endian with the high bit as the continuation
-  flag, and a negative `int32`/`int64` is its two's-complement *64-bit* value,
-  which is why -1 costs ten bytes;
-* `sint32`/`sint64` are zigzag: `(n << 1) ^ (n >> 63)`, so small magnitudes stay
-  short whichever sign they have;
-* in proto3 a scalar equal to its zero is **not emitted at all**, which is what
-  makes `_defaults()` encode to nothing.
-
-Assertions are at the *plan* boundary — `encode_values` / `decode_values` —
-because that is what the C implements. Object construction happens in Python.
-
-The boundary cases matter more than the shapes. A varint's length is a property
-of the value, so every width transition is a branch that can be off by one; the
-same is true of the sign handling, of packed versus unpacked repeated, and of
-the -0.0 that must not be mistaken for a default.
-"""
-
 from __future__ import annotations
 
 import enum
@@ -89,9 +60,28 @@ INNER_PLAN = Inner.__wreath_protobuf_plan__[0]
 def _defaults() -> list:
     """A value list holding every field's proto3 zero, in plan order."""
     return [
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0.0, 0.0, False, "", b"", 0,
-        [], [], [], None, [], {},
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0.0,
+        0.0,
+        False,
+        "",
+        b"",
+        0,
+        [],
+        [],
+        [],
+        None,
+        [],
+        {},
     ]
 
 
@@ -120,11 +110,22 @@ def _tag(number: int, wire_type: int) -> bytes:
 #: `"varint"` takes the two's-complement 64-bit form for a negative, which is
 #: what makes int32 -1 ten bytes rather than five.
 _SCALARS: dict[int, tuple[int, str]] = {
-    0: (1, "varint"), 1: (2, "varint"), 2: (3, "varint"), 3: (4, "varint"),
-    4: (5, "zigzag"), 5: (6, "zigzag"),
-    6: (7, "fixed32"), 7: (8, "fixed32"), 8: (9, "fixed64"), 9: (10, "fixed64"),
-    10: (11, "double"), 11: (12, "float"), 12: (13, "varint"),
-    13: (14, "string"), 14: (15, "bytes"), 15: (16, "varint"),
+    0: (1, "varint"),
+    1: (2, "varint"),
+    2: (3, "varint"),
+    3: (4, "varint"),
+    4: (5, "zigzag"),
+    5: (6, "zigzag"),
+    6: (7, "fixed32"),
+    7: (8, "fixed32"),
+    8: (9, "fixed64"),
+    9: (10, "fixed64"),
+    10: (11, "double"),
+    11: (12, "float"),
+    12: (13, "varint"),
+    13: (14, "string"),
+    14: (15, "bytes"),
+    15: (16, "varint"),
 }
 
 
@@ -193,9 +194,6 @@ def _same_values(raw: bytes) -> tuple:
     return decoded
 
 
-# -- encoding parity --------------------------------------------------------
-
-
 def test_an_all_default_message_encodes_to_nothing_in_both() -> None:
     assert _same_bytes(_defaults()) == b""
 
@@ -203,17 +201,27 @@ def test_an_all_default_message_encodes_to_nothing_in_both() -> None:
 @pytest.mark.parametrize(
     "value",
     [
-        0, 1, 127, 128, 255, 256, 16383, 16384,          # varint width steps
-        2**31 - 1, -1, -2, -128, -129, -(2**31),
+        0,
+        1,
+        127,
+        128,
+        255,
+        256,
+        16383,
+        16384,  # varint width steps
+        2**31 - 1,
+        -1,
+        -2,
+        -128,
+        -129,
+        -(2**31),
     ],
 )
 def test_int32_width_transitions(value: int) -> None:
     _scalar(0, value)
 
 
-@pytest.mark.parametrize(
-    "value", [0, 1, -1, 2**63 - 1, -(2**63), 2**40, -(2**40)]
-)
+@pytest.mark.parametrize("value", [0, 1, -1, 2**63 - 1, -(2**63), 2**40, -(2**40)])
 def test_int64_width_transitions(value: int) -> None:
     _scalar(1, value)
 
@@ -228,16 +236,12 @@ def test_uint64_reaches_the_very_top(value: int) -> None:
     _scalar(3, value)
 
 
-@pytest.mark.parametrize(
-    "value", [0, -1, 1, -2, 2, 2**31 - 1, -(2**31)]
-)
+@pytest.mark.parametrize("value", [0, -1, 1, -2, 2, 2**31 - 1, -(2**31)])
 def test_sint32_zigzag(value: int) -> None:
     _scalar(4, value)
 
 
-@pytest.mark.parametrize(
-    "value", [0, -1, 1, 2**63 - 1, -(2**63)]
-)
+@pytest.mark.parametrize("value", [0, -1, 1, 2**63 - 1, -(2**63)])
 def test_sint64_zigzag(value: int) -> None:
     _scalar(5, value)
 
@@ -280,9 +284,7 @@ def test_bool_true_is_written_and_false_is_not() -> None:
     assert _scalar(12, False) == b""
 
 
-@pytest.mark.parametrize(
-    "value", ["", "a", "snø", "\U0001f600", "x" * 200, "y" * 20000]
-)
+@pytest.mark.parametrize("value", ["", "a", "snø", "\U0001f600", "x" * 200, "y" * 20000])
 def test_string_length_transitions(value: str) -> None:
     _scalar(13, value)
 
@@ -297,9 +299,7 @@ def test_enum_members_and_an_unknown_integer() -> None:
     _scalar(15, 99)
 
 
-@pytest.mark.parametrize(
-    "items", [[], [0], [1, 2, 3], list(range(300)), [-1, 2**40]]
-)
+@pytest.mark.parametrize("items", [[], [0], [1, 2, 3], list(range(300)), [-1, 2**40]])
 def test_packed_repeated(items: list) -> None:
     _same_bytes(_with(16, items))
 
@@ -324,9 +324,7 @@ def test_repeated_nested_messages() -> None:
     _same_bytes(_with(20, [([1], b""), ([2], b"")]))
 
 
-@pytest.mark.parametrize(
-    "mapping", [{}, {"a": 1}, {"": 0}, {"a": 1, "b": 2, "c": 3}]
-)
+@pytest.mark.parametrize("mapping", [{}, {"a": 1}, {"": 0}, {"a": 1, "b": 2, "c": 3}])
 def test_maps(mapping: dict) -> None:
     _same_bytes(_with(21, mapping))
 
@@ -342,15 +340,30 @@ def test_unknown_field_bytes_are_appended_identically() -> None:
 
 def test_a_fully_populated_message_agrees() -> None:
     values = [
-        -7, -(2**40), 4294967295, 2**64 - 1, -3, 3,
-        4294967295, -2147483648, 2**64 - 1, -(2**63),
-        1.25, 0.5, True, "hello", b"\x01\x02", int(Quality.GOOD),
-        [1, 2, 3], [4, 5], ["p", "q"], ([9], b""), [([1], b"")], {"k": 2},
+        -7,
+        -(2**40),
+        4294967295,
+        2**64 - 1,
+        -3,
+        3,
+        4294967295,
+        -2147483648,
+        2**64 - 1,
+        -(2**63),
+        1.25,
+        0.5,
+        True,
+        "hello",
+        b"\x01\x02",
+        int(Quality.GOOD),
+        [1, 2, 3],
+        [4, 5],
+        ["p", "q"],
+        ([9], b""),
+        [([1], b"")],
+        {"k": 2},
     ]
     _same_bytes(values, b"\xfa\x01\x01z")
-
-
-# -- decoding parity --------------------------------------------------------
 
 
 def test_decoding_an_empty_buffer_agrees() -> None:
@@ -359,10 +372,28 @@ def test_decoding_an_empty_buffer_agrees() -> None:
 
 def test_a_fully_populated_message_survives_a_round_trip() -> None:
     values = [
-        -7, -(2**40), 4294967295, 2**64 - 1, -3, 3,
-        4294967295, -2147483648, 2**64 - 1, -(2**63),
-        1.25, 0.5, True, "hello", b"\x01\x02", int(Quality.GOOD),
-        [1, 2, 3], [4, 5], ["p", "q"], ([9], b""), [([1], b"")], {"k": 2},
+        -7,
+        -(2**40),
+        4294967295,
+        2**64 - 1,
+        -3,
+        3,
+        4294967295,
+        -2147483648,
+        2**64 - 1,
+        -(2**63),
+        1.25,
+        0.5,
+        True,
+        "hello",
+        b"\x01\x02",
+        int(Quality.GOOD),
+        [1, 2, 3],
+        [4, 5],
+        ["p", "q"],
+        ([9], b""),
+        [([1], b"")],
+        {"k": 2},
     ]
     _same_values(native_encode(PLAN, values, b""))
 
@@ -397,20 +428,17 @@ def test_a_later_scalar_overwrites_an_earlier_one_in_both() -> None:
     _same_values(b"\x08\x01\x08\x02")
 
 
-# -- refusal parity ---------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "raw",
     [
-        b"\x08" + b"\x80" * 11 + b"\x01",   # varint over ten bytes
-        b"\x08\x80",                        # truncated varint
-        b"\x72\xc8\x01ab",                  # length past the end
-        b"\x3d\x01\x00",                    # truncated fixed32
-        b"\x00\x01",                        # field number zero
-        b"\x0b",                            # group wire type
-        b"\x0e",                            # unknown wire type
-        b"\x72\x01\xff",                    # invalid UTF-8 in a string
+        b"\x08" + b"\x80" * 11 + b"\x01",  # varint over ten bytes
+        b"\x08\x80",  # truncated varint
+        b"\x72\xc8\x01ab",  # length past the end
+        b"\x3d\x01\x00",  # truncated fixed32
+        b"\x00\x01",  # field number zero
+        b"\x0b",  # group wire type
+        b"\x0e",  # unknown wire type
+        b"\x72\x01\xff",  # invalid UTF-8 in a string
     ],
 )
 def test_malformed_buffers_are_refused(raw: bytes) -> None:
@@ -426,10 +454,5 @@ def test_malformed_buffers_are_refused(raw: bytes) -> None:
     [(0, 2**31), (0, -(2**31) - 1), (2, -1), (2, 2**32), (3, -1), (3, 2**64)],
 )
 def test_out_of_range_values_are_refused(index: int, value: int) -> None:
-    """A value the declared width cannot hold is refused, not truncated.
-
-    Silently wrapping is the failure mode that reaches a peer as a plausible
-    wrong number rather than as an error.
-    """
     with pytest.raises(ValueError):
         native_encode(PLAN, _with(index, value), b"")

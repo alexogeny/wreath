@@ -1,18 +1,3 @@
-"""Deeper adversarial red-teaming with replay + fault injection.
-
-Where ``test_replay_faults.py`` is the readable baseline, this file is the
-property/matrix sweep: it drives the owned parser, pool lifecycle, and outbound
-path across many adversarial inputs and fault placements and asserts the owned
-invariants hold every time —
-
-- a truncated or reset stream never crashes and never fabricates a ``200``;
-- every owned outcome is deterministic on a re-run;
-- a boundary fault never leaks a connection, whatever the handler does.
-
-A failure here is a real framework finding, not a flaky test: every input and
-fault placement is fixed and reproducible.
-"""
-
 from __future__ import annotations
 
 import importlib
@@ -47,7 +32,8 @@ proto = pytest.mark.parametrize(
     "protocol_cls",
     [
         pytest.param(
-            _NATIVE_HTTP1, id="http1",
+            _NATIVE_HTTP1,
+            id="http1",
             marks=pytest.mark.skipif(_NATIVE_HTTP1 is None, reason="native server not built"),
         ),
     ],
@@ -79,7 +65,9 @@ ADVERSARIAL = {
     "chunked_truncated": b"POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhel",  # noqa: E501
     "duplicate_content_length": b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nContent-Length: 6\r\nConnection: close\r\n\r\nhello",  # noqa: E501
     "unknown_method": b"FROBNICATE /ping HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
-    "header_bomb": b"GET /ping HTTP/1.1\r\nHost: x\r\n" + b"X-Pad: v\r\n" * 500 + b"Connection: close\r\n\r\n",  # noqa: E501
+    "header_bomb": b"GET /ping HTTP/1.1\r\nHost: x\r\n"
+    + b"X-Pad: v\r\n" * 500
+    + b"Connection: close\r\n\r\n",
     "nul_in_target": b"GET /pi\x00ng HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
     "absurd_content_length": b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 999999999\r\nConnection: close\r\n\r\nhi",  # noqa: E501
     "bare_lf": b"GET /ping HTTP/1.1\nHost: x\nConnection: close\n\n",
@@ -101,9 +89,6 @@ async def test_adversarial_input_is_deterministic_and_bounded(
     # A request that cannot complete must never be answered 200.
     if name in ("chunked_truncated",):
         assert b"HTTP/1.1 200" not in a.response
-
-
-# --- truncation / reset property sweeps --------------------------------------
 
 
 @proto
@@ -170,14 +155,13 @@ async def test_reset_between_pipelined_requests_drops_the_second(protocol_cls: t
     rec = record_transport_segments([first, second])
     clean = await replay_transport(_app(), rec, protocol_cls=protocol_cls)
     reset = await replay_transport(
-        _app(), rec, protocol_cls=protocol_cls,
+        _app(),
+        rec,
+        protocol_cls=protocol_cls,
         faults=FaultSchedule((FaultDescriptor(int(FaultKind.RESET), 0),)),
     )
     # The clean run answers both; the reset run cannot answer more than the clean.
     assert clean.response.count(b"HTTP/1.1 200") >= reset.response.count(b"HTTP/1.1 200")
-
-
-# --- PostgreSQL fault matrix --------------------------------------------------
 
 
 def _db_app() -> wreath.Wreath:
@@ -210,7 +194,8 @@ async def test_db_fault_at_any_query_releases_and_is_deterministic(
     def run():
         double = DatabaseDouble("main", query_faults={position: fault})
         return double, replay_endpoint_plan(
-            _db_app(), CanonicalRequest("GET", "/q"),
+            _db_app(),
+            CanonicalRequest("GET", "/q"),
             adapters=ReplayAdapters(databases={"main": double}),
         )
 
@@ -218,9 +203,9 @@ async def test_db_fault_at_any_query_releases_and_is_deterministic(
     result_a = await coro_a
     double_b, coro_b = run()
     result_b = await coro_b
-    assert result_a.status == 500          # an unhandled boundary fault is a 500
-    assert not double_a.leaked             # released on the error path
-    assert result_a.matches(result_b)      # deterministic
+    assert result_a.status == 500  # an unhandled boundary fault is a 500
+    assert not double_a.leaked  # released on the error path
+    assert result_a.matches(result_b)  # deterministic
     assert double_a.acquired == double_b.acquired == 1
 
 
@@ -229,7 +214,8 @@ async def test_acquire_fault_matrix_never_double_releases() -> None:
     for fault in (AdapterFault.POOL_TIMEOUT, AdapterFault.POOL_EXHAUSTED):
         double = DatabaseDouble("main", acquire_fault=fault)
         result = await replay_endpoint_plan(
-            _db_app(), CanonicalRequest("GET", "/q"),
+            _db_app(),
+            CanonicalRequest("GET", "/q"),
             adapters=ReplayAdapters(databases={"main": double}),
         )
         assert result.status == 500
@@ -248,14 +234,15 @@ async def test_two_connections_both_released_when_one_faults() -> None:
         a: Annotated[Connection, FromDatabase("a")],
         b: Annotated[Connection, FromDatabase("b")],
     ) -> dict:
-        await a.fetch("SELECT 1")   # this one faults
+        await a.fetch("SELECT 1")  # this one faults
         await b.fetch("SELECT 2")
         return {"ok": True}
 
     double_a = DatabaseDouble("a", query_faults={0: AdapterFault.SERVER_ERROR})
     double_b = DatabaseDouble("b")
     result = await replay_endpoint_plan(
-        app, CanonicalRequest("GET", "/join"),
+        app,
+        CanonicalRequest("GET", "/join"),
         adapters=ReplayAdapters(databases={"a": double_a, "b": double_b}),
     )
     assert result.status == 500
@@ -270,14 +257,12 @@ async def test_release_error_is_surfaced_without_leaking_state() -> None:
     # error rather than swallowing it or hanging.
     double = DatabaseDouble("main", release_fault=AdapterFault.RELEASE_ERROR)
     result = await replay_endpoint_plan(
-        _db_app(), CanonicalRequest("GET", "/q"),
+        _db_app(),
+        CanonicalRequest("GET", "/q"),
         adapters=ReplayAdapters(databases={"main": double}),
     )
     assert result.status in (200, 500)  # owned decision, never a crash
     assert double.acquired == 1 and double.released == 1
-
-
-# --- outbound HTTP matrix -----------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -293,31 +278,26 @@ async def test_nth_outbound_call_fault_maps_to_owned_status() -> None:
 
     @app.get("/fanout")
     async def fanout(request: wreath.Request) -> dict:
-        await faulty.request("GET", "/one")   # ok
-        await faulty.request("GET", "/two")   # times out -> unhandled
+        await faulty.request("GET", "/one")  # ok
+        await faulty.request("GET", "/two")  # times out -> unhandled
         return {"ok": True}
 
     result = await replay_endpoint_plan(app, CanonicalRequest("GET", "/fanout"))
     assert result.status == 500
 
 
-# --- endpoint-plan routing adversarial ---------------------------------------
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "method, path",
     [
-        ("POST", "/ping"),          # wrong method for a GET route
+        ("POST", "/ping"),  # wrong method for a GET route
         ("GET", "/../etc/passwd"),  # traversal-looking path
         ("GET", "/ping/" + "x" * 4000),  # very long path
-        ("GET", ""),                # empty path
-        ("GET", "/ping%00"),        # encoded nul
+        ("GET", ""),  # empty path
+        ("GET", "/ping%00"),  # encoded nul
     ],
 )
-async def test_routing_adversarial_never_200_and_is_deterministic(
-    method: str, path: str
-) -> None:
+async def test_routing_adversarial_never_200_and_is_deterministic(method: str, path: str) -> None:
     canonical = CanonicalRequest(method, path)
     a = await replay_endpoint_plan(_app(), canonical)
     b = await replay_endpoint_plan(_app(), canonical)

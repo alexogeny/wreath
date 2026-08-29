@@ -35,8 +35,6 @@ from typing import Any
 from ._native import _core
 from .protobuf import field, message
 
-# -- common.proto ------------------------------------------------------------
-
 
 @message
 class AnyValue:
@@ -58,15 +56,9 @@ class InstrumentationScope:
     version: str = field(2)
 
 
-# -- resource.proto ----------------------------------------------------------
-
-
 @message
 class Resource:
     attributes: list[KeyValue] = field(1)
-
-
-# -- trace.proto -------------------------------------------------------------
 
 
 @message
@@ -103,9 +95,6 @@ class ResourceSpans:
 @message
 class ExportTraceServiceRequest:
     resource_spans: list[ResourceSpans] = field(1)
-
-
-# -- metrics.proto -----------------------------------------------------------
 
 
 @message
@@ -173,9 +162,6 @@ class ExportMetricsServiceRequest:
     resource_metrics: list[ResourceMetrics] = field(1)
 
 
-# -- logs.proto --------------------------------------------------------------
-
-
 @message
 class LogRecord:
     time_unix_nano: int = field(1, kind="fixed64")
@@ -204,9 +190,6 @@ class ResourceLogs:
 @message
 class ExportLogsServiceRequest:
     resource_logs: list[ResourceLogs] = field(1)
-
-
-# -- the three entry points --------------------------------------------------
 
 
 def encode_traces(request: dict[str, Any]) -> bytes:

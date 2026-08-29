@@ -1,4 +1,3 @@
-"""The bounded LRU/TTL store behind the response cache and idempotency layer."""
 from __future__ import annotations
 
 import pytest
@@ -26,8 +25,8 @@ def test_lru_eviction_past_capacity() -> None:
     cache: BoundedCache[str, int] = BoundedCache(max_entries=2)
     cache.set("a", 1)
     cache.set("b", 2)
-    cache.get("a")           # touch a, so b is now the LRU
-    cache.set("c", 3)        # evicts b
+    cache.get("a")  # touch a, so b is now the LRU
+    cache.set("c", 3)  # evicts b
     assert "a" in cache and "c" in cache
     assert "b" not in cache
     assert cache.stats.evictions == 1
@@ -40,7 +39,7 @@ def test_ttl_expiry_is_lazy() -> None:
     clock.now = 9.9
     assert cache.get("a") == 1
     clock.now = 10.0
-    assert cache.get("a") is None      # expired exactly at ttl
+    assert cache.get("a") is None  # expired exactly at ttl
     assert cache.stats.expirations == 1
 
 
@@ -48,8 +47,8 @@ def test_updating_a_key_refreshes_recency_and_value() -> None:
     cache: BoundedCache[str, int] = BoundedCache(max_entries=2)
     cache.set("a", 1)
     cache.set("b", 2)
-    cache.set("a", 10)       # update a -> a is now most-recent
-    cache.set("c", 3)        # evicts b, not a
+    cache.set("a", 10)  # update a -> a is now most-recent
+    cache.set("c", 3)  # evicts b, not a
     assert cache.get("a") == 10
     assert "b" not in cache
 

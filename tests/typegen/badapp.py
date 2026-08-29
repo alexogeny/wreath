@@ -1,5 +1,3 @@
-"""An application whose annotations are unsupported under strict typegen."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass

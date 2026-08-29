@@ -124,7 +124,7 @@ class SignedRoutePolicy:
                 if token is not None:
                     return self._refusal()
                 try:
-                    token = part[len(self._parameter_bytes):].decode("ascii")
+                    token = part[len(self._parameter_bytes) :].decode("ascii")
                 except UnicodeDecodeError:
                     return self._refusal()
             elif part:
@@ -149,10 +149,13 @@ class SignedRoutePolicy:
 
         return PolicyContract(
             responses=(
-                (403, ResponseSpec(
-                    description="The signed URL is missing, invalid, expired, or replayed.",
-                    media_type="application/problem+json",
-                )),
+                (
+                    403,
+                    ResponseSpec(
+                        description="The signed URL is missing, invalid, expired, or replayed.",
+                        media_type="application/problem+json",
+                    ),
+                ),
             ),
             methods=self._methods,
         )

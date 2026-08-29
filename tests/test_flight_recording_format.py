@@ -1,10 +1,3 @@
-"""Stage 5 slice 5c — WFR1 recording container + async recording sink.
-
-Round-trips the container, proves it recovers a torn tail and rejects an
-incompatible header, and drives the real native recorder through the async sink
-to an owner-only file, including the disk-error drop-and-count path.
-"""
-
 from __future__ import annotations
 
 import os
@@ -68,9 +61,6 @@ def _commit(rec: object, count: int) -> None:
 def _capture_slabs(rec: object, count: int) -> list[bytes]:
     _commit(rec, count)
     return rec.drain_captures()
-
-
-# --- container round trip ----------------------------------------------------
 
 
 def _write(image: MetadataImage, slabs: list[bytes], events: bytes = b"") -> bytes:
@@ -172,8 +162,7 @@ def test_wfr1_requires_a_metadata_chunk() -> None:
 
     buf = io.BytesIO()
     buf.write(
-        _HEADER.pack(MAGIC, 1, fs.SCHEMA_VERSION, 0, b"\x00" * 16, b"\x00" * 16,
-                     1, 1, 1, 0, 0)
+        _HEADER.pack(MAGIC, 1, fs.SCHEMA_VERSION, 0, b"\x00" * 16, b"\x00" * 16, 1, 1, 1, 0, 0)
     )
     with pytest.raises(fs.SchemaError):
         read_recording(buf.getvalue())
@@ -185,9 +174,6 @@ def test_wfr1_writer_rejects_ragged_event_bytes() -> None:
     writer = WFR1Writer(io.BytesIO(), _image())
     with pytest.raises(fs.SchemaError):
         writer.write_events(b"not a whole cell")
-
-
-# --- async recording sink ----------------------------------------------------
 
 
 def test_recording_sink_writes_owner_only_wfr1(tmp_path: object) -> None:

@@ -1,11 +1,3 @@
-"""Two applications the infra tests render: one with nothing, one with everything.
-
-Kept beside the tests rather than inside one of them because both the rendering
-goldens and the derivation tests want the same declarations, and two copies of
-an application fixture drift in exactly the way a plan derived from it would not
-notice.
-"""
-
 from __future__ import annotations
 
 from typing import Any

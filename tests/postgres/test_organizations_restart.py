@@ -1,5 +1,3 @@
-"""Restart and concurrency facts for the durable organisation store."""
-
 from __future__ import annotations
 
 import os
@@ -46,13 +44,9 @@ async def _execute(database: Database, statements: tuple[str, ...]) -> None:
 async def test_accepted_membership_and_consumed_token_survive_an_api_restart() -> None:
     table = f"org_restart_{uuid.uuid4().hex[:10]}"
     first_database = await _database("organizations_before_restart")
-    first = PostgresOrganizationStore(
-        first_database, roles={"admin", "member"}, table=table
-    )
+    first = PostgresOrganizationStore(first_database, roles={"admin", "member"}, table=table)
     await _execute(first_database, first.component().statements())
-    invitation = await first.invite(
-        "acme", "ada@example.test", roles={"member"}, ttl=3600
-    )
+    invitation = await first.invite("acme", "ada@example.test", roles={"member"}, ttl=3600)
     assert await first.accept(invitation.token, "ada") == Membership(
         "acme", "ada", frozenset({"member"})
     )
@@ -61,9 +55,7 @@ async def test_accepted_membership_and_consumed_token_survive_an_api_restart() -
     # A different Database and store instance is the relevant restart boundary:
     # neither retains an in-process row or prepared statement from the first.
     second_database = await _database("organizations_after_restart")
-    second = PostgresOrganizationStore(
-        second_database, roles={"admin", "member"}, table=table
-    )
+    second = PostgresOrganizationStore(second_database, roles={"admin", "member"}, table=table)
     try:
         assert await second.memberships("ada") == (
             Membership("acme", "ada", frozenset({"member"})),

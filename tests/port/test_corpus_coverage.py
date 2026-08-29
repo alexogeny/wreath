@@ -1,8 +1,3 @@
-"""Auto-translation coverage over the anonymized corpus.
-
-Skipped today (``wreath.port`` does not exist yet); auto-activates when the tool
-ships. Encodes design 07 §5's honest per-category expectations, not aspirations.
-"""
 import pytest
 
 port = pytest.importorskip("wreath.port")

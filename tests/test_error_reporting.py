@@ -113,6 +113,7 @@ async def test_sentry_error_context_gets_bounded_client_facts(monkeypatch) -> No
             new_scope=new_scope,
         ),
     )
+
     async def receive() -> dict[str, object]:
         return {"type": "http.request", "body": b"", "more_body": False}
 
@@ -126,9 +127,7 @@ async def test_sentry_error_context_gets_bounded_client_facts(monkeypatch) -> No
     )
     request._set_client(("4.1.1.1", None), source="forwarded")
     error = RuntimeError("reported")
-    reporter = SentryErrorReporter(
-        client_facts=ClientFactsProvider(geoip=WreathGeoIP())
-    )
+    reporter = SentryErrorReporter(client_facts=ClientFactsProvider(geoip=WreathGeoIP()))
     await reporter.report(ErrorEvent(error, request, "request"))
     assert captured == [error]
     assert scope.context["wreath.client"] == {

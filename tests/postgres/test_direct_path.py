@@ -1,5 +1,3 @@
-"""Edge coverage for the parser-to-tape direct DataRow path."""
-
 from __future__ import annotations
 
 import importlib

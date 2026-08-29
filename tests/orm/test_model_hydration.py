@@ -1,10 +1,3 @@
-"""Direct model hydration: field tape straight into model cells.
-
-These drive the real decoder plan and field tape, so they exercise the same C
-path a live query takes. Values, nulls, identity, and failure cleanup are
-asserted at the model boundary.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -101,25 +94,17 @@ def hydrate(
     tape = storage._FieldTape(len(oids))
     for payload in payloads:
         tape.append(payload, len(oids))
-    decoder = storage._compile_decoder_plan(
-        oids, formats or (1,) * len(oids), NAMES[: len(oids)]
-    )
+    decoder = storage._compile_decoder_plan(oids, formats or (1,) * len(oids), NAMES[: len(oids)])
     plan = storage._compile_hydrate_plan(Row, registry.spec_for(Row), targets)
     rows: list[Any] = []
-    storage._decode_models(
-        decoder, tape, (plan, session._identity, session), 256, rows
-    )
+    storage._decode_models(decoder, tape, (plan, session._identity, session), 256, rows)
     return rows, plan
 
 
-def test_values_round_trip_through_inline_cells(
-    session: Any, registry: Registry
-) -> None:
+def test_values_round_trip_through_inline_cells(session: Any, registry: Registry) -> None:
     moment = datetime.datetime(2024, 7, 15, 13, 45, 30, 123456)
     key = KEY
-    rows, plan = hydrate(
-        session, registry, [encode(7, "hello", -2.25, False, moment, key)]
-    )
+    rows, plan = hydrate(session, registry, [encode(7, "hello", -2.25, False, moment, key)])
     assert len(rows) == 1
     row = rows[0]
     assert row.id == 7
@@ -131,18 +116,14 @@ def test_values_round_trip_through_inline_cells(
     assert plan.counters == {"allocated": 1, "reused": 0}
 
 
-def test_hydrated_objects_are_persistent_and_owned(
-    session: Any, registry: Registry
-) -> None:
+def test_hydrated_objects_are_persistent_and_owned(session: Any, registry: Registry) -> None:
     rows, _ = hydrate(session, registry, [encode(1)])
     assert rows[0]._orm_state == PERSISTENT
     assert rows[0]._orm_owner is session
     assert not rows[0]._orm_has_changes()
 
 
-def test_nulls_set_the_null_bit_rather_than_a_value(
-    session: Any, registry: Registry
-) -> None:
+def test_nulls_set_the_null_bit_rather_than_a_value(session: Any, registry: Registry) -> None:
     rows, _ = hydrate(
         session,
         registry,
@@ -157,9 +138,7 @@ def test_nulls_set_the_null_bit_rather_than_a_value(
     assert row.id == 1
 
 
-def test_no_record_is_allocated_on_the_direct_path(
-    session: Any, registry: Registry
-) -> None:
+def test_no_record_is_allocated_on_the_direct_path(session: Any, registry: Registry) -> None:
     # The Record type must never be instantiated: that is the whole point of
     # the direct path.
     gc.collect()
@@ -180,9 +159,7 @@ def test_identity_is_reused_across_batches(session: Any, registry: Registry) -> 
     assert second[0].label == "b"
 
 
-def test_repeated_rows_for_one_key_hydrate_one_object(
-    session: Any, registry: Registry
-) -> None:
+def test_repeated_rows_for_one_key_hydrate_one_object(session: Any, registry: Registry) -> None:
     rows, plan = hydrate(session, registry, [encode(5), encode(5), encode(5)])
     assert rows[0] is rows[1] is rows[2]
     assert plan.counters == {"allocated": 1, "reused": 2}
@@ -204,9 +181,7 @@ def test_a_null_primary_key_yields_no_object(session: Any, registry: Registry) -
     assert plan.counters["allocated"] == 0
 
 
-def test_a_projection_hydrates_only_its_columns(
-    session: Any, registry: Registry
-) -> None:
+def test_a_projection_hydrates_only_its_columns(session: Any, registry: Registry) -> None:
     tape = storage._FieldTape(2)
     tape.append(data_row((struct.pack("!q", 4), b"only")), 2)
     decoder = storage._compile_decoder_plan((Int64.oid, Text.oid), (1, 1), ("id", "label"))
@@ -217,9 +192,7 @@ def test_a_projection_hydrates_only_its_columns(
     assert not rows[0]._orm_is_loaded(2)
 
 
-def test_text_format_falls_back_to_the_boxed_decoder(
-    session: Any, registry: Registry
-) -> None:
+def test_text_format_falls_back_to_the_boxed_decoder(session: Any, registry: Registry) -> None:
     # A statement's first execution returns text; the same plan must handle it.
     tape = storage._FieldTape(2)
     tape.append(data_row((b"11", b"text-mode")), 2)
@@ -229,9 +202,6 @@ def test_text_format_falls_back_to_the_boxed_decoder(
     storage._decode_models(decoder, tape, (plan, session._identity, session), 256, rows)
     assert rows[0].id == 11
     assert rows[0].label == "text-mode"
-
-
-# -- validation and failure ----------------------------------------------------
 
 
 def test_a_column_count_mismatch_is_rejected_before_the_first_row(
@@ -246,9 +216,7 @@ def test_a_column_count_mismatch_is_rejected_before_the_first_row(
     assert session._identity == {}
 
 
-def test_an_oid_mismatch_is_rejected_before_the_first_row(
-    session: Any, registry: Registry
-) -> None:
+def test_an_oid_mismatch_is_rejected_before_the_first_row(session: Any, registry: Registry) -> None:
     tape = storage._FieldTape(2)
     tape.append(data_row((struct.pack("!q", 1), b"x")), 2)
     decoder = storage._compile_decoder_plan((Int64.oid, Int64.oid), (1, 1), ("id", "label"))
@@ -283,9 +251,7 @@ def test_malformed_data_leaves_no_partially_visible_object(
     decoder = storage._compile_decoder_plan(OIDS, (1,) * len(OIDS), NAMES)
     plan = storage._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1, 2, 3, 4, 5))
     with pytest.raises(ValueError):
-        storage._decode_models(
-            decoder, tape, (plan, session._identity, session), 256, rows
-        )
+        storage._decode_models(decoder, tape, (plan, session._identity, session), 256, rows)
     # Nothing half-built escapes: no object in the list, none in the identity map.
     assert rows == []
     assert session._identity == {}
@@ -296,9 +262,7 @@ def test_a_failure_partway_through_a_batch_publishes_no_rows(
     session: Any, registry: Registry
 ) -> None:
     good = encode(1)
-    bad = data_row(
-        (struct.pack("!q", 2), b"x", struct.pack("!d", 1.0), b"\x01\x02", None, None)
-    )
+    bad = data_row((struct.pack("!q", 2), b"x", struct.pack("!d", 1.0), b"\x01\x02", None, None))
     rows: list[Any] = []
     tape = storage._FieldTape(len(OIDS))
     tape.append(good, len(OIDS))
@@ -306,17 +270,13 @@ def test_a_failure_partway_through_a_batch_publishes_no_rows(
     decoder = storage._compile_decoder_plan(OIDS, (1,) * len(OIDS), NAMES)
     plan = storage._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1, 2, 3, 4, 5))
     with pytest.raises(ValueError):
-        storage._decode_models(
-            decoder, tape, (plan, session._identity, session), 256, rows
-        )
+        storage._decode_models(decoder, tape, (plan, session._identity, session), 256, rows)
     # The batch is all-or-nothing for the caller's list.
     assert rows == []
     gc.collect()
 
 
-def test_infinity_timestamps_are_rejected_not_wrapped(
-    session: Any, registry: Registry
-) -> None:
+def test_infinity_timestamps_are_rejected_not_wrapped(session: Any, registry: Registry) -> None:
     payload = data_row(
         (
             struct.pack("!q", 1),
@@ -349,15 +309,6 @@ def test_hydrated_objects_survive_collection(session: Any, registry: Registry) -
 async def test_every_batch_reaches_the_model_destination_not_only_the_last(
     session: Any, registry: Registry
 ) -> None:
-    """Results larger than one batch must be models throughout.
-
-    The storage parser decodes a batch as soon as the tape reaches 256 rows,
-    without returning to Python. That in-C flush has to honour the operation's
-    destination: when it did not, each full batch decoded to Records and only
-    the trailing partial batch was hydrated, so any result over 256 rows came
-    back as a mixture. Unit-testing _decode_models directly cannot see this --
-    it takes the parser out of the picture -- so this drives the parser.
-    """
     protocol = storage.BufferedProtocol()
     plan = storage._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1))
     tape = storage._FieldTape(2)

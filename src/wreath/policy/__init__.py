@@ -205,11 +205,7 @@ class HttpPolicy:
         self._native_ingress_only = (
             ai_scraping is not None
             and self._native_descriptor is not None
-            and all(
-                value is None
-                for name, value, _expected in values
-                if name != "ai_scraping"
-            )
+            and all(value is None for name, value, _expected in values if name != "ai_scraping")
         )
 
     @property
@@ -226,9 +222,7 @@ class HttpPolicy:
         """Return one policy containing two disjoint feature declarations."""
         return self._merged(other, replace_default_ai=False)
 
-    def _merged(
-        self, other: HttpPolicy, *, replace_default_ai: bool
-    ) -> HttpPolicy:
+    def _merged(self, other: HttpPolicy, *, replace_default_ai: bool) -> HttpPolicy:
         """Merge application declarations, optionally replacing Wreath's default."""
         values: dict[str, Any] = {}
         for name in (
@@ -256,11 +250,7 @@ class HttpPolicy:
         ):
             current = getattr(self, name)
             incoming = getattr(other, name)
-            replacing = (
-                name == "ai_scraping"
-                and replace_default_ai
-                and incoming is not None
-            )
+            replacing = name == "ai_scraping" and replace_default_ai and incoming is not None
             if current is not None and incoming is not None and not replacing:
                 raise ValueError(f"HTTP policy feature {name!r} is already configured")
             values[name] = incoming if replacing or current is None else current
@@ -350,9 +340,7 @@ class HttpPolicy:
                 return candidate
         return None
 
-    def _reference_ingress_scope(
-        self, scope: Any, method: str, path: str
-    ) -> Any | None:
+    def _reference_ingress_scope(self, scope: Any, method: str, path: str) -> Any | None:
         """Execute the sole scope-safe ingress component before activation."""
         if not self._native_ingress_only or self.ai_scraping is None:
             raise RuntimeError("HTTP policy is not scope-only ingress")

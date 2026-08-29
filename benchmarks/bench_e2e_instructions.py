@@ -11,7 +11,7 @@ Run after installing the benchmark group:
 
     uv sync --inexact --group benchmark
     uv run python -m benchmarks.bench_e2e_instructions --output \
-      docs/perf/data/e2e-stack-instructions.json
+      benchmarks/baselines/e2e-stack-instructions.json
 """
 
 from __future__ import annotations
@@ -418,8 +418,7 @@ def main(argv: list[str] | None = None) -> int:
         previous = json.loads(args.output.read_text(encoding="utf-8"))
         if previous.get("schema") != document["schema"]:
             parser.error(
-                f"cannot merge schema {previous.get('schema')!r}; expected "
-                f"{document['schema']!r}"
+                f"cannot merge schema {previous.get('schema')!r}; expected {document['schema']!r}"
             )
         if previous.get("measurement") != document["measurement"]:
             parser.error("cannot merge an artifact recorded with different measurement options")

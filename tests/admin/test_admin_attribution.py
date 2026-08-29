@@ -1,11 +1,3 @@
-"""Every admin write is attributed, and goes through the ordinary stack.
-
-`wreath.audit_log` records inside the transaction that wrote the row, driven by
-the ORM rather than by the caller remembering. What the admin owes it is an
-actor bound around the write -- so these tests assert the actor is bound *at the
-moment the session flushes*, which is the only moment that matters.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -102,8 +94,6 @@ async def test_the_actor_does_not_leak_past_the_write(account_model: type) -> No
 async def test_a_write_with_no_identity_raises_rather_than_recording_one(
     account_model: type,
 ) -> None:
-    """A record complete except for the field that makes it evidence is worse
-    than a refusal, so the refusal is what happens."""
     session = RecordingSession()
     handlers = _handlers(account_model, session)
 
@@ -119,8 +109,6 @@ async def test_a_write_with_no_identity_raises_rather_than_recording_one(
 async def test_writes_use_the_ordinary_transaction_and_flush(
     account_model: type,
 ) -> None:
-    """No privileged path: the same `begin()`/`flush()` a hand-written route uses,
-    so `_orm_events` and the audit trail see an admin write like any other."""
     session = RecordingSession({1: _account(account_model)})
     handlers = _handlers(account_model, session)
 
@@ -156,9 +144,7 @@ async def test_an_async_csrf_verifier_is_awaited(account_model: type) -> None:
     async def verify(request: Any) -> bool:
         return False
 
-    admin = Admin(
-        lambda request: session, authorize=Access.roles("staff"), csrf=verify
-    )
+    admin = Admin(lambda request: session, authorize=Access.roles("staff"), csrf=verify)
     admin.register(account_model)
     handlers = routes(admin.router())
 

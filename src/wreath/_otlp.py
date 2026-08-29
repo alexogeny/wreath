@@ -82,8 +82,6 @@ _PROTOCOL_VERSION: Final = {
 }
 
 
-# --- OTLP/JSON value helpers -----------------------------------------------
-#
 # OTLP's JSON encoding carries 64-bit integers and timestamps as decimal
 # *strings* to survive JSON's double-precision number range.
 
@@ -122,9 +120,6 @@ def _phase_span_id(parent_span_id: int, sequence: int) -> int:
     """A deterministic child span id derived from the parent and the phase's
     sequence -- phases carry no span id of their own."""
     return _mix64(parent_span_id ^ (0x9E3779B97F4A7C15 * (sequence + 1))) or 1
-
-
-# --- span mapping -----------------------------------------------------------
 
 
 class _Routes:
@@ -187,9 +182,7 @@ def _server_span(trace: ProjectedTrace, routes: _Routes) -> dict[str, Any]:
         attributes.append(
             _str(
                 "wreath.policy.disposition",
-                "ai_scraping"
-                if trace.flags & FLAG_AI_SCRAPING_REFUSED
-                else "refused",
+                "ai_scraping" if trace.flags & FLAG_AI_SCRAPING_REFUSED else "refused",
             )
         )
     client = trace.client_facts
@@ -208,15 +201,11 @@ def _server_span(trace: ProjectedTrace, routes: _Routes) -> dict[str, Any]:
             _bool("wreath.user_agent.classified", bool(facts & ClientFactFlag.UA_KNOWN))
         )
         if client.user_agent_rule_id:
-            attributes.append(
-                _int("wreath.user_agent.rule_id", client.user_agent_rule_id)
-            )
+            attributes.append(_int("wreath.user_agent.rule_id", client.user_agent_rule_id))
         if facts & ClientFactFlag.BOT_CLAIMED:
             attributes.append(_str("user_agent.synthetic.type", "bot"))
         if facts & ClientFactFlag.MOBILE_KNOWN:
-            attributes.append(
-                _bool("browser.mobile", bool(facts & ClientFactFlag.MOBILE))
-            )
+            attributes.append(_bool("browser.mobile", bool(facts & ClientFactFlag.MOBILE)))
         if facts & ClientFactFlag.IP_KNOWN:
             attributes.append(
                 _str(
@@ -227,9 +216,7 @@ def _server_span(trace: ProjectedTrace, routes: _Routes) -> dict[str, Any]:
             attributes.append(
                 _str(
                     "wreath.client.address_source",
-                    "forwarded"
-                    if facts & ClientFactFlag.IP_FORWARDED
-                    else "socket",
+                    "forwarded" if facts & ClientFactFlag.IP_FORWARDED else "socket",
                 )
             )
         if client.country is not None:
@@ -314,9 +301,6 @@ def build_trace_request(
             }
         ]
     }
-
-
-# --- metric mapping ---------------------------------------------------------
 
 
 def _exponential_histogram(metric: RouteMetric) -> dict[str, Any]:
@@ -417,9 +401,6 @@ def resource(attributes: dict[str, str] | None) -> dict[str, Any]:
     return {"attributes": [_str(key, value) for key, value in attrs.items()]}
 
 
-# --- export contract --------------------------------------------------------
-
-
 class SpanExporter(_Protocol):
     """The minimal contract a trace exporter satisfies. The concrete OTLP/HTTP
     adapter (slice 4c, optional dependency group) implements this; tests use a
@@ -444,8 +425,6 @@ class MetricExporter(_Protocol):
 BoundedExportQueue = Queue
 
 
-# --- log mapping ------------------------------------------------------------
-#
 # Logs are the third signal on the transport that already carries traces and
 # metrics. The mapping is a projection rather than a translation because the log
 # cell was laid out against the OTel data model in the first place: severity is
@@ -471,9 +450,7 @@ def _log_attributes(registry: SiteRegistry, record: ProjectedLog) -> list[dict[s
         else:
             attributes.append(_str(key, str(value)))
     if record.cell.dropped_siblings:
-        attributes.append(
-            _int("wreath.dropped_siblings", record.cell.dropped_siblings)
-        )
+        attributes.append(_int("wreath.dropped_siblings", record.cell.dropped_siblings))
     if record.route_id:
         attributes.append(_int("wreath.route_id", record.route_id))
     return attributes

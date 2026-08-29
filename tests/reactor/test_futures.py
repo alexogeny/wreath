@@ -1,9 +1,3 @@
-"""loop.create_future: result/exception/cancel and done-callback scheduling.
-
-The done-callback-scheduling test pins the semantic the fused fast path must
-still honour for *foreign* futures: callbacks run via the loop's ready queue,
-never inline at set_result time.
-"""
 from __future__ import annotations
 
 import asyncio

@@ -1,10 +1,3 @@
-"""Stage 6: a build-time chart drawn from a declaration's own numbers.
-
-`_docs/charts.py` already rendered an SVG bar chart from a JSON file. A
-calculated view writes that file, so the docs chart and the API chart are the
-same numbers rather than two hand-maintained copies.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -23,9 +16,7 @@ from wreath.temporal import parse
 
 def _result(**changes):
     span = Range(parse("2026-03-01T00:00:00+13:00"), parse("2026-03-04T00:00:00+13:00"))
-    buckets = tuple(
-        parse(f"2026-03-0{day}T00:00:00+13:00") for day in (1, 2, 3)
-    )
+    buckets = tuple(parse(f"2026-03-0{day}T00:00:00+13:00") for day in (1, 2, 3))
     base = dict(
         range=span,
         zone="Pacific/Auckland",
@@ -43,16 +34,12 @@ def _pairs(document, config):
     return charts._pairs(document, config)
 
 
-# -- series -----------------------------------------------------------------
-
-
 def test_a_series_result_plots_bucket_against_value():
     pairs = _pairs(_result().as_dict(), {"measure": "started"})
     assert pairs == [("2026-03-01", 3.0), ("2026-03-02", 5.0), ("2026-03-03", 4.0)]
 
 
 def test_a_day_bucket_is_labelled_by_its_date_not_its_instant():
-    """An ISO instant is exact and unreadable on an axis."""
     (label, _value) = _pairs(_result().as_dict(), {"measure": "started"})[0]
     assert label == "2026-03-01"
     assert "T" not in label
@@ -65,13 +52,10 @@ def test_a_sub_day_bucket_keeps_its_time():
 
 
 def test_the_first_measure_is_the_default():
-    assert _pairs(_result().as_dict(), {}) == _pairs(
-        _result().as_dict(), {"measure": "started"}
-    )
+    assert _pairs(_result().as_dict(), {}) == _pairs(_result().as_dict(), {"measure": "started"})
 
 
 def test_a_null_value_is_a_gap_not_a_zero():
-    """An average of no rows is undefined; drawing it as zero is a lie."""
     pairs = _pairs(_result().as_dict(), {"measure": "mean_km"})
     assert pairs == [("2026-03-01", 1.5), ("2026-03-03", 2.5)]
 
@@ -105,9 +89,6 @@ def test_naming_a_series_that_is_not_there_is_an_error():
         _pairs(_result().as_dict(), {"series": "north"})
 
 
-# -- aggregate --------------------------------------------------------------
-
-
 def test_an_aggregate_result_plots_label_against_measure():
     document = AggregateResult(
         rows=(
@@ -128,9 +109,6 @@ def test_an_unknown_aggregate_measure_is_an_error():
         _pairs(document, {"measure": "km"})
 
 
-# -- the existing path is untouched -----------------------------------------
-
-
 def test_a_plain_mapping_still_plots_as_it_always_did():
     assert _pairs({"a": 1, "b": 2.5}, {}) == [("a", 1.0), ("b", 2.5)]
 
@@ -142,14 +120,11 @@ def test_a_list_of_records_still_plots_as_it_always_did():
 
 
 def test_a_chart_error_renders_as_a_message_not_a_build_failure(tmp_path):
-    """A docs build should say what is wrong, not stop."""
     path = tmp_path / "activity.json"
     # The encoder a real job would use: `as_dict` keeps Instants, and
     # `wreath._json` is what renders them as ISO-8601.
     path.write_bytes(_json.dumps(_result().as_dict()))
-    html = charts._render(
-        {"source": "activity.json", "measure": "nope"}, tmp_path, None
-    )
+    html = charts._render({"source": "activity.json", "measure": "nope"}, tmp_path, None)
     assert "chart-error" in html and "nope" in html
 
 

@@ -32,7 +32,8 @@ from wreath._native import _docs as _native_docs
 STOPWORDS: frozenset[str] = frozenset(
     """a an and are as at be but by can for from has have how if in into is it its may
     not of on or that the their then there these this to was were what when which who
-    will with you your""".split())
+    will with you your""".split()
+)
 
 _STOPWORD_TAPE = tuple(sorted(STOPWORDS))
 

@@ -24,11 +24,29 @@ from .model import Finding, Report
 from .rules import scan_source
 
 #: Directory names never worth scanning.
-SKIP_DIRECTORIES = frozenset({
-    ".git", ".hg", ".svn", "__pycache__", ".venv", "venv", "env", "node_modules",
-    ".mypy_cache", ".ruff_cache", ".pytest_cache", ".ty_cache", ".hypothesis",
-    "build", "dist", ".eggs", "site-packages", ".tox", ".nox",
-})
+SKIP_DIRECTORIES = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        "__pycache__",
+        ".venv",
+        "venv",
+        "env",
+        "node_modules",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".pytest_cache",
+        ".ty_cache",
+        ".hypothesis",
+        "build",
+        "dist",
+        ".eggs",
+        "site-packages",
+        ".tox",
+        ".nox",
+    }
+)
 
 #: Skipped unless `--tests`. See the module docstring.
 TEST_DIRECTORIES = frozenset({"tests", "test"})

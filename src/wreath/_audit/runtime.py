@@ -4,6 +4,7 @@ One-shot, dependency-free — fetches with `urllib.request` (stdlib), so no life
 client wiring. The per-response logic (`audit_response`) is separated from the fetch so
 it is testable against a synthetic or in-process response without a socket.
 """
+
 from __future__ import annotations
 
 import gzip
@@ -18,19 +19,37 @@ from .rules import A11Y_RULES, HTML_PERF_RULES, RESPONSE_SECURITY_RULES, Respons
 
 
 def _header_findings(headers: dict[str, str], surface: str):
-    lower = {k.lower(): v for k, v in headers.items()}
+    lower = {name.lower(): value for name, value in headers.items()}
     if "content-encoding" not in lower:
-        yield Finding("compression-enabled", Severity.WARN, surface,
-                      "response has no Content-Encoding (uncompressed)", "perf:compression",
-                      "", "mount CompressionPolicy and negotiate gzip")
+        yield Finding(
+            "compression-enabled",
+            Severity.WARN,
+            surface,
+            "response has no Content-Encoding (uncompressed)",
+            "perf:compression",
+            "",
+            "mount CompressionPolicy and negotiate gzip",
+        )
     if "cache-control" not in lower and "etag" not in lower:
-        yield Finding("cache-control", Severity.WARN, surface,
-                      "response has no Cache-Control or ETag", "perf:cache",
-                      "", "add cache directives or an ETag")
+        yield Finding(
+            "cache-control",
+            Severity.WARN,
+            surface,
+            "response has no Cache-Control or ETag",
+            "perf:cache",
+            "",
+            "add cache directives or an ETag",
+        )
     if "content-security-policy" not in lower:
-        yield Finding("security-headers", Severity.WARN, surface,
-                      "response has no Content-Security-Policy", "perf:security-headers",
-                      "", "mount SecurityHeadersPolicy")
+        yield Finding(
+            "security-headers",
+            Severity.WARN,
+            surface,
+            "response has no Content-Security-Policy",
+            "perf:security-headers",
+            "",
+            "mount SecurityHeadersPolicy",
+        )
 
 
 def audit_response(
@@ -49,7 +68,10 @@ def audit_response(
     `Set-Cookie` value separately, because a response often sets more than one
     and a dict would hide all but the last.
     """
-    content_type = next((v for k, v in headers.items() if k.lower() == "content-type"), "")
+    content_type = next(
+        (value for name, value in headers.items() if name.lower() == "content-type"),
+        "",
+    )
     if "text/html" in content_type.lower() and body:
         root = parse_html(body)
         for rule in A11Y_RULES:
@@ -61,7 +83,7 @@ def audit_response(
         status=status,
         scheme=scheme,
         surface=surface,
-        headers={k.lower(): v for k, v in headers.items()},
+        headers={name.lower(): value for name, value in headers.items()},
         set_cookies=tuple(set_cookies),
     )
     for rule in RESPONSE_SECURITY_RULES:
@@ -79,15 +101,28 @@ def run_runtime_audit(base_url: str, paths: Iterable[str] = ("/",)) -> Report:
                 raw = response.read()
                 if "gzip" in response.headers.get("Content-Encoding", ""):
                     raw = gzip.decompress(raw)
-                headers = {k: v for k, v in response.headers.items()}
+                headers = dict(response.headers.items())
                 # get_all preserves every Set-Cookie; the dict above keeps only one.
                 set_cookies = response.headers.get_all("Set-Cookie") or ()
                 audit_response(
-                    response.status, headers, raw.decode("utf-8", "replace"),
-                    f"runtime:{path}", report, scheme=scheme, set_cookies=set_cookies,
+                    response.status,
+                    headers,
+                    raw.decode("utf-8", "replace"),
+                    f"runtime:{path}",
+                    report,
+                    scheme=scheme,
+                    set_cookies=set_cookies,
                 )
         except (urllib.error.URLError, OSError) as exc:
-            report.add(Finding("runtime-fetch", Severity.ERROR, f"runtime:{path}",
-                               f"could not fetch {url}: {exc}", "runtime", "",
-                               "is the server running and reachable?"))
+            report.add(
+                Finding(
+                    "runtime-fetch",
+                    Severity.ERROR,
+                    f"runtime:{path}",
+                    f"could not fetch {url}: {exc}",
+                    "runtime",
+                    "",
+                    "is the server running and reachable?",
+                )
+            )
     return report

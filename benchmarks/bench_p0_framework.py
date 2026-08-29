@@ -96,9 +96,7 @@ def _dispatch_arms() -> list[measure.Arm]:
             {"item_id": limit, "name": "wreath", "secret": "filtered"},
         )
 
-    contract.__annotations__["limit"] = Annotated[
-        int, Query(minimum=1, maximum=10)
-    ]
+    contract.__annotations__["limit"] = Annotated[int, Query(minimum=1, maximum=10)]
     contract.__annotations__["return"] = PublicItem
 
     host = Wreath()
@@ -180,8 +178,7 @@ def _ingress_arms() -> list[measure.Arm]:
         + b"--\r\n"
     )
     multipart_chunks = tuple(
-        multipart_body[index : index + 256]
-        for index in range(0, len(multipart_body), 256)
+        multipart_body[index : index + 256] for index in range(0, len(multipart_body), 256)
     )
     multipart = Wreath()
 
@@ -410,15 +407,11 @@ def main() -> int:
 
     if args.suite in ("static", "all"):
         arms = _static_arms()
-        results["static"] = _run_apps(
-            arms, args, "static route", "control static route"
-        )
+        results["static"] = _run_apps(arms, args, "static route", "control static route")
         measured["static"] = arms
     if args.suite in ("dispatch", "all"):
         arms = _dispatch_arms()
-        results["dispatch"] = _run_apps(
-            arms, args, "static route", "control static route"
-        )
+        results["dispatch"] = _run_apps(arms, args, "static route", "control static route")
         measured["dispatch"] = arms
     if args.suite in ("ingress", "all"):
         arms = _ingress_arms()
@@ -456,10 +449,7 @@ def main() -> int:
         },
         "results": results,
         "samples_us": {
-            suite: {
-                arm.label: [round(sample, 6) for sample in arm.samples]
-                for arm in arms
-            }
+            suite: {arm.label: [round(sample, 6) for sample in arm.samples] for arm in arms}
             for suite, arms in measured.items()
         },
     }

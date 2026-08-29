@@ -1,7 +1,6 @@
 """Measure PolicyRouteTable match cost, for the MaskMap key experiment.
 
-`docs/plans/bitset-routing.md` ("Discriminating bytes") argues the remaining
-per-lookup cost in the bitset matcher is not *finding* the bucket -- probe
+The remaining per-lookup cost in the bitset matcher is not *finding* the bucket -- probe
 chains are length 1 -- but that `hash_bytes` reads every byte of the segment
 and then ~60% of lookups `memcmp` it again, so each segment is read ~1.6x.
 This benchmark exists to decide that with numbers rather than argument.
@@ -42,9 +41,28 @@ from typing import Any
 from wreath._native import _core
 
 WORDS = [
-    "api", "users", "orders", "items", "posts", "teams", "files", "jobs",
-    "events", "tokens", "roles", "plans", "sites", "hooks", "keys", "logs",
-    "search", "billing", "reports", "settings", "webhooks", "sessions",
+    "api",
+    "users",
+    "orders",
+    "items",
+    "posts",
+    "teams",
+    "files",
+    "jobs",
+    "events",
+    "tokens",
+    "roles",
+    "plans",
+    "sites",
+    "hooks",
+    "keys",
+    "logs",
+    "search",
+    "billing",
+    "reports",
+    "settings",
+    "webhooks",
+    "sessions",
 ]
 
 
@@ -91,9 +109,7 @@ def build_routes(
         ]
         if all(s is None for s in shape):
             continue  # an all-parameter route at every position: no shape to key
-        path = "/" + "/".join(
-            f"{{p{i}}}" if s is None else s for i, s in enumerate(shape)
-        )
+        path = "/" + "/".join(f"{{p{i}}}" if s is None else s for i, s in enumerate(shape))
         key = "/" + "/".join("*" if s is None else s for s in shape)
         if key in seen:
             continue  # same literal/parameter shape is a conflicting route
@@ -105,9 +121,7 @@ def build_routes(
     requests: list[str] = []
     for shape in parameterized:
         requests.append(
-            "/" + "/".join(
-                f"v{rng.randrange(1000)}" if s is None else s for s in shape
-            )
+            "/" + "/".join(f"v{rng.randrange(1000)}" if s is None else s for s in shape)
         )
     return paths, requests
 
@@ -175,8 +189,9 @@ def main() -> None:
     parser.add_argument("--iterations", type=int, default=200_000)
     parser.add_argument("--trials", type=int, default=9)
     parser.add_argument("--seed", type=int, default=20260716)
-    parser.add_argument("--label", default="unlabelled",
-                        help="which build this run measured, e.g. 'baseline'")
+    parser.add_argument(
+        "--label", default="unlabelled", help="which build this run measured, e.g. 'baseline'"
+    )
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
 
@@ -200,22 +215,24 @@ def main() -> None:
         probe = _core.PolicyRouteTable.probe_stats()
 
         raw = sample(table, requests, args.iterations, args.trials)
-        rows.append({
-            "routes": routes,
-            "segmax": segmax,
-            "param": param,
-            "vocabulary": vocab,
-            "registered": len(paths),
-            "requests": len(requests),
-            "hit_rate": hits / len(requests),
-            "stats": table.stats(),
-            "probe": probe,
-            "ns_per_match": {
-                "raw": raw,
-                "median": statistics.median(raw),
-                "min": min(raw),
-            },
-        })
+        rows.append(
+            {
+                "routes": routes,
+                "segmax": segmax,
+                "param": param,
+                "vocabulary": vocab,
+                "registered": len(paths),
+                "requests": len(requests),
+                "hit_rate": hits / len(requests),
+                "stats": table.stats(),
+                "probe": probe,
+                "ns_per_match": {
+                    "raw": raw,
+                    "median": statistics.median(raw),
+                    "min": min(raw),
+                },
+            }
+        )
 
     _paths, floor_requests = build_routes(64, 5, 0.3, "words", args.seed)
     document = {

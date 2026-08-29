@@ -267,11 +267,13 @@ _C_TOKEN = re.compile(
 
 #: C keywords are structure; every other identifier is a name, and a name is
 #: exactly what a copy changes.
-_C_KEYWORDS = frozenset("""
+_C_KEYWORDS = frozenset(
+    """
 auto break case char const continue default do double else enum extern float
 for goto if inline int long register restrict return short signed sizeof static
 struct switch typedef union unsigned void volatile while
-""".split())
+""".split()
+)
 
 #: A definition header. The prevailing style here puts the return type on its
 #: own line and the name in column one, so both that and the one-line form have
@@ -300,8 +302,7 @@ _C_OPERATOR_TOKENS: dict[str, bytes] = {}
 #: Control keywords cannot begin a definition, and `#define FOO(x) { ... }` is
 #: not one either; the token pattern above has already removed the directive,
 #: but a macro *body* left in column one would otherwise read as a header.
-_C_NOT_A_DEFINITION = frozenset({"if", "for", "while", "switch", "do", "return",
-                                 "else", "sizeof"})
+_C_NOT_A_DEFINITION = frozenset({"if", "for", "while", "switch", "do", "return", "else", "sizeof"})
 
 
 def _c_skip_string(src: str, index: int) -> int:
@@ -349,9 +350,9 @@ def _c_body(src: str, brace: int) -> tuple[str, int]:
         else:
             depth -= 1
             if depth == 0:
-                return src[brace + 1:index], index
+                return src[brace + 1 : index], index
             index += 1
-    return src[brace + 1:], end
+    return src[brace + 1 :], end
 
 
 def _c_shape(
@@ -442,12 +443,12 @@ class Site:
         if root is not None and context >= 0:
             try:
                 source_lines = (root / self.path).read_text(encoding="utf-8").splitlines()
-            except (OSError, UnicodeError):
+            except OSError, UnicodeError:
                 result["source"] = ""
             else:
                 first = max(1, start - context)
                 last = min(len(source_lines), end + context)
-                result["source"] = "\n".join(source_lines[first - 1:last])
+                result["source"] = "\n".join(source_lines[first - 1 : last])
         return result
 
 
@@ -491,284 +492,285 @@ INTENTIONAL_GROUPS: tuple[Exclusion, ...] = (
     _exclusion(
         "gzip encode and decode deliberately own independent ISA kernels so neither "
         "direction pulls the other algorithm into its instruction or cache footprint",
-        ('src/wreath/_native/gzip/decode/crc32_pclmul.c',
-         'wreath_gzip_decoder_crc32_pclmul'),
-        ('src/wreath/_native/gzip/encode/crc32_pclmul.c',
-         'wreath_gzip_encoder_crc32_pclmul'),
+        ("src/wreath/_native/gzip/decode/crc32_pclmul.c", "wreath_gzip_decoder_crc32_pclmul"),
+        ("src/wreath/_native/gzip/encode/crc32_pclmul.c", "wreath_gzip_encoder_crc32_pclmul"),
     ),
     _exclusion(
         "gzip encode and decode deliberately own independent ISA kernels so neither "
         "direction pulls the other algorithm into its instruction or cache footprint",
-        ('src/wreath/_native/gzip/decode/crc32_vpclmul.c',
-         'wreath_gzip_decoder_crc32_vpclmul'),
-        ('src/wreath/_native/gzip/encode/crc32_vpclmul.c',
-         'wreath_gzip_encoder_crc32_vpclmul'),
+        ("src/wreath/_native/gzip/decode/crc32_vpclmul.c", "wreath_gzip_decoder_crc32_vpclmul"),
+        ("src/wreath/_native/gzip/encode/crc32_vpclmul.c", "wreath_gzip_encoder_crc32_vpclmul"),
     ),
     _exclusion(
         "gzip encode and decode keep separate runtime dispatch contracts; sharing this "
         "small query would couple otherwise independent codec implementations",
-        ('src/wreath/_native/gzip/decode/crc32.c',
-         'wreath_gzip_decoder_crc32_arm_available'),
-        ('src/wreath/_native/gzip/encode/crc32.c',
-         'wreath_gzip_encoder_crc32_arm_available'),
+        ("src/wreath/_native/gzip/decode/crc32.c", "wreath_gzip_decoder_crc32_arm_available"),
+        ("src/wreath/_native/gzip/encode/crc32.c", "wreath_gzip_encoder_crc32_arm_available"),
     ),
     _exclusion(
         "HTTP-client and PostgreSQL awaitables live in separate extensions with distinct "
         "object layouts; direct field access avoids a generic offset or callback layer",
-        ('src/wreath/_native/client_http1.c', 'client_request_result'),
-        ('src/wreath/_native/postgres/pipeline.c', 'statement_completion_result'),
+        ("src/wreath/_native/client_http1.c", "client_request_result"),
+        ("src/wreath/_native/postgres/pipeline.c", "statement_completion_result"),
     ),
     _exclusion(
         "HTTP-client and PostgreSQL awaitables live in separate extensions with distinct "
         "object layouts; direct field access avoids a generic offset or callback layer",
-        ('src/wreath/_native/client_http1.c', 'client_request_exception'),
-        ('src/wreath/_native/postgres/pipeline.c', 'statement_completion_exception'),
+        ("src/wreath/_native/client_http1.c", "client_request_exception"),
+        ("src/wreath/_native/postgres/pipeline.c", "statement_completion_exception"),
     ),
     _exclusion(
         "normalisation erases the different capsule layouts and owned fields released by "
         "these unrelated destructors",
-        ('src/wreath/_native/activate.c', 'request_layout_free'),
-        ('src/wreath/_native/cedar.c', 'cedar_decision_batch_destroy'),
+        ("src/wreath/_native/activate.c", "request_layout_free"),
+        ("src/wreath/_native/cedar.c", "cedar_decision_batch_destroy"),
     ),
     _exclusion(
         "object-store read and list preserve distinct streaming APIs; a shared async "
         "generator would add an await/yield layer to every observed item",
-        ('src/wreath/_replay_adapters.py', 'ObservedObjectStore.read_stream'),
-        ('src/wreath/_replay_adapters.py', 'ObservedObjectStore.list'),
+        ("src/wreath/_replay_adapters.py", "ObservedObjectStore.read_stream"),
+        ("src/wreath/_replay_adapters.py", "ObservedObjectStore.list"),
     ),
     _exclusion(
         "scaffold functions emit unrelated literal artifacts; normalisation erases "
         "the literal content that is their entire behaviour",
-        *(('src/wreath/_scaffold.py', name) for name in (
-            '_tenants', '_tenancy_tests', '_web_package_json', '_web_index_html')),
+        *(
+            ("src/wreath/_scaffold.py", name)
+            for name in ("_tenants", "_tenancy_tests", "_web_package_json", "_web_index_html")
+        ),
     ),
     _exclusion(
         "scaffold functions emit unrelated literal artifacts; normalisation erases "
         "the literal content that is their entire behaviour",
-        *(('src/wreath/_scaffold.py', name) for name in (
-            '_contracts', '_memory_adapter', '_web_tsconfig', '_web_main')),
+        *(
+            ("src/wreath/_scaffold.py", name)
+            for name in ("_contracts", "_memory_adapter", "_web_tsconfig", "_web_main")
+        ),
     ),
     _exclusion(
         "scaffold functions emit unrelated literal artifacts; normalisation erases "
         "the literal content that is their entire behaviour",
-        ('src/wreath/_scaffold.py', '_model_tests'),
-        ('src/wreath/_scaffold.py', '_web_app'),
+        ("src/wreath/_scaffold.py", "_model_tests"),
+        ("src/wreath/_scaffold.py", "_web_app"),
     ),
     _exclusion(
         "scaffold functions emit unrelated literal artifacts; normalisation erases "
         "the literal content that is their entire behaviour",
-        ('src/wreath/_scaffold.py', '_agents'),
-        ('src/wreath/_scaffold.py', '_models'),
+        ("src/wreath/_scaffold.py", "_agents"),
+        ("src/wreath/_scaffold.py", "_models"),
     ),
     _exclusion(
         "the compiled JSON converter closes over annotation-specific child converters; "
         "the Any converter is its independent recursive base case and hot-path oracle",
-        ('src/wreath/binding.py', '_jsonable_any'),
-        ('src/wreath/binding.py', '_compile_jsonable.<locals>.jsonable_value'),
+        ("src/wreath/binding.py", "_jsonable_any"),
+        ("src/wreath/binding.py", "_compile_jsonable.<locals>.jsonable_value"),
     ),
     _exclusion(
         "fixed Flight cell kinds have distinct ABI layouts and straight-line ingest "
         "loops; a callback or tagged generic loop would add work per cell",
-        *(('src/wreath/_native/flight_project.c', name) for name in (
-            'flight_ingest_completion', 'flight_ingest_correlation',
-            'flight_ingest_client_facts')),
+        *(
+            ("src/wreath/_native/flight_project.c", name)
+            for name in (
+                "flight_ingest_completion",
+                "flight_ingest_correlation",
+                "flight_ingest_client_facts",
+            )
+        ),
     ),
     _exclusion(
         "SSE2 and AVX2 are separate measured implementations selected by per-call dispatch",
-        ('src/wreath/_native/simd.h', 'wreath_find_sse2'),
-        ('src/wreath/_native/simd.h', 'wreath_find_avx2'),
+        ("src/wreath/_native/simd.h", "wreath_find_sse2"),
+        ("src/wreath/_native/simd.h", "wreath_find_avx2"),
     ),
     _exclusion(
         "reader and writer registration are symmetric reactor operations over distinct "
         "kernel filters; combining them would hide the selected filter in a branch",
-        ('src/wreath/_native/reactor_poller.c', 'rp_add_reader'),
-        ('src/wreath/_native/reactor_poller.c', 'rp_add_writer'),
+        ("src/wreath/_native/reactor_poller.c", "rp_add_reader"),
+        ("src/wreath/_native/reactor_poller.c", "rp_add_writer"),
     ),
     _exclusion(
         "normalisation erases mapping keys and attribute names, making unrelated status "
         "snapshots look identical",
-        ('src/wreath/doctor.py', 'TracedRequest.as_dict'),
-        ('src/wreath/inspector.py', '_projector_loss'),
-        ('src/wreath/jobs.py', 'JobRunner.stats'),
-        ('src/wreath/messaging.py', 'MessageBus.stats'),
+        ("src/wreath/doctor.py", "TracedRequest.as_dict"),
+        ("src/wreath/inspector.py", "_projector_loss"),
+        ("src/wreath/jobs.py", "JobRunner.stats"),
+        ("src/wreath/messaging.py", "MessageBus.stats"),
     ),
     _exclusion(
         "conjunction and disjunction are separate precedence levels in the SCIM grammar; "
         "their mirrored recursive-descent shape makes that precedence visible",
-        ('src/wreath/_native/scim.c', 'scim_conjunction'),
-        ('src/wreath/_native/scim.c', 'scim_disjunction'),
+        ("src/wreath/_native/scim.c", "scim_conjunction"),
+        ("src/wreath/_native/scim.c", "scim_disjunction"),
     ),
     _exclusion(
         "SSE2 and AVX2 are separate measured implementations selected by per-call dispatch",
-        ('src/wreath/_native/simd.h', 'wreath_json_run_sse2'),
-        ('src/wreath/_native/simd.h', 'wreath_json_run_avx2'),
+        ("src/wreath/_native/simd.h", "wreath_json_run_sse2"),
+        ("src/wreath/_native/simd.h", "wreath_json_run_avx2"),
     ),
     _exclusion(
         "policy describe methods populate the shared MiddlewareContract with independent "
         "header semantics; normalisation erases those declarations",
-        ('src/wreath/policy/compression.py', 'CompressionPolicy.describe'),
-        ('src/wreath/policy/cors.py', 'CorsPolicy.describe'),
+        ("src/wreath/policy/compression.py", "CompressionPolicy.describe"),
+        ("src/wreath/policy/cors.py", "CorsPolicy.describe"),
     ),
     _exclusion(
         "the optional HTTP/3 and server extensions resolve different recorder owner "
         "types and cannot share a linked implementation",
-        ('src/wreath/_native/http3_connection.c', 'wreath_h3_worker_from'),
-        ('src/wreath/_native/server_common.c', 'wreath_flight_worker_from'),
+        ("src/wreath/_native/http3_connection.c", "wreath_h3_worker_from"),
+        ("src/wreath/_native/server_common.c", "wreath_flight_worker_from"),
     ),
     _exclusion(
         "these are iterator protocols for unrelated native object layouts; their common "
         "shape is CPython's StopIteration/error contract",
-        ('src/wreath/_native/queue.c', 'queue_value_next'),
-        ('src/wreath/_native/server_common.c', 'value_awaitable_next'),
+        ("src/wreath/_native/queue.c", "queue_value_next"),
+        ("src/wreath/_native/server_common.c", "value_awaitable_next"),
     ),
     _exclusion(
         "SSE2 and AVX2 are separate measured implementations selected by per-call dispatch",
-        ('src/wreath/_native/simd.h', 'wreath_html_run_sse2'),
-        ('src/wreath/_native/simd.h', 'wreath_html_run_avx2'),
+        ("src/wreath/_native/simd.h", "wreath_html_run_sse2"),
+        ("src/wreath/_native/simd.h", "wreath_html_run_avx2"),
     ),
     _exclusion(
         "FIFO queue and deadline heap drains are layout-specialized hot loops; a common "
         "callback loop would add an indirect call per item",
-        ('src/wreath/_native/queue.c', 'queue_drain'),
-        ('src/wreath/_native/queue.c', 'heap_drain'),
+        ("src/wreath/_native/queue.c", "queue_drain"),
+        ("src/wreath/_native/queue.c", "heap_drain"),
     ),
     _exclusion(
         "SSE2 and AVX2 are separate measured implementations selected by per-call dispatch",
-        ('src/wreath/_native/simd.h', 'wreath_dkim_run_sse2'),
-        ('src/wreath/_native/simd.h', 'wreath_dkim_run_avx2'),
+        ("src/wreath/_native/simd.h", "wreath_dkim_run_sse2"),
+        ("src/wreath/_native/simd.h", "wreath_dkim_run_avx2"),
     ),
     _exclusion(
         "the strict step and attempt wrappers already layer type-specific diagnostics over "
         "the canonical _read_one_recording implementation",
-        ('src/wreath/_recording_format.py', 'read_step_recording'),
-        ('src/wreath/_recording_format.py', 'read_attempt_recording'),
+        ("src/wreath/_recording_format.py", "read_step_recording"),
+        ("src/wreath/_recording_format.py", "read_attempt_recording"),
     ),
     _exclusion(
         "the attempt and data-kernel readers own different binary formats and error "
         "vocabularies; their common bounds-check shape is the wire-decoder contract",
-        ('src/wreath/_native/codecs.c', 'read_attempt_text'),
-        ('src/wreath/_native/data_kernels.c', 'data_read_text'),
+        ("src/wreath/_native/codecs.c", "read_attempt_text"),
+        ("src/wreath/_native/data_kernels.c", "data_read_text"),
     ),
     _exclusion(
         "reader and writer removal are symmetric reactor operations over distinct kernel "
         "filters; combining them would hide the selected filter in a branch",
-        ('src/wreath/_native/reactor_poller.c', 'rp_remove_reader'),
-        ('src/wreath/_native/reactor_poller.c', 'rp_remove_writer'),
+        ("src/wreath/_native/reactor_poller.c", "rp_remove_reader"),
+        ("src/wreath/_native/reactor_poller.c", "rp_remove_writer"),
     ),
     _exclusion(
         "SSE2 and AVX2 are separate measured implementations selected by per-call dispatch",
-        ('src/wreath/_native/simd.h', 'wreath_value_run_sse2'),
-        ('src/wreath/_native/simd.h', 'wreath_value_run_avx2'),
+        ("src/wreath/_native/simd.h", "wreath_value_run_sse2"),
+        ("src/wreath/_native/simd.h", "wreath_value_run_avx2"),
     ),
     _exclusion(
         "the two migration refusals own different hazards and recovery instructions; "
         "normalisation erases the diagnostic text that distinguishes them",
-        ('src/wreath/migrations.py', 'DowngradeWouldStrandCode.__init__'),
-        ('src/wreath/migrations.py', 'DowngradeWouldStrandRecodedData.__init__'),
+        ("src/wreath/migrations.py", "DowngradeWouldStrandCode.__init__"),
+        ("src/wreath/migrations.py", "DowngradeWouldStrandRecodedData.__init__"),
     ),
     _exclusion(
         "sparse-vector indices and values require different CPython constructors in a "
         "per-element hot loop; a converter callback would add an indirect call per item",
-        ('src/wreath/_native/codecs.c', 'wreath_sparsevector_indices'),
-        ('src/wreath/_native/codecs.c', 'wreath_sparsevector_values'),
+        ("src/wreath/_native/codecs.c", "wreath_sparsevector_indices"),
+        ("src/wreath/_native/codecs.c", "wreath_sparsevector_values"),
     ),
     _exclusion(
         "FIFO queue and deadline heap waiting slots are layout-specialized; sharing would "
         "replace direct field access with layout branches",
-        ('src/wreath/_native/queue.c', 'queue_set_waiting'),
-        ('src/wreath/_native/queue.c', 'heap_set_waiting'),
+        ("src/wreath/_native/queue.c", "queue_set_waiting"),
+        ("src/wreath/_native/queue.c", "heap_set_waiting"),
     ),
     _exclusion(
         "io_uring start and stop deliberately mirror the registration lifecycle while "
         "calling opposite kernel operations",
-        ('src/wreath/_native/reactor_poller.c', 'rp_start_uring_receive'),
-        ('src/wreath/_native/reactor_poller.c', 'rp_stop_uring_receive'),
+        ("src/wreath/_native/reactor_poller.c", "rp_start_uring_receive"),
+        ("src/wreath/_native/reactor_poller.c", "rp_stop_uring_receive"),
     ),
     _exclusion(
         "IPv4 and IPv6 indexes use different integer widths and record layouts; a common "
         "inner loop would add width/layout branches per bucket",
-        ('src/wreath/_native/client_facts.c', 'geo_index_v4'),
-        ('src/wreath/_native/client_facts.c', 'geo_index_v6'),
+        ("src/wreath/_native/client_facts.c", "geo_index_v4"),
+        ("src/wreath/_native/client_facts.c", "geo_index_v6"),
     ),
     _exclusion(
         "Prometheus escaping targets the sizing buffer in one pass and the final bytes "
         "writer in another; an adapter callback would add work per escaped run",
-        ('src/wreath/_native/observability.c', 'prom_label_buffer_value'),
-        ('src/wreath/_native/observability.c', 'prom_write_label_value'),
+        ("src/wreath/_native/observability.c", "prom_label_buffer_value"),
+        ("src/wreath/_native/observability.c", "prom_write_label_value"),
     ),
     _exclusion(
         "SSE2 and AVX2 are separate measured implementations selected by per-call dispatch",
-        ('src/wreath/_native/simd.h', 'wreath_xor_mask_sse2'),
-        ('src/wreath/_native/simd.h', 'wreath_xor_mask_avx2'),
+        ("src/wreath/_native/simd.h", "wreath_xor_mask_sse2"),
+        ("src/wreath/_native/simd.h", "wreath_xor_mask_avx2"),
     ),
     _exclusion(
         "JSON and MessagePack are separately built extension modules; the matching wrapper "
         "shape is their shared Python codec protocol, not shared encoding logic",
-        ('src/wreath/_native/json.c', 'wreath_json_dumps'),
-        ('src/wreath/_native/msgpack.c', 'wreath_msgpack_dumps'),
+        ("src/wreath/_native/json.c", "wreath_json_dumps"),
+        ("src/wreath/_native/msgpack.c", "wreath_msgpack_dumps"),
     ),
     _exclusion(
         "FIFO queue and deadline heap close paths are layout-specialized and wake different "
         "waiter structures",
-        ('src/wreath/_native/queue.c', 'queue_close'),
-        ('src/wreath/_native/queue.c', 'heap_close'),
+        ("src/wreath/_native/queue.c", "queue_close"),
+        ("src/wreath/_native/queue.c", "heap_close"),
     ),
     _exclusion(
         "normalisation erases mapping keys and attribute names, making unrelated report "
         "serializers look identical",
-        ('src/wreath/_port/ir.py', 'Finding.as_dict'),
-        ('src/wreath/doctor.py', 'TracedWork.as_dict'),
+        ("src/wreath/_port/ir.py", "Finding.as_dict"),
+        ("src/wreath/doctor.py", "TracedWork.as_dict"),
     ),
     _exclusion(
         "a Flight slab decoder and an HTTP signature builder are unrelated; normalisation "
         "erases the callees and constants that define both operations",
-        ('src/wreath/_flight_schema.py', 'CaptureSlab.decode'),
-        ('src/wreath/signatures.py', 'signature_base'),
+        ("src/wreath/_flight_schema.py", "CaptureSlab.decode"),
+        ("src/wreath/signatures.py", "signature_base"),
     ),
     _exclusion(
         "these capsule destructors own unrelated layouts; the common shape is CPython's "
         "capsule validation and cleanup protocol",
-        ('src/wreath/_native/graphql.c', 'graphql_policy_state_destroy'),
-        ('src/wreath/_native/sparse_vector.h', 'wreath_sparse_vector_destroy'),
+        ("src/wreath/_native/graphql.c", "graphql_policy_state_destroy"),
+        ("src/wreath/_native/sparse_vector.h", "wreath_sparse_vector_destroy"),
     ),
     _exclusion(
         "GC traverse and clear must enumerate the same plan fields in the same order; their "
         "parallel shape is an ownership invariant",
-        ('src/wreath/_native/postgres/plan.c', 'plan_traverse'),
-        ('src/wreath/_native/postgres/plan.c', 'plan_clear'),
+        ("src/wreath/_native/postgres/plan.c", "plan_traverse"),
+        ("src/wreath/_native/postgres/plan.c", "plan_clear"),
     ),
     _exclusion(
         "FIFO queue and deadline heap clear paths are layout-specialized and release "
         "different storage representations",
-        ('src/wreath/_native/queue.c', 'queue_clear'),
-        ('src/wreath/_native/queue.c', 'heap_clear'),
+        ("src/wreath/_native/queue.c", "queue_clear"),
+        ("src/wreath/_native/queue.c", "heap_clear"),
     ),
     _exclusion(
         "reader and writer callback removal bind different event-loop methods; the mirrored "
         "shape is the transport's explicit duplex protocol",
-        ('src/wreath/_native/reactor_transport.c', 'st_remove_reader_cb'),
-        ('src/wreath/_native/reactor_transport.c', 'st_remove_writer_cb'),
+        ("src/wreath/_native/reactor_transport.c", "st_remove_reader_cb"),
+        ("src/wreath/_native/reactor_transport.c", "st_remove_writer_cb"),
     ),
     _exclusion(
         "these porting helpers copy unrelated framework metadata; normalisation erases the "
         "field names and target API calls that distinguish them",
-        ('src/wreath/_port/analyzer/models.py', '_config_extra'),
-        ('src/wreath/_port/emit/ormar.py', '_copy_tablename'),
+        ("src/wreath/_port/analyzer/models.py", "_config_extra"),
+        ("src/wreath/_port/emit/ormar.py", "_copy_tablename"),
     ),
     _exclusion(
         "trace and log wrappers declare signal-specific types and fields over the shared "
         "_export_projected transport; normalisation erases those declarations",
-        ('src/wreath/_export.py', 'OtlpHttpExporter.export_projected_logs'),
-        ('src/wreath/_export.py', 'OtlpHttpExporter.export_projected_traces'),
+        ("src/wreath/_export.py", "OtlpHttpExporter.export_projected_logs"),
+        ("src/wreath/_export.py", "OtlpHttpExporter.export_projected_traces"),
     ),
 )
 
 
 def intentional_reason(group: Group) -> str | None:
     """The reason `group` is filtered, only when its full site set matches."""
-    sites = tuple(
-        sorted((site.path, site.identity_name) for site in group.sites)
-    )
+    sites = tuple(sorted((site.path, site.identity_name) for site in group.sites))
     for exclusion in INTENTIONAL_GROUPS:
         if sites == exclusion.sites:
             return exclusion.reason
@@ -921,8 +923,9 @@ class Coverage:
         }
 
 
-def _sources(root: Path, relatives: tuple[str, ...],
-             langs: tuple[str, ...]) -> list[tuple[Path, str]]:
+def _sources(
+    root: Path, relatives: tuple[str, ...], langs: tuple[str, ...]
+) -> list[tuple[Path, str]]:
     """Every file the scan will read, paired with the language that owns it."""
     wanted = {suffix: lang for lang in langs for suffix in SUFFIXES[lang]}
     files: list[tuple[Path, str]] = []
@@ -1045,10 +1048,7 @@ def _python_bodies(
         return []
     source_lines = source.splitlines(keepends=True)
     definitions = _definitions(tree)
-    deep_scopes = any(
-        qualname.count(".<locals>.") >= 8
-        for _, qualname in definitions
-    )
+    deep_scopes = any(qualname.count(".<locals>.") >= 8 for _, qualname in definitions)
     if not build_structure or not deep_scopes:
         bodies = []
         for node, qualname in definitions:
@@ -1066,36 +1066,36 @@ def _python_bodies(
                     _structure(body, shape)
             body_start = body[0].lineno
             body_end = body[-1].end_lineno or body[-1].lineno
-            fragment_source = b"".join(source_lines[body_start - 1:body_end])
-            bodies.append(Body(
-                Site(
-                    relative,
-                    node.name,
-                    node.lineno,
-                    span,
-                    qualname,
+            fragment_source = b"".join(source_lines[body_start - 1 : body_end])
+            bodies.append(
+                Body(
+                    Site(
+                        relative,
+                        node.name,
+                        node.lineno,
+                        span,
+                        qualname,
+                        body_start,
+                        body_end,
+                    ),
+                    _digest(shape),
+                    bytes(shape),
+                    fragment_source,
                     body_start,
-                    body_end,
-                ),
-                _digest(shape),
-                bytes(shape),
-                fragment_source,
-                body_start,
-                0,
-            ))
+                    0,
+                )
+            )
         return bodies
 
     # Deep chains use fixed-size child images.  Ordinary source stays on the
     # tighter direct normalizer above: this branch pays for its catalog only
     # once nesting is deep enough for repeated descendant walks to dominate.
     definitions, scope_children = _scope_catalog(tree)
-    function_bodies = {
-        id(defined): _significant_body(defined)
-        for defined, _ in definitions
-    }
+    function_bodies = {id(defined): _significant_body(defined) for defined, _ in definitions}
     structures: dict[int, bytes] = {}
     scope_images: dict[int, bytes] = {}
     if build_structure:
+
         def build_scope(defined: ast.AST) -> bytes:
             existing = scope_images.get(id(defined))
             if existing is not None:
@@ -1106,8 +1106,7 @@ def _python_bodies(
                 significant = list(defined.body)
             else:
                 raise TypeError(
-                    f"nested scope must be a function or class, got "
-                    f"{type(defined).__name__}"
+                    f"nested scope must be a function or class, got {type(defined).__name__}"
                 )
             for child in scope_children.get(id(defined), ()):
                 child_image = build_scope(child)
@@ -1129,6 +1128,7 @@ def _python_bodies(
             ).digest()
             scope_images[id(defined)] = image
             return image
+
     bodies = []
     for node, qualname in definitions:
         body = function_bodies[id(node)]
@@ -1142,23 +1142,25 @@ def _python_bodies(
         shape = structures.get(id(node), b"")
         body_start = body[0].lineno
         body_end = body[-1].end_lineno or body[-1].lineno
-        fragment_source = b"".join(source_lines[body_start - 1:body_end])
-        bodies.append(Body(
-            Site(
-                relative,
-                node.name,
-                node.lineno,
-                span,
-                qualname,
+        fragment_source = b"".join(source_lines[body_start - 1 : body_end])
+        bodies.append(
+            Body(
+                Site(
+                    relative,
+                    node.name,
+                    node.lineno,
+                    span,
+                    qualname,
+                    body_start,
+                    body_end,
+                ),
+                _digest(shape),
+                shape,
+                fragment_source,
                 body_start,
-                body_end,
-            ),
-            _digest(shape),
-            shape,
-            fragment_source,
-            body_start,
-            0,
-        ))
+                0,
+            )
+        )
     return bodies
 
 
@@ -1198,14 +1200,16 @@ def _native_bodies(
             continue
         body_start = source.count("\n", 0, brace) + 1
         body_end = source.count("\n", 0, end) + 1
-        bodies.append(Body(
-            Site(relative, name, line, lines, name, body_start, body_end),
-            _digest(shape),
-            bytes(shape),
-            body.encode(),
-            body_start,
-            1,
-        ))
+        bodies.append(
+            Body(
+                Site(relative, name, line, lines, name, body_start, body_end),
+                _digest(shape),
+                bytes(shape),
+                body.encode(),
+                body_start,
+                1,
+            )
+        )
     return bodies
 
 
@@ -1222,8 +1226,7 @@ def collect(
     """Every body worth comparing, in both languages."""
     if normalization not in NORMALIZATIONS:
         raise ValueError(
-            f"normalization must be one of {', '.join(NORMALIZATIONS)}; "
-            f"got {normalization!r}"
+            f"normalization must be one of {', '.join(NORMALIZATIONS)}; got {normalization!r}"
         )
     read = {"python": _python_bodies, "native": _native_bodies}
     sources = _sources(root, relatives, langs)
@@ -1233,14 +1236,16 @@ def collect(
     for path, lang in sources:
         relative = str(path.relative_to(root))
         skipped_before = len(coverage.skipped_files) if coverage is not None else 0
-        bodies.extend(read[lang](
-            path,
-            relative,
-            min_lines,
-            normalization,
-            coverage,
-            build_structure,
-        ))
+        bodies.extend(
+            read[lang](
+                path,
+                relative,
+                min_lines,
+                normalization,
+                coverage,
+                build_structure,
+            )
+        )
         if coverage is not None and len(coverage.skipped_files) == skipped_before:
             coverage.scanned_files += 1
     return bodies
@@ -1261,7 +1266,9 @@ def scan(
 
 
 def _scan_bodies(
-    bodies: list[Body], *, include_excluded: bool = False,
+    bodies: list[Body],
+    *,
+    include_excluded: bool = False,
 ) -> tuple[list[Group], int]:
     """Group one already-normalised body image.
 
@@ -1343,10 +1350,15 @@ def _similarity(left: tuple[int, ...], right: tuple[int, ...]) -> float:
     return both / union
 
 
-def near_clones(root: Path, relatives: tuple[str, ...], min_lines: int,
-                langs: tuple[str, ...] = LANGS,
-                similarity: float = DEFAULT_SIMILARITY,
-                *, normalization: str = "shape") -> list[Pair]:
+def near_clones(
+    root: Path,
+    relatives: tuple[str, ...],
+    min_lines: int,
+    langs: tuple[str, ...] = LANGS,
+    similarity: float = DEFAULT_SIMILARITY,
+    *,
+    normalization: str = "shape",
+) -> list[Pair]:
     """Bodies that are almost, but not exactly, the same shape.
 
     Exact grouping cannot see these at all -- one added statement changes the
@@ -1392,11 +1404,13 @@ def _near_bodies(bodies: list[Body], similarity: float) -> list[Pair]:
             continue
         score = _similarity(sketches[left], sketches[right])
         if score >= similarity:
-            first, second = sorted((bodies[left].site, bodies[right].site),
-                                   key=lambda s: (s.path, s.line))
+            first, second = sorted(
+                (bodies[left].site, bodies[right].site), key=lambda s: (s.path, s.line)
+            )
             pairs.append(Pair(first, second, score))
-    pairs.sort(key=lambda p: (-min(p.left.lines, p.right.lines), -p.similarity,
-                              p.left.path, p.left.line))
+    pairs.sort(
+        key=lambda p: (-min(p.left.lines, p.right.lines), -p.similarity, p.left.path, p.left.line)
+    )
     return pairs
 
 
@@ -1409,10 +1423,7 @@ def _fragment_bodies(
     """Run the native maximal token-window matcher over one body image."""
     mode = NORMALIZATIONS.index(normalization)
     native = _fragment_scan(
-        [
-            (body.fragment_source, body.fragment_start, body.language)
-            for body in bodies
-        ],
+        [(body.fragment_source, body.fragment_start, body.language) for body in bodies],
         min_lines,
         min_tokens,
         mode,
@@ -1541,20 +1552,38 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="wreath-dup-scan",
         description="Report function bodies that share a structure, ranked by "
-                    "the lines a collapse would remove. A report, not a gate.",
+        "the lines a collapse would remove. A report, not a gate.",
     )
-    parser.add_argument("--path", action="append", metavar="REL",
-                        help=f"repo-relative file or directory to scan "
-                             f"(repeatable; default {', '.join(DEFAULT_ROOTS)})")
-    parser.add_argument("--min-lines", type=int, default=DEFAULT_MIN_LINES,
-                        help=f"ignore bodies shorter than this (default {DEFAULT_MIN_LINES})")
-    parser.add_argument("--top", type=int, default=DEFAULT_TOP,
-                        help=f"groups to print (default {DEFAULT_TOP}; 0 for all)")
-    parser.add_argument("--lang", choices=("all", *LANGS), default="all",
-                        help="which half of the tree to scan (default all)")
-    parser.add_argument("--near", action="store_true",
-                        help="also report pairs that are almost the same shape, "
-                             "which exact grouping cannot see")
+    parser.add_argument(
+        "--path",
+        action="append",
+        metavar="REL",
+        help=f"repo-relative file or directory to scan "
+        f"(repeatable; default {', '.join(DEFAULT_ROOTS)})",
+    )
+    parser.add_argument(
+        "--min-lines",
+        type=int,
+        default=DEFAULT_MIN_LINES,
+        help=f"ignore bodies shorter than this (default {DEFAULT_MIN_LINES})",
+    )
+    parser.add_argument(
+        "--top",
+        type=int,
+        default=DEFAULT_TOP,
+        help=f"groups to print (default {DEFAULT_TOP}; 0 for all)",
+    )
+    parser.add_argument(
+        "--lang",
+        choices=("all", *LANGS),
+        default="all",
+        help="which half of the tree to scan (default all)",
+    )
+    parser.add_argument(
+        "--near",
+        action="store_true",
+        help="also report pairs that are almost the same shape, which exact grouping cannot see",
+    )
     parser.add_argument(
         "--fragments",
         action="store_true",
@@ -1589,9 +1618,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="also show exact intentional groups and the reason each is filtered",
     )
-    parser.add_argument("--similarity", type=float, default=DEFAULT_SIMILARITY,
-                        help=f"how alike a --near pair must be "
-                             f"(default {DEFAULT_SIMILARITY})")
+    parser.add_argument(
+        "--similarity",
+        type=float,
+        default=DEFAULT_SIMILARITY,
+        help=f"how alike a --near pair must be (default {DEFAULT_SIMILARITY})",
+    )
     parser.add_argument("--format", choices=("text", "json"), default="text")
     args = parser.parse_args(argv)
 
@@ -1610,15 +1642,12 @@ def main(argv: list[str] | None = None) -> int:
     for relative in relatives:
         target = root / relative
         if not target.exists():
-            parser.error(
-                f"{relative} does not exist; use a repository-relative file or directory"
-            )
+            parser.error(f"{relative} does not exist; use a repository-relative file or directory")
         try:
             target.resolve().relative_to(resolved_root)
         except ValueError:
             parser.error(
-                f"{relative} is outside the repository; "
-                "use a repository-relative file or directory"
+                f"{relative} is outside the repository; use a repository-relative file or directory"
             )
 
     # The exact and near passes consume the same normalised bodies. The ordinary
@@ -1675,11 +1704,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         excluded = []
-    pairs = (
-        _near_bodies(bodies, args.similarity)
-        if args.near and bodies is not None
-        else []
-    )
+    pairs = _near_bodies(bodies, args.similarity) if args.near and bodies is not None else []
     fragments = (
         _fragment_bodies(
             bodies,
@@ -1694,37 +1719,39 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.format == "json":
         evidence_root = root if args.context > 0 else None
-        print(json.dumps({
-            "scanned_functions": scanned,
-            "min_lines": args.min_lines,
-            "min_tokens": args.min_tokens,
-            "langs": list(langs),
-            "normalization": args.normalization,
-            "coverage": coverage.as_dict(),
-            "groups": [g.as_dict(evidence_root, args.context) for g in groups],
-            "excluded_groups": [
-                {**group.as_dict(evidence_root, args.context), "reason": reason}
-                for group, reason in excluded
-            ],
-            "near": [p.as_dict(evidence_root, args.context) for p in pairs],
-            "fragments": [
-                fragment.as_dict(evidence_root, args.context)
-                for fragment in fragments
-            ],
-            **({"summary": summarize(groups)} if args.summary else {}),
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "scanned_functions": scanned,
+                    "min_lines": args.min_lines,
+                    "min_tokens": args.min_tokens,
+                    "langs": list(langs),
+                    "normalization": args.normalization,
+                    "coverage": coverage.as_dict(),
+                    "groups": [g.as_dict(evidence_root, args.context) for g in groups],
+                    "excluded_groups": [
+                        {**group.as_dict(evidence_root, args.context), "reason": reason}
+                        for group, reason in excluded
+                    ],
+                    "near": [p.as_dict(evidence_root, args.context) for p in pairs],
+                    "fragments": [
+                        fragment.as_dict(evidence_root, args.context) for fragment in fragments
+                    ],
+                    **({"summary": summarize(groups)} if args.summary else {}),
+                },
+                indent=2,
+            )
+        )
         return 0
 
-    print(f"{scanned} function(s) of >= {args.min_lines} lines scanned in "
-          f"{', '.join(relatives)}\n")
+    print(f"{scanned} function(s) of >= {args.min_lines} lines scanned in {', '.join(relatives)}\n")
     if not groups:
         print("no shared structure found.")
     else:
         print("redundant  copies  group")
         for group in shown:
             first = group.sites[0]
-            print(f"{group.redundant_lines:>9}  {len(group.sites):>6}  "
-                  f"{first.lines} lines each")
+            print(f"{group.redundant_lines:>9}  {len(group.sites):>6}  {first.lines} lines each")
             for site in group.sites:
                 print(f"{'':>19}{site.path}:{site.line} {site.identity_name}")
                 if args.context > 0:
@@ -1763,18 +1790,19 @@ def main(argv: list[str] | None = None) -> int:
         near_shown = pairs if args.top <= 0 else pairs[: args.top]
         print(f"\nnear copies (>= {args.similarity:.2f} alike, not exact)")
         for pair in near_shown:
-            print(f"{pair.similarity:>9.2f}  {pair.left.path}:{pair.left.line} "
-                  f"{pair.left.identity_name}  <->  "
-                  f"{pair.right.path}:{pair.right.line} "
-                  f"{pair.right.identity_name}")
+            print(
+                f"{pair.similarity:>9.2f}  {pair.left.path}:{pair.left.line} "
+                f"{pair.left.identity_name}  <->  "
+                f"{pair.right.path}:{pair.right.line} "
+                f"{pair.right.identity_name}"
+            )
             if args.context > 0:
                 for site in (pair.left, pair.right):
                     source = site.as_dict(root, args.context).get("source", "")
                     for source_line in source.splitlines():
                         print(f"{'':>21}| {source_line}")
         if len(pairs) > len(near_shown):
-            print(f"\n... and {len(pairs) - len(near_shown)} more pair(s); "
-                  f"--top 0 for all.")
+            print(f"\n... and {len(pairs) - len(near_shown)} more pair(s); --top 0 for all.")
         print(f"\nwreath-dup-scan: {len(pairs)} near pair(s).")
 
     if args.fragments:
@@ -1805,22 +1833,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.summary:
         hotspots = summarize(groups)
-        file_rows = hotspots["files"] if args.top <= 0 else hotspots["files"][:args.top]
+        file_rows = hotspots["files"] if args.top <= 0 else hotspots["files"][: args.top]
         directory_rows = (
-            hotspots["directories"]
-            if args.top <= 0
-            else hotspots["directories"][:args.top]
+            hotspots["directories"] if args.top <= 0 else hotspots["directories"][: args.top]
         )
         print("\nduplicate hotspots by file")
         for row in file_rows:
-            print(
-                f"{row['duplicated_lines']:>9}  {row['groups']:>6}  {row['path']}"
-            )
+            print(f"{row['duplicated_lines']:>9}  {row['groups']:>6}  {row['path']}")
         print("\nduplicate hotspots by directory")
         for row in directory_rows:
-            print(
-                f"{row['duplicated_lines']:>9}  {row['groups']:>6}  {row['path']}"
-            )
+            print(f"{row['duplicated_lines']:>9}  {row['groups']:>6}  {row['path']}")
     return 0
 
 

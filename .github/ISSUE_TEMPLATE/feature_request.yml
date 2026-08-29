@@ -9,15 +9,12 @@ body:
         below is what a maintainer needs, not a test of how you wrote it. Leave
         tool attribution out of the body; it is not something anyone can act on.
 
-        Two things worth doing first, because they answer most requests faster
+        One thing worth doing first, because it answers many requests faster
         than an issue can:
 
         - `wreath capabilities <the package you would otherwise install>` —
           wreath is wide on purpose, and the answer is often a module you
           already have.
-        - [`docs/reference/roadmap.md`](../blob/main/docs/reference/roadmap.md) —
-          which records what is deliberately *not* shipped, and why. If your
-          request is there, say what changed rather than opening a duplicate.
 
   - type: textarea
     id: problem
@@ -51,8 +48,6 @@ body:
       label: Before filing
       options:
         - label: I ran `wreath capabilities` and this is not already shipped under another name.
-          required: true
-        - label: I checked the roadmap for whether this is deliberately unshipped.
           required: true
         - label: I have read this request and can answer follow-up questions about it.
           required: true

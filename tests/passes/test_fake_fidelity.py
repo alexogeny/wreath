@@ -1,15 +1,3 @@
-"""The three shapes that reached working-looking code, now refused by the fake.
-
-Each of these was written, reviewed, and shipped green. None of them worked
-against a real server. They are here as *regression* tests on the double rather
-than on the pass: if the fake ever goes back to accepting them, the next defect
-of this class gets the same free ride.
-
-The rules they exercise are measured, not assumed --
-``tests/postgres/test_double_fidelity.py`` runs the same assertions against
-PostgreSQL 17.10 and fails if the two disagree.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -49,7 +37,6 @@ class TestTheCastThatSurvivesOneCall:
 
     @pytest.mark.asyncio
     async def test_to_regclass_survives_every_call(self) -> None:
-        """The spelling the denominator now uses. Three calls, no complaint."""
         connection = _connection()
         sql = "SELECT reltuples FROM x WHERE oid = to_regclass($1)"
         for _ in range(3):
@@ -57,7 +44,6 @@ class TestTheCastThatSurvivesOneCall:
 
     @pytest.mark.asyncio
     async def test_a_cast_to_an_encodable_type_is_fine(self) -> None:
-        """`jsonb` has an encoder, and the ledger leans on that in nine places."""
         connection = _connection()
         sql = "SELECT reltuples FROM pg_class WHERE oid = $1::jsonb"
         for _ in range(3):
@@ -65,11 +51,6 @@ class TestTheCastThatSurvivesOneCall:
 
     @pytest.mark.asyncio
     async def test_the_same_trap_with_a_friendlier_type_name(self) -> None:
-        """`$1::uuid` with a string is the identical defect, less obviously.
-
-        Nothing warns you, because a UUID-shaped string is exactly what you
-        would expect to bind to a uuid column.
-        """
         connection = _connection()
         sql = "SELECT reltuples FROM pg_class WHERE oid = $1::uuid"
         await connection.fetchval(sql, "11111111-1111-1111-1111-111111111111")
@@ -98,13 +79,6 @@ class TestBindingAList:
             await connection.fetch("SELECT 1 WHERE x = ANY($1)", (1, 2, 3))
 
     def test_the_in_spelling_that_replaced_it_binds_cleanly(self) -> None:
-        """One placeholder per value, which is what all three sites now emit.
-
-        Asserted against the binding rule rather than through the fake's
-        interpreter: the passes fake has no ``IN`` in its grammar, and the three
-        sites that emit this shape live in the migration and ledger readers,
-        which have their own doubles. The claim here is about *binding*.
-        """
         check_statement("SELECT id FROM things WHERE id IN ($1, $2)", (1, 2))
 
 

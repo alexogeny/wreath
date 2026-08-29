@@ -107,9 +107,7 @@ PROTOBUF = Serializer("application/x-protobuf", _to_protobuf)
 #: `application/protobuf` is the IANA registration and the two name one format.
 #: Being strict about a sender's spelling of an unambiguous type buys nothing
 #: and costs a caller a body refused for a reason that is not about the body.
-PROTOBUF_MEDIA_TYPES: frozenset[str] = frozenset(
-    {PROTOBUF.media_type, "application/protobuf"}
-)
+PROTOBUF_MEDIA_TYPES: frozenset[str] = frozenset({PROTOBUF.media_type, "application/protobuf"})
 
 #: JSON first, so it wins ties and is the default when Accept is absent/`*/*`.
 #:

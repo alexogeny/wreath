@@ -33,7 +33,6 @@ def _copy_tablename(value: ast.AST | None) -> str | None:
 
 
 class _OrmarModels(_EmitterState):
-    # -- classes (ORM models, Phase 2) -------------------------------------------
     def _rewrite_ormar_class(self, node: ast.ClassDef) -> None:
         self.needs.add("Model")
         table, config_stmt = None, None
@@ -71,9 +70,7 @@ class _OrmarModels(_EmitterState):
             if self.imports.origin(base).split(".")[-1] in self.orm_mixins
         ]
         bases = [
-            self._seg(base)
-            for base in node.bases
-            if self.imports.origin(base) != "ormar.Model"
+            self._seg(base) for base in node.bases if self.imports.origin(base) != "ormar.Model"
         ]
         if not inherited_mixins:
             bases.insert(0, "Model")
@@ -120,9 +117,7 @@ class _OrmarModels(_EmitterState):
                     self.needs.add("index")
                     args = ", ".join(self._seg(column) for column in columns)
                     declarations.append(f"_index_{len(declarations)} = index({args})")
-            elif name == "constraints" and isinstance(
-                statement.value, (ast.List, ast.Tuple)
-            ):
+            elif name == "constraints" and isinstance(statement.value, (ast.List, ast.Tuple)):
                 for value in statement.value.elts:
                     if not isinstance(value, ast.Call):
                         continue
@@ -135,9 +130,7 @@ class _OrmarModels(_EmitterState):
                     target = "unique" if kind == "UniqueColumns" else "index"
                     self.needs.add(target)
                     args = ", ".join(self._seg(column) for column in value.args)
-                    declarations.append(
-                        f"_{target}_{len(declarations)} = {target}({args})"
-                    )
+                    declarations.append(f"_{target}_{len(declarations)} = {target}({args})")
         indent = self.buf.line_indent(meta.lineno)
         replacement = (
             f"\n{indent}".join(declarations)
@@ -157,9 +150,7 @@ class _OrmarModels(_EmitterState):
             self.buf._edits.append((name_end, name_end, b"(Model)"))
         self._rewrite_ormar_fields(node, None)
 
-    def _rewrite_ormar_fields(
-        self, node: ast.ClassDef, config_stmt: ast.Assign | None
-    ) -> None:
+    def _rewrite_ormar_fields(self, node: ast.ClassDef, config_stmt: ast.Assign | None) -> None:
         """Rewrite the column declarations shared by tables and mixins."""
         # Paired rather than filtered: `AnnAssign.value` is Optional, and a list
         # of statements throws away the narrowing every reader below relies on.
@@ -265,9 +256,7 @@ class _OrmarModels(_EmitterState):
         args = "" if not kwargs else ", " + ", ".join(kwargs)
         self._replace_all_of(call, f"column({pgtype}{args})")
 
-    def _rewrite_unannotated_ormar_column(
-        self, stmt: ast.Assign, call: ast.Call
-    ) -> None:
+    def _rewrite_unannotated_ormar_column(self, stmt: ast.Assign, call: ast.Call) -> None:
         """Move an old-style mixin column whose Python type was implicit."""
         tail = self.imports.origin(call.func).split(".")[-1]
         if tail == "ForeignKey":

@@ -152,8 +152,6 @@ async def _seed(dsn: str) -> None:
         await connection.close()
 
 
-# --- wreath ------------------------------------------------------------------
-
 async def _wreath_ops(dsn: str) -> tuple[dict[str, Callable[[], Awaitable[Any]]], Any]:
     from wreath.orm import Mapped, Model, column, relationship
     from wreath.orm.registry import Registry
@@ -229,8 +227,6 @@ async def _wreath_ops(dsn: str) -> tuple[dict[str, Callable[[], Awaitable[Any]]]
     }, database.stop()
 
 
-# --- tortoise -------------------------------------------------------------
-
 async def _tortoise_ops(dsn: str) -> tuple[dict[str, Callable[[], Awaitable[Any]]], Any]:
     from tortoise import Tortoise
 
@@ -263,8 +259,6 @@ async def _tortoise_ops(dsn: str) -> tuple[dict[str, Callable[[], Awaitable[Any]
     }, Tortoise.close_connections()
 
 
-# --- sqlalchemy -----------------------------------------------------------
-
 async def _sqlalchemy_ops(dsn: str) -> tuple[dict[str, Callable[[], Awaitable[Any]]], Any]:
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -274,7 +268,8 @@ async def _sqlalchemy_ops(dsn: str) -> tuple[dict[str, Callable[[], Awaitable[An
 
     engine = create_async_engine(
         dsn.replace("postgresql://", "postgresql+asyncpg://"),
-        pool_size=1, max_overflow=0,
+        pool_size=1,
+        max_overflow=0,
     )
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -288,14 +283,23 @@ async def _sqlalchemy_ops(dsn: str) -> tuple[dict[str, Callable[[], Awaitable[An
             return await session.get(Item, 42)
 
     async def joined_to_one() -> Any:
-        books = await _run(lambda: select(Book).options(joinedload(Book.author))
-                           .order_by(Book.id).limit(CHILD_LIMIT))
+        books = await _run(
+            lambda: (
+                select(Book).options(joinedload(Book.author)).order_by(Book.id).limit(CHILD_LIMIT)
+            )
+        )
         _touch_to_one(books, "author")
         return books
 
     async def selectin_to_many() -> Any:
-        authors = await _run(lambda: select(Author).options(selectinload(Author.books))
-                             .order_by(Author.id).limit(PARENTS))
+        authors = await _run(
+            lambda: (
+                select(Author)
+                .options(selectinload(Author.books))
+                .order_by(Author.id)
+                .limit(PARENTS)
+            )
+        )
         _touch_to_many(authors, "books")
         return authors
 
@@ -308,13 +312,10 @@ async def _sqlalchemy_ops(dsn: str) -> tuple[dict[str, Callable[[], Awaitable[An
         "joined_to_one": joined_to_one,
         "selectin_to_many": selectin_to_many,
         "join_filter_by_child": lambda: _run(
-            lambda: select(Book).join(Author).where(Author.name == FILTER_AUTHOR)
-            .order_by(Book.id)
+            lambda: select(Book).join(Author).where(Author.name == FILTER_AUTHOR).order_by(Book.id)
         ),
     }, engine.dispose()
 
-
-# --- sqlmodel -------------------------------------------------------------
 
 async def _sqlmodel_ops(dsn: str) -> tuple[dict[str, Callable[[], Awaitable[Any]]], Any]:
     from sqlalchemy.ext.asyncio import create_async_engine
@@ -326,7 +327,8 @@ async def _sqlmodel_ops(dsn: str) -> tuple[dict[str, Callable[[], Awaitable[Any]
 
     engine = create_async_engine(
         dsn.replace("postgresql://", "postgresql+asyncpg://"),
-        pool_size=1, max_overflow=0,
+        pool_size=1,
+        max_overflow=0,
     )
 
     async def _run(build: Callable[[], Any]) -> Any:
@@ -338,14 +340,23 @@ async def _sqlmodel_ops(dsn: str) -> tuple[dict[str, Callable[[], Awaitable[Any]
             return await session.get(Item, 42)
 
     async def joined_to_one() -> Any:
-        books = await _run(lambda: select(Book).options(joinedload(Book.author))
-                           .order_by(Book.id).limit(CHILD_LIMIT))
+        books = await _run(
+            lambda: (
+                select(Book).options(joinedload(Book.author)).order_by(Book.id).limit(CHILD_LIMIT)
+            )
+        )
         _touch_to_one(books, "author")
         return books
 
     async def selectin_to_many() -> Any:
-        authors = await _run(lambda: select(Author).options(selectinload(Author.books))
-                             .order_by(Author.id).limit(PARENTS))
+        authors = await _run(
+            lambda: (
+                select(Author)
+                .options(selectinload(Author.books))
+                .order_by(Author.id)
+                .limit(PARENTS)
+            )
+        )
         _touch_to_many(authors, "books")
         return authors
 
@@ -358,13 +369,10 @@ async def _sqlmodel_ops(dsn: str) -> tuple[dict[str, Callable[[], Awaitable[Any]
         "joined_to_one": joined_to_one,
         "selectin_to_many": selectin_to_many,
         "join_filter_by_child": lambda: _run(
-            lambda: select(Book).join(Author).where(Author.name == FILTER_AUTHOR)
-            .order_by(Book.id)
+            lambda: select(Book).join(Author).where(Author.name == FILTER_AUTHOR).order_by(Book.id)
         ),
     }, engine.dispose()
 
-
-# --- peewee (synchronous) -------------------------------------------------
 
 def _peewee_ops(dsn: str) -> tuple[dict[str, Callable[[], Any]], Callable[[], None]]:
     import peewee
@@ -374,8 +382,11 @@ def _peewee_ops(dsn: str) -> tuple[dict[str, Callable[[], Any]], Callable[[], No
     # enclosing function, so `database = database` inside Meta would resolve the
     # right-hand side globally and raise NameError.
     handle = peewee.PostgresqlDatabase(
-        parts["database"], user=parts["user"], password=parts["password"],
-        host=parts["host"], port=parts["port"],
+        parts["database"],
+        user=parts["user"],
+        password=parts["password"],
+        host=parts["host"],
+        port=parts["port"],
     )
 
     class Item(peewee.Model):
@@ -409,16 +420,13 @@ def _peewee_ops(dsn: str) -> tuple[dict[str, Callable[[], Any]], Callable[[], No
     handle.connect()
 
     def joined_to_one() -> Any:
-        books = list(
-            Book.select(Book, Author).join(Author).order_by(Book.id).limit(CHILD_LIMIT)
-        )
+        books = list(Book.select(Book, Author).join(Author).order_by(Book.id).limit(CHILD_LIMIT))
         _touch_to_one(books, "author")
         return books
 
     def selectin_to_many() -> Any:
         authors = list(
-            peewee.prefetch(Author.select().order_by(Author.id).limit(PARENTS),
-                            Book.select())
+            peewee.prefetch(Author.select().order_by(Author.id).limit(PARENTS), Book.select())
         )
         _touch_to_many(authors, "books")
         return authors
@@ -454,8 +462,9 @@ def _count(value: Any) -> int:
     return len(value) if isinstance(value, list) else 1
 
 
-async def _time_async(op: Callable[[], Awaitable[Any]], warmup: int,
-                      trials: int, expect: int) -> list[float]:
+async def _time_async(
+    op: Callable[[], Awaitable[Any]], warmup: int, trials: int, expect: int
+) -> list[float]:
     for _ in range(warmup):
         await op()
     got = _count(await op())
@@ -486,8 +495,10 @@ async def _run_all(dsn: str, warmup: int, trials: int) -> dict[str, Any]:
     scenarios: dict[str, dict[str, Any]] = {name: {} for name in EXPECTED}
 
     for label, builder in (
-        ("wreath", _wreath_ops), ("tortoise", _tortoise_ops),
-        ("sqlalchemy", _sqlalchemy_ops), ("sqlmodel", _sqlmodel_ops),
+        ("wreath", _wreath_ops),
+        ("tortoise", _tortoise_ops),
+        ("sqlalchemy", _sqlalchemy_ops),
+        ("sqlmodel", _sqlmodel_ops),
     ):
         ops, teardown = await builder(dsn)
         try:

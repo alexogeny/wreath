@@ -1,6 +1,3 @@
-"""Idempotency replay policy and response-cache snapshots (report 23: R-04,
-R-05, R-11, G-04, G-10, and R-79 found while testing R-04)."""
-
 from __future__ import annotations
 
 from wreath import Wreath
@@ -62,8 +59,6 @@ class TestIdempotencyReachesAnIdentity:
 
 class TestIdempotencyReplayPolicy:
     async def test_a_client_error_is_not_replayed_for_the_whole_ttl(self):
-        """R-04: only >= 500 releases the key, so one 429/401/422 poisons that
-        Idempotency-Key for 24 hours."""
         statuses = iter([429, 200])
 
         def handler():
@@ -79,7 +74,6 @@ class TestIdempotencyReplayPolicy:
         assert second.status == 200, "the 429 was replayed instead of retried"
 
     async def test_a_replay_does_not_re_send_set_cookie(self):
-        """R-05: stored headers are replayed verbatim, cookies included."""
 
         def handler():
             response = Response(b"{}", media_type=b"application/json")
@@ -96,7 +90,6 @@ class TestIdempotencyReplayPolicy:
         assert second.header("set-cookie") is None
 
     async def test_an_in_flight_conflict_says_when_to_retry(self):
-        """G-04: the 409 carries no Retry-After."""
         from wreath.policy.idempotency import MemoryIdempotencyStore
 
         store = MemoryIdempotencyStore()
@@ -121,8 +114,6 @@ class TestIdempotencyReplayPolicy:
 
 class TestResponseCacheSnapshot:
     async def test_a_cached_mapping_is_not_shared_by_reference(self):
-        """R-11: `_snapshot` stores the handler's own dict, so a later mutation
-        of it rewrites what every later caller is served."""
         rows = {"rows": [1, 2, 3]}
         app = Wreath()
 
@@ -144,7 +135,6 @@ class TestResponseCacheSnapshot:
         assert second.json() == {"rows": [1, 2, 3]}, "the stored entry aliased the handler's object"
 
     async def test_two_hits_do_not_share_one_mutable_object(self):
-        """The other direction: whatever a hit hands back must not be the entry."""
         from wreath.response_cache import _revive, _snapshot
 
         entry = _snapshot({"rows": [1]})
@@ -153,7 +143,6 @@ class TestResponseCacheSnapshot:
         assert _revive(entry) == {"rows": [1]}
 
     async def test_a_redirect_is_not_cached(self):
-        """G-10: `status < 400` admits a 3xx whose Location can be per-user."""
         from wreath.response import RedirectResponse
 
         seen = 0

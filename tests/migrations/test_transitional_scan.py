@@ -1,10 +1,3 @@
-"""The §4 operator lattice: which reads survive a re-encode window.
-
-Pure Python over `orm/expressions.py` -- no database, no fake driver. Every row
-of design 24 §4.1 (safe by rewriting) and §4.2 (refused) is a test here, plus
-the three refusals that are not predicates at all.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -38,9 +31,6 @@ def none(predicate) -> None:
     assert scan_predicates((predicate,), User.name.column, MAPPING, site="test") == []
 
 
-# -- §4.1 safe by rewriting ---------------------------------------------------
-
-
 def test_equality_widens_to_both_encodings() -> None:
     hazard = one(User.name == "planned")
     assert hazard.verdict == "rewritable"
@@ -49,7 +39,6 @@ def test_equality_widens_to_both_encodings() -> None:
 
 
 def test_inequality_widens_to_exclude_both_encodings() -> None:
-    """The one people get wrong by hand: the rewrite excludes, it does not match."""
     hazard = one(User.name != "planned")
     assert hazard.verdict == "rewritable"
     assert hazard.rewrite.startswith("name NOT IN (")
@@ -74,17 +63,12 @@ def test_a_null_test_is_unaffected_when_the_mapping_moves_no_nulls() -> None:
 
 
 def test_a_null_test_is_refused_when_the_mapping_introduces_nulls() -> None:
-    found = scan_predicates(
-        (User.name.is_null(),), User.name.column, {"1": None}, site="test"
-    )
+    found = scan_predicates((User.name.is_null(),), User.name.column, {"1": None}, site="test")
     assert [item.verdict for item in found] == ["refused"]
 
 
 def test_a_predicate_on_another_column_is_not_a_finding() -> None:
     none(User.email == "someone@example.test")
-
-
-# -- §4.2 unsafe, and refused -------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -104,7 +88,6 @@ def test_every_ordered_comparison_is_refused(predicate) -> None:
 
 
 def test_the_refusal_names_monotonicity_so_a_total_mapping_can_be_waived() -> None:
-    """An order-preserving mapping is still refused -- and says why, and how to waive."""
     monotone = {"1": "aaa", "2": "bbb", "3": "ccc"}
     found = scan_predicates((User.name > "aaa",), User.name.column, monotone, site="test")
     assert found[0].verdict == "refused"
@@ -127,28 +110,15 @@ def test_a_value_the_mapping_does_not_mention_is_refused() -> None:
     assert "archived" in hazard.detail
 
 
-# -- §4.4 undecidable ---------------------------------------------------------
-
-
 def test_a_bound_parameter_is_undecidable_even_for_equality() -> None:
-    """Equality is not safe merely because it is equality."""
     hazard = one(User.name == Param("name"))
     assert hazard.verdict == "undecidable"
     assert "either encoding" in hazard.detail
 
 
 def test_membership_against_a_param_is_not_expressible_today() -> None:
-    """Not a scan limit: `_bind` refuses an Expression operand in `in_`.
-
-    Recorded rather than worked around, because when the carve-out that lets
-    `Param` into `in_`/`like`/jsonb lands, this scan must classify it as
-    undecidable rather than silently widening a value it cannot see.
-    """
     with pytest.raises(TypeError, match="column-to-column"):
         User.name.in_([Param("a"), Param("b")])
-
-
-# -- combinators --------------------------------------------------------------
 
 
 def test_the_walk_reaches_inside_and_or_and_not() -> None:
@@ -158,13 +128,8 @@ def test_the_walk_reaches_inside_and_or_and_not() -> None:
 
 
 def test_the_walk_reaches_inside_a_negation() -> None:
-    found = scan_predicates(
-        (~(User.name > "walking"),), User.name.column, MAPPING, site="test"
-    )
+    found = scan_predicates((~(User.name > "walking"),), User.name.column, MAPPING, site="test")
     assert [item.verdict for item in found] == ["refused"]
-
-
-# -- the three refusals that are not predicates -------------------------------
 
 
 def test_order_by_on_a_converting_column_is_refused() -> None:
@@ -175,7 +140,6 @@ def test_order_by_on_a_converting_column_is_refused() -> None:
 
 
 def test_a_foreign_key_column_is_refused_from_the_model_declaration() -> None:
-    """Post.author_id *is* a foreign key, so converting it breaks the join."""
 
     class Registry:
         specs = ()
@@ -195,9 +159,6 @@ def test_a_column_referenced_by_another_model_is_a_join_key() -> None:
     assert any(item.operation == "join key" for item in report.hazards)
 
 
-# -- populations --------------------------------------------------------------
-
-
 class Reads(Queries[User]):
     by_name = query(User.name == "planned")
     ordered = query().order_by(User.name)
@@ -214,24 +175,18 @@ def test_the_scan_finds_a_predicate_in_a_declared_query() -> None:
 def test_the_scan_finds_an_ordering_in_a_declared_query() -> None:
     report = scan(User.name, MAPPING, queries=(Reads,))
     assert any(
-        item.site == "Reads.ordered" and item.operation == "ORDER BY"
-        for item in report.hazards
+        item.site == "Reads.ordered" and item.operation == "ORDER BY" for item in report.hazards
     )
 
 
 def test_a_report_that_scanned_nothing_says_so_rather_than_clean() -> None:
-    """The empty-denominator shape doc 19 found; it must not come back here."""
     report = scan(User.name, MAPPING)
     assert report.scanned_nothing
     assert report.blocking == ()
     assert "not the same as safe" in report.explain()
 
 
-# -- waivers ------------------------------------------------------------------
-
-
 def test_discovery_finds_declarations_and_populations_in_a_module() -> None:
-    """`check` has to look where declarations are written: beside the model."""
     import types
 
     from wreath._migrations.deferred import Recode
@@ -269,7 +224,6 @@ def test_a_waiver_records_the_column_and_the_reason() -> None:
 
 
 def test_a_declared_query_cannot_be_decorated_and_says_what_to_do_instead() -> None:
-    """§13 soft spot 4: a declared read is a slotted value, not a function."""
 
     class Slotted(Queries[User]):
         ranked = query(User.name >= "walking")

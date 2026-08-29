@@ -1,40 +1,3 @@
-"""`wreath.edge.serve()`: a proxy whose request path contains no Python.
-
-Written as a failing spec before the protocol existed, so it is a contract rather
-than a description of whatever the code turned out to do. It is green now; the
-shape it pins is the reason to keep reading it.
-
-**The point is the absence, not the speed.** `serve()` takes an `UpstreamPool`
-and *no ASGI app*, because there is nothing for an app to do: a native protocol
-owns the listening socket, and on a complete request head it selects an upstream
-from a compiled table, builds the outbound head in C, writes it to an
-already-open upstream transport, and pipes the response back. No scope, no
-`Request`, no coroutine, no Task. Having no app to call is what makes that
-structural instead of aspirational -- there is no seam through which Python can
-creep back onto the request path later.
-
-Why the pool is warmed at startup: `loop.create_connection` is a coroutine, so
-opening an upstream connection mid-request pulls asyncio's Task and Future
-machinery straight back in -- 6.3 CPU-microseconds for the Task alone, plus the
-orchestration around it. Connections are established while the proxy is being
-configured, which is Python's half of the job, so the request path only ever
-picks an open transport and writes to it.
-
-Sizing, so a later reader knows what this is worth. Measured on one machine, 32
-connections, three 5s runs, CPU-microseconds per forwarded request:
-
-    ReverseProxy (ASGI), on metal      112
-    single-threaded haproxy 3.4.3       26
-    nginx 1.30.4, one worker            23
-    wreath.edge.serve()                 19
-    wreath's own server, answering      10
-
-The gap was never the language or the syscalls (4.6 against haproxy's 4.8) --
-wreath *serves* a request for less than either proxy spends forwarding one. It
-was the Python orchestration between primitives that were already in C, and
-`serve()` removes it rather than shrinking it.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -155,7 +118,6 @@ class _CloseTable:
 
 
 async def test_close_cancels_and_joins_pending_upstream_reopens() -> None:
-    """A reconnect task is owned until shutdown, never left pending on the loop."""
     server = _CloseServer()
     table = _CloseTable()
     task = asyncio.create_task(asyncio.sleep(60))
@@ -214,11 +176,6 @@ async def _get(port: int, path: bytes = b"/p") -> bytes:
 
 
 async def test_serve_forwards_a_request_without_an_asgi_app() -> None:
-    """The signature is the specification: a pool, and nothing to call.
-
-    If this ever grows an `app` parameter, the design has been lost -- that is
-    the seam Python returns through.
-    """
     serve = _serve()
     origin = _Origin()
     origin_port = _next_port()
@@ -238,24 +195,6 @@ async def test_serve_forwards_a_request_without_an_asgi_app() -> None:
 
 
 async def test_no_task_is_created_for_a_forwarded_request() -> None:
-    """The measurable form of "no Python": nothing schedules on the loop.
-
-    A Task per request is 6.3 CPU-microseconds and, more importantly, proof that
-    a coroutine ran -- which means a scope was built and the request went through
-    the framework rather than around it. Counting `create_task` is the cheapest
-    assertion that distinguishes the native path from a fast Python one.
-
-    **The connection is established before the counter goes on, and that is not
-    a loophole.** `BaseSelectorEventLoop._accept_connection` creates one Task per
-    accepted connection unconditionally -- it is how stock asyncio runs its own
-    handshake step, it is paid by every asyncio server including this test's
-    origin, and no protocol can decline it. Counting it would measure asyncio
-    accepting a socket and call the answer wreath's. What is wreath's is
-    everything after: three keep-alive requests down one open connection, which
-    is the claim this file exists to pin and a stricter one than the original two
-    connections made -- it also proves the second request costs nothing the first
-    did not.
-    """
     serve = _serve()
     origin = _Origin()
     origin_port = _next_port()
@@ -291,11 +230,6 @@ async def test_no_task_is_created_for_a_forwarded_request() -> None:
 
 
 async def test_upstream_connections_are_open_before_the_first_request() -> None:
-    """Warmed at configuration time, so the request path never awaits a connect.
-
-    `loop.create_connection` is a coroutine; reaching for one mid-request drags
-    the Task and Future machinery back onto the path this exists to keep clear.
-    """
     serve = _serve()
     origin = _Origin()
     origin_port = _next_port()
@@ -328,13 +262,6 @@ async def test_upstream_connections_are_open_before_the_first_request() -> None:
     ],
 )
 async def test_the_native_path_keeps_the_smuggling_refusals(raw: bytes, reason: str) -> None:
-    """The refusals survive the rewrite, and nothing reaches the origin.
-
-    Pinned separately from `test_edge_forwarding_contract.py` because that file
-    tests the Python implementation being replaced. These are the same rules
-    asserted against the thing replacing it -- a rewrite that gets faster by
-    relaxing framing checks has not got faster, it has become a desync vector.
-    """
     serve = _serve()
     origin = _Origin()
     origin_port = _next_port()
@@ -359,17 +286,6 @@ async def test_the_native_path_keeps_the_smuggling_refusals(raw: bytes, reason: 
 
 @pytest.mark.skipif(_reactor is None, reason="native reactor not built")
 async def test_serve_terminates_tls_natively() -> None:
-    """The proxy faces the internet, which means it terminates TLS.
-
-    Until this passes `wreath.edge.serve()` is an east-west proxy: fine for
-    internal plaintext hops, and not deployable at an edge, because TLS
-    termination is the primary job of the thing it replaces.
-
-    Native termination is the whole point of doing it here. Measured on one
-    physical core, handshakes amortised: 21,500 req/s through
-    `asyncio.sslproto` against 46,000 through the reactor's C transport, with
-    nginx at 48,200.
-    """
     import ssl as ssl_module
 
     from wreath.reactor import metal_tls_context

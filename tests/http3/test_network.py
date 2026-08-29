@@ -1,8 +1,3 @@
-"""End-to-end HTTP/3 over UDP with a real, independent QUIC client (curl).
-
-These exercise the ngtcp2/nghttp3 endpoint for real: TLS+ALPN handshake, request
-stream, ASGI dispatch, and response. No mock is used (RFC 9114).
-"""
 from __future__ import annotations
 
 import asyncio
@@ -42,8 +37,13 @@ async def _echo_app(scope, receive, send):
         payload = b"x" * 100_000
     else:
         payload = b"path=" + scope["path"].encode() + b";body=" + body
-    await send({"type": "http.response.start", "status": 200,
-                "headers": [(b"content-type", b"text/plain")]})
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"content-type", b"text/plain")],
+        }
+    )
     await send({"type": "http.response.body", "body": payload})
 
 
@@ -103,7 +103,9 @@ async def test_concurrent_streams_complete():
     server, port = await _serve(_echo_app)
     try:
         results = await asyncio.gather(
-            curl_http3(port, "/a"), curl_http3(port, "/b"), curl_http3(port, "/c"),
+            curl_http3(port, "/a"),
+            curl_http3(port, "/b"),
+            curl_http3(port, "/c"),
         )
         for rc, _ in results:
             assert rc == 0
@@ -114,7 +116,6 @@ async def test_concurrent_streams_complete():
 
 
 async def test_close_drains_a_response_that_is_still_in_flight():
-    """A graceful close waits for a request that has not been answered yet."""
     started = asyncio.Event()
 
     async def slow_app(scope, receive, send):
@@ -124,8 +125,13 @@ async def test_close_drains_a_response_that_is_still_in_flight():
                 break
         started.set()
         await asyncio.sleep(0.5)
-        await send({"type": "http.response.start", "status": 200,
-                    "headers": [(b"content-type", b"text/plain")]})
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"text/plain")],
+            }
+        )
         await send({"type": "http.response.body", "body": b"drained"})
 
     server, port = await _serve(slow_app)
@@ -142,13 +148,6 @@ async def test_close_drains_a_response_that_is_still_in_flight():
 
 
 async def test_close_does_not_wait_out_the_timeout_for_an_idle_connection():
-    """The endpoint is a listener, and an idle connection owes nothing.
-
-    A QUIC connection outlives the client that made it, so it is still in the
-    endpoint's table long after its last response was delivered. Treating the
-    endpoint's presence -- or that stale connection -- as work to drain made
-    every HTTP/3 close wait out the whole shutdown_timeout.
-    """
     server, port = await _serve(_echo_app)
     rc, _ = await curl_http3(port, "/hello")
     assert rc == 0
@@ -174,7 +173,8 @@ async def test_malformed_packets_never_invoke_asgi():
     try:
         loop = asyncio.get_event_loop()
         transport, _ = await loop.create_datagram_endpoint(
-            asyncio.DatagramProtocol, remote_addr=("127.0.0.1", port))
+            asyncio.DatagramProtocol, remote_addr=("127.0.0.1", port)
+        )
         try:
             for _ in range(20):
                 transport.sendto(b"\x00\x01\x02not-a-quic-packet\xff" * 8)

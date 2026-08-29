@@ -1,10 +1,3 @@
-"""Slice 2 end to end: one request, four principals, four resolutions.
-
-The composition test. A ladder that resolves correctly and a `coarsen` that
-rounds correctly prove nothing together unless a real Cedar policy decides
-which rung a real caller gets and the value actually leaves the route that way.
-"""
-
 from __future__ import annotations
 
 import json
@@ -133,9 +126,6 @@ def _setup(roles):
     return _routes(router)[("GET", "/station/{id}")], _Req(app, identity, {"id": "1"})
 
 
-# --- the four answers --------------------------------------------------------
-
-
 async def test_a_ranger_sees_the_exact_position():
     retrieve, request = _setup(["ranger"])
     data = json.loads((await retrieve(request)).body)
@@ -158,22 +148,13 @@ async def test_a_volunteer_sees_a_ten_kilometre_cell():
 
 
 async def test_the_public_sees_no_location_key_at_all():
-    """Absent, not null. A null claims the row has no position, which is false."""
     retrieve, request = _setup([])
     data = json.loads((await retrieve(request)).body)
     assert "location" not in data
     assert data["name"] == "Waterhole"
 
 
-# --- the properties worth attacking ------------------------------------------
-
-
 async def test_the_degraded_value_is_stable_across_repeated_requests():
-    """Non-reversibility, at the route rather than in the grid function.
-
-    A volunteer asking a thousand times must see one value. If the ladder ever
-    grew per-request jitter, this is where it would show.
-    """
     seen = set()
     for _ in range(25):
         retrieve, request = _setup(["volunteer"])
@@ -191,7 +172,6 @@ async def test_a_coarser_caller_cannot_recover_the_finer_answer():
 
 
 async def test_a_list_response_degrades_every_row():
-    """The bypass worth checking: `list` is the operation that returns everything."""
     Station = _model()
     rows = {
         1: _Row(1, "A", STATION),
@@ -215,11 +195,6 @@ async def test_a_list_response_degrades_every_row():
 
 
 async def test_no_authorizer_withholds_rather_than_publishes():
-    """A ladder with nothing to evaluate it must fail closed.
-
-    Publishing would answer "may this caller see the exact position?" with yes,
-    on the strength of nobody having been asked.
-    """
     Station = _model()
     station = _Row(1, "Waterhole", STATION)
     router = crud_router(
@@ -233,11 +208,7 @@ async def test_no_authorizer_withholds_rather_than_publishes():
     assert "location" not in data
 
 
-# --- declaration-time refusals -----------------------------------------------
-
-
 async def test_the_ladder_is_asked_once_per_request_not_once_per_row():
-    """The cache that stops a list of N rows becoming N x rungs Cedar calls."""
     Station = _model()
     rows = {i: _Row(i, f"S{i}", STATION) for i in range(1, 11)}
 
@@ -262,19 +233,10 @@ async def test_the_ladder_is_asked_once_per_request_not_once_per_row():
     assert len(data["items"]) == 10
     # Three rungs, asked once for the request: the volunteer is denied exact and
     # fine before being permitted coarse. Ten rows must not multiply that.
-    assert CountingAuthorizer.asks == 3, (
-        f"asked {CountingAuthorizer.asks} times for 10 rows"
-    )
+    assert CountingAuthorizer.asks == 3, f"asked {CountingAuthorizer.asks} times for 10 rows"
 
 
 async def test_resolving_one_ladder_twice_in_a_request_asks_once():
-    """The cache inside `resolve_precision`, which crud alone never exercises.
-
-    `crud_router` resolves once per response, so the cache below it is reached
-    only by a second caller in the same request -- a hand-written handler asking
-    for the same ladder after the router already did. The mutation pass found it
-    untested for exactly that reason.
-    """
     from wreath._auth.geofence import resolve_precision
 
     class CountingAuthorizer(CedarAuthorizer):
@@ -297,7 +259,6 @@ async def test_resolving_one_ladder_twice_in_a_request_asks_once():
 
 
 async def test_a_withheld_answer_is_cached_too_rather_than_re_resolved():
-    """`WITHHELD` is falsy, so a naive cache would miss it and re-ask forever."""
     from wreath._auth.geofence import WITHHELD, resolve_precision
 
     class CountingAuthorizer(CedarAuthorizer):
@@ -318,7 +279,6 @@ async def test_a_withheld_answer_is_cached_too_rather_than_re_resolved():
 
 
 async def test_a_row_with_no_location_stays_null_rather_than_being_coarsened():
-    """Coarsening `None` would be a crash; publishing a cell would be a lie."""
     Station = _model()
     router = crud_router(
         Station,
@@ -333,7 +293,6 @@ async def test_a_row_with_no_location_stays_null_rather_than_being_coarsened():
 
 
 async def test_a_router_with_no_ladder_does_no_authorization_work():
-    """The default path must not pay for a feature it did not ask for."""
     Station = _model()
 
     class CountingAuthorizer(CedarAuthorizer):
@@ -354,7 +313,6 @@ async def test_a_router_with_no_ladder_does_no_authorization_work():
 
 
 def test_a_ladder_on_an_unserialized_column_is_refused():
-    """A ladder that protects nothing reads as protection, which is worse."""
     Station = _model()
     with pytest.raises(ValueError, match="does not.*serialize|not serialize"):
         crud_router(
@@ -365,7 +323,6 @@ def test_a_ladder_on_an_unserialized_column_is_refused():
 
 
 def test_a_ladder_on_a_sensitive_column_is_refused_because_it_is_withheld():
-    """`password_hash` never leaves, so a precision ladder on it is a mistake."""
     from wreath.orm import Mapped, Model, column
     from wreath.orm.types import Int64, Text
 

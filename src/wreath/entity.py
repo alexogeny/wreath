@@ -195,8 +195,7 @@ class Ownership:
                 update={
                     "owner": Sql("excluded.owner"),
                     "fence": Sql(
-                        f"CASE WHEN {_OWNER} = excluded.owner "
-                        f"THEN {_FENCE} ELSE {_FENCE} + 1 END"
+                        f"CASE WHEN {_OWNER} = excluded.owner THEN {_FENCE} ELSE {_FENCE} + 1 END"
                     ),
                     "expires": window,
                 },
@@ -219,8 +218,7 @@ class Ownership:
         )
         self._store.define(
             "holder",
-            f"SELECT owner FROM {table} "
-            f"WHERE name = $1 AND expires > clock_timestamp()",
+            f"SELECT owner FROM {table} WHERE name = $1 AND expires > clock_timestamp()",
             workload="read",
         )
 
@@ -319,7 +317,8 @@ class Ownership:
         try:
             status = await connection.execute(
                 f"DELETE FROM {self._table} WHERE owner = $1 AND name IN ({placeholders})",
-                self._owner, *keys,
+                self._owner,
+                *keys,
             )
         finally:
             await self._database.release("write", connection)
@@ -342,9 +341,18 @@ class EntityRegistry:
     """
 
     __slots__ = (
-        "_answers", "_bus", "_channel", "_held", "_lost", "_on_lost",
-        "_ownership", "_pending", "_renew_every", "_renewals",
-        "_unrouted", "_woken",
+        "_answers",
+        "_bus",
+        "_channel",
+        "_held",
+        "_lost",
+        "_on_lost",
+        "_ownership",
+        "_pending",
+        "_renew_every",
+        "_renewals",
+        "_unrouted",
+        "_woken",
     )
 
     def __init__(
@@ -425,6 +433,7 @@ class EntityRegistry:
         `kind` namespaces the answer, so one registry serves devices and
         sessions without either handler seeing the other's questions.
         """
+
         def register(handler: Answer) -> Answer:
             if kind in self._answers:
                 raise ValueError(f"{kind!r} already has an answer on this registry")
@@ -532,9 +541,7 @@ class EntityRegistry:
                 async with asyncio.timeout(Duration.of(timeout).total_seconds()):
                     return await waiter
             except TimeoutError as error:
-                raise Unanswered(
-                    f"{key!r} did not answer within the deadline"
-                ) from error
+                raise Unanswered(f"{key!r} did not answer within the deadline") from error
 
     async def _receive(self, message: Any) -> None:
         """One channel carries both questions and answers; the shape says which.
@@ -562,8 +569,6 @@ class EntityRegistry:
             self._pending.fail(correlation, NotHeld(str(payload["error"])))
         else:
             self._pending.settle(correlation, payload["reply"])
-
-    # -- the renewal service -------------------------------------------------
 
     @property
     def held(self) -> frozenset[str]:
@@ -656,7 +661,8 @@ class EntityRegistry:
         """
         now = asyncio.get_running_loop().time()
         expired = [
-            key for key, release_at in self._held.items()
+            key
+            for key, release_at in self._held.items()
             if release_at is not None and release_at <= now
         ]
         if expired:

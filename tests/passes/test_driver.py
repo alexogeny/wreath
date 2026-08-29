@@ -1,16 +1,3 @@
-"""The shift loop: one transaction per chunk, and the properties that buys.
-
-The three that matter most are here, and each is a specific way the hand-rolled
-backfill is wrong:
-
-* the cursor advances **inside** the chunk transaction, so a failed chunk leaves
-  no half-applied work and no advanced cursor;
-* the compare-and-swap is the chunk's **first** statement, so a second worker's
-  chunk rolls back whole rather than doing something observable;
-* a **short chunk is not the end of the walk**, because rows in a range can have
-  been deleted or filtered and the next key can sit well beyond it.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -42,6 +29,7 @@ EXPIRES = Key("expires", "timestamptz", indexed=True)
 KEY = Key("key", "text", unique=True)
 ID = Key("id", "int8", indexed=True, unique=True, monotone=True)
 
+
 async def _nap(_seconds):
     """Pacing without the wall clock: assert the rest happened, do not serve it."""
     await asyncio.sleep(0)
@@ -59,12 +47,7 @@ def purge_pass(**overrides):
     return ChunkedPass("purge_replays", **options)
 
 
-# --- the walk -----------------------------------------------------------------
-
-
-async def test_a_walk_removes_everything_behind_the_frontier_and_nothing_ahead(
-    database, world
-):
+async def test_a_walk_removes_everything_behind_the_frontier_and_nothing_ahead(database, world):
     walk = purge_pass()
 
     result = await walk.run(database, sleep=_nap)
@@ -137,9 +120,6 @@ async def test_a_composite_walk_emits_one_row_comparison(world, database):
     assert " OR " not in probe
 
 
-# --- atomicity ----------------------------------------------------------------
-
-
 async def test_a_chunk_whose_work_fails_leaves_the_cursor_where_it_was(database, world):
     walk = purge_pass()
 
@@ -184,9 +164,7 @@ async def test_a_transient_chunk_failure_is_absorbed_inside_the_shift(database, 
     assert sorted(row["key"] for row in world.rows) == ["live0", "live1", "live2"]
 
 
-async def test_a_walk_resumes_from_the_cursor_after_the_shift_that_moved_it(
-    database, world
-):
+async def test_a_walk_resumes_from_the_cursor_after_the_shift_that_moved_it(database, world):
     # One chunk, then a shutdown at the boundary, then a fresh shift: the second
     # one starts from the ledger rather than from the beginning.
     walk = purge_pass()
@@ -241,9 +219,6 @@ async def test_a_recovered_chunk_clears_the_recorded_error(database, world):
     assert (await walk.status(database)).last_error is None
 
 
-# --- the compare-and-swap -----------------------------------------------------
-
-
 async def test_the_swap_is_the_chunk_transactions_first_statement(world, database):
     await purge_pass().run(database, sleep=_nap)
 
@@ -251,9 +226,7 @@ async def test_the_swap_is_the_chunk_transactions_first_statement(world, databas
     for index, (sql, _) in enumerate(world.statements):
         if sql == "BEGIN":
             rest = [text for text, _ in world.statements[index + 1 :]]
-            after_begin = next(
-                text for text in rest if not text.startswith("SET LOCAL")
-            )
+            after_begin = next(text for text in rest if not text.startswith("SET LOCAL"))
             break
     # It takes the ledger row's lock for the rest of the transaction, which is
     # what serialises two workers on one pass without a lock of its own.
@@ -308,9 +281,6 @@ async def test_completion_is_compare_and_swapped_so_it_happens_once(database):
     assert again.chunks == 0
 
 
-# --- a short chunk is not the end ---------------------------------------------
-
-
 async def test_a_short_chunk_is_not_the_end_of_the_walk():
     # A gap wider than the chunk limit: the first probe at OFFSET 2 finds
     # nothing, and a walk that took that for completion would stop here with
@@ -348,9 +318,6 @@ async def test_a_walk_over_an_empty_table_completes_immediately():
 
     assert result.complete is True
     assert result.chunks == 0
-
-
-# --- stopping, budgets, and pacing --------------------------------------------
 
 
 async def test_a_shift_yields_at_a_chunk_boundary_when_asked_to_stop(database, world):
@@ -410,9 +377,7 @@ async def test_the_pass_rests_between_chunks_in_proportion_to_its_duty_cycle(dat
     from wreath._passes import driver
 
     elapsed = iter([0.0, 1.0] * 12)
-    await driver.run_shift(
-        walk, database, budget=None, sleep=record, clock=lambda: next(elapsed)
-    )
+    await driver.run_shift(walk, database, budget=None, sleep=record, clock=lambda: next(elapsed))
 
     # A quarter of wall time is three seconds of rest per second of work.
     assert naps and all(nap == pytest.approx(3.0) for nap in naps)
@@ -439,12 +404,7 @@ async def test_the_connection_is_released_even_when_a_chunk_fails(database, worl
     assert database.acquired == database.released == 1
 
 
-# --- recurrence ---------------------------------------------------------------
-
-
-async def test_a_recurring_pass_rewinds_and_finds_what_expired_behind_the_cursor(
-    database, world
-):
+async def test_a_recurring_pass_rewinds_and_finds_what_expired_behind_the_cursor(database, world):
     walk = purge_pass()
     await walk.run(database, sleep=_nap)
     assert (await walk.status(database)).phase == DONE
@@ -536,9 +496,6 @@ async def test_a_ceiling_over_an_empty_table_does_no_work():
 
     assert result.complete is True
     assert result.rows == 0
-
-
-# --- the work shapes ----------------------------------------------------------
 
 
 async def test_a_purge_can_carry_an_extra_filter(world, database):

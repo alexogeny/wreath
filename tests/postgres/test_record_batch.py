@@ -33,12 +33,8 @@ def _data_row(fields: tuple[bytes | None, ...]) -> memoryview:
 def _decoded_batch(rows: tuple[tuple[int, str], ...]) -> Any:
     tape = _postgres._FieldTape(2)
     for identifier, message in rows:
-        tape.append(
-            _data_row((struct.pack("!q", identifier), message.encode())), 2
-        )
-    plan = _postgres._compile_decoder_plan(
-        (20, 25), (1, 1), ("id", "message")
-    )
+        tape.append(_data_row((struct.pack("!q", identifier), message.encode())), 2)
+    plan = _postgres._compile_decoder_plan((20, 25), (1, 1), ("id", "message"))
     return _postgres._decode_field_tape(plan, tape, "fetch_batch", 256)
 
 
@@ -88,22 +84,16 @@ def test_native_tagged_batch_sorts_and_renders_without_materializing_cells() -> 
     native_core = extension("_core")
     native_core.template_configure(Markup, TemplateRenderError)
     native_core.template_record_configure(_postgres._RECORD_C_API)
-    tape = compile_tape(
-        "{% for row in rows %}{{ row.id }}={{ row.message }};{% endfor %}"
-    )
+    tape = compile_tape("{% for row in rows %}{{ row.id }}={{ row.message }};{% endfor %}")
     program = native_core.template_compile(tape)
-    batch = _decoded_batch(
-        ((3, "same"), (2, "a<b"), (1, "same"), (4, "c&d"))
-    )
+    batch = _decoded_batch(((3, "same"), (2, "a<b"), (1, "same"), (4, "c&d")))
     batch.append(_postgres.Record(("id", "message"), (0, "prefix")))
 
     assert _postgres._batch_storage_counts(batch) == (1, 0, 4, 4, 2)
     batch.sort_by("message")
     assert _postgres._batch_storage_counts(batch) == (1, 0, 4, 4, 2)
 
-    rendered = native_core.template_render_compiled(
-        program, {"rows": batch}, MAX_OUTPUT_BYTES
-    )
+    rendered = native_core.template_render_compiled(program, {"rows": batch}, MAX_OUTPUT_BYTES)
 
     assert rendered == b"2=a&lt;b;4=c&amp;d;0=prefix;3=same;1=same;"
     assert _postgres._batch_storage_counts(batch) == (1, 0, 4, 4, 2)
@@ -125,9 +115,7 @@ def test_native_tagged_text_sort_matches_python_unicode_order() -> None:
 
     batch.sort_by("message")
 
-    assert [(row["id"], row["message"]) for row in batch] == sorted(
-        source, key=lambda row: row[1]
-    )
+    assert [(row["id"], row["message"]) for row in batch] == sorted(source, key=lambda row: row[1])
 
 
 def test_native_backend_exports_record_batch() -> None:

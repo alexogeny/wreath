@@ -1,9 +1,7 @@
 """Foxglove dispatch — the Celery wiring, which is a rename plus one gap.
 
-`docs/reference/port-gaps.md` files `bg.celery` (19 sites) under "not a gap,
-just unwritten": the target is exact and nobody has written the rewrite. This
-module carries each half of it separately so the rewrite can be written a piece
-at a time.
+The target for `bg.celery` is exact, but the rewrite is not implemented. This
+module carries each half separately.
 
 The one place the rename stops is `countdown=`. `JobRunner.enqueue` takes
 `run_at=`, an absolute instant — `jobs.py:686` — and `COALESCE($5, now())` is

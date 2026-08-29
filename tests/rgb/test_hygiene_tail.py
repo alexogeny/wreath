@@ -1,6 +1,3 @@
-"""Smaller correctness and bounding items (report 23: G-02, G-03, G-13, G-19,
-G-49, G-52, G-54, G-56, G-76, G-80, R-42)."""
-
 from __future__ import annotations
 
 import pytest
@@ -78,13 +75,15 @@ class TestFormParameterPollution:
 
         request = Request(
             {
-                "type": "http", "method": "POST", "path": "/",
+                "type": "http",
+                "method": "POST",
+                "path": "/",
                 "headers": [(b"content-type", b"application/x-www-form-urlencoded")],
             },
             receive,
         )
         form = await request.form()
-        assert form["role"] == "user"          # first wins, as before
+        assert form["role"] == "user"  # first wins, as before
         assert form.getlist("role") == ["user", "admin"]
 
     async def test_a_single_value_still_reads_normally(self):
@@ -95,7 +94,9 @@ class TestFormParameterPollution:
 
         request = Request(
             {
-                "type": "http", "method": "POST", "path": "/",
+                "type": "http",
+                "method": "POST",
+                "path": "/",
                 "headers": [(b"content-type", b"application/x-www-form-urlencoded")],
             },
             receive,
@@ -135,11 +136,9 @@ class TestClauseExpansion:
         app = Wreath()
 
         def build():
-            handler = lambda request: None      # noqa: E731 - metadata carrier
+            handler = lambda request: None  # noqa: E731 - metadata carrier
             for index in range(6):
-                handler = roles(
-                    *[f"r{index}_{n}" for n in range(8)], mode="any"
-                )(handler)
+                handler = roles(*[f"r{index}_{n}" for n in range(8)], mode="any")(handler)
             app.get("/wide")(handler)
             app._compile_routes()
 

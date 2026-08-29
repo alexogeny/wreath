@@ -1,11 +1,5 @@
-"""AWS Signature Version 4 signing (zero-dependency, stdlib `hmac`/`hashlib`).
+"""AWS Signature Version 4 signing."""
 
-Used by the Phase-2 S3 storage backend and vector-tested against the published
-AWS suite -- those vectors are the correctness anchor.
-
-TODO(native): the 4-HMAC signing-key chain (`signing_key`) is the only piece
-worth a `security.c` accelerator (design 09 §5/§10).
-"""
 from __future__ import annotations
 
 import hashlib
@@ -58,8 +52,8 @@ def _canonical_headers(headers: dict[str, str]) -> tuple[str, str]:
 
 
 def _canonical_query(params: Iterable[tuple[str, str]]) -> str:
-    enc = sorted((uri_encode(k), uri_encode(v)) for k, v in params)
-    return "&".join(f"{k}={v}" for k, v in enc)
+    encoded = sorted((uri_encode(name), uri_encode(value)) for name, value in params)
+    return "&".join(f"{name}={value}" for name, value in encoded)
 
 
 def canonical_request(
@@ -97,31 +91,37 @@ def sign(
 ) -> dict[str, str]:
     """Return the headers to add for a header-auth SigV4 request (`Authorization` etc.)."""
     date_stamp = amz_date[:8]
-    hdrs: dict[str, str] = {k.lower(): v for k, v in (headers or {}).items()}
-    hdrs.setdefault("host", host)
-    hdrs["x-amz-date"] = amz_date
+    normalized_headers: dict[str, str] = {
+        name.lower(): value for name, value in (headers or {}).items()
+    }
+    normalized_headers.setdefault("host", host)
+    normalized_headers["x-amz-date"] = amz_date
     if payload_hash is None:
         payload_hash = EMPTY_SHA256
-    hdrs["x-amz-content-sha256"] = payload_hash
+    normalized_headers["x-amz-content-sha256"] = payload_hash
     if session_token:
-        hdrs["x-amz-security-token"] = session_token
-    cr, signed_headers = canonical_request(method, path, params or [], hdrs, payload_hash)
+        normalized_headers["x-amz-security-token"] = session_token
+    canonical, signed_headers = canonical_request(
+        method, path, params or [], normalized_headers, payload_hash
+    )
     scope = _scope(date_stamp, region, service)
-    sts = string_to_sign(amz_date, scope, cr)
-    sig = hmac.new(
-        signing_key(secret_key, date_stamp, region, service), sts.encode("utf-8"), hashlib.sha256
+    signing_value = string_to_sign(amz_date, scope, canonical)
+    signature = hmac.new(
+        signing_key(secret_key, date_stamp, region, service),
+        signing_value.encode("utf-8"),
+        hashlib.sha256,
     ).hexdigest()
-    out = {
+    output = {
         "Authorization": (
             f"{ALGORITHM} Credential={access_key}/{scope}, "
-            f"SignedHeaders={signed_headers}, Signature={sig}"
+            f"SignedHeaders={signed_headers}, Signature={signature}"
         ),
         "x-amz-date": amz_date,
         "x-amz-content-sha256": payload_hash,
     }
     if session_token:
-        out["x-amz-security-token"] = session_token
-    return out
+        output["x-amz-security-token"] = session_token
+    return output
 
 
 def presign(
@@ -144,25 +144,30 @@ def presign(
     """Return a fully-formed SigV4 presigned URL (auth in the query string, no network)."""
     date_stamp = amz_date[:8]
     scope = _scope(date_stamp, region, service)
-    headers = {"host": host, **{k.lower(): v for k, v in (signed_headers or {}).items()}}
-    _, sh = _canonical_headers(headers)
+    headers = {
+        "host": host,
+        **{name.lower(): value for name, value in (signed_headers or {}).items()},
+    }
+    _, canonical_header_names = _canonical_headers(headers)
     params: list[tuple[str, str]] = [
         ("X-Amz-Algorithm", ALGORITHM),
         ("X-Amz-Credential", f"{access_key}/{scope}"),
         ("X-Amz-Date", amz_date),
         ("X-Amz-Expires", str(expires)),
-        ("X-Amz-SignedHeaders", sh),
+        ("X-Amz-SignedHeaders", canonical_header_names),
     ]
     if session_token:
         params.append(("X-Amz-Security-Token", session_token))
     if extra_params:
         params.extend(extra_params)
-    cr, _ = canonical_request(method, path, params, headers, payload_hash)
-    sts = string_to_sign(amz_date, scope, cr)
-    sig = hmac.new(
-        signing_key(secret_key, date_stamp, region, service), sts.encode("utf-8"), hashlib.sha256
+    canonical, _ = canonical_request(method, path, params, headers, payload_hash)
+    signing_value = string_to_sign(amz_date, scope, canonical)
+    signature = hmac.new(
+        signing_key(secret_key, date_stamp, region, service),
+        signing_value.encode("utf-8"),
+        hashlib.sha256,
     ).hexdigest()
     # The signature is appended last (not part of the signed query), per AWS convention.
-    query = "&".join(f"{uri_encode(k)}={uri_encode(v)}" for k, v in sorted(params))
-    query += f"&X-Amz-Signature={sig}"
+    query = "&".join(f"{uri_encode(name)}={uri_encode(value)}" for name, value in sorted(params))
+    query += f"&X-Amz-Signature={signature}"
     return f"{scheme}://{host}{uri_encode(path, encode_slash=False)}?{query}"

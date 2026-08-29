@@ -1,5 +1,3 @@
-"""The managed tenant fleet runner: pack a directory, resolve it in metal."""
-
 from __future__ import annotations
 
 import pytest
@@ -105,9 +103,6 @@ def test_a_large_fleet_resolves_in_one_call() -> None:
         for i in range(10_000)
     ]
     assert _resolve(states).current == 10_000
-
-
-# -- packing and validation ---------------------------------------------------
 
 
 def test_pack_is_thirty_two_bytes_per_tenant() -> None:

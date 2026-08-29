@@ -1,11 +1,3 @@
-"""`wreath.sync`: shape declaration, the bound, and the revocation diff.
-
-No database. A shape is a `Select` and an evaluation is `session.fetch(select)`,
-so a fake session that answers with a scripted row list exercises every branch
-that decides correctness -- including the one that matters, which is what a
-client is told when it *loses* a row.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -102,9 +94,6 @@ def as_session(session):
     return lambda: session
 
 
-# -- the bound -------------------------------------------------------------
-
-
 def test_unbounded_shape_is_refused_where_it_is_declared():
     sync = photo_sync()
 
@@ -178,7 +167,6 @@ def test_max_rows_must_be_positive():
 
 @pytest.mark.parametrize("limit", [0, -1])
 def test_an_explicitly_declared_limit_must_be_positive(limit):
-    """`limit=0` is an unbounded shape wearing a bound."""
     sync = photo_sync()
     with pytest.raises(UnboundedShape, match="positive limit"):
         sync.add_shape("mine", lambda principal: Select(limit=5), limit=limit)
@@ -196,9 +184,6 @@ def test_a_principal_is_keyed_by_sub_then_id_then_its_string():
     assert _principal_id("anonymous") == "anonymous"
 
 
-# -- evaluation ------------------------------------------------------------
-
-
 async def test_evaluate_returns_rows_and_an_authoritative_key_set():
     sync = photo_sync()
     sync.add_shape("mine", lambda principal: Select(limit=5))
@@ -212,7 +197,6 @@ async def test_evaluate_returns_rows_and_an_authoritative_key_set():
 
 
 async def test_evaluation_truncates_to_the_declared_bound():
-    """The memory bound must not depend on the shape staying honest."""
     sync = photo_sync()
     sync.add_shape("mine", lambda principal: Select(limit=2))
     session = FakeSession([Row(str(n), "x") for n in range(10)])
@@ -223,7 +207,6 @@ async def test_evaluation_truncates_to_the_declared_bound():
 
 
 async def test_the_shape_is_rebuilt_on_every_evaluation():
-    """Authorization is evaluated on the change, not on the subscription."""
     sync = photo_sync()
     calls: list[str] = []
 
@@ -240,15 +223,7 @@ async def test_the_shape_is_rebuilt_on_every_evaluation():
     assert calls == ["alice", "alice"], "a cached Select would evaluate stale policy"
 
 
-# -- the diff, which is where revocation lives -----------------------------
-
-
 async def test_a_row_leaving_the_shape_produces_a_tombstone():
-    """The test that matters: assert the *losing* client is told.
-
-    A suite that only checks the gaining client proves nothing about the leak
-    this feature exists to avoid.
-    """
     sync = photo_sync()
     sync.add_shape("mine", lambda principal: Select(limit=5))
     session = FakeSession([Row("a", "one"), Row("b", "two")])
@@ -295,7 +270,6 @@ async def test_a_poll_with_nothing_moved_is_falsy():
 
 
 async def test_a_row_falling_out_of_the_ordered_window_is_also_a_tombstone():
-    """A bounded shape revokes by displacement, and it is the same event."""
     sync = photo_sync()
     sync.add_shape("recent", lambda principal: Select(limit=2))
     session = FakeSession([Row("a", "1"), Row("b", "2")])
@@ -310,7 +284,6 @@ async def test_a_row_falling_out_of_the_ordered_window_is_also_a_tombstone():
 
 
 async def test_a_snapshot_adopts_the_result_as_what_the_client_holds():
-    """A reconnect re-snapshots; the held set must follow, not accumulate."""
     sync = photo_sync()
     sync.add_shape("mine", lambda principal: Select(limit=5))
     session = FakeSession([Row("a", "one"), Row("b", "two")])
@@ -321,9 +294,6 @@ async def test_a_snapshot_adopts_the_result_as_what_the_client_holds():
     await subscription.snapshot(session)
 
     assert subscription.held == {"c"}
-
-
-# -- subscriptions and the stream ------------------------------------------
 
 
 async def test_the_registry_refuses_past_its_per_principal_cap():
@@ -387,7 +357,6 @@ async def test_an_idle_stream_emits_a_keepalive_comment():
 
 
 async def test_a_failing_evaluation_is_counted_and_the_stream_survives():
-    """A shape broken since deploy is a number, not silence."""
     sync = photo_sync()
     sync.add_shape("mine", lambda principal: Select(limit=5))
     sessions: list[FakeSession] = [FakeSession([Row("a", "one")])]
@@ -437,11 +406,7 @@ async def test_a_closed_stream_releases_its_slot_on_disconnect():
     assert sync.subscribers == 0
 
 
-# -- versions --------------------------------------------------------------
-
-
 async def test_the_default_key_is_the_primary_key():
-    """Constructed without `key=`, which is the documented default."""
     sync = Sync(Row)  # no key=
     sync.add_shape("mine", lambda principal: Select(limit=5))
     session = FakeSession([Row("a", "one"), Row("b", "two")])
@@ -493,7 +458,6 @@ def test_compiled_model_primary_key_override_keeps_the_public_path():
 
 
 async def test_a_supplied_key_is_used_instead_of_the_primary_key():
-    """Distinguishable from the default on purpose: same-shaped keys prove nothing."""
     sync = Sync(Row, key=lambda row: f"photo-{row.id}")
     sync.add_shape("mine", lambda principal: Select(limit=5))
     session = FakeSession([Row("a", "one")])
@@ -504,7 +468,6 @@ async def test_a_supplied_key_is_used_instead_of_the_primary_key():
 
 
 async def test_a_composite_primary_key_becomes_one_colon_joined_key():
-    """A client has no tuples, so identity has to arrive as one string."""
 
     class Composite(Row):
         def _orm_primary_key(self):
@@ -525,7 +488,6 @@ def test_the_doorbell_channel_is_derived_from_the_model_or_given():
 
 
 def test_a_bool_limit_is_not_a_limit():
-    """`True` is an int in Python, and `limit=True` is a typo, not a bound."""
     sync = photo_sync()
 
     with pytest.raises(UnboundedShape, match="declares no limit"):
@@ -533,7 +495,6 @@ def test_a_bool_limit_is_not_a_limit():
 
 
 async def test_a_stream_with_no_keepalive_takes_the_documents_default():
-    """Not merely that it opens -- that the default actually paces the ticks."""
     sync = photo_sync(keepalive=0.05)
     sync.add_shape("mine", lambda principal: Select(limit=5))
     session = FakeSession([Row("a", "one")])
@@ -553,7 +514,6 @@ async def test_a_stream_with_no_keepalive_takes_the_documents_default():
 
 
 async def test_a_wake_up_that_moved_nothing_emits_no_event():
-    """The doorbell is model-grained, so most wake-ups are for other rows."""
     sync = photo_sync()
     sync.add_shape("mine", lambda principal: Select(limit=5))
     session = FakeSession([Row("a", "one")])
@@ -571,7 +531,6 @@ async def test_a_wake_up_that_moved_nothing_emits_no_event():
 
 
 def test_a_row_version_is_stable_and_order_independent():
-    """`hash()` is randomised per process; two workers must agree."""
     from wreath.sync import _version_of
 
     assert _version_of({}) == "cae66941d9efbd404e4d88758ea67670"
@@ -581,11 +540,6 @@ def test_a_row_version_is_stable_and_order_independent():
 
 
 def test_native_sync_digest_lanes_match_the_scalar_tail_across_blocks():
-    """Four-lane state construction must agree with the one-to-three-row tail.
-
-    Values exceed one BLAKE2b block, and truncating the new state to three rows
-    deliberately compares AVX2-built old digests with scalar-built new ones.
-    """
     from wreath._native import _core
 
     rows = tuple(

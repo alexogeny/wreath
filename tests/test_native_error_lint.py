@@ -1,5 +1,3 @@
-"""The native error-protocol linter must demonstrate every rule."""
-
 from __future__ import annotations
 
 from wreath._devtools.native_error_lint import (
@@ -99,12 +97,15 @@ static State *find_state(void) {
 
 
 def test_checked_status_is_accepted() -> None:
-    assert codes("""
+    assert (
+        codes("""
 static int safe(PyObject *d, PyObject *k, PyObject *v) {
     if (PyDict_SetItem(d, k, v) < 0) return -1;
     return 0;
 }
-""") == []
+""")
+        == []
+    )
 
 
 def test_waiver_requires_and_accepts_a_reason() -> None:

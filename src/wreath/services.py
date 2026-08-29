@@ -62,7 +62,12 @@ class Supervisor:
     """
 
     __slots__ = (
-        "_services", "_tasks", "_stopping", "_started", "drain_timeout", "drain_errors",
+        "_services",
+        "_tasks",
+        "_stopping",
+        "_started",
+        "drain_timeout",
+        "drain_errors",
     )
 
     def __init__(self, *, drain_timeout: float = 10.0) -> None:
@@ -117,9 +122,6 @@ class Supervisor:
             The task, for a caller that wants to await or cancel it itself.
         """
         task = asyncio.ensure_future(coro)
-        # `ensure_future` over a coroutine always yields a Task, and `Task.set_name`
-        # has existed since 3.8 -- on a 3.14-only codebase there is nothing here
-        # that can raise, so the guard this used to carry was suppressing nothing.
         task.set_name(name)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)

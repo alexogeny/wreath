@@ -1,19 +1,3 @@
-"""The refusals `Connection._submit` owes its callers, in both backends.
-
-Every guard here is a branch on the submission path, and each one bounds
-something that is unbounded without it: queue depth, outbound batch size,
-pipeline reentrancy during an explicit transaction. They were not covered
-before this module, which mattered because a guard that stops firing does not
-raise -- it accepts work it should have refused, and the symptom arrives later
-and somewhere else as memory growth or an interleaved transaction.
-
-Parametrized over both backends so the native path and the Python reference are
-held to the identical text and the identical exception type. The gate on
-`FakePostgres` is what makes the depth tests deterministic: with it closed the
-server accepts flights and answers nothing, so operations accumulate exactly
-where the guard is supposed to see them.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -86,14 +70,9 @@ async def gated() -> Any:
 @pytest.mark.parametrize("backend", POSTGRES_BACKENDS)
 @pytest.mark.asyncio
 async def test_the_pipeline_refuses_work_past_its_queue_bound(
-    gated: Any, backend: Any,
+    gated: Any,
+    backend: Any,
 ) -> None:
-    """`max_queued_operations` is a bound, so the operation past it is refused.
-
-    Without this the queue is whatever the caller can produce: the driver would
-    accept unbounded work against a server that has stopped answering, and the
-    failure would arrive as memory rather than as an error.
-    """
     open_connection, _server = gated
     connection = await open_connection(backend)
     depth = connection.max_queued_operations
@@ -117,14 +96,9 @@ async def test_the_pipeline_refuses_work_past_its_queue_bound(
 @pytest.mark.parametrize("backend", POSTGRES_BACKENDS)
 @pytest.mark.asyncio
 async def test_an_operation_larger_than_the_outbound_batch_is_refused(
-    gated: Any, backend: Any,
+    gated: Any,
+    backend: Any,
 ) -> None:
-    """One packet may not exceed `max_outbound_batch`.
-
-    The batch bound exists so a flight is a bounded write. An operation that
-    cannot fit in one on its own can never be emitted, so it is refused at
-    submission rather than queued forever behind a test it will not pass.
-    """
     open_connection, _server = gated
     connection = await open_connection(backend)
     oversized = "select " + ("1" * (connection.max_outbound_batch + 1))
@@ -151,12 +125,6 @@ async def test_a_closed_connection_refuses_new_work(backend: Any) -> None:
 @pytest.mark.parametrize("sql", ["", None, 7])
 @pytest.mark.asyncio
 async def test_sql_must_be_a_non_empty_string(backend: Any, sql: Any) -> None:
-    """Refused at submission, not carried to the wire as a malformed Parse.
-
-    `None` and `7` are here beside `""` because the check is one condition
-    covering both emptiness and type; splitting them in the C twin and keeping
-    only the emptiness half would still pass a test that only passed `""`.
-    """
     server = FakePostgres(fragment=False)
     dsn = await server.start_tcp()
     try:
@@ -175,12 +143,6 @@ async def test_sql_must_be_a_non_empty_string(backend: Any, sql: Any) -> None:
 async def test_an_open_transaction_refuses_a_concurrent_operation(
     backend: Any,
 ) -> None:
-    """Inside an explicit transaction the pipeline is serial, and says so.
-
-    Two operations overlapping inside one transaction would interleave on a
-    connection whose whole purpose here is ordering, so the second is refused
-    rather than allowed to race the first.
-    """
     server = FakePostgres(fragment=False)
     dsn = await server.start_tcp()
     server.query_gate = asyncio.Event()
@@ -194,9 +156,7 @@ async def test_an_open_transaction_refuses_a_concurrent_operation(
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
-        async with refuses(
-            backend.InterfaceError, "explicit transactions reject concurrent"
-        ):
+        async with refuses(backend.InterfaceError, "explicit transactions reject concurrent"):
             await connection.fetchval("select $1::int4", 2)
 
         parked.cancel()
@@ -210,13 +170,9 @@ async def test_an_open_transaction_refuses_a_concurrent_operation(
 @pytest.mark.parametrize("backend", POSTGRES_BACKENDS)
 @pytest.mark.asyncio
 async def test_transaction_control_cannot_enter_an_active_pipeline(
-    gated: Any, backend: Any,
+    gated: Any,
+    backend: Any,
 ) -> None:
-    """`BEGIN` may not join a flight that already has operations in it.
-
-    Transaction control is a barrier. Letting one enter beside concurrent
-    operations would put the barrier after work it was supposed to precede.
-    """
     open_connection, _server = gated
     connection = await open_connection(backend)
 
@@ -239,13 +195,6 @@ async def test_transaction_control_cannot_enter_an_active_pipeline(
 @pytest.mark.parametrize("backend", POSTGRES_BACKENDS)
 @pytest.mark.asyncio
 async def test_pipelined_results_arrive_in_submission_order(backend: Any) -> None:
-    """The bookkeeping the guards protect: N results, each to its own caller.
-
-    A state machine that resolved futures out of order would still pass every
-    refusal test above, so the pairing of result to caller is asserted on its
-    own. Sixteen distinct literals go out in one pipeline and each awaiter must
-    receive its own.
-    """
     server = FakePostgres(fragment=False)
     dsn = await server.start_tcp()
     try:
@@ -264,12 +213,6 @@ async def test_pipelined_results_arrive_in_submission_order(backend: Any) -> Non
 @pytest.mark.parametrize("backend", POSTGRES_BACKENDS)
 @pytest.mark.asyncio
 async def test_one_failing_operation_fails_only_its_own_caller(backend: Any) -> None:
-    """A pipeline is not a transaction: neighbours are unaffected.
-
-    `FakePostgres` answers any SQL containing "broken" with a syntax error, so
-    this puts one such operation between two others and requires both of them
-    to still return their own values.
-    """
     server = FakePostgres(fragment=False)
     dsn = await server.start_tcp()
     try:
@@ -292,24 +235,15 @@ async def test_one_failing_operation_fails_only_its_own_caller(backend: Any) -> 
 @pytest.mark.parametrize("backend", POSTGRES_BACKENDS)
 @pytest.mark.asyncio
 async def test_a_cancelled_queued_operation_does_not_strand_the_ones_behind_it(
-    gated: Any, backend: Any,
+    gated: Any,
+    backend: Any,
 ) -> None:
-    """Cancellation tombstones a *queued* operation; the queue still drains.
-
-    `_flush` drops a cancelled operation when it reaches the head rather than
-    removing it on cancel, so the tombstone has to be drained or it wedges the
-    queue behind it. Reaching that path needs an operation that is queued and
-    not yet emitted, which means submitting past `max_emitted_operations` --
-    cancelling one of the first 64 sends a CancelRequest instead, which is a
-    different mechanism and does not exercise the tombstone at all.
-    """
     open_connection, server = gated
     connection = await open_connection(backend)
     depth = connection.max_emitted_operations + 6
 
     tasks = [
-        asyncio.ensure_future(connection.fetchval(f"select {index}"))
-        for index in range(depth)
+        asyncio.ensure_future(connection.fetchval(f"select {index}")) for index in range(depth)
     ]
     await asyncio.sleep(0)
     await asyncio.sleep(0)

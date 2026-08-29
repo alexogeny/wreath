@@ -1,10 +1,3 @@
-"""Cedar set construction preserves Cedar's structural equality.
-
-Scalar identity is tagged because Cedar treats `True` and `1` as different
-values while Python compares them equal and hashes them alike. Records and
-nested sets use structural equality, including order-independent nested sets.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -16,11 +9,7 @@ def _convert(value: object) -> list:
     return _to_cedar_value(value, where="test")
 
 
-# -- semantics ---------------------------------------------------------------
-
-
 def test_bool_and_int_are_not_merged() -> None:
-    """The case a plain set() would get wrong: hash(1) == hash(True)."""
     assert _convert([True, 1, False, 0]) == [True, 1, False, 0]
     assert _convert([1, True]) == [1, True]
 
@@ -40,7 +29,6 @@ def test_records_still_dedupe_structurally() -> None:
 
 
 def test_nested_sets_dedupe_as_sets_not_sequences() -> None:
-    """[1,2] and [2,1] are the same Cedar set, so one of them goes."""
     assert _convert([[1, 2], [2, 1], [3]]) == [[1, 2], [3]]
 
 

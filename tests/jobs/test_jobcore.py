@@ -1,5 +1,3 @@
-"""Pure-logic tests for the jobs/messaging core (no database)."""
-
 from __future__ import annotations
 
 import pytest

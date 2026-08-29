@@ -1,6 +1,3 @@
-"""The cross-feature interaction and the small signals (report 23: G-06, G-08,
-G-17, G-31, G-40, G-55, G-64, B-12)."""
-
 from __future__ import annotations
 
 import pytest
@@ -52,9 +49,7 @@ class TestCsrfDoesNotDisableCaching:
         assert response.json()["token"]
 
     async def test_an_unsafe_request_is_still_protected(self):
-        app = Wreath(
-            http_policy=HttpPolicy(csrf=CsrfPolicy(_SECRET, secure=False))
-        )
+        app = Wreath(http_policy=HttpPolicy(csrf=CsrfPolicy(_SECRET, secure=False)))
 
         @app.post("/write")
         async def write(request):
@@ -65,9 +60,7 @@ class TestCsrfDoesNotDisableCaching:
         assert refused.status == 403
 
     async def test_the_token_round_trips_from_a_form_to_a_write(self):
-        app = Wreath(
-            http_policy=HttpPolicy(csrf=CsrfPolicy(_SECRET, secure=False))
-        )
+        app = Wreath(http_policy=HttpPolicy(csrf=CsrfPolicy(_SECRET, secure=False)))
 
         @app.get("/form")
         async def form(request):
@@ -130,7 +123,7 @@ class TestIdempotencyIgnoredSignal:
         class _Request:
             method = "POST"
             path = "/orders"
-            identity = None                     # anonymous: not guarded
+            identity = None  # anonymous: not guarded
             state = _State()
 
             def header(self, name, default=None):
@@ -143,10 +136,10 @@ class TestIdempotencyIgnoredSignal:
         from wreath.response import JSONResponse
 
         response = await middleware.after(request, JSONResponse({"ok": True}))
-        assert response.header("idempotency-ignored") if hasattr(
-            response, "header"
-        ) else any(
-            name.lower() == b"idempotency-ignored" for name, _ in response.headers
+        assert (
+            response.header("idempotency-ignored")
+            if hasattr(response, "header")
+            else any(name.lower() == b"idempotency-ignored" for name, _ in response.headers)
         )
 
     async def test_a_guarded_request_says_nothing(self):
@@ -184,9 +177,7 @@ class TestIdempotencyIgnoredSignal:
         assert await middleware.action(request) is None
         assert middleware.ignored == 0
         response = await middleware.after(request, JSONResponse({"ok": True}))
-        assert not any(
-            name.lower() == b"idempotency-ignored" for name, _ in response.headers
-        )
+        assert not any(name.lower() == b"idempotency-ignored" for name, _ in response.headers)
 
 
 class TestManifestResourceSentinel:
@@ -223,9 +214,7 @@ class TestTieredKeyDeclaration:
         from wreath.auth import Identity
         from wreath.policy.ratelimit import TieredRateLimitPolicy
 
-        middleware = TieredRateLimitPolicy(
-            tiers={"pro": (10, 60.0)}, default=(1, 60.0)
-        )
+        middleware = TieredRateLimitPolicy(tiers={"pro": (10, 60.0)}, default=(1, 60.0))
 
         class _Request:
             method = "GET"
@@ -288,8 +277,9 @@ class TestDrainReleasesUnstartedClaims:
 
         runner = JobRunner(_Database(), name="work")
         runner._claimed_not_started.append(
-            _Claimed(id=5, task="t", args=[], tenant="", attempts=0,
-                     max_attempts=3, fence=2, key=None)
+            _Claimed(
+                id=5, task="t", args=[], tenant="", attempts=0, max_attempts=3, fence=2, key=None
+            )
         )
         await runner.drain(asyncio.get_running_loop().time())
         assert any("state='ready'" in sql for sql, _args in released), (

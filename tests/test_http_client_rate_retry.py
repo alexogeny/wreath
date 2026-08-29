@@ -1,5 +1,3 @@
-"""Outbound HTTPClient rate-limiting (native TokenBucket) + retry backoff with
-jitter and Retry-After honouring."""
 from __future__ import annotations
 
 import pytest
@@ -25,7 +23,6 @@ class _Resp:
         return self._ra if name == b"retry-after" else None
 
 
-# -- policy validation -------------------------------------------------------
 def test_retry_policy_rejects_bad_values() -> None:
     with pytest.raises(ValueError):
         RetryPolicy(attempts=0)
@@ -44,7 +41,6 @@ def test_rate_policy_requires_positive_when_enabled() -> None:
     RatePolicy(enabled=True, capacity=10, rate=5)
 
 
-# -- backoff math ------------------------------------------------------------
 def test_retry_delay_exponential_without_jitter() -> None:
     client = _client(
         retry=RetryPolicy(attempts=6, jitter=False, backoff_base=0.05, backoff_cap=1.0)
@@ -55,13 +51,6 @@ def test_retry_delay_exponential_without_jitter() -> None:
 
 
 def test_retry_delay_jitter_is_symmetric_about_the_computed_delay() -> None:
-    """The band is `compute_backoff`'s, shared with jobs, messaging and webhooks.
-
-    It used to be multiplicative within `[0.5x, 1.0x]` -- a *different*
-    distribution from the one every other retry in the tree used, and biased
-    below the delay it had just computed. It is now symmetric +/-25%, so the
-    mean delay is the delay.
-    """
     client = _client(retry=RetryPolicy(jitter=True, backoff_base=0.05, backoff_cap=1.0))
     seen = [client._retry_delay(0, None) for _ in range(50)]
     for d in seen:
@@ -92,7 +81,6 @@ def test_parse_retry_after() -> None:
     assert _parse_retry_after(b"Wed, 99 Xxx 2099") is None
 
 
-# -- throttle path (native TokenBucket) --------------------------------------
 async def test_throttle_disabled_is_noop() -> None:
     await _client()._throttle()  # rate disabled → returns immediately
 
@@ -111,9 +99,7 @@ async def test_one_attempt_still_spends_an_enabled_rate_token(
     async def throttle(_client: HTTPClient) -> None:
         calls["throttle"] += 1
 
-    async def request_once(
-        _client: HTTPClient, method: str, request: bytes
-    ) -> ClientResponse:
+    async def request_once(_client: HTTPClient, method: str, request: bytes) -> ClientResponse:
         calls["request"] += 1
         return ClientResponse(200, (), b"ok", "1.1", b"OK")
 
@@ -122,9 +108,7 @@ async def test_one_attempt_still_spends_an_enabled_rate_token(
     client = _client(rate=RatePolicy(enabled=True, capacity=5, rate=5))
     client._started = True
 
-    response = await client._request_flow(
-        "GET", "/", headers=(), body=b"", idempotency_key=None
-    )
+    response = await client._request_flow("GET", "/", headers=(), body=b"", idempotency_key=None)
 
     assert response.body == b"ok"
     assert calls == {"throttle": 1, "request": 1}

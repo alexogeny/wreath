@@ -1,8 +1,3 @@
-"""LocalObjectStore backend — round-trip, containment, atomic write, listing, presign.
-
-Imports the built wreath package (needs ``_fsguard``), so the review+build+fix fork
-runs it under ``uv``. Uses ``asyncio.run`` so it needs no pytest-asyncio config.
-"""
 import asyncio
 import os
 
@@ -125,13 +120,6 @@ def test_local_presign_sign_and_verify(tmp_path, monkeypatch):
 
 
 def test_a_local_signed_url_stops_working_at_its_deadline(tmp_path, monkeypatch):
-    """`expires` is enforced, not merely signed.
-
-    The URL carries an absolute deadline rather than a lifetime, because a
-    lifetime with no issue time next to it is a number no verifier can act on:
-    before this, the only way to invalidate an outstanding URL was to rotate
-    ``url_secret`` and break every other URL with it.
-    """
     s = LocalObjectStore(tmp_path, url_secret=b"k" * 32)
     monkeypatch.setattr(objects, "_now", lambda: 1_000_000.0)
     q = _query(s.url("a.txt", expires=900, method="GET"))
@@ -147,7 +135,6 @@ def test_a_local_signed_url_stops_working_at_its_deadline(tmp_path, monkeypatch)
 
 
 def test_a_memory_signed_url_expires_the_same_way(monkeypatch):
-    """The memory twin verifies with the same arithmetic, so a route can be tested on it."""
     s = MemoryObjectStore(url_secret=b"k" * 32)
     monkeypatch.setattr(objects, "_now", lambda: 500.0)
     url = s.url("a.txt", expires=60, method="GET")
@@ -160,7 +147,6 @@ def test_a_memory_signed_url_expires_the_same_way(monkeypatch):
 
 
 def test_etags_have_one_format_across_backends(tmp_path):
-    """No backend quotes its etag, so a cross-backend comparison fails only for real reasons."""
     async def go():
         mem = MemoryObjectStore()
         local = LocalObjectStore(tmp_path)
@@ -175,7 +161,6 @@ def test_etags_have_one_format_across_backends(tmp_path):
 
 
 def test_list_does_not_report_write_temporaries(tmp_path):
-    """A killed write leaves `.<name>.<hex>.tmp` behind; it is not an object."""
     s = LocalObjectStore(tmp_path)
 
     async def populate():
@@ -189,7 +174,9 @@ def test_list_does_not_report_write_temporaries(tmp_path):
 
     async def go():
         assert sorted([o.key async for o in s.list()]) == [
-            "kept.tmp", "nested/deep.txt", "real.txt",
+            "kept.tmp",
+            "nested/deep.txt",
+            "real.txt",
         ]
 
     _run(go())
@@ -197,7 +184,6 @@ def test_list_does_not_report_write_temporaries(tmp_path):
 
 
 def test_a_write_block_that_raises_stores_nothing():
-    """`open("wb")` flushes on a clean exit only — a failed body leaves no partial object."""
     async def go():
         s = MemoryObjectStore()
         with pytest.raises(ZeroDivisionError):
@@ -210,23 +196,21 @@ def test_a_write_block_that_raises_stores_nothing():
 
 
 def test_glob_star_crosses_a_slash_and_iterdir_recurses():
-    """The stated contract: keys are not paths, so `*` does not stop at `/`.
-
-    `fnmatch` over the whole key, not `pathlib` semantics -- pinned here because
-    the difference is invisible until a listing returns more than expected.
-    """
     async def go():
         s = MemoryObjectStore()
         for key in ("reports/summary.csv", "reports/2026/q3.csv", "reports/notes.txt"):
             await s.write(key, b"x")
         assert sorted([p.key async for p in s.path("reports").glob("*.csv")]) == [
-            "reports/2026/q3.csv", "reports/summary.csv",
+            "reports/2026/q3.csv",
+            "reports/summary.csv",
         ]
         assert sorted([p.key async for p in s.path("reports").glob("2026/*.csv")]) == [
             "reports/2026/q3.csv",
         ]
         assert sorted([p.key async for p in s.path("reports").iterdir()]) == [
-            "reports/2026/q3.csv", "reports/notes.txt", "reports/summary.csv",
+            "reports/2026/q3.csv",
+            "reports/notes.txt",
+            "reports/summary.csv",
         ]
 
     _run(go())
@@ -246,7 +230,6 @@ def test_an_empty_object_yields_no_chunks_on_either_backend(tmp_path):
 
 
 def test_normalize_key_says_when_it_was_handed_a_non_string():
-    """`None` is a field that was never populated, not an empty key."""
     with pytest.raises(ObjectError, match="must be a string, not NoneType"):
         normalize_key(None)  # type: ignore[arg-type]
     with pytest.raises(ObjectError, match="empty object key"):
@@ -254,7 +237,6 @@ def test_normalize_key_says_when_it_was_handed_a_non_string():
 
 
 def test_closing_twice_cannot_close_a_recycled_descriptor(tmp_path):
-    """The second `close()` must be a no-op, not a close of whatever inherited the fd."""
     s = LocalObjectStore(tmp_path)
     root_fd = s._root_fd
     s.close()
@@ -296,8 +278,6 @@ def test_storagepath_ergonomics(tmp_path):
     _run(go())
 
 
-# --- the url secret, which decides whether another process can verify a URL ---
-#
 # `test_local_presign_sign_and_verify` signs and verifies with one store, so it
 # holds for a store that ignored `url_secret` and signed with a random key: the
 # same instance verifies its own signature either way. What a secret is *for* is
@@ -335,7 +315,6 @@ def test_a_second_store_with_the_same_url_secret_verifies_the_first_ones_url(tmp
 
 
 def test_a_store_given_no_url_secret_signs_with_one_only_it_knows(tmp_path):
-    """The fallback is a random key, not no key: an unsigned URL would verify anywhere."""
     a = LocalObjectStore(tmp_path)
     b = LocalObjectStore(tmp_path)
     claim = _signed(a)
@@ -351,12 +330,6 @@ def test_a_store_given_no_url_secret_signs_with_one_only_it_knows(tmp_path):
 
 
 def test_a_url_secret_that_is_not_bytes_is_refused_by_type_and_by_name():
-    """A `str` gets the hint that would fix it; anything else gets its own type named.
-
-    `Wreath.objects()` takes `**options`, so a `str` reaches here from a config
-    file with nothing to stop it, and the hint is the difference between naming the
-    option and raising from inside `hmac.new` on the first `url()` call.
-    """
     for factory in (MemoryObjectStore, lambda **kw: LocalObjectStore("/tmp", **kw)):
         with pytest.raises(TypeError) as text:
             factory(url_secret="a-string-secret")
@@ -375,10 +348,7 @@ def test_a_bytes_like_url_secret_is_accepted_and_copied():
         assert store.verify_local_url("k", **_signed(store, "k"))
 
 
-# --- refusals the backends make that nothing exercised ------------------------
-
 def test_normalize_key_refuses_a_delete_character():
-    """0x7F is a control character above the 0x20 range, and not covered by it."""
     with pytest.raises(ObjectError, match="control character"):
         normalize_key("reports/q3\x7f.csv")
     with pytest.raises(ObjectError, match="control character"):
@@ -386,7 +356,6 @@ def test_normalize_key_refuses_a_delete_character():
 
 
 def test_a_directory_component_that_is_a_symlink_is_refused(tmp_path):
-    """A symlinked parent is how a key that normalises cleanly still leaves the root."""
     (tmp_path / "real").mkdir()
     os.symlink(tmp_path / "real", tmp_path / "link")
 
@@ -401,12 +370,6 @@ def test_a_directory_component_that_is_a_symlink_is_refused(tmp_path):
 
 
 def test_deleting_beneath_a_directory_that_is_not_there_creates_nothing(tmp_path):
-    """`delete` walks parents with `create=False`, and swallows the refusal.
-
-    Which is why the refusal has to be there: without it the walk falls through to
-    `mkdir`, and a delete of a key that was never written leaves the directories
-    behind -- silently, since `delete` treats "not there" as success either way.
-    """
     async def go():
         s = LocalObjectStore(tmp_path)
         await s.delete("no/such/dir/f.txt")  # not an error
@@ -417,7 +380,6 @@ def test_deleting_beneath_a_directory_that_is_not_there_creates_nothing(tmp_path
 
 
 def test_stat_reports_a_symlink_that_leaves_the_root_as_a_storage_error(tmp_path):
-    """`ContainmentError` is an internal type; a caller catches `ObjectError`."""
     root = tmp_path / "root"
     root.mkdir()
     outside = tmp_path / "outside"
@@ -437,7 +399,6 @@ def test_stat_reports_a_symlink_that_leaves_the_root_as_a_storage_error(tmp_path
 
 
 def test_a_read_stream_is_chunked_rather_than_read_whole(tmp_path):
-    """64 KiB per chunk is the bound on what a read holds in memory at once."""
     payload = b"wreath!!" * 40_000  # 320 KiB, not a multiple of the chunk
 
     async def go():
@@ -470,20 +431,12 @@ def test_memory_list_matches_the_prefix_it_was_given(tmp_path):
 @pytest.mark.parametrize(
     "signature",
     [
-        "é",                         # one non-ASCII character
-        "deadbeefé",            # a real signature with one appended
-        "١" * 64,               # Arabic-Indic digits: `isdigit()` is True
+        "é",  # one non-ASCII character
+        "deadbeefé",  # a real signature with one appended
+        "١" * 64,  # Arabic-Indic digits: `isdigit()` is True
     ],
 )
 def test_a_non_ascii_signature_is_refused_rather_than_raised(signature):
-    """**`hmac.compare_digest` raises `TypeError` on a non-ASCII `str`.**
-
-    The signature is a query parameter, so this is unauthenticated input on the
-    documented recipe's own handler, and the refusal it should get is a 403.
-    `_secondfactor.py:261-266` guards exactly this hazard and its comment says
-    what happens without the guard -- the endpoint answers 500 instead of
-    refusing. Learned in one module, applied here.
-    """
     store = MemoryObjectStore(url_secret=_SECRET)
     assert not store.verify_local_url(
         "reports/q3.csv", method="GET", expires=1_000_900, signature=signature

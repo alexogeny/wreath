@@ -1,9 +1,3 @@
-"""WCAG 2.2 A/AA compliance, codified against the audit rule set.
-
-Each test drives the real a11y rules over violating markup and asserts the
-finding fires (with the right criterion), then over conformant markup and
-asserts silence — the false-positive direction that gets linters switched off.
-"""
 from __future__ import annotations
 
 import pytest
@@ -22,9 +16,6 @@ def _findings(html: str):
 
 def _fired(html: str) -> set[str]:
     return {f.rule_id for f in _findings(html)}
-
-
-# --- Level A ----------------------------------------------------------------
 
 
 def test_1_1_1_non_text_content() -> None:
@@ -50,7 +41,7 @@ def test_3_3_2_labels_or_instructions() -> None:
 def test_4_1_2_name_role_value() -> None:
     assert "aria-valid" in _fired('<div role="notarole">x</div>')
     assert "aria-valid" not in _fired('<div role="button">x</div>')
-    assert "duplicate-id" in _fired('<p id=x>a</p><p id=x>b</p>')
+    assert "duplicate-id" in _fired("<p id=x>a</p><p id=x>b</p>")
     assert "frame-title" in _fired("<iframe src=x></iframe>")
     assert "frame-title" not in _fired('<iframe src=x title="Report"></iframe>')
 
@@ -67,9 +58,6 @@ def test_2_4_4_link_purpose() -> None:
     assert "link-text" in _fired('<a href="/x">click here</a>')
 
 
-# --- Level AA ---------------------------------------------------------------
-
-
 def test_1_4_2_audio_control() -> None:
     assert "autoplay" in _fired("<video autoplay src=v.mp4>")
     assert "autoplay" not in _fired("<video autoplay muted src=v.mp4>")
@@ -77,7 +65,8 @@ def test_1_4_2_audio_control() -> None:
 
 def test_1_4_4_resize_text() -> None:
     assert "viewport-scale" in _fired(
-        '<meta name=viewport content="width=device-width, user-scalable=no">')
+        '<meta name=viewport content="width=device-width, user-scalable=no">'
+    )
 
 
 def test_2_4_3_focus_order() -> None:
@@ -99,11 +88,14 @@ def test_1_4_11_non_text_contrast() -> None:
     assert "non-text-contrast" not in _fired(deco)
 
 
-@pytest.mark.parametrize("markup", [
-    '<th aria-sort="ascending">N</th>',
-    '<span role="code">x</span>',
-    '<div role="meter" aria-valuenow="1" aria-valuemin="0" aria-valuemax="2"></div>',
-])
+@pytest.mark.parametrize(
+    "markup",
+    [
+        '<th aria-sort="ascending">N</th>',
+        '<span role="code">x</span>',
+        '<div role="meter" aria-valuenow="1" aria-valuemin="0" aria-valuemax="2"></div>',
+    ],
+)
 def test_valid_aria_1_2_is_not_false_flagged(markup: str) -> None:
     # A narrow allow-list would report conformant ARIA as broken (WCAG 4.1.2).
     assert "aria-valid" not in _fired(markup)

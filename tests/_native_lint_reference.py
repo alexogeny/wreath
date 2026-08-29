@@ -1,5 +1,3 @@
-"""Independent Python definition of the native C-source lexical tape."""
-
 from __future__ import annotations
 
 import re
@@ -67,9 +65,7 @@ def strip_c(text: str) -> list[str]:
             blank(row, col + 1)
             col += 2
             continue
-        if (state == "string" and char == '"') or (
-            state == "char" and char == "'"
-        ):
+        if (state == "string" and char == '"') or (state == "char" and char == "'"):
             state = "code"
             col += 1
             continue
@@ -88,12 +84,8 @@ def loop_depth_map(code_lines: list[str]) -> list[int]:
     index = 0
     while index < length:
         depth_at[index] = current
-        if (
-            _LOOP_KEYWORD.match(text, index)
-            and (
-                index == 0
-                or not (text[index - 1].isalnum() or text[index - 1] == "_")
-            )
+        if _LOOP_KEYWORD.match(text, index) and (
+            index == 0 or not (text[index - 1].isalnum() or text[index - 1] == "_")
         ):
             open_paren = text.find("(", index)
             balance = 0

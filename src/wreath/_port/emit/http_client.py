@@ -33,10 +33,7 @@ class _HttpxRewrite(_EmitterState):
                 statement.lineno,
                 f"{indent}{parts} = urlsplit(str({self._seg(dynamic)}))",
             )
-            options = [
-                "base_url=urlunsplit("
-                f"({parts}.scheme, {parts}.netloc, '', '', ''))"
-            ]
+            options = [f"base_url=urlunsplit(({parts}.scheme, {parts}.netloc, '', '', ''))"]
         else:
             options = [f"base_url={self._seg(base_url)}"]
         timeout = self._http_request_timeouts.get(key, by_name.get("timeout"))
@@ -66,8 +63,7 @@ class _HttpxRewrite(_EmitterState):
 
     def _http_timeout_value(self, timeout: ast.expr) -> str | None:
         if not (
-            isinstance(timeout, ast.Call)
-            and self.imports.origin(timeout.func) == "httpx.Timeout"
+            isinstance(timeout, ast.Call) and self.imports.origin(timeout.func) == "httpx.Timeout"
         ):
             return self._seg(timeout)
         if timeout.args:
@@ -111,10 +107,7 @@ class _HttpxRewrite(_EmitterState):
             parts = self._http_url_parts.get(key)
             if parts is None:
                 return
-            args[target_index] = (
-                "urlunsplit(('', '', "
-                f"{parts}.path or '/', {parts}.query, ''))"
-            )
+            args[target_index] = f"urlunsplit(('', '', {parts}.path or '/', {parts}.query, ''))"
         by_name = {keyword.arg: keyword.value for keyword in node.keywords}
         params = by_name.get("params")
         if params is not None:

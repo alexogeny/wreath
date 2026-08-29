@@ -122,8 +122,7 @@ class Component:
         versions = [step.version for step in self.steps]
         if versions != sorted(set(versions)):
             raise ValueError(
-                f"component {self.name!r} steps must be ascending and unique, "
-                f"got {versions}"
+                f"component {self.name!r} steps must be ascending and unique, got {versions}"
             )
 
     @property
@@ -208,7 +207,7 @@ def marker_statements(schema: str = DEFAULT_SCHEMA) -> tuple[str, ...]:
     name = _quote(schema)
     return (
         f"CREATE SCHEMA IF NOT EXISTS {name}",
-        f"CREATE TABLE IF NOT EXISTS {name}.\"schema_version\" (\n"
+        f'CREATE TABLE IF NOT EXISTS {name}."schema_version" (\n'
         "  component text PRIMARY KEY,\n"
         "  version integer NOT NULL,\n"
         "  applied_at timestamptz NOT NULL DEFAULT now()\n"
@@ -216,8 +215,9 @@ def marker_statements(schema: str = DEFAULT_SCHEMA) -> tuple[str, ...]:
     )
 
 
-def emit_sql(components: Sequence[Component], *, schema: str = DEFAULT_SCHEMA,
-             from_version: int = 0) -> str:
+def emit_sql(
+    components: Sequence[Component], *, schema: str = DEFAULT_SCHEMA, from_version: int = 0
+) -> str:
     """The full ordered DDL, for a DBA to apply by hand.
 
     This is the supported spelling for a deployment whose application role
@@ -268,7 +268,8 @@ async def _relation_exists(connection: Any, schema: str, relation: str) -> bool:
         "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
         "WHERE n.nspname = $1::text AND c.relname = $2::text "
         "AND c.relkind IN ('r', 'p', 'v', 'm')",
-        schema, relation,
+        schema,
+        relation,
     )
     return bool(rows)
 
@@ -324,9 +325,7 @@ async def _missing_relations(
         if component.qualified:
             if component.schema not in present:
                 present[component.schema] = await _present_in(connection, component.schema)
-            absent = tuple(
-                r for r in component.relations if r not in present[component.schema]
-            )
+            absent = tuple(r for r in component.relations if r not in present[component.schema])
         else:
             unresolved = []
             for relation in component.relations:
@@ -463,7 +462,8 @@ async def bootstrap(
             if not await _relation_exists(connection, schema, "schema_version"):
                 logger.info(
                     "wreath schema %r has the relations but no version marker; "
-                    "reporting versions as unknown", schema,
+                    "reporting versions as unknown",
+                    schema,
                 )
                 return {}
             return await _recorded_versions(connection, schema)
@@ -486,16 +486,16 @@ async def bootstrap(
                         connection,
                         (f"CREATE SCHEMA IF NOT EXISTS {_quote(component.schema)}",),
                     )
-                recorded = (await _recorded_versions(connection, schema)).get(
-                    component.name, 0
-                )
+                recorded = (await _recorded_versions(connection, schema)).get(component.name, 0)
                 if recorded > component.target_version:
                     logger.warning(
                         "wreath schema component %r is at version %d but this "
                         "build targets %d; steps are additive so this build will "
                         "run, but a gap this way round means a newer wreath has "
                         "already upgraded it",
-                        component.name, recorded, component.target_version,
+                        component.name,
+                        recorded,
+                        component.target_version,
                     )
                 for step in component.steps:
                     if step.version <= recorded:
@@ -507,11 +507,9 @@ async def bootstrap(
                     # step harmlessly on the next start. The marker is a fast
                     # path -- it lets a current database skip the DDL -- not the
                     # source of truth, which is the catalog itself.
-                    #
                     # That idempotence is therefore a *requirement* on a step,
                     # not a convenience, and it is why `verify` reads relations
                     # from the catalog rather than trusting the marker.
-                    #
                     # (The pure driver also refuses `async with
                     # connection.transaction()` on a pooled connection outright
                     # -- see the report accompanying this branch -- so a
@@ -522,7 +520,8 @@ async def bootstrap(
                         "(component, version) VALUES ($1, $2) "
                         "ON CONFLICT (component) DO UPDATE SET "
                         "version = EXCLUDED.version, applied_at = now()",
-                        component.name, step.version,
+                        component.name,
+                        step.version,
                     )
                     recorded = step.version
                 applied[component.name] = recorded

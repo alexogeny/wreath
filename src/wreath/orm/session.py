@@ -158,19 +158,15 @@ class RawQuery:
         order = _validate_raw_result(connection, self._sql, spec)
         if not rows:
             return []
-        plan = _row_plan(spec, order)          # once, not once per row
+        plan = _row_plan(spec, order)  # once, not once per row
         return [
             item
-            for item in (
-                session._hydrate(spec, plan, row, 0) for row in rows
-            )
+            for item in (session._hydrate(spec, plan, row, 0) for row in rows)
             if item is not None
         ]
 
 
-def _validate_raw_result(
-    connection: Any, sql: str, spec: ModelSpec
-) -> tuple[ColumnSpec, ...]:
+def _validate_raw_result(connection: Any, sql: str, spec: ModelSpec) -> tuple[ColumnSpec, ...]:
     plan = getattr(connection, "_plans", {}).get(sql)
     if plan is None:
         raise MappingError(
@@ -306,10 +302,12 @@ def _row_plan(spec: ModelSpec, columns: tuple[ColumnSpec, ...]) -> _RowPlan:
     # whether the hoist pays at all on the commonest shape. Measured on this
     # model, the two comprehensions are 0.84us against the generators' 1.31us.
     return _RowPlan(
-        key=tuple([
-            (offset, item.pg_type._from_wire)
-            for offset, item in zip(offsets, spec.primary_key, strict=True)
-        ]),
+        key=tuple(
+            [
+                (offset, item.pg_type._from_wire)
+                for offset, item in zip(offsets, spec.primary_key, strict=True)
+            ]
+        ),
         cells=tuple([(item.column.index, item.pg_type._from_wire) for item in columns]),
     )
 
@@ -370,8 +368,7 @@ class TenantContext:
 
 #: A suggested threshold for `identity_map_warn_at`, for a caller who wants one
 #: without picking a number. Not the default: the check costs a boundary
-#: crossing on every fetch, and `docs/agents/request-boundary-baseline.json`
-#: is not the place to spend one on a diagnostic that fires for almost nobody.
+#: crossing on every fetch.
 #: Turn it on while chasing memory, or set it on the registry for a service that
 #: has been bitten.
 SUGGESTED_IDENTITY_MAP_WARN_AT = 50_000
@@ -499,8 +496,6 @@ class Session:
         """The leased connection, or None while the session is still lazy."""
         return self._connection
 
-    # -- lifecycle ----------------------------------------------------------
-
     async def _acquire(self) -> Any:
         if self._closed:
             raise SessionClosedError("this ORM session is closed")
@@ -614,8 +609,6 @@ class Session:
                 "search_path is bound; wrap the work in 'async with session.begin():'"
             )
 
-    # -- reads --------------------------------------------------------------
-
     async def get(self, model: type, primary_key: Any, *, load: Iterable[Any] = ()) -> Any:
         """Fetch one object by primary key, or None."""
         self._check_usable()
@@ -629,15 +622,11 @@ class Session:
             query = query.include(*options)
         return await self.fetch_one(query.limit(1))
 
-    async def require(
-        self, model: type, primary_key: Any, *, load: Iterable[Any] = ()
-    ) -> Any:
+    async def require(self, model: type, primary_key: Any, *, load: Iterable[Any] = ()) -> Any:
         """Fetch one object by primary key, raising when it does not exist."""
         result = await self.get(model, primary_key, load=load)
         if result is None:
-            raise NoResultError(
-                f"{model.__name__} with primary key {primary_key!r} does not exist"
-            )
+            raise NoResultError(f"{model.__name__} with primary key {primary_key!r} does not exist")
         return result
 
     async def fetch(self, query: Select) -> list[Any]:
@@ -666,9 +655,7 @@ class Session:
         await self._run_selectin(compiled.load_plan.selectin, objects)
         return objects
 
-    async def _fetch_compiled(
-        self, query: Select, compiled: CompiledQuery
-    ) -> list[Any]:
+    async def _fetch_compiled(self, query: Select, compiled: CompiledQuery) -> list[Any]:
         """Execute a query whose immutable plan and bind values are ready.
 
         This deliberately mirrors `fetch`'s execution tail. Factoring the tail
@@ -699,9 +686,7 @@ class Session:
         await self._run_selectin(compiled.load_plan.selectin, objects)
         return objects
 
-    async def _fetch_one_compiled(
-        self, query: Select, compiled: CompiledQuery
-    ) -> Any:
+    async def _fetch_one_compiled(self, query: Select, compiled: CompiledQuery) -> Any:
         results = await self._fetch_compiled(query, compiled)
         if len(results) > 1:
             raise MultipleResultsError(
@@ -781,7 +766,7 @@ class Session:
                 spec,
                 tuple(item.index for item in compiled.load_plan.columns),
             )
-        except (TypeError, ValueError, IndexError, RuntimeError, MappingError):
+        except TypeError, ValueError, IndexError, RuntimeError, MappingError:
             cached.hydrate_plan = False
             return None
         cached.hydrate_plan = plan
@@ -807,9 +792,7 @@ class Session:
         """Run `query` and require exactly one result."""
         result = await self.fetch_one(query)
         if result is None:
-            raise NoResultError(
-                f"require_one() matched no rows for {query.model.__name__}"
-            )
+            raise NoResultError(f"require_one() matched no rows for {query.model.__name__}")
         return result
 
     async def count(self, query: Select) -> int:
@@ -888,8 +871,7 @@ class Session:
             declared = relationship
         else:
             raise TypeError(
-                "load() takes a model relationship such as User.posts, got "
-                f"{relationship!r}"
+                f"load() takes a model relationship such as User.posts, got {relationship!r}"
             )
         instances = [target] if isinstance(target, Model) else list(target)
         if not instances:
@@ -904,9 +886,7 @@ class Session:
         spec = self._registry.spec_for(owner)
         found = spec.relationship(declared.python_name)
         if found is None:
-            raise RegistryError(
-                f"{owner.__name__}.{declared.python_name} is not registered"
-            )
+            raise RegistryError(f"{owner.__name__}.{declared.python_name} is not registered")
         await self._load_relationship(found, instances, ())
 
     def _hydrate_rows(self, compiled: CompiledQuery, rows: list[Any]) -> list[Any]:
@@ -923,13 +903,9 @@ class Session:
             self, spec, row_plan, cursors, rows, models._MODEL_API
         )
 
-    def _assemble_joins(
-        self, cursors: tuple[_JoinCursor, ...], parent: Any, row: Any
-    ) -> None:
+    def _assemble_joins(self, cursors: tuple[_JoinCursor, ...], parent: Any, row: Any) -> None:
         models = _model_storage()
-        _native_core.orm_assemble_joins(
-            self, cursors, parent, row, models._MODEL_API
-        )
+        _native_core.orm_assemble_joins(self, cursors, parent, row, models._MODEL_API)
 
     def _record_plan(
         self, compiled: CompiledQuery, spec: ModelSpec, plan: LoadPlan
@@ -965,9 +941,7 @@ class Session:
             instance._orm_set_loaded(cell, value if decode is None else decode(value))
         return instance
 
-    async def _run_selectin(
-        self, steps: tuple[SelectinStep, ...], objects: list[Any]
-    ) -> None:
+    async def _run_selectin(self, steps: tuple[SelectinStep, ...], objects: list[Any]) -> None:
         if not objects:
             return
         for step in steps:
@@ -1008,21 +982,16 @@ class Session:
                 target,
                 tuple(column.index for column in target.columns),
             )
-        except (TypeError, ValueError, IndexError, RuntimeError, MappingError):
+        except TypeError, ValueError, IndexError, RuntimeError, MappingError:
             direct_plan = None
         batch_limit = _batch_limit(len(remote))
         remote_indexes = tuple(column.index for column in remote)
         identities = tuple(keys)
         for start in range(0, len(identities), batch_limit):
             batch = identities[start : start + batch_limit]
-            sql, values = _selectin_sql(
-                target, remote, _pad_to_width(batch, batch_limit)
-            )
+            sql, values = _selectin_sql(target, remote, _pad_to_width(batch, batch_limit))
             connection = await self._acquire()
-            if (
-                direct_plan is not None
-                and getattr(connection, "_decode_dest", None) is not None
-            ):
+            if direct_plan is not None and getattr(connection, "_decode_dest", None) is not None:
                 batch_children = await connection._fetch_into(
                     sql, tuple(values), (direct_plan, self._identity, self)
                 )
@@ -1059,9 +1028,7 @@ class Session:
         """The objects pending insertion, in add() order."""
         if self._new_stale:
             identifiers = self._new_ids
-            self._new_items = [
-                item for item in self._new_items if id(item) in identifiers
-            ]
+            self._new_items = [item for item in self._new_items if id(item) in identifiers]
             self._new_stale = False
         return self._new_items
 
@@ -1104,8 +1071,6 @@ class Session:
         self._deleted_ids.clear()
         self._dirty_items = []
 
-    # -- writes -------------------------------------------------------------
-
     async def create(self, model: type, **values: Any) -> Any:
         """Construct, insert, and return one mapped model.
 
@@ -1128,9 +1093,7 @@ class Session:
                 "objects so those rules run once, or use explicit SQL"
             )
         self._refuse_bulk_audit(query.model)
-        sql, bind_values, _oids = compile_update_where(
-            self._registry, query, values
-        )
+        sql, bind_values, _oids = compile_update_where(self._registry, query, values)
         return await self._execute_bulk(spec, "UPDATE", sql, bind_values)
 
     async def delete_where(self, query: Select) -> int:
@@ -1176,9 +1139,7 @@ class Session:
             self._detach_model(spec)
         return count
 
-    async def _execute_bulk_inner(
-        self, verb: str, sql: str, bind_values: tuple[Any, ...]
-    ) -> int:
+    async def _execute_bulk_inner(self, verb: str, sql: str, bind_values: tuple[Any, ...]) -> int:
         connection = await self._acquire()
         status = await connection.execute(sql, *bind_values)
         return _affected_count(status, verb)
@@ -1191,9 +1152,7 @@ class Session:
             instance._orm_state = DETACHED
             instance._orm_owner = None
         self._dirty_items = [
-            instance
-            for instance in self._dirty_items
-            if instance._orm_owner is self
+            instance for instance in self._dirty_items if instance._orm_owner is self
         ]
 
     def add(self, instance: Any) -> None:
@@ -1219,8 +1178,7 @@ class Session:
             return
         if instance._orm_primary_key() is None:
             raise SessionError(
-                f"{spec.model_type.__name__} has no loaded primary key and cannot be "
-                "deleted"
+                f"{spec.model_type.__name__} has no loaded primary key and cannot be deleted"
             )
         instance._orm_state = DELETED
         self._schedule_deleted(instance)
@@ -1265,8 +1223,7 @@ class Session:
 
     def _any_dirty(self) -> bool:
         return any(
-            item._orm_has_changes() and item._orm_state == PERSISTENT
-            for item in self._dirty_items
+            item._orm_has_changes() and item._orm_state == PERSISTENT for item in self._dirty_items
         )
 
     def _dirty_objects(self) -> list[Any]:
@@ -1329,9 +1286,7 @@ class Session:
             return None
         return getattr(type(instance), "__wreath_facets__", {}).get("audit")
 
-    def _audit_write(
-        self, instance: Any, spec: Any, operation: str, mask: int | None
-    ) -> None:
+    def _audit_write(self, instance: Any, spec: Any, operation: str, mask: int | None) -> None:
         """Hold the record for a write that has just happened.
 
         Called *after* the statement, because an insert's primary key is only
@@ -1501,9 +1456,7 @@ class Session:
                 written, self._written = self._written, frozenset()
                 _publish_write(written)
 
-    async def _unwind(
-        self, connection: Any, depth: int, savepoint: str, *, commit: bool
-    ) -> None:
+    async def _unwind(self, connection: Any, depth: int, savepoint: str, *, commit: bool) -> None:
         if self._closed:
             # `close()` already returned this connection to the pool.
             return
@@ -1523,8 +1476,7 @@ class Session:
             return
         if self._workload not in _WRITE_WORKLOADS:
             raise SessionError(
-                "for_update() needs a write-workload session; this session is "
-                f"{self._workload!r}"
+                f"for_update() needs a write-workload session; this session is {self._workload!r}"
             )
         if not self._depth:
             raise SessionError(
@@ -1559,9 +1511,7 @@ class Session:
         """
         self._check_usable()
         if mode not in ("exclusive", "shared"):
-            raise SessionError(
-                f"advisory lock mode must be 'exclusive' or 'shared', not {mode!r}"
-            )
+            raise SessionError(f"advisory lock mode must be 'exclusive' or 'shared', not {mode!r}")
         if scope == "session":
             raise SessionError(
                 "session-scoped advisory locks are not available on Session; use "
@@ -1578,14 +1528,10 @@ class Session:
             )
         if namespace is None:
             namespace = (
-                self._tenant.schema
-                if self._tenant is not None
-                else self._registry.database.name
+                self._tenant.schema if self._tenant is not None else self._registry.database.name
             )
         function = (
-            "pg_advisory_xact_lock"
-            if mode == "exclusive"
-            else "pg_advisory_xact_lock_shared"
+            "pg_advisory_xact_lock" if mode == "exclusive" else "pg_advisory_xact_lock_shared"
         )
         connection = await self._acquire()
         # The same 64-bit, server-side key `wreath._locks` derives, so a lock
@@ -1624,11 +1570,7 @@ def _affected_count(status: Any, verb: str) -> int:
     """Read PostgreSQL's ``VERB n`` command tag without inventing a count."""
     if isinstance(status, str):
         reported_verb, _separator, reported_count = status.partition(" ")
-        if (
-            reported_verb == verb
-            and reported_count.isascii()
-            and reported_count.isdecimal()
-        ):
+        if reported_verb == verb and reported_count.isascii() and reported_count.isdecimal():
             return int(reported_count)
     raise SessionError(
         f"the PostgreSQL adapter returned {status!r} for {verb}; expected "
@@ -1700,8 +1642,6 @@ def _wire_value(instance: Any, column: ColumnSpec) -> Any:
     return column.pg_type.to_wire(instance._orm_get(column.index))
 
 
-
-
 def _key_tuple(spec: ModelSpec, primary_key: Any) -> tuple[Any, ...]:
     values = primary_key if isinstance(primary_key, tuple) else (primary_key,)
     if len(values) != len(spec.primary_key):
@@ -1726,9 +1666,7 @@ def _batch_widths() -> tuple[int, ...]:
     return _BATCH_WIDTHS
 
 
-def _pad_to_width(
-    batch: tuple[tuple[Any, ...], ...], limit: int
-) -> tuple[tuple[Any, ...], ...]:
+def _pad_to_width(batch: tuple[tuple[Any, ...], ...], limit: int) -> tuple[tuple[Any, ...], ...]:
     """Round a batch up to the next allowed width by repeating its last key.
 
     Never past `limit` -- the caller's key and bind-parameter bounds are the
@@ -1755,9 +1693,7 @@ def _selectin_sql(
     order. User queries are never reordered.
     """
     values: list[Any] = []
-    columns = ", ".join(
-        f"{quote('t0')}.{quote(item.database_name)}" for item in target.columns
-    )
+    columns = ", ".join(f"{quote('t0')}.{quote(item.database_name)}" for item in target.columns)
     sql = f"SELECT {columns} FROM {qualified(target)} AS {quote('t0')} WHERE "
     if len(remote) == 1:
         column = remote[0]
@@ -1767,9 +1703,7 @@ def _selectin_sql(
             placeholders.append(f"${len(values)}")
         sql += f"{quote('t0')}.{quote(column.database_name)} IN ({', '.join(placeholders)})"
     else:
-        left = ", ".join(
-            f"{quote('t0')}.{quote(item.database_name)}" for item in remote
-        )
+        left = ", ".join(f"{quote('t0')}.{quote(item.database_name)}" for item in remote)
         rows = []
         for key in batch:
             placeholders = []
@@ -1778,15 +1712,11 @@ def _selectin_sql(
                 placeholders.append(f"${len(values)}")
             rows.append(f"({', '.join(placeholders)})")
         sql += f"({left}) IN ({', '.join(rows)})"
-    order = ", ".join(
-        f"{quote('t0')}.{quote(item.database_name)}" for item in target.primary_key
-    )
+    order = ", ".join(f"{quote('t0')}.{quote(item.database_name)}" for item in target.primary_key)
     return sql + f" ORDER BY {order}", values
 
 
-def compile_session_binding(
-    registries: Any, marker: FromORM
-) -> tuple[str, Any]:
+def compile_session_binding(registries: Any, marker: FromORM) -> tuple[str, Any]:
     """Resolve `marker` to a registry at route-compile time."""
     name = marker.database
     if name is None:

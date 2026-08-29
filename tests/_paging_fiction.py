@@ -1,24 +1,3 @@
-"""A frozen replica of the `page_params` signature that shipped broken.
-
-`wreath.pagination.page_params` used to be
-`page_params(page, size, sort)` with `Query()` markers on its own parameters --
-a dependency is called `fn(request, **nested_depends)`, so the request object
-arrived *as* the page number and the first comparison against it was a 500.
-
-That is now fixed at the source: `page_params` takes the request and reads the
-query string, and route compilation refuses a marker on any dependency
-parameter. Which left the docs floor's acceptance test with nothing to check --
-its fixture imported the shipped function precisely *because* it exhibited the
-defect, so fixing the defect quietly disarmed the test that proves the rule
-works.
-
-So the fiction is frozen here instead of borrowed from shipping code. A check
-built to catch a known bug has to keep catching it after the bug is gone; see
-`AGENTS.md's rule about a check that has nothing to check`.
-
-Nothing imports this outside `tests/test_docs_codeblocks.py`.
-"""
-
 from __future__ import annotations
 
 from typing import Annotated

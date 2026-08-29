@@ -84,14 +84,13 @@ def _mib(value: float) -> str:
 
 
 def _cell(text: str, best: bool = False, worst: bool = False, dim: bool = False) -> str:
-    classes = " ".join(c for c, on in
-                       (("win", best), ("lose", worst), ("dim", dim)) if on)
+    classes = " ".join(c for c, on in (("win", best), ("lose", worst), ("dim", dim)) if on)
     return f'<td class="{classes}">{text}</td>' if classes else f"<td>{text}</td>"
 
 
-# --- ranking guards -------------------------------------------------------
 # A report may only crown a winner when the comparison is legitimate. These are
 # the rules, and they are deliberately conservative.
+
 
 def _format_value(value: float, unit: str) -> str:
     return f"{value:.3f} {unit}"
@@ -117,11 +116,8 @@ def is_rankable(rows: list[dict[str, Any]]) -> bool:
     valid = [row for row in rows if int(row.get("errors", 0)) == 0]
     if not valid:
         return False
-    return len(_distinct(valid, "load_generator")) <= 1 and \
-        len(_distinct(valid, "protocol")) <= 1
+    return len(_distinct(valid, "load_generator")) <= 1 and len(_distinct(valid, "protocol")) <= 1
 
-
-# --- aggregation ----------------------------------------------------------
 
 def merge_documents(documents: list[dict[str, Any]]) -> dict[str, Any]:
     """Reduce N result documents to one, medianed per (scenario, framework, protocol).
@@ -148,8 +144,7 @@ def merge_documents(documents: list[dict[str, Any]]) -> dict[str, Any]:
         samples: dict[str, list[float]] = {}
         for metric in (_HEADLINE, *(name for name, _t, _u in _METRICS)):
             values = [
-                float(item[metric]) for item in rows
-                if isinstance(item.get(metric), int | float)
+                float(item[metric]) for item in rows if isinstance(item.get(metric), int | float)
             ]
             if not values:
                 continue
@@ -192,10 +187,9 @@ def _separated(rows: list[dict[str, Any]], metric: str, lower_better: bool) -> b
     return lead_range[0] > second_range[1]
 
 
-# --- rendering ------------------------------------------------------------
-
-def _bars(rows: list[dict[str, Any]], metric: str, title: str, unit: str,
-          lower_better: bool = True) -> str:
+def _bars(
+    rows: list[dict[str, Any]], metric: str, title: str, unit: str, lower_better: bool = True
+) -> str:
     """One metric across frameworks as a ranked bar group.
 
     Used as the report's hero. The detail lives in the tables below it; this is
@@ -211,8 +205,7 @@ def _bars(rows: list[dict[str, Any]], metric: str, title: str, unit: str,
     winner = pick((float(row[metric]) for row in valid), default=None) if rankable else None
     maximum = max((float(row[metric]) for row in present), default=1.0) or 1.0
     bars: list[str] = []
-    for row in sorted(present, key=lambda item: float(item[metric]),
-                      reverse=not lower_better):
+    for row in sorted(present, key=lambda item: float(item[metric]), reverse=not lower_better):
         value = float(row[metric])
         width = max(1.0, value / maximum * 100)
         errored = int(row.get("errors", 0)) != 0
@@ -223,9 +216,7 @@ def _bars(rows: list[dict[str, Any]], metric: str, title: str, unit: str,
         if errored:
             tags += '<span class="tag tag-err">ERRORS</span>'
         span = _range(row, metric)
-        spread = (
-            f'<span class="spread">{span[0]:,.3f}–{span[1]:,.3f}</span>' if span else ""
-        )
+        spread = f'<span class="spread">{span[0]:,.3f}–{span[1]:,.3f}</span>' if span else ""
         bars.append(
             '<div class="bar-row">'
             f'<div class="who">{escape(str(row["framework"]))}</div>'
@@ -242,9 +233,7 @@ def _bars(rows: list[dict[str, Any]], metric: str, title: str, unit: str,
             '<p class="within-noise">Ranges overlap across runs: the gap here is '
             "smaller than the run-to-run spread, so no winner is crowned.</p>"
         )
-    return (
-        f'<section class="chart"><h3>{escape(title)}</h3>{note}{"".join(bars)}</section>'
-    )
+    return f'<section class="chart"><h3>{escape(title)}</h3>{note}{"".join(bars)}</section>'
 
 
 def _chart(rows: list[dict[str, Any]], metric: str, title: str, unit: str) -> str:
@@ -258,9 +247,7 @@ def _scenario_table(rows: list[dict[str, Any]]) -> str:
     if any(_HEADLINE in row for row in rows):
         columns.append((_HEADLINE, "req/s", False))
     available = {key for row in rows for key in row}
-    columns += [
-        (name, title, True) for name, title, _u in _METRICS if name in available
-    ]
+    columns += [(name, title, True) for name, title, _u in _METRICS if name in available]
     if not columns:
         return ""
     rankable = is_rankable(rows)
@@ -270,8 +257,7 @@ def _scenario_table(rows: list[dict[str, Any]]) -> str:
         valid = [
             float(row[metric])
             for row in rows
-            if isinstance(row.get(metric), int | float)
-            and int(row.get("errors", 0)) == 0
+            if isinstance(row.get(metric), int | float) and int(row.get("errors", 0)) == 0
         ]
         resolved = _separated(rows, metric, lower_better=lower_better)
         best = (min(valid) if lower_better else max(valid)) if valid else None
@@ -287,14 +273,18 @@ def _scenario_table(rows: list[dict[str, Any]]) -> str:
                 continue
             value = float(row[metric])
             resolved, best, valid_count = column_facts[metric]
-            is_best = (rankable and resolved and not errored
-                       and best is not None and value == best and valid_count > 1)
+            is_best = (
+                rankable
+                and resolved
+                and not errored
+                and best is not None
+                and value == best
+                and valid_count > 1
+            )
             span = _range(row, metric)
             hint = f' title="runs: {span[0]:,.3f}–{span[1]:,.3f}"' if span else ""
             shown = f"{value:,.0f}" if metric == _HEADLINE else f"{value:.3f}"
-            cells.append(
-                f'<td class="{"win" if is_best else ""}"{hint}>{shown}</td>'
-            )
+            cells.append(f'<td class="{"win" if is_best else ""}"{hint}>{shown}</td>')
         name = escape(str(row["framework"]))
         tag = '<span class="tag tag-err">ERRORS</span>' if errored else ""
         body.append(f"<tr><td>{name} {tag}</td>{''.join(cells)}</tr>")
@@ -320,11 +310,18 @@ def _overview(rows: list[dict[str, Any]], scenarios: list[str]) -> str:
         by_framework = {str(row["framework"]): row for row in here}
         rankable = is_rankable(here)
         resolved = _separated(here, _HEADLINE, lower_better=False)
-        best = max(
-            (float(r[_HEADLINE]) for r in here
-             if _HEADLINE in r and int(r.get("errors", 0)) == 0),
-            default=None,
-        ) if rankable and resolved else None
+        best = (
+            max(
+                (
+                    float(r[_HEADLINE])
+                    for r in here
+                    if _HEADLINE in r and int(r.get("errors", 0)) == 0
+                ),
+                default=None,
+            )
+            if rankable and resolved
+            else None
+        )
         for framework in frameworks:
             row = by_framework.get(framework)
             if row is None or _HEADLINE not in row:
@@ -334,13 +331,9 @@ def _overview(rows: list[dict[str, Any]], scenarios: list[str]) -> str:
             win = best is not None and value == best
             span = _range(row, _HEADLINE)
             title = f' title="runs: {span[0]:,.0f}–{span[1]:,.0f}"' if span else ""
-            cells.append(
-                f'<td class="{"win" if win else ""}"{title}>{value:,.0f}</td>'
-            )
+            cells.append(f'<td class="{"win" if win else ""}"{title}>{value:,.0f}</td>')
         marker = "" if rankable and resolved else '<span class="dim"> ·&nbsp;unresolved</span>'
-        body.append(
-            f"<tr><td>{escape(scenario)}{marker}</td>{''.join(cells)}</tr>"
-        )
+        body.append(f"<tr><td>{escape(scenario)}{marker}</td>{''.join(cells)}</tr>")
     return (
         '<section class="block"><h2>Throughput overview</h2>'
         '<p class="sub">Requests per second, higher is better. Hover a cell for its '
@@ -440,9 +433,7 @@ def _protocol_section(rows: list[dict[str, Any]]) -> str:
         column_best: dict[str, float] = {}
         for protocol in present:
             values = [
-                statistics.median(s.get(protocol, [0]))
-                for s in stacks.values()
-                if s.get(protocol)
+                statistics.median(s.get(protocol, [0])) for s in stacks.values() if s.get(protocol)
             ]
             if values:
                 column_best[protocol] = max(values)
@@ -453,9 +444,7 @@ def _protocol_section(rows: list[dict[str, Any]]) -> str:
                 best = ranked and value == column_best.get(protocol)
                 cells.append(_cell(f"{value:,.0f}", best=best))
             elif protocol not in capable:
-                cells.append(
-                    f'<td class="dim" title="{escape(note)}">not supported</td>'
-                )
+                cells.append(f'<td class="dim" title="{escape(note)}">not supported</td>')
             else:
                 cells.append('<td class="dim" title="not measured in this run">—</td>')
         body.append(
@@ -469,8 +458,7 @@ def _protocol_section(rows: list[dict[str, Any]]) -> str:
     caveat = (
         ""
         if ranked
-        else '<p class="warning">Rows use different load generators, so nothing '
-        "here is ranked.</p>"
+        else '<p class="warning">Rows use different load generators, so nothing here is ranked.</p>'
     )
     return (
         '<section class="block"><h2>Protocols, and who can speak them</h2>'
@@ -508,10 +496,10 @@ def _routing_memory_section(documents: list[dict[str, Any]]) -> str:
     for shape in shapes:
         modes = modes_by_shape[shape]
         routes = grouped[(shape, modes[0])][0].get("routes", "?")
+
         def med(mode: str, key: str, _shape: str = shape) -> float:
-            return statistics.median(
-                [float(r[key]) for r in grouped[(_shape, mode)] if key in r]
-            )
+            return statistics.median([float(r[key]) for r in grouped[(_shape, mode)] if key in r])
+
         totals = [med(m, "total_bytes") for m in modes]
         peaks = [med(m, "vmhwm_bytes") for m in modes]
         body: list[str] = []
@@ -531,7 +519,7 @@ def _routing_memory_section(documents: list[dict[str, Any]]) -> str:
             )
         blocks.append(
             f'<div class="scroll"><table>'
-            f'<caption>{escape(shape)} — {routes:,} routes</caption>'
+            f"<caption>{escape(shape)} — {routes:,} routes</caption>"
             "<thead><tr><th>mode</th><th>total</th><th>eager</th><th>lazy</th>"
             "<th>peak RSS</th><th>compile</th></tr></thead>"
             f"<tbody>{''.join(body)}</tbody></table></div>"
@@ -572,19 +560,24 @@ def _routing_backends_section(documents: list[dict[str, Any]]) -> str:
         for backend, samples in backends.items():
             value = statistics.median(samples)
             is_native = backend.startswith("c-")
-            cls = _extreme_class(value, list(native.values()), lower_better=True) \
-                if is_native else {}
+            cls = (
+                _extreme_class(value, list(native.values()), lower_better=True) if is_native else {}
+            )
             ns = value / int(info.get("queries", 1)) * 1e9
             body.append(
                 f'<tr><td class="{"" if is_native else "dim"}">{escape(backend)}</td>'
-                + _cell(f"{value * 1e3:.2f} ms", cls.get("best", False),
-                        cls.get("worst", False), dim=not is_native)
+                + _cell(
+                    f"{value * 1e3:.2f} ms",
+                    cls.get("best", False),
+                    cls.get("worst", False),
+                    dim=not is_native,
+                )
                 + _cell(f"{ns:.0f} ns", dim=not is_native)
                 + "</tr>"
             )
         blocks.append(
             '<div class="scroll"><table>'
-            f'<caption>{escape(name)} — {escape(str(info.get("description", "")))}</caption>'
+            f"<caption>{escape(name)} — {escape(str(info.get('description', '')))}</caption>"
             "<thead><tr><th>backend</th><th>per pass</th><th>per match</th></tr></thead>"
             f"<tbody>{''.join(body)}</tbody></table></div>"
         )
@@ -608,15 +601,11 @@ def _orm_section(documents: list[dict[str, Any]]) -> str:
                     continue  # skips the wreath_speedup_vs summary block
                 if values.get("sync"):
                     sync.add(orm)
-                ops.setdefault(op, {}).setdefault(orm, []).append(
-                    float(values["median_ms"])
-                )
+                ops.setdefault(op, {}).setdefault(orm, []).append(float(values["median_ms"]))
     if not ops:
         return ""
     names = list(dict.fromkeys(o for orms in ops.values() for o in orms))
-    head = "".join(
-        f'<th>{escape(n)}{" (sync)" if n in sync else ""}</th>' for n in names
-    )
+    head = "".join(f"<th>{escape(n)}{' (sync)' if n in sync else ''}</th>" for n in names)
     body: list[str] = []
     for op, orms in ops.items():
         medians = {o: statistics.median(v) for o, v in orms.items()}
@@ -629,10 +618,15 @@ def _orm_section(documents: list[dict[str, Any]]) -> str:
                 cells.append('<td class="dim">—</td>')
                 continue
             value = medians[name]
-            cls = _extreme_class(value, ranked, lower_better=True) \
-                if name not in sync else {}
-            cells.append(_cell(f"{value:.3f}", cls.get("best", False),
-                               cls.get("worst", False), dim=name in sync))
+            cls = _extreme_class(value, ranked, lower_better=True) if name not in sync else {}
+            cells.append(
+                _cell(
+                    f"{value:.3f}",
+                    cls.get("best", False),
+                    cls.get("worst", False),
+                    dim=name in sync,
+                )
+            )
         slowest = max(ranked) if ranked else None
         # Always emit this cell: when Wreath is omitted from a scenario the row
         # would otherwise be one column short and the table would misalign.
@@ -669,10 +663,12 @@ def _migration_section(documents: list[dict[str, Any]]) -> str:
                 tools.setdefault(name, []).append(float(values["median_ns"]))
         values = document.get("fleet")
         if isinstance(values, dict) and "median_ns_per_tenant" in values:
-            fleet.append((
-                int(values.get("tenants", 0)),
-                float(values["median_ns_per_tenant"]),
-            ))
+            fleet.append(
+                (
+                    int(values.get("tenants", 0)),
+                    float(values["median_ns_per_tenant"]),
+                )
+            )
     if not tools:
         return ""
     medians = {name: statistics.median(values) for name, values in tools.items()}
@@ -827,9 +823,7 @@ def _postgres_section(documents: list[dict[str, Any]]) -> str:
             for driver, values in drivers.items():
                 if not isinstance(values, dict) or "median_ms" not in values:
                     continue
-                ops.setdefault(op, {}).setdefault(driver, []).append(
-                    float(values["median_ms"])
-                )
+                ops.setdefault(op, {}).setdefault(driver, []).append(float(values["median_ms"]))
     if not ops:
         return ""
     names = list(dict.fromkeys(d for drivers in ops.values() for d in drivers))
@@ -845,8 +839,7 @@ def _postgres_section(documents: list[dict[str, Any]]) -> str:
                 continue
             value = medians[name]
             cls = _extreme_class(value, values, lower_better=True)
-            cells.append(_cell(f"{value:.3f}", cls.get("best", False),
-                               cls.get("worst", False)))
+            cells.append(_cell(f"{value:.3f}", cls.get("best", False), cls.get("worst", False)))
         ratio = ""
         if "wreath" in medians and "asyncpg" in medians and medians["wreath"]:
             speedup = medians["asyncpg"] / medians["wreath"]
@@ -1016,8 +1009,9 @@ def render(document: dict[str, Any], extra: list[dict[str, Any]] | None = None) 
     hero = ""
     if scenarios:
         first = results_by_scenario[scenarios[0]]
-        hero = _bars(first, _HEADLINE, f"{scenarios[0]} — requests per second",
-                     "req/s", lower_better=False)
+        hero = _bars(
+            first, _HEADLINE, f"{scenarios[0]} — requests per second", "req/s", lower_better=False
+        )
 
     sections: list[str] = []
     for scenario in scenarios:
@@ -1044,15 +1038,17 @@ def render(document: dict[str, Any], extra: list[dict[str, Any]] | None = None) 
     by_kind: dict[str, list[dict[str, Any]]] = {}
     for doc in extra:
         by_kind.setdefault(classify(doc), []).append(doc)
-    bespoke = "".join((
-        _protocol_section(results),
-        _routing_backends_section(by_kind.get(_KIND_ROUTING_BACKENDS, [])),
-        _routing_memory_section(by_kind.get(_KIND_ROUTING_MEMORY, [])),
-        _orm_section(by_kind.get(_KIND_ORM, [])),
-        _migration_section(by_kind.get(_KIND_MIGRATIONS, [])),
-        _cedar_section(by_kind.get(_KIND_CEDAR, [])),
-        _postgres_section(by_kind.get(_KIND_POSTGRES, [])),
-    ))
+    bespoke = "".join(
+        (
+            _protocol_section(results),
+            _routing_backends_section(by_kind.get(_KIND_ROUTING_BACKENDS, [])),
+            _routing_memory_section(by_kind.get(_KIND_ROUTING_MEMORY, [])),
+            _orm_section(by_kind.get(_KIND_ORM, [])),
+            _migration_section(by_kind.get(_KIND_MIGRATIONS, [])),
+            _cedar_section(by_kind.get(_KIND_CEDAR, [])),
+            _postgres_section(by_kind.get(_KIND_POSTGRES, [])),
+        )
+    )
 
     meta_html = "".join(
         f"<div><b>{escape(str(key).replace('_', ' '))}</b> {escape(str(value))}</div>"
@@ -1062,12 +1058,12 @@ def render(document: dict[str, Any], extra: list[dict[str, Any]] | None = None) 
     if not results:
         standfirst = "Hover any value for its range across runs."
     elif runs:
-        standfirst = (
-            f"Medians across {runs} merged runs. Hover any value for its range."
-        )
+        standfirst = f"Medians across {runs} merged runs. Hover any value for its range."
     else:
-        standfirst = ("A single run. Ranges are unavailable, so no result here can be "
-                      "separated from run-to-run noise.")
+        standfirst = (
+            "A single run. Ranges are unavailable, so no result here can be "
+            "separated from run-to-run noise."
+        )
     generated = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     return f"""<!doctype html>
 <html lang="en">
@@ -1106,8 +1102,6 @@ def generate_report(document: dict[str, Any], output_path: Path) -> None:
     output_path.write_text(render(document), encoding="utf-8")
 
 
-# --- CLI ------------------------------------------------------------------
-
 def _load(paths: list[Path]) -> list[dict[str, Any]]:
     documents: list[dict[str, Any]] = []
     for path in paths:
@@ -1123,8 +1117,7 @@ def _load(paths: list[Path]) -> list[dict[str, Any]]:
             if isinstance(data, dict) and classify(data) != "unknown":
                 documents.append(data)
             else:
-                print(f"skipping {file}: not a benchmark result document",
-                      file=sys.stderr)
+                print(f"skipping {file}: not a benchmark result document", file=sys.stderr)
     return documents
 
 
@@ -1139,12 +1132,20 @@ def main(argv: list[str] | None = None) -> int:
             "told from noise."
         ),
     )
-    parser.add_argument("paths", nargs="*", type=Path,
-                        help="result JSON files or directories of them; omit to "
-                             "aggregate every benchmark-results*/ directory")
+    parser.add_argument(
+        "paths",
+        nargs="*",
+        type=Path,
+        help="result JSON files or directories of them; omit to "
+        "aggregate every benchmark-results*/ directory",
+    )
     parser.add_argument("-o", "--output", type=Path, default=Path("benchmark-report.html"))
-    parser.add_argument("--open", action="store_true", dest="open_browser",
-                        help="open the report in a browser when it is written")
+    parser.add_argument(
+        "--open",
+        action="store_true",
+        dest="open_browser",
+        help="open the report in a browser when it is written",
+    )
     args = parser.parse_args(argv)
 
     paths = args.paths
@@ -1153,12 +1154,14 @@ def main(argv: list[str] | None = None) -> int:
         # directory's own runs still yield per-scenario medians and ranges.
         paths = sorted(p for p in Path.cwd().glob("benchmark-results*") if p.is_dir())
         if not paths:
-            print(f"no benchmark-results*/ directories found under {Path.cwd()}",
-                  file=sys.stderr)
+            print(f"no benchmark-results*/ directories found under {Path.cwd()}", file=sys.stderr)
             return 1
-        print(f"aggregating {len(paths)} benchmark "
-              f"{'family' if len(paths) == 1 else 'families'}: "
-              f"{', '.join(p.name for p in paths)}", file=sys.stderr)
+        print(
+            f"aggregating {len(paths)} benchmark "
+            f"{'family' if len(paths) == 1 else 'families'}: "
+            f"{', '.join(p.name for p in paths)}",
+            file=sys.stderr,
+        )
 
     documents = _load(paths)
     if not documents:
@@ -1172,11 +1175,15 @@ def main(argv: list[str] | None = None) -> int:
     args.output.write_text(render(document, extra), encoding="utf-8")
 
     kinds = sorted({classify(d) for d in documents})
-    print(f"wrote {args.output} ({len(document['results'])} rows from "
-          f"{len(rows_docs)} run(s); sections: {', '.join(kinds)})")
+    print(
+        f"wrote {args.output} ({len(document['results'])} rows from "
+        f"{len(rows_docs)} run(s); sections: {', '.join(kinds)})"
+    )
     if len(rows_docs) == 1:
-        print("note: one run only -- no ranges, so nothing here clears its own noise.",
-              file=sys.stderr)
+        print(
+            "note: one run only -- no ranges, so nothing here clears its own noise.",
+            file=sys.stderr,
+        )
     if args.open_browser:
         webbrowser.open(args.output.resolve().as_uri())
     return 0

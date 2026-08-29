@@ -1,11 +1,3 @@
-"""Parsing the profile ``wreath.xml`` does accept.
-
-The refusals live in ``test_xml_refusals.py``; this is the other half -- that a
-document inside the profile parses to the tree a caller expects, with expanded
-names in the ``{uri}local`` spelling ``xml.etree.ElementTree`` uses, so a
-caller migrating from stdlib reads the same strings.
-"""
-
 from __future__ import annotations
 
 from xml.etree import ElementTree as ET
@@ -51,12 +43,6 @@ def test_attribute_value_whitespace_is_normalized() -> None:
 
 
 def test_a_character_reference_in_an_attribute_is_not_re_normalized() -> None:
-    """``&#x9;`` survives attribute-value normalization as a real tab.
-
-    XML normalizes literal whitespace in attribute values to spaces, but a
-    character reference is not literal whitespace -- it is the escape that
-    exists precisely to survive that step.
-    """
     doc = parse(b'<r a="one&#x9;two"/>')
     assert doc.root.attrib["a"] == "one\ttwo"
 
@@ -66,9 +52,7 @@ def test_line_endings_are_normalized_to_lf() -> None:
     assert parse(b"<r>a\rb</r>").root.text == "a\nb"
 
 
-# --------------------------------------------------------------------------
 # Namespaces
-# --------------------------------------------------------------------------
 
 
 def test_default_namespace_applies_to_elements_not_attributes() -> None:
@@ -135,9 +119,7 @@ def test_namespace_declarations_are_reported_per_element() -> None:
     assert dict(doc.root.children[0].nsdeclarations) == {"q": "urn:q"}
 
 
-# --------------------------------------------------------------------------
 # Differential against the stdlib on documents both accept
-# --------------------------------------------------------------------------
 
 SHARED = [
     b"<r/>",
@@ -188,18 +170,13 @@ def test_structure_agrees_with_elementtree(source: bytes) -> None:
     [
         b"<r><!-- a comment --></r>",
         b"<r><![CDATA[raw]]></r>",
-        b'<r><?target data?></r>',
-        b'<!DOCTYPE r><r/>',
+        b"<r><?target data?></r>",
+        b"<!DOCTYPE r><r/>",
         b"\xef\xbb\xbf<r/>",
     ],
     ids=["comment", "cdata", "pi", "doctype", "bom"],
 )
 def test_the_profile_is_narrower_than_the_stdlib(source: bytes) -> None:
-    """Everything here parses under the stdlib and is refused here.
-
-    That gap is the profile. Asserting it explicitly means a later widening
-    shows up as a failing test rather than as a silently larger attack surface.
-    """
     ET.fromstring(source)  # the stdlib accepts it
     from wreath.xml import XMLRefusal
 
@@ -207,9 +184,7 @@ def test_the_profile_is_narrower_than_the_stdlib(source: bytes) -> None:
         parse(source)
 
 
-# --------------------------------------------------------------------------
 # Limits
-# --------------------------------------------------------------------------
 
 
 def test_default_limits_accept_an_ordinary_assertion() -> None:

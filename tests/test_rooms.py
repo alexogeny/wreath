@@ -1,5 +1,3 @@
-"""WebSocket rooms: local fan-out, cross-worker fan-out, and socket churn."""
-
 from __future__ import annotations
 
 from typing import Any
@@ -54,9 +52,6 @@ class _Message:
         self.payload = payload
 
 
-# --- membership --------------------------------------------------------------
-
-
 async def test_join_leave_and_counts() -> None:
     rooms = RoomRegistry()
     a, b = FakeSocket(), FakeSocket()
@@ -83,7 +78,6 @@ async def test_join_is_idempotent() -> None:
 
 
 async def test_leaving_a_room_never_joined_is_safe() -> None:
-    """So it can live in a `finally` without a guard."""
     rooms = RoomRegistry()
     await rooms.leave("nope", FakeSocket())
     await rooms.leave_all(FakeSocket())
@@ -109,9 +103,6 @@ async def test_leaving_clears_the_socket_membership_index() -> None:
     assert socket not in rooms._memberships
 
 
-# --- local broadcast ---------------------------------------------------------
-
-
 async def test_broadcast_reaches_every_member_of_that_room_only() -> None:
     rooms = RoomRegistry()
     here, also_here, elsewhere = FakeSocket(), FakeSocket(), FakeSocket()
@@ -130,7 +121,6 @@ async def test_broadcast_to_an_empty_room_is_a_no_op() -> None:
 
 
 async def test_every_member_receives_the_same_payload_object() -> None:
-    """Encoded once, shared by the room -- not rebuilt per recipient."""
     rooms = RoomRegistry()
     sockets = [FakeSocket() for _ in range(5)]
     for socket in sockets:
@@ -151,10 +141,7 @@ async def test_a_dead_socket_does_not_abort_the_broadcast_and_is_evicted() -> No
 
     assert delivered == 2
     assert good.sent == ["ping"] == also_good.sent
-    assert rooms.members("chat") == 2      # the dead one was dropped
-
-
-# --- cross-worker ------------------------------------------------------------
+    assert rooms.members("chat") == 2  # the dead one was dropped
 
 
 async def test_without_a_bus_it_is_single_process() -> None:
@@ -178,11 +165,10 @@ async def test_a_broadcast_reaches_members_on_another_worker() -> None:
     await worker_one.broadcast("chat", "hello")
 
     assert here.sent == ["hello"]
-    assert there.sent == ["hello"]          # crossed the bus
+    assert there.sent == ["hello"]  # crossed the bus
 
 
 async def test_the_publishing_worker_does_not_deliver_twice() -> None:
-    """The bus copy comes back to the publisher; it must be dropped."""
     bus = FakeBus()
     rooms = RoomRegistry(bus)
     socket = FakeSocket()
@@ -198,7 +184,7 @@ async def test_a_worker_holding_no_members_drops_the_message() -> None:
     bus_one, bus_two = FakeBus(), FakeBus()
     bus_one.peers.append(bus_two)
     worker_one = RoomRegistry(bus_one)
-    RoomRegistry(bus_two)                    # subscribed, but empty
+    RoomRegistry(bus_two)  # subscribed, but empty
 
     await worker_one.join("chat", FakeSocket())
     await worker_one.broadcast("chat", "hi")  # must not raise
@@ -217,7 +203,6 @@ async def test_bytes_payloads_survive_the_bus_round_trip() -> None:
 
 
 async def test_binary_payloads_survive_the_bus_round_trip() -> None:
-    """Bytes that are not UTF-8 cross the bus unchanged rather than raising."""
     bus_one, bus_two = FakeBus(), FakeBus()
     bus_one.peers.append(bus_two)
     worker_one, worker_two = RoomRegistry(bus_one), RoomRegistry(bus_two)
@@ -234,7 +219,6 @@ async def test_binary_payloads_survive_the_bus_round_trip() -> None:
 
 
 async def test_a_binary_broadcast_publishes_a_json_safe_payload() -> None:
-    """The bus payload must survive `_json.dumps`; raw bytes would not."""
     from wreath._json import dumps, loads
 
     bus = FakeBus()
@@ -246,7 +230,6 @@ async def test_a_binary_broadcast_publishes_a_json_safe_payload() -> None:
 
 
 async def test_a_binary_broadcast_never_half_delivers() -> None:
-    """A payload the bus cannot carry is refused before any socket is sent to."""
     class RefusingBus(FakeBus):
         async def publish(self, channel, payload, **kwargs):
             raise RuntimeError("bus down")
@@ -269,9 +252,7 @@ async def test_an_unknown_bus_encoding_is_dropped() -> None:
     socket = FakeSocket()
     await rooms.join("chat", socket)
 
-    await rooms._apply(
-        {"room": "chat", "data": "hi", "binary": True, "encoding": "rot13"}
-    )
+    await rooms._apply({"room": "chat", "data": "hi", "binary": True, "encoding": "rot13"})
     assert socket.sent == []
 
 
@@ -288,7 +269,6 @@ async def test_undecodable_base64_from_the_bus_is_dropped() -> None:
 
 
 async def test_the_registry_subscribes_once_to_one_channel() -> None:
-    """One LISTEN regardless of room count -- rooms are filtered locally."""
     bus = FakeBus()
     rooms = RoomRegistry(bus)
     for index in range(50):
@@ -312,7 +292,6 @@ async def test_registries_on_separate_channels_do_not_cross_talk() -> None:
 
 
 async def test_a_malformed_bus_payload_is_ignored() -> None:
-    """The channel is shared; anything else on it must not crash the worker."""
     bus = FakeBus()
     rooms = RoomRegistry(bus)
     socket = FakeSocket()

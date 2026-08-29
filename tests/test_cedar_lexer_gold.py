@@ -1,5 +1,3 @@
-"""Cedar string escapes retain their distinct parse contracts."""
-
 from __future__ import annotations
 
 import pytest
@@ -8,9 +6,7 @@ from wreath.authorization import CedarParseError, CedarPolicies, EntityUid
 
 
 def test_braced_unicode_escape_is_decoded_before_evaluation() -> None:
-    policies = CedarPolicies(
-        r'permit(principal, action, resource) when { "\u{61}" == "a" };'
-    )
+    policies = CedarPolicies(r'permit(principal, action, resource) when { "\u{61}" == "a" };')
 
     decision = policies.is_authorized(
         principal=EntityUid("User", "alice"),

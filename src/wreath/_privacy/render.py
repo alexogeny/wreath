@@ -53,8 +53,7 @@ def _actions(plan: ErasurePlan, lines: list[str]) -> None:
     for action in plan.tables:
         match = f" where {action.match_column} = <subject>" if action.match_column else ""
         lines.append(
-            f"  {action.order + 1:>3}. {action.schema}.{action.table}"
-            f"  [{action.disposal}]{match}"
+            f"  {action.order + 1:>3}. {action.schema}.{action.table}  [{action.disposal}]{match}"
         )
         lines.append(f"       reached: {action.reach.explain()}")
         if action.reason:
@@ -105,10 +104,7 @@ def _findings(plan: ErasurePlan, lines: list[str]) -> None:
     if not plan.surviving_references:
         lines.append("  none: nothing this erasure keeps still points at what it deletes.")
     for reference in plan.surviving_references:
-        lines.append(
-            f"  {reference.edge.explain()}  ON DELETE "
-            f"{_action(reference.edge.on_delete)}"
-        )
+        lines.append(f"  {reference.edge.explain()}  ON DELETE {_action(reference.edge.on_delete)}")
         lines.append(f"       {reference.detail}")
 
 

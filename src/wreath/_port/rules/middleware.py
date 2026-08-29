@@ -7,7 +7,6 @@ from __future__ import annotations
 from ..ir import NEEDS_REVIEW, TRANSLATED
 
 MIDDLEWARE: dict[str, tuple[str, str, str, str]] = {
-    # -- middleware / lifespan / infra (not floor-checked) --------------------
     "mw.cors": (
         "middleware",
         "other",

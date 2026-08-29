@@ -158,7 +158,10 @@ def changed_lines(repo: Path, ref: str) -> dict[str, set[int]]:
         try:
             completed = subprocess.run(
                 ["git", "-C", str(repo), *args],
-                capture_output=True, text=True, check=False, timeout=60,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
             )
         except (OSError, subprocess.SubprocessError) as error:
             raise ChangedUnavailable(f"could not run git: {error}") from error
@@ -180,9 +183,7 @@ def changed_lines(repo: Path, ref: str) -> dict[str, set[int]]:
             start, _, count = span.partition(",")
             length = int(count) if count else 1
             if length:
-                lines.setdefault(current, set()).update(
-                    range(int(start), int(start) + length)
-                )
+                lines.setdefault(current, set()).update(range(int(start), int(start) + length))
     for path in git("ls-files", "--others", "--exclude-standard").splitlines():
         if path.endswith(".py"):
             lines[path] = set(range(1, 1_000_000))
@@ -207,8 +208,7 @@ def build_plan(
     only_pattern = re.compile("|".join(map(re.escape, only))) if only else None
     if selected_ids is not None:
         selected_paths = {
-            identifier.split("@", 1)[1].rpartition(":")[0]
-            for identifier in selected_ids
+            identifier.split("@", 1)[1].rpartition(":")[0] for identifier in selected_ids
         }
     for path in discover(roots):
         name = module_name_for(path)
@@ -262,9 +262,7 @@ def build_plan(
             plan.errors.append((name, f"not importable: {type(error).__name__}: {error}"))
             continue
         for candidate, identifier in selected:
-            mutation = _build(
-                candidate, tree, name, relative, str(path), identifier
-            )
+            mutation = _build(candidate, tree, name, relative, str(path), identifier)
             if isinstance(mutation, str):
                 plan.errors.append((identifier, mutation))
                 continue
@@ -310,7 +308,7 @@ def sample_identifiers(
             continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        except (OSError, SyntaxError, ValueError):
+        except OSError, SyntaxError, ValueError:
             # The selected build pass reports errors for selected sources. A
             # file that cannot yield identifiers cannot enter the sample.
             continue
@@ -345,10 +343,7 @@ def watch_selected_identifiers(
     seen: dict[str, int] = {}
     watched: dict[str, set[int]] = {}
     whole_file: set[str] = set()
-    selected_paths = {
-        identifier.split("@", 1)[1].rpartition(":")[0]
-        for identifier in selected_ids
-    }
+    selected_paths = {identifier.split("@", 1)[1].rpartition(":")[0] for identifier in selected_ids}
     for path in discover(roots):
         name = module_name_for(path)
         if name is None or name.startswith("wreath._mutant"):
@@ -358,7 +353,7 @@ def watch_selected_identifiers(
             continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        except (OSError, SyntaxError, ValueError):
+        except OSError, SyntaxError, ValueError:
             continue
         tag(tree)
         for candidate in scan(tree, name):
@@ -428,7 +423,6 @@ def _build(
     return Mutation(identifier, candidate.operator, candidate.control, site, module, patch)
 
 
-# ---------------------------------------------------------------------------
 # running
 
 
@@ -507,9 +501,7 @@ def run_baseline(
             payload = {
                 "passed": sorted(outcomes.passed),
                 "failed": sorted(outcomes.failed),
-                "hits": [
-                    [f"{path}:{line}", list(nodes)] for (path, line), nodes in index.items()
-                ],
+                "hits": [[f"{path}:{line}", list(nodes)] for (path, line), nodes in index.items()],
                 "files": {path: sorted(nodes) for path, nodes in per_file.items()},
                 "code": code,
             }
@@ -580,9 +572,7 @@ def run_native_baseline(
             finally:
                 tracer.stop()
             index = tracer.index()
-            per_file: dict[str, set[str]] = {
-                path: set() for path in plan.whole_file
-            }
+            per_file: dict[str, set[str]] = {path: set() for path in plan.whole_file}
             for (path, _line), nodes in index.items():
                 bucket = per_file.get(path)
                 if bucket is not None:
@@ -591,9 +581,7 @@ def run_native_baseline(
                 json.dumps(
                     {
                         "passed": sorted(
-                            result.node_id
-                            for result in results
-                            if result.outcome == "passed"
+                            result.node_id for result in results if result.outcome == "passed"
                         ),
                         "failed": [
                             result.node_id
@@ -601,12 +589,9 @@ def run_native_baseline(
                             if result.outcome in {"failed", "interrupted"}
                         ],
                         "hits": [
-                            [f"{path}:{line}", list(nodes)]
-                            for (path, line), nodes in index.items()
+                            [f"{path}:{line}", list(nodes)] for (path, line), nodes in index.items()
                         ],
-                        "files": {
-                            path: sorted(nodes) for path, nodes in per_file.items()
-                        },
+                        "files": {path: sorted(nodes) for path, nodes in per_file.items()},
                     }
                 ),
                 encoding="utf-8",
@@ -615,9 +600,7 @@ def run_native_baseline(
             os._exit(0)
     os.waitpid(pid, 0)
     if not target.exists():
-        raise RuntimeError(
-            "the native baseline produced no result; the suite may have crashed"
-        )
+        raise RuntimeError("the native baseline produced no result; the suite may have crashed")
     payload = json.loads(target.read_text(encoding="utf-8"))
     target.unlink(missing_ok=True)
     index: dict[tuple[str, int], tuple[str, ...]] = {}
@@ -661,20 +644,14 @@ def combine_native_collections(collections: Sequence[Any]) -> Any:
     """Join operation-owned case images without importing their modules again."""
     from wreath._native_test_runner import Collection
 
-    cases = tuple(
-        itertools.chain.from_iterable(collection.cases for collection in collections)
-    )
+    cases = tuple(itertools.chain.from_iterable(collection.cases for collection in collections))
     modules = tuple(
         dict.fromkeys(
-            itertools.chain.from_iterable(
-                collection.modules for collection in collections
-            )
+            itertools.chain.from_iterable(collection.modules for collection in collections)
         )
     )
     files = tuple(
-        dict.fromkeys(
-            itertools.chain.from_iterable(collection.files for collection in collections)
-        )
+        dict.fromkeys(itertools.chain.from_iterable(collection.files for collection in collections))
     )
     index: dict[str, Any] = {}
     for collection in collections:
@@ -696,9 +673,7 @@ def unique_native_collections(collections: Iterable[Any]) -> tuple[Any, ...]:
     return tuple(unique)
 
 
-def pooled_native_collection(
-    files: Sequence[str], pool: dict[str, Any]
-) -> Any:
+def pooled_native_collection(files: Sequence[str], pool: dict[str, Any]) -> Any:
     """Compile only files absent from this operation's native case-image pool."""
     missing = tuple(path for path in files if path not in pool)
     if missing:
@@ -791,12 +766,32 @@ def _wait_for_mutants(
         time.sleep(min(delay, 0.002))
 
 
-_PROBE_NOISE = frozenset({
-    "always", "branch", "choice", "clause", "compound", "condition",
-    "control", "else", "fires", "from", "guarded", "into", "never",
-    "operand", "statement", "take", "than", "that", "then", "this",
-    "when", "with",
-})
+_PROBE_NOISE = frozenset(
+    {
+        "always",
+        "branch",
+        "choice",
+        "clause",
+        "compound",
+        "condition",
+        "control",
+        "else",
+        "fires",
+        "from",
+        "guarded",
+        "into",
+        "never",
+        "operand",
+        "statement",
+        "take",
+        "than",
+        "that",
+        "then",
+        "this",
+        "when",
+        "with",
+    }
+)
 
 
 def _focused_probe(mutation: Mutation, tests: Sequence[str]) -> tuple[str, ...]:
@@ -809,17 +804,17 @@ def _focused_probe(mutation: Mutation, tests: Sequence[str]) -> tuple[str, ...]:
     """
     if len(tests) < 2:
         return ()
+
     def words(value: str) -> set[str]:
         separated = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", value).replace("_", " ")
         return {
-            term for term in re.findall(r"[a-z0-9]+", separated.lower())
+            term
+            for term in re.findall(r"[a-z0-9]+", separated.lower())
             if len(term) >= 3 and term not in _PROBE_NOISE
         }
 
     control_terms = words(mutation.control)
-    context_terms = words(
-        f"{mutation.site.scope} {Path(mutation.site.path).stem}"
-    )
+    context_terms = words(f"{mutation.site.scope} {Path(mutation.site.path).stem}")
     scored: list[tuple[int, int, str]] = []
     for nodeid in tests:
         node_terms = words(nodeid)
@@ -885,9 +880,7 @@ def start_mutant(
                     tests,
                     max_failures=maxfail,
                 )
-                failed = sorted(
-                    result.node_id for result in results if result.outcome == "failed"
-                )
+                failed = sorted(result.node_id for result in results if result.outcome == "failed")
                 _write_mutant_payload(
                     target,
                     write_fd,
@@ -910,9 +903,7 @@ def start_mutant(
             ran = 0
             probe = _focused_probe(mutation, tests)
             if probe:
-                code = int(
-                    pytest.main(_pytest_argv(probe, child_extra), plugins=[recorder])
-                )
+                code = int(pytest.main(_pytest_argv(probe, child_extra), plugins=[recorder]))
                 ran += len(recorder.passed | recorder.failed)
             else:
                 code = 0
@@ -920,9 +911,7 @@ def start_mutant(
                 # A focused pass proves only that one candidate did not object.
                 # Run the untouched full set to decide the verdict.
                 recorder = OutcomeRecorder()
-                code = int(
-                    pytest.main(_pytest_argv(tests, child_extra), plugins=[recorder])
-                )
+                code = int(pytest.main(_pytest_argv(tests, child_extra), plugins=[recorder]))
                 ran += len(recorder.passed | recorder.failed)
             _write_mutant_payload(
                 target,
@@ -942,7 +931,7 @@ def start_mutant(
         os.close(write_fd)
     try:
         pid_fd = os.pidfd_open(pid)
-    except (AttributeError, OSError):
+    except AttributeError, OSError:
         pid_fd = None
     return RunningMutant(
         pid=pid,
@@ -995,8 +984,12 @@ def poll_mutant(
         signalled = os.WIFSIGNALED(status)
         note = "the child died before reporting"
         if signalled:
-            return (Outcome.KILLED, (), elapsed,
-                    f"the interpreter took signal {os.WTERMSIG(status)} with the control removed")
+            return (
+                Outcome.KILLED,
+                (),
+                elapsed,
+                f"the interpreter took signal {os.WTERMSIG(status)} with the control removed",
+            )
         return (Outcome.ERROR, (), elapsed, note)
     payload = json.loads(encoded)
     TESTS_RUN.append(int(payload.get("ran", 0)))
@@ -1006,8 +999,12 @@ def poll_mutant(
     if failed:
         return (Outcome.KILLED, failed, elapsed, "")
     if payload["code"] not in (0, 5):
-        return (Outcome.KILLED, (), elapsed,
-                f"pytest exited {payload['code']} with the control removed")
+        return (
+            Outcome.KILLED,
+            (),
+            elapsed,
+            f"pytest exited {payload['code']} with the control removed",
+        )
     return (Outcome.SURVIVED, (), elapsed, "")
 
 
@@ -1040,9 +1037,7 @@ def run_mutant(
         _wait_for_mutants((running,))
 
 
-def _live_trace_events(
-    directory: Path, positions: dict[Path, int]
-) -> list[dict[str, object]]:
+def _live_trace_events(directory: Path, positions: dict[Path, int]) -> list[dict[str, object]]:
     events: list[dict[str, object]] = []
     for path in sorted(directory.glob("live-*.jsonl")):
         try:
@@ -1215,9 +1210,7 @@ def _run_live_mutants(
                 if native_engine:
                     test_file = nodeid.split("::", 1)[0]
                     if live_collections.get(test_file) is None:
-                        live_collections[test_file] = prepare_native_collection(
-                            (test_file,)
-                        )
+                        live_collections[test_file] = prepare_native_collection((test_file,))
                 candidates: dict[int, Mutation] = {}
                 for hit in hits:
                     if not isinstance(hit, list) or len(hit) != 2:
@@ -1423,9 +1416,7 @@ def execute(
         warm_targets = tests
         if baseline is not None:
             nodes = baseline.passed | frozenset(baseline.failed)
-            warm_targets = tuple(
-                sorted({node.split("::", 1)[0] for node in nodes})
-            )
+            warm_targets = tuple(sorted({node.split("::", 1)[0] for node in nodes}))
         with contextlib.redirect_stdout(io.StringIO()):
             pytest.main([*_PYTEST_BASE, "--collect-only", *extra, *warm_targets])
     if test_engine == "native":
@@ -1439,11 +1430,7 @@ def execute(
             native_collection = prepare_native_collection(tests)
 
     live_verdicts: dict[int, Verdict] = {}
-    if (
-        baseline is None
-        and baseline_wait is not None
-        and baseline_stream is not None
-    ):
+    if baseline is None and baseline_wait is not None and baseline_stream is not None:
         (
             live_verdicts,
             report.live_probes,
@@ -1461,18 +1448,14 @@ def execute(
             maxfail=maxfail,
             jobs=jobs,
             reclaim_jobs=(
-                max(jobs, min(suite_workers, os.cpu_count() or 1))
-                if reclaim_workers
-                else jobs
+                max(jobs, min(suite_workers, os.cpu_count() or 1)) if reclaim_workers else jobs
             ),
             progressive=reclaim_workers,
             origin=started,
             emit=emit,
             native_collection=native_collection,
             native_engine=test_engine == "native",
-            native_collections=(
-                live_native_collections if test_engine == "native" else None
-            ),
+            native_collections=(live_native_collections if test_engine == "native" else None),
         )
         report.live_kills = len(live_verdicts)
     if baseline is None and baseline_wait is not None:
@@ -1509,9 +1492,7 @@ def execute(
     # at its seal, so charging them against this deadline only suppresses free
     # overlap. The explicit budget is the additional post-suite tail ceiling.
     remaining_budget = budget
-    mutation_deadline = (
-        time.perf_counter() + remaining_budget if budget else None
-    )
+    mutation_deadline = time.perf_counter() + remaining_budget if budget else None
     verdicts: dict[int, Verdict] = dict(live_verdicts)
     runnable: list[tuple[int, Mutation, tuple[str, ...]]] = []
     for ordinal, mutation in enumerate(plan.mutations):
@@ -1550,17 +1531,8 @@ def execute(
     # original ordinal still owns the report/grid tile; only launch order moves.
     runnable.sort(key=lambda item: (len(item[2]), item[0]))
     if test_engine == "native" and runnable and native_collection is None:
-        selected_nodes = itertools.chain.from_iterable(
-            item[2] for item in runnable
-        )
-        candidate_files = tuple(
-            sorted(
-                {
-                    node_id.split("::", 1)[0]
-                    for node_id in selected_nodes
-                }
-            )
-        )
+        selected_nodes = itertools.chain.from_iterable(item[2] for item in runnable)
+        candidate_files = tuple(sorted({node_id.split("::", 1)[0] for node_id in selected_nodes}))
         native_collection = pooled_native_collection(
             candidate_files,
             live_native_collections,
@@ -1575,9 +1547,7 @@ def execute(
     if reclaim_workers:
         scheduler_jobs = max(jobs, min(suite_workers, os.cpu_count() or 1))
 
-    active: dict[
-        int, tuple[RunningMutant, Mutation, tuple[str, ...]]
-    ] = {}
+    active: dict[int, tuple[RunningMutant, Mutation, tuple[str, ...]]] = {}
     next_runnable = 0
     while next_runnable < len(runnable) or active:
         while next_runnable < len(runnable) and len(active) < scheduler_jobs:
@@ -1650,9 +1620,7 @@ def execute(
         if active and not completed:
             _wait_for_mutants(tuple(item[0] for item in active.values()))
 
-    report.verdicts.extend(
-        verdicts[ordinal] for ordinal in range(len(plan.mutations))
-    )
+    report.verdicts.extend(verdicts[ordinal] for ordinal in range(len(plan.mutations)))
 
     for identifier, reason in plan.errors:
         report.verdicts.append(

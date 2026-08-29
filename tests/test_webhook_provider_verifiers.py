@@ -23,9 +23,7 @@ BODY = dumps({"id": "evt_1", "type": "invoice.paid", "api_version": "2026-08"})
 
 def test_standard_webhooks_profile() -> None:
     secret = b"standard-secret"
-    signature = base64.b64encode(
-        hmac.digest(secret, b"evt_1." + SECONDS + b"." + BODY, "sha256")
-    )
+    signature = base64.b64encode(hmac.digest(secret, b"evt_1." + SECONDS + b"." + BODY, "sha256"))
     verifier = StandardWebhookVerifier(secret)
     assert isinstance(verifier, WebhookVerifier)
     result = verifier.verify(
@@ -37,16 +35,12 @@ def test_standard_webhooks_profile() -> None:
         },
         now=NOW,
     )
-    assert (result.id, result.type, result.version) == (
-        "evt_1", "invoice.paid", "2026-08"
-    )
+    assert (result.id, result.type, result.version) == ("evt_1", "invoice.paid", "2026-08")
 
 
 def test_stripe_profile() -> None:
     secret = b"whsec_test"
-    signature = hmac.new(
-        secret, SECONDS + b"." + BODY, hashlib.sha256
-    ).hexdigest().encode("ascii")
+    signature = hmac.new(secret, SECONDS + b"." + BODY, hashlib.sha256).hexdigest().encode("ascii")
     result = StripeWebhookVerifier(secret).verify(
         body=BODY,
         headers={b"Stripe-Signature": b"t=" + SECONDS + b",v1=" + signature},
@@ -56,7 +50,6 @@ def test_stripe_profile() -> None:
 
 
 def test_standard_signature_rotation_hashes_each_secret_once(monkeypatch) -> None:
-    """Many supplied signatures must not multiply body HMAC work."""
     secrets = tuple(f"secret-{index}".encode() for index in range(8))
     signed = b"evt_1." + SECONDS + b"." + BODY
     wanted = hmac.digest(secrets[-1], signed, "sha256")
@@ -84,14 +77,11 @@ def test_standard_signature_rotation_hashes_each_secret_once(monkeypatch) -> Non
 
 
 def test_stripe_signature_rotation_hashes_each_secret_once(monkeypatch) -> None:
-    """Stripe's multiple v1 values must be indexed, not cross-multiplied."""
     secrets = tuple(f"secret-{index}".encode() for index in range(8))
     signed = SECONDS + b"." + BODY
     wanted = hmac.new(secrets[-1], signed, hashlib.sha256).hexdigest().encode()
     signatures = [f"{index:064x}".encode() for index in range(32)] + [wanted]
-    header = b"t=" + SECONDS + b"," + b",".join(
-        b"v1=" + value for value in signatures
-    )
+    header = b"t=" + SECONDS + b"," + b",".join(b"v1=" + value for value in signatures)
     original = webhook_module.hmac.new
     calls = 0
 
@@ -127,26 +117,18 @@ def test_standard_webhooks_refuses_an_empty_secret_collection() -> None:
         ),
         (
             StripeWebhookVerifier(b"stripe-secret"),
-            {
-                b"stripe-signature": (
-                    b"t=999999999999999999999999,v1=not-a-signature"
-                )
-            },
+            {b"stripe-signature": (b"t=999999999999999999999999,v1=not-a-signature")},
         ),
     ),
 )
-def test_provider_profiles_normalize_out_of_range_timestamps(
-    verifier, headers
-) -> None:
+def test_provider_profiles_normalize_out_of_range_timestamps(verifier, headers) -> None:
     with pytest.raises(ValueError, match="invalid webhook Unix timestamp"):
         verifier.verify(body=BODY, headers=headers, now=NOW)
 
 
 def test_github_profile_uses_delivery_and_event_headers() -> None:
     secret = b"github-secret"
-    signature = b"sha256=" + hmac.new(
-        secret, BODY, hashlib.sha256
-    ).hexdigest().encode("ascii")
+    signature = b"sha256=" + hmac.new(secret, BODY, hashlib.sha256).hexdigest().encode("ascii")
     result = GitHubWebhookVerifier(secret).verify(
         body=BODY,
         headers={

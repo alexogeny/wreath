@@ -1,5 +1,3 @@
-"""The write-path validation seam: a body is proven once, by its columns."""
-
 from __future__ import annotations
 
 import datetime
@@ -147,8 +145,6 @@ def test_an_unmapped_class_cannot_validate_a_body() -> None:
     with pytest.raises(TypeError, match="not a mapped model"):
         compile_model_validator(Model)
 
-
-# -- through a route -----------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_a_model_body_binds_validated_and_persists(

@@ -1,11 +1,3 @@
-"""Refusals that fire where the pass is declared, not at three in the morning.
-
-Each of these is a bug the declaration can see: a chunk that cannot fit inside a
-shift, a shift that cannot fit inside a lease, a key the work itself moves, a
-callback nobody has claimed is safe to run twice. Raising at import time costs a
-failed start; the same bug raising during a walk costs a table.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -40,9 +32,6 @@ def declare(**overrides):
     }
     options.update(overrides)
     return ChunkedPass(name, **options)
-
-
-# --- the time chain -----------------------------------------------------------
 
 
 def test_a_chunk_budget_must_fit_inside_a_shift():
@@ -120,9 +109,6 @@ def test_duration_parser_distinguishes_bool_unitless_text_and_permitted_zero():
     assert seconds(0, what="frontier", allow_zero=True) == 0.0
 
 
-# --- the work and the key -----------------------------------------------------
-
-
 def test_a_pass_refuses_to_walk_by_a_column_its_own_work_rewrites():
     # A key the work changes moves rows past the cursor, so they are processed
     # twice or never -- and the counters still add up either way.
@@ -182,9 +168,6 @@ def test_a_declared_callback_is_accepted():
 def test_apply_needs_something_callable():
     with pytest.raises(PassDeclarationError, match="async callable"):
         Apply("not a function", idempotent=Declared("because"))
-
-
-# --- the declaration's own shape ----------------------------------------------
 
 
 def test_a_table_name_must_be_a_plain_identifier():
@@ -255,9 +238,6 @@ def test_the_pacing_policy_says_why_it_is_holding_the_pass_back():
     # A paced pass that does not say it is paced is indistinguishable from a
     # broken one, so the reason is written to the ledger rather than inferred.
     assert DutyCycle(0.25).reason == "duty cycle 0.25"
-
-
-# --- the frontier -------------------------------------------------------------
 
 
 def test_a_fixed_ceiling_over_an_unordered_key_is_refused_at_declaration():

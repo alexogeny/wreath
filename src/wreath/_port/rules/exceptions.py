@@ -7,7 +7,6 @@ from __future__ import annotations
 from ..ir import NEEDS_REVIEW, TRANSLATED
 
 EXCEPTIONS: dict[str, tuple[str, str, str, str]] = {
-    # -- exceptions -----------------------------------------------------------
     "exc.http_literal": (
         "httpexception",
         "exceptions",
@@ -35,7 +34,6 @@ EXCEPTIONS: dict[str, tuple[str, str, str, str]] = {
 }
 
 RESPONSES: dict[str, tuple[str, str, str, str]] = {
-    # -- responses ------------------------------------------------------------
     "resp.class": (
         "response",
         "other",

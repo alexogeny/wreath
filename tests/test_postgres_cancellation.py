@@ -1,25 +1,3 @@
-"""Cancelling the awaiting task stops the PostgreSQL backend, not just the await.
-
-A cancelled Python task does not, by itself, cancel a running server-side query:
-the backend keeps scanning until it tries to write to a socket nobody is reading.
-Stopping it needs a wire-level `CancelRequest` on a *second* connection, carrying
-the backend PID and secret key from the startup handshake. `Connection` sends
-one, and these tests hold it to that from outside — `pg_stat_activity`, observed
-over an independent connection, is the evidence. Asserting that our own `await`
-raised `CancelledError` would prove only that asyncio works.
-
-Both drivers share this path rather than twinning it: the native `Connection`
-subclasses the Python one, so `_cancel_operation` and `_send_cancel_request` are
-one implementation, exercised here under whichever backend is selected.
-
-**This file covers layers 2-4 of the cancellation chain and deliberately not
-layer 1.** A client disconnect does not currently cancel the handler task -- the
-server queues `http.disconnect` for a handler that is not awaiting `receive()`
--- so nothing upstream generates the `CancelledError` these tests inject by hand.
-See `.plans/14-cancellation-into-storage.md`; when that lands, its own test
-belongs with the server, and this file keeps guarding the half beneath it.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -52,9 +30,7 @@ async def pair():
 
 
 async def _backend_state(observer, pid: int) -> str | None:
-    return await observer.fetchval(
-        "SELECT state FROM pg_stat_activity WHERE pid = $1", pid
-    )
+    return await observer.fetchval("SELECT state FROM pg_stat_activity WHERE pid = $1", pid)
 
 
 async def _settle(observer, pid: int, *, want: str) -> str | None:
@@ -69,7 +45,6 @@ async def _settle(observer, pid: int, *, want: str) -> str | None:
 
 
 async def test_cancelling_the_await_stops_the_backend(pair):
-    """The server-side query ends, observed from another connection."""
     victim, observer = pair
     pid = await victim.fetchval("SELECT pg_backend_pid()")
 
@@ -87,12 +62,6 @@ async def test_cancelling_the_await_stops_the_backend(pair):
 
 
 async def test_an_uncancelled_query_keeps_running(pair):
-    """The control. Without this, the test above could pass vacuously.
-
-    If `pg_sleep` were somehow not running by the time we look, or the state
-    column read `idle` for an unrelated reason, the assertion above would be
-    satisfied by a backend that was never cancelled at all.
-    """
     victim, observer = pair
     pid = await victim.fetchval("SELECT pg_backend_pid()")
 
@@ -111,7 +80,6 @@ async def test_an_uncancelled_query_keeps_running(pair):
 
 
 async def test_the_connection_survives_a_cancelled_query(pair):
-    """A poisoned connection returned to a pool is worse than a wasted scan."""
     victim, observer = pair
     pid = await victim.fetchval("SELECT pg_backend_pid()")
 
@@ -129,7 +97,6 @@ async def test_the_connection_survives_a_cancelled_query(pair):
 
 
 async def test_a_cancelled_query_leaves_the_transaction_clean(pair):
-    """`idle in transaction` after a cancel is a held-open snapshot."""
     victim, observer = pair
     pid = await victim.fetchval("SELECT pg_backend_pid()")
 

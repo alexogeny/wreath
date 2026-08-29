@@ -10,10 +10,7 @@ backs every `call_later` deadline with the native hashed timing wheel from
 The loop stays a strict `asyncio` loop, so `await` of anything works. The
 wheel path trades sub-millisecond timer precision for O(1) deadline churn, which
 is the right trade for keep-alive/request timeouts; it is opt-in and off in the
-default loop so general asyncio-timer semantics are preserved. The full story and
-the measurement behind the wheel choice are in
-docs/explorations/the-timer-that-wouldnt-settle.md.
-
+default loop so general asyncio-timer semantics are preserved.
 
 Stage 0 lands the loop core and the headline novel technique: **inline-drive**.
 A request coroutine that completes without ever suspending is driven straight to
@@ -33,6 +30,7 @@ The loop is a `SelectorEventLoop` subclass so that every third-party `await`
 one; the C poller, timing wheel, and protocol→coroutine fusion replace internals
 in later stages behind the same observable contract (see tests/reactor/).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -134,9 +132,7 @@ def metal_tls_client_context(
         A context usable anywhere an `ssl.SSLContext` is.
     """
     if _wheel_ext is None or not hasattr(_wheel_ext, "TLSClientContext"):
-        raise RuntimeError(
-            "native TLS needs 'wreath[linux]'; the metal tier is Linux-only"
-        )
+        raise RuntimeError("native TLS needs 'wreath[linux]'; the metal tier is Linux-only")
     context = _MetalTLSContext(ssl.PROTOCOL_TLS_CLIENT)
     if verify:
         if cafile is not None or capath is not None:
@@ -148,7 +144,8 @@ def metal_tls_client_context(
         context.verify_mode = ssl.CERT_NONE
     context.set_alpn_protocols(list(alpn))
     context.metal = _wheel_ext.TLSClientContext(
-        cafile=cafile, capath=capath, verify=verify, alpn=list(alpn))
+        cafile=cafile, capath=capath, verify=verify, alpn=list(alpn)
+    )
     return context
 
 
@@ -194,15 +191,15 @@ def metal_tls_context(
             connection is the failure this tree refuses everywhere else.
     """
     if _wheel_ext is None or not hasattr(_wheel_ext, "TLSContext"):
-        raise RuntimeError(
-            "native TLS needs 'wreath[linux]'; the metal tier is Linux-only"
-        )
+        raise RuntimeError("native TLS needs 'wreath[linux]'; the metal tier is Linux-only")
     context = _MetalTLSContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(certfile, keyfile, password)
     context.set_alpn_protocols(list(alpn))
     context.metal = _wheel_ext.TLSContext(
-        certfile=str(certfile), keyfile=str(keyfile),
-        password=password, alpn=list(alpn),
+        certfile=str(certfile),
+        keyfile=str(keyfile),
+        password=password,
+        alpn=list(alpn),
     )
     return context
 
@@ -260,21 +257,30 @@ class _LoopCollector:
     only when this collector is the one that froze.
     """
 
-    __slots__ = ("_poller", "_previous_threshold", "_frozen", "_threshold",
-                 "_idle_seconds", "_full_idle_seconds", "_freeze_enabled",
-                 "_min_interval_seconds")
+    __slots__ = (
+        "_poller",
+        "_previous_threshold",
+        "_frozen",
+        "_threshold",
+        "_idle_seconds",
+        "_full_idle_seconds",
+        "_freeze_enabled",
+        "_min_interval_seconds",
+    )
 
-    def __init__(self, *, threshold: int = _GC_THRESHOLD,
-                 idle_seconds: float = _GC_IDLE_SECONDS,
-                 full_idle_seconds: float = _GC_FULL_IDLE_SECONDS,
-                 min_interval_seconds: float = _GC_MIN_INTERVAL_SECONDS,
-                 freeze_enabled: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        threshold: int = _GC_THRESHOLD,
+        idle_seconds: float = _GC_IDLE_SECONDS,
+        full_idle_seconds: float = _GC_FULL_IDLE_SECONDS,
+        min_interval_seconds: float = _GC_MIN_INTERVAL_SECONDS,
+        freeze_enabled: bool = True,
+    ) -> None:
         if threshold < 1:
             raise ValueError("gc threshold must be positive")
         if not idle_seconds > 0.0 or full_idle_seconds < idle_seconds:
-            raise ValueError(
-                "idle_seconds must be positive and no greater than "
-                "full_idle_seconds")
+            raise ValueError("idle_seconds must be positive and no greater than full_idle_seconds")
         if min_interval_seconds < 0.0:
             raise ValueError("min_interval_seconds must not be negative")
         self._threshold = threshold
@@ -293,8 +299,8 @@ class _LoopCollector:
             gc.set_threshold(self._threshold, *self._previous_threshold[1:])
         self._poller = poller
         poller._set_gc_collector(
-            gc.collect, self._idle_seconds, self._full_idle_seconds,
-            self._min_interval_seconds)
+            gc.collect, self._idle_seconds, self._full_idle_seconds, self._min_interval_seconds
+        )
 
     def freeze(self) -> int:
         """Collect once, then move everything still alive out of the collector's reach.
@@ -329,11 +335,9 @@ class _LoopCollector:
         return {
             "threshold": gc.get_threshold()[0],
             "frozen_objects": self._frozen,
-            "idle_young_collections": getattr(
-                poller, "gc_young_collections", 0),
+            "idle_young_collections": getattr(poller, "gc_young_collections", 0),
             "idle_full_collections": getattr(poller, "gc_full_collections", 0),
-            "idle_collect_nanoseconds": getattr(
-                poller, "gc_collect_nanoseconds", 0),
+            "idle_collect_nanoseconds": getattr(poller, "gc_collect_nanoseconds", 0),
         }
 
 
@@ -381,7 +385,6 @@ class WreathTask(asyncio.Future):
             loop.call_soon(self.__step, context=self._context)
             loop._reactor_stats["tasks_promoted"] += 1
 
-    # -- introspection parity with asyncio.Task -----------------------------
     def get_coro(self):
         return self._coro
 
@@ -397,7 +400,6 @@ class WreathTask(asyncio.Future):
     def __repr__(self):
         return f"<WreathTask name={self._name!r} state={self._state}>"
 
-    # -- cancellation -------------------------------------------------------
     def cancel(self, msg=None):
         self._num_cancels_requested += 1
         if self.done():
@@ -417,7 +419,6 @@ class WreathTask(asyncio.Future):
             self._num_cancels_requested -= 1
         return self._num_cancels_requested
 
-    # -- the driver ---------------------------------------------------------
     def _drive_first_step_inline(self):
         loop = self._loop
         outer = asyncio.current_task(loop)
@@ -612,14 +613,26 @@ class EventLoop(_LoopBase):
     opt-in rather than the default.
     """
 
-    def __init__(self, selector=None, *, backend: str = "epoll",
-                 timers: str = "heap", tasks: str = "inline", stats: bool = True,
-                 native_transport: bool = False, native_loop: bool = False,
-                 direct_task_steps: bool = True, worker_id: int = 0,
-                 reuse_port: bool = False, adaptive_polling: bool = True,
-                 diagnostics: bool = True, wheel_slots: int = 4096,
-                 wheel_resolution: float = 0.001, gc_mode: str = "stock",
-                 gc_freeze: bool = True):
+    def __init__(
+        self,
+        selector=None,
+        *,
+        backend: str = "epoll",
+        timers: str = "heap",
+        tasks: str = "inline",
+        stats: bool = True,
+        native_transport: bool = False,
+        native_loop: bool = False,
+        direct_task_steps: bool = True,
+        worker_id: int = 0,
+        reuse_port: bool = False,
+        adaptive_polling: bool = True,
+        diagnostics: bool = True,
+        wheel_slots: int = 4096,
+        wheel_resolution: float = 0.001,
+        gc_mode: str = "stock",
+        gc_freeze: bool = True,
+    ):
         super().__init__(selector)
         # Everything `close()` touches, before anything below can raise.
         # `super().__init__` has already made this object collectable, so a
@@ -657,15 +670,13 @@ class EventLoop(_LoopBase):
             # here rather than install a policy with no hook to run in.
             raise ValueError(
                 "gc_mode='idle' requires native_loop=True: the idle gap it "
-                "collects in belongs to the native run loop")
+                "collects in belongs to the native run loop"
+            )
         # `gc_freeze` is separable from `gc_mode` because the two are separately
         # measurable: freezing makes collections cheaper, the idle policy makes
         # them land somewhere harmless, and which one earned a result is a
         # question an ablation has to be able to ask.
-        self._collector = (
-            _LoopCollector(freeze_enabled=gc_freeze) if gc_mode == "idle"
-            else None
-        )
+        self._collector = _LoopCollector(freeze_enabled=gc_freeze) if gc_mode == "idle" else None
         if self._native_loop and timers != "wheel":
             # The C _run_once pops loop._scheduled by expiry only; asyncio's
             # cancelled-TimerHandle compaction lives in the Python _run_once it
@@ -673,12 +684,14 @@ class EventLoop(_LoopBase):
             # schedule-then-cancel (wait_for churn) until its deadline lapses.
             raise ValueError(
                 "native_loop=True requires timers='wheel': the native run "
-                "loop does not compact cancelled heap timers")
+                "loop does not compact cancelled heap timers"
+            )
         if timers == "wheel":
             if _wheel_ext is None:
                 raise RuntimeError("timers='wheel' needs 'wreath[linux]'")
             self._wheel = _wheel_ext.TimingWheel(
-                resolution=wheel_resolution, slots=wheel_slots, base=self.time())
+                resolution=wheel_resolution, slots=wheel_slots, base=self.time()
+            )
             self._wheel_schedule = self._wheel.schedule_call
         if not stats:
             # No introspection: shadow the counting call_soon/_run_once with the
@@ -855,7 +868,8 @@ class EventLoop(_LoopBase):
         if self._wheel_tick_handle is None and self._wheel.count > 0:
             # Bypass our call_at override: the tick itself must ride the heap.
             self._wheel_tick_handle = super().call_at(
-                self.time() + self._wheel_res, self._wheel_tick)
+                self.time() + self._wheel_res, self._wheel_tick
+            )
 
     def _wheel_tick(self):
         self._wheel_tick_handle = None
@@ -872,8 +886,14 @@ class EventLoop(_LoopBase):
         return super()._run_once()
 
     def _start_serving(
-        self, protocol_factory, sock, sslcontext=None, server=None, backlog=100,
-        ssl_handshake_timeout=None, ssl_shutdown_timeout=None,
+        self,
+        protocol_factory,
+        sock,
+        sslcontext=None,
+        server=None,
+        backlog=100,
+        ssl_handshake_timeout=None,
+        ssl_shutdown_timeout=None,
     ):
         native_tls = getattr(sslcontext, "metal", None)
         if self._poller is not None and (sslcontext is None or native_tls is not None):
@@ -882,7 +902,6 @@ class EventLoop(_LoopBase):
             # `socket(fileno=...)` that is not told them asks the kernel --
             # two getsockopt calls per accepted connection for a fact this
             # socket has known since it was bound.
-            #
             # SOCK_NONBLOCK/SOCK_CLOEXEC are masked out of the type because a
             # listener handed in as `sock=` may carry them and the kernel's
             # SO_TYPE never reports them. Masking keeps the accepted socket's
@@ -894,8 +913,13 @@ class EventLoop(_LoopBase):
             # and defers `connection_made` until the handshake completes; the
             # transport drives that itself, in C.
             native_server = (
-                protocol_factory, server, socket.socket,
-                int(sock.family), sock_type, int(sock.proto), native_tls,
+                protocol_factory,
+                server,
+                socket.socket,
+                int(sock.family),
+                sock_type,
+                int(sock.proto),
+                native_tls,
             )
             self._poller._add_uring_listener(sock.fileno(), native_server)
             return
@@ -910,8 +934,16 @@ class EventLoop(_LoopBase):
         )
 
     def _make_ssl_transport(
-        self, rawsock, protocol, sslcontext, waiter=None, *,
-        server_side=False, server_hostname=None, extra=None, server=None,
+        self,
+        rawsock,
+        protocol,
+        sslcontext,
+        waiter=None,
+        *,
+        server_side=False,
+        server_hostname=None,
+        extra=None,
+        server=None,
         **kwargs,
     ):
         """Native TLS when the context carries one, asyncio's otherwise.
@@ -941,20 +973,31 @@ class EventLoop(_LoopBase):
             and kwargs.get("call_connection_made", True)
         ):
             return _wheel_ext.SocketTransport(
-                self, rawsock, protocol, waiter, extra, None, False, -1,
-                native_tls, server_hostname,
+                self,
+                rawsock,
+                protocol,
+                waiter,
+                extra,
+                None,
+                False,
+                -1,
+                native_tls,
+                server_hostname,
             )
         return super()._make_ssl_transport(
-            rawsock, protocol, sslcontext, waiter,
-            server_side=server_side, server_hostname=server_hostname,
-            extra=extra, server=server, **kwargs,
+            rawsock,
+            protocol,
+            sslcontext,
+            waiter,
+            server_side=server_side,
+            server_hostname=server_hostname,
+            extra=extra,
+            server=server,
+            **kwargs,
         )
 
     def _stop_serving(self, sock):
-        if (
-            self._poller is not None
-            and self._poller._remove_uring_listener(sock.fileno())
-        ):
+        if self._poller is not None and self._poller._remove_uring_listener(sock.fileno()):
             sock.close()
             return
         return super()._stop_serving(sock)
@@ -982,9 +1025,7 @@ class EventLoop(_LoopBase):
         directly and would otherwise overtake it.
         """
         if type(transport) is not _wheel_ext.SocketTransport:
-            return await super().sendfile(
-                transport, file, offset, count, fallback=fallback
-            )
+            return await super().sendfile(transport, file, offset, count, fallback=fallback)
         if transport.is_closing():
             raise RuntimeError("Transport is closing")
         sock = transport.get_extra_info("socket")
@@ -996,23 +1037,18 @@ class EventLoop(_LoopBase):
         transport.pause_reading()
         try:
             await transport._empty_waiter()
-            return await self.sock_sendfile(
-                sock, file, offset, count, fallback=False
-            )
+            return await self.sock_sendfile(sock, file, offset, count, fallback=False)
         finally:
             if resume_reading and not transport.is_closing():
                 transport.resume_reading()
 
-    def _make_socket_transport(self, sock, protocol, waiter=None, *,
-                               extra=None, server=None):
+    def _make_socket_transport(self, sock, protocol, waiter=None, *, extra=None, server=None):
         if self._native_transport:
             # Native C transport: direct recv/send, one contiguous write buffer,
             # bounded eager read-drain. App-facing behaviour matches asyncio.
             return _wheel_ext.SocketTransport(self, sock, protocol, waiter, extra, server)
-        return super()._make_socket_transport(
-            sock, protocol, waiter, extra=extra, server=server)
+        return super()._make_socket_transport(sock, protocol, waiter, extra=extra, server=server)
 
-    # -- native-reactor surface --------------------------------------------
     def reactor_backend(self) -> str:
         return self._backend
 
@@ -1025,13 +1061,11 @@ class EventLoop(_LoopBase):
 
 # `create_future` and `get_debug` in C, replacing the two inherited from
 # `asyncio.base_events`.
-#
 # Between them they are two interpreter frames on every future this loop
 # creates: `create_future` itself, and the `get_debug` that
 # `asyncio.Future.__init__` calls on its loop before deciding whether to capture
 # a source traceback. That is charged per future, and a PostgreSQL query creates
 # two of them -- the operation's, and the protocol's read waiter.
-#
 # The C replacements return exactly what the originals did, `get_debug` included, so
 # `loop.set_debug(True)` still works and a debug loop still captures tracebacks.
 # Grafted rather than declared in the class body because they are C methods on a
@@ -1081,8 +1115,11 @@ def _metal_gc_mode(configured: str | None, *, gil_enabled: bool) -> str:
 
 
 def metal_event_loop(
-    *, worker_id: int = 0, reuse_port: bool | None = None,
-    diagnostics: bool = False, gc_mode: str | None = None,
+    *,
+    worker_id: int = 0,
+    reuse_port: bool | None = None,
+    diagnostics: bool = False,
+    gc_mode: str | None = None,
     adaptive_polling: bool | None = None,
 ) -> EventLoop:
     """The event loop for the ``metal`` tier: native C poller + transport.
@@ -1133,13 +1170,22 @@ def metal_event_loop(
     if freeze_setting not in ("0", "1"):
         raise ValueError("WREATH_METAL_GC_FREEZE must be '0' or '1'")
     backend = _default_backend()
-    return EventLoop(selectors.EpollSelector(), backend=backend,
-                     timers=timers, tasks=tasks, stats=False,
-                     adaptive_polling=adaptive_polling, diagnostics=diagnostics,
-                     native_transport=transport, native_loop=native_loop,
-                     direct_task_steps=direct_task_steps, worker_id=worker_id,
-                     reuse_port=reuse_port, gc_mode=gc_mode,
-                     gc_freeze=freeze_setting == "1")
+    return EventLoop(
+        selectors.EpollSelector(),
+        backend=backend,
+        timers=timers,
+        tasks=tasks,
+        stats=False,
+        adaptive_polling=adaptive_polling,
+        diagnostics=diagnostics,
+        native_transport=transport,
+        native_loop=native_loop,
+        direct_task_steps=direct_task_steps,
+        worker_id=worker_id,
+        reuse_port=reuse_port,
+        gc_mode=gc_mode,
+        gc_freeze=freeze_setting == "1",
+    )
 
 
 class _ServerHandle:
@@ -1177,9 +1223,7 @@ async def serve(
     # Stage 0 drives bare ASGI apps in tests; lifespan is disabled so an app that
     # only handles "http" scopes is not invoked with a "lifespan" scope.
     if config is None:
-        config = _server.ServerConfig(
-            protocols=protocols, host=host, port=port, lifespan="off"
-        )
+        config = _server.ServerConfig(protocols=protocols, host=host, port=port, lifespan="off")
     else:
         config = dataclasses.replace(
             config, protocols=protocols, host=host, port=port, lifespan="off"

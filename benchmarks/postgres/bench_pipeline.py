@@ -50,15 +50,13 @@ class LatencyRelay:
             downstream_writer.close()
             return
 
-        async def pump(
-            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-        ) -> None:
+        async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
             try:
                 while data := await reader.read(256 * 1024):
                     await asyncio.sleep(self.one_way_delay)
                     writer.write(data)
                     await writer.drain()
-            except (ConnectionError, OSError):
+            except ConnectionError, OSError:
                 pass
             finally:
                 writer.close()
@@ -102,9 +100,7 @@ async def _measure(
     return samples
 
 
-async def _wreath_samples(
-    dsn: str, concurrency: int, warmup: int, trials: int
-) -> list[float]:
+async def _wreath_samples(dsn: str, concurrency: int, warmup: int, trials: int) -> list[float]:
     connection = await connect(dsn)
     sql = "select $1::int4"
     try:
@@ -122,9 +118,7 @@ async def _wreath_samples(
         await connection.close()
 
 
-async def _asyncpg_samples(
-    dsn: str, concurrency: int, warmup: int, trials: int
-) -> list[float]:
+async def _asyncpg_samples(dsn: str, concurrency: int, warmup: int, trials: int) -> list[float]:
     try:
         asyncpg: Any = importlib.import_module("asyncpg")
     except ImportError as error:
@@ -147,15 +141,14 @@ async def _asyncpg_samples(
         await connection.close()
 
 
-async def _psycopg3_samples(
-    dsn: str, concurrency: int, warmup: int, trials: int
-) -> list[float]:
+async def _psycopg3_samples(dsn: str, concurrency: int, warmup: int, trials: int) -> list[float]:
     try:
         psycopg: Any = importlib.import_module("psycopg")
     except ImportError as error:
         raise RuntimeError("install psycopg[binary] to run the comparison") from error
     connection = await psycopg.AsyncConnection.connect(dsn)
     try:
+
         async def operation() -> None:
             values = []
             async with connection.cursor() as cursor:
@@ -171,9 +164,7 @@ async def _psycopg3_samples(
         await connection.close()
 
 
-async def _psycopg2_samples(
-    dsn: str, concurrency: int, warmup: int, trials: int
-) -> list[float]:
+async def _psycopg2_samples(dsn: str, concurrency: int, warmup: int, trials: int) -> list[float]:
     try:
         psycopg2: Any = importlib.import_module("psycopg2")
     except ImportError as error:

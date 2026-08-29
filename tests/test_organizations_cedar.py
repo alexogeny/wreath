@@ -1,12 +1,3 @@
-"""Organisation membership as Cedar context, and the facts machinery behind it.
-
-`context.flags` and `context.regions` were two hand-written copies of one rule.
-Four more facts were queued behind them, and six copies of a security-critical
-caching rule is how the copies drift -- in the *permit* direction. `SetFact` is
-the one implementation; these tests hold every fact to the same four properties
-rather than testing the newest one and hoping.
-"""
-
 from __future__ import annotations
 
 import warnings
@@ -96,73 +87,49 @@ async def _status(
     return response.status
 
 
-# --- membership reaches policy ----------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_member_is_permitted_and_a_non_member_is_not() -> None:
     store = InMemoryOrganizationStore(roles=ROLES)
     await store.add_member("acme", "alice", roles={"admin"})
     provider = Memberships(store)
 
-    assert (
-        await _status(ORG_POLICY, identity=Identity("alice"), organizations=provider)
-        == 200
-    )
-    assert (
-        await _status(ORG_POLICY, identity=Identity("bob"), organizations=provider)
-        == 403
-    )
+    assert await _status(ORG_POLICY, identity=Identity("alice"), organizations=provider) == 200
+    assert await _status(ORG_POLICY, identity=Identity("bob"), organizations=provider) == 403
 
 
 @pytest.mark.asyncio
 async def test_a_role_in_one_organization_is_not_a_role_in_another() -> None:
-    """The cross-tenant leak, in the one shape that produces it."""
     store = InMemoryOrganizationStore(roles=ROLES)
     await store.add_member("acme", "alice", roles={"member"})
     await store.add_member("globex", "alice", roles={"admin"})
     provider = Memberships(store)
 
-    assert (
-        await _status(ROLE_POLICY, identity=Identity("alice"), organizations=provider)
-        == 403
-    ), "an admin of globex was treated as an admin of acme"
+    assert await _status(ROLE_POLICY, identity=Identity("alice"), organizations=provider) == 403, (
+        "an admin of globex was treated as an admin of acme"
+    )
 
     await store.add_member("acme", "alice", roles={"admin"})
-    assert (
-        await _status(ROLE_POLICY, identity=Identity("alice"), organizations=provider)
-        == 200
-    )
+    assert await _status(ROLE_POLICY, identity=Identity("alice"), organizations=provider) == 200
 
 
 @pytest.mark.asyncio
 async def test_no_provider_denies_rather_than_permitting() -> None:
-    """The fail-closed default, for the fact as for every other one."""
     assert await _status(ORG_POLICY, identity=Identity("alice")) == 403
     assert await _status(ROLE_POLICY, identity=Identity("alice")) == 403
 
 
 @pytest.mark.asyncio
 async def test_an_unless_forbid_still_stands_with_no_provider() -> None:
-    """An *absent* set key skips a forbid rather than standing it.
-
-    The reason every set fact is supplied even when switched off. Verified
-    against the engine here rather than assumed to transfer from `flags`.
-    """
     source = (
-        'permit(principal, action, resource);\n'
+        "permit(principal, action, resource);\n"
         "forbid(principal, action, resource)\n"
         'unless { context.organizations.contains("acme") };'
     )
     assert await _status(source, identity=Identity("alice")) == 403
 
 
-# --- limits narrow, never grant ---------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_claimed_membership_the_store_denies_grants_nothing() -> None:
-    """Composition never grants. `member_of` is a restriction, not an assertion."""
     store = InMemoryOrganizationStore(roles=ROLES)
     provider = Memberships(store)
     identity = (human(Identity("alice")) | member_of("acme", role="admin")).bind()
@@ -192,47 +159,28 @@ async def test_a_claimed_membership_narrows_a_real_one() -> None:
 async def test_a_claimed_plan_the_provider_disagrees_with_yields_nothing() -> None:
     provider = Entitlements({"alice": {"export"}}, plans={"alice": "free"})
     identity = (human(Identity("alice")) | on_plan("pro")).bind()
-    assert (
-        await _status(ENTITLEMENT_POLICY, identity=identity, entitlements=provider)
-        == 403
-    ), "claiming a plan granted that plan's entitlements"
+    assert await _status(ENTITLEMENT_POLICY, identity=identity, entitlements=provider) == 403, (
+        "claiming a plan granted that plan's entitlements"
+    )
 
 
 @pytest.mark.asyncio
 async def test_a_matching_plan_keeps_the_entitlements() -> None:
     provider = Entitlements({"alice": {"export"}}, plans={"alice": "pro"})
     identity = (human(Identity("alice")) | on_plan("pro")).bind()
-    assert (
-        await _status(ENTITLEMENT_POLICY, identity=identity, entitlements=provider)
-        == 200
-    )
+    assert await _status(ENTITLEMENT_POLICY, identity=identity, entitlements=provider) == 200
 
 
 @pytest.mark.asyncio
 async def test_an_unrestricted_caller_keeps_what_the_provider_grants_whatever_the_plan() -> None:
-    """The plan check validates a *claim*; it is not a second gate on everyone.
-
-    A caller who claimed no plan has no claim to disagree with, so the
-    provider's answer stands as given. Running the comparison anyway denies
-    every ordinary caller whose provider reports a plan at all -- and the plan
-    the provider reports is the common case, not the exception.
-    """
     provider = Entitlements({"alice": {"export"}}, plans={"alice": "pro"})
     assert (
-        await _status(ENTITLEMENT_POLICY, identity=Identity("alice"), entitlements=provider)
-        == 200
+        await _status(ENTITLEMENT_POLICY, identity=Identity("alice"), entitlements=provider) == 200
     )
 
 
 @pytest.mark.asyncio
 async def test_a_claimed_plan_a_provider_cannot_confirm_yields_nothing() -> None:
-    """Fail closed, and without raising, when the provider has no `plan_for`.
-
-    `on_plan("pro")` is a restriction to the pro plan's entitlements *if the
-    provider agrees*. A provider that cannot be asked cannot agree, so the
-    answer is the empty set -- not the claimed plan's entitlements, and not a
-    `TypeError` out of the authorization path.
-    """
 
     class PlanBlind:
         """An entitlement provider with no way to report a caller's plan."""
@@ -244,19 +192,10 @@ async def test_a_claimed_plan_a_provider_cannot_confirm_yields_nothing() -> None
             return frozenset({"export"})
 
     identity = (human(Identity("alice")) | on_plan("pro")).bind()
-    assert (
-        await _status(ENTITLEMENT_POLICY, identity=identity, entitlements=PlanBlind()) == 403
-    )
+    assert await _status(ENTITLEMENT_POLICY, identity=identity, entitlements=PlanBlind()) == 403
 
 
 def test_an_anonymous_request_resolves_every_fact_to_nothing() -> None:
-    """`facts_for` is public and takes any request, including one with no caller.
-
-    The manifest tags its answer with these, so they resolve outside
-    `authorize` -- which refuses an anonymous request before any provider is
-    asked. Here there is no such refusal in front, and a provider handed `None`
-    reads attributes off it.
-    """
     authorizer = CedarAuthorizer(
         engine=CedarPolicies(ENTITLEMENT_POLICY),
         entitlements=Entitlements({"alice": {"export"}}),
@@ -269,23 +208,11 @@ def test_an_anonymous_request_resolves_every_fact_to_nothing() -> None:
 async def test_an_entitlement_limit_narrows_what_the_provider_grants() -> None:
     provider = Entitlements({"alice": {"export", "api"}})
     identity = (human(Identity("alice")) | with_entitlements("api")).bind()
-    assert (
-        await _status(ENTITLEMENT_POLICY, identity=identity, entitlements=provider)
-        == 403
-    )
-
-
-# --- laziness: a fact nobody reads costs nothing -----------------------------
+    assert await _status(ENTITLEMENT_POLICY, identity=identity, entitlements=provider) == 403
 
 
 @pytest.mark.asyncio
 async def test_a_policy_naming_no_entitlement_never_asks_the_provider() -> None:
-    """The vocabulary walk is the laziness mechanism, not an optimisation.
-
-    An entitlement or membership lookup can be a database round trip, so a fact
-    no policy reads must not resolve at all -- otherwise every application pays
-    for every fact any application might want.
-    """
     provider = Entitlements({"alice": {"export"}})
     source = 'permit(principal, action == Action::"read", resource);'
     assert await _status(source, identity=Identity("alice"), entitlements=provider) == 200
@@ -296,13 +223,6 @@ async def test_a_policy_naming_no_entitlement_never_asks_the_provider() -> None:
 
 @pytest.mark.asyncio
 async def test_a_policy_reading_entitlements_asks_exactly_once() -> None:
-    """Resolved once per request, however many policies evaluate.
-
-    Two policies over one route still make one engine call, so the multi-policy
-    shape that would expose a per-evaluation resolution is the manifest; this
-    asserts the weaker but still meaningful property that one request resolves
-    once, and the count is what would move.
-    """
     provider = Entitlements({"alice": {"export"}})
     source = ENTITLEMENT_POLICY + (
         '\nforbid(principal, action == Action::"read", resource)\n'
@@ -312,9 +232,6 @@ async def test_a_policy_reading_entitlements_asks_exactly_once() -> None:
     assert provider.calls == 1, f"resolved {provider.calls} times in one request"
 
 
-# --- startup validation ------------------------------------------------------
-
-
 def test_a_policy_naming_an_undeclared_role_fails_at_startup() -> None:
     store = InMemoryOrganizationStore(roles=ROLES)
     source = (
@@ -322,9 +239,7 @@ def test_a_policy_naming_an_undeclared_role_fails_at_startup() -> None:
         'when { context.org_roles.contains("acme:amdin") };'
     )
     with pytest.raises(ValueError, match="amdin"):
-        CedarAuthorizer(
-            engine=CedarPolicies(source), organizations=Memberships(store)
-        )
+        CedarAuthorizer(engine=CedarPolicies(source), organizations=Memberships(store))
 
 
 def test_the_startup_refusal_says_why_it_would_have_denied_forever() -> None:
@@ -334,9 +249,7 @@ def test_the_startup_refusal_says_why_it_would_have_denied_forever() -> None:
         'when { context.org_roles.contains("acme:amdin") };'
     )
     with pytest.raises(ValueError) as caught:
-        CedarAuthorizer(
-            engine=CedarPolicies(source), organizations=Memberships(store)
-        )
+        CedarAuthorizer(engine=CedarPolicies(source), organizations=Memberships(store))
     assert "deny forever" in str(caught.value)
 
 
@@ -346,12 +259,6 @@ def test_a_correct_role_boots() -> None:
 
 
 def test_an_organization_id_is_data_and_is_not_refused() -> None:
-    """An organisation that does not exist yet must not stop the process booting.
-
-    The asymmetry with roles is deliberate and is the reason `org_roles` gets
-    its own validator: a role is configuration and can be enumerated, an
-    organisation id is a row and cannot.
-    """
     store = InMemoryOrganizationStore(roles=ROLES)
     source = (
         'permit(principal, action == Action::"read", resource)\n'
@@ -372,12 +279,6 @@ def test_a_policy_naming_an_undeclared_entitlement_fails_at_startup() -> None:
 
 
 def test_no_provider_is_not_refused() -> None:
-    """Switching a capability off is a decision, not a misconfiguration.
-
-    Silently, too: the unenumerable-provider warning below is the diagnosis for
-    a provider that cannot answer, and firing it at an application that
-    configured none would train an operator to ignore it.
-    """
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         CedarAuthorizer(engine=CedarPolicies(ROLE_POLICY))
@@ -402,18 +303,9 @@ def test_a_provider_that_cannot_enumerate_its_roles_says_so() -> None:
 
 
 def test_a_provider_that_cannot_enumerate_is_silent_when_no_policy_names_a_role() -> None:
-    """There is nothing to check, so there is nothing to warn about.
-
-    The warning is about *unverifiable* names, not about the provider: a policy
-    set naming no role has none to verify, and warning anyway would make the
-    diagnosis depend on the provider alone.
-    """
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         CedarAuthorizer(engine=CedarPolicies(ORG_POLICY), organizations=Unenumerable())
-
-
-# --- the snapshot path -------------------------------------------------------
 
 
 class AsyncOnlyStore:
@@ -441,23 +333,16 @@ class FakeRequest:
 
 
 def test_a_loaded_snapshot_is_used_without_a_synchronous_source() -> None:
-    """How a database-backed store participates without querying on the
-    authorization path: whatever established identity loads the snapshot."""
     from wreath.organizations import Membership
 
     provider = Memberships(AsyncOnlyStore())
     request = FakeRequest(Identity("alice"))
     load_into(request, [Membership("acme", "alice", frozenset({"admin"}))])
 
-    assert provider.for_request(request) == (
-        Membership("acme", "alice", frozenset({"admin"})),
-    )
+    assert provider.for_request(request) == (Membership("acme", "alice", frozenset({"admin"})),)
 
 
 def test_no_snapshot_and_no_synchronous_source_resolves_to_nothing() -> None:
-    """And nothing denies. There is deliberately no async fallback: one that
-    sometimes queried would make the authorization path's cost depend on whether
-    a snapshot happened to be loaded."""
     provider = Memberships(AsyncOnlyStore())
     assert provider.for_request(FakeRequest(Identity("alice"))) == ()
 
@@ -476,13 +361,6 @@ class SessionRequest(FakeRequest):
 
 @pytest.mark.asyncio
 async def test_the_active_organization_supplies_unqualified_roles() -> None:
-    """A policy written without thinking about tenancy must still be tenant-safe.
-
-    `context.org_roles.contains("admin")` is the reading a policy author reaches
-    for first. It means "admin of the organisation this request is acting in",
-    never "admin of anything" -- so the unqualified names come only from the
-    active organisation.
-    """
     from wreath._auth.requirements import PolicyRequirement
     from wreath.organizations import Membership
 
@@ -500,13 +378,9 @@ async def test_the_active_organization_supplies_unqualified_roles() -> None:
     decision = await authorizer.authorize(
         acting_in_acme, PolicyRequirement(action="read", resource='Doc::"d"')
     )
-    assert decision.allowed is False, (
-        "an admin of globex was admin here while acting in acme"
-    )
+    assert decision.allowed is False, "an admin of globex was admin here while acting in acme"
 
-    acting_in_globex = SessionRequest(
-        Identity("alice"), {ACTIVE_ORGANIZATION_KEY: "globex"}
-    )
+    acting_in_globex = SessionRequest(Identity("alice"), {ACTIVE_ORGANIZATION_KEY: "globex"})
     load_into(acting_in_globex, memberships)
     decision = await authorizer.authorize(
         acting_in_globex, PolicyRequirement(action="read", resource='Doc::"d"')
@@ -516,7 +390,6 @@ async def test_the_active_organization_supplies_unqualified_roles() -> None:
 
 @pytest.mark.asyncio
 async def test_no_active_organization_supplies_no_unqualified_roles() -> None:
-    """Fail-closed: without a chosen organisation, "admin" names nothing."""
     from wreath._auth.requirements import PolicyRequirement
     from wreath.organizations import Membership
 
@@ -534,7 +407,6 @@ async def test_no_active_organization_supplies_no_unqualified_roles() -> None:
 
 @pytest.mark.asyncio
 async def test_a_snapshot_reaches_policy() -> None:
-    """End to end, through the real authorizer rather than the provider alone."""
     from wreath._auth.requirements import PolicyRequirement
     from wreath.organizations import Membership
 
@@ -550,16 +422,7 @@ async def test_a_snapshot_reaches_policy() -> None:
     assert decision.allowed is True
 
 
-# --- every fact is held to the same rules ------------------------------------
-
-
 def test_every_declared_fact_shares_one_implementation() -> None:
-    """The dedupe, asserted rather than assumed.
-
-    If a future fact is added by copying the flags path instead of declaring a
-    `SetFact`, this is what notices. The register in `tests/test_cedar.py` pins
-    the context keys; this pins that they all come from the same machinery.
-    """
     from wreath._auth.facts import SetFact
 
     authorizer = CedarAuthorizer(engine=CedarPolicies(ORG_POLICY))
@@ -577,12 +440,9 @@ def test_every_declared_fact_shares_one_implementation() -> None:
 
 @pytest.mark.asyncio
 async def test_facts_for_enumerates_what_a_manifest_must_tag() -> None:
-    """A manifest tagged with only some facts outlives the others."""
     store = InMemoryOrganizationStore(roles=ROLES)
     await store.add_member("acme", "alice", roles={"admin"})
-    authorizer = CedarAuthorizer(
-        engine=CedarPolicies(ORG_POLICY), organizations=Memberships(store)
-    )
+    authorizer = CedarAuthorizer(engine=CedarPolicies(ORG_POLICY), organizations=Memberships(store))
 
     class FakeState:
         def get(self, key: str, default: Any = None) -> Any:
@@ -611,15 +471,7 @@ async def test_facts_for_enumerates_what_a_manifest_must_tag() -> None:
     assert facts["organizations"] == frozenset({"acme"})
 
 
-# --- cases the mutation sweep named ------------------------------------------
-
-
 def test_an_anonymous_request_resolves_to_nothing_against_a_sync_store() -> None:
-    """The anonymous guard, exercised where it can actually be observed.
-
-    Against a store with no synchronous read the answer is `()` either way, so
-    the earlier anonymous test could not tell the guard from its absence.
-    """
     store = InMemoryOrganizationStore(roles=ROLES)
 
     class Sync:
@@ -634,8 +486,6 @@ def test_an_anonymous_request_resolves_to_nothing_against_a_sync_store() -> None
 
 
 def test_a_provider_over_a_store_with_no_roles_enumerates_nothing() -> None:
-    """`names()` degrades rather than raising, and an empty vocabulary means a
-    policy naming a role is refused at startup rather than silently trusted."""
 
     class Roleless:
         pass
@@ -644,8 +494,6 @@ def test_a_provider_over_a_store_with_no_roles_enumerates_nothing() -> None:
 
 
 def test_the_active_organization_falls_back_to_the_principal_limits() -> None:
-    """A composed principal names its own active organisation; a request with no
-    session must still honour it."""
     from wreath.organizations import active_organization
 
     identity = (human(Identity("alice")) | member_of("acme", role="admin")).bind()
@@ -653,7 +501,6 @@ def test_the_active_organization_falls_back_to_the_principal_limits() -> None:
 
 
 def test_an_empty_session_value_is_not_an_active_organization() -> None:
-    """`session["org"] = ""` must not select an organisation named empty."""
     from wreath.organizations import active_organization
 
     request = SessionRequest(Identity("alice"), {ACTIVE_ORGANIZATION_KEY: ""})

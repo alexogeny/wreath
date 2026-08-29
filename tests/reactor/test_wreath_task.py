@@ -1,17 +1,3 @@
-"""The WreathTask fast path — the reactor's reason to exist.
-
-Native-only: these assert behaviour asyncio cannot provide (a task that finishes
-on create_task without a loop turn), observed through `loop.reactor_stats()`.
-They run on the native `loop` fixture and are RED until the reactor exists.
-
-Contract:
-  * A request coroutine that completes without suspending is driven to
-    completion *inline* at create_task time — no Task object scheduled, no
-    ready-queue round trip. (`inline_completions` ++, `call_soon_scheduled` flat)
-  * A coroutine that actually suspends is promoted to a full cancellable driver
-    exactly once, and never counts as an inline completion.
-  * Promotion preserves cancellation and contextvar isolation.
-"""
 from __future__ import annotations
 
 import asyncio

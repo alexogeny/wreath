@@ -139,7 +139,6 @@ class _Authorizer:
 
 # Ordered as a deployment would be: trust the proxy before anything reads a
 # forwarded Host, and rate-limit before doing real work for the caller.
-#
 # Factories, not instances. Policy carries mutable operational state -- a token
 # bucket above all -- and sharing one instance across benchmark arms drains it,
 # after which the "measurement" is of 429 responses. Callers that need several
@@ -189,12 +188,8 @@ def policy_from_components(components: list[Any] | tuple[Any, ...]) -> HttpPolic
 def build_realistic_app() -> tuple[Wreath, dict[str, str], str, str]:
     """The full stack. Returns (app, headers, default_method, default_path)."""
     database = _ScriptedDatabase()
-    database.connection.script(
-        "users", [[1, "a@b.c", "A", datetime.datetime(2024, 1, 1)]]
-    )
-    registry = Registry(
-        database, [TracedUser, TracedPost], validate_schema="off"
-    )
+    database.connection.script("users", [[1, "a@b.c", "A", datetime.datetime(2024, 1, 1)]])
+    registry = Registry(database, [TracedUser, TracedPost], validate_schema="off")
 
     async def verify(token: str) -> Identity | None:
         if token != "tok":
@@ -205,11 +200,7 @@ def build_realistic_app() -> tuple[Wreath, dict[str, str], str, str]:
             permissions=frozenset({"users:read", "users:write"}),
         )
 
-    app = Wreath(
-        http_policy=policy_from_components(
-            [factory() for factory in POLICY_FACTORIES]
-        )
-    )
+    app = Wreath(http_policy=policy_from_components([factory() for factory in POLICY_FACTORIES]))
     app.configure_auth(BearerTokenBackend(verify), _Authorizer())
 
     # A route table with enough shape that classification is a real decision:

@@ -1,6 +1,3 @@
-"""First-party framework feature tests: responses, cookies, background,
-CORS, and static files — exercised through the ASGI interface."""
-
 from __future__ import annotations
 
 import asyncio
@@ -48,9 +45,6 @@ async def call(app: Wreath, scope: dict) -> tuple[int, dict[bytes, list[bytes]],
         headers.setdefault(name, []).append(value)
     body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
     return status, headers, body
-
-
-# --- response types -------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -135,9 +129,6 @@ async def test_file_response(tmp_path: Path) -> None:
     assert body == b"file contents"
 
 
-# --- cookies --------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_request_cookies_and_set_cookie() -> None:
     app = Wreath()
@@ -214,9 +205,6 @@ def test_method_not_allowed_carries_allow_header() -> None:
     assert (b"retry-after", b"30") in TooManyRequests(retry_after=30).headers
 
 
-# --- background tasks -----------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_background_runs_after_response() -> None:
     order: list[str] = []
@@ -236,9 +224,6 @@ async def test_background_runs_after_response() -> None:
     order.append("after-call")
     assert status == 200 and body == b"ok"
     assert order == ["background", "after-call"]
-
-
-# --- CORS -----------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -276,11 +261,7 @@ async def test_cors_preflight_short_circuits() -> None:
 
 @pytest.mark.asyncio
 async def test_cors_preflight_for_get_only_route() -> None:
-    """Preflights target routes that declare no OPTIONS method; the app-level
-    fallback must answer them before the 404 path."""
-    app = Wreath(
-        http_policy=HttpPolicy(cors=CorsPolicy(allow_origins=["https://app.example"]))
-    )
+    app = Wreath(http_policy=HttpPolicy(cors=CorsPolicy(allow_origins=["https://app.example"])))
 
     @app.get("/data")
     async def data(request: Any) -> Any:
@@ -318,9 +299,7 @@ async def test_cors_simple_request_headers_appended() -> None:
 
 @pytest.mark.asyncio
 async def test_cors_disallowed_preflight_origin() -> None:
-    app = Wreath(
-        http_policy=HttpPolicy(cors=CorsPolicy(allow_origins=["https://app.example"]))
-    )
+    app = Wreath(http_policy=HttpPolicy(cors=CorsPolicy(allow_origins=["https://app.example"])))
 
     @app.route("/data", methods=["OPTIONS"])
     async def data(request: Any) -> Any:
@@ -338,9 +317,6 @@ async def test_cors_disallowed_preflight_origin() -> None:
         ),
     )
     assert status == 403
-
-
-# --- static files ---------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -403,9 +379,6 @@ async def test_static_missing_is_404(tmp_path: Path) -> None:
     assert status == 404
 
 
-# --- lifespan -------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_lifespan_handlers_run_in_order() -> None:
     order: list[str] = []
@@ -424,9 +397,7 @@ async def test_lifespan_handlers_run_in_order() -> None:
     async def bye(application: Wreath) -> None:
         order.append("bye")
 
-    messages = iter(
-        [{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}]
-    )
+    messages = iter([{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}])
     sent: list[dict] = []
 
     async def receive() -> dict:
@@ -516,11 +487,8 @@ async def test_a_test_client_reports_an_app_that_returns_without_replying() -> N
             pass
 
 
-# --- adversarial static-file containment and executor bounds (#4, #5) --------
-
 @pytest.mark.asyncio
 async def test_static_symlink_inside_root_is_not_followed(tmp_path) -> None:
-    """A symlink under the static root pointing outside must not be served."""
     from wreath import Wreath
     from wreath.testing import TestClient
 
@@ -543,7 +511,6 @@ async def test_static_symlink_inside_root_is_not_followed(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_file_response_bounds_each_executor_submission(tmp_path, monkeypatch) -> None:
-    """No executor worker stays occupied while a client consumes a chunk."""
     from wreath.response import FileResponse
 
     submissions = 0

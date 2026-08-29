@@ -1,14 +1,3 @@
-"""The resumable-upload protocol surface, end to end over the test client.
-
-`draft-ietf-httpbis-resumable-upload-12`: `POST` creates, `HEAD` reports the
-offset, `PATCH` appends at a claimed offset, `DELETE` cancels.
-
-The test that matters is `test_interrupted_upload_resumes_byte_identical`, and
-it interrupts at *both* a chunk boundary and mid-chunk, because the two exercise
-different arithmetic: one leaves the accumulated length on a part boundary and
-the other does not.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -38,8 +27,14 @@ def _mounted(**options):
     return store, uploads, _app(uploads)
 
 
-async def _create(client, *, complete: bool = False, length: int | None = None,
-                  content: bytes = b"", content_type: str | None = None):
+async def _create(
+    client,
+    *,
+    complete: bool = False,
+    length: int | None = None,
+    content: bytes = b"",
+    content_type: str | None = None,
+):
     headers = {"upload-complete": "?1" if complete else "?0"}
     if length is not None:
         headers["upload-length"] = str(length)
@@ -60,9 +55,6 @@ def _header(response, name: str) -> str | None:
         if key.lower() == name.encode():
             return value.decode()
     return None
-
-
-# --- the lifecycle -------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -126,19 +118,9 @@ async def test_unknown_upload_is_404_not_409() -> None:
         assert response.status == 404
 
 
-# --- the test that matters ----------------------------------------------
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cut", [0, 4, 7, 9, 16], ids=lambda n: f"cut-at-{n}")
 async def test_interrupted_upload_resumes_byte_identical(cut: int) -> None:
-    """Stop after `cut` bytes, resume from the server's offset, compare bytes.
-
-    `cut` deliberately lands on a chunk boundary (0, 8, 16 for the 8-byte
-    chunks below) and off one (4, 7, 9), because a truncated final chunk and a
-    clean boundary are different arithmetic and only one of them is the obvious
-    case.
-    """
     payload = bytes(range(64)) * 4
     store, _, app = _mounted()
 
@@ -193,16 +175,12 @@ async def test_many_small_appends_assemble_in_order() -> None:
     assert await store.read(keys[0]) == payload
 
 
-# --- offset lying ---------------------------------------------------------
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("claimed", [0, 1, 3, 99])
 async def test_a_mismatched_offset_is_refused_with_the_real_one(claimed: int) -> None:
-    """§4.4.2: 409, and the response MUST carry the correct offset."""
     store, _, app = _mounted()
     async with TestClient(app) as client:
-        created = await _create(client, content=b"abcd")   # offset is 4
+        created = await _create(client, content=b"abcd")  # offset is 4
         location = _location(created)
 
         response = await client.patch(
@@ -220,7 +198,6 @@ async def test_a_mismatched_offset_is_refused_with_the_real_one(claimed: int) ->
 
 @pytest.mark.asyncio
 async def test_an_offset_claim_cannot_reach_into_another_upload() -> None:
-    """Two uploads in flight; a claim against one never touches the other."""
     store, _, app = _mounted()
     async with TestClient(app) as client:
         _location(await _create(client, content=b"AAAAAAAA"))
@@ -263,12 +240,8 @@ async def test_a_second_append_to_a_completed_upload_is_refused() -> None:
         assert response.status in (404, 409)
 
 
-# --- sizes ----------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_declared_length_over_max_size_is_refused_before_any_bytes() -> None:
-    """Admission at creation: 413 against a request that sent nothing."""
     store, _, app = _mounted(limits=UploadLimits(max_size=10))
     async with TestClient(app) as client:
         response = await _create(client, length=11)
@@ -279,7 +252,6 @@ async def test_declared_length_over_max_size_is_refused_before_any_bytes() -> No
 
 @pytest.mark.asyncio
 async def test_overrunning_the_declared_length_is_refused_on_append() -> None:
-    """`Content-Length` is a claim; the accumulated length is the check."""
     _, _, app = _mounted()
     async with TestClient(app) as client:
         location = _location(await _create(client, length=8, content=b"abcd"))
@@ -338,9 +310,7 @@ async def test_a_short_non_final_append_is_refused_when_a_floor_is_advertised() 
 
 @pytest.mark.asyncio
 async def test_max_append_size_is_clamped_to_the_readable_body_size() -> None:
-    _, uploads, _ = _mounted(
-        limits=UploadLimits(max_append_size=1 << 30), max_append_bytes=4096
-    )
+    _, uploads, _ = _mounted(limits=UploadLimits(max_append_size=1 << 30), max_append_bytes=4096)
     assert uploads.limits.max_append_size == 4096
 
 
@@ -355,9 +325,6 @@ async def test_an_oversize_append_is_refused() -> None:
             content=b"more than four",
         )
         assert response.status == 413
-
-
-# --- protocol hygiene -----------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -380,7 +347,6 @@ async def test_append_requires_the_partial_upload_media_type() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("value", ["true", "1", "", "?2"])
 async def test_a_non_structured_upload_complete_is_refused(value: str) -> None:
-    """`?1`/`?0` only: guessing at `true` is how a partial upload finishes."""
     _, _, app = _mounted()
     async with TestClient(app) as client:
         response = await client.post("/uploads", headers={"upload-complete": value})

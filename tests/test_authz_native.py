@@ -21,12 +21,8 @@ def test_authorization_helpers_support_wide_masks_and_normalize_results() -> Non
     assert build_mask(capabilities, {"admin"}, {"billing:read", "unknown"}) == (
         1 | (1 << 70) | (1 << 130)
     )
-    assert normalize(True, AuthorizationDecision) == AuthorizationDecision(
-        True, "cedar"
+    assert normalize(True, AuthorizationDecision) == AuthorizationDecision(True, "cedar")
+    assert normalize(EngineResult(), AuthorizationDecision) == AuthorizationDecision(
+        True, "cedar", ("policy-1", "2")
     )
-    assert normalize(
-        EngineResult(), AuthorizationDecision
-    ) == AuthorizationDecision(True, "cedar", ("policy-1", "2"))
-    assert normalize(object(), AuthorizationDecision) == AuthorizationDecision(
-        False, "cedar"
-    )
+    assert normalize(object(), AuthorizationDecision) == AuthorizationDecision(False, "cedar")

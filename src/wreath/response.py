@@ -42,13 +42,9 @@ _CONTENT_LENGTH = b"content-length"
 # keeps str+encode out of the per-response path. Two KiB includes ordinary HTML
 # pages such as Fortunes (1,224 bytes) while retaining only ~40 KiB at startup.
 _CONTENT_LENGTH_CACHE_SIZE = 2048
-_CONTENT_LENGTHS = tuple(
-    str(n).encode("ascii") for n in range(_CONTENT_LENGTH_CACHE_SIZE)
-)
+_CONTENT_LENGTHS = tuple(str(n).encode("ascii") for n in range(_CONTENT_LENGTH_CACHE_SIZE))
 _HTML_TYPE_HEADER = (_CONTENT_TYPE, b"text/html; charset=utf-8")
-_HTML_HEADERS = tuple(
-    (_HTML_TYPE_HEADER, (_CONTENT_LENGTH, length)) for length in _CONTENT_LENGTHS
-)
+_HTML_HEADERS = tuple((_HTML_TYPE_HEADER, (_CONTENT_LENGTH, length)) for length in _CONTENT_LENGTHS)
 
 
 def _content_length(size: int) -> bytes:
@@ -115,13 +111,6 @@ class Response:
             if media_type is None:
                 media_type_header = self._media_type_header
             else:
-                # A `str` here used to travel all the way onto the wire, so the
-                # app emitted `(b"content-type", "application/x-protobuf")` --
-                # a bytes name beside a str value, which is not a valid ASGI
-                # header. Nothing raised at the call site; what surfaced was a
-                # `TypeError` from whatever read the header later, far from the
-                # `media_type=` that caused it. The annotation has always said
-                # bytes, so this enforces the contract rather than widening it.
                 if isinstance(media_type, str):
                     raise TypeError(
                         f"media_type must be bytes, not str: pass "
@@ -322,7 +311,6 @@ class JSONResponse(Response):
         super().__init__(_json_dumps(data), status=status, background=background)
 
 
-# --- coercion fast paths ----------------------------------------------------
 # Handlers overwhelmingly return str/bytes/dict with the default 200 status.
 # _coerce_response builds those into a Response in one frame -- skipping the
 # subclass __init__ -> Response.__init__ double call and its branch logic --
@@ -930,6 +918,8 @@ def parse_range(header: str | None, size: int) -> tuple[int, int] | _Unsatisfiab
 
 
 _FILE_CHUNK = 256 * 1024
+
+
 async def _send_from_descriptor(
     fd: int,
     size: int,

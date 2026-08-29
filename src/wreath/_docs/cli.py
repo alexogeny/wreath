@@ -60,8 +60,10 @@ def execute(namespace: Any) -> int:
         if report.errors:
             print(f"wreath docs check: {len(report.errors)} error(s)", file=sys.stderr)
             return 1
-        print(f"wreath docs check: {report.pages} page(s) clean"
-              + (f", {len(report.warnings)} warning(s)" if report.warnings else ""))
+        print(
+            f"wreath docs check: {report.pages} page(s) clean"
+            + (f", {len(report.warnings)} warning(s)" if report.warnings else "")
+        )
         return 0
 
     report = build(site, root=root)
@@ -71,7 +73,10 @@ def execute(namespace: Any) -> int:
     print(f"wreath docs: built {report.pages} page(s) into {report.output}")
     if action == "serve":
         return _serve(
-            site, root, Path(report.output), getattr(namespace, "port", 8000),
+            site,
+            root,
+            Path(report.output),
+            getattr(namespace, "port", 8000),
             reload=not getattr(namespace, "no_reload", False),
         )
     return 0
@@ -89,7 +94,7 @@ def _stamp(paths: list[Path]) -> tuple:
         try:
             marks.append((path.as_posix(), path.stat().st_mtime_ns))
         except OSError:
-            continue                     # deleted between listing and stat
+            continue  # deleted between listing and stat
     return tuple(marks)
 
 
@@ -160,75 +165,27 @@ def _log_access(request: Any, response: Any) -> None:
 
 
 def preview_app(directory: Path) -> Any:
-    """The application `wreath docs serve` runs: one static mount at the root.
-
-    **Wreath's own server and `wreath.staticfiles`, not `http.server`.** The
-    preview used to be a `SimpleHTTPRequestHandler`, which is a strange thing
-    for a site whose config module opens by calling itself the hero dogfood —
-    and `_docs/site.py` has always described its own output as "a plain
-    directory of self-contained HTML you can serve with wreath's hardened
-    `StaticFiles`". It was simply never revisited after the generator landed.
-
-    What the stdlib handler was costing, beyond the principle:
-
-    * **No conditional requests.** `StaticFiles` derives an `ETag` from mtime
-      and size and answers `If-None-Match` with a 304; the stdlib handler does
-      not, so every reload was a full transfer of every asset and the caching
-      behaviour of the real site could not be observed at all.
-    * **A different containment story from the one that ships.** `StaticFiles`
-      opens beneath a trusted root descriptor (`wreath._fsguard`), so the file
-      checked is the file served.
-    * **A `Server` header naming the Python version**, where wreath sends its
-      own.
-
-    The practical consequence was that `wreath audit` reports compression,
-    cache and security-header findings about this site that a local preview had
-    no way to reproduce, because the thing being previewed was not the thing
-    being audited.
-    """
     from ..app import Wreath
     from ..middleware.base import MiddlewareHooks
 
     app = Wreath()
-    app.add_global_middleware(
-        MiddlewareHooks(after_inplace=_log_access), priority=-90)
-    # `html_index` is what makes `/guides/` reach `guides/index.html`, which is
-    # the shape every directory in a docs tree has.
+    app.add_global_middleware(MiddlewareHooks(after_inplace=_log_access), priority=-90)
     app.static("/", str(directory), html_index=True)
     return app
 
 
 def _serve(site: Site, root: Path, directory: Path, port: int, *, reload: bool) -> int:
-    """Preview the built site, rebuilding when a source file changes.
-
-    Polling rather than inotify: a watcher would be a dependency, and a docs
-    tree is small enough that stat-ing it twice a second costs nothing. The
-    browser is not told to refresh — reloading the tab is one keystroke, and a
-    live-reload socket would mean shipping a server into every built page.
-
-    The rebuild runs in a worker thread rather than on the loop. It is a
-    synchronous pass over the whole tree that takes appreciably longer than a
-    request, and running it inline would stall every response for its duration
-    — including the reload the author is waiting on.
-    """
     import asyncio
 
     from ..server import ServerConfig, serve
     from ..telemetry import Mode, TelemetryConfig
 
-    # A recorder, because `wreath.logging` rides its ring: without one there is
-    # no ring for a record and no projector to correlate it, so every `log.*`
-    # call stays the no-op it is before a server boots. `Pulse` is the cheapest
-    # mode that still creates one -- the preview wants the access line, not
-    # per-phase forensics. `log_writer` is left at its default, which is text on
-    # a terminal and JSON lines when the output is redirected.
     async def run() -> None:
         server = await serve(
             preview_app(directory),
-            ServerConfig(host="127.0.0.1", port=port,
-                         telemetry=TelemetryConfig(mode=Mode.PULSE)))
-        print(f"wreath docs: serving {directory} at "
-              f"http://127.0.0.1:{port} (ctrl-c to stop)")
+            ServerConfig(host="127.0.0.1", port=port, telemetry=TelemetryConfig(mode=Mode.PULSE)),
+        )
+        print(f"wreath docs: serving {directory} at http://127.0.0.1:{port} (ctrl-c to stop)")
         try:
             if reload:
                 await _watch(site, root)
@@ -253,8 +210,7 @@ async def _watch(site: Site, root: Path) -> None:
 
     config = Path(root / "wreath_docs.py")
     watched = _sources(site, root, config)
-    print(f"wreath docs: watching {len(watched)} source file(s); "
-          "edit and reload the page")
+    print(f"wreath docs: watching {len(watched)} source file(s); edit and reload the page")
     stamp = _stamp(watched)
     while True:
         await asyncio.sleep(0.4)

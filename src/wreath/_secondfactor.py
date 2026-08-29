@@ -110,7 +110,6 @@ __all__ = [
     "verify_webauthn_assertion",
 ]
 
-# --- parameters -------------------------------------------------------------
 
 #: Digits in a generated code. Six is what every authenticator app shows.
 DEFAULT_DIGITS = 6
@@ -150,9 +149,6 @@ _ALGORITHMS = {"sha1": hashlib.sha1, "sha256": hashlib.sha256, "sha512": hashlib
 #: `webauthn` is reserved so the stored shape does not change under it later.
 Kind = Literal["totp", "webauthn", "recovery"]
 _KINDS = frozenset(("totp", "webauthn", "recovery"))
-
-
-# --- RFC 4226 / 6238 --------------------------------------------------------
 
 
 def totp_code(
@@ -354,9 +350,6 @@ def totp_uri(
     return f"otpauth://totp/{quote(label, safe='')}?" + "&".join(query)
 
 
-# --- recovery codes ---------------------------------------------------------
-
-
 def generate_recovery_codes(count: int = DEFAULT_RECOVERY_CODES) -> list[str]:
     """Mint `count` single-use recovery codes, formatted for a human to copy.
 
@@ -378,9 +371,7 @@ def generate_recovery_codes(count: int = DEFAULT_RECOVERY_CODES) -> list[str]:
         raise ValueError("count must not exceed 50")
     codes = []
     for _ in range(count):
-        raw = "".join(
-            secrets.choice(_RECOVERY_ALPHABET) for _ in range(_RECOVERY_CODE_CHARS)
-        )
+        raw = "".join(secrets.choice(_RECOVERY_ALPHABET) for _ in range(_RECOVERY_CODE_CHARS))
         codes.append(
             "-".join(
                 raw[at : at + _RECOVERY_GROUP]
@@ -462,9 +453,6 @@ def verify_recovery_code(code: str, stored: str) -> bool:
         hashlib.sha256(candidate.encode("utf-8")).hexdigest(),
         stored[len(_RECOVERY_SCHEME) :],
     )
-
-
-# --- the credential record and its store ------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -602,6 +590,7 @@ class DiscoverableSecondFactorStore(SecondFactorStore, Protocol):
         """
         ...
 
+
 @dataclass(slots=True)
 class InMemorySecondFactorStore:
     """A dict-backed `SecondFactorStore` for development and tests.
@@ -679,9 +668,6 @@ class InMemorySecondFactorStore:
         return self._advance(credential_id, counter, at)
 
 
-# --- enrolment and verification flows ---------------------------------------
-
-
 @dataclass(frozen=True, slots=True)
 class TotpEnrolment:
     """A minted TOTP secret that is **not enrolled yet**.
@@ -749,16 +735,12 @@ def begin_totp_enrolment(
             digit count or period the code generator will not accept.
     """
     material = generate_totp_secret() if secret is None else bytes(secret)
-    uri = totp_uri(
-        material, account=account, issuer=issuer, digits=digits, period=period
-    )
+    uri = totp_uri(material, account=account, issuer=issuer, digits=digits, period=period)
     # Generate one code now, so a parameter the verifier would later reject --
     # a period of zero, eleven digits -- fails here, before a user has been
     # shown a QR code that could never have worked.
     totp_code(material, totp_counter(period=period), digits=digits)
-    return TotpEnrolment(
-        secret=material, uri=uri, label=label, digits=digits, period=period
-    )
+    return TotpEnrolment(secret=material, uri=uri, label=label, digits=digits, period=period)
 
 
 async def confirm_totp_enrolment(
@@ -794,9 +776,7 @@ async def confirm_totp_enrolment(
     existing = await store.credentials(user_id)
     if any(row.kind == "totp" for row in existing):
         raise ValueError("this user already has a TOTP factor enrolled")
-    counter = verify_totp(
-        secret, code, at=at, period=period, digits=digits, skew=skew
-    )
+    counter = verify_totp(secret, code, at=at, period=period, digits=digits, skew=skew)
     if counter is None:
         return None
     now = datetime.now(UTC) if at is None else datetime.fromtimestamp(at, UTC)
@@ -968,17 +948,13 @@ async def remove_second_factor(
     if target is None or target.kind == "recovery":
         return None
     await store.remove(user_id, credential_id)
-    survivors = [
-        row for row in rows if row.id != credential_id and row.kind != "recovery"
-    ]
+    survivors = [row for row in rows if row.id != credential_id and row.kind != "recovery"]
     if not survivors:
         for row in rows:
             if row.kind == "recovery":
                 await store.remove(user_id, row.id)
     return target
 
-
-# --- WebAuthn ---------------------------------------------------------------
 
 #: Bytes of challenge. WebAuthn requires at least 16 and recommends more; 32 is
 #: what every relying party uses and matches the SHA-256 the client hashes into.
@@ -1076,9 +1052,7 @@ def _descriptors(credentials: Sequence[SecondFactor]) -> list[dict[str, Any]]:
             stored = unpack_credential(row.material)
         except WebAuthnError:
             continue
-        out.append(
-            {"type": "public-key", "id": b64url_encode(stored.credential_id)}
-        )
+        out.append({"type": "public-key", "id": b64url_encode(stored.credential_id)})
     return out
 
 
@@ -1133,9 +1107,7 @@ def begin_webauthn_registration(
         raise ValueError(f"unknown user verification: {user_verification!r}")
     handle = user_id.encode("utf-8")
     if not handle or len(handle) > MAX_USER_HANDLE_BYTES:
-        raise ValueError(
-            f"a WebAuthn user handle must be 1..{MAX_USER_HANDLE_BYTES} bytes"
-        )
+        raise ValueError(f"a WebAuthn user handle must be 1..{MAX_USER_HANDLE_BYTES} bytes")
     minted = _webauthn_challenge(challenge)
     options: dict[str, Any] = {
         "rp": {"id": rp_id, "name": rp_name or rp_id},
@@ -1353,7 +1325,6 @@ async def verify_webauthn_assertion(
         # has since refused to advance it: another assertion carrying the same
         # or a newer count got there first. Same conclusion as the check above,
         # reached the only way a race can be seen -- by losing it.
-        #
         # Guarded on a non-zero count because zero is "this authenticator does
         # not implement the counter", and an advance from zero to zero is not
         # something any store can win. Those credentials are protected by the
@@ -1392,15 +1363,12 @@ async def _webauthn_credential(
     raise WebAuthnError("no such credential for this user")
 
 
-# --- single-use ceremony challenges ------------------------------------------
-#
 # A ceremony challenge is spent exactly once, by the user who began it. The
 # property is *atomic* consumption, and it is why these live on
 # `wreath.store`'s keyed table rather than in the session: a read followed by a
 # delete lets two concurrent completions both conclude they were first, and a
 # challenge carried in a cookie is not single-use at all -- a caller who kept
 # an older copy of the cookie kept the challenge with it.
-#
 # The user binding is part of the consuming statement, never a check after it.
 # Consuming first and comparing afterwards would let anyone holding a handle
 # burn the rightful user's ceremony, which is a denial of service against
@@ -1425,9 +1393,7 @@ CHALLENGE_ENROLMENT: Final = "totp-enrolment"
 CHALLENGE_TABLE: Final = "wreath_second_factor_challenges"
 
 
-def challenge_declaration(
-    *, table: str = CHALLENGE_TABLE, prefix: str = "wreath_2fa"
-) -> Any:
+def challenge_declaration(*, table: str = CHALLENGE_TABLE, prefix: str = "wreath_2fa") -> Any:
     """The `Keyed` declaration behind a challenge store.
 
     `ttl=None`: a challenge's lifetime is the caller's, because a WebAuthn
@@ -1508,9 +1474,7 @@ class ChallengeStore(Protocol):
         """
         ...
 
-    async def consume(
-        self, handle: str, *, user_id: str, kind: str
-    ) -> dict[str, Any] | None:
+    async def consume(self, handle: str, *, user_id: str, kind: str) -> dict[str, Any] | None:
         """Spend the challenge and return its payload, or None.
 
         None covers every way it is not spendable -- absent, expired, already
@@ -1563,9 +1527,7 @@ class MemoryChallengeStore:
         # A copy, so editing what was read cannot edit what is still stored.
         return ChallengeRow(held_user, held_kind, dict(payload))
 
-    async def consume(
-        self, handle: str, *, user_id: str, kind: str
-    ) -> dict[str, Any] | None:
+    async def consume(self, handle: str, *, user_id: str, kind: str) -> dict[str, Any] | None:
         entry = self._cache.consume(
             handle,
             predicate=lambda held: held[0] == user_id and held[1] == kind,
@@ -1659,9 +1621,7 @@ class PostgresChallengeStore:
             return None
         return ChallengeRow(str(row[0]), str(row[1]), _payload(row[2]))
 
-    async def consume(
-        self, handle: str, *, user_id: str, kind: str
-    ) -> dict[str, Any] | None:
+    async def consume(self, handle: str, *, user_id: str, kind: str) -> dict[str, Any] | None:
         row = await self._store.statement("consume").fetchrow(handle, user_id, kind)
         if row is None:
             return None

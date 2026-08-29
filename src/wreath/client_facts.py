@@ -152,9 +152,7 @@ class ClientFactsProvider:
         if not name:
             raise ValueError("client-facts provider name must be non-empty")
         self._geoip = geoip
-        self._geoip_packed = (
-            geoip._lookup_packed if type(geoip) is WreathGeoIP else None
-        )
+        self._geoip_packed = geoip._lookup_packed if type(geoip) is WreathGeoIP else None
         self._name = name
         if signatures is not None and not callable(getattr(signatures, "facts", None)):
             raise TypeError("client-facts signatures must expose facts(request)")
@@ -204,7 +202,8 @@ class ClientFactsProvider:
         platform_hint = request.header("sec-ch-ua-platform")
         platform = (
             platform_hint.strip().removeprefix('"').removesuffix('"')
-            if platform_hint else db_platform
+            if platform_hint
+            else db_platform
         )
         mobile_hint = request.header("sec-ch-ua-mobile")
         mobile = db_mobile if mobile_hint is None else mobile_hint.strip() == "?1"
@@ -247,13 +246,9 @@ class ClientFactsProvider:
                     is_loopback=parsed.is_loopback,
                     geo=geo,
                 )
-        signature_facts = (
-            None if self._signatures is None else self._signatures.facts(request)
-        )
+        signature_facts = None if self._signatures is None else self._signatures.facts(request)
         verified = bool(getattr(signature_facts, "verified", False))
-        identity = (
-            getattr(signature_facts, "agent", None) if verified else None
-        )
+        identity = getattr(signature_facts, "agent", None) if verified else None
         agent = AgentFacts(claimed=ua.bot, verified=verified, identity=identity)
         facts = ClientFacts(ip=ip, user_agent=ua, agent=agent)
         self._record_flight(request, facts)
@@ -261,10 +256,7 @@ class ClientFactsProvider:
             counts = self._counts
             counts[0] += 1
             counts[6] += int(
-                ua.browser is not None
-                or ua.platform is not None
-                or ua.mobile is not None
-                or ua.bot
+                ua.browser is not None or ua.platform is not None or ua.mobile is not None or ua.bot
             )
             counts[7] += int(ua.bot)
             counts[8] += int(agent.verified)
@@ -371,12 +363,7 @@ def client_fact_attributes(
 
 def _country_code(record: GeoIPRecord | None) -> str | None:
     country = None if record is None else record.country
-    if (
-        country is None
-        or len(country) != 2
-        or not country.isascii()
-        or not country.isalpha()
-    ):
+    if country is None or len(country) != 2 or not country.isascii() or not country.isalpha():
         return None
     return country.upper()
 
@@ -410,15 +397,18 @@ class UserAgentDatabase:
             if not isinstance(row, dict):
                 raise ValueError(f"UA database entry {index} must be an object")
             try:
-                entries.append((
-                    row["token"], row.get("browser"), row.get("platform"),
-                    row.get("mobile", -1), row.get("bot", False),
-                    row.get("priority", 0),
-                ))
+                entries.append(
+                    (
+                        row["token"],
+                        row.get("browser"),
+                        row.get("platform"),
+                        row.get("mobile", -1),
+                        row.get("bot", False),
+                        row.get("priority", 0),
+                    )
+                )
             except KeyError as exc:
-                raise ValueError(
-                    f"UA database entry {index} needs string 'token'"
-                ) from exc
+                raise ValueError(f"UA database entry {index} needs string 'token'") from exc
         return cls(entries)
 
     def lookup(
@@ -460,9 +450,7 @@ class WreathGeoIP:
 
     def __init__(self, database: str | Path | None = None) -> None:
         image = (
-            _builtin_database("country.wgd")
-            if database is None
-            else Path(database).read_bytes()
+            _builtin_database("country.wgd") if database is None else Path(database).read_bytes()
         )
         self._database = _core.GeoDB(image)
 

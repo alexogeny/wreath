@@ -240,7 +240,13 @@ context_header_name_equal(const char *candidate, Py_ssize_t length,
 static int
 context_build_header_index(WreathRequestContext *self)
 {
-    if (self->header_index != NULL) return 0;
+    if (self->header_index != NULL || self->header_index_capacity < 0) return 0;
+    if (wreath_headers_is_block(self->headers)) {
+        self->header_unique_count = wreath_headers_unique_count(self->headers);
+        if (self->header_unique_count < 0) return -1;
+        self->header_index_capacity = -1;
+        return 0;
+    }
     Py_ssize_t count = wreath_headers_count(self->headers);
     if (count < 0) return -1;
     Py_ssize_t capacity = 8;
@@ -317,9 +323,13 @@ context_find_header(WreathRequestContext *self, PyObject *key,
         *found = -1;
         return 0;
     }
-    if (context_build_header_index(self) < 0) return -1;
     const char *wanted = PyBytes_AS_STRING(key);
     Py_ssize_t wanted_size = PyBytes_GET_SIZE(key);
+    if (wreath_headers_is_block(self->headers)) {
+        return wreath_headers_find(
+            self->headers, wanted, wanted_size, found, NULL);
+    }
+    if (context_build_header_index(self) < 0) return -1;
     Py_ssize_t slot = (Py_ssize_t)(
         context_header_hash(wanted, wanted_size) &
         (uint64_t)(self->header_index_capacity - 1));
@@ -349,6 +359,9 @@ static int
 context_find_header_name(WreathRequestContext *self, PyObject *key,
                          Py_ssize_t wanted_size, Py_ssize_t *found)
 {
+    if (wreath_headers_is_block(self->headers)) {
+        return wreath_headers_find_name(self->headers, key, found, NULL);
+    }
     if (context_build_header_index(self) < 0) return -1;
     Py_ssize_t slot = (Py_ssize_t)(
         context_header_name_hash(key, wanted_size) &
@@ -388,7 +401,8 @@ context_header_text(WreathRequestContext *self, PyObject *const *args,
     Py_ssize_t wanted_size;
     if (context_header_name_length(key, &wanted_size) < 0) return NULL;
     Py_ssize_t found = -1;
-    if (self->header_index == NULL && !self->header_scanned) {
+    if (!wreath_headers_is_block(self->headers) &&
+        self->header_index == NULL && !self->header_scanned) {
         self->header_scanned = 1;
         Py_ssize_t count = wreath_headers_count(self->headers);
         if (count < 0) return NULL;
@@ -428,24 +442,13 @@ context_header(WreathRequestContext *self, PyObject *key)
         PyErr_SetString(PyExc_TypeError, "header name must be bytes");
         return NULL;
     }
-    const char *wanted = PyBytes_AS_STRING(key);
-    Py_ssize_t wanted_size = PyBytes_GET_SIZE(key);
-    Py_ssize_t count = wreath_headers_count(self->headers);
-    if (count < 0) return NULL;
-    for (Py_ssize_t index = 0; index < count; index++) {
-        const char *candidate;
-        const char *ignored_value;
-        Py_ssize_t candidate_size;
-        Py_ssize_t ignored_value_size;
-        if (wreath_headers_view(
-                self->headers, index, &candidate, &candidate_size,
-                &ignored_value, &ignored_value_size) < 0) return NULL;
-        if (candidate_size != wanted_size ||
-            memcmp(candidate, wanted, (size_t)wanted_size) != 0) continue;
-        PyObject *value = wreath_headers_value_borrowed(self->headers, index);
-        return value == NULL ? NULL : Py_NewRef(value);
-    }
-    Py_RETURN_NONE;
+    Py_ssize_t found;
+    if (wreath_headers_find(
+            self->headers, PyBytes_AS_STRING(key), PyBytes_GET_SIZE(key),
+            &found, NULL) < 0) return NULL;
+    if (found < 0) Py_RETURN_NONE;
+    PyObject *value = wreath_headers_value_borrowed(self->headers, found);
+    return value == NULL ? NULL : Py_NewRef(value);
 }
 
 static PyObject *
@@ -455,26 +458,14 @@ context_single_header(WreathRequestContext *self, PyObject *key)
         PyErr_SetString(PyExc_TypeError, "header name must be bytes");
         return NULL;
     }
-    const char *wanted = PyBytes_AS_STRING(key);
-    Py_ssize_t wanted_size = PyBytes_GET_SIZE(key);
-    Py_ssize_t count = wreath_headers_count(self->headers);
-    if (count < 0) return NULL;
-    Py_ssize_t found = -1;
-    for (Py_ssize_t index = 0; index < count; index++) {
-        const char *candidate;
-        const char *ignored_value;
-        Py_ssize_t candidate_size;
-        Py_ssize_t ignored_value_size;
-        if (wreath_headers_view(
-                self->headers, index, &candidate, &candidate_size,
-                &ignored_value, &ignored_value_size) < 0) return NULL;
-        if (candidate_size != wanted_size ||
-            memcmp(candidate, wanted, (size_t)wanted_size) != 0) continue;
-        if (found >= 0) {
-            PyErr_SetString(PyExc_ValueError, "request header occurs more than once");
-            return NULL;
-        }
-        found = index;
+    Py_ssize_t found;
+    Py_ssize_t matches;
+    if (wreath_headers_find(
+            self->headers, PyBytes_AS_STRING(key), PyBytes_GET_SIZE(key),
+            &found, &matches) < 0) return NULL;
+    if (matches > 1) {
+        PyErr_SetString(PyExc_ValueError, "request header occurs more than once");
+        return NULL;
     }
     if (found < 0) Py_RETURN_NONE;
     PyObject *value = wreath_headers_value_borrowed(self->headers, found);
@@ -604,6 +595,9 @@ context_parse_cookies(WreathRequestContext *self, PyObject *args)
 static Py_ssize_t
 context_header_length(WreathRequestContext *self)
 {
+    if (wreath_headers_is_block(self->headers)) {
+        return wreath_headers_unique_count(self->headers);
+    }
     if (context_build_header_index(self) < 0) return -1;
     return self->header_unique_count;
 }

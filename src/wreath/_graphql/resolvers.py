@@ -135,10 +135,8 @@ def order_fields(
         if name in placed:
             return
         if name in visiting:
-            cycle = " -> ".join((*visiting[visiting.index(name):], name))
-            raise ResolverError(
-                f"resolver dependency cycle on {type_name}: {cycle}"
-            )
+            cycle = " -> ".join((*visiting[visiting.index(name) :], name))
+            raise ResolverError(f"resolver dependency cycle on {type_name}: {cycle}")
         spec = resolvers.get(name)
         if spec is not None:
             visiting.append(name)
@@ -159,9 +157,7 @@ def order_fields(
     return ordered
 
 
-def validate_dependencies(
-    registry: ResolverRegistry, known_fields: dict[str, set[str]]
-) -> None:
+def validate_dependencies(registry: ResolverRegistry, known_fields: dict[str, set[str]]) -> None:
     """Check every `requires` names a real field, at schema-build time.
 
     A dependency that does not exist is a wiring mistake, and finding it on the
@@ -187,9 +183,7 @@ def validate_dependencies(
             if (spec := registry.for_field(type_name, name)) is not None
         }
         if specs:
-            order_fields(
-                [_NameOnly(name) for name in specs], specs, type_name=type_name
-            )
+            order_fields([_NameOnly(name) for name in specs], specs, type_name=type_name)
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,10 +1,3 @@
-"""``wreath passes status``: the answer to "is it still going?".
-
-A pass runs for hours across thousands of job deliveries, so the question people
-actually have is not whether a job succeeded but where the walk has got to. The
-ledger row is the durable answer, and this reads it.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -43,18 +36,30 @@ class _Application:
 
 def _seed(world, **overrides):
     row = {
-        "name": "purge_replays", "tenant": "", "phase": "walking",
-        "cursor": ["2026-07-27T11:00:00+00:00", "k042"], "ceiling": None,
-        "keyspace_from": None, "pending": [],
-        "units_done": 14, "rows_done": 14_000, "denominator": None,
-        "denominator_kind": None, "chunk_limit": 1000,
-        "paced_reason": "duty cycle 0.25", "started_at": NOW,
+        "name": "purge_replays",
+        "tenant": "",
+        "phase": "walking",
+        "cursor": ["2026-07-27T11:00:00+00:00", "k042"],
+        "ceiling": None,
+        "keyspace_from": None,
+        "pending": [],
+        "units_done": 14,
+        "rows_done": 14_000,
+        "denominator": None,
+        "denominator_kind": None,
+        "chunk_limit": 1000,
+        "paced_reason": "duty cycle 0.25",
+        "started_at": NOW,
         "window_started": NOW - datetime.timedelta(seconds=30),
-        "window_rows": 3_000, "window_units": 3,
-        "last_advance": NOW - datetime.timedelta(seconds=4), "cycle_started": NOW,
+        "window_rows": 3_000,
+        "window_units": 3,
+        "last_advance": NOW - datetime.timedelta(seconds=4),
+        "cycle_started": NOW,
         "driven_at": NOW - datetime.timedelta(seconds=4),
         "last_drive_error": None,
-        "verified_at": None, "verified_fact": None, "last_error": None,
+        "verified_at": None,
+        "verified_fact": None,
+        "last_error": None,
         "trace_context": None,
     }
     row.update(overrides)
@@ -83,13 +88,8 @@ def cli(monkeypatch):
     world = World("replays", [])
     database = _StartableDatabase(world)
     application = _Application(database)
-    monkeypatch.setattr(
-        "wreath._cli.load_application", lambda target, factory=False: application
-    )
+    monkeypatch.setattr("wreath._cli.load_application", lambda target, factory=False: application)
     return world, database, application
-
-
-# --- parsing ------------------------------------------------------------------
 
 
 def test_the_parser_requires_a_subcommand():
@@ -125,9 +125,6 @@ def test_pause_and_resume_are_still_not_offered():
     for verb in ("pause", "resume"):
         with pytest.raises(SystemExit):
             parser.parse_args(["passes", verb, "app:app"])
-
-
-# --- reading ------------------------------------------------------------------
 
 
 def test_status_prints_a_row_per_pass(cli, capsys):
@@ -190,11 +187,6 @@ def test_status_surfaces_a_recorded_error(cli, capsys):
 
 
 def test_a_failed_pass_prints_the_trace_that_started_the_walk(cli, capsys):
-    """Plan 01 stage 4: the thread from a chunk that broke back to its cause.
-
-    A backfill's third day is a long way from whatever started it, and the
-    ledger row is the only thing that still holds the link.
-    """
     parent = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
     world, _, _ = cli
     _seed(world, last_error="RuntimeError('deadlock')", trace_context=parent)
@@ -207,11 +199,6 @@ def test_a_failed_pass_prints_the_trace_that_started_the_walk(cli, capsys):
 
 
 def test_a_healthy_pass_does_not_print_a_trace_line(cli, capsys):
-    """Deliberate: on a pass that is fine the id is noise on every line.
-
-    The column is a forensic aid, and printing it unconditionally would make
-    the surface an operator scans for trouble noisier rather than clearer.
-    """
     parent = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
     world, _, _ = cli
     _seed(world, trace_context=parent)
@@ -222,13 +209,6 @@ def test_a_healthy_pass_does_not_print_a_trace_line(cli, capsys):
 
 
 def test_a_pass_stopped_at_a_hole_prints_its_trace(cli, capsys):
-    """`holes_open` is its own reason, not a spelling of `last_error`.
-
-    A pass that skipped a chunk reaches `done` with the hole still barring its
-    gate and no error on the row -- and that is precisely when somebody needs
-    the thread back to whatever started the walk. A mutant sweep found this
-    operand of the guard untested.
-    """
     parent = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
     world, _, _ = cli
     _seed(world, trace_context=parent)
@@ -240,11 +220,6 @@ def test_a_pass_stopped_at_a_hole_prints_its_trace(cli, capsys):
 
 
 def test_a_pass_blocked_without_an_error_still_prints_its_trace(cli, capsys):
-    """The third operand: `blocked` with nothing in `last_error`.
-
-    `wreath passes retry` clears a hole and the row's error with it, so a pass
-    can sit blocked with no error text at all -- and it is still stopped.
-    """
     parent = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
     world, _, _ = cli
     _seed(world, phase="blocked", last_error=None, trace_context=parent)
@@ -255,12 +230,6 @@ def test_a_pass_blocked_without_an_error_still_prints_its_trace(cli, capsys):
 
 
 def test_a_version_one_ledger_is_never_asked_for_the_column(cli, capsys):
-    """`read_all` has its own projection, and its own version-1 arm.
-
-    Asserted on the statement rather than the value: the fake hands back
-    whatever row it holds regardless of what the `SELECT` named, so only the
-    emitted SQL can tell the two arms apart -- which a mutant sweep found.
-    """
     world, database, _ = cli
     world.trace_column = False
     _seed(world)
@@ -269,7 +238,8 @@ def test_a_version_one_ledger_is_never_asked_for_the_column(cli, capsys):
     execute_passes(_namespace())
 
     reads = [
-        sql for sql, _args in world.statements
+        sql
+        for sql, _args in world.statements
         if "trace_context" in sql and "pg_attribute" not in sql
     ]
     assert not reads, reads
@@ -282,13 +252,11 @@ def test_a_version_two_ledger_is_asked_for_the_column(cli, capsys):
     execute_passes(_namespace())
 
     assert any(
-        "trace_context" in sql and "pg_attribute" not in sql
-        for sql, _args in world.statements
+        "trace_context" in sql and "pg_attribute" not in sql for sql, _args in world.statements
     )
 
 
 def test_a_pass_with_no_trace_prints_no_trace_line(cli, capsys):
-    """A pass driven only by `cron` has no originating request and mints none."""
     world, _, _ = cli
     _seed(world, last_error="RuntimeError('deadlock')", trace_context=None)
 
@@ -336,9 +304,7 @@ def test_a_pass_nothing_has_driven_is_blocked_and_says_which_way(cli, capsys):
     assert "nothing has driven this pass" in out
 
 
-def test_a_drive_failure_names_itself_rather_than_only_incrementing_a_counter(
-    cli, capsys
-):
+def test_a_drive_failure_names_itself_rather_than_only_incrementing_a_counter(cli, capsys):
     world, _, _ = cli
     _seed(world, last_drive_error="ConnectionRefusedError('no route to host')")
 
@@ -392,15 +358,14 @@ def test_an_application_with_no_job_runner_and_no_database_is_refused(monkeypatc
     assert error.value.exit_code == 2
 
 
-# --- holes and retry ----------------------------------------------------------
-
-
 def _seed_hole(world, **overrides):
     hole = {
-        "name": "purge_replays", "tenant": "",
+        "name": "purge_replays",
+        "tenant": "",
         "cursor_from": ["2026-07-27T10:00:00+00:00", "k000"],
         "cursor_to": ["2026-07-27T11:00:00+00:00", "k042"],
-        "attempts": 3, "error": "RuntimeError('deadlock detected')",
+        "attempts": 3,
+        "error": "RuntimeError('deadlock detected')",
         "predicate": (
             "SELECT * FROM replays WHERE (expires, key) > ('2026-07-27T10:00:00+00:00', "
             "'k000') AND (expires, key) <= ('2026-07-27T11:00:00+00:00', 'k042')"

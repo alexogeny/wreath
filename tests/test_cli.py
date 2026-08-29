@@ -128,11 +128,6 @@ def test_multiple_workers_are_explicitly_metal_only() -> None:
 
 
 def test_one_worker_keeps_single_process_options_available() -> None:
-    """Each multi-worker guard must retain its worker-count operand.
-
-    Exercising only invalid multi-worker cases cannot detect mutations that
-    make their loop and fixed-port restrictions apply to a single worker.
-    """
     ordinary = build_parser().parse_args(
         ["run", "example:app", "--loop", "asyncio", "--workers", "1"]
     )
@@ -166,9 +161,7 @@ def test_run_parser_configures_default_response_headers() -> None:
     assert options.server_header == "example"
     assert options.date_header is False
 
-    namespace = build_parser().parse_args(
-        ["run", "example:app", "--no-server-header"]
-    )
+    namespace = build_parser().parse_args(["run", "example:app", "--no-server-header"])
     assert options_from_namespace(namespace).server_header is None
 
 
@@ -326,9 +319,7 @@ def test_main_routes_multiple_metal_workers_to_the_supervisor(
         calls.append(workers)
 
     monkeypatch.setattr("wreath._cli._run_metal_worker_group", fake_group)
-    assert cli.main([
-        "run", f"{module_name}:app", "--loop", "metal", "--workers", "2"
-    ]) == 0
+    assert cli.main(["run", f"{module_name}:app", "--loop", "metal", "--workers", "2"]) == 0
     assert calls == [2]
 
 
@@ -395,24 +386,10 @@ def _read_line(stream: Any, timeout: float) -> str:
 
 # Only the `metal` case needs the reactor; the `asyncio` case is the one that
 # proves the console script works at all, and it runs everywhere.
-@pytest.mark.parametrize(
-    "loop", ["asyncio", pytest.param("metal", marks=requires_metal)]
-)
+@pytest.mark.parametrize("loop", ["asyncio", pytest.param("metal", marks=requires_metal)])
 def test_the_console_script_serves_an_app_from_the_working_directory(
     tmp_path: Path, loop: str
 ) -> None:
-    """`wreath run app:app` works where the README says it does.
-
-    Deliberately a subprocess driving the installed console script rather than
-    an in-process call: the defect this covers is that a console script's
-    `sys.path[0]` is the virtualenv's `bin`, not the working directory, and
-    every in-process test already runs with the repository importable. Running
-    `python -m wreath` would pass this test with the fix reverted, so it must
-    not be used here, and `PYTHONPATH` is scrubbed for the same reason.
-
-    Asserts on a served response, not just on a clean start: an app that
-    imports but never binds is not what the quickstart promises.
-    """
     script = _console_script()
     (tmp_path / "app.py").write_text(QUICKSTART_APP)
     env = {name: value for name, value in os.environ.items() if name != "PYTHONPATH"}
@@ -455,12 +432,6 @@ def test_the_console_script_serves_an_app_from_the_working_directory(
 def test_loading_an_application_leaves_an_already_importable_cwd_alone(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The empty `sys.path` entry already means the working directory.
-
-    A second, absolute entry for the same directory would be harmless but
-    untrue to what the interpreter was handed, and it would grow `sys.path` once
-    per CLI command in a long-lived process.
-    """
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys, "path", ["", *sys.path])
 

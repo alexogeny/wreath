@@ -1,12 +1,3 @@
-"""The `passes` check: alerting-visible, and deliberately not on the traffic path.
-
-The instinct runs the other way, so the rule is worth restating. A blocked
-backfill is a data problem and the application is still serving correctly.
-Failing readiness for it converts that data problem into an outage -- and
-removes the very workers that would have resumed the pass. What a stuck pass
-needs is a person.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -99,9 +90,7 @@ async def test_a_stalled_pass_fails_the_check_too(statuses):
 async def test_a_blocked_pass_never_makes_the_instance_unready(statuses):
     statuses["rows"] = [_Row("normalize_grades", "blocked")]
 
-    serving, detail = await evaluate(
-        [callable_check("postgres", _ok), passes_check(_Database([]))]
-    )
+    serving, detail = await evaluate([callable_check("postgres", _ok), passes_check(_Database([]))])
 
     # This is the load-bearing assertion of the whole check. `serving` stays
     # true, so the load balancer keeps the instance -- and keeps the worker that
@@ -121,9 +110,7 @@ async def test_the_check_is_not_critical_so_it_cannot_be_wired_into_a_503(status
 @pytest.mark.asyncio
 async def test_the_alerts_path_is_separate_from_readiness(statuses):
     statuses["rows"] = [_Row("normalize_grades", "blocked")]
-    router = health_router(
-        [callable_check("postgres", _ok)], alerts=[passes_check(_Database([]))]
-    )
+    router = health_router([callable_check("postgres", _ok)], alerts=[passes_check(_Database([]))])
 
     paths = {route.path for route in router.routes}
 

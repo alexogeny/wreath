@@ -1,13 +1,3 @@
-"""PoC: bypass ``max_body_bytes`` on the HTTP/1 server with slow chunks.
-
-Run from the repository root::
-
-    uv run python tests/security/poc_chunked_body_limit_bypass.py
-
-The configured limit is 10 bytes.  A vulnerable build lets a streaming app
-consume two six-byte chunks and answers 200 with the complete 12-byte body.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -66,8 +56,7 @@ async def _main() -> int:
     )
     protocol.connection_made(transport)
     protocol.data_received(
-        b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
-        b"6\r\n123456\r\n"
+        b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n6\r\n123456\r\n"
     )
     for _ in range(5):
         await asyncio.sleep(0)

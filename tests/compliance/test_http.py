@@ -1,8 +1,3 @@
-"""HTTP compliance, codified. Each test names the clause it enforces.
-
-Framing tests drive the real native HTTP/1 protocol (see conftest); response and
-cookie tests exercise the framework primitives a handler uses directly.
-"""
 from __future__ import annotations
 
 import pytest
@@ -13,14 +8,11 @@ from wreath.response import Response
 
 from .conftest import drive_request, header_block, status_of
 
-# --- RFC 9112 message framing (request) -------------------------------------
-
 
 def test_transfer_encoding_and_content_length_together_is_400() -> None:
     # RFC 9112 §6.1 — a request-smuggling vector; the server must reject it.
     r = drive_request(
-        b"POST / HTTP/1.1\r\nHost: x\r\n"
-        b"Transfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n"
+        b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n"
     )
     assert status_of(r) == 400
 
@@ -49,9 +41,6 @@ def test_multiple_host_headers_is_400() -> None:
     assert status_of(drive_request(b"GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n")) == 400
 
 
-# --- RFC 9110 response requirements -----------------------------------------
-
-
 def test_date_header_is_sent_by_default() -> None:
     # RFC 9110 §6.6.1 (MUST) — an origin server with a clock sends Date.
     headers = header_block(drive_request(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"))
@@ -69,7 +58,8 @@ def test_401_carries_www_authenticate_by_default() -> None:
     # RFC 9110 §15.5.2 (MUST) — a 401 carries a WWW-Authenticate challenge.
     assert (b"www-authenticate", b"Bearer") in Unauthorized().headers
     assert (b"www-authenticate", b'Basic realm="x"') in Unauthorized(
-        challenge='Basic realm="x"').headers
+        challenge='Basic realm="x"'
+    ).headers
 
 
 def test_429_may_carry_retry_after() -> None:
@@ -84,8 +74,7 @@ def test_frameworks_own_oauth2_401_carries_a_bearer_challenge() -> None:
 
     resp = _bearer_401("invalid_id_token")
     assert resp.status == 401
-    assert any(name == b"www-authenticate" and b"Bearer" in value
-               for name, value in resp.headers)
+    assert any(name == b"www-authenticate" and b"Bearer" in value for name, value in resp.headers)
 
 
 @pytest.mark.parametrize("status", [204, 304])
@@ -95,9 +84,6 @@ def test_bodyless_statuses_omit_content_length(status: int) -> None:
     assert b"content-length" not in names
 
 
-# --- RFC 9111 cache-control -------------------------------------------------
-
-
 def test_cache_control_renders_directives() -> None:
     from wreath.cache_control import CacheControl
 
@@ -105,17 +91,11 @@ def test_cache_control_renders_directives() -> None:
     assert b"no-store" in header
 
 
-# --- RFC 9110 §10.2.3 Retry-After parsing (client) --------------------------
-
-
 def test_retry_after_accepts_delta_seconds_and_http_date() -> None:
     assert _parse_retry_after(b"120") == 120.0
     assert _parse_retry_after(b"Wed, 21 Oct 2099 07:28:00 GMT") > 1_000_000
     assert _parse_retry_after(b"Wed, 21 Oct 1999 07:28:00 GMT") == 0.0
     assert _parse_retry_after(b"garbage") is None
-
-
-# --- RFC 6265bis Set-Cookie -------------------------------------------------
 
 
 def test_samesite_none_requires_secure() -> None:

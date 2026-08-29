@@ -1,25 +1,3 @@
-"""A QUIC connection must keep serving past its initial stream budget.
-
-`initial_max_streams_bidi` is a *budget*, not a concurrency limit: it is how
-many streams the peer may ever open, and it only replenishes when the server
-sends MAX_STREAMS. HTTP/3 opens one bidirectional stream per request, so a
-server that never extends it serves exactly `max_concurrent_streams` requests
-on a connection and then stalls -- the next request waits for a stream it will
-never be granted. With the default of 100, a browser holding a connection open
-broke at request 101.
-
-Why this uses h2load rather than curl
--------------------------------------
-Every other HTTP/3 test here drives curl, and curl **cannot detect this bug**:
-when the stream budget runs out it transparently opens a new connection and
-retries, so each request gets a fresh budget and every one succeeds. Measured
-against the unfixed server with a budget of 4: curl reported 20/20 OK, while
-h2load on one connection reported 4 done and 16 errored.
-
-So this test needs a client that keeps one connection and reports the failure
-instead of papering over it. That is h2load with `-c 1`, and the test skips
-when it is unavailable rather than quietly proving nothing.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -35,8 +13,10 @@ pytestmark = [requires_h3, pytest.mark.asyncio]
 
 #: Small, so exhausting it is fast and the arithmetic is obvious.
 BUDGET = 4
-_DONE = re.compile(r"requests:\s+\d+\s+total,\s+\d+\s+started,\s+(\d+)\s+done,"
-                   r"\s+(\d+)\s+succeeded,\s+(\d+)\s+failed")
+_DONE = re.compile(
+    r"requests:\s+\d+\s+total,\s+\d+\s+started,\s+(\d+)\s+done,"
+    r"\s+(\d+)\s+succeeded,\s+(\d+)\s+failed"
+)
 
 
 def _h2load_with_http3() -> str | None:
@@ -56,8 +36,7 @@ async def _serve(app, **config):
     cert, key = make_self_signed_cert()
     server = await serve(
         app,
-        ServerConfig(host="127.0.0.1", port=0, lifespan="off", protocols=("h3",),
-                     **config),
+        ServerConfig(host="127.0.0.1", port=0, lifespan="off", protocols=("h3",), **config),
         tls=TLSConfig(cert, key),
     )
     return server, server.datagram_addresses[0][1]
@@ -70,8 +49,13 @@ async def _ok_app(scope, receive, send) -> None:
             return
         if not message.get("more_body", False):
             break
-    await send({"type": "http.response.start", "status": 200,
-                "headers": [(b"content-type", b"text/plain")]})
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"content-type", b"text/plain")],
+        }
+    )
     await send({"type": "http.response.body", "body": b"ok"})
 
 
@@ -80,8 +64,15 @@ async def _one_connection(port: int, count: int) -> tuple[int, int, int]:
     binary = _h2load_with_http3()
     assert binary is not None
     proc = await asyncio.create_subprocess_exec(
-        binary, "--h3", "-n", str(count), "-c", "1", f"https://127.0.0.1:{port}/",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        binary,
+        "--h3",
+        "-n",
+        str(count),
+        "-c",
+        "1",
+        f"https://127.0.0.1:{port}/",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
     )
     out, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
     match = _DONE.search(out.decode("utf-8", "replace"))

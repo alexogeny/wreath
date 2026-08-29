@@ -1,11 +1,3 @@
-"""Streamable HTTP: sessions, cancellation, `DELETE`, and the SSE reply.
-
-The transport is the half an MCP client meets before any of the methods do, and
-it is where interop goes wrong. These tests pin the parts a client depends on:
-where the session identifier comes from, what happens to a message that arrives
-without one, and that a cancelled call really stops and really sends nothing.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -120,9 +112,7 @@ async def test_a_client_that_only_takes_sse_gets_the_reply_as_one_event() -> Non
     app = Wreath()
     MCP(app, name="x", version="1.0.0")
     async with TestClient(app) as client:
-        session_id, initialized = await initialize(
-            client, headers={"accept": "text/event-stream"}
-        )
+        session_id, initialized = await initialize(client, headers={"accept": "text/event-stream"})
         assert header(initialized, "content-type") == "text/event-stream"
         assert initialized.body.startswith(b"event: message\ndata: {")
         assert initialized.body.endswith(b"\n\n")
@@ -133,9 +123,7 @@ async def test_a_client_that_only_takes_sse_gets_the_reply_as_one_event() -> Non
             json={"jsonrpc": "2.0", "id": 5, "method": "ping"},
             headers={"mcp-session-id": session_id, "accept": "text/event-stream"},
         )
-        assert response.body == (
-            b'event: message\ndata: {"jsonrpc":"2.0","id":5,"result":{}}\n\n'
-        )
+        assert response.body == (b'event: message\ndata: {"jsonrpc":"2.0","id":5,"result":{}}\n\n')
 
 
 async def test_a_client_that_takes_both_gets_json() -> None:
@@ -150,12 +138,6 @@ async def test_a_client_that_takes_both_gets_json() -> None:
 
 
 async def test_the_notification_stream_needs_a_session_and_an_accept_header() -> None:
-    """The two ways to ask for the stream wrongly, both named rather than bare.
-
-    The stream itself is `tests/test_mcp_notifications.py`; these are the
-    refusals a client meets on the way to it, and an empty 400 for either of them
-    is the failure that costs a client author an afternoon.
-    """
     app = Wreath()
     MCP(app, name="x", version="1.0.0")
     async with TestClient(app) as client:

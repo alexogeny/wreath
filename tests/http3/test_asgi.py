@@ -1,11 +1,3 @@
-"""HTTP/3 ASGI mapping (ASGI HTTP spec, http_version == "3").
-
-Behavioral HTTP/3 tests. They require the optional ``wreath._native._http3`` backend
-(WREATH_BUILD_HTTP3=1 with ngtcp2/nghttp3) and are skipped otherwise; in the
-dedicated HTTP/3 CI job the backend is present and these run. The executable
-detail is completed with the endpoint implementation (Step 5); the endpoint is
-exercised through the ``h3_module`` fixture and a real QUIC client, never a mock.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -20,19 +12,16 @@ from .conftest import curl_http3, make_self_signed_cert, requires_curl_h3, requi
 pytestmark = [requires_h3, pytest.mark.asyncio]
 
 
-# --- streaming responses ---------------------------------------------------
-#
 # The response body is queued as immutable segments whose addresses are handed
 # straight to nghttp3, and submitted at http.response.start so bytes reach the
 # wire while the app is still producing. These drive a real QUIC client.
+
 
 async def _serve_h3(app, **config):
     cert, key = make_self_signed_cert()
     server = await serve(
         app,
-        ServerConfig(
-            host="127.0.0.1", port=0, lifespan="off", protocols=("h3",), **config
-        ),
+        ServerConfig(host="127.0.0.1", port=0, lifespan="off", protocols=("h3",), **config),
         tls=TLSConfig(cert, key),
     )
     return server, server.datagram_addresses[0][1]
@@ -58,30 +47,33 @@ async def test_scope_reports_http3_over_https() -> None:
 @requires_curl_h3
 @pytest.mark.network
 async def test_response_bytes_are_sent_before_the_final_body_message() -> None:
-    """The first chunk reaches the client before the app sends its last message.
-
-    The app holds its final body message until the test has actually read the
-    first chunk out of the client. A buffered implementation, which submits
-    nothing until more_body=False, cannot satisfy this and times out.
-    """
     release = asyncio.Event()
 
     async def app(scope, receive, send):
-        await send({"type": "http.response.start", "status": 200,
-                    "headers": [(b"content-type", b"text/plain")]})
-        await send({"type": "http.response.body", "body": b"early",
-                    "more_body": True})
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"text/plain")],
+            }
+        )
+        await send({"type": "http.response.body", "body": b"early", "more_body": True})
         await release.wait()  # only set once the client has read "early"
-        await send({"type": "http.response.body", "body": b"late",
-                    "more_body": False})
+        await send({"type": "http.response.body", "body": b"late", "more_body": False})
 
     server, port = await _serve_h3(app)
     proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
-            "curl", "-sN", "--http3-only", "-k", "--max-time", "20",
+            "curl",
+            "-sN",
+            "--http3-only",
+            "-k",
+            "--max-time",
+            "20",
             f"https://127.0.0.1:{port}/stream",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         # Read the early chunk while the app is still suspended.
         early = await asyncio.wait_for(proc.stdout.readexactly(5), timeout=15)
@@ -103,8 +95,9 @@ async def test_many_chunks_arrive_in_exact_order() -> None:
     async def app(scope, receive, send):
         await send({"type": "http.response.start", "status": 200, "headers": []})
         for i, chunk in enumerate(chunks):
-            await send({"type": "http.response.body", "body": chunk,
-                        "more_body": i < len(chunks) - 1})
+            await send(
+                {"type": "http.response.body", "body": chunk, "more_body": i < len(chunks) - 1}
+            )
 
     server, port = await _serve_h3(app)
     try:
@@ -118,7 +111,6 @@ async def test_many_chunks_arrive_in_exact_order() -> None:
 @requires_curl_h3
 @pytest.mark.network
 async def test_empty_chunks_do_not_end_the_body_early() -> None:
-    """An empty interior chunk must not be read as EOF."""
     async def app(scope, receive, send):
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b"a", "more_body": True})
@@ -138,19 +130,13 @@ async def test_empty_chunks_do_not_end_the_body_early() -> None:
 @requires_curl_h3
 @pytest.mark.network
 async def test_large_streamed_response_is_complete_under_retransmission() -> None:
-    """A response far larger than one window exercises ack-driven release.
-
-    Segments are freed as acknowledgements arrive while nghttp3 may still be
-    retransmitting others; the delivered bytes must remain exact.
-    """
     chunk = b"x" * 4096
     count = 512  # 2 MiB across many segments
 
     async def app(scope, receive, send):
         await send({"type": "http.response.start", "status": 200, "headers": []})
         for i in range(count):
-            await send({"type": "http.response.body", "body": chunk,
-                        "more_body": i < count - 1})
+            await send({"type": "http.response.body", "body": chunk, "more_body": i < count - 1})
 
     server, port = await _serve_h3(app)
     try:
@@ -196,9 +182,7 @@ async def test_response_retention_watermarks_suspend_asgi_send(
     async def app(scope, receive, send):
         await send({"type": "http.response.start", "status": 200, "headers": []})
         for index, chunk in enumerate(chunks):
-            waiter = send(
-                {"type": "http.response.body", "body": chunk, "more_body": True}
-            )
+            waiter = send({"type": "http.response.body", "body": chunk, "more_body": True})
             if index == len(chunks) - 1:
                 observed.append(not waiter.done())
             await waiter
@@ -234,17 +218,6 @@ async def test_app_that_never_sends_a_final_body_still_completes() -> None:
 @requires_curl_h3
 @pytest.mark.network
 async def test_acknowledged_segments_are_released_while_streaming() -> None:
-    """Retained response storage must fall as acknowledgements arrive.
-
-    Each chunk is a distinct bytes object the app keeps a reference to, so once
-    the stream drops its own reference the only holder left is the app's list,
-    which `sys.getrefcount` can see.
-
-    The app deliberately never sends ``more_body=False`` until after it has
-    measured. The stream therefore cannot reach EOF or close during the
-    measurement window, so anything released can only have been released by the
-    acknowledgement path -- not by stream teardown freeing the queue wholesale.
-    """
     import sys
 
     count = 400
@@ -257,8 +230,7 @@ async def test_acknowledged_segments_are_released_while_streaming() -> None:
             body = bytes([65 + (i % 26)]) * 4096  # a fresh object every time
             sent.append(body)
             # Always more_body=True: the stream stays open while we measure.
-            await send({"type": "http.response.body", "body": body,
-                        "more_body": True})
+            await send({"type": "http.response.body", "body": body, "more_body": True})
         for _ in range(100):
             await asyncio.sleep(0.05)
             # 2 == `sent` + getrefcount's own argument: nothing else holds it.
@@ -280,15 +252,13 @@ async def test_acknowledged_segments_are_released_while_streaming() -> None:
         await server.close()
 
 
-# --- Native Flight Recorder (Stage 1 HTTP/3 hooks) -------------------------
-
-
 async def _serve_h3_telemetry(app, telemetry):
     cert, key = make_self_signed_cert()
     server = await serve(
         app,
-        ServerConfig(host="127.0.0.1", port=0, lifespan="off", protocols=("h3",),
-                     telemetry=telemetry),
+        ServerConfig(
+            host="127.0.0.1", port=0, lifespan="off", protocols=("h3",), telemetry=telemetry
+        ),
         tls=TLSConfig(cert, key),
     )
     return server, server.datagram_addresses[0][1]
@@ -297,7 +267,6 @@ async def _serve_h3_telemetry(app, telemetry):
 @requires_curl_h3
 @pytest.mark.network
 async def test_h3_pulse_records_a_completion_with_bytes() -> None:
-    """A real QUIC request produces one HTTP/3 completion cell with byte tallies."""
     pytest.importorskip("wreath._native._flight")
     from wreath import _flight_schema as fs
     from wreath.telemetry import Mode, TelemetryConfig
@@ -326,8 +295,8 @@ async def test_h3_pulse_records_a_completion_with_bytes() -> None:
         assert cell.protocol is fs.Protocol.HTTP3
         assert cell.status == 201
         assert cell.terminal is fs.TerminalStatus.OK
-        assert cell.bytes_in == 4          # "ping"
-        assert cell.bytes_out == 14        # "h3-flight-body"
+        assert cell.bytes_in == 4  # "ping"
+        assert cell.bytes_out == 14  # "h3-flight-body"
     finally:
         await server.close()
 
@@ -335,7 +304,6 @@ async def test_h3_pulse_records_a_completion_with_bytes() -> None:
 @requires_curl_h3
 @pytest.mark.network
 async def test_h3_native_ai_refusal_is_a_structured_completion() -> None:
-    """Native ingress refusals remain visible without activating the ASGI app."""
     pytest.importorskip("wreath._native._flight")
     from wreath import Wreath
     from wreath import _flight_schema as fs
@@ -377,9 +345,6 @@ async def test_h3_native_ai_refusal_is_a_structured_completion() -> None:
 @requires_curl_h3
 @pytest.mark.network
 async def test_large_request_body_uploads_past_the_flow_control_window() -> None:
-    """A request body larger than the initial QUIC stream window (~64 KiB) must
-    upload fully. Without crediting DATA payload to flow control the upload
-    stalls once the initial window fills; this drives ~1 MiB through."""
 
     async def app(scope, receive, send):
         body = b""

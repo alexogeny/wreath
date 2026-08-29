@@ -103,9 +103,7 @@ class BatchReceipt:
 
 #: The media type a station sends and this application answers in. Wreath does
 #: not map it to a codec: `wreath.protobuf` is a codec and not a content
-#: negotiator, so the handler reads bytes and decodes them. See
-#: `docs/cookbook/recipes/accept-a-protobuf-body.md`, which is the shape this
-#: example follows rather than invents.
+#: negotiator, so the handler reads bytes and decodes them.
 MEDIA_TYPE = "application/x-protobuf"
 
 #: The same string as `bytes`, and the one the response constructor must be
@@ -119,10 +117,6 @@ MEDIA_TYPE = "application/x-protobuf"
 #: from `wreath.testing.TestResponse.header` or from whatever the deployed
 #: server does with it.
 #:
-#: The reason it is worth a named constant rather than a `.encode()` at the one
-#: call site is that `docs/cookbook/recipes/accept-a-protobuf-body.md` -- the
-#: recipe this example deliberately follows -- shows the `str` form. Anyone
-#: copying the recipe hits this, and the constant is where the answer lives.
 #: Reported; when `Response` either encodes or refuses, this collapses back into
 #: `MEDIA_TYPE`.
 MEDIA_TYPE_HEADER = MEDIA_TYPE.encode("ascii")

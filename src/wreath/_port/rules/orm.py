@@ -7,7 +7,6 @@ from __future__ import annotations
 from ..ir import NEEDS_REVIEW, TRANSLATED, UNSUPPORTED
 
 ORM_MODELS: dict[str, tuple[str, str, str, str]] = {
-    # -- ORM models -----------------------------------------------------------
     "orm.model": (
         "orm_model",
         "orm_models",
@@ -35,13 +34,10 @@ ORM_MODELS: dict[str, tuple[str, str, str, str]] = {
 }
 
 QUERIES: dict[str, tuple[str, str, str, str]] = {
-    # -- queries ---------------------------------------------------------------
-    #
     # `.objects.` is the largest single construct in a real ormar codebase — of
     # the order of a third of every framework token in one.
     # One generic verdict for all of it reports the *size* of the job
     # and nothing about its *shape*, so each verb names the call it becomes.
-    #
     # The split within a verb is by *argument*, not by verb alone. `filter(id=x)`
     # is a mechanical rewrite — every keyword maps to a wreath predicate with the
     # value carried across untouched. `filter(name__icontains=x)` is not: the
@@ -259,8 +255,6 @@ QUERIES: dict[str, tuple[str, str, str, str]] = {
 }
 
 DJANGO_MODELS: dict[str, tuple[str, str, str, str]] = {
-    # -- Django models --------------------------------------------------------
-    #
     # `translated` here means the emitter rewrites the site, and it does:
     # `models.CharField(max_length=32, null=True)` comes out as
     # `Mapped[str | None] = column(Varchar, nullable=True, check=Length(maximum=32))`,

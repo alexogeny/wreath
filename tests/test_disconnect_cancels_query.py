@@ -1,19 +1,3 @@
-"""A client that goes away stops the PostgreSQL backend it started.
-
-The whole chain, end to end, against a live server: a real socket closes, the
-server cancels the application task, the driver sends a wire-level
-`CancelRequest` on a second connection, and PostgreSQL stops scanning.
-
-**The evidence is `pg_stat_activity` read over an independent connection.**
-Asserting that the handler saw `CancelledError` proves only that asyncio works,
-and asserting that our own `await` raised proves less than that. Every verdict
-here is what a *third* connection saw the victim backend doing.
-
-`tests/test_server_cancel_on_disconnect.py` pins the server's half of this
-without a database. This file exists because the two halves were built years
-apart and only their composition answers the question anybody actually has.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -62,7 +46,6 @@ async def database() -> Any:
         # claim they make -- so the lease is never coming back and the default
         # 10s grace is spent in full, twice, waiting for something this file
         # arranged not to happen. Measured at 10.01s of teardown per test.
-        #
         # Shortened rather than removed: the drain path still runs, and nothing
         # here asserts on how long it waits. The tests' verdicts come from
         # `pg_stat_activity` on a third connection, never from shutdown timing.
@@ -82,9 +65,7 @@ def protocol() -> type:
 
 
 async def _backend_state(observer: Any, pid: int) -> str | None:
-    return await observer.fetchval(
-        "SELECT state FROM pg_stat_activity WHERE pid = $1", pid
-    )
+    return await observer.fetchval("SELECT state FROM pg_stat_activity WHERE pid = $1", pid)
 
 
 async def _settle(observer: Any, pid: int, *, want: str) -> str | None:
@@ -151,9 +132,7 @@ def _port(server: Any) -> int:
 
 
 def _request(method: str) -> bytes:
-    return (
-        f"{method} /scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n"
-    ).encode()
+    return (f"{method} /scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n").encode()
 
 
 async def _start_and_wait_active(
@@ -174,20 +153,17 @@ async def _drop(writer: Any) -> None:
     writer.close()
     try:
         await writer.wait_closed()
-    except (ConnectionResetError, BrokenPipeError):
+    except ConnectionResetError, BrokenPipeError:
         pass
 
 
 async def test_a_disconnected_get_stops_the_backend(
     protocol: type, database: Any, observer: Any
 ) -> None:
-    """The finding, closed. Observed from a connection that is not ours."""
     scan = _Scan()
     server = await _serve(_scanning_app(database, scan))
     try:
-        writer, pid = await _start_and_wait_active(
-            _port(server), "GET", scan, observer
-        )
+        writer, pid = await _start_and_wait_active(_port(server), "GET", scan, observer)
         await _drop(writer)
         state = await _settle(observer, pid, want="idle")
     finally:
@@ -203,18 +179,10 @@ async def test_a_disconnected_get_stops_the_backend(
 async def test_an_unabandoned_query_keeps_running(
     protocol: type, database: Any, observer: Any
 ) -> None:
-    """The control. Without it the test above could pass vacuously.
-
-    If `pg_sleep` were not actually running by the time we look, or `state` read
-    `idle` for some unrelated reason, the assertion above would be satisfied by
-    a backend nobody ever cancelled.
-    """
     scan = _Scan()
     server = await _serve(_scanning_app(database, scan))
     try:
-        writer, pid = await _start_and_wait_active(
-            _port(server), "GET", scan, observer
-        )
+        writer, pid = await _start_and_wait_active(_port(server), "GET", scan, observer)
         await asyncio.sleep(1.0)
         state = await _backend_state(observer, pid)
         assert state == "active", (
@@ -230,13 +198,10 @@ async def test_an_unabandoned_query_keeps_running(
 async def test_a_disconnected_post_leaves_the_backend_running(
     protocol: type, database: Any, observer: Any
 ) -> None:
-    """An unsafe method is not cancelled implicitly, all the way down."""
     scan = _Scan()
     server = await _serve(_scanning_app(database, scan))
     try:
-        writer, pid = await _start_and_wait_active(
-            _port(server), "POST", scan, observer
-        )
+        writer, pid = await _start_and_wait_active(_port(server), "POST", scan, observer)
         await _drop(writer)
         await asyncio.sleep(1.0)
         state = await _backend_state(observer, pid)
@@ -252,12 +217,6 @@ async def test_a_disconnected_post_leaves_the_backend_running(
 async def test_the_pooled_connection_serves_the_next_request(
     protocol: type, database: Any, observer: Any
 ) -> None:
-    """A poisoned connection back in the pool is worse than a wasted scan.
-
-    The pool holds exactly one connection, so the request that follows the
-    abandoned one is served by the same backend that was cancelled -- there is
-    no second connection for it to hide behind.
-    """
     scan = _Scan()
     app = _scanning_app(database, scan)
     answered = asyncio.Event()
@@ -275,9 +234,7 @@ async def test_the_pooled_connection_serves_the_next_request(
 
     server = await _serve(app)
     try:
-        writer, pid = await _start_and_wait_active(
-            _port(server), "GET", scan, observer
-        )
+        writer, pid = await _start_and_wait_active(_port(server), "GET", scan, observer)
         await _drop(writer)
         assert await _settle(observer, pid, want="idle") == "idle"
 
@@ -302,13 +259,10 @@ async def test_the_pooled_connection_serves_the_next_request(
 async def test_the_backend_is_idle_not_idle_in_transaction(
     protocol: type, database: Any, observer: Any
 ) -> None:
-    """`idle in transaction` after a cancel is a snapshot held open forever."""
     scan = _Scan()
     server = await _serve(_scanning_app(database, scan))
     try:
-        writer, pid = await _start_and_wait_active(
-            _port(server), "GET", scan, observer
-        )
+        writer, pid = await _start_and_wait_active(_port(server), "GET", scan, observer)
         await _drop(writer)
         state = await _settle(observer, pid, want="idle")
     finally:
@@ -316,15 +270,12 @@ async def test_the_backend_is_idle_not_idle_in_transaction(
     assert state == "idle", f"expected a clean idle backend, saw {state!r}"
 
 
-# --- the same chain, reached by a gRPC deadline instead of a disconnect -------
-#
 # `wreath.grpc`'s plan left this unchecked, and honestly: "the deadline cancels
 # the handler" was proved, and whether that cancellation reached an in-flight
 # ORM query was recorded as *unknown* rather than claimed. It is the same chain
 # as the one above -- the driver cancels a backend whenever the awaiting task is
 # cancelled, whatever cancelled it -- but "the same chain" is an argument, and
 # the plan's own rule is that an argument is not a test.
-#
 # So this is the composition, driven the way gRPC actually reaches it:
 # `grpc-timeout` on the wire, an HTTP/2 stream, and the verdict read from a
 # third connection.
@@ -363,16 +314,6 @@ def _grpc_scanning_app(database: Any, scan: _Scan) -> Any:
 
 
 async def test_a_grpc_deadline_stops_the_postgresql_backend(observer, database) -> None:
-    """`grpc-timeout: 300m` with a 30-second query behind it.
-
-    The evidence is `pg_stat_activity` on a third connection, for the reason
-    this file's docstring gives: asserting the handler saw `CancelledError`
-    proves asyncio works, and asserting our own await raised proves less.
-
-    This closes the gRPC plan's highest-value follow-up. The guide said
-    plainly that `grpc-timeout` bounds the response and is not a guarantee the
-    server stopped working; it now is one, for a query on a wreath connection.
-    """
     from http2 import support
     from http2.conftest import H2Driver, Http2Protocol
 
@@ -406,9 +347,7 @@ async def test_a_grpc_deadline_stops_the_postgresql_backend(observer, database) 
             )
         )
         await driver.feed_and_settle(
-            support.encode_frame(
-                support.DATA, 0x1, 1, frame_message(encode(Ask(nothing=0)))
-            )
+            support.encode_frame(support.DATA, 0x1, 1, frame_message(encode(Ask(nothing=0))))
         )
 
         pid = await asyncio.wait_for(scan.pid, timeout=_PATIENCE)
@@ -427,15 +366,7 @@ async def test_a_grpc_deadline_stops_the_postgresql_backend(observer, database) 
         driver.close()
 
 
-async def test_the_connection_is_usable_after_a_deadline_cancel(
-    observer, database
-) -> None:
-    """A cancelled query must return its connection to the pool *usable*.
-
-    The failure this guards is worse than a leak: a connection returned with
-    the cancelled query's state half-consumed answers the next borrower's
-    request with the previous one's rows.
-    """
+async def test_the_connection_is_usable_after_a_deadline_cancel(observer, database) -> None:
     from http2 import support
     from http2.conftest import H2Driver, Http2Protocol
 
@@ -466,9 +397,7 @@ async def test_the_connection_is_usable_after_a_deadline_cancel(
             )
         )
         await driver.feed_and_settle(
-            support.encode_frame(
-                support.DATA, 0x1, 1, frame_message(encode(Ask(nothing=0)))
-            )
+            support.encode_frame(support.DATA, 0x1, 1, frame_message(encode(Ask(nothing=0))))
         )
         await asyncio.wait_for(scan.cancelled.wait(), timeout=_PATIENCE)
     finally:

@@ -1,8 +1,3 @@
-"""Native API-docs subsystem: fail-closed gating, self-containment, escaping.
-
-v1 has no C of its own; these drive the Python that builds and gates the page.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -25,7 +20,9 @@ def test_signature_block_keeps_receiver_parameters_when_requested() -> None:
         pass
 
     rendered = _signature_block(
-        "callable_with_receivers", callable_with_receivers, skip_self=False,
+        "callable_with_receivers",
+        callable_with_receivers,
+        skip_self=False,
     )
 
     assert "self: object" in rendered
@@ -33,7 +30,9 @@ def test_signature_block_keeps_receiver_parameters_when_requested() -> None:
     assert "value: int" in rendered
 
     without_receivers = _signature_block(
-        "callable_with_receivers", callable_with_receivers, skip_self=True,
+        "callable_with_receivers",
+        callable_with_receivers,
+        skip_self=True,
     )
     assert "self: object" not in without_receivers
     assert "cls: type[object]" not in without_receivers
@@ -155,9 +154,7 @@ async def test_open_when_no_auth_args() -> None:
 @pytest.mark.asyncio
 async def test_try_it_out_inherits_docs_gate() -> None:
     # try_it_out shares the docs gate: no separate/stricter auth.
-    app = _app(
-        environments=("dev",), env="dev", auth=_bearer_backend(), try_it_out=True
-    )
+    app = _app(environments=("dev",), env="dev", auth=_bearer_backend(), try_it_out=True)
     async with TestClient(app) as client:
         assert (await client.request("GET", "/docs")).status == 401
         ok = {"authorization": "Bearer letmein"}

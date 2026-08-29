@@ -1,7 +1,3 @@
-"""Structural check that user_router wires the expected lifecycle routes.
-
-Needs the built wreath package (imports the router/binding/response glue).
-"""
 from __future__ import annotations
 
 import pytest
@@ -43,7 +39,6 @@ def test_custom_prefix():
 
 
 async def test_ormuserstore_write_path_uses_unit_of_work():
-    """create -> add()+flush(); update -> flush() on the loaded row (no session.update)."""
     Model = default_user_model()
     inst = Model(email="seed@x.co", hashed_password="h")
     assert inst.id is not None  # uuid default applies on instantiation
@@ -72,8 +67,6 @@ async def test_ormuserstore_write_path_uses_unit_of_work():
     assert s.flushes == 2 and inst.email == "new@b.co"
 
 
-# -- refusals and branches a mutation sweep found unexercised -------------------
-#
 # A sweep over `src/wreath/users.py` reported these as `unreached`: no test executed
 # them at all. They are the same shape as the `orm/types.py` findings -- the behaviour
 # was covered and the *validation* was not -- with one that is a live branch rather
@@ -82,13 +75,6 @@ async def test_ormuserstore_write_path_uses_unit_of_work():
 
 @pytest.mark.parametrize("max_attempts", [0, -1, -100])
 def test_login_limiter_refuses_a_budget_of_no_attempts(max_attempts: int) -> None:
-    """`LoginLimiter`'s docstring promises this under `Raises:` and nothing tested it.
-
-    `max_attempts=0` is the dangerous value: the limiter would refuse every identifier
-    on its first failure, locking out every account in the system. Read as "unlimited"
-    it would do the opposite and throttle nothing. Refusing at construction is what
-    keeps a configuration typo from being either.
-    """
     from wreath.users import LoginLimiter
 
     with pytest.raises(ValueError, match="max_attempts must be at least 1"):
@@ -97,8 +83,6 @@ def test_login_limiter_refuses_a_budget_of_no_attempts(max_attempts: int) -> Non
 
 @pytest.mark.parametrize("window", [0.0, -1.0, -0.001])
 def test_login_limiter_refuses_a_window_that_is_not_positive(window: float) -> None:
-    """A zero window would expire every count immediately, so nothing is ever refused
-    -- a throttle that reports being on while doing nothing."""
     from wreath.users import LoginLimiter
 
     with pytest.raises(ValueError, match="window must be positive"):
@@ -106,7 +90,6 @@ def test_login_limiter_refuses_a_window_that_is_not_positive(window: float) -> N
 
 
 def test_login_limiter_accepts_the_smallest_legal_configuration() -> None:
-    """The accepting side of both bounds, or they could be tightened undetectably."""
     from wreath.users import LoginLimiter
 
     limiter = LoginLimiter(max_attempts=1, window=0.001)
@@ -114,13 +97,6 @@ def test_login_limiter_accepts_the_smallest_legal_configuration() -> None:
 
 
 def test_a_verify_link_and_a_reset_link_are_different_urls() -> None:
-    """Both arms of `_default_link`'s `purpose == "verify"` branch, neither exercised.
-
-    This is not a refusal -- it is a live branch that decides which URL goes into an
-    email. Inverted, a verification email would carry a password-reset link and a
-    reset email a verification link, and every test that only checked "an email was
-    sent with a token in it" would still pass. The token must survive into both.
-    """
     from wreath.users import _default_link
 
     build = _default_link("https://app.example.com/", "/users")
@@ -135,11 +111,6 @@ def test_a_verify_link_and_a_reset_link_are_different_urls() -> None:
 
 
 def test_the_base_url_keeps_exactly_one_slash_before_the_prefix() -> None:
-    """`base_url.rstrip("/")` -- with and without a trailing slash must agree.
-
-    A doubled slash still resolves for most servers, which is why this goes unnoticed;
-    it reaches users as a visibly wrong link in an email.
-    """
     from wreath.users import _default_link
 
     with_slash = _default_link("https://app.example.com/", "/users")("verify", "t")
@@ -149,17 +120,6 @@ def test_the_base_url_keeps_exactly_one_slash_before_the_prefix() -> None:
 
 
 async def test_a_bad_verification_token_is_a_400_and_says_it_was_invalid() -> None:
-    """Both arms of `"verified" if ok else "invalid_token"` and `200 if ok else 400`.
-
-    Neither was exercised: no test posted a token to `/users/verify`, so the endpoint
-    could have reported success for every token and the suite would not have noticed.
-    That is the direction that matters -- a verification endpoint answering `200
-    {"status": "verified"}` to a forged token marks an address verified that nobody
-    proved they own, and email verification is what password reset then trusts.
-
-    Both the body and the status are asserted, because the mutation sweep found them
-    as two separate controls on adjacent lines.
-    """
     from wreath.app import Wreath
     from wreath.testing import TestClient
 
@@ -172,11 +132,6 @@ async def test_a_bad_verification_token_is_a_400_and_says_it_was_invalid() -> No
 
 
 async def test_a_real_verification_token_is_a_200_and_says_verified() -> None:
-    """The accepting arm, so "always 400 / always invalid_token" cannot pass either.
-
-    The token is minted through the same helper the router's email path uses, rather
-    than by reaching into the endpoint, so this exercises the pair end to end.
-    """
     from wreath import _userkit
     from wreath.app import Wreath
     from wreath.testing import TestClient
@@ -186,9 +141,7 @@ async def test_a_real_verification_token_is_a_200_and_says_verified() -> None:
     user = await store.create("ann@example.com", hash_password("hunter2hunter2"))
     # The same call `_userkit.request_email_verification` makes, with the module's own
     # purpose constant rather than the literal, so a renamed purpose fails here too.
-    token = _userkit.sign_token(
-        "s" * 32, _userkit._VERIFY, user.id, ttl=3600
-    )
+    token = _userkit.sign_token("s" * 32, _userkit._VERIFY, user.id, ttl=3600)
 
     app = Wreath()
     app.include_router(user_router(store, secret="s" * 32))
@@ -199,14 +152,6 @@ async def test_a_real_verification_token_is_a_200_and_says_verified() -> None:
 
 
 async def test_the_verification_link_refuses_a_forged_token() -> None:
-    """`GET /verify/{token}` is the arm a mail client actually follows.
-
-    The POST twin above was tested and this one was not, and it is the one an
-    attacker can reach with nothing but a URL -- no JSON body, no fetch, no
-    same-origin anything. A mutation that made every check in the endpoint
-    answer True survived the whole suite, which is to say the link could have
-    marked any address verified and nothing would have gone red.
-    """
     from wreath.app import Wreath
     from wreath.testing import TestClient
 
@@ -219,7 +164,6 @@ async def test_the_verification_link_refuses_a_forged_token() -> None:
 
 
 async def test_the_verification_link_accepts_a_real_token() -> None:
-    """The other arm, so "always 400" could not pass the test above."""
     from wreath import _userkit
     from wreath.app import Wreath
     from wreath.testing import TestClient

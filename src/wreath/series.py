@@ -268,7 +268,7 @@ class ChartData:
     database-derived snapshot serves more than one projection.
     """
 
-    __slots__ = ("_chart_cache", "_chart_text_cache", "_data")
+    __slots__ = ("_chart_cache", "_chart_plan_cache", "_chart_text_cache", "_data")
 
     def __init__(
         self,
@@ -281,7 +281,26 @@ class ChartData:
         # only its latest projection: operation-owned, bounded, and enough to
         # turn a repeated application write into a close-object cache hit.
         self._chart_cache = None
+        self._chart_plan_cache = None
         self._chart_text_cache = None
+
+    def _chart_plan(
+        self,
+        key: tuple[tuple[int, ...], tuple[int, ...], int, int],
+    ) -> Any:
+        cached = self._chart_plan_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        downsample, full, threshold, tick_target = key
+        plan = _core.series_data_chart_plan(
+            self._data,
+            downsample,
+            full,
+            threshold,
+            tick_target,
+        )
+        self._chart_plan_cache = (key, plan)
+        return plan
 
     def project_chart(
         self,
@@ -290,6 +309,7 @@ class ChartData:
         full_rows: Any = (),
         threshold: int = 128,
         tick_target: int = 9,
+        cache: bool = True,
     ) -> tuple[
         int,
         tuple[tuple[Any, bool], ...],
@@ -301,21 +321,24 @@ class ChartData:
         downsample = tuple(downsample_rows)
         full = tuple(full_rows)
         key = (downsample, full, threshold, tick_target)
-        cacheable = (
-            all(type(row) is int for row in downsample)
-            and all(type(row) is int for row in full)
+        cacheable = all(type(row) is int for row in downsample) and all(
+            type(row) is int for row in full
         )
         cached = self._chart_cache
-        if cacheable and cached is not None and cached[0] == key:
+        if cache and cacheable and cached is not None and cached[0] == key:
             return cached[1]
-        result = _core.series_data_chart(
-            self._data,
-            downsample,
-            full,
-            threshold,
-            tick_target,
+        result = (
+            _core.series_chart_plan(self._chart_plan(key))
+            if cacheable
+            else _core.series_data_chart(
+                self._data,
+                downsample,
+                full,
+                threshold,
+                tick_target,
+            )
         )
-        if cacheable:
+        if cache and cacheable:
             self._chart_cache = (key, result)
         return result
 
@@ -326,27 +349,31 @@ class ChartData:
         full_rows: Any = (),
         threshold: int = 128,
         tick_target: int = 9,
+        cache: bool = True,
     ) -> tuple[int, tuple[tuple[Any, bool], ...], tuple[str, ...], str, int]:
         """Serialize tick axes at their final text egress boundary."""
 
         downsample = tuple(downsample_rows)
         full = tuple(full_rows)
         key = (downsample, full, threshold, tick_target)
-        cacheable = (
-            all(type(row) is int for row in downsample)
-            and all(type(row) is int for row in full)
+        cacheable = all(type(row) is int for row in downsample) and all(
+            type(row) is int for row in full
         )
         cached = self._chart_text_cache
-        if cacheable and cached is not None and cached[0] == key:
+        if cache and cacheable and cached is not None and cached[0] == key:
             return cached[1]
-        result = _core.series_data_chart_text(
-            self._data,
-            downsample,
-            full,
-            threshold,
-            tick_target,
+        result = (
+            _core.series_chart_plan_text(self._chart_plan(key))
+            if cacheable
+            else _core.series_data_chart_text(
+                self._data,
+                downsample,
+                full,
+                threshold,
+                tick_target,
+            )
         )
-        if cacheable:
+        if cache and cacheable:
             self._chart_text_cache = (key, result)
         return result
 
@@ -812,8 +839,6 @@ class _Builder:
     def _with(self, **changes: Any) -> Any:
         raise NotImplementedError
 
-    # -- declaration ------------------------------------------------------
-
     @property
     def model(self) -> type:
         return self._d.model
@@ -975,8 +1000,6 @@ class _Builder:
             )
         return column
 
-    # -- the stages that are specified but not built ----------------------
-    #
     # Named here so the surface a later stage fills in is visible now, and so a
     # caller who writes one gets an answer rather than a silent no-op. Each
     # refuses by name; none of them ever destroys anything, and `drop()` in
@@ -1006,16 +1029,12 @@ class _Builder:
             "that destroys anything. It will stay opt-in when it arrives."
         )
 
-    # -- running ----------------------------------------------------------
-
     def _bind(self, values: dict[str, Any]) -> tuple[Predicate, ...]:
         """This view's predicates with each `Param` replaced by its value."""
         self._check_values(values)
         return tuple(
             predicate if binder is None else binder(values)
-            for predicate, binder in zip(
-                self._d.predicates, self._d._binders, strict=True
-            )
+            for predicate, binder in zip(self._d.predicates, self._d._binders, strict=True)
         )
 
     def _check_values(self, values: dict[str, Any]) -> None:
@@ -1804,17 +1823,13 @@ class Series(_Builder):
                     compare=self._compare,
                 )
                 shape_key = _series_plan_key(sql, oids)
-                plan = session.registry.store_plan(
-                    shape_key, _CompiledSeriesPlan(sql, oids)
-                )
+                plan = session.registry.store_plan(shape_key, _CompiledSeriesPlan(sql, oids))
                 session.registry.remember_prepared_shape(self, shape_key)
                 sql = plan.sql
             else:
                 _shape_key, plan = cached
                 sql = plan.sql
-                args = self._compiled_args(
-                    values, start=start, end=end, zone_name=zone_name
-                )
+                args = self._compiled_args(values, start=start, end=end, zone_name=zone_name)
             rows = await session.declared(sql, args)
             result = self._envelope(rows, range, zone_name)
         if self._events is None:
@@ -1920,7 +1935,6 @@ class Series(_Builder):
             # Sealing advances forwards, so the buckets nobody has settled are a
             # suffix: recomputing from just past the last stored one covers them
             # without a second round trip to ask which are missing.
-            #
             # `end_of` rather than adding the bucket's nominal length, because
             # the last stored bucket may have been a 23- or 25-hour day and
             # stepping by 24 would start the gap in the middle of one.

@@ -1,10 +1,3 @@
-"""a04, a15 -- a path assembled from request text, and an archive trusted.
-
-`Path(root) / name` looks like containment and is not: an absolute `name`
-discards `root` entirely, and `..` walks out of it. The archive half is the same
-mistake one layer down -- a member name is attacker-controlled text, and a
-symlink member turns a later read into a read of whatever it points at.
-"""
 from __future__ import annotations
 
 import os

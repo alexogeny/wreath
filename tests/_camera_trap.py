@@ -1,21 +1,3 @@
-"""Shared fixture machinery for the camera-trap example's database tests.
-
-Three suites build the same schema the same way — replay the shipped migration
-artifact, seed it, hand back a client, drop it — and they had three copies of
-the path constant and the replay loop between them. One copy, here, in the
-`tests/_name.py` style the repository already uses for `_replaydrive`,
-`_gated_skips` and `_pgfidelity`: `tests/` is on `sys.path`, so these import as
-plain modules rather than through a package.
-
-The artifact is v1's shipped DDL and names its schema literally, which is
-correct for the thing it is — a migration someone applies to production. The
-tests need it somewhere else, because they run in a per-worker namespace, so
-`statements()` rewrites the one token. That substitution is confined to the
-test fixtures on purpose: rewriting the artifact itself, or teaching the
-migration system to parameterise a schema it deliberately hard-codes, would
-change what the artifact *is* to make a test easier.
-"""
-
 from __future__ import annotations
 
 import pathlib
@@ -55,12 +37,10 @@ async def build_schema(connection, *, seed_rows: int | None = None) -> None:
     # this by hand. A fixture is the one caller that legitimately does: it
     # prepares a database *before* any app starts, and some tests here read the
     # schema without ever entering a lifespan.
-    #
     # So it asks the runner's own schema component for its statements, rather
     # than keeping an example-local copy of the DDL. The example used to export
     # a `queue_schema_sql` for this; that was a workaround for a gap wreath has
     # since closed.
-    #
     # Not `wreath.schema.emit_sql`, which is the DBA-facing spelling and wraps
     # its output in transaction control -- correct for `psql -f`, and rejected
     # by the driver, which refuses `BEGIN` on a connection with an operation

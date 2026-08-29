@@ -1,5 +1,3 @@
-"""Shared helpers for the canonical native policy-routing corpus."""
-
 from __future__ import annotations
 
 from typing import Any, Protocol
@@ -9,9 +7,7 @@ from wreath._native import _core
 
 class RouteTableLike(Protocol):
     def add(self, path: str, method: str, handler: Any) -> None: ...
-    def match(
-        self, method: str, path: str
-    ) -> tuple[Any, dict[str, str] | None] | None: ...
+    def match(self, method: str, path: str) -> tuple[Any, dict[str, str] | None] | None: ...
 
 
 # name -> table factory.

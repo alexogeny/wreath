@@ -229,17 +229,15 @@ async def repair_legs(session: Any, animal_id: int, *, since: Any) -> int:
     Returns:
         How many fixes had their leg rewritten.
     """
-    rows = await (
-        session.raw(
-            f'SELECT collar_id, recorded_at, latitude, longitude FROM "{SCHEMA}"."fixes" '
-            "WHERE animal_id = $1 AND recorded_at >= COALESCE("
-            f'  (SELECT max(recorded_at) FROM "{SCHEMA}"."fixes" '
-            "   WHERE animal_id = $1 AND recorded_at < $2), $2) "
-            "ORDER BY recorded_at, collar_id",
-            animal_id,
-            since,
-        ).fetch()
-    )
+    rows = await session.raw(
+        f'SELECT collar_id, recorded_at, latitude, longitude FROM "{SCHEMA}"."fixes" '
+        "WHERE animal_id = $1 AND recorded_at >= COALESCE("
+        f'  (SELECT max(recorded_at) FROM "{SCHEMA}"."fixes" '
+        "   WHERE animal_id = $1 AND recorded_at < $2), $2) "
+        "ORDER BY recorded_at, collar_id",
+        animal_id,
+        since,
+    ).fetch()
     if not rows:
         return 0
 
@@ -250,8 +248,9 @@ async def repair_legs(session: Any, animal_id: int, *, since: Any) -> int:
         # The row before `since` is read only to give the next one a
         # predecessor; its own leg was already right and is not rewritten.
         if recorded_at >= since:
-            legs.append((collar_id, recorded_at, None if previous is None else
-                         distance(previous, here)))
+            legs.append(
+                (collar_id, recorded_at, None if previous is None else distance(previous, here))
+            )
         previous = here
 
     for start in range(0, len(legs), BATCH):
@@ -271,9 +270,7 @@ async def _fleet(session: Any, collar_ids: set[int]) -> dict[int, Collar]:
     if not collar_ids:
         return {}
     found = await session.fetch(
-        Collar.select()
-        .where(Collar.id.in_(sorted(collar_ids)))
-        .include(Collar.animal.joined())
+        Collar.select().where(Collar.id.in_(sorted(collar_ids))).include(Collar.animal.joined())
     )
     return {collar.id: collar for collar in found}
 
@@ -296,8 +293,17 @@ def _coordinate(position: Position) -> Coordinate | None:
 
 
 _COLUMNS = (
-    "collar_id", "recorded_at", "animal_id", "received_at", "latitude",
-    "longitude", "accuracy_m", "battery_pct", "leg_m", "relay", "satellites",
+    "collar_id",
+    "recorded_at",
+    "animal_id",
+    "received_at",
+    "latitude",
+    "longitude",
+    "accuracy_m",
+    "battery_pct",
+    "leg_m",
+    "relay",
+    "satellites",
 )
 
 

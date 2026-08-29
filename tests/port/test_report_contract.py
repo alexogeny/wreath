@@ -1,8 +1,3 @@
-"""The port report JSON contract.
-
-Skipped today; auto-activates when the tool ships. Pins the report shape from
-design 07 §3 and the invariant that ormar queries are flagged, never translated.
-"""
 import pytest
 
 port = pytest.importorskip("wreath.port")
@@ -11,12 +6,6 @@ VALID_TAGS = {"translated", "needs-review", "unsupported"}
 
 
 def test_report_shape_and_every_query_is_still_reported(corpus_app_roots):
-    """Pin the JSON contract and ensure every ORM query receives a verdict.
-
-    Design 07 §6: no ``.objects.`` chain goes unmentioned, whatever its verdict.
-    The two contracts consume the same immutable report, so the corpus is
-    deliberately analyzed once.
-    """
     doc = port.analyze_all(corpus_app_roots).as_dict()
     assert set(doc) >= {"counts", "findings"}
     assert set(doc["counts"]) >= {"translated", "needs_review", "unsupported"}
@@ -35,8 +24,7 @@ def test_report_shape_and_every_query_is_still_reported(corpus_app_roots):
     # is the only genuinely useless verdict.
     query_findings = [f for f in doc["findings"] if f["construct"] == "orm_query"]
     assert query_findings, "corpus deliberately contains .objects. query calls"
-    assert all(f["tag"] in {"translated", "needs-review", "unsupported"}
-               for f in query_findings)
+    assert all(f["tag"] in {"translated", "needs-review", "unsupported"} for f in query_findings)
     # And the split is real: a corpus this varied must land on both sides.
     tags = {f["tag"] for f in query_findings}
     assert "translated" in tags and "needs-review" in tags

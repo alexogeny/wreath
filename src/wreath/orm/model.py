@@ -55,6 +55,7 @@ STATE_NAMES = {
     DETACHED: "detached",
 }
 
+
 def validate_identifier(value: str, kind: str) -> str:
     """Validate ORM's unquoted form through the PostgreSQL name authority."""
     return validate_unquoted_identifier(value, kind, error=DeclarationError)
@@ -102,14 +103,10 @@ class ModelMeta(_MetaBase):
             inherited_facets.extend(getattr(base, "__wreath_proto_facets__", ()))
 
         own_columns = [
-            (key, value)
-            for key, value in namespace.items()
-            if isinstance(value, Column)
+            (key, value) for key, value in namespace.items() if isinstance(value, Column)
         ]
         own_relations = [
-            (key, value)
-            for key, value in namespace.items()
-            if isinstance(value, Relationship)
+            (key, value) for key, value in namespace.items() if isinstance(value, Relationship)
         ]
         for key, prototype in (*own_columns, *own_relations):
             prototype.python_name = key
@@ -241,9 +238,7 @@ class ModelMeta(_MetaBase):
         bases = (storage, *bases)
 
         namespace["__wreath_columns__"] = tuple(bound_columns)
-        namespace["__wreath_column_names__"] = tuple(
-            item.python_name for item in bound_columns
-        )
+        namespace["__wreath_column_names__"] = tuple(item.python_name for item in bound_columns)
         namespace["__wreath_relationships__"] = tuple(bound_relations)
         namespace["__wreath_by_prototype__"] = by_prototype
         namespace["__wreath_column_map__"] = column_map
@@ -298,9 +293,7 @@ def _storage_base(
     rooting it at `Model` would make its metatype conflict with `ModelMeta`.
     """
     return _storage._compile_model_layout(
-        tuple(
-            (item.pg_type.oid, item.primary_key, item.nullable) for item in columns
-        ),
+        tuple((item.pg_type.oid, item.primary_key, item.nullable) for item in columns),
         len(relations),
     )
 
@@ -366,9 +359,7 @@ def _reject_duplicates(model: str, items: list[Any], kind: str) -> None:
     for item in items:
         existing = seen.get(item.python_name)
         if existing is not None and existing is not item:
-            raise DeclarationError(
-                f"{model} declares {kind} {item.python_name!r} twice"
-            )
+            raise DeclarationError(f"{model} declares {kind} {item.python_name!r} twice")
         seen[item.python_name] = item
 
 
@@ -420,10 +411,7 @@ class Model(metaclass=ModelMeta):
         initialized = self._orm_initialize(values)
         if initialized is None:
             unknown = values.keys() - type(self).__wreath_column_map__.keys()
-            raise TypeError(
-                f"{type(self).__name__} has no column(s) "
-                f"{', '.join(sorted(unknown))}"
-            )
+            raise TypeError(f"{type(self).__name__} has no column(s) {', '.join(sorted(unknown))}")
         if not initialized:
             for spec in columns:
                 if self._orm_is_loaded(spec.index):
@@ -453,8 +441,6 @@ class Model(metaclass=ModelMeta):
         if type(self).__wreath_compiled_rules__:
             enforce_rules(self)
 
-    # -- storage protocol ---------------------------------------------------
-    #
     # ModelMeta prepends the generated storage base to every concrete model, so
     # these declarations state the protocol while the C type supplies it.
 

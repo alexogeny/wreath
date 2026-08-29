@@ -101,9 +101,6 @@ def _safe_href(url: str) -> str:
     return _esc(stripped)
 
 
-# --- inline ----------------------------------------------------------------
-
-
 def _inline(text: str) -> str:
     code_marked = "`" in text
     link_marked = "[" in text
@@ -167,9 +164,6 @@ def _inline(text: str) -> str:
     return text
 
 
-# --- blocks ----------------------------------------------------------------
-
-
 class _Renderer:
     def __init__(self, counter: list[int] | None = None) -> None:
         self.out: list[str] = []
@@ -213,8 +207,7 @@ class _Renderer:
                 self.out.append("<hr />")
                 i += 1
             elif (
-                line_kind & _WDT_ADMONITION
-                and (admonition := _ADMONITION.match(line)) is not None
+                line_kind & _WDT_ADMONITION and (admonition := _ADMONITION.match(line)) is not None
             ):
                 i = self._admonition(lines, i, admonition)
             elif line_kind & _WDT_TAB and _CONTENT_TAB.match(line):
@@ -338,7 +331,10 @@ class _Renderer:
         return f"<{tag}>{body}</{tag}>", i
 
     def _admonition(
-        self, lines: list[str], i: int, match: re.Match[str],
+        self,
+        lines: list[str],
+        i: int,
+        match: re.Match[str],
     ) -> int:
         marker, kind = match.group(1), match.group(2).lower()
         title = match.group(3) if match.group(3) is not None else kind.capitalize()

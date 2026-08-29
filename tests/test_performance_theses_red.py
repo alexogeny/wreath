@@ -1,12 +1,3 @@
-"""Deterministic red checklist for the next performance architecture slices.
-
-These tests deliberately state source/architecture properties rather than timing
-claims. They are excluded from the default suite by the ``thesis`` marker. Run
-``uv run pytest -m thesis tests/test_performance_theses_red.py`` to see the
-remaining checklist fail; each case should move into an ordinary behavior or
-regression test when its implementation starts.
-"""
-
 from __future__ import annotations
 
 import json
@@ -52,9 +43,7 @@ def test_native_request_parser_does_not_materialize_header_list_before_activatio
 
 
 def test_builtin_pre_activation_stack_has_one_compiled_native_phase() -> None:
-    baseline = json.loads(
-        _text(_ROOT / "docs" / "agents" / "request-boundary-baseline.json")
-    )
+    baseline = json.loads(_text(_ROOT / "tools" / "baselines" / "request-boundary-baseline.json"))
     realistic = baseline["scenarios"]["realistic"]
 
     # Leaves room for app entry, one credential-verifier activation, and route

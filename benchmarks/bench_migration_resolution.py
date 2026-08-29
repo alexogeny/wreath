@@ -382,7 +382,6 @@ def main(argv: list[str] | None = None) -> int:
     fleet_samples = _fleet_sample(args.fleet_tenants, args.trials)
     fleet_median = statistics.median(fleet_samples)
 
-    # -- generation: the same two-object drift, planned and rendered ---------
     scenario = _GenerationScenario()
     wreath_generate = _wreath_generation_arm(scenario)
     expected_operations = wreath_generate()
@@ -415,12 +414,9 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         close_connection()
 
-    # -- artifact: verify one checksummed WMA1 from bytes --------------------
     artifact_data = _artifact_bytes(scenario)
     verify_arm, expected_verify = _artifact_verify_arm(artifact_data)
-    verify_samples = _measure_expected(
-        verify_arm, args.iterations, args.trials, expected_verify
-    )
+    verify_samples = _measure_expected(verify_arm, args.iterations, args.trials, expected_verify)
     verify_median = statistics.median(verify_samples)
 
     document = {

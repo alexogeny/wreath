@@ -1,9 +1,3 @@
-"""call_later / call_at ordering, cancel, time(); timing-wheel stress.
-
-The reactor's timer subsystem is a hashed timing wheel (O(1) insert/cancel/
-expire) rather than a heap, so per-request deadlines stay cheap at high RPS.
-These pin the observable contract, which must match asyncio exactly.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -70,7 +64,6 @@ def test_zero_and_negative_delay_run_promptly(loop):
 
 
 def test_many_timers_fire_in_order(loop):
-    """Timing-wheel stress: hundreds of near-term deadlines, exact ordering."""
     n = 400
     fired = []
 

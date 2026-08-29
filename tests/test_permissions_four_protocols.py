@@ -1,20 +1,3 @@
-"""One authorization vocabulary across REST, gRPC, MCP and GraphQL.
-
-Wreath serves four protocols, and each already declares authorization in the
-same shape -- `@authorize` on a route, `action=` on a gRPC method, `action=` on
-an MCP tool, a field policy in GraphQL. The thing being proved here is that they
-are *literally one vocabulary*: `declared_actions(app)` reads all four off their
-own declarations, so `permissions_router` answers for all four and `wreath
-typegen` emits the types for all four, with no second list anywhere that could
-drift.
-
-The property that must survive that widening is the one the guide is emphatic
-about: **none of it is enforcement.** A wider vocabulary must not turn the
-manifest into something a caller may treat as authoritative, so there is a test
-here that the manifest says yes at the type level while the surface itself still
-refuses at the field level -- optimistic chrome, exactly as before.
-"""
-
 from __future__ import annotations
 
 import sys
@@ -124,44 +107,23 @@ def _four_protocol_app() -> tuple[Wreath, MCP, GraphQL]:
     return app, mcp, graphql
 
 
-# --- the vocabulary spans all four ------------------------------------------
-
-
 def test_a_rest_route_is_in_the_vocabulary() -> None:
     app, _mcp, _graphql = _four_protocol_app()
     assert "Trek::read" in declared_actions(app)["Trek"]
 
 
 def test_a_grpc_method_is_in_the_vocabulary() -> None:
-    """`action=` on a gRPC method means what it means on a route.
-
-    A gRPC method is registered as an ordinary route, so nothing extra has to
-    happen for the vocabulary to see it -- but the keyword has to *reach* the
-    requirement, which is what this pins.
-    """
     app, _mcp, _graphql = _four_protocol_app()
     assert "Collar::read" in declared_actions(app)["Collar"]
 
 
 def test_an_mcp_tool_is_in_the_vocabulary() -> None:
-    """The MCP endpoint is one route fronting many declarations.
-
-    `mcp.declared_actions()` has always been able to list them; the point here
-    is that the *application's* vocabulary contains them, so there is one list
-    rather than two that agree by inspection.
-    """
     app, mcp, _graphql = _four_protocol_app()
     assert "Camera::read" in declared_actions(app)["Camera"]
     assert mcp.declared_actions()["Camera"] == ("Camera::read",)
 
 
 def test_a_graphql_field_policy_is_in_the_vocabulary() -> None:
-    """GraphQL declares one action over many named resources.
-
-    Its resource types are the schema's types, so `User` joins the vocabulary
-    with the endpoint's own action -- the same `(action, resource type)` pair
-    every other surface contributes.
-    """
     app, _mcp, _graphql = _four_protocol_app()
     vocabulary = declared_actions(app)
     assert vocabulary["User"] == ("read",)
@@ -169,11 +131,6 @@ def test_a_graphql_field_policy_is_in_the_vocabulary() -> None:
 
 
 def test_a_graphql_endpoint_with_no_authorizer_contributes_nothing() -> None:
-    """The vocabulary is what is *enforced*, and an unguarded endpoint is not.
-
-    `GraphQL` takes its authorizer explicitly and enforces nothing without one,
-    so advertising its types would publish a control that does not exist.
-    """
     app = Wreath()
     graphql = GraphQL(Registry(FakeDatabase(), [User, Post]), models=[User, Post])
     app.include_router(graphql.router())
@@ -181,16 +138,12 @@ def test_a_graphql_endpoint_with_no_authorizer_contributes_nothing() -> None:
 
 
 def test_the_four_surfaces_share_one_dictionary() -> None:
-    """All four, in one answer, read off their own declarations."""
     app, _mcp, _graphql = _four_protocol_app()
     vocabulary = declared_actions(app)
     assert vocabulary["Trek"] == ("Trek::read",)
     assert vocabulary["Collar"] == ("Collar::read",)
     assert vocabulary["Camera"] == ("Camera::read",)
     assert vocabulary["User"] == ("read",)
-
-
-# --- the endpoints answer for all four ---------------------------------------
 
 
 @pytest.mark.asyncio
@@ -212,22 +165,13 @@ async def test_the_vocabulary_endpoint_publishes_every_protocol() -> None:
     app, _mcp, _graphql = _four_protocol_app()
     app.include_router(permissions_router(app))
     async with TestClient(app) as client:
-        response = await client.get(
-            "/permissions", headers={"authorization": "Bearer ada:ranger"}
-        )
+        response = await client.get("/permissions", headers={"authorization": "Bearer ada:ranger"})
         resources = response.json()["resources"]
     assert set(resources) >= {"Trek", "Collar", "Camera", "User", "Query"}
 
 
 @pytest.mark.asyncio
 async def test_a_graphql_field_is_answered_exactly_by_the_batch_endpoint() -> None:
-    """A field is a *named* resource, so the row-level endpoint answers it exactly.
-
-    This is the whole reason GraphQL needs no new wire shape: the batch endpoint
-    already asks `authorize(action, Type::"id")`, and a GraphQL field decision
-    *is* `authorize("read", User::"email")`. The manifest's type-level answer is
-    the coarse one; this is the exact one, from the same vocabulary.
-    """
     app, _mcp, _graphql = _four_protocol_app()
     app.include_router(permissions_router(app))
     async with TestClient(app) as client:
@@ -243,13 +187,6 @@ async def test_a_graphql_field_is_answered_exactly_by_the_batch_endpoint() -> No
 
 @pytest.mark.asyncio
 async def test_the_wider_vocabulary_is_still_only_chrome() -> None:
-    """The manifest may say yes where the surface then says no.
-
-    `permit(..., resource == User::"id")` makes the *type-level* question --
-    `User::"\\x00type-level"` -- answer no, and nothing here changes that; what
-    must stay true is the direction of the error. A manifest entry is never a
-    grant: the field decision is taken again, per field, by the endpoint.
-    """
     app, _mcp, graphql = _four_protocol_app()
     app.include_router(permissions_router(app))
     async with TestClient(app) as client:
@@ -273,11 +210,7 @@ async def test_the_wider_vocabulary_is_still_only_chrome() -> None:
     assert graphql.resolver_errors == 0
 
 
-# --- typegen reads the same one vocabulary -----------------------------------
-
-
 def test_typegen_emits_permission_types_for_every_protocol() -> None:
-    """The generated client's action unions come from all four surfaces."""
     from wreath.typegen.inspect import build_api_model
 
     app, _mcp, _graphql = _four_protocol_app()
@@ -289,11 +222,7 @@ def test_typegen_emits_permission_types_for_every_protocol() -> None:
     assert by_type["User"] == ("read",)
 
 
-# --- the gRPC keyword is the one every other surface uses --------------------
-
-
 def test_a_grpc_method_action_records_the_requirement_authorize_records() -> None:
-    """`action=` on a method builds the same requirement `@authorize` does."""
     service = GrpcService("camera.Tracker")
 
     @service.unary(request=Position, response=Position, action="Collar::read")
@@ -308,12 +237,6 @@ def test_a_grpc_method_action_records_the_requirement_authorize_records() -> Non
 
 @pytest.mark.asyncio
 async def test_a_grpc_method_action_actually_refuses() -> None:
-    """Recorded is not enforced, and only the second one is worth anything.
-
-    The refusal arrives before the transport check that would otherwise reject
-    this HTTP/1.1 request, which is the proof it is the *authorization* tape
-    answering and not `wreath.grpc`'s own guard.
-    """
     app, _mcp, _graphql = _four_protocol_app()
     async with TestClient(app) as client:
         anonymous = await client.post("/camera.Tracker/GetPosition", content=b"")
@@ -327,7 +250,6 @@ async def test_a_grpc_method_action_actually_refuses() -> None:
 
 
 def test_a_grpc_resource_without_an_action_is_refused_at_declaration() -> None:
-    """The same refusal `@mcp.tool` makes: a resource alone gates nothing."""
     service = GrpcService("camera.Tracker")
     with pytest.raises(ValueError, match="resource=.*with no .action="):
 

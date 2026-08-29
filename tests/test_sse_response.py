@@ -1,4 +1,3 @@
-"""SSEResponse — Server-Sent Events framing over the streaming plumbing."""
 from __future__ import annotations
 
 from wreath.response import ServerSentEvent, SSEResponse, _encode_sse

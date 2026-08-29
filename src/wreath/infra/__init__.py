@@ -51,7 +51,6 @@ writes a checksummed Compose deployment contract. There is no provider, state
 file, image build, or `apply`. A human checks the artifacts before anything
 touches an account.
 
-Reference: `docs/reference/infra.md`. Guide: `docs/guides/infra.md`.
 """
 
 from __future__ import annotations

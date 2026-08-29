@@ -149,7 +149,7 @@ def _resolve(
 
 
 class CedarSchema:
-    """A parsed Cedar schema used to reject bad policies before startup.
+    """A parsed Cedar schema that rejects bad policies before startup.
 
     The supported input is Cedar's human-readable schema syntax.  Action
     hierarchy declarations are also compiled into ordinary `Action` entity

@@ -1,6 +1,3 @@
-"""wreath audit (Tier 1): self-audit of the API-docs surface, a11y rule firing,
-and middleware-introspection performance checks. No C of its own.
-"""
 from __future__ import annotations
 
 from typing import Any
@@ -59,9 +56,18 @@ def test_a11y_rules_fire_on_bad_html() -> None:
     findings = _run_a11y(_BAD_HTML)
     fired = {f.rule_id for f in findings}
     for expected in {
-        "html-lang", "document-title", "img-alt", "control-label", "heading-order",
-        "link-text", "table-headers", "duplicate-id", "tabindex", "viewport-scale",
-        "aria-valid", "landmarks",
+        "html-lang",
+        "document-title",
+        "img-alt",
+        "control-label",
+        "heading-order",
+        "link-text",
+        "table-headers",
+        "duplicate-id",
+        "tabindex",
+        "viewport-scale",
+        "aria-valid",
+        "landmarks",
     }:
         assert expected in fired, f"{expected} did not fire; fired={sorted(fired)}"
     # errors carry a WCAG reference and the right severity
@@ -76,7 +82,7 @@ def test_a11y_clean_html_is_silent() -> None:
         '<!DOCTYPE html><html lang="en"><head><title>Ok</title>'
         '<meta name="viewport" content="width=device-width, initial-scale=1"></head>'
         '<body><main><h1>Ok</h1><h2>Sub</h2><img src="a.png" alt="a" width="4" height="4">'
-        '</main></body></html>'
+        "</main></body></html>"
     )
     assert _run_a11y(good) == []
 
@@ -125,10 +131,12 @@ def test_meta_refresh_is_flagged() -> None:
 
 
 def test_focus_outline_removal_is_flagged() -> None:
-    assert any(f.rule_id == "focus-visible"
-               for f in _run_a11y("<style>:focus { outline: none }</style>"))
-    assert any(f.rule_id == "focus-visible"
-               for f in _run_a11y('<button style="outline:0">x</button>'))
+    assert any(
+        f.rule_id == "focus-visible" for f in _run_a11y("<style>:focus { outline: none }</style>")
+    )
+    assert any(
+        f.rule_id == "focus-visible" for f in _run_a11y('<button style="outline:0">x</button>')
+    )
 
 
 def test_perf_flags_missing_middleware() -> None:
@@ -137,9 +145,7 @@ def test_perf_flags_missing_middleware() -> None:
 
 
 def test_perf_middleware_introspection_positive() -> None:
-    app = Wreath(
-        http_policy=HttpPolicy(security_headers=SecurityHeadersPolicy())
-    )
+    app = Wreath(http_policy=HttpPolicy(security_headers=SecurityHeadersPolicy()))
     app.configure_http_policy(HttpPolicy(compression=CompressionPolicy()))
     fired = {f.rule_id for f in app_perf(app, "{}")}
     assert "compression-enabled" not in fired

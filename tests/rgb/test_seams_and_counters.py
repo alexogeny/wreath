@@ -1,6 +1,3 @@
-"""Injection seams, stuck keys, and per-handler scoping (report 23: R-02, R-03,
-B-01, B-02, G-05, G-09, G-12, G-14, G-23, B-08)."""
-
 from __future__ import annotations
 
 import pytest
@@ -36,7 +33,7 @@ class TestStoreExpressionSeam:
         from wreath.store import Keyed, PostgresStore
 
         store = PostgresStore(object(), Keyed(table="t", ttl=60.0))
-        assert "$1" in store.window("$1")          # a placeholder is fine
+        assert "$1" in store.window("$1")  # a placeholder is fine
         with pytest.raises(TypeError):
             store.window("(SELECT 1)")
 
@@ -54,7 +51,7 @@ class TestIdempotencyOperability:
 
         store = MemoryIdempotencyStore()
         middleware = IdempotencyPolicy(store=store)
-        await store.reserve("k")                  # claimed, never completed
+        await store.reserve("k")  # claimed, never completed
         assert (await store.reserve("k"))[0] == "in_flight"
 
         await middleware.release("k")
@@ -221,8 +218,11 @@ class TestBusStats:
 
         stats = MessageBus(_Database(), name="events").stats()
         for name in (
-            "unrouted_publishes", "group_registry_errors", "doorbell_reconnects",
-            "handler_errors", "delivery_errors",
+            "unrouted_publishes",
+            "group_registry_errors",
+            "doorbell_reconnects",
+            "handler_errors",
+            "delivery_errors",
         ):
             assert name in stats
 

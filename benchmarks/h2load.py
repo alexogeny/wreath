@@ -72,10 +72,8 @@ def capabilities() -> Capabilities | None:
     if path is None:
         return None
     try:
-        linkage = subprocess.run(
-            ["ldd", path], capture_output=True, text=True, timeout=20
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
+        linkage = subprocess.run(["ldd", path], capture_output=True, text=True, timeout=20).stdout
+    except OSError, subprocess.SubprocessError:
         # Not Linux, or no ldd. Assume HTTP/3 is present and let the negotiated
         # protocol check below catch it if it is not; a false "no h3" here would
         # skip a protocol that works.
@@ -172,10 +170,14 @@ def measure(
         def command_for(count: int, *, measured: bool) -> list[str]:
             command = [
                 found.path,
-                "-n", str(count),
-                "-c", str(connections),
-                "-t", str(min(threads, connections)),
-                "-m", str(streams_per_connection),
+                "-n",
+                str(count),
+                "-c",
+                str(connections),
+                "-t",
+                str(min(threads, connections)),
+                "-m",
+                str(streams_per_connection),
                 *([f"--log-file={log}"] if measured else []),
                 *(["--data", str(data)] if send_data else []),
                 # h2load's request method is GET (or POST with --data); the
@@ -194,7 +196,9 @@ def measure(
             try:
                 completed = subprocess.run(
                     command_for(count, measured=measured),
-                    capture_output=True, text=True, timeout=timeout,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
                 )
             except subprocess.TimeoutExpired as error:
                 raise H2LoadError(f"h2load timed out after {timeout}s") from error
@@ -202,8 +206,7 @@ def measure(
             if completed.returncode != 0:
                 phase = "measurement" if measured else "warmup"
                 raise H2LoadError(
-                    f"h2load {phase} exited {completed.returncode}: "
-                    f"{output.strip()[:400]}"
+                    f"h2load {phase} exited {completed.returncode}: {output.strip()[:400]}"
                 )
             return output
 

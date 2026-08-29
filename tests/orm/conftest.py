@@ -1,22 +1,3 @@
-"""Shared models and a scriptable fake driver for ORM tests.
-
-The fake connection speaks the same surface as `wreath.postgres.Connection`
-(execute/fetch/fetchrow/fetchval/close plus the `_plans` description cache),
-so these tests exercise the real compiler, session, and hydrator without a
-database. Behavior that depends on catalog fidelity belongs in the PostgreSQL
-integration tests instead.
-
-**The fake refuses what the driver refuses and returns what the driver
-returns.** Both come from the driver itself rather than from a restatement
-here -- `check_statement` is the shipped refusal path and `ScriptedRecord` is
-the row surface, so neither can drift from what a real connection does. This
-matters more than it looks: thirteen introspection tests once passed against a
-fake scripted with `str` and `int` rows, modelling a driver with catalog codecs
-that does not exist, and `validate_schema="error"` -- the framework default --
-had never once completed lifespan startup against a real PostgreSQL. See
-the never-more-capable rule for doubles in `AGENTS.md`.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -87,9 +68,7 @@ def _row(scripted: Any) -> Any:
 class FakePlan:
     __slots__ = ("checked", "result_names", "result_oids")
 
-    def __init__(
-        self, names: tuple[str, ...], oids: tuple[int, ...], checked: bool = True
-    ) -> None:
+    def __init__(self, names: tuple[str, ...], oids: tuple[int, ...], checked: bool = True) -> None:
         self.result_names = names
         self.result_oids = oids
         #: False when the plan deliberately disagrees with the scripted rows --

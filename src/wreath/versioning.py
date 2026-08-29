@@ -118,9 +118,7 @@ class VersionedRouter:
         return self.mount(Router())
 
 
-def negotiate_version(
-    request: Any, *, default: str, supported: Iterable[str]
-) -> str:
+def negotiate_version(request: Any, *, default: str, supported: Iterable[str]) -> str:
     """Resolve the requested version from `Accept-Version`, else `default`.
 
     This never refuses. An absent header, a blank one, a version outside
@@ -130,13 +128,9 @@ def negotiate_version(
     `default` validated -- it is returned stringified whether or not it appears
     in `supported`.
 
-    Reads through `Request.header()`, which is the accessor. `Request.headers`
-    is the raw `list[tuple[bytes, bytes]]` and has no `.get` -- this used to
-    call `request.headers.get(...)` inside a blanket `except Exception`, so
-    every real request raised `AttributeError`, was swallowed, and got
-    `default` back. Negotiation never happened; only a dict-shaped test double
-    ever exercised the path. Guarding for the accessor rather than catching is
-    what makes that visible instead of silent.
+    Reads through `Request.header()`. `Request.headers` is the raw
+    `list[tuple[bytes, bytes]]` and is not a mapping. An object without the
+    accessor resolves to `default`.
 
     Args:
         supported: the version tags this endpoint serves, compared as strings

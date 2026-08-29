@@ -1,4 +1,5 @@
 """Finding / Report value types shared by the rules, runner, and CLI."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

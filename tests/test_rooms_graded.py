@@ -1,12 +1,3 @@
-"""Slice 5: two subscribers on one room, one event, different precisions.
-
-The composition wreath is uniquely placed to make: it owns the fan-out
-(`rooms`, cross-worker over the bus), the policy engine (Cedar) and the
-coordinate type. Assembling this from three packages means re-authorizing every
-event per socket, which is exactly the implementation that falls over during the
-incident everyone is watching.
-"""
-
 from __future__ import annotations
 
 import json
@@ -19,9 +10,7 @@ from wreath.rooms import RoomRegistry
 
 COLLAR = Coordinate(lat=-23.6980, lon=133.8807)
 
-LADDER = PrecisionLadder(
-    ("exact", None), ("fine", 1_000), ("coarse", 10_000)
-)
+LADDER = PrecisionLadder(("exact", None), ("fine", 1_000), ("coarse", 10_000))
 
 #: What each role may see, as the grade a subscriber carries.
 GRADES = {"ranger": None, "partner": 1_000.0, "volunteer": 10_000.0}
@@ -51,16 +40,7 @@ def _grade(socket):
     return GRADES.get(socket.role, _WITHHELD)
 
 
-# --- the composition ---------------------------------------------------------
-
-
 async def test_two_subscribers_receive_one_event_at_different_precisions():
-    """The single most valuable assertion in the slice.
-
-    Same room, same broadcast, same instant -- and the two watchers legitimately
-    disagree about where the animal is, because the authorizer graded them
-    differently.
-    """
     rooms = RoomRegistry()
     ranger, volunteer = _Socket("ranger"), _Socket("volunteer")
     await rooms.join("collar-7", ranger)
@@ -78,7 +58,6 @@ async def test_two_subscribers_receive_one_event_at_different_precisions():
 
 
 async def test_a_grade_seeing_nothing_receives_no_frame_at_all():
-    """Absent, not an empty event: a blank frame still announces that one happened."""
     rooms = RoomRegistry()
     ranger, public = _Socket("ranger"), _Socket("nobody")
     await rooms.join("collar-7", ranger)
@@ -92,7 +71,6 @@ async def test_a_grade_seeing_nothing_receives_no_frame_at_all():
 
 
 async def test_the_expensive_half_runs_once_per_grade_not_once_per_socket():
-    """The optimisation that makes this affordable during an incident."""
     rooms = RoomRegistry()
     for _ in range(30):
         await rooms.join("collar-7", _Socket("volunteer"))
@@ -105,16 +83,13 @@ async def test_the_expensive_half_runs_once_per_grade_not_once_per_socket():
         renders.append(grade)
         return _render(grade, payload)
 
-    delivered = await rooms.broadcast(
-        "collar-7", "7", grade=_grade, render=counting_render
-    )
+    delivered = await rooms.broadcast("collar-7", "7", grade=_grade, render=counting_render)
 
     assert delivered == 50
     assert len(renders) == 2, f"rendered {len(renders)} times for 2 grades"
 
 
 async def test_the_cheap_half_runs_once_per_socket():
-    """`grade` is per socket per broadcast, which is what keeps it fresh."""
     rooms = RoomRegistry()
     sockets = [_Socket("ranger") for _ in range(5)]
     for socket in sockets:
@@ -130,17 +105,7 @@ async def test_the_cheap_half_runs_once_per_socket():
     assert len(graded) == 5
 
 
-# --- the stale-grant decision ------------------------------------------------
-
-
 async def test_a_revoked_grant_takes_effect_on_the_very_next_event():
-    """The plan required an explicit answer, and this is it.
-
-    Grouping subscribers by authorization outcome is only sound while the
-    outcome holds. `grade` is therefore called per broadcast rather than cached
-    at join, so a grade backed by live state is fresh by construction: the
-    framework cannot serve an event under a grant that has been revoked.
-    """
     rooms = RoomRegistry()
     watcher = _Socket("ranger")
     await rooms.join("collar-7", watcher)
@@ -171,11 +136,7 @@ async def test_a_revocation_to_nothing_stops_delivery_entirely():
     assert len(watcher.sent) == 1
 
 
-# --- refusals and degradation ------------------------------------------------
-
-
 async def test_grade_without_render_is_refused():
-    """One without the other would deliver the ungraded payload to everyone."""
     rooms = RoomRegistry()
     await rooms.join("collar-7", _Socket("ranger"))
     with pytest.raises(ValueError, match="both or neither"):
@@ -190,7 +151,6 @@ async def test_render_without_grade_is_refused():
 
 
 async def test_a_grade_that_raises_drops_that_socket_and_is_counted():
-    """One socket that cannot be graded must not end the fan-out -- or vanish."""
     rooms = RoomRegistry()
     good, bad = _Socket("ranger"), _Socket("ranger")
     await rooms.join("collar-7", good)
@@ -201,9 +161,7 @@ async def test_a_grade_that_raises_drops_that_socket_and_is_counted():
             raise RuntimeError("no answer")
         return _grade(socket)
 
-    delivered = await rooms.broadcast(
-        "collar-7", "7", grade=grade, render=_render
-    )
+    delivered = await rooms.broadcast("collar-7", "7", grade=grade, render=_render)
 
     assert delivered == 1
     assert good.sent and not bad.sent
@@ -241,7 +199,6 @@ async def test_a_graded_broadcast_to_an_unknown_room_delivers_nothing():
 
 
 async def test_an_ungraded_broadcast_is_unchanged():
-    """The default path must be exactly what it was before this slice."""
     rooms = RoomRegistry()
     a, b = _Socket("ranger"), _Socket("volunteer")
     await rooms.join("chat", a)

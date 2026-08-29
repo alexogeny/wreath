@@ -103,8 +103,6 @@ __all__ = [
 ]
 
 
-# --- checksummed container framing (shape shared with _recording_format) -----
-
 MAX_CHUNK_BYTES = 256 * 1024 * 1024
 _CHUNK = struct.Struct("<4sII")  # tag, byte_length, crc32
 _MAGIC_TRANSPORT = b"WTR1"
@@ -226,9 +224,6 @@ def _encode_addr(addr: tuple[str, int]) -> bytes:
     return struct.pack("<HH", len(host), int(addr[1])) + host
 
 
-# --- transport recording model ----------------------------------------------
-
-
 class SegmentKind(IntEnum):
     """What a recorded transport segment represents on the inbound half."""
 
@@ -318,9 +313,6 @@ def record_transport_segments(
     return TransportRecording(tuple(segments), peername, sockname, _build_id())
 
 
-# --- virtual clock -----------------------------------------------------------
-
-
 class VirtualClock:
     """A monotonic virtual clock in microseconds, advanced explicitly by replay.
 
@@ -340,9 +332,6 @@ class VirtualClock:
     def advance_to(self, offset_us: int) -> None:
         if offset_us > self._now_us:
             self._now_us = offset_us
-
-
-# --- fake transport ----------------------------------------------------------
 
 
 class _ReplayTransport(asyncio.Transport):
@@ -470,9 +459,6 @@ def _feed(protocol: Any, data: bytes) -> None:
         view = view[n:]
         if not len(view):
             return
-
-
-# --- transport replay --------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -751,9 +737,6 @@ def _default_protocol_cls() -> type:
     return cast(type, _server.Http1Protocol)
 
 
-# --- fault injection ---------------------------------------------------------
-
-
 #: A `_TransportFaultPlan.rewrite` action sentinel (distinct from any SegmentKind)
 #: meaning "fire the driver's owned timeout after feeding this segment".
 _FIRE_TIMEOUT = 100
@@ -914,9 +897,6 @@ class _TransportFaultPlan:
                 return (data,), None
             return (data[:cut], data[cut:]), None
         return (data,), None
-
-
-# --- curated fault corpus ----------------------------------------------------
 
 
 def fault_corpus() -> dict[str, FaultSchedule]:
@@ -1084,7 +1064,6 @@ def fault_corpus() -> dict[str, FaultSchedule]:
     # failure, and either alone is handled. One entry per compound, because a
     # cross product nobody can reason about is worse than a short list that maps
     # to named incidents.
-    #
     # A doorbell that ends its stream and then cannot re-LISTEN: the shape of a
     # database that went away and came back refusing. A supervisor must keep
     # retrying rather than treating the failed reopen as terminal.
@@ -1121,9 +1100,6 @@ def fault_corpus() -> dict[str, FaultSchedule]:
         )
     )
     return corpus
-
-
-# --- open a recording from disk ----------------------------------------------
 
 
 #: What `recording_kind` reports, and the two things a recording can be.
@@ -1192,8 +1168,6 @@ def open_attempt_recording(path: str) -> AttemptRecord:
     raise ReplayError(f"unrecognized recording container {magic!r}")
 
 
-# --- recording -> regression test ---------------------------------------------
-#
 # An incident produces a recording, and a recording is only useful while someone
 # is looking at it. Turning one into a test is twenty minutes of transcribing
 # headers by hand, which is why it usually does not happen and the same bug comes
@@ -1432,17 +1406,11 @@ async def generate_test(
             content=request.body,
         )
 
-    parsed_target = parse_target(
-        target, label="replay application", default_attribute="app"
-    )
+    parsed_target = parse_target(target, label="replay application", default_attribute="app")
     module = parsed_target.module
     attribute = parsed_target.attribute
     explicit_attribute = ":" in target
-    import_line = (
-        f"from {module} import {attribute}"
-        if explicit_attribute
-        else f"import {module}"
-    )
+    import_line = f"from {module} import {attribute}" if explicit_attribute else f"import {module}"
     application = attribute if explicit_attribute else f"{module}.{attribute}"
     headers = {
         name_.decode("latin-1"): value.decode("latin-1")
@@ -1489,14 +1457,11 @@ async def generate_test(
     return "\n".join(lines)
 
 
-# --- replaying a durable job attempt ------------------------------------------
-#
 # A failed durable job is harder to reproduce than a failed request: the request
 # that caused it succeeded hours ago, the arguments came from state that has
 # since changed, and the failure is on attempt 4 after two retries and a lease
 # expiry. Wreath owns the queue, the retry policy, the driver, and the doubles,
 # so it can re-run *that attempt* with every boundary it crossed replaced.
-#
 # The join between recording and replay is the coordinate space. A recorded
 # `BoundaryEvent` is `(seam, target, coordinate)` -- which is exactly what an
 # `AdapterFaultDescriptor` addresses -- so a recorded failure becomes an
@@ -1777,17 +1742,11 @@ async def generate_attempt_test(
     """
     result = await replay_attempt(runner, record, args=args, scope=scope)
 
-    parsed_target = parse_target(
-        target, label="replay job runner", default_attribute="jobs"
-    )
+    parsed_target = parse_target(target, label="replay job runner", default_attribute="jobs")
     module = parsed_target.module
     attribute = parsed_target.attribute
     explicit_attribute = ":" in target
-    import_line = (
-        f"from {module} import {attribute}"
-        if explicit_attribute
-        else f"import {module}"
-    )
+    import_line = f"from {module} import {attribute}" if explicit_attribute else f"import {module}"
     queue = attribute if explicit_attribute else f"{module}.{attribute}"
     where = f" from {origin}" if origin else ""
     tenant = f" for tenant {record.tenant!r}" if record.tenant else ""

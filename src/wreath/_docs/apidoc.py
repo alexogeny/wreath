@@ -21,7 +21,8 @@ __all__ = ["TargetNotFound", "expand", "has_directives", "rest_markup"]
 
 _DIRECTIVE = re.compile(r"^:::\s+([\w.]+)\s*$")
 _SECTION = re.compile(
-    r"^(Args|Arguments|Parameters|Returns|Raises|Yields|Example|Examples|Note|Notes):\s*$")
+    r"^(Args|Arguments|Parameters|Returns|Raises|Yields|Example|Examples|Note|Notes):\s*$"
+)
 #: reST markup that this renderer does not speak. Docstrings reach the site as
 #: markdown, and markdown has no ``double backtick`` literal and no ``:role:``
 #: — so both survive into the page as damage rather than as an error.
@@ -130,23 +131,6 @@ def expand(source: str, page: str = "", sink: list[str] | None = None) -> str:
 
 
 def _empty_module_finding(path: str, targets: list[str]) -> str | None:
-    """Report a module directive whose section would contain no API at all.
-
-    The only allowance is structural rather than a list of blessed pages: a
-    facade may render nothing when the same page also carries a directive for
-    one of its submodules. That is the shape `docs/reference/middleware.md`
-    established and `docs/reference/orm.md` now follows -- the facade directive
-    contributes the package docstring as the page's intro, and the submodule
-    sections beneath it carry the API. It is checked against the page's own
-    directives, so a page that keeps the facade and deletes the submodules goes
-    red rather than quietly emptying out.
-
-    There used to be a second allowance, `EMPTY_MODULE_OK`: five facades over
-    *private* packages, which no submodule directive can reach, and which
-    therefore rendered nothing at all. `_documented_here` renders those, so the
-    waiver has nothing left to buy and is gone rather than sitting here reading
-    as permission. A page that empties out now has to be fixed, not listed.
-    """
     try:
         target = _import(path)
     except TargetNotFound:
@@ -157,8 +141,7 @@ def _empty_module_finding(path: str, targets: list[str]) -> str | None:
         return None
     return (
         f"::: {path} resolves to a module and renders no members -- every public "
-        "name is defined elsewhere. Add a directive per submodule, as "
-        "docs/reference/middleware.md does, so the API is on the page"
+        "name is defined elsewhere. Add a directive for each public submodule"
     )
 
 
@@ -514,7 +497,7 @@ def _return_annotation(func: Any) -> str:
         return ""
     try:
         sig = inspect.signature(func)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return ""
     if sig.return_annotation is inspect.Signature.empty:
         return ""
@@ -546,7 +529,7 @@ def _unquote(text: str) -> str:
 def _signature_block(name: str, func: Any, skip_self: bool) -> str:
     try:
         sig = inspect.signature(func)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return ""
     if skip_self:
         params = [p for p in sig.parameters.values() if p.name not in ("self", "cls")]
@@ -570,14 +553,10 @@ def _docstring(doc: str | None) -> str:
             continue
         out += ["", f"**{section.group(1)}:**", ""]
         i += 1
-        while i < len(lines) and (
-            lines[i].startswith((" ", "\t")) or not lines[i].strip()
-        ):
+        while i < len(lines) and (lines[i].startswith((" ", "\t")) or not lines[i].strip()):
             item = lines[i].strip()
             if item:
                 name, sep, rest = item.partition(":")
-                out.append(
-                    f"- `{name.strip()}` — {rest.strip()}" if sep else f"- {item}"
-                )
+                out.append(f"- `{name.strip()}` — {rest.strip()}" if sep else f"- {item}")
             i += 1
     return "\n".join(out).strip()

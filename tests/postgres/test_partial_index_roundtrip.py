@@ -1,13 +1,3 @@
-"""Real PostgreSQL proof that a partial index round-trips through the catalog.
-
-The risk this file exists for is not a crash. It is that ``detect`` reports drift
-on an index it created moments earlier, on every run, forever -- because
-PostgreSQL stores a predicate as a node tree and ``pg_get_expr`` deparses it back
-to a canonical text that need not match what was written. So every test here
-applies the migration and then asks ``detect`` **twice**: the second answer must
-be empty.
-"""
-
 from __future__ import annotations
 
 import os
@@ -112,16 +102,13 @@ async def test_an_equality_predicate_round_trips() -> None:
 
 
 async def test_a_unique_partial_index_round_trips() -> None:
-    """The shape the exactly-once guarantee rests on."""
 
     def build(schema: str) -> Any:
         class Message(Model, table="messages", schema=schema):
             id: Mapped[int] = column(Int64, primary_key=True)
             channel: Mapped[str] = column(Text)
             dedup_key: Mapped[str] = column(Text, nullable=True)
-            _dedup = index(
-                "channel", "dedup_key", unique=True, where=is_not_null("dedup_key")
-            )
+            _dedup = index("channel", "dedup_key", unique=True, where=is_not_null("dedup_key"))
 
         return Message
 
@@ -136,9 +123,7 @@ async def test_an_in_predicate_round_trips_as_any_array() -> None:
             id: Mapped[int] = column(Int64, primary_key=True)
             next_attempt_at: Mapped[int] = column(Int64)
             state: Mapped[str] = column(Text)
-            _ready = index(
-                "next_attempt_at", where=one_of("state", ["pending", "retry_wait"])
-            )
+            _ready = index("next_attempt_at", where=one_of("state", ["pending", "retry_wait"]))
 
         return Delivery
 
@@ -181,7 +166,6 @@ async def test_a_boolean_and_a_reserved_word_column_round_trip() -> None:
 
 
 async def test_two_predicates_over_one_column_set_are_two_indexes() -> None:
-    """The digest in the object name is what keeps these apart."""
 
     def build(schema: str) -> Any:
         class Split(Model, table="splits", schema=schema):
@@ -198,16 +182,6 @@ async def test_two_predicates_over_one_column_set_are_two_indexes() -> None:
 
 
 async def test_is_null_round_trips_on_types_no_literal_could_use() -> None:
-    """``IS NULL`` renders no literal, so the literal vocabulary does not apply.
-
-    The ``IsNull`` branch used to compute the column's type kind and then discard
-    it, which refused ``timestamptz`` -- and ``retired_at IS NULL`` is the
-    archetypal partial index, so the restriction cost real indexes and bought
-    nothing. This is the proof it bought nothing: one index per type that
-    ``eq()`` still refuses, read back from ``pg_get_expr``, then ``detect``
-    twice. A ``NullTest`` node has no operand to coerce, which is why the type
-    never reaches the deparsed text.
-    """
 
     def build(schema: str) -> Any:
         class Card(Model, table="cards", schema=schema):
@@ -238,7 +212,6 @@ async def test_is_null_round_trips_on_types_no_literal_could_use() -> None:
 
 
 async def test_widening_is_null_did_not_widen_the_comparisons() -> None:
-    """``eq()`` and ``one_of()`` do render a literal, and still refuse the type."""
 
     class Mixed(Model, table="mixed", schema="app"):
         id: Mapped[int] = column(Int64, primary_key=True)
@@ -257,23 +230,15 @@ async def test_widening_is_null_did_not_widen_the_comparisons() -> None:
 
 
 async def test_the_reserved_word_list_matches_the_server() -> None:
-    """A version bump that adds a keyword must not silently change quoting."""
     db = await connection()
     try:
-        rows = await db.fetch(
-            "SELECT word FROM pg_get_keywords() WHERE catcode IN ('R', 'T')"
-        )
+        rows = await db.fetch("SELECT word FROM pg_get_keywords() WHERE catcode IN ('R', 'T')")
     finally:
         await db.close()
     assert {str(row[0]) for row in rows} == set(RESERVED_WORDS)
 
 
 async def test_the_renderer_agrees_with_pg_get_expr_verbatim() -> None:
-    """Render locally, create the index from that text, read it back unchanged.
-
-    This is the property the whole design rests on, stated without the migration
-    machinery in the way: what wreath writes is already what PostgreSQL says.
-    """
     schema = f"wreath_render_{uuid.uuid4().hex[:12]}"
     db = await connection()
 
@@ -305,8 +270,7 @@ async def test_the_renderer_agrees_with_pg_get_expr_verbatim() -> None:
         for ordinal, predicate in enumerate(cases):
             rendered = render_predicate(predicate, columns, "Sample")
             await db.execute(
-                f'CREATE INDEX idx_{ordinal} ON "{schema}".samples (id) '
-                f"WHERE {rendered}"
+                f'CREATE INDEX idx_{ordinal} ON "{schema}".samples (id) WHERE {rendered}'
             )
             stored = await db.fetchval(
                 "SELECT pg_get_expr(i.indpred, i.indrelid) FROM pg_index i "

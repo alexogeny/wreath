@@ -1,10 +1,3 @@
-"""a01 -- SQL built by string formatting, handed to an unmodified-SQL sink.
-
-The sanitiser is part of the shape rather than decoration: it is what makes this
-survive review. It strips statement separators and refuses one keyword, so it
-looks like somebody thought about injection, and it stops neither of the two
-things that matter. A `UNION` needs no semicolon and no `DROP`.
-"""
 from __future__ import annotations
 
 from typing import Annotated

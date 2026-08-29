@@ -106,6 +106,7 @@ PyObject *wreath_normalize_authorization_decision(PyObject *self, PyObject *args
 PyObject *wreath_cedar_is_authorized(PyObject *self, PyObject *args);
 PyObject *wreath_cedar_compile_plan(PyObject *self, PyObject *policies);
 PyObject *wreath_cedar_route_denial(PyObject *self, PyObject *args);
+PyObject *wreath_cedar_route_denial_prepared(PyObject *self, PyObject *args);
 PyObject *wreath_cedar_is_authorized_many(PyObject *self, PyObject *args);
 PyObject *wreath_cedar_is_authorized_many_native(PyObject *self, PyObject *args);
 int wreath_cedar_decision_batch_read(PyObject *object, Py_ssize_t *count,
@@ -317,6 +318,9 @@ PyObject *wreath_series_chart_spine(PyObject *self, PyObject *args);
 PyObject *wreath_series_data(PyObject *self, PyObject *args);
 PyObject *wreath_series_data_chart(PyObject *self, PyObject *args);
 PyObject *wreath_series_data_chart_text(PyObject *self, PyObject *args);
+PyObject *wreath_series_data_chart_plan(PyObject *self, PyObject *args);
+PyObject *wreath_series_chart_plan(PyObject *self, PyObject *plan);
+PyObject *wreath_series_chart_plan_text(PyObject *self, PyObject *plan);
 int wreath_series_ready(void);
 
 /* proxy.c: adds the TrustedNetworks type; returns -1 on failure. */
@@ -499,6 +503,7 @@ PyObject *wreath_xml_c14n(PyObject *self, PyObject *args);
 PyObject *wreath_template_compile(PyObject *self, PyObject *arg);
 PyObject *wreath_template_render(PyObject *self, PyObject *args);
 PyObject *wreath_template_render_compiled(PyObject *self, PyObject *args);
+PyObject *wreath_template_render_compiled_tail(PyObject *self, PyObject *args);
 PyObject *wreath_template_configure(PyObject *self, PyObject *args);
 PyObject *wreath_template_record_configure(PyObject *self, PyObject *capsule);
 PyObject *wreath_html_response_configure(PyObject *self, PyObject *args);

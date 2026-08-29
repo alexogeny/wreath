@@ -1,5 +1,3 @@
-"""The fused policy router is Wreath's sole routing implementation."""
-
 from __future__ import annotations
 
 from typing import Any, cast
@@ -16,9 +14,7 @@ async def handler(*_args: Any, **_kwargs: Any) -> None:
     pass
 
 
-async def invoke(
-    app: Wreath, path: str = "/", *, method: str = "GET"
-) -> list[dict[str, Any]]:
+async def invoke(app: Wreath, path: str = "/", *, method: str = "GET") -> list[dict[str, Any]]:
     sent: list[dict[str, Any]] = []
 
     async def receive() -> dict[str, Any]:
@@ -78,7 +74,6 @@ async def test_head_uses_get(mode: RoutingMode) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["policy"])
 async def test_a_method_miss_is_405_under_every_backend(mode: RoutingMode) -> None:
-    """The 404-vs-405 split reclassifies under each registered method."""
     app = _build(mode)
 
     @app.route("/users/{uid}", methods=("DELETE",))
@@ -179,15 +174,18 @@ def test_policy_table_orders_host_static_and_greedy_routes() -> None:
     router.add("/assets/{name}", "GET", tenant, host="{account}.example.test")
     router.compile()
 
-    assert router.classify_request(
-        "GET", "/assets/logo.svg", "acme.example.test"
-    ) == (1, (tenant, {"name": "logo.svg", "account": "acme"}))
-    assert router.classify_request(
-        "GET", "/assets/manifest.json", "elsewhere.test"
-    ) == (1, (manifest, None))
-    assert router.classify_request(
-        "GET", "/assets/css/site.css", "elsewhere.test"
-    ) == (1, (fallback, {"rest": "css/site.css"}))
+    assert router.classify_request("GET", "/assets/logo.svg", "acme.example.test") == (
+        1,
+        (tenant, {"name": "logo.svg", "account": "acme"}),
+    )
+    assert router.classify_request("GET", "/assets/manifest.json", "elsewhere.test") == (
+        1,
+        (manifest, None),
+    )
+    assert router.classify_request("GET", "/assets/css/site.css", "elsewhere.test") == (
+        1,
+        (fallback, {"rest": "css/site.css"}),
+    )
 
 
 @pytest.mark.parametrize(
@@ -221,9 +219,7 @@ def test_dynamic_protected_routes_resolve_the_native_continuation(
     router.add(path, "GET", handler, (required,), host=host)
     router.compile()
 
-    classification, ticket = router.classify_request(
-        "GET", request_path, request_host
-    )
+    classification, ticket = router.classify_request("GET", request_path, request_host)
 
     assert classification == 2
     assert router.resolve(ticket, 0) is None

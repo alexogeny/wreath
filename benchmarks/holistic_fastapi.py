@@ -307,9 +307,7 @@ def _protobuf_type() -> type[Any]:
             if repeated
             else _protobuf_descriptor.FieldDescriptorProto.LABEL_OPTIONAL
         )
-    descriptor = _protobuf_pool.DescriptorPool().Add(file).message_types_by_name[
-        "OperationsExport"
-    ]
+    descriptor = _protobuf_pool.DescriptorPool().Add(file).message_types_by_name["OperationsExport"]
     return message_factory.GetMessageClass(descriptor)
 
 
@@ -368,9 +366,7 @@ async def holistic(
     occupied_cells, trail_speed = _geospatial_summary()
 
     vector_index = np.arange(128, dtype=np.float64)
-    embedding = np.sin((vector_index + account_id) / 17.0) * np.cos(
-        (vector_index + item_id) / 29.0
-    )
+    embedding = np.sin((vector_index + account_id) / 17.0) * np.cos((vector_index + item_id) / 29.0)
     scores = np.abs(embedding[:48])
     order = np.argsort(scores)
     if sort == "-score":

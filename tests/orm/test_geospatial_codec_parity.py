@@ -1,12 +1,3 @@
-"""The `point` binary parameter codec, in both languages, held byte-for-byte.
-
-Lane G established that the *expression compiler* needs no C for a new operator
-token. The *wire codec* is a separate axis and does: the prepared path binds
-parameters in binary, and both both encoders enumerate OIDs
-with no shared fallback. So `point` has two encoders, and this is what keeps
-them from drifting.
-"""
-
 from __future__ import annotations
 
 import struct
@@ -39,13 +30,6 @@ def test_the_pure_encoder_is_two_big_endian_float8_x_then_y(literal: str) -> Non
 
 @pytest.mark.parametrize("literal", CASES)
 def test_the_binary_dispatch_routes_oid_600_to_the_point_encoder(literal: str) -> None:
-    """Through `_encode_binary`, not just the helper.
-
-    The helper is reachable from a test; the *dispatch arm* that selects it is
-    only reached when a point is bound on the prepared path, which the native
-    driver answers in C without entering this module at all. Calling the
-    dispatcher directly is what covers the Python arm.
-    """
     from wreath._pgdriver import _encode_binary
 
     assert _encode_binary(literal, 600) == _pure_encode_point(literal)
@@ -58,9 +42,7 @@ def test_the_binary_dispatch_still_refuses_an_oid_it_has_no_encoder_for() -> Non
         _encode_binary("whatever", 1_000_000)
 
 
-@pytest.mark.parametrize(
-    "bad", ["", "1,2", "(1)", "(a,b)", "(1,2", "1,2)", "(1,2,3)", "()"]
-)
+@pytest.mark.parametrize("bad", ["", "1,2", "(1)", "(a,b)", "(1,2", "1,2)", "(1,2,3)", "()"])
 def test_a_malformed_literal_is_refused_rather_than_guessed(bad: str) -> None:
     with pytest.raises(TypeError, match="point codec"):
         _pure_encode_point(bad)
@@ -72,20 +54,6 @@ def test_a_non_string_is_refused(bad: object = 1.5) -> None:
 
 
 def test_the_native_encoder_is_covered_by_the_live_round_trip() -> None:
-    """Where the native twin is actually proved, and why not here.
-
-    `encode_point` in `_native/postgres/codec.c` is not exposed to Python, so
-    there is nothing to call from this file. Skipping would be the wrong answer
-    -- that would be a gap in Wreath dressed as a gap in the environment, which
-    is the shape `AGENTS.md` rules out. The native encoder is instead driven for
-    real by `tests/orm/test_geospatial_live.py`, whose inserts go through the
-    prepared, binary-parameter path that selects it; a divergence from the pure
-    encoder puts the wrong coordinate in the table and
-    `test_a_coordinate_round_trips_through_a_bind` fails.
-
-    This test exists to make that pointer discoverable from the parity file
-    someone will look in first.
-    """
     from pathlib import Path
 
     codec = Path(__file__).resolve().parents[2] / "src/wreath/_native/postgres/codec.c"
@@ -96,8 +64,6 @@ def test_the_native_encoder_is_covered_by_the_live_round_trip() -> None:
     assert "PG_POINT" in source
 
 
-# --- tier 2: PostGIS `geography` ----------------------------------------------
-#
 # The same axis one type further out. `geography`'s OID is assigned by
 # `CREATE EXTENSION`, so its encoder is selected from the runtime kind table
 # rather than from a `case` -- but the wall is identical: the prepared path
@@ -140,7 +106,6 @@ def test_the_pure_encoder_un_hexes_and_nothing_else(hexed: str) -> None:
 
 @pytest.mark.parametrize("hexed", GEOGRAPHY_CASES)
 def test_the_binary_dispatch_routes_a_geography_oid_to_its_encoder(hexed: str) -> None:
-    """Through `_encode_binary`, for the reason the `point` arm above gives."""
     from wreath._pgdriver import _encode_binary, _encode_geography
 
     _register_pure_geography()
@@ -163,12 +128,6 @@ def test_a_non_string_is_refused_by_the_geography_encoder() -> None:
 
 
 def test_an_unknown_codec_kind_is_still_refused_at_registration() -> None:
-    """The kind table is a whitelist, not a passthrough.
-
-    Adding `geography` widened it by one, and a widening that accidentally
-    stopped refusing would let an unknown OID decode as raw bytes at query time
-    instead of failing at startup.
-    """
     from wreath._pgdriver import _register_extension_type
 
     with pytest.raises(ValueError, match="unknown extension codec kind"):
@@ -176,7 +135,6 @@ def test_an_unknown_codec_kind_is_still_refused_at_registration() -> None:
 
 
 def test_the_native_geography_encoder_is_covered_by_the_live_round_trip() -> None:
-    """Where the native twin is proved, for the reason the `point` note gives."""
     from pathlib import Path
 
     codec = Path(__file__).resolve().parents[2] / "src/wreath/_native/postgres/codec.c"
@@ -185,8 +143,6 @@ def test_the_native_geography_encoder_is_covered_by_the_live_round_trip() -> Non
     assert "WREATH_PG_EXT_GEOGRAPHY" in source
 
 
-# --- and the way back ----------------------------------------------------------
-#
 # Reading needed no new decoder for `point`: an OID the driver does not
 # enumerate falls through to raw bytes and `Point.from_wire` reads them. A
 # *registered* extension OID is different -- the native decoder plan routes
@@ -205,13 +161,6 @@ def test_the_pure_decoder_hands_a_geography_back_unread(format_code: int) -> Non
 
 
 def test_the_native_decoder_has_a_geography_arm() -> None:
-    """The arm is not reachable from Python, so this pins its existence.
-
-    `tests/orm/test_postgis.py::test_a_coordinate_round_trips_through_a_geography_column`
-    is what drives it for real -- it is the read that failed before the arm
-    existed. This exists so the requirement is discoverable from the parity
-    file rather than only from a live failure.
-    """
     from pathlib import Path
 
     codec = Path(__file__).resolve().parents[2] / "src/wreath/_native/postgres/codec.c"

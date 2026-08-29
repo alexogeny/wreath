@@ -18,27 +18,33 @@ __all__ = ["highlight", "languages"]
 
 
 def _esc(text: str) -> str:
-    return (text.replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;").replace('"', "&quot;"))
+    return (
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    )
 
 
 def _spec(*patterns: str) -> re.Pattern[str]:
     return re.compile("|".join(patterns), re.MULTILINE | re.DOTALL)
 
 
-_PY_KW = (r"\b(?P<keyword>def|class|return|if|elif|else|for|while|import|from|as|with|try|"
-          r"except|finally|raise|yield|await|async|lambda|pass|break|continue|in|is|not|and|"
-          r"or|None|True|False|global|nonlocal|assert|del|match|case)\b")
-_PY_BUILTIN = (r"\b(?P<builtin>print|len|range|enumerate|zip|dict|list|set|tuple|int|str|float|"
-               r"bool|bytes|isinstance|issubclass|super|self|cls|type|open|map|filter|sorted|"
-               r"any|all|min|max|sum|abs|getattr|setattr|hasattr)\b")
+_PY_KW = (
+    r"\b(?P<keyword>def|class|return|if|elif|else|for|while|import|from|as|with|try|"
+    r"except|finally|raise|yield|await|async|lambda|pass|break|continue|in|is|not|and|"
+    r"or|None|True|False|global|nonlocal|assert|del|match|case)\b"
+)
+_PY_BUILTIN = (
+    r"\b(?P<builtin>print|len|range|enumerate|zip|dict|list|set|tuple|int|str|float|"
+    r"bool|bytes|isinstance|issubclass|super|self|cls|type|open|map|filter|sorted|"
+    r"any|all|min|max|sum|abs|getattr|setattr|hasattr)\b"
+)
 
 _SPECS: dict[str, re.Pattern[str]] = {
     "python": _spec(
         r"(?P<comment>#[^\n]*)",
         r"(?P<string>[rbfRBF]{0,2}(?:'''.*?'''|\"\"\".*?\"\"\"|'(?:\\.|[^'\\\n])*'|\"(?:\\.|[^\"\\\n])*\"))",
         r"(?P<number>\b\d[\d_]*\.?\d*(?:[eE][+-]?\d+)?\b)",
-        _PY_KW, _PY_BUILTIN,
+        _PY_KW,
+        _PY_BUILTIN,
         r"(?P<operator>[+\-*/%=<>!&|^~@]=?|:=|->)",
     ),
     "bash": _spec(
@@ -64,8 +70,14 @@ _SPECS: dict[str, re.Pattern[str]] = {
         r"(?P<number>-?\b\d+\.?\d*(?:[eE][+-]?\d+)?\b)",
     ),
 }
-_ALIASES = {"py": "python", "sh": "bash", "shell": "bash", "console": "bash",
-            "js": "json", "typescript": "json"}
+_ALIASES = {
+    "py": "python",
+    "sh": "bash",
+    "shell": "bash",
+    "console": "bash",
+    "js": "json",
+    "typescript": "json",
+}
 
 
 def languages() -> tuple[str, ...]:
@@ -81,7 +93,7 @@ def highlight(code: str, lang: str) -> str:
     pos = 0
     for match in spec.finditer(code):
         if match.start() > pos:
-            out.append(_esc(code[pos:match.start()]))
+            out.append(_esc(code[pos : match.start()]))
         kind = match.lastgroup or "text"
         out.append(f'<span class="tok-{kind}">{_esc(match.group())}</span>')
         pos = match.end()

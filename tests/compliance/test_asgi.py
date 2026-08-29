@@ -1,8 +1,3 @@
-"""ASGI 3.0 conformance, codified — wreath as an ASGI application.
-
-Asserts the message shapes and ordering the spec requires (HTTP response events,
-lifespan protocol) and that the native server hands the app a conformant scope.
-"""
 from __future__ import annotations
 
 import asyncio

@@ -1,12 +1,3 @@
-"""Fused native ingress for the PostgreSQL wire protocol.
-
-The metal transport delivers ingress to native HTTP/1 through the stream
-C API capsule with no Python calling convention per read. These tests pin the
-PostgreSQL driver as the second implementer of that seam: on a metal loop the
-driver's connection must fuse (no ``get_buffer``/``buffer_updated`` object
-churn per socket read) while returning byte-identical query results, including
-rows spanning provided buffers and slab boundaries.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -90,8 +81,7 @@ def test_pg_ingress_fuses_on_metal_loop() -> None:
     assert rows[-1][0] == 20000
 
     fused = [
-        t for t in transports
-        if getattr(t, "_fused_stream", None) == "wreath._native._postgres"
+        t for t in transports if getattr(t, "_fused_stream", None) == "wreath._native._postgres"
     ]
     assert fused, [getattr(t, "_fused_stream", None) for t in transports]
     assert all(t._fused_http1 is False for t in fused)
@@ -101,8 +91,6 @@ def test_pg_ingress_fuses_on_metal_loop() -> None:
 
 @requires_metal
 def test_pg_fusion_survives_abrupt_connection_loss() -> None:
-    """connection_lost with fused ingress leaves the driver in a clean error
-    state instead of crashing or hanging."""
     native_pg = importlib.import_module("wreath._native._postgres")
     loop = _metal_loop_or_skip()
     transports: list = []
@@ -128,15 +116,10 @@ def test_pg_fusion_survives_abrupt_connection_loss() -> None:
             await server.close()
 
     _, captured = _run_fused(loop, exercise(), transports)
-    assert any(
-        getattr(t, "_fused_stream", None) == "wreath._native._postgres"
-        for t in captured
-    )
+    assert any(getattr(t, "_fused_stream", None) == "wreath._native._postgres" for t in captured)
 
 
 def test_pg_fallback_path_unchanged_on_stock_loop() -> None:
-    """On a plain asyncio loop the driver still works through the Python
-    BufferedProtocol path (no metal transport, no fusion)."""
     native_pg = importlib.import_module("wreath._native._postgres")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

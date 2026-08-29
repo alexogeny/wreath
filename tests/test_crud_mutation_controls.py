@@ -1,4 +1,3 @@
-"""Focused objections for generated CRUD route boundaries."""
 from __future__ import annotations
 
 import json
@@ -92,9 +91,7 @@ def test_composite_primary_key_names_the_model_columns_and_correct_form() -> Non
 @pytest.mark.asyncio
 async def test_fields_allow_list_also_constrains_writable_input() -> None:
     session = _Session({1: Record(id=1, name="before", note="private")})
-    routes = _routes(
-        crud_router(Record, lambda _request: session, fields=("id", "name"))
-    )
+    routes = _routes(crud_router(Record, lambda _request: session, fields=("id", "name")))
 
     response = await routes[("PATCH", "/record/{id}")](
         _Request(path_params={"id": "1"}, body={"name": "after", "note": "leak"})
@@ -124,9 +121,7 @@ def test_prefix_and_explicit_tags_are_preserved_on_every_route() -> None:
 def test_default_tag_is_the_lowercase_model_name() -> None:
     router = crud_router(Record, lambda _request: _Session(), operations=("list",))
 
-    assert [(route.path, route.tags) for route in router.routes] == [
-        ("/record", ("record",))
-    ]
+    assert [(route.path, route.tags) for route in router.routes] == [("/record", ("record",))]
 
 
 def test_fields_refuses_an_expose_escape_hatch_at_declaration() -> None:
@@ -153,13 +148,9 @@ def test_fields_refuses_each_unknown_model_column_at_declaration() -> None:
 
 def test_operation_selection_distinguishes_list_from_retrieve() -> None:
     listed = crud_router(Record, lambda _request: _Session(), operations=("list",))
-    retrieved = crud_router(
-        Record, lambda _request: _Session(), operations=("retrieve",)
-    )
+    retrieved = crud_router(Record, lambda _request: _Session(), operations=("retrieve",))
 
-    assert [(route.methods, route.path) for route in listed.routes] == [
-        (("GET",), "/record")
-    ]
+    assert [(route.methods, route.path) for route in listed.routes] == [(("GET",), "/record")]
     assert [(route.methods, route.path) for route in retrieved.routes] == [
         (("GET",), "/record/{id}")
     ]
@@ -174,9 +165,9 @@ async def test_retrieve_deny_short_circuits_before_opening_a_session() -> None:
         opened = True
         return _Session()
 
-    retrieve = _routes(
-        crud_router(Record, open_session, authorize={"retrieve": Access.deny()})
-    )[("GET", "/record/{id}")]
+    retrieve = _routes(crud_router(Record, open_session, authorize={"retrieve": Access.deny()}))[
+        ("GET", "/record/{id}")
+    ]
 
     response = await retrieve(_Request(path_params={"id": "1"}))
 
@@ -230,9 +221,9 @@ async def test_update_deny_short_circuits_before_parsing_json() -> None:
         async def json(self) -> object:
             raise AssertionError("deny must precede body parsing")
 
-    update = _routes(
-        crud_router(Record, lambda _request: _Session(), authorize=Access.deny())
-    )[("PATCH", "/record/{id}")]
+    update = _routes(crud_router(Record, lambda _request: _Session(), authorize=Access.deny()))[
+        ("PATCH", "/record/{id}")
+    ]
 
     response = await update(ExplodingRequest(path_params={"id": "1"}))
 
@@ -260,13 +251,9 @@ async def test_update_refuses_non_object_json_before_opening_a_session() -> None
 @pytest.mark.asyncio
 async def test_update_missing_row_returns_not_found_and_closes_session() -> None:
     session = _Session()
-    update = _routes(crud_router(Record, lambda _request: session))[
-        ("PATCH", "/record/{id}")
-    ]
+    update = _routes(crud_router(Record, lambda _request: session))[("PATCH", "/record/{id}")]
 
-    response = await update(
-        _Request(path_params={"id": "9"}, body={"name": "unused"})
-    )
+    response = await update(_Request(path_params={"id": "9"}, body={"name": "unused"}))
 
     assert response.status == 404
     assert session.closed is True
@@ -279,9 +266,7 @@ def test_authenticated_and_cedar_rules_attach_their_distinct_metadata() -> None:
             lambda _request: _Session(),
             authorize={
                 "list": Access.authenticated(),
-                "retrieve": Access.cedar(
-                    action="record:read", resource='Record::"{id}"'
-                ),
+                "retrieve": Access.cedar(action="record:read", resource='Record::"{id}"'),
             },
         )
     )

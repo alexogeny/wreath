@@ -1,15 +1,3 @@
-"""`expose_routes`: an opt-in adapter with no way to say "all of them".
-
-The design decisions being pinned here are the ones that make this safe to
-ship at all. There is no `all=True`, so nobody converts an application's whole
-HTTP surface -- including its destructive half -- into model-callable actions in
-one line. A route with no description is refused. And an exposed route keeps
-whatever was in front of it: the same Cedar decision, the same rate limiting,
-the same Flight Recorder marker as a hand-declared tool, because a route
-exposed as a tool that skipped any of those would be a hole rather than a
-feature.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -71,7 +59,6 @@ def build() -> tuple[Wreath, MCP]:
 
 
 def test_there_is_no_way_to_expose_everything() -> None:
-    """The decision the whole adapter turns on, asserted rather than described."""
     app, mcp = build()
     with pytest.raises(ValueError) as caught:
         expose_routes(mcp, app)
@@ -98,8 +85,9 @@ def test_a_path_and_a_predicate_are_the_other_two_selectors() -> None:
     assert [tool.name for tool in mcp.tools] == ["health"]
 
     _, other = build()
-    expose_routes(other, predicate=lambda route: "GET" in route.methods
-                  and route.path == "/sightings")
+    expose_routes(
+        other, predicate=lambda route: "GET" in route.methods and route.path == "/sightings"
+    )
     assert [tool.name for tool in other.tools] == ["list_sightings"]
 
 
@@ -114,9 +102,7 @@ async def test_an_exposed_route_is_callable_with_its_own_schema() -> None:
     expose_routes(mcp, app, tags=("sightings",))
     async with TestClient(app) as client:
         session = await initialize(client)
-        listed = await call(
-            client, session, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
-        )
+        listed = await call(client, session, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         entry = next(t for t in listed["result"]["tools"] if t["name"] == "list_sightings")
         # The description is the handler's docstring, which is the same text the
         # OpenAPI document carries as the operation description.
@@ -156,7 +142,6 @@ async def test_a_route_with_no_docstring_is_refused_by_name() -> None:
 
 
 async def test_a_path_parameter_is_refused_naming_the_route_and_the_parameter() -> None:
-    """The refusal route-derived tools hit far more often than declared ones."""
     app = Wreath()
 
     @app.get("/sightings/{sighting_id}", tags=("public",))
@@ -176,14 +161,6 @@ async def test_a_path_parameter_is_refused_naming_the_route_and_the_parameter() 
 
 
 async def test_a_dependency_is_refused_naming_the_route() -> None:
-    """The route's `dependencies=` tuple, which a tool call would not replay.
-
-    The handler's signature is deliberately clean. A `Depends(...)` *parameter*
-    is refused earlier, by the schema derivation, for an unrelated reason -- so
-    a handler carrying one never reaches `_check_carryable` and cannot prove
-    anything about it. This test names the route-level control, so it declares
-    the route-level control and nothing else.
-    """
     from wreath.binding import Depends
 
     ran: list[str] = []
@@ -211,12 +188,6 @@ async def test_a_dependency_is_refused_naming_the_route() -> None:
 
 
 async def test_a_dependency_parameter_is_refused_naming_the_route() -> None:
-    """The other refusal, kept: a `Depends(...)` parameter names its route too.
-
-    This is the body the test above used to have. It exercises the schema
-    derivation's refusal rather than `_check_carryable`'s, which is why it now
-    has a name that says so.
-    """
     from wreath.binding import Depends
 
     async def provide() -> int:
@@ -234,9 +205,6 @@ async def test_a_dependency_parameter_is_refused_naming_the_route() -> None:
         expose_routes(mcp, app, tags=("public",))
     assert "/counted" in str(caught.value)
     assert "Depends" in str(caught.value)
-
-
-# -- the controls come with the route ----------------------------------------
 
 
 class Engine:
@@ -293,7 +261,6 @@ def gated(identity: Identity) -> tuple[Wreath, MCP, Engine, list[str]]:
 
 
 async def test_a_route_s_cedar_policy_comes_with_it() -> None:
-    """The assertion the whole adapter has to earn."""
     app, mcp, engine, ran = gated(Identity("ada", permissions=frozenset({"staff::read"})))
     assert mcp.declared_actions() == {
         "Sighting": ("Sighting::purge", "Sighting::read"),
@@ -350,7 +317,6 @@ async def test_a_route_s_permissions_come_with_it_too() -> None:
 
 
 async def test_a_protected_route_exposed_on_an_unauthenticated_endpoint_refuses() -> None:
-    """Fail closed, and say which of the two boundaries is missing."""
     app = Wreath()
 
     @app.get("/sightings", tags=("sightings",))
@@ -399,7 +365,6 @@ async def test_a_rate_limit_applies_to_every_route_this_call_exposes() -> None:
 
 
 async def test_a_router_s_inherited_permissions_reach_the_tool() -> None:
-    """Inheritance folds into the definition, so the tool must see it folded."""
     app = Wreath()
     internal = Router(prefix="/internal", tags=("internal",), permissions=["internal::use"])
 
@@ -445,9 +410,7 @@ async def test_an_exposed_route_leaves_the_same_record_a_declared_tool_does() ->
                 },
             )
         markers = [
-            log.attributes(cell)
-            for cell in records
-            if not cell.flags & fs.LOG_FLAG_EVENT_FIELDS
+            log.attributes(cell) for cell in records if not cell.flags & fs.LOG_FLAG_EVENT_FIELDS
         ]
     # The identical marker a declared tool leaves: an exposed route is not a
     # second dispatch path, so it cannot have a second (or no) audit trail.

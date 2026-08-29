@@ -1,11 +1,3 @@
-"""Stage 5 slice 5d: Inspector capture-control commands (arm/disarm/status).
-
-These are the first *mutating* Inspector commands, and the security-critical part
-of Stage 5: a runtime arm needs the capability token (separate from read access),
-can never exceed the startup redaction/memory ceiling, and is bounded by expiry
-and a maximum match count. Everything runs over a real Unix socket in tmp_path.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -60,12 +52,7 @@ def _ceiling() -> RecordingPolicy:
 def _serve(tmp_path, *, token: str | None = TOKEN, registry: bool = True):
     config = InspectorConfig(path=str(tmp_path / "wfi.sock"), capture_token=token)
     arm_registry = ArmRegistry(_ceiling()) if registry else None
-    return serve_inspector(
-        _recorder(), _app(), config, arm_registry=arm_registry
-    )
-
-
-# --- capability advertisement ------------------------------------------------
+    return serve_inspector(_recorder(), _app(), config, arm_registry=arm_registry)
 
 
 @pytest.mark.asyncio
@@ -93,9 +80,6 @@ async def test_capture_commands_absent_without_a_token(tmp_path) -> None:
         await server.close()
 
 
-# --- authorization -----------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_arm_requires_the_capability_token(tmp_path) -> None:
     server = await _serve(tmp_path)
@@ -114,9 +98,6 @@ async def test_arm_requires_the_capability_token(tmp_path) -> None:
         await server.close()
 
 
-# --- ceiling enforcement -----------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_arm_cannot_exceed_the_startup_ceiling(tmp_path) -> None:
     server = await _serve(tmp_path)
@@ -133,8 +114,12 @@ async def test_arm_cannot_exceed_the_startup_ceiling(tmp_path) -> None:
             with pytest.raises(InspectorError, match="ceiling"):
                 await client.arm_capture(
                     token=TOKEN,
-                    redaction={"body": "structured", "max_fields": 8, "max_depth": 4,
-                               "max_body_bytes": 1024},
+                    redaction={
+                        "body": "structured",
+                        "max_fields": 8,
+                        "max_depth": 4,
+                        "max_body_bytes": 1024,
+                    },
                     expiry_seconds=60,
                 )
     finally:
@@ -154,9 +139,6 @@ async def test_arm_requires_expiry(tmp_path) -> None:
                 )
     finally:
         await server.close()
-
-
-# --- arm / status / disarm round trip ---------------------------------------
 
 
 @pytest.mark.asyncio
@@ -188,9 +170,6 @@ async def test_arm_status_disarm_round_trip(tmp_path) -> None:
             assert status["arms"] == []
     finally:
         await server.close()
-
-
-# --- registry unit behavior (expiry, max matches, ceiling) ------------------
 
 
 def test_registry_prunes_on_expiry_and_match_exhaustion() -> None:
@@ -225,9 +204,6 @@ def test_registry_prunes_on_expiry_and_match_exhaustion() -> None:
     assert registry.note_match(arm2.arm_id) is False
 
 
-# --- CLI ---------------------------------------------------------------------
-
-
 def test_capture_cli_arm_status_disarm(tmp_path, capsys) -> None:
     import asyncio
     import threading
@@ -240,16 +216,29 @@ def test_capture_cli_arm_status_disarm(tmp_path, capsys) -> None:
     thread.start()
     server = asyncio.run_coroutine_threadsafe(
         serve_inspector(
-            _recorder(), _app(),
+            _recorder(),
+            _app(),
             InspectorConfig(path=sock, capture_token=TOKEN),
             arm_registry=ArmRegistry(_ceiling()),
         ),
         loop,
     ).result(5)
     try:
-        rc = cli_main(["capture", sock, "--token", TOKEN, "arm",
-                       "--allow-header", "x-trace", "--expiry", "60",
-                       "--max-matches", "10"])
+        rc = cli_main(
+            [
+                "capture",
+                sock,
+                "--token",
+                TOKEN,
+                "arm",
+                "--allow-header",
+                "x-trace",
+                "--expiry",
+                "60",
+                "--max-matches",
+                "10",
+            ]
+        )
         assert rc == 0
         out = capsys.readouterr().out
         assert "armed capture #1" in out and "x-trace" in out

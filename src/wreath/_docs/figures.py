@@ -54,8 +54,9 @@ def _parse(config: list[str]) -> dict[str, str]:
 
 
 def _esc(text: str) -> str:
-    return (text.replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;").replace('"', "&quot;"))
+    return (
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    )
 
 
 def _render(config: dict[str, str]) -> str:
@@ -63,14 +64,16 @@ def _render(config: dict[str, str]) -> str:
     draw = FIGURES.get(name)
     if draw is None:
         known = ", ".join(sorted(FIGURES)) or "none"
-        return (f'<div class="chart-error">figure: no figure named {_esc(name)}; '
-                f"this build has {_esc(known)}</div>")
+        return (
+            f'<div class="chart-error">figure: no figure named {_esc(name)}; '
+            f"this build has {_esc(known)}</div>"
+        )
     # Stable across builds, and unique per figure on a page: two figures sharing
     # a checkbox id would make one figure's pause control operate the other.
     uid = sha256(repr(sorted(config.items())).encode()).hexdigest()[:8]
     title = config.get("title", "")
     note = config.get("note", "")
-    head = (f'<span class="fig-title">{_esc(title)}</span>' if title else "<span></span>")
+    head = f'<span class="fig-title">{_esc(title)}</span>' if title else "<span></span>"
     tail = f'<p class="fig-note">{_esc(note)}</p>' if note else ""
     return (
         f'<figure class="fig fig-{_esc(name)}">'
@@ -81,8 +84,6 @@ def _render(config: dict[str, str]) -> str:
     )
 
 
-# --- the boundary ------------------------------------------------------------
-
 #: Phase names in request order, straight from the columns
 #: `wreath-request-trace` reports and `request-boundary-baseline.json` records.
 _PHASES = ("ingress", "middleware", "routing", "auth", "handler", "egress")
@@ -90,8 +91,9 @@ _PHASES = ("ingress", "middleware", "routing", "auth", "handler", "egress")
 
 def _phase_labels(y: int) -> str:
     return "".join(
-        f'<text class="f-tick" x="{120 + column * 100}" y="{y}" text-anchor="middle">'
-        f"{phase}</text>" for column, phase in enumerate(_PHASES))
+        f'<text class="f-tick" x="{120 + column * 100}" y="{y}" text-anchor="middle">{phase}</text>'
+        for column, phase in enumerate(_PHASES)
+    )
 
 
 def _request_boundary(uid: str) -> str:
@@ -102,38 +104,40 @@ def _request_boundary(uid: str) -> str:
     is the checked-in measurement rather than a claim.
     """
     # A stage-by-stage zigzag: up into Python for the stage, back down after it.
-    upper = "M 64 250 " + " ".join(
-        f"L {86 + column * 100} 250 L {104 + column * 100} 198 "
-        f"L {136 + column * 100} 198 L {154 + column * 100} 250"
-        for column in range(6)) + " L 700 250"
+    upper = (
+        "M 64 250 "
+        + " ".join(
+            f"L {86 + column * 100} 250 L {104 + column * 100} 198 "
+            f"L {136 + column * 100} 198 L {154 + column * 100} 250"
+            for column in range(6)
+        )
+        + " L 700 250"
+    )
     # Native the whole way, one excursion at `handler`, then native again.
-    lower = ("M 64 106 L 528 106 L 546 54 L 578 54 L 596 106 L 700 106")
+    lower = "M 64 106 L 528 106 L 546 54 L 578 54 L 596 106 L 700 106"
     return (
         '<svg viewBox="0 0 720 300" role="img" width="100%" style="max-width:720px" '
         'aria-label="A request crossing the Python/native boundary: a conventional '
-        'stack crosses at every stage; wreath crosses once, when the route is '
+        "stack crosses at every stage; wreath crosses once, when the route is "
         'activated.">'
-        # --- the conventional track ---
         '<text class="f-label" x="0" y="176">A stack written in Python</text>'
         '<line class="f-boundary" x1="64" y1="224" x2="700" y2="224"/>'
         '<text class="f-side" x="0" y="202">python</text>'
         '<text class="f-side" x="0" y="256">native</text>'
         f'<path class="f-path f-path-other" d="{upper}"/>'
         f'<circle class="f-dot f-dot-other" r="5" style="offset-path:path(\'{upper}\')"/>'
-        + _phase_labels(282) +
-        # --- wreath's track ---
-        '<text class="f-label" x="0" y="32">Wreath</text>'
+        + _phase_labels(282)
+        + '<text class="f-label" x="0" y="32">Wreath</text>'
         '<line class="f-boundary" x1="64" y1="80" x2="700" y2="80"/>'
         '<text class="f-side" x="0" y="58">python</text>'
         '<text class="f-side" x="0" y="112">native</text>'
         f'<path class="f-path f-path-wreath" d="{lower}"/>'
         f'<circle class="f-dot f-dot-wreath" r="5" style="offset-path:path(\'{lower}\')"/>'
         '<text class="f-note-in" x="562" y="42" text-anchor="middle">1 frame</text>'
-        + _phase_labels(138) +
-        "</svg>")
+        + _phase_labels(138)
+        + "</svg>"
+    )
 
-
-# --- routing -----------------------------------------------------------------
 
 #: The six routes in one `(method, segment-count)` group, and where each one
 #: stops matching `GET /orders/42/items`. `alive` is how many of the three
@@ -161,12 +165,14 @@ def _route_bitset(uid: str) -> str:
     Reading a row tells you when a route dropped out; reading a column tells you
     how many were still in the running.
     """
-    # --- the tree: real segment labels, and the duplicate marked as one -------
+
     def node(x, y, label, ghost=False):
         css = "f-box f-box-ghost" if ghost else "f-box"
-        return (f'<g><rect class="{css}" x="{x - 30}" y="{y - 11}" width="60" '
-                f'height="22" rx="4"/><text class="f-box-t" x="{x}" y="{y + 4}" '
-                f'text-anchor="middle">{_esc(label)}</text></g>')
+        return (
+            f'<g><rect class="{css}" x="{x - 30}" y="{y - 11}" width="60" '
+            f'height="22" rx="4"/><text class="f-box-t" x="{x}" y="{y + 4}" '
+            f'text-anchor="middle">{_esc(label)}</text></g>'
+        )
 
     tree = [
         '<text class="f-label" x="0" y="14">Decision tree</text>',
@@ -175,8 +181,10 @@ def _route_bitset(uid: str) -> str:
         'M 235 85 L 202 111 M 235 85 L 268 111"/>',
         '<circle class="f-node" cx="165" cy="36" r="8"/>',
         '<text class="f-box-t" x="165" y="40" text-anchor="middle">/</text>',
-        node(95, 74, "orders"), node(235, 74, "users"),
-        node(128, 122, "new"), node(268, 122, "me"),
+        node(95, 74, "orders"),
+        node(235, 74, "users"),
+        node(128, 122, "new"),
+        node(268, 122, "me"),
     ]
     # The two copies of the same parameter route, drawn as copies: they arrive
     # one after the other with a brace joining them, which is the argument.
@@ -186,18 +194,20 @@ def _route_bitset(uid: str) -> str:
         '<g class="f-fold" style="--i:2">'
         '<path class="f-brace" d="M 62 140 L 62 150 L 202 150 L 202 140"/>'
         '<text class="f-tick f-tick-warn" x="132" y="166" text-anchor="middle">'
-        "one route, two copies</text></g>")
+        "one route, two copies</text></g>"
+    )
     tree.append(
         '<g class="f-fold" style="--i:3">'
         '<text class="f-tick" x="132" y="190" text-anchor="middle">'
-        "\u2026 and again under every branch below</text></g>")
+        "\u2026 and again under every branch below</text></g>"
+    )
 
-    # --- the grid: one row per route, one column per segment tested ----------
     grid = ['<text class="f-label" x="356" y="14">Bitset</text>']
     for column, header in enumerate(_COLUMNS):
         grid.append(
             f'<text class="f-tick" x="{574 + column * 40}" y="36" '
-            f'text-anchor="middle">{_esc(header)}</text>')
+            f'text-anchor="middle">{_esc(header)}</text>'
+        )
     for row, (route, alive) in enumerate(_ROUTES):
         y = 56 + row * 25
         matched = alive == len(_COLUMNS) - 1
@@ -210,30 +220,32 @@ def _route_bitset(uid: str) -> str:
                 css += " f-cell-hit"
             grid.append(
                 f'<rect class="{css}" style="--t:{column * 0.55:.2f}" '
-                f'x="{562 + column * 40}" y="{y}" width="24" height="16" rx="3"/>')
+                f'x="{562 + column * 40}" y="{y}" width="24" height="16" rx="3"/>'
+            )
     grid.append(
         '<text class="f-tick" x="356" y="216">'
-        "a parameter is one bit, not one copy per branch</text>")
+        "a parameter is one bit, not one copy per branch</text>"
+    )
 
     return (
         '<svg viewBox="0 0 720 230" role="img" width="100%" style="max-width:720px" '
         'aria-label="Matching GET /orders/42/items against six routes. The decision '
-        'tree repeats the parameter route under every literal branch. The bitset '
-        'gives each route one bit and switches off the bits that cannot match, '
+        "tree repeats the parameter route under every literal branch. The bitset "
+        "gives each route one bit and switches off the bits that cannot match, "
         'segment by segment, until one route is left.">'
         f'<g transform="translate(8,8)">{"".join(tree)}</g>'
-        f'{"".join(grid)}'
-        "</svg>")
+        f"{''.join(grid)}"
+        "</svg>"
+    )
 
-
-# --- timers ------------------------------------------------------------------
 
 def _pips(x: int, y: int, count: int, first: float, css: str) -> str:
     """A row of step markers that light one per operation, in time."""
     return "".join(
         f'<rect class="f-pip {css}" style="--t:{first + index * 0.3:.2f}" '
         f'x="{x + index * 14}" y="{y}" width="9" height="9" rx="2"/>'
-        for index in range(count))
+        for index in range(count)
+    )
 
 
 def _heap(target: tuple[int, int]) -> str:
@@ -241,15 +253,17 @@ def _heap(target: tuple[int, int]) -> str:
     parts: list[str] = []
     positions: dict[tuple[int, int], tuple[float, float]] = {}
     for depth in range(4):
-        count = 2 ** depth
+        count = 2**depth
         y = 42 + depth * 38
         for slot in range(count):
             x = (250 / (count + 1)) * (slot + 1) + 28
             positions[(depth, slot)] = (x, y)
             if depth:
                 px, py = positions[(depth - 1, slot // 2)]
-                parts.append(f'<line class="f-edge" x1="{px:.1f}" y1="{py + 7:.1f}" '
-                             f'x2="{x:.1f}" y2="{y - 7:.1f}"/>')
+                parts.append(
+                    f'<line class="f-edge" x1="{px:.1f}" y1="{py + 7:.1f}" '
+                    f'x2="{x:.1f}" y2="{y - 7:.1f}"/>'
+                )
     # The walk a cancelled leaf's replacement makes: its own slot, then each
     # ancestor in turn. One pulse per level, which is the log-n the caption
     # claims, drawn rather than asserted.
@@ -260,15 +274,19 @@ def _heap(target: tuple[int, int]) -> str:
     path_keys = set(path)
     for step, key in enumerate(path):
         x, y = positions[key]
-        parts.append(f'<circle class="f-node f-sift" style="--t:{1.0 + step * 0.3:.2f}" '
-                     f'cx="{x:.1f}" cy="{y:.1f}" r="7"/>')
+        parts.append(
+            f'<circle class="f-node f-sift" style="--t:{1.0 + step * 0.3:.2f}" '
+            f'cx="{x:.1f}" cy="{y:.1f}" r="7"/>'
+        )
     for key, (x, y) in positions.items():
         if key not in path_keys:
             parts.append(f'<circle class="f-node" cx="{x:.1f}" cy="{y:.1f}" r="7"/>')
     tx, ty = positions[target]
     parts.append(f'<circle class="f-mark" cx="{tx:.1f}" cy="{ty:.1f}" r="11"/>')
-    parts.append(f'<text class="f-tick f-tick-warn" x="{tx:.1f}" y="{ty + 26:.1f}" '
-                 'text-anchor="middle">cancel</text>')
+    parts.append(
+        f'<text class="f-tick f-tick-warn" x="{tx:.1f}" y="{ty + 26:.1f}" '
+        'text-anchor="middle">cancel</text>'
+    )
     return "".join(parts)
 
 
@@ -283,11 +301,16 @@ def _timing_wheel(uid: str) -> str:
     ring: list[str] = []
     for index in range(16):
         angle = index * 22.5 - 90
-        dot = ('<circle class="f-timer" cx="466" cy="72" r="4"/>'
-               if index in {1, 3, 6, 7, 11, 14} else "")
-        ring.append(f'<g transform="rotate({angle} 466 132)">'
-                    f'<line class="f-slot-tick" x1="466" y1="60" x2="466" y2="70"/>'
-                    f"{dot}</g>")
+        dot = (
+            '<circle class="f-timer" cx="466" cy="72" r="4"/>'
+            if index in {1, 3, 6, 7, 11, 14}
+            else ""
+        )
+        ring.append(
+            f'<g transform="rotate({angle} 466 132)">'
+            f'<line class="f-slot-tick" x1="466" y1="60" x2="466" y2="70"/>'
+            f"{dot}</g>"
+        )
     # One bucket, opened: prev <-> node <-> next. The middle node leaves and the
     # link closes over it; that is the entire cancel path.
     chain = (
@@ -299,32 +322,32 @@ def _timing_wheel(uid: str) -> str:
         '<circle class="f-chain f-chain-gone" cx="638" cy="132" r="7"/>'
         '<circle class="f-chain" cx="680" cy="132" r="7"/>'
         '<text class="f-tick" x="638" y="158" text-anchor="middle">'
-        "unlink \u2192 link closes</text>")
+        "unlink \u2192 link closes</text>"
+    )
     return (
         '<svg viewBox="0 0 720 250" role="img" width="100%" style="max-width:720px" '
         'aria-label="Cancelling one timer. The binary heap walks four levels and '
-        'later pays a compaction pass; the timing wheel unlinks the node from its '
+        "later pays a compaction pass; the timing wheel unlinks the node from its "
         'bucket in a single step.">'
-        # --- the heap ---
         '<text class="f-label" x="8" y="20">Binary heap</text>'
         f"{_heap((3, 5))}"
         '<rect class="f-compact" x="8" y="30" width="290" height="180" rx="6"/>'
-        f'{_pips(8, 216, 4, 1.0, "f-pip-other")}'
+        f"{_pips(8, 216, 4, 1.0, 'f-pip-other')}"
         '<text class="f-tick" x="76" y="225">4 swaps up the tree</text>'
         '<text class="f-tick f-compact-t" x="8" y="243">'
         "\u2026 and a compaction pass, later</text>"
-        # --- the wheel ---
         '<text class="f-label" x="360" y="20">Hashed timing wheel</text>'
         '<circle class="f-ring" cx="466" cy="132" r="58"/>'
-        f'{"".join(ring)}'
+        f"{''.join(ring)}"
         '<line class="f-hand" x1="466" y1="132" x2="466" y2="80"/>'
         '<circle class="f-hub" cx="466" cy="132" r="4"/>'
         f"{chain}"
-        f'{_pips(360, 216, 1, 1.0, "f-pip-wreath")}'
+        f"{_pips(360, 216, 1, 1.0, 'f-pip-wreath')}"
         '<text class="f-tick" x="380" y="225">1 splice</text>'
         '<text class="f-tick f-tick-hit" x="360" y="243">'
         "no reallocation, no heapify, nothing to compact</text>"
-        "</svg>")
+        "</svg>"
+    )
 
 
 #: Every figure this build can draw. A name outside this map renders a visible

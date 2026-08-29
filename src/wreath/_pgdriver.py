@@ -95,8 +95,6 @@ _NUMERIC = 1700
 _UUID = 2950
 _JSONB = 3802
 
-# --- extension types ---------------------------------------------------------
-#
 # An extension's OIDs are assigned by CREATE EXTENSION, so they cannot be
 # constants here the way every OID above is. They arrive at startup through
 # `_register_extension_type` and land in one bounded table, consulted only after
@@ -1593,7 +1591,6 @@ class Connection:
         # Access-ordered so the least-recently-used automatic plan is evicted
         # first; bounded by statement_cache_size to cap per-connection (and,
         # via the Close on eviction, backend) prepared-statement memory.
-        #
         # `track_evictions=True` is the whole reason `wreath.kv` grew a way to
         # report what it dropped. An evicted plan still exists *on the
         # PostgreSQL backend* until a `Close ('S')` goes out for it, so a cache
@@ -1883,7 +1880,6 @@ class Connection:
                 # connection failed, and failed as a hang. See
                 # `_build_cold_query_packet` for why the format has to be decided
                 # here rather than caught downstream.
-                #
                 # Deliberately the Python builder even when the C one is bound:
                 # the accelerated `_build_cold` takes five positional arguments
                 # and adding a sixth means changing both builders to serve a
@@ -2024,25 +2020,21 @@ class Connection:
     async def _read_pipeline(self) -> None:
         try:
             # **The reader waits on the socket, and only on the socket.**
-            #
             # This loop used to end the moment `_emitted` emptied. At pipeline
             # depth one -- a pooled connection serving one query per lease,
             # which is every request on the Fortunes board -- that meant
             # `_flush` built a fresh `Task` for the very next query: one Task
             # allocated, scheduled, called back and torn down *per query*.
-            #
             # The first fix parked on a wakeup future that `_flush` resolved.
             # That removed the Task and added a future, a wake and a
             # *suspension* -- and a suspension on this loop was measured at
             # ~6,250 instructions, which is not a rounding error against a
             # ~66,000-instruction query.
-            #
             # Waiting on the socket unconditionally removes all three. There is
             # nothing to wake: `_flush` writes, the server answers, and the read
             # completes on its own. It is also what this loop already did
             # whenever a LISTEN channel was registered, so it is one behaviour
             # instead of two.
-            #
             # The task now lives until the connection closes. `close()` cancels
             # it; `_fail_connection` closes the transport, which fails the read
             # waiter and lands in the handler below. A reader blocked on a
@@ -2097,7 +2089,6 @@ class Connection:
             # wire condition -- a decoder that cannot read the format it was sent,
             # a plan that does not match its rows. It still has to fail every
             # caller before it leaves.
-            #
             # This runs in the reader task, which is nobody's awaiter. Without
             # this clause the task died, the `finally` tidied `_reader_task`, and
             # every in-flight operation waited on a future that would never be
@@ -2105,7 +2096,6 @@ class Connection:
             # exactly how `catalog destination requires binary rows` sat unseen:
             # it only ran under `-m ''`, where it hung the whole suite instead of
             # failing one test.
-            #
             # Broad on purpose, and `BaseException` on purpose: a `SystemExit` or
             # a `KeyboardInterrupt` raised in here would strand the same callers.
             # It re-raises, so nothing is swallowed -- the catch exists to resolve
@@ -2316,7 +2306,6 @@ class Connection:
             operation.discarded = True
             # `_current` alone is not enough to decide "is the backend running
             # this right now".
-            #
             # It is published by the reader just before it blocks on the socket,
             # which used to be the same moment the operation was emitted --
             # `_flush` started or woke the reader, and the reader's first act
@@ -2328,7 +2317,6 @@ class Connection:
             # running the query -- which is precisely the defect the comment in
             # `_read_pipeline` records the LISTEN/NOTIFY rewrite causing once
             # before, reached the second time by a different route.
-            #
             # The head of `_emitted` is the operation the backend is executing,
             # by construction and without depending on the reader having been
             # scheduled. `_current` still has to be tested as well: it is what

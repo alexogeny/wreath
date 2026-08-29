@@ -85,9 +85,7 @@ def _open_at(dir_fd: int, name: str, extra_flags: int) -> int:
     if stat.S_ISLNK(os.lstat(name, dir_fd=dir_fd).st_mode):
         raise ContainmentError(f"refusing to follow symlink component {name!r}")
     try:
-        return os.open(
-            name, os.O_RDONLY | _O_NOFOLLOW | _O_CLOEXEC | extra_flags, dir_fd=dir_fd
-        )
+        return os.open(name, os.O_RDONLY | _O_NOFOLLOW | _O_CLOEXEC | extra_flags, dir_fd=dir_fd)
     except OSError as exc:
         # A component swapped to a symlink after the lstat still fails the open
         # under O_NOFOLLOW (ELOOP, or ENOTDIR with O_DIRECTORY); fail closed.

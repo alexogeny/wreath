@@ -1,8 +1,3 @@
-"""ASGI mapping for HTTP/2 (RFC 9113 + ASGI HTTP spec).
-
-Verifies scope shape, request body delivery, disconnect, response
-start/body/trailers, application exceptions, and out-of-order multiplexing.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -40,9 +35,11 @@ async def test_scope_shape(make_driver):
     app, captured = scope_capture_app()
     d = make_driver(app)
     await d.preface()
-    await d.feed_and_settle(support.build_headers_frame(
-        1, support.request_headers(method=b"GET", path=b"/a/b?x=1",
-                                   authority=b"example.com")))
+    await d.feed_and_settle(
+        support.build_headers_frame(
+            1, support.request_headers(method=b"GET", path=b"/a/b?x=1", authority=b"example.com")
+        )
+    )
     assert len(captured) == 1
     scope = captured[0]
     assert scope["type"] == "http"
@@ -57,8 +54,9 @@ async def test_authority_maps_to_host_header(make_driver):
     app, captured = scope_capture_app()
     d = make_driver(app)
     await d.preface()
-    await d.feed_and_settle(support.build_headers_frame(
-        1, support.request_headers(authority=b"example.com")))
+    await d.feed_and_settle(
+        support.build_headers_frame(1, support.request_headers(authority=b"example.com"))
+    )
     headers = dict(captured[0]["headers"])
     assert headers.get(b"host") == b"example.com"
     # pseudo-headers must not leak into scope headers
@@ -69,11 +67,20 @@ async def test_explicit_host_header_equivalent_to_authority_is_preserved(make_dr
     app, captured = scope_capture_app()
     d = make_driver(app)
     await d.preface()
-    block = support.HpackEncoder().encode([
-        (b":method", b"GET"), (b":path", b"/"), (b":scheme", b"https"),
-        (b":authority", b"example.com:443"), (b"host", b"EXAMPLE.COM")])
-    await d.feed_and_settle(support.encode_frame(
-        support.HEADERS, support.FLAG_END_HEADERS | support.FLAG_END_STREAM, 1, block))
+    block = support.HpackEncoder().encode(
+        [
+            (b":method", b"GET"),
+            (b":path", b"/"),
+            (b":scheme", b"https"),
+            (b":authority", b"example.com:443"),
+            (b"host", b"EXAMPLE.COM"),
+        ]
+    )
+    await d.feed_and_settle(
+        support.encode_frame(
+            support.HEADERS, support.FLAG_END_HEADERS | support.FLAG_END_STREAM, 1, block
+        )
+    )
     headers = [v for n, v in captured[0]["headers"] if n == b"host"]
     assert headers == [b"EXAMPLE.COM"]
 
@@ -82,10 +89,14 @@ async def test_duplicate_regular_headers_preserved_in_order(make_driver):
     app, captured = scope_capture_app()
     d = make_driver(app)
     await d.preface()
-    block = support.HpackEncoder().encode(support.request_headers(
-        extra=[(b"x-multi", b"a"), (b"x-multi", b"b")]))
-    await d.feed_and_settle(support.encode_frame(
-        support.HEADERS, support.FLAG_END_HEADERS | support.FLAG_END_STREAM, 1, block))
+    block = support.HpackEncoder().encode(
+        support.request_headers(extra=[(b"x-multi", b"a"), (b"x-multi", b"b")])
+    )
+    await d.feed_and_settle(
+        support.encode_frame(
+            support.HEADERS, support.FLAG_END_HEADERS | support.FLAG_END_STREAM, 1, block
+        )
+    )
     multi = [v for n, v in captured[0]["headers"] if n == b"x-multi"]
     assert multi == [b"a", b"b"]
 
@@ -108,11 +119,13 @@ async def test_request_body_delivered(make_driver):
 
     d = make_driver(app)
     await d.preface()
-    await d.feed_and_settle(support.build_headers_frame(
-        1, support.request_headers(method=b"POST"), end_stream=False))
+    await d.feed_and_settle(
+        support.build_headers_frame(1, support.request_headers(method=b"POST"), end_stream=False)
+    )
     await d.feed_and_settle(support.encode_frame(support.DATA, 0, 1, b"chunk1"))
-    await d.feed_and_settle(support.encode_frame(support.DATA, support.FLAG_END_STREAM,
-                                                 1, b"chunk2"))
+    await d.feed_and_settle(
+        support.encode_frame(support.DATA, support.FLAG_END_STREAM, 1, b"chunk2")
+    )
     assert seen == [b"chunk1chunk2"]
     streams = _decode_response(d)
     assert streams[1]["body"] == b"chunk1chunk2"
@@ -120,8 +133,13 @@ async def test_request_body_delivered(make_driver):
 
 async def test_response_status_and_body(make_driver):
     async def app(scope, receive, send):
-        await send({"type": "http.response.start", "status": 201,
-                    "headers": [(b"content-type", b"text/plain")]})
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 201,
+                "headers": [(b"content-type", b"text/plain")],
+            }
+        )
         await send({"type": "http.response.body", "body": b"created"})
 
     d = make_driver(app)
@@ -151,9 +169,7 @@ async def test_synchronous_completion_owns_no_asyncio_task(make_driver):
     try:
         d = make_driver(app)
         await d.preface()
-        await d.feed_and_settle(
-            support.build_headers_frame(1, support.request_headers())
-        )
+        await d.feed_and_settle(support.build_headers_frame(1, support.request_headers()))
     finally:
         loop.set_task_factory(previous)
 
@@ -180,9 +196,7 @@ async def test_real_suspension_transfers_to_one_asyncio_task(make_driver):
     try:
         d = make_driver(app)
         await d.preface()
-        await d.feed_and_settle(
-            support.build_headers_frame(1, support.request_headers())
-        )
+        await d.feed_and_settle(support.build_headers_frame(1, support.request_headers()))
     finally:
         loop.set_task_factory(previous)
 
@@ -215,10 +229,7 @@ async def test_native_one_shot_responses_share_the_input_batch_transport_write(
     writes_before_requests = len(d.transport.writes)
     request = support.request_headers()
 
-    d.feed(
-        support.build_headers_frame(1, request)
-        + support.build_headers_frame(3, request)
-    )
+    d.feed(support.build_headers_frame(1, request) + support.build_headers_frame(3, request))
 
     assert len(d.transport.writes) == writes_before_requests + 1
     streams = _decode_response(d)
@@ -251,12 +262,10 @@ async def test_server_default_response_headers(make_driver):
 
 async def test_response_trailers(make_driver):
     async def app(scope, receive, send):
-        await send({"type": "http.response.start", "status": 200, "headers": [],
-                    "trailers": True})
+        await send({"type": "http.response.start", "status": 200, "headers": [], "trailers": True})
         await send({"type": "http.response.body", "body": b"x", "more_body": True})
         await send({"type": "http.response.body", "body": b""})
-        await send({"type": "http.response.trailers",
-                    "headers": [(b"x-trailer", b"done")]})
+        await send({"type": "http.response.trailers", "headers": [(b"x-trailer", b"done")]})
 
     d = make_driver(app)
     await d.preface()
@@ -294,8 +303,9 @@ async def test_disconnect_delivered_on_stream_reset(make_driver):
 
     d = make_driver(app)
     await d.preface()
-    await d.feed_and_settle(support.build_headers_frame(
-        1, support.request_headers(), end_stream=False))
+    await d.feed_and_settle(
+        support.build_headers_frame(1, support.request_headers(), end_stream=False)
+    )
     await d.feed_and_settle(support.encode_rst_stream(1, support.CANCEL))
     assert "http.disconnect" in events
 
@@ -317,22 +327,19 @@ async def test_multiplexed_streams_complete_out_of_order(make_driver):
 
     d = make_driver(app)
     await d.preface()
-    await d.feed_and_settle(support.build_headers_frame(
-        1, support.request_headers(path=b"/slow")))
-    await d.feed_and_settle(support.build_headers_frame(
-        3, support.request_headers(path=b"/fast")))
+    await d.feed_and_settle(support.build_headers_frame(1, support.request_headers(path=b"/slow")))
+    await d.feed_and_settle(support.build_headers_frame(3, support.request_headers(path=b"/fast")))
     await d.settle()
     streams = _decode_response(d)
     assert streams[1]["body"] == b"/slow"
     assert streams[3]["body"] == b"/fast"
 
 
-# --- buffered request queue ------------------------------------------------
-#
 # The queue is an owned list plus a head index: it drops its consumed prefix in
 # one slice instead of shifting on every take. These drive enough separately
 # framed chunks to cross the compaction threshold, and assert only on
 # app-visible behavior (order, more_body, completeness) rather than internals.
+
 
 async def _queue_driver(make_driver, chunks: list[bytes]):
     """Buffer `chunks` while the app is not reading, then let it drain."""
@@ -357,8 +364,11 @@ async def _queue_driver(make_driver, chunks: list[bytes]):
 
     d = make_driver(app)
     await d.preface()
-    await d.feed_and_settle(support.build_headers_frame(
-        1, support.request_headers(method=b"POST", path=b"/"), end_stream=False))
+    await d.feed_and_settle(
+        support.build_headers_frame(
+            1, support.request_headers(method=b"POST", path=b"/"), end_stream=False
+        )
+    )
     for chunk in chunks:
         d.feed(support.encode_frame(support.DATA, 0, 1, chunk))
     d.feed(support.encode_frame(support.DATA, support.FLAG_END_STREAM, 1, b""))
@@ -386,7 +396,6 @@ async def test_queued_body_more_body_tracks_logical_queue_length(make_driver):
 
 
 async def test_delivery_is_correct_across_coalescing_boundaries(make_driver):
-    """Chunks larger than one coalescing block still arrive in exact byte order."""
     chunks = [bytes([index % 251]) * 1024 for index in range(32)]
     d, seen = await _queue_driver(make_driver, chunks)
     assert b"".join(seen["parts"]) == b"".join(chunks)
@@ -406,25 +415,15 @@ async def test_delivery_is_correct_across_coalescing_boundaries(make_driver):
         (b"/search?q=a%2Fb", "/search", b"/search", b"q=a%2Fb"),
     ],
 )
-async def test_scope_path_is_percent_decoded_like_http1(
-    make_driver, target, path, raw_path, query
-):
-    """The same URL must produce the same scope whichever protocol carried it.
-
-    The h2 scope was built straight from the raw `:path`: `path` kept its
-    percent escapes (ASGI 3.0 requires it decoded, and HTTP/1 decodes it), and
-    `raw_path` carried the query string too. So a route with any encoded
-    character in its path was unreachable over h2 while working over h1, path
-    parameters reached handlers still encoded, and the application-level
-    encoded-separator guard -- which reads `raw_path` -- refused an ordinary
-    `%2F` inside a *query* value on h2 only.
-    """
+async def test_scope_path_is_percent_decoded_like_http1(make_driver, target, path, raw_path, query):
     app, captured = scope_capture_app()
     d = make_driver(app)
     await d.preface()
-    await d.feed_and_settle(support.build_headers_frame(
-        1, support.request_headers(method=b"GET", path=target,
-                                   authority=b"example.com")))
+    await d.feed_and_settle(
+        support.build_headers_frame(
+            1, support.request_headers(method=b"GET", path=target, authority=b"example.com")
+        )
+    )
     assert len(captured) == 1
     assert captured[0]["path"] == path
     assert captured[0]["raw_path"] == raw_path
@@ -432,28 +431,23 @@ async def test_scope_path_is_percent_decoded_like_http1(
 
 
 @pytest.mark.parametrize("target", [b"/x%2fy", b"/x%5Cy", b"/bad%FF"])
-async def test_a_path_http1_refuses_is_a_malformed_request_on_http2(
-    make_driver, target
-):
-    """An encoded separator, or a path that is not UTF-8, is malformed either way.
-
-    HTTP/1 answers 400. The h2 equivalent is a stream error (RFC 9113 s8.3.1),
-    not a 200 with the escape handed to the application -- which is what
-    building the scope from the raw `:path` produced. The connection survives,
-    so a well-formed request on the same connection still runs.
-    """
+async def test_a_path_http1_refuses_is_a_malformed_request_on_http2(make_driver, target):
     app, captured = scope_capture_app()
     d = make_driver(app)
     await d.preface()
-    await d.feed_and_settle(support.build_headers_frame(
-        1, support.request_headers(method=b"GET", path=target,
-                                   authority=b"example.com")))
+    await d.feed_and_settle(
+        support.build_headers_frame(
+            1, support.request_headers(method=b"GET", path=target, authority=b"example.com")
+        )
+    )
     assert captured == []
     resets = [f for f in d.frames() if f.type == support.RST_STREAM]
     assert resets and resets[-1].stream_id == 1
     assert int.from_bytes(resets[-1].payload[:4], "big") == support.PROTOCOL_ERROR
 
-    await d.feed_and_settle(support.build_headers_frame(
-        3, support.request_headers(method=b"GET", path=b"/ok",
-                                   authority=b"example.com")))
+    await d.feed_and_settle(
+        support.build_headers_frame(
+            3, support.request_headers(method=b"GET", path=b"/ok", authority=b"example.com")
+        )
+    )
     assert [scope["path"] for scope in captured] == ["/ok"]

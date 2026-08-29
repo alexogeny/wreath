@@ -73,8 +73,12 @@ def _make_loop(kind: str, worker_id: int, reuse_port: bool) -> Any:
 
 
 def _serve_forever(
-    app: Any, config: ServerConfig, tls: TLSConfig | None,
-    kind: str, worker_id: int, reuse_port: bool,
+    app: Any,
+    config: ServerConfig,
+    tls: TLSConfig | None,
+    kind: str,
+    worker_id: int,
+    reuse_port: bool,
 ) -> None:
     async def run_server() -> None:
         server = await serve(app, config, tls=tls)
@@ -87,7 +91,11 @@ def _serve_forever(
 
 
 def _run_worker_group(
-    app: Any, config: ServerConfig, tls: TLSConfig | None, kind: str, workers: int,
+    app: Any,
+    config: ServerConfig,
+    tls: TLSConfig | None,
+    kind: str,
+    workers: int,
 ) -> int:
     """Fork `workers` servers onto one SO_REUSEPORT listener group.
 
@@ -157,18 +165,24 @@ def main() -> None:
     )
     parser.add_argument("--loop", choices=("asyncio", "uvloop", "metal"), default="asyncio")
     parser.add_argument(
-        "--workers", type=int, default=1,
+        "--workers",
+        type=int,
+        default=1,
         help="server processes sharing one SO_REUSEPORT listener group",
     )
     parser.add_argument(
-        "--protocol", nargs="+", default=["http/1.1"],
+        "--protocol",
+        nargs="+",
+        default=["http/1.1"],
         choices=("http/1.1", "h2", "h3"),
         help="protocol set to serve (h2/h3 require --tls-cert/--tls-key)",
     )
     parser.add_argument("--tls-cert", default=None)
     parser.add_argument("--tls-key", default=None)
     parser.add_argument(
-        "--prearm", type=int, default=0,
+        "--prearm",
+        type=int,
+        default=0,
         help="synthetic connections driven through the stack before serving",
     )
     args = parser.parse_args()
@@ -199,8 +213,7 @@ def main() -> None:
         tls = TLSConfig(certfile=args.tls_cert, keyfile=args.tls_key)
 
     if args.workers > 1:
-        raise SystemExit(
-            _run_worker_group(app, config, tls, args.loop, args.workers))
+        raise SystemExit(_run_worker_group(app, config, tls, args.loop, args.workers))
     _serve_forever(app, config, tls, args.loop, 0, False)
 
 

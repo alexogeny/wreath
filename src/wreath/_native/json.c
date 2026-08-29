@@ -1,7 +1,6 @@
 /* Compact JSON encoder and decoder over UTF-8 byte buffers.
  *
- * Encoder differences from stdlib json.dumps (documented in
- * docs/native/json.md): bytes output, str-only dict keys, and NaN/Infinity
+ * Encoder differences from stdlib json.dumps: bytes output, str-only dict keys, and NaN/Infinity
  * rejected. The decoder mirrors stdlib json.loads semantics: NaN/Infinity/
  * -Infinity accepted, lone surrogate escapes allowed, last duplicate key
  * wins, ints of any size. Inputs that stdlib would sniff as UTF-16/32 are

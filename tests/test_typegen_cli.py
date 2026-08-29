@@ -1,5 +1,3 @@
-"""CLI behaviour: write, --check, atomic replacement, and file ownership."""
-
 from __future__ import annotations
 
 import json
@@ -64,9 +62,7 @@ def test_factory_target(tmp_path: Path) -> None:
 
 def test_strict_failure_leaves_previous_tree_intact(tmp_path: Path) -> None:
     assert _run(TARGET, "--output", str(tmp_path), "--react-query") == 0
-    snapshot = {
-        path.name: path.read_bytes() for path in tmp_path.iterdir()
-    }
+    snapshot = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
     # A strict run against an unsupported annotation fails before any write.
     assert _run(BAD_TARGET, "--output", str(tmp_path)) == 1
     after = {path.name: path.read_bytes() for path in tmp_path.iterdir()}

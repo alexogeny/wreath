@@ -1,14 +1,3 @@
-"""Metered allowances: the counter, the refusal, and the fact.
-
-A quota and a rate limit answer different questions and are decided in one hook,
-so the tests that matter most here are the ones about their *interaction*: a
-throttled request must not be charged against a monthly allowance, and a caller
-who is both throttled and out of quota must get one answer rather than two.
-
-The accounting test is the load-bearing one. Over-counting is the failure that
-reaches an invoice, and it is invisible from any single request.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -27,11 +16,8 @@ from wreath.policy.ratelimit import MemoryRateLimitStore
 from wreath.quota import MemoryQuotaStore, PostgresQuotaStore, Quota, Quotas
 from wreath.testing import TestClient
 
-# --- the declaration ---------------------------------------------------------
-
 
 def test_a_quota_refuses_configuration_that_would_refuse_everything() -> None:
-    """A cost above the limit is an outage wearing a configuration."""
     with pytest.raises(ValueError, match="cost must not exceed the limit"):
         Quota(name="api", limit=1.0, period=60.0, cost=2.0)
 
@@ -55,7 +41,6 @@ def test_an_unnamed_quota_is_refused() -> None:
 
 
 def test_two_quotas_cannot_share_a_name() -> None:
-    """They would share the `context.quota` member a policy tests."""
     quotas = Quotas()
     quotas.declare("api", limit=10.0, period=60.0)
     with pytest.raises(ValueError, match="already declared"):
@@ -63,7 +48,6 @@ def test_two_quotas_cannot_share_a_name() -> None:
 
 
 def test_an_undeclared_meter_names_what_was_declared() -> None:
-    """Returning None would be a quota that counts nothing while looking wired."""
     quotas = Quotas()
     quotas.declare("api", limit=10.0, period=60.0)
     with pytest.raises(KeyError, match="declared: api"):
@@ -71,13 +55,8 @@ def test_an_undeclared_meter_names_what_was_declared() -> None:
 
 
 def test_an_empty_registry_says_none_rather_than_nothing() -> None:
-    """`declared: ` with an empty tail reads like a truncated message; the
-    likeliest cause of asking an empty registry is a registry wired nowhere."""
     with pytest.raises(KeyError, match="declared: none"):
         Quotas().meter("api")
-
-
-# --- the counter -------------------------------------------------------------
 
 
 def test_the_counter_admits_to_the_limit_then_reports_the_reset() -> None:
@@ -86,12 +65,11 @@ def test_the_counter_admits_to_the_limit_then_reports_the_reset() -> None:
 
     assert store.try_spend("k", 0.0) == 0.0
     assert store.try_spend("k", 0.0) == 0.0
-    assert store.try_spend("k", 0.0) == 10.0        # refused, seconds to reset
-    assert store.peek("k") == 2.0                   # and nothing was spent on it
+    assert store.try_spend("k", 0.0) == 10.0  # refused, seconds to reset
+    assert store.peek("k") == 2.0  # and nothing was spent on it
 
 
 def test_the_reset_shrinks_as_the_period_elapses() -> None:
-    """`Retry-After` has to be the time remaining, not the whole period."""
     store = MemoryQuotaStore()
     store.configure(Quota(name="api", limit=1.0, period=100.0))
     store.try_spend("k", 10.0)
@@ -102,9 +80,6 @@ def test_the_reset_shrinks_as_the_period_elapses() -> None:
 def test_a_new_period_restores_the_allowance_with_no_sweep(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The period lives in the key, so a rollover needs no `UPDATE ... SET
-    used = 0` that a worker could miss: the next request counts against a key
-    nobody has written."""
     quotas = Quotas()
     meter = quotas.declare("api", limit=1.0, period=10.0)
     request = _Requesting("ada")
@@ -116,12 +91,11 @@ def test_a_new_period_restores_the_allowance_with_no_sweep(
 
     assert first != second
     assert meter.store.try_spend(first, 5.0) == 0.0
-    assert meter.store.try_spend(first, 5.0) > 0.0      # spent, inside the period
-    assert meter.store.try_spend(second, 15.0) == 0.0   # a new period, a new key
+    assert meter.store.try_spend(first, 5.0) > 0.0  # spent, inside the period
+    assert meter.store.try_spend(second, 15.0) == 0.0  # a new period, a new key
 
 
 def test_the_key_names_the_quota_the_principal_and_the_period() -> None:
-    """Two quotas, two callers and two periods must never share a counter."""
     quotas = Quotas()
     meter = quotas.declare("api", limit=1.0, period=10.0)
 
@@ -145,7 +119,6 @@ def test_each_key_counts_separately() -> None:
 
 
 def test_configuring_a_store_twice_is_refused() -> None:
-    """Two meters over one keyspace: one would consume the other's allowance."""
     store = MemoryQuotaStore()
     store.configure(Quota(name="api", limit=1.0, period=10.0))
     with pytest.raises(ValueError, match="already configured"):
@@ -153,8 +126,6 @@ def test_configuring_a_store_twice_is_refused() -> None:
 
 
 def test_the_ceiling_evicts_the_fullest_counter() -> None:
-    """At the ceiling something loses its history; the choice that grants least
-    is to forget the caller who has consumed the most."""
     store = MemoryQuotaStore(max_entries=2)
     store.configure(Quota(name="api", limit=5.0, period=10.0))
     store.try_spend("heavy", 0.0)
@@ -163,8 +134,8 @@ def test_the_ceiling_evicts_the_fullest_counter() -> None:
 
     store.try_spend("new", 0.0)
 
-    assert store.peek("heavy") == 0.0               # evicted
-    assert store.peek("light") == 1.0               # kept
+    assert store.peek("heavy") == 0.0  # evicted
+    assert store.peek("light") == 1.0  # kept
 
 
 def test_a_store_used_before_configure_says_so() -> None:
@@ -178,15 +149,12 @@ def test_a_store_with_no_room_for_a_key_is_refused() -> None:
 
 
 def test_spending_again_on_a_known_key_evicts_nothing() -> None:
-    """The ceiling bounds *distinct keys*. Evicting on every spend once the table
-    is full would drop a counter per request, which is an allowance that resets
-    continuously -- the failure looks like the quota not working at all."""
     store = MemoryQuotaStore(max_entries=2)
     store.configure(Quota(name="api", limit=9.0, period=10.0))
     store.try_spend("ada", 0.0)
     for _ in range(3):
-        store.try_spend("bo", 0.0)      # bo is the fullest, so bo is what an
-                                        # unguarded eviction would take
+        store.try_spend("bo", 0.0)  # bo is the fullest, so bo is what an
+        # unguarded eviction would take
     store.try_spend("ada", 0.0)
 
     assert store.peek("ada") == 2.0
@@ -194,8 +162,6 @@ def test_spending_again_on_a_known_key_evicts_nothing() -> None:
     assert store.tracked == 2
 
 
-# --- the shared store, without a database ------------------------------------
-#
 # The same offline coverage `PostgresRateLimitStore` has: construction, the
 # identifier guard, the offered DDL, and the configure-once rule are all
 # decidable without a server. Only `spend` and `used` need one, and they are
@@ -219,7 +185,6 @@ def test_the_postgres_schema_is_offered_as_a_migration() -> None:
 
 
 def test_the_postgres_store_refuses_a_second_allowance() -> None:
-    """Two meters over one keyspace: one would consume the other's allowance."""
     store = PostgresQuotaStore(object())
     store.configure(Quota(name="api", limit=1.0, period=60.0))
     with pytest.raises(ValueError, match="already configured"):
@@ -233,13 +198,9 @@ def test_the_postgres_store_used_before_configure_says_so() -> None:
 
 
 def test_the_postgres_store_names_the_database_its_table_belongs_to() -> None:
-    """The application never saw this store constructed, so it cannot know which
-    pool the table goes to unless the store says."""
     database = object()
 
     assert PostgresQuotaStore(database).schema_database is database
-
-
 
 
 def _pg_quota(monkeypatch: pytest.MonkeyPatch, rows: list[Any]) -> tuple[Any, Any, Any]:
@@ -272,7 +233,7 @@ async def test_the_postgres_store_translates_the_row_into_a_decision(
     assert await store.spend("k", 40.0) == pytest.approx(60.0)
 
     sql, args = _spends(connection)[0]
-    assert args == ("k", 1.0, 2.0)                  # key, cost, limit
+    assert args == ("k", 1.0, 2.0)  # key, cost, limit
     # One statement: a read-then-write would race, and a raced quota overspends
     # in the direction that reaches an invoice.
     assert sql.count(";") == 0
@@ -294,15 +255,10 @@ async def test_the_postgres_store_reads_the_used_total_without_spending(
 
 
 def test_the_purge_pass_waits_two_periods() -> None:
-    """A counter retired while its period is still current on a worker whose
-    clock is behind would hand that worker a fresh allowance."""
     store = PostgresQuotaStore(object())
     store.configure(Quota(name="api", limit=1.0, period=3600.0))
 
     assert store.purge_pass() is not None
-
-
-# --- the refusal, through the tape ------------------------------------------
 
 
 def _app(middleware: Any) -> Wreath:
@@ -320,9 +276,7 @@ def _metered(limit: float, *, rate: int = 1000) -> tuple[Wreath, Any]:
     quotas = Quotas()
     meter = quotas.declare("api_calls", limit=limit, period=3600.0)
     app = _app(
-        TieredRateLimitPolicy(
-            tiers={"pro": (rate, 60.0)}, default=(rate, 60.0), quota=meter
-        )
+        TieredRateLimitPolicy(tiers={"pro": (rate, 60.0)}, default=(rate, 60.0), quota=meter)
     )
     return app, meter
 
@@ -343,8 +297,6 @@ async def test_an_exhausted_quota_is_refused_with_the_reset() -> None:
 
 
 async def test_the_quota_refusal_is_distinguishable_from_the_rate_refusal() -> None:
-    """Both are 429. A caller that cannot tell them apart cannot act on either:
-    one clears in a second, the other in a month."""
     app, _ = _metered(1.0)
     async with TestClient(app) as client:
         ada = client.acting_as("ada")
@@ -366,10 +318,6 @@ async def test_each_principal_gets_its_own_allowance() -> None:
 
 
 async def test_a_throttled_request_is_not_charged_against_the_quota() -> None:
-    """The accounting invariant. A refused request did no work, so billing it
-    would put requests the server rejected onto an invoice -- and the meter is
-    the one signal that has to reconcile.
-    """
     app, meter = _metered(10.0, rate=1)
     async with TestClient(app) as client:
         ada = client.acting_as("ada")
@@ -397,15 +345,9 @@ class _Anonymous:
 
 
 async def test_an_anonymous_request_is_not_metered() -> None:
-    """There is no allowance to spend, and metering by address would charge a
-    shared proxy's callers to one counter. The route's own requirement is what
-    refuses an anonymous caller."""
     quotas = Quotas()
     meter = quotas.declare("api_calls", limit=1.0, period=3600.0)
-    app = _app(
-        TieredRateLimitPolicy(tiers={"pro": (99, 60.0)}, default=(99, 60.0),
-                                  quota=meter)
-    )
+    app = _app(TieredRateLimitPolicy(tiers={"pro": (99, 60.0)}, default=(99, 60.0), quota=meter))
     async with TestClient(app) as client:
         for _ in range(3):
             assert (await client.get("/llamas")).status == 401
@@ -414,8 +356,6 @@ async def test_an_anonymous_request_is_not_metered() -> None:
 
 
 async def test_the_global_limiter_refuses_a_quota() -> None:
-    """It runs at ingress, before authentication, so every key would be None and
-    the quota would count nothing while looking configured."""
     quotas = Quotas()
     meter = quotas.declare("api_calls", limit=1.0, period=3600.0)
     with pytest.raises(ValueError, match="no principal to meter a quota"):
@@ -423,8 +363,6 @@ async def test_the_global_limiter_refuses_a_quota() -> None:
 
 
 def test_an_unidentified_request_spends_nothing() -> None:
-    """`spend_sync` reached directly: through the app the route requirement
-    answers 401 first, so the guard inside the hook is never observed there."""
     quotas = Quotas()
     meter = quotas.declare("api_calls", limit=1.0, period=3600.0)
 
@@ -433,16 +371,11 @@ def test_an_unidentified_request_spends_nothing() -> None:
 
 
 async def test_an_unidentified_request_spends_nothing_on_the_awaiting_path() -> None:
-    """The same guard on the other hook. Two spellings of one rule drift apart
-    exactly when only one of them is watched."""
     quotas = Quotas(store_factory=_AwaitingQuotaStore)
     meter = quotas.declare("api_calls", limit=1.0, period=3600.0)
 
     assert await meter.spend(_Anonymous()) is None
     assert meter.store.tracked == 0
-
-
-# --- the awaiting store, which is the production one -------------------------
 
 
 class _AwaitingQuotaStore(MemoryQuotaStore):
@@ -467,16 +400,12 @@ def _awaiting_metered(limit: float, *, rate: int = 1000) -> tuple[Wreath, Any]:
     quotas = Quotas(store_factory=_AwaitingQuotaStore)
     meter = quotas.declare("api_calls", limit=limit, period=3600.0)
     app = _app(
-        TieredRateLimitPolicy(
-            tiers={"pro": (rate, 60.0)}, default=(rate, 60.0), quota=meter
-        )
+        TieredRateLimitPolicy(tiers={"pro": (rate, 60.0)}, default=(rate, 60.0), quota=meter)
     )
     return app, meter
 
 
 def test_an_awaiting_quota_forces_the_awaiting_hook() -> None:
-    """The pair is one decision and cannot be half-synchronous: a local bucket
-    beside a remote meter still has to await."""
     quotas = Quotas(store_factory=_AwaitingQuotaStore)
     meter = quotas.declare("api_calls", limit=1.0, period=3600.0)
     limiter = RateLimitPolicy(limit=10, quota=meter, _route_scoped=True)
@@ -487,8 +416,6 @@ def test_an_awaiting_quota_forces_the_awaiting_hook() -> None:
 
 
 def test_two_local_stores_keep_the_synchronous_hook() -> None:
-    """And the optimisation is not given up when neither half needs awaiting:
-    an admitted request costs no coroutine at all."""
     quotas = Quotas()
     meter = quotas.declare("api_calls", limit=1.0, period=3600.0)
     limiter = RateLimitPolicy(limit=10, quota=meter, _route_scoped=True)
@@ -512,7 +439,6 @@ async def test_an_awaiting_quota_is_charged_and_refuses() -> None:
 
 
 async def test_an_awaiting_quota_is_not_charged_for_a_throttled_request() -> None:
-    """The accounting invariant again, on the path production actually runs."""
     app, meter = _awaiting_metered(10.0, rate=1)
     async with TestClient(app) as client:
         ada = client.acting_as("ada")
@@ -524,7 +450,6 @@ async def test_an_awaiting_quota_is_not_charged_for_a_throttled_request() -> Non
 
 
 async def test_the_awaiting_hook_without_a_quota_still_limits() -> None:
-    """A remote bucket and no quota at all: the branch that returns early."""
     limiter = RateLimitPolicy(limit=1, store=_AwaitingRateStore(), _route_scoped=True)
     app = _app(limiter)
     async with TestClient(app) as client:
@@ -546,9 +471,6 @@ class _AwaitingRateStore:
         return self._inner.try_acquire(key, cost, now)
 
 
-# --- what the schema collects ------------------------------------------------
-
-
 def test_a_limiter_without_a_quota_offers_only_its_own_store() -> None:
     limiter = RateLimitPolicy(limit=10)
 
@@ -556,16 +478,11 @@ def test_a_limiter_without_a_quota_offers_only_its_own_store() -> None:
 
 
 async def test_the_quota_store_is_collected_for_the_schema() -> None:
-    """A table emitted by `wreath schema sql` and created by nothing is the
-    defect `schema_owners` exists to prevent."""
     quotas = Quotas()
     meter = quotas.declare("api_calls", limit=1.0, period=3600.0)
     limiter = RateLimitPolicy(limit=10, quota=meter, _route_scoped=True)
 
     assert meter.store in limiter.schema_owners
-
-
-# --- the fact ---------------------------------------------------------------
 
 
 READ_ONLY_POLICY = """
@@ -608,29 +525,16 @@ async def _status(source: str, *, identity: Identity, quota: Any = None) -> int:
 async def test_a_declared_state_reaches_the_policy() -> None:
     quotas = Quotas(states=Billing({"ada": {"read_only"}}))
 
-    assert await _status(
-        READ_ONLY_POLICY, identity=Identity(id="ada"), quota=quotas
-    ) == 403
+    assert await _status(READ_ONLY_POLICY, identity=Identity(id="ada"), quota=quotas) == 403
 
 
 async def test_a_caller_without_the_state_is_unaffected() -> None:
     quotas = Quotas(states=Billing({"ada": {"read_only"}}))
 
-    assert await _status(
-        READ_ONLY_POLICY, identity=Identity(id="bo"), quota=quotas
-    ) == 200
+    assert await _status(READ_ONLY_POLICY, identity=Identity(id="bo"), quota=quotas) == 200
 
 
 def test_a_policy_reading_the_states_without_a_provider_is_refused() -> None:
-    """The polarity inversion, made a boot failure.
-
-    Every other set fact is a grant: a policy reads it in a `permit` condition,
-    so no provider means an empty set, a false condition, and a denial. A quota
-    state is read to *forbid*, so that same empty set skips the forbid and the
-    request is **allowed**. An application that forgot to configure a provider
-    would boot clean and enforce none of its refusals, which is why this is the
-    one fact that cannot be switched off while a policy still names it.
-    """
     with pytest.raises(ValueError) as refusal:
         CedarAuthorizer(engine=CedarPolicies(READ_ONLY_POLICY))
 
@@ -641,9 +545,6 @@ def test_a_policy_reading_the_states_without_a_provider_is_refused() -> None:
 
 
 def test_the_states_are_read_in_an_unknowable_shape_and_still_refused() -> None:
-    """`isEmpty()` names no member, so the vocabulary walk answers "all of them"
-    rather than a list. That is still a read of the key, and a read with no
-    provider is still an unenforced refusal."""
     source = """
     permit(principal, action, resource)
     unless { context.quota.isEmpty() };
@@ -653,31 +554,20 @@ def test_the_states_are_read_in_an_unknowable_shape_and_still_refused() -> None:
 
 
 async def test_no_policy_reading_the_states_needs_no_provider() -> None:
-    """The overwhelmingly common case, and it must stay free. An application
-    that never writes a quota policy configures no quota provider, boots, and
-    serves."""
-    source = 'permit(principal, action, resource);'
+    source = "permit(principal, action, resource);"
     CedarAuthorizer(engine=CedarPolicies(source))
 
     assert await _status(source, identity=Identity(id="ada")) == 200
 
 
 async def test_a_configured_provider_still_forbids() -> None:
-    """The other side of the refusal: with a provider the fact resolves, the
-    forbid fires, and the write is refused."""
     quotas = Quotas(states=Billing({"ada": {"read_only"}}))
     CedarAuthorizer(engine=CedarPolicies(READ_ONLY_POLICY), quota=quotas)
 
-    assert await _status(
-        READ_ONLY_POLICY, identity=Identity(id="ada"), quota=quotas
-    ) == 403
+    assert await _status(READ_ONLY_POLICY, identity=Identity(id="ada"), quota=quotas) == 403
 
 
 def test_an_engine_that_cannot_be_read_is_not_refused_on_its_silence() -> None:
-    """An outside evaluator offering neither `reads_context` nor the member walk
-    has not said the key is unread -- but it has not said it is read either, and
-    refusing on that silence would refuse every correct application built on
-    one. The boundary of what this check can know, written down."""
 
     class Opaque:
         def is_authorized(self, **request: object) -> bool:
@@ -687,10 +577,6 @@ def test_an_engine_that_cannot_be_read_is_not_refused_on_its_silence() -> None:
 
 
 async def test_a_grant_shaped_fact_is_still_switchable_off() -> None:
-    """The polarity is per fact, not a new rule for all of them. A policy
-    reading `context.flags` with no flag provider still boots: the set is empty,
-    the `permit` condition is false, and the request denies. Changing that would
-    refuse applications that are correct."""
     source = """
     permit(principal, action, resource)
     when { context.flags.contains("beta") };
@@ -701,38 +587,23 @@ async def test_a_grant_shaped_fact_is_still_switchable_off() -> None:
 
 
 async def test_a_policy_naming_an_unknown_state_is_refused_at_startup() -> None:
-    """A typo denies forever with nothing to see; this makes it a boot failure."""
     source = """
     permit(principal, action, resource)
     when { context.quota.contains("read_onyl") };
     """
     with pytest.raises(ValueError, match="read_onyl"):
-        CedarAuthorizer(
-            engine=CedarPolicies(source), quota=Quotas(states=Billing({}))
-        )
+        CedarAuthorizer(engine=CedarPolicies(source), quota=Quotas(states=Billing({})))
 
 
 async def test_a_delegation_cannot_narrow_a_state_away() -> None:
-    """The security property this fact is shaped around.
-
-    Every other set fact is a grant, so intersecting it with a delegation's
-    limits can only subtract. A quota state is read to *forbid*, so subtracting
-    it would grant -- and composition must never grant. A delegated agent that
-    could drop `read_only` would hold a permission its delegator does not.
-    """
     principal = human(Identity(id="ada"))
     delegated = principal.narrow(actor="agent", scope=("write",), ttl=60.0)
     quotas = Quotas(states=Billing({"ada": {"read_only"}}))
 
-    assert await _status(
-        READ_ONLY_POLICY, identity=delegated.identity, quota=quotas
-    ) == 403
+    assert await _status(READ_ONLY_POLICY, identity=delegated.identity, quota=quotas) == 403
 
 
 async def test_the_state_is_resolved_once_per_request() -> None:
-    """A fact re-resolved per policy could answer differently inside one
-    decision, and a permit and a forbid disagreeing is not a decision anybody
-    wrote."""
     calls = 0
 
     class Counting(Billing):
@@ -754,32 +625,21 @@ async def test_the_state_is_resolved_once_per_request() -> None:
 
 
 async def test_a_plain_callable_is_a_states_provider() -> None:
-    """The provider is a duck type, and the smallest shape that satisfies it is
-    a function. A class with a `states` method is the other."""
     quotas = Quotas(states=lambda identity: {"read_only"})
 
     with pytest.warns(RuntimeWarning, match="cannot enumerate"):
-        status = await _status(
-            READ_ONLY_POLICY, identity=Identity(id="ada"), quota=quotas
-        )
+        status = await _status(READ_ONLY_POLICY, identity=Identity(id="ada"), quota=quotas)
 
     assert status == 403
 
 
 def test_a_provider_that_cannot_enumerate_offers_no_vocabulary_at_all() -> None:
-    """Not an empty one. `validate_names` reads an empty vocabulary as "every
-    referenced state is unknown" and refuses to boot -- so answering on behalf
-    of a provider that simply cannot list itself would reject every correct
-    application that writes a state policy."""
     assert not hasattr(Quotas(states=lambda identity: frozenset()), "names")
     assert hasattr(Quotas(states=Billing({})), "names")
-    assert hasattr(Quotas(), "names")           # deliberately off: refuses a typo
+    assert hasattr(Quotas(), "names")  # deliberately off: refuses a typo
 
 
 async def test_a_provider_that_cannot_enumerate_warns_rather_than_refusing() -> None:
-    """It cannot be checked, so a misspelled state will deny silently. Saying so
-    where the authorizer is built is the same shape `validate_names` uses for
-    every other unenumerable provider."""
     with pytest.warns(RuntimeWarning, match="cannot enumerate"):
         CedarAuthorizer(
             engine=CedarPolicies(READ_ONLY_POLICY),
@@ -788,14 +648,8 @@ async def test_a_provider_that_cannot_enumerate_warns_rather_than_refusing() -> 
 
 
 async def test_an_anonymous_request_resolves_the_fact_to_nothing() -> None:
-    """There is no identity to ask the provider about, and the empty set is the
-    fail-closed answer -- the same one an absent provider gives. Reached through
-    the fact rather than the provider, because the guard being tested is the one
-    inside `_resolve_quota`."""
     quotas = Quotas(states=Billing({"ada": {"read_only"}}))
-    authorizer = CedarAuthorizer(
-        engine=CedarPolicies(READ_ONLY_POLICY), quota=quotas
-    )
+    authorizer = CedarAuthorizer(engine=CedarPolicies(READ_ONLY_POLICY), quota=quotas)
 
     class FakeState:
         def get(self, key: str, default: Any = None) -> Any:
@@ -827,8 +681,6 @@ def test_no_states_provider_resolves_to_nothing() -> None:
 
 
 async def test_a_key_no_policy_names_is_never_resolved() -> None:
-    """The laziness mechanism: an empty vocabulary means nothing resolves, which
-    is what keeps a fact off the request path for applications not using it."""
     calls = 0
 
     class Counting(Billing):
@@ -837,7 +689,7 @@ async def test_a_key_no_policy_names_is_never_resolved() -> None:
             calls += 1
             return super().states(identity)
 
-    source = 'permit(principal, action, resource);'
+    source = "permit(principal, action, resource);"
     quotas = Quotas(states=Counting({"ada": {"read_only"}}))
     await _status(source, identity=Identity(id="ada"), quota=quotas)
 

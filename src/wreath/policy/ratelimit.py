@@ -116,13 +116,10 @@ class MemoryRateLimitStore:
         # consumption -- a throttled client let straight back through.
         if self._policy is not None:
             raise ValueError(
-                "this store is already configured; "
-                "give each RateLimitPolicy its own store"
+                "this store is already configured; give each RateLimitPolicy its own store"
             )
         self._policy = (capacity, rate)
-        self._bucket = TokenBucket(
-            capacity=capacity, rate=rate, max_entries=self._max_entries
-        )
+        self._bucket = TokenBucket(capacity=capacity, rate=rate, max_entries=self._max_entries)
 
     @property
     def tracked(self) -> int:
@@ -271,8 +268,7 @@ class PostgresRateLimitStore:
         """
         if self._policy is not None:
             raise ValueError(
-                "this store is already configured; give each RateLimitPolicy "
-                "its own store"
+                "this store is already configured; give each RateLimitPolicy its own store"
             )
         self._policy = (capacity, rate)
         self._capacity = capacity
@@ -287,9 +283,7 @@ class PostgresRateLimitStore:
         `configure` to have run.
         """
         # `now` is ignored: Postgres is the clock, so workers cannot disagree.
-        row = await self._store.statement("acquire").fetchrow(
-            key, self._capacity, cost, self._rate
-        )
+        row = await self._store.statement("acquire").fetchrow(key, self._capacity, cost, self._rate)
         tokens = float(row[0])
         if row[1]:
             return 0.0
@@ -317,8 +311,10 @@ class PostgresRateLimitStore:
 
         return keyed_purge_pass(
             self._store.declaration,
-            name=f"purge_{self._store.table}", after=float(idle_seconds),
-            chunk=chunk, **options,
+            name=f"purge_{self._store.table}",
+            after=float(idle_seconds),
+            chunk=chunk,
+            **options,
         )
 
     async def purge(self, idle_seconds: float) -> str:
@@ -422,8 +418,16 @@ class RateLimitPolicy:
     _default_key = staticmethod(_client_key)
 
     __slots__ = (
-        "_cost", "_exempt", "_key", "_policy_headers", "_quota", "_store",
-        "_try_acquire", "_ingress", "_ingress_sync", "throttled",
+        "_cost",
+        "_exempt",
+        "_key",
+        "_policy_headers",
+        "_quota",
+        "_store",
+        "_try_acquire",
+        "_ingress",
+        "_ingress_sync",
+        "throttled",
     )
 
     def __init__(
@@ -453,7 +457,6 @@ class RateLimitPolicy:
             # identified anyone, so `principal_key` would silently degrade to
             # the client address and put every caller in one bucket. That is a
             # production incident, not a preference -- refuse it at startup.
-            #
             # `_route_scoped` is how `TieredRateLimitPolicy` says "I run
             # after authentication". It used to assign `child._key` afterwards
             # instead, which meant the guard could be stepped around by anyone
@@ -485,7 +488,6 @@ class RateLimitPolicy:
         # +18 boundary crossings per request -- real work on every successful
         # request to carry a header that matters when one is refused. The 429
         # already exists, so these are free there.
-        #
         # The *remaining* allowance stays absent even then for an allowed
         # request: neither store reports it (`acquire` answers "wait this long",
         # not "you have this many left"), and a number invented here would be
@@ -515,9 +517,7 @@ class RateLimitPolicy:
         # store awaits forces the awaiting stage even behind a local bucket --
         # the pair is one decision and cannot be half-synchronous.
         self._try_acquire: Any = getattr(selected, "try_acquire", None)
-        awaiting = self._try_acquire is None or (
-            quota is not None and quota.awaits
-        )
+        awaiting = self._try_acquire is None or (quota is not None and quota.awaits)
         if awaiting:
             self._ingress = self._before_remote
             self._ingress_sync = None
@@ -540,9 +540,8 @@ class RateLimitPolicy:
         A limiter owns no tables itself, so it answers with the store it was
         given rather than forwarding a `component()`. Answering at all is the
         point: `Wreath.schema_components` walks policy and asks each holder
-        this question, and this class used to expose neither it nor
-        `component()`, so a `PostgresRateLimitStore`'s `wreath_rate_limit`
-        table was emitted by `wreath schema sql` and created by nothing.
+        this question, so a `PostgresRateLimitStore` contributes its
+        `wreath_rate_limit` table.
 
         The default in-process store is returned too and contributes nothing --
         it has no `component()`, and the walk asks rather than assumes, so
@@ -569,8 +568,7 @@ class RateLimitPolicy:
         from .base import HeaderSpec, PolicyContract
 
         policy = {
-            name.decode("ascii"): value.decode("ascii")
-            for name, value in self._policy_headers
+            name.decode("ascii"): value.decode("ascii") for name, value in self._policy_headers
         }
         return PolicyContract(
             responses=(
@@ -736,9 +734,7 @@ class TieredRateLimitPolicy:
         ValueError: `tiers` is empty.
     """
 
-    __slots__ = (
-        "_children", "_default", "_dispatch", "_tier", "_tier_rates", "_tiers"
-    )
+    __slots__ = ("_children", "_default", "_dispatch", "_tier", "_tier_rates", "_tiers")
 
     def __init__(
         self,
@@ -777,8 +773,14 @@ class TieredRateLimitPolicy:
             # authentication, which is what makes `principal_key` valid -- the
             # global form refuses it because a global stage runs at ingress.
             child = RateLimitPolicy(
-                limit=limit, window=window, cost=cost, exempt=exempt, store=build(),
-                key=key, quota=quota, _route_scoped=True,
+                limit=limit,
+                window=window,
+                cost=cost,
+                exempt=exempt,
+                store=build(),
+                key=key,
+                quota=quota,
+                _route_scoped=True,
             )
             stage = child._ingress
             self._dispatch[name] = (
@@ -789,9 +791,7 @@ class TieredRateLimitPolicy:
         # Child construction above remains the validation owner for non-positive
         # windows. Compile the generosity comparison only after those declarations
         # have been accepted, so the request path neither divides nor allocates.
-        self._tier_rates = {
-            name: limit / window for name, (limit, window) in self._tiers.items()
-        }
+        self._tier_rates = {name: limit / window for name, (limit, window) in self._tiers.items()}
 
     @property
     def schema_owners(self) -> tuple[Any, ...]:
@@ -829,9 +829,7 @@ class TieredRateLimitPolicy:
         `tiers` -- including None, which is what an unmatched or anonymous
         caller gets -- is charged against `default`.
         """
-        stage, awaiting = self._dispatch.get(
-            self._tier(request), self._dispatch[None]
-        )
+        stage, awaiting = self._dispatch.get(self._tier(request), self._dispatch[None])
         return await stage(request) if awaiting else stage(request)
 
 

@@ -45,8 +45,7 @@ def _quic_flags() -> tuple[list[str], list[str]]:
         missing.append("libngtcp2_crypto_ossl|libngtcp2_crypto_quictls")
     if missing:
         raise SystemExit(
-            "the sanitized HTTP/3 build needs these QUIC libraries: "
-            f"{', '.join(missing)}"
+            f"the sanitized HTTP/3 build needs these QUIC libraries: {', '.join(missing)}"
         )
     required.append(crypto)
 

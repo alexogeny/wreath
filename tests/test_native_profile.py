@@ -63,8 +63,15 @@ def test_dry_run_writes_reproducible_metadata_without_running(
     output = tmp_path / "profile"
     result = native_profile.main(
         [
-            "cpu", "--output", str(output), "--tool", "/usr/bin/perf", "--dry-run",
-            "--", "python", "bench.py",
+            "cpu",
+            "--output",
+            str(output),
+            "--tool",
+            "/usr/bin/perf",
+            "--dry-run",
+            "--",
+            "python",
+            "bench.py",
         ]
     )
 

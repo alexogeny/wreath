@@ -1,26 +1,3 @@
-"""Generated columns through detect/generate/apply/down.
-
-`GENERATED ALWAYS AS (...) STORED` is the form full-text search needs, because
-it is the one that keeps a GIN index correct without a trigger: PostgreSQL
-recomputes the column inside the same statement that changed its sources.
-
-Two things about it are structural rather than cosmetic.
-
-* **The expression has to be spelled the way the catalog spells it back.**
-  `pg_get_expr` deparses the parse tree, not the text you wrote, so
-  `to_tsvector('english', coalesce(title,''))` comes back as
-  `to_tsvector('english'::regconfig, COALESCE(title, ''::text))`. If wreath's
-  intent and the catalog disagree by one byte, every `detect` run reports drift
-  on a column it just created -- forever, with nothing actually wrong.
-* **It has to be created after the columns it reads, and dropped before them.**
-  Order inside the column block was decided by a content hash, which for this
-  model put `search` first and made the whole migration fail on
-  `column "title" does not exist`.
-
-These render without a database. `test_catalog_integration.py` and
-`tests/orm/test_fulltext.py` are where the two sides meet a real server.
-"""
-
 from __future__ import annotations
 
 import importlib
@@ -59,9 +36,7 @@ class Document(Model, table="documents", schema="app"):
     id: Mapped[int] = column(Int64, primary_key=True)
     title: Mapped[str] = column(Text)
     body: Mapped[str] = column(Text)
-    search: Mapped[bytes] = column(
-        TsVector("english", sources=("title", "body")), index="gin"
-    )
+    search: Mapped[bytes] = column(TsVector("english", sources=("title", "body")), index="gin")
 
 
 class Simple(Model, table="documents", schema="app"):
@@ -70,9 +45,7 @@ class Simple(Model, table="documents", schema="app"):
     id: Mapped[int] = column(Int64, primary_key=True)
     title: Mapped[str] = column(Text)
     body: Mapped[str] = column(Text)
-    search: Mapped[bytes] = column(
-        TsVector("simple", sources=("title", "body")), index="gin"
-    )
+    search: Mapped[bytes] = column(TsVector("simple", sources=("title", "body")), index="gin")
 
 
 class Titles(Model, table="titles", schema="app"):
@@ -106,9 +79,6 @@ def _forward(*models: type) -> list[str]:
     return [sql for _flags, sql in _sql(_image(*models))]
 
 
-# -- the expression -----------------------------------------------------------
-
-
 def test_the_expression_is_rendered_in_postgresqls_normal_form() -> None:
     registry = Registry(Database(), [Document], validate_schema="off")
     spec = registry.spec_for(Document)
@@ -127,8 +97,7 @@ def test_a_single_source_is_not_wrapped_in_parentheses() -> None:
 
 def test_a_generated_column_is_created_with_its_expression() -> None:
     assert any(
-        f'add column "search" tsvector generated always as ({ENGLISH_TWO}) stored '
-        "not null;" in sql
+        f'add column "search" tsvector generated always as ({ENGLISH_TWO}) stored not null;' in sql
         for sql in _forward(Document)
     )
 
@@ -141,13 +110,14 @@ def test_an_unchanged_generated_column_produces_no_statement() -> None:
     assert _sql(_image(Document), _image(Document)) == []
 
 
-# -- ordering -----------------------------------------------------------------
-
-
 def test_the_generated_column_is_added_after_the_columns_it_reads() -> None:
     adds = [sql for sql in _forward(Document) if " add column " in sql]
-    positions = {name: index for index, sql in enumerate(adds) for name in
-                 ("title", "body", "search") if f'add column "{name}"' in sql}
+    positions = {
+        name: index
+        for index, sql in enumerate(adds)
+        for name in ("title", "body", "search")
+        if f'add column "{name}"' in sql
+    }
     assert positions["search"] > positions["title"], adds
     assert positions["search"] > positions["body"], adds
 
@@ -155,13 +125,18 @@ def test_the_generated_column_is_added_after_the_columns_it_reads() -> None:
 def test_the_generated_column_is_dropped_before_the_columns_it_reads() -> None:
     plan = native._migration_plan_descriptors(_image(Document), EMPTY_IMAGE)
     statements = [
-        sql for _flags, sql in _statements(
+        sql
+        for _flags, sql in _statements(
             native._migration_render_sql(native._migration_reverse_plan(plan))
         )
     ]
     drops = [sql for sql in statements if " drop column " in sql]
-    order = [name for sql in drops for name in ("title", "body", "search")
-             if f'drop column "{name}"' in sql]
+    order = [
+        name
+        for sql in drops
+        for name in ("title", "body", "search")
+        if f'drop column "{name}"' in sql
+    ]
     assert order[0] == "search", drops
 
 
@@ -172,9 +147,6 @@ def test_down_drops_the_index_and_the_generated_column() -> None:
     assert any(sql.startswith("drop index ") for _flags, sql in statements)
     assert any('drop column "search";' in sql for _flags, sql in statements)
     assert not any(flags & 2 for flags, _sql in statements)
-
-
-# -- drift --------------------------------------------------------------------
 
 
 def test_a_gin_index_is_created_on_the_generated_column() -> None:
@@ -204,9 +176,6 @@ def test_an_ordinary_column_signature_is_unchanged_by_this_feature() -> None:
     # defaulted, so no existing descriptor moves.
     image = _image(Titles)
     assert b"column\x1f25\x1f\x1f1\x1f\x1f\x1f" in image
-
-
-# -- declaration --------------------------------------------------------------
 
 
 def test_a_source_must_be_a_declared_column() -> None:
@@ -279,8 +248,6 @@ def test_a_repeated_source_is_refused() -> None:
         TsVector(sources=("title", "title"))
 
 
-# -- against a real server ----------------------------------------------------
-#
 # The rendering above is only worth anything if PostgreSQL deparses the
 # expression back to the byte-identical string. That cannot be asserted without
 # a server, and getting it wrong is the failure that never resolves: `detect`
@@ -302,9 +269,7 @@ async def test_a_generated_column_round_trips_through_the_catalog() -> None:
         id: Mapped[int] = column(Int64, primary_key=True)
         title: Mapped[str] = column(Text)
         body: Mapped[str] = column(Text)
-        search: Mapped[bytes] = column(
-            TsVector("english", sources=("title", "body")), index="gin"
-        )
+        search: Mapped[bytes] = column(TsVector("english", sources=("title", "body")), index="gin")
 
     registry = Registry(Database(), [Article], validate_schema="off")
     db = await connect(_DSN)
@@ -333,7 +298,6 @@ async def test_a_generated_column_round_trips_through_the_catalog() -> None:
 @pytest.mark.asyncio
 @pytest.mark.database
 async def test_a_single_source_column_round_trips_too() -> None:
-    """One source has no parentheses at all; two have three pairs."""
     schema = f"wreath_generated_{uuid.uuid4().hex[:12]}"
 
     class Heading(Model, table="headings", schema=schema):
@@ -345,9 +309,7 @@ async def test_a_single_source_column_round_trips_too() -> None:
     db = await connect(_DSN)
     try:
         await db.execute(f'CREATE SCHEMA "{schema}"')
-        for _flags, statement in _statements(
-            (await generate_single_plan(registry, db)).sql.tape
-        ):
+        for _flags, statement in _statements((await generate_single_plan(registry, db)).sql.tape):
             await db.execute(statement)
         assert (await detect_single(registry, db)).current
     finally:

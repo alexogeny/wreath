@@ -1,14 +1,3 @@
-"""Bounding boxes, and the two edges that get shipped broken.
-
-A proximity search is a box an index can answer, ANDed with the exact
-great-circle filter. The box is a superset of the circle, so the exact filter
-is what makes the answer right and the box is what makes it fast.
-
-Both failure modes here are discovered by a customer rather than by a test:
-a fleet crossing the date line, and a station near a pole. This file is why
-they are not.
-"""
-
 from __future__ import annotations
 
 import math
@@ -40,15 +29,6 @@ class TestOrdinaryBoxes:
         ids=["equator", "subtropical", "high-north", "high-south"],
     )
     def test_a_box_is_a_superset_of_the_circle(self, centre: Coordinate) -> None:
-        """Every point within the radius must fall in some box, or the
-        prefilter silently drops rows the exact filter would have kept.
-
-        **Parametrised by latitude on purpose.** `tools/geo_teeth_check.py`
-        shows the classic bug -- reusing the latitude span for longitude,
-        ignoring meridian convergence -- escapes 48 of 72 bearings at lat 60
-        and **0 of 72 at the equator**. A superset test centred on the equator
-        proves nothing, so the high-latitude cases are what give this teeth.
-        """
         radius = 10_000.0
         boxes = bounding_boxes(centre, radius)
         for bearing_deg in range(0, 360, 5):
@@ -82,7 +62,6 @@ class TestOrdinaryBoxes:
         assert large.lon_max > small.lon_max
 
     def test_latitude_span_does_not_depend_on_longitude(self) -> None:
-        """A degree of latitude is a fixed arc everywhere."""
         (equator,) = bounding_boxes(Coordinate(lat=0.0, lon=0.0), 10_000.0)
         (elsewhere,) = bounding_boxes(Coordinate(lat=0.0, lon=120.0), 10_000.0)
         assert (equator.lat_max - equator.lat_min) == pytest.approx(
@@ -90,7 +69,6 @@ class TestOrdinaryBoxes:
         )
 
     def test_longitude_span_widens_toward_the_pole(self) -> None:
-        """Meridians converge, so the same metres cover more degrees."""
         (equator,) = bounding_boxes(Coordinate(lat=0.0, lon=0.0), 10_000.0)
         (high,) = bounding_boxes(Coordinate(lat=60.0, lon=0.0), 10_000.0)
         assert (high.lon_max - high.lon_min) > (equator.lon_max - equator.lon_min)
@@ -106,8 +84,6 @@ class TestTheAntimeridian:
         assert len(boxes) == 2
 
     def test_neither_box_has_an_out_of_range_longitude(self) -> None:
-        """The whole point of splitting: no comparison understands a wrapped
-        edge, so every emitted bound stays inside [-180, 180]."""
         boxes = bounding_boxes(Coordinate(lat=0.0, lon=179.95), 20_000.0)
         for box in boxes:
             assert -180.0 <= box.lon_min <= 180.0
@@ -149,7 +125,6 @@ class TestThePoles:
         assert box.lon_max == 180.0
 
     def test_latitude_is_still_clamped_to_the_sphere(self) -> None:
-        """There is no latitude beyond the pole to search."""
         (box,) = bounding_boxes(Coordinate(lat=89.99, lon=0.0), 50_000.0)
         assert box.lat_max <= 90.0
         assert box.lat_min >= -90.0
@@ -182,8 +157,6 @@ class TestRefusals:
             bounding_boxes((0.0, 0.0), 100.0)  # ty: ignore[invalid-argument-type]
 
     def test_a_text_radius_is_refused_rather_than_parsed(self) -> None:
-        """Added after a mutation pass: the `isinstance` clause survived,
-        because every existing case reached the *numeric* branch."""
         with pytest.raises(GeospatialError):
             bounding_boxes(Coordinate(lat=0.0, lon=0.0), "100")  # ty: ignore[invalid-argument-type]
 
@@ -210,8 +183,6 @@ class TestBoundingBoxValue:
         assert hash(a) == hash(b)
 
     def test_boxes_differing_in_any_single_edge_are_unequal(self) -> None:
-        """One test per edge, because `__eq__` ands four comparisons and
-        dropping any one of them survived the suite."""
         from wreath.geospatial import BoundingBox
 
         base = BoundingBox(1.0, 2.0, 3.0, 4.0)

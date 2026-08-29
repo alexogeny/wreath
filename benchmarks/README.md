@@ -36,7 +36,7 @@ typed ecosystem business kernel on their fastest retained server configurations.
 uv sync --inexact --group benchmark
 uv run python -m benchmarks.bench_holistic_stack_instructions \
   --requests 30 --trials 5 --connections 8 --warmup 16 \
-  --output docs/perf/data/e2e-holistic-stack-instructions.json
+  --output benchmarks/baselines/e2e-holistic-stack-instructions.json
 ```
 
 The request count is workload-sized: even the 30/15 slope subtracts totals
@@ -71,7 +71,7 @@ must not be read as equivalent feature costs.
 uv sync --inexact --group benchmark
 uv run python -m benchmarks.bench_e2e_instructions \
   --requests 4000 --trials 5 --connections 32 --warmup 500 \
-  --output docs/perf/data/e2e-stack-instructions.json
+  --output benchmarks/baselines/e2e-stack-instructions.json
 ```
 
 The only metric is `instructions:u`. Each sample is the slope between a fresh
@@ -281,8 +281,7 @@ the rendered SHA-256 values to match before comparing any timings.
 
 ## Logging
 
-`benchmarks/bench_logging.py` runs the six measurements
-`docs/plans/first-class-logging.md` owed, one per `--suite`: `emit` (a record
+`benchmarks/bench_logging.py` runs six measurements, one per `--suite`: `emit` (a record
 against stdlib `logging` and structlog), `disabled` (what a *disabled*
 `DEBUG(...)` call costs — the load-bearing one, because failure-triggered
 logging assumes verbose instrumentation is affordable), `publish` (a LOG cell's
@@ -310,10 +309,8 @@ each native arm sizes its ring from the run's own record budget and refuses the
 result if a single record was lost.
 
 The baselines were measured 2026-07-28, before and after `wreath_nfr_log`.
-Recorded runs are output rather than source and are not kept in the tree --
-`docs/plans/first-class-logging.md` carries the tables and what they mean; the short
-version is that the fast tier was not fast until the emitter moved to C, and the
-cost has since moved off the request path and onto the projector thread. Every
+The fast tier was not fast until the emitter moved to C, and the cost has since
+moved off the request path and onto the projector thread. Every
 number is one machine — reproduce before quoting an absolute.
 
 ## Native GIL contention
@@ -479,8 +476,8 @@ It is a framework/router microbenchmark rather than an end-to-end server compari
 
 ## Native CPU and memory-pressure benchmark
 
-`benchmarks/bench_native_pressure.py` isolates the superlinear and unbounded
-native operations addressed by `docs/plans/native-c-hotspots.md`. Each case runs
+`benchmarks/bench_native_pressure.py` isolates superlinear and unbounded native
+operations. Each case runs
 in a **fresh subprocess** so `ru_maxrss` is attributable to that case alone: the
 parent spawns one child per scenario, each child prints exactly one scenario
 record to stdout, and the parent writes one JSON document.
@@ -523,9 +520,8 @@ machine-specific. As everywhere in this suite, never call a single run a win.
 
 ## HTTP/1, routing, and storage pressure benchmark
 
-`benchmarks/bench_native_http1_storage.py` isolates the CPU-amplification and
-memory-pressure paths addressed by
-`docs/plans/native-c-http1-routing-storage-pressure.md`. Same shape as the
+`benchmarks/bench_native_http1_storage.py` isolates CPU-amplification and
+memory-pressure paths. Same shape as the
 native pressure benchmark above: one fresh child process per scenario, one JSON
 document from the parent.
 

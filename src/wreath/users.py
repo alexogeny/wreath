@@ -244,9 +244,7 @@ def _challenge_slots(users: UserStore) -> list[tuple[str, Any]]:
     return list(slots.items())
 
 
-async def _forget_ceremonies(
-    session: dict[str, Any], users: UserStore, sessions: Any
-) -> None:
+async def _forget_ceremonies(session: dict[str, Any], users: UserStore, sessions: Any) -> None:
     """Drop every begun-but-unfinished ceremony from `session`, rows included.
 
     A pending TOTP enrolment is an unconfirmed shared secret and a pending
@@ -284,9 +282,7 @@ async def _forget_ceremonies(
         session.pop(_WEBAUTHN_KEY, None)
 
 
-async def _factor_this_login_cannot_check(
-    users: UserStore, user_id: str
-) -> str | None:
+async def _factor_this_login_cannot_check(users: UserStore, user_id: str) -> str | None:
     """The kind of an enrolled factor this login path cannot check, or None.
 
     Asked only by a `user_router` that has no `second_factors=` of its own, of
@@ -337,9 +333,6 @@ async def _factor_another_store_holds(
             if row.kind != "recovery":
                 return row.kind
     return None
-
-
-# --- request models (validated by wreath binding) ---------------------------
 
 
 @dataclass(slots=True)
@@ -596,9 +589,8 @@ async def reset_password_endpoint(
 
     `session_key` is the session key login wrote the principal under, and it is
     handed to the store rather than assumed: enumeration has to look where the
-    principal actually is. `PostgresSessionStore.delete_for` used to hardcode
-    `principal`, so an application that renamed the key got a reset that matched
-    no row, ended nothing, and still answered `password_reset`.
+    principal actually is. It must match the key configured on the session
+    store.
 
     Args:
         session_key: the session key holding the principal. Passed
@@ -611,9 +603,7 @@ async def reset_password_endpoint(
         True when the password changed, False for a bad token or a refused new password.
     """
     subject = _userkit._token_subject(token)
-    ok = await _userkit.reset_password(
-        store, secret=secret, token=token, new_password=new_password
-    )
+    ok = await _userkit.reset_password(store, secret=secret, token=token, new_password=new_password)
     if not ok or sessions is None or subject is None:
         return ok
     delete_for = getattr(sessions, "delete_for", None)
@@ -634,10 +624,12 @@ def _profile(user: UserRecord) -> dict[str, Any]:
 
 def _default_link(base_url: str, prefix: str) -> Callable[[str, str], str]:
     root = base_url.rstrip("/") + prefix
+
     def build(purpose: str, token: str) -> str:
         if purpose == "verify":
             return f"{root}/verify/{token}"
         return f"{root}/reset-password?token={token}"
+
     return build
 
 
@@ -680,8 +672,7 @@ def user_router(
     enumerates by the key this router writes -- give the store the same key
     (`PostgresSessionStore(..., session_key=...)`) so a caller of `delete_for`
     outside this router agrees too. A store whose `delete_for` takes only a
-    subject works unchanged on the default key and raises on a renamed one,
-    which is the loud version of what it used to do silently: nothing. It
+    subject works unchanged on the default key and raises on a renamed one. It
     is also where login and logout delete a half-finished second-factor
     ceremony's row, though a `second_factor_router` mounted with its own
     `enrolments=` store is cleared there too, whichever store that is.
@@ -753,8 +744,13 @@ def user_router(
     @router.post("/register")
     async def register(request: Any, data: Annotated[RegisterInput, Body()]):
         await _userkit.register(
-            store, mailer, secret=secret, email=data.email, password=data.password,
-            link_builder=links, ttl=verify_ttl,
+            store,
+            mailer,
+            secret=secret,
+            email=data.email,
+            password=data.password,
+            link_builder=links,
+            ttl=verify_ttl,
         )
         # Uniform response — never reveals whether the email already existed.
         return JSONResponse({"status": "registration_received"}, status=202)
@@ -770,9 +766,7 @@ def user_router(
             # Retry-After: saying "too many attempts for *this* account" would
             # confirm the account exists.
             refused = JSONResponse({"error": "invalid_credentials"}, status=429)
-            refused.headers.append(
-                (b"retry-after", str(int(login_window)).encode("ascii"))
-            )
+            refused.headers.append((b"retry-after", str(int(login_window)).encode("ascii")))
             return refused
         user = await _userkit.authenticate(store, data.email, data.password)
         if user is None:
@@ -837,7 +831,6 @@ def user_router(
             # being so. This is the one moment where the mistake is knowable:
             # the account in hand demonstrably has a factor, and this login path
             # has nothing to check it with.
-            #
             # It locks out a misconfigured deployment, which is the trade
             # the refuse-rather-than-half-wire rule makes deliberately: a door that refuses and
             # names its own misconfiguration beats one that opens quietly. 500,
@@ -881,14 +874,16 @@ def user_router(
     @router.post("/verify")
     async def verify(request: Any, data: Annotated[TokenInput, Body()]):
         ok = await _userkit.verify_email(store, secret=secret, token=data.token)
-        return JSONResponse({"status": "verified" if ok else "invalid_token"},
-                           status=200 if ok else 400)
+        return JSONResponse(
+            {"status": "verified" if ok else "invalid_token"}, status=200 if ok else 400
+        )
 
     @router.get("/verify/{token}")
     async def verify_link(request: Any, token: Annotated[str, Path()]):
         ok = await _userkit.verify_email(store, secret=secret, token=token)
-        return JSONResponse({"status": "verified" if ok else "invalid_token"},
-                           status=200 if ok else 400)
+        return JSONResponse(
+            {"status": "verified" if ok else "invalid_token"}, status=200 if ok else 400
+        )
 
     @router.post("/forgot-password")
     async def forgot(request: Any, data: Annotated[ForgotInput, Body()]):
@@ -898,8 +893,12 @@ def user_router(
             # both the response and the work decision free of enumeration clues.
             reset_limiter.record_failure(identifier)
             await _userkit.start_password_reset(
-                store, mailer, secret=secret, email=data.email,
-                link_builder=links, ttl=reset_ttl,
+                store,
+                mailer,
+                secret=secret,
+                email=data.email,
+                link_builder=links,
+                ttl=reset_ttl,
             )
         # Uniform response for absent accounts and exhausted issuance budgets.
         return JSONResponse({"status": "reset_email_sent"}, status=200)
@@ -907,11 +906,16 @@ def user_router(
     @router.post("/reset-password")
     async def reset(request: Any, data: Annotated[ResetInput, Body()]):
         ok = await reset_password_endpoint(
-            store, sessions, secret=secret, token=data.token,
-            new_password=data.password, session_key=session_key,
+            store,
+            sessions,
+            secret=secret,
+            token=data.token,
+            new_password=data.password,
+            session_key=session_key,
         )
-        return JSONResponse({"status": "password_reset" if ok else "invalid_token"},
-                           status=200 if ok else 400)
+        return JSONResponse(
+            {"status": "password_reset" if ok else "invalid_token"}, status=200 if ok else 400
+        )
 
     @router.get("/me")
     async def me(request: Any):
@@ -966,10 +970,8 @@ def second_factor_router(
     application that does not want a second factor mounts neither this router
     nor its table.
 
-    **Separate, but not independent.** Mounting this and forgetting
-    `user_router(second_factors=...)` used to leave users enrolling factors,
-    seeing them listed, and signing in with a password alone. Building this
-    router therefore records it against the `users` store it was given, and a
+    **Separate, but not independent.** Building this router records it against
+    the `users` store it was given, and a
     `user_router` over that same store with no `second_factors=` of its own
     refuses the login of anybody who has a factor here rather than issuing a
     full session. Pass the same `SecondFactorStore` to both and none of that
@@ -1127,9 +1129,7 @@ def second_factor_router(
     # Validate the parameters once, here, rather than on the first request: a
     # router built with an impossible period should fail at import, not answer
     # 500 to the first person trying to sign in.
-    _secondfactor.totp_code(
-        b"\x00" * _secondfactor.MIN_SECRET_BYTES, 0, digits=digits
-    )
+    _secondfactor.totp_code(b"\x00" * _secondfactor.MIN_SECRET_BYTES, 0, digits=digits)
     if skew < 0 or skew > _secondfactor.MAX_SKEW:
         raise ValueError(f"skew must be between 0 and {_secondfactor.MAX_SKEW} steps")
     if period <= 0:
@@ -1142,8 +1142,7 @@ def second_factor_router(
         raise ValueError("passkey_login requires a non-empty rp_id")
     if passkey_login and not isinstance(factors, DiscoverableSecondFactorStore):
         raise TypeError(
-            "passkey_login requires "
-            "DiscoverableSecondFactorStore.credential(credential_id)"
+            "passkey_login requires DiscoverableSecondFactorStore.credential(credential_id)"
         )
     discoverable_factors = cast(DiscoverableSecondFactorStore, factors)
     accepted_origins = tuple(origins) if origins else (default_origins(rp_id) if rp_id else ())
@@ -1153,12 +1152,9 @@ def second_factor_router(
         # Checked here rather than on the first ceremony, for the same reason
         # the TOTP parameters are: a router built with an impossible setting
         # should fail where it is written, not where somebody signs in.
-        _secondfactor.begin_webauthn_assertion(
-            (), rp_id=rp_id, user_verification=user_verification
-        )
+        _secondfactor.begin_webauthn_assertion((), rp_id=rp_id, user_verification=user_verification)
     # A ceremony's state is never held in the session, whatever the deployment
     # passed. It goes to a `ChallengeStore`, and the default is a real one.
-    #
     # This replaces a `UserWarning` that could only name *half* its condition:
     # it fired on `enrolments=None` and then had to say "if your
     # SessionPolicy also has no store=, that means a cookie", because a
@@ -1166,7 +1162,6 @@ def second_factor_router(
     # warning nobody can act on with certainty is a warning people learn to
     # ignore. The property now simply holds: single-use is enforced by an
     # atomic consume against a store, not by wherever the cookie went.
-    #
     # `MemoryChallengeStore` bounds a single worker. Behind more than one, a
     # ceremony begun on one worker is not spendable on another -- which fails
     # *closed* (refused, begin again) rather than open, and is what
@@ -1176,9 +1171,7 @@ def second_factor_router(
     # A `PostgresChallengeStore` measures it in the database instead --
     # `clock_timestamp()`, so workers whose wall clocks disagree cannot disagree
     # about whether a challenge is still live.
-    challenges = (
-        challenges if challenges is not None else MemoryChallengeStore(clock=clock)
-    )
+    challenges = challenges if challenges is not None else MemoryChallengeStore(clock=clock)
     router = Router(prefix=prefix, tags=("users",))
     # `WebAuthnCeremony.ceremony` is the vocabulary the ceremony builders
     # already speak; this is the one place it becomes a store kind.
@@ -1247,9 +1240,7 @@ def second_factor_router(
         never on their own, so an account holding only them is in the same
         position as an account holding nothing.
         """
-        return not any(row.kind != "recovery" for row in enrolled) or not _stale_step_up(
-            session
-        )
+        return not any(row.kind != "recovery" for row in enrolled) or not _stale_step_up(session)
 
     def _stamp(session: dict[str, Any], extra: dict[str, Any] | None = None) -> None:
         """Record on the principal that a second factor was just proved.
@@ -1274,13 +1265,9 @@ def second_factor_router(
     ) -> None:
         """Park a begun enrolment server-side, under an opaque handle.
 
-        **Never in the session.** An unconfirmed TOTP secret riding in a cookie
-        was the other half of the warning this router used to emit, and it is
-        the half that outlives the tab on a shared machine. With `enrolments=`
-        it goes there, because a deployment that named a store meant it; without
-        one it goes to the `ChallengeStore`, which is a real store rather than
-        the session by another name. The cookie carries the handle and nothing
-        else in both cases.
+        **Never in the session.** With `enrolments=` the unconfirmed record goes
+        there; otherwise it goes to the `ChallengeStore`. The cookie carries an
+        opaque handle and no TOTP secret in both cases.
         """
         handle = _secondfactor.new_credential_id()
         if enrolments is not None:
@@ -1295,9 +1282,7 @@ def second_factor_router(
             )
         session[key] = {"id": handle, "at": record["at"]}
 
-    async def _load_record(
-        marker: dict[str, Any], prefix: str
-    ) -> dict[str, Any] | None:
+    async def _load_record(marker: dict[str, Any], prefix: str) -> dict[str, Any] | None:
         """The begun enrolment behind a session marker, wherever it is kept.
 
         A *read*, deliberately, and not a consume. An enrolment's property is
@@ -1340,9 +1325,7 @@ def second_factor_router(
     async def _load_enrolment(marker: dict[str, Any]) -> dict[str, Any] | None:
         return await _load_record(marker, _ENROLMENT_PREFIX)
 
-    async def _forget_enrolment(
-        session: dict[str, Any], marker: dict[str, Any]
-    ) -> None:
+    async def _forget_enrolment(session: dict[str, Any], marker: dict[str, Any]) -> None:
         await _forget_record(session, enrolment_key, _ENROLMENT_PREFIX, marker)
 
     @router.post("/totp/begin")
@@ -1358,7 +1341,6 @@ def second_factor_router(
             # Enrolling twice would mint a second secret and a second set of
             # recovery codes, invalidating neither -- so it is refused rather
             # than quietly leaving the user with two of everything.
-            #
             # Ahead of the step-up check below because it is the more specific
             # answer and costs nothing to give: `GET /auth/2fa` already lists
             # this account's factors to any signed-in session, so naming the
@@ -1367,8 +1349,11 @@ def second_factor_router(
         if not _may_enrol(session, enrolled):
             return _step_up_required()
         enrolment = _secondfactor.begin_totp_enrolment(
-            account=user.email, issuer=issuer, label=label,
-            digits=digits, period=period,
+            account=user.email,
+            issuer=issuer,
+            label=label,
+            digits=digits,
+            period=period,
         )
         # The unconfirmed secret has to survive one round trip, and where it
         # waits is a real choice. With `enrolments`, it waits server-side and
@@ -1378,16 +1363,13 @@ def second_factor_router(
         # tab on a shared machine. Without a store it stays in the session,
         # which is the stage-one behaviour and is only as server-side as the
         # session middleware is.
-        #
         # It is not a credential in either case: nothing in the store refers to
         # it, and nothing ever will unless a code generated from it verifies.
         # `user` is recorded with it so a session that changes hands -- signed
         # out and signed in as somebody else -- cannot confirm an enrolment that
         # was begun for a different account.
         record = {"secret": enrolment.secret_base32, "user": user.id, "at": clock()}
-        await _save_record(
-            session, enrolment_key, _ENROLMENT_PREFIX, record, enrolment_ttl
-        )
+        await _save_record(session, enrolment_key, _ENROLMENT_PREFIX, record, enrolment_ttl)
         return JSONResponse(
             {
                 "uri": enrolment.uri,
@@ -1452,8 +1434,15 @@ def second_factor_router(
         # may stamp the session. See `_stamp`'s caller below.
         first_factor = not any(row.kind != "recovery" for row in enrolled)
         confirmed = await _secondfactor.confirm_totp_enrolment(
-            factors, user.id, secret=secret, code=data.code, label=label,
-            digits=digits, period=period, skew=skew, recovery_codes=recovery_codes,
+            factors,
+            user.id,
+            secret=secret,
+            code=data.code,
+            label=label,
+            digits=digits,
+            period=period,
+            skew=skew,
+            recovery_codes=recovery_codes,
             at=clock(),
         )
         if confirmed is None:
@@ -1469,7 +1458,6 @@ def second_factor_router(
         # of the authenticator was just checked, and without this a user who has
         # only ever enrolled would have to step up separately before they could
         # remove what they just added.
-        #
         # Enrolling an *additional* factor stamps nothing, and that is the whole
         # point of the condition. A stamp is the answer to "did this caller
         # prove a factor the account already had", and a factor the caller has
@@ -1508,8 +1496,7 @@ def second_factor_router(
                         "label": row.label,
                         "created_at": row.created_at.isoformat(),
                         "last_used_at": (
-                            None if row.last_used_at is None
-                            else row.last_used_at.isoformat()
+                            None if row.last_used_at is None else row.last_used_at.isoformat()
                         ),
                     }
                     for row in rows
@@ -1517,9 +1504,7 @@ def second_factor_router(
                 ],
                 # Counted rather than listed: an individual recovery code has no
                 # label worth showing, and how many are left is the useful fact.
-                "recovery_codes_remaining": sum(
-                    1 for row in rows if row.kind == "recovery"
-                ),
+                "recovery_codes_remaining": sum(1 for row in rows if row.kind == "recovery"),
             },
             status=200,
         )
@@ -1549,8 +1534,13 @@ def second_factor_router(
         if not limiter.allow(subject):
             return _throttled()
         matched = await _secondfactor.verify_second_factor(
-            factors, subject, data.code, at=clock(), period=period,
-            digits=digits, skew=skew,
+            factors,
+            subject,
+            data.code,
+            at=clock(),
+            period=period,
+            digits=digits,
+            skew=skew,
         )
         if matched is None:
             limiter.record_failure(subject)
@@ -1566,14 +1556,14 @@ def second_factor_router(
         # this rotates here.
         rotate_session(request)
         session[session_key] = {
-            "sub": user.id, "type": "User", "roles": [],
+            "sub": user.id,
+            "type": "User",
+            "roles": [],
             "second_factor_at": int(clock()),
         }
         return JSONResponse(_profile(user), status=200)
 
-    async def _step_up(
-        request: Any, session: dict[str, Any], code: str
-    ) -> JSONResponse:
+    async def _step_up(request: Any, session: dict[str, Any], code: str) -> JSONResponse:
         """Re-prove a factor on a session that is already signed in.
 
         The same code check as promotion, the same per-user throttle, and the
@@ -1594,8 +1584,13 @@ def second_factor_router(
         if not await factors.credentials(subject):
             return JSONResponse({"error": "no_second_factor_enrolled"}, status=400)
         matched = await _secondfactor.verify_second_factor(
-            factors, subject, code, at=clock(), period=period,
-            digits=digits, skew=skew,
+            factors,
+            subject,
+            code,
+            at=clock(),
+            period=period,
+            digits=digits,
+            skew=skew,
         )
         if matched is None:
             limiter.record_failure(subject)
@@ -1811,30 +1806,20 @@ def second_factor_router(
             async def webauthn_login_begin(request: Any):
                 session = _session(request)
                 if session is None:
-                    return JSONResponse(
-                        {"error": "session_middleware_required"}, status=500
-                    )
+                    return JSONResponse({"error": "session_middleware_required"}, status=500)
                 ceremony = _secondfactor.begin_webauthn_assertion(
                     (), rp_id=rp_id, user_verification="required"
                 )
-                return await _begin_ceremony(
-                    session, ceremony, _PASSKEY_LOGIN_SUBJECT
-                )
+                return await _begin_ceremony(session, ceremony, _PASSKEY_LOGIN_SUBJECT)
 
             @router.post("/webauthn/login")
-            async def webauthn_login(
-                request: Any, data: Annotated[WebAuthnAssertionInput, Body()]
-            ):
+            async def webauthn_login(request: Any, data: Annotated[WebAuthnAssertionInput, Body()]):
                 session = _session(request)
                 if session is None:
-                    return JSONResponse(
-                        {"error": "session_middleware_required"}, status=500
-                    )
+                    return JSONResponse({"error": "session_middleware_required"}, status=500)
                 marker = session.get(webauthn_key)
                 if not isinstance(marker, dict):
-                    return JSONResponse(
-                        {"error": "no_ceremony_in_progress"}, status=400
-                    )
+                    return JSONResponse({"error": "no_ceremony_in_progress"}, status=400)
                 record, _ = await _take_ceremony(
                     session,
                     marker,
@@ -1867,7 +1852,7 @@ def second_factor_router(
                         require_user_verification=True,
                         at=clock(),
                     )
-                except (ValueError, WebAuthnError):
+                except ValueError, WebAuthnError:
                     if subject is not None:
                         limiter.record_failure(subject)
                     return JSONResponse({"error": "invalid_assertion"}, status=401)
@@ -1896,15 +1881,9 @@ def second_factor_router(
             if subject is None:
                 principal = _principal(session)
                 if principal is None:
-                    return JSONResponse(
-                        {"error": "no_pending_second_factor"}, status=401
-                    )
+                    return JSONResponse({"error": "no_pending_second_factor"}, status=401)
                 subject = str(principal["sub"])
-            rows = [
-                row
-                for row in await factors.credentials(subject)
-                if row.kind == "webauthn"
-            ]
+            rows = [row for row in await factors.credentials(subject) if row.kind == "webauthn"]
             if not rows:
                 return JSONResponse({"error": "no_second_factor_enrolled"}, status=400)
             ceremony = _secondfactor.begin_webauthn_assertion(
@@ -1913,9 +1892,7 @@ def second_factor_router(
             return await _begin_ceremony(session, ceremony, subject)
 
         @router.post("/webauthn/verify")
-        async def webauthn_verify(
-            request: Any, data: Annotated[WebAuthnAssertionInput, Body()]
-        ):
+        async def webauthn_verify(request: Any, data: Annotated[WebAuthnAssertionInput, Body()]):
             session = _session(request)
             if session is None:
                 return JSONResponse({"error": "session_middleware_required"}, status=500)
@@ -1928,8 +1905,10 @@ def second_factor_router(
             # never gets to say who the caller is.
             pending = _pending_subject(session)
             principal = _principal(session)
-            subject = pending if pending is not None else (
-                None if principal is None else str(principal["sub"])
+            subject = (
+                pending
+                if pending is not None
+                else (None if principal is None else str(principal["sub"]))
             )
             if subject is None:
                 await _forget_ceremony(session)
@@ -2029,8 +2008,6 @@ def second_factor_router(
     return router
 
 
-# --- reference ORM-backed store + model -------------------------------------
-#
 # Optional convenience. The store is a thin adapter over any user model with the
 # expected columns; the app may supply its own model instead.
 
@@ -2120,8 +2097,11 @@ class OrmUserStore:
 
     def _to_record(self, row: Any) -> UserRecord:
         return UserRecord(
-            id=str(row.id), email=row.email, hashed_password=row.hashed_password,
-            is_active=bool(row.is_active), is_verified=bool(row.is_verified),
+            id=str(row.id),
+            email=row.email,
+            hashed_password=row.hashed_password,
+            is_active=bool(row.is_active),
+            is_verified=bool(row.is_verified),
         )
 
     def _found(self, row: Any) -> UserRecord | None:
@@ -2229,9 +2209,7 @@ def default_second_factor_model(table: str = "user_second_factors") -> type[Any]
     from .orm.types import Bytea, Int64, TimestampTz, Varchar
 
     class SecondFactorCredential(Model, table=table):
-        id: Mapped[str] = column(
-            Varchar, primary_key=True, default=_secondfactor.new_credential_id
-        )
+        id: Mapped[str] = column(Varchar, primary_key=True, default=_secondfactor.new_credential_id)
         user_id: Mapped[str] = column(Varchar, index=True)
         kind: Mapped[str] = column(Varchar)
         label: Mapped[str] = column(Varchar)
@@ -2386,7 +2364,5 @@ class OrmSecondFactorStore:
         """
         if self._advance_sql is None:
             self._advance_sql = self._advance_statement()
-        won = await self._session.raw(
-            self._advance_sql, counter, at, credential_id
-        ).fetchval()
+        won = await self._session.raw(self._advance_sql, counter, at, credential_id).fetchval()
         return won is not None

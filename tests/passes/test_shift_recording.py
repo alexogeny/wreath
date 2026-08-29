@@ -1,12 +1,3 @@
-"""A pass shift is a job attempt, so it records like one.
-
-`JobRunner.drive` registers the shift as an ordinary task -- that is the whole
-of the pass/queue seam -- so a shift that fails is captured by exactly the
-arming that captures any other failed attempt. No second vocabulary, and no
-second recorder: what makes this worth a test is that it would be easy to build
-one by accident.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -94,8 +85,14 @@ def armed(tmp_path):
 
 def _shift_claim(task: str, *, fence: int = 3) -> _Claimed:
     return _Claimed(
-        id=7, task=task, args=[], tenant="", attempts=0, max_attempts=5,
-        fence=fence, key=None,
+        id=7,
+        task=task,
+        args=[],
+        tenant="",
+        attempts=0,
+        max_attempts=5,
+        fence=fence,
+        key=None,
     )
 
 

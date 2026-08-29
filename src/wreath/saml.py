@@ -18,9 +18,7 @@ This is the *service provider* half, and only the receiving end of it. It reads
 a `Response` or a bare `Assertion` that arrived by some route you own — the POST
 body of your assertion consumer endpoint, most often. It does not act as an
 identity provider, publish service-provider metadata, decrypt an
-`EncryptedAssertion`, or mount the redirect/POST binding endpoints; see
-`docs/reference/roadmap.md`, which names each of those as absent rather than
-implied.
+`EncryptedAssertion`, or mount the redirect/POST binding endpoints.
 
 ## The three properties it is built on
 
@@ -107,9 +105,7 @@ __all__ = [
 ]
 
 
-# ---------------------------------------------------------------------------
 # Names
-# ---------------------------------------------------------------------------
 
 _PROTOCOL: Final = "urn:oasis:names:tc:SAML:2.0:protocol"
 _ASSERTION: Final = "urn:oasis:names:tc:SAML:2.0:assertion"
@@ -156,11 +152,13 @@ _SIGNATURES: Final = {
 #: is a refusal here: a validity constraint nobody read is not a constraint.
 #: `OneTimeUse` needs no handling because every assertion is single-use, and
 #: `ProxyRestriction` bounds onward issuance, which this module never does.
-_KNOWN_CONDITIONS: Final = frozenset({
-    f"{{{_ASSERTION}}}AudienceRestriction",
-    f"{{{_ASSERTION}}}OneTimeUse",
-    f"{{{_ASSERTION}}}ProxyRestriction",
-})
+_KNOWN_CONDITIONS: Final = frozenset(
+    {
+        f"{{{_ASSERTION}}}AudienceRestriction",
+        f"{{{_ASSERTION}}}OneTimeUse",
+        f"{{{_ASSERTION}}}ProxyRestriction",
+    }
+)
 
 #: Bounds for a SAML payload. There is no unbounded setting, here or below it.
 LIMITS: Final = Limits(max_bytes=512 * 1024, max_depth=40)
@@ -196,9 +194,7 @@ def _refuse(reason: str, message: str) -> SamlRefusal:
     return SamlRefusal(reason, message)
 
 
-# ---------------------------------------------------------------------------
 # Configuration
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,8 +267,7 @@ class ServiceProvider:
             raise ValueError("a service provider needs an acs_url for SubjectConfirmationData")
         if not 0.0 <= self.clock_skew <= MAX_CLOCK_SKEW:
             raise ValueError(
-                f"clock_skew must be between 0 and {MAX_CLOCK_SKEW} seconds, "
-                f"not {self.clock_skew}"
+                f"clock_skew must be between 0 and {MAX_CLOCK_SKEW} seconds, not {self.clock_skew}"
             )
 
 
@@ -326,9 +321,7 @@ def ledger_declaration(
     )
 
 
-# ---------------------------------------------------------------------------
 # The result
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,9 +370,7 @@ class VerifiedAssertion:
         }
 
 
-# ---------------------------------------------------------------------------
 # Key material
-# ---------------------------------------------------------------------------
 
 # OID encodings, as they appear inside an AlgorithmIdentifier's OBJECT
 # IDENTIFIER value. Comparing the encoded bytes rather than decoding to a dotted
@@ -484,9 +475,7 @@ def _key_from_spki(spki: bytes) -> _PublicKey:
     raise ValueError("a configured SAML key is neither RSA nor EC")
 
 
-# ---------------------------------------------------------------------------
 # Tree helpers
-# ---------------------------------------------------------------------------
 
 
 def _children(element: Element, namespace: str, local: str) -> list[Element]:
@@ -533,9 +522,7 @@ def _contains(ancestor: Element, node: Element) -> bool:
     return outer <= inner and inner_end <= outer_end
 
 
-# ---------------------------------------------------------------------------
 # Signature verification
-# ---------------------------------------------------------------------------
 
 
 def _b64_bytes(text: str, *, reason: str, what: str) -> bytes:
@@ -675,9 +662,7 @@ def _verify_signature(
     document: Document, signature: Element, covered: Element, idp: IdentityProvider
 ) -> None:
     """Check `signature` covers exactly `covered`, under a configured key."""
-    signed_info = _only(
-        signature, _DS, "SignedInfo", reason="signedinfo", what="a <Signature>"
-    )
+    signed_info = _only(signature, _DS, "SignedInfo", reason="signedinfo", what="a <Signature>")
     value_element = _only(
         signature, _DS, "SignatureValue", reason="signaturevalue", what="a <Signature>"
     )
@@ -772,9 +757,7 @@ def _verify_signature(
     digest_element = _only(
         reference, _DS, "DigestValue", reason="digest-value", what="a <Reference>"
     )
-    declared_digest = _b64_bytes(
-        digest_element.text, reason="digest-value", what="a <DigestValue>"
-    )
+    declared_digest = _b64_bytes(digest_element.text, reason="digest-value", what="a <DigestValue>")
 
     digest_input = _canonical_digest_input(
         document, covered, signature if (enveloped and inside) else None, prefixes
@@ -821,9 +804,7 @@ def _any_key_verifies(
     return verified
 
 
-# ---------------------------------------------------------------------------
 # Assertion semantics
-# ---------------------------------------------------------------------------
 
 
 def _instant(value: str, *, reason: str, what: str) -> datetime:
@@ -910,9 +891,7 @@ def _check_conditions(
     # disjunction, and reading it the other way accepts an assertion addressed
     # to somebody else that merely mentions us.
     for restriction in restrictions:
-        audiences = [
-            child.text.strip() for child in _children(restriction, _ASSERTION, "Audience")
-        ]
+        audiences = [child.text.strip() for child in _children(restriction, _ASSERTION, "Audience")]
         if sp.entity_id not in audiences:
             raise _refuse(
                 "audience-mismatch",
@@ -1025,9 +1004,7 @@ def _read_authn(assertion: Element) -> tuple[str, str, datetime]:
         )
     statement = statements[0]
     instant = _instant(
-        _attribute(
-            statement, "AuthnInstant", reason="authn-instant", what="<AuthnStatement>"
-        ),
+        _attribute(statement, "AuthnInstant", reason="authn-instant", what="<AuthnStatement>"),
         reason="authn-instant",
         what="AuthnStatement/@AuthnInstant",
     )
@@ -1077,9 +1054,7 @@ def _read_attributes(assertion: Element) -> dict[str, tuple[str, ...]]:
     return attributes
 
 
-# ---------------------------------------------------------------------------
 # Entry point
-# ---------------------------------------------------------------------------
 
 
 def _locate_assertion(root: Element) -> tuple[Element, Element]:
@@ -1193,9 +1168,7 @@ async def verify_response(
 
     _verify_signature(document, signature, covered, idp)
 
-    issuer_element = _only(
-        assertion, _ASSERTION, "Issuer", reason="issuer", what="an <Assertion>"
-    )
+    issuer_element = _only(assertion, _ASSERTION, "Issuer", reason="issuer", what="an <Assertion>")
     issuer = issuer_element.text.strip()
     if issuer != idp.entity_id:
         raise _refuse(

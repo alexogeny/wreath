@@ -1,33 +1,3 @@
-"""Drivers that put *real* Wreath subsystems behind the fault corpus.
-
-The corpus was already good at naming failures. What it was not good at was
-being *driven*: the corpus test asserted a generic outcome ("something
-deterministic happened"), which is one grade above asserting nothing. A region
-only earns its place if some owned code answers it differently from its
-neighbours, and that is only checkable if the owned code actually runs.
-
-So each driver here starts a genuine subsystem -- a `MessageBus` doorbell, a
-`JobRunner`, a `ChunkedPass` shift, a `PostgresStore` claim, a `SingletonRunner`,
-the request pipeline -- points a schedule at it, and reports an
-:class:`Observation`: what was raised, which counters moved, what status or
-state was recorded. Two properties are then checkable across the whole corpus
-at once, and both of them are properties whose absence shipped:
-
-* **No fault may produce a hang.** Every drive runs under a wall-clock bound and
-  names the schedule and the driver when it blows. A defect shipped today in a
-  *default* configuration where a query error was raised and printed while the
-  caller waited forever; a hang has to be a red test, not a stalled suite.
-* **No fault may produce silence.** Every drive is compared against its own
-  no-fault control, and must differ in at least one named channel. "Nothing
-  happened and nothing was recorded" is the exact shape of the doorbell that
-  died and never reconnected, of `_start_passes`, of `_enqueue_next_shift`, and
-  of `services._cancel_all`.
-
-Separate from any `test_*.py` file because several of them import it, and
-`import conftest` is this tree's cautionary tale about ambiguous test-adjacent
-module names. The basename is repo-unique on purpose.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -90,9 +60,7 @@ class Observation:
         if self.exceptions != control.exceptions:
             changed.append("exceptions")
         moved = [
-            name
-            for name, value in self.counters.items()
-            if control.counters.get(name) != value
+            name for name, value in self.counters.items() if control.counters.get(name) != value
         ]
         if moved:
             changed.append("counters:" + ",".join(sorted(moved)))
@@ -152,9 +120,6 @@ def _double(schedule: FaultSchedule, target: str = "main") -> DatabaseDouble:
     return adapters.databases.get(target) or DatabaseDouble(target)
 
 
-# --- a supervisor, exactly as the real one behaves ---------------------------
-
-
 class Supervisor:
     """Spawns real tasks and stops them the way `wreath.Supervisor` does.
 
@@ -192,12 +157,9 @@ async def until(predicate: Callable[[], bool], *, within: float = 1.0) -> bool:
     return predicate()
 
 
-# --- transport: the owned HTTP/1 driver ---------------------------------------
-
 GET = b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
 POST = (
-    b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 12\r\n"
-    b"Connection: close\r\n\r\nhello world!"
+    b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 12\r\nConnection: close\r\n\r\nhello world!"
 )
 
 
@@ -258,9 +220,6 @@ def transport_driver(protocol_cls: type, label: str) -> Driver:
     return Driver(name=f"transport-{label}", seams=frozenset({TRANSPORT}), run=run)
 
 
-# --- the request pipeline over the pool seams ---------------------------------
-
-
 def _db_app() -> wreath.Wreath:
     app = wreath.Wreath()
     app.postgres("main", dsn="postgres://stub/db")
@@ -308,9 +267,6 @@ ENDPOINT = Driver(
 )
 
 
-# --- the outbound HTTP client -------------------------------------------------
-
-
 async def _run_http_client(schedule: FaultSchedule) -> Observation:
     adapters = ReplayAdapters.from_faults(schedule.adapter_faults)
     from wreath.replay import FaultyHttpClient
@@ -337,9 +293,6 @@ HTTP_CLIENT = Driver(
 )
 
 
-# --- the LISTEN/NOTIFY doorbell, under a real supervisor ----------------------
-
-
 async def _run_bus_doorbell(schedule: FaultSchedule) -> Observation:
     from wreath.messaging import MessageBus
 
@@ -363,9 +316,7 @@ async def _run_bus_doorbell(schedule: FaultSchedule) -> Observation:
                     lambda: bus.doorbell_reconnects >= 1 and double.streams >= 1
                 )
             else:
-                recovered = await until(
-                    lambda: bus.doorbell_reconnects >= 2 or double.streams >= 2
-                )
+                recovered = await until(lambda: bus.doorbell_reconnects >= 2 or double.streams >= 2)
             if not recovered:
                 raise AssertionError("message-bus doorbell did not retry the injected fault")
         else:
@@ -440,9 +391,6 @@ JOBS_DOORBELL = Driver(
 )
 
 
-# --- a chunked pass over the transaction seam ---------------------------------
-
-
 def chunked_pass() -> Any:
     from wreath.passes import ChunkedPass, DutyCycle, Key, Purge, Rows, Sealed, Table
 
@@ -501,9 +449,6 @@ PASS_SHIFT = Driver(
 )
 
 
-# --- a keyed store claim ------------------------------------------------------
-
-
 def keyed_store(double: DatabaseDouble) -> Any:
     from wreath.store import Column, Keyed, PostgresStore
 
@@ -553,9 +498,6 @@ STORE_CLAIM = Driver(
     ),
     run=_run_store_claim,
 )
-
-
-# --- object storage -----------------------------------------------------------
 
 
 async def _run_object_store(schedule: FaultSchedule) -> Observation:
@@ -610,9 +552,6 @@ OBJECT_STORE = Driver(
     seams=frozenset({AdapterSeam.OBJECT_STORE}),
     run=_run_object_store,
 )
-
-
-# --- jobs.launch over the query seam ------------------------------------------
 
 
 async def _run_job_launch(schedule: FaultSchedule) -> Observation:

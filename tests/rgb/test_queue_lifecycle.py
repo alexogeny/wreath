@@ -1,6 +1,3 @@
-"""Doorbell wake-ups, retention, and lifecycle claims (report 23: R-19, G-15,
-G-16, G-21, G-22)."""
-
 from __future__ import annotations
 
 import asyncio
@@ -35,7 +32,7 @@ class TestDoorbellWakesEveryParkedWorker:
         runner = JobRunner(_FakeDatabase(), name="work", poll_interval=30.0, concurrency=3)
         waiters = [runner._new_waiter() for _ in range(3)]
         parked = [asyncio.create_task(runner._park(w)) for w in waiters]
-        await asyncio.sleep(0)          # let them all reach the wait
+        await asyncio.sleep(0)  # let them all reach the wait
 
         runner._wake_workers()
 
@@ -58,8 +55,8 @@ class TestDoorbellWakesEveryParkedWorker:
     async def test_a_wake_during_a_claim_is_remembered(self):
         runner = JobRunner(_FakeDatabase(), name="work", poll_interval=30.0)
         wake = runner._new_waiter()
-        wake.clear()                    # the worker is about to claim
-        runner._wake_workers()          # a NOTIFY lands mid-claim
+        wake.clear()  # the worker is about to claim
+        runner._wake_workers()  # a NOTIFY lands mid-claim
         async with asyncio.timeout(1):  # the park must not sleep through it
             await runner._park(wake)
 
@@ -136,7 +133,7 @@ class TestLifecycleValidatorIsUsed:
         source = inspect.getsource(_jobcore)
         claims_checking = "Every transition a worker performs is checked" in source
         if not claims_checking:
-            return                      # the docstring was corrected instead
+            return  # the docstring was corrected instead
         import wreath.jobs
         import wreath.messaging
 

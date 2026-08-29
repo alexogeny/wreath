@@ -1,5 +1,3 @@
-"""API versioning: the ``version`` tag, header negotiation, and mounting."""
-
 from __future__ import annotations
 
 from wreath.request import Request
@@ -33,12 +31,6 @@ def test_negotiate_version():
 
 
 def test_negotiate_version_reads_a_real_request():
-    """The regression the old blanket catch hid.
-
-    `Request.headers` is a list of raw byte pairs with no `.get`, so reading it
-    that way raised on every real request and the catch returned `default`.
-    A dict-shaped double passed while nothing in production ever negotiated.
-    """
 
     async def receive():
         return {"type": "http.request", "body": b"", "more_body": False}

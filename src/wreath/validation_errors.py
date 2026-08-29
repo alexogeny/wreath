@@ -51,18 +51,13 @@ __all__ = [
 ValidationFormatter = Callable[[list[dict[str, Any]], "Request"], ProblemDetail]
 
 
-def default_validation_problem(
-    errors: list[dict[str, Any]], request: Request
-) -> ProblemDetail:
+def default_validation_problem(errors: list[dict[str, Any]], request: Request) -> ProblemDetail:
     """Exactly what Wreath produced before formatters existed."""
     return ProblemDetail(
         status=422,
         detail="Request validation failed",
         extensions={"errors": errors},
     )
-
-
-# --- language negotiation ----------------------------------------------------
 
 
 def select_language(accept_language: str | bytes | None, offered: Sequence[str]) -> str:
@@ -90,9 +85,6 @@ def select_language(accept_language: str | bytes | None, offered: Sequence[str])
     return _core.select_language(accept_language, offered)
 
 
-# --- catalogue ---------------------------------------------------------------
-
-
 class MessageCatalogue:
     """Per-language messages keyed by an error's `type`.
 
@@ -107,9 +99,7 @@ class MessageCatalogue:
     def __init__(self, messages: Mapping[str, Mapping[str, str]]) -> None:
         if not messages:
             raise ValueError("a catalogue needs at least one language")
-        self._messages = {
-            language: dict(entries) for language, entries in messages.items()
-        }
+        self._messages = {language: dict(entries) for language, entries in messages.items()}
         self._languages = list(self._messages)
         self._default = self._languages[0]
 
@@ -151,9 +141,7 @@ def catalogue_formatter(
     """
     alias_map = dict(aliases or {})
 
-    def format_errors(
-        errors: list[dict[str, Any]], request: Request
-    ) -> ProblemDetail:
+    def format_errors(errors: list[dict[str, Any]], request: Request) -> ProblemDetail:
         language = catalogue.for_request(request.header("accept-language"))
         shaped: list[dict[str, Any]] = []
         for error in errors:
@@ -161,11 +149,13 @@ def catalogue_formatter(
             location = list(error.get("loc", ()))
             if location and isinstance(location[-1], str):
                 location[-1] = alias_map.get(location[-1], location[-1])
-            shaped.append({
-                "loc": location,
-                "msg": catalogue.message(language, kind, str(error.get("msg", ""))),
-                "type": kind,
-            })
+            shaped.append(
+                {
+                    "loc": location,
+                    "msg": catalogue.message(language, kind, str(error.get("msg", ""))),
+                    "type": kind,
+                }
+            )
         return ProblemDetail(
             status=422,
             detail=detail,

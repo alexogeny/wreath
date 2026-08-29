@@ -1,9 +1,3 @@
-"""a06, a07, a08 -- the three ways a credential stops being a secret.
-
-a06 is a development key that shipped, a07 is a token from a generator that is
-not a CSPRNG, and a08 is a comparison that leaks the answer one character at a
-time. None of the three fails a test, and none is visible in a response.
-"""
 from __future__ import annotations
 
 import hashlib

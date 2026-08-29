@@ -26,11 +26,14 @@ class _ParallelBuildExt(build_ext):
             self.parallel = os.cpu_count() or 1
 
 
-sources = [str(NATIVE / name) for name in (
-    "_reactormodule.c",
-    "reactor_wheel.c",
-    "reactor_tls.c",
-)]
+sources = [
+    str(NATIVE / name)
+    for name in (
+        "_reactormodule.c",
+        "reactor_wheel.c",
+        "reactor_tls.c",
+    )
+]
 
 setup(
     packages=[],

@@ -41,8 +41,7 @@ class RequestCase:
             )
         if not self.path.startswith("/"):
             raise ValueError(
-                f"port verification case {self.name!r} path must start with '/': "
-                f"{self.path!r}"
+                f"port verification case {self.name!r} path must start with '/': {self.path!r}"
             )
         seen_headers: set[str] = set()
         for header_name, header_value in self.headers:
@@ -141,11 +140,7 @@ def _headers(
         name = raw_name.decode("latin-1").lower()
         if name not in ignored:
             grouped.setdefault(name, []).append(raw_value.decode("latin-1"))
-    return tuple(
-        (name, value)
-        for name in sorted(grouped)
-        for value in grouped[name]
-    )
+    return tuple((name, value) for name in sorted(grouped) for value in grouped[name])
 
 
 def _snapshot(response: Any, ignored: frozenset[str]) -> ResponseSnapshot:
@@ -165,9 +160,7 @@ def _differences(
     if source.status != candidate.status:
         differences.append(Difference(case.name, "status", source.status, candidate.status))
     if source.headers != candidate.headers:
-        differences.append(
-            Difference(case.name, "headers", source.headers, candidate.headers)
-        )
+        differences.append(Difference(case.name, "headers", source.headers, candidate.headers))
     if source.body != candidate.body:
         differences.append(
             Difference(
@@ -207,9 +200,7 @@ async def verify_apps(
     ignored = frozenset(name.lower() for name in ignore_headers)
     for name in ignored:
         if not _is_http_token(name):
-            raise ValueError(
-                f"ignored response header {name!r} must be an ASCII HTTP token"
-            )
+            raise ValueError(f"ignored response header {name!r} must be an ASCII HTTP token")
 
     from ..testing import TestClient
 
@@ -256,19 +247,14 @@ def load_cases(path: str | Path) -> tuple[RequestCase, ...]:
             )
         headers = record.get("headers", {})
         if not isinstance(headers, dict) or not all(
-            isinstance(name, str) and isinstance(value, str)
-            for name, value in headers.items()
+            isinstance(name, str) and isinstance(value, str) for name, value in headers.items()
         ):
-            raise ValueError(
-                f"port verification case {index} headers must map strings to strings"
-            )
+            raise ValueError(f"port verification case {index} headers must map strings to strings")
         body_text = record.get("body", "")
         encoded = record.get("body_base64")
         if encoded is not None:
             if not isinstance(encoded, str):
-                raise ValueError(
-                    f"port verification case {index} body_base64 must be a string"
-                )
+                raise ValueError(f"port verification case {index} body_base64 must be a string")
             try:
                 body = base64.b64decode(encoded, validate=True)
             except ValueError as error:

@@ -1,5 +1,3 @@
-"""Deterministic regression for the dependency-compiler complexity (QPY-001)."""
-
 from __future__ import annotations
 
 import inspect

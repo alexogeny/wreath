@@ -1,16 +1,3 @@
-"""The erasure planner, and the four ways an erasure silently misses data.
-
-Every test here runs against a compiled ORM registry and **no database**, which
-is the property the module promises: a plan is derived from declarations, so
-`wreath privacy plan` is safe to run against an application whose database is
-not reachable. A test that needed a socket would be evidence the planner had
-grown one.
-
-The falsification tests are the point of the file. A planner that reports a
-tidy list of tables and quietly drops a cycle, an orphaning edge or an
-unreachable table is worse than no planner, because the tidy list gets believed.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -36,9 +23,6 @@ class FakeDatabase:
 
     def __init__(self, name: str = "main") -> None:
         self.name = name
-
-
-# -- a schema with all four hazards in it -------------------------------------
 
 
 class Person(Model, table="people"):
@@ -129,9 +113,6 @@ def privacy(orm: Registry) -> Privacy:
     return item
 
 
-# -- reachability -------------------------------------------------------------
-
-
 def test_a_table_that_declares_the_subject_column_matches_directly(
     privacy: Privacy,
 ) -> None:
@@ -160,18 +141,9 @@ def test_children_are_ordered_before_the_parent_they_reference(
     assert order["receipts"] < order["people"]
 
 
-# -- falsification: the four findings -----------------------------------------
-
-
 def test_an_unreachable_classified_table_is_named_and_blocks(
     privacy: Privacy,
 ) -> None:
-    """The finding this module exists to produce.
-
-    `Orphaned` holds a column somebody classified and no foreign key connects
-    it to a subject. An erasure that ran anyway would report success and leave
-    the rows, which is the EDPB's "incomplete response" in one table.
-    """
     privacy.classify(Orphaned, personal={"contact_string": Erase.REDACT})
     plan = privacy.plan("4711")
     assert [item.table for item in plan.unreachable] == ["orphaned"]
@@ -191,11 +163,6 @@ def test_an_orphaning_edge_is_named_with_the_reason_it_strands_data(
 
 
 def test_a_foreign_key_cycle_is_named_rather_than_ordered(orm: Registry) -> None:
-    """A cycle admits no ordering of plain deletes, so it is reported.
-
-    Declared inside the test because a cyclic pair would otherwise make every
-    other plan in the file blocked.
-    """
 
     class Household(Model, table="households"):
         id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('seq')")
@@ -228,13 +195,6 @@ def test_a_foreign_key_cycle_is_named_rather_than_ordered(orm: Registry) -> None
 def test_a_surviving_row_that_still_references_a_deleted_one_blocks(
     orm: Registry,
 ) -> None:
-    """The finding that turns a green plan into a half-run erasure.
-
-    Ordering answers `NO ACTION` only when the child rows are deleted too. A
-    child that is *anonymised* keeps its foreign key, so PostgreSQL refuses the
-    parent's delete -- and it refuses it after the children have already been
-    redacted, which is the worst place to stop.
-    """
 
     class Kept(Model, table="kept"):
         id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('seq')")
@@ -258,13 +218,6 @@ def test_a_surviving_row_that_still_references_a_deleted_one_blocks(
 def test_a_table_nobody_classified_can_be_the_one_that_refuses_the_delete(
     orm: Registry,
 ) -> None:
-    """Holding a foreign key has nothing to do with being personal data.
-
-    Reported over the whole graph rather than over the plan's tables, because
-    the row that blocks the delete is very often one no declaration mentions --
-    and a finding that only looked at classified tables would miss exactly the
-    case nobody was thinking about.
-    """
 
     class Unclassified(Model, table="unclassified"):
         id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('seq')")
@@ -275,21 +228,13 @@ def test_a_table_nobody_classified_can_be_the_one_that_refuses_the_delete(
     privacy.subject(Person, key="id", delete=True)
 
     plan = privacy.plan("4711")
-    assert [item.edge.from_table for item in plan.surviving_references] == [
-        "public.unclassified"
-    ]
+    assert [item.edge.from_table for item in plan.surviving_references] == ["public.unclassified"]
     assert plan.blocked is True
 
 
 def test_a_child_the_erasure_also_deletes_is_not_a_surviving_reference(
     orm: Registry,
 ) -> None:
-    """Ordering *does* answer `NO ACTION` when the child goes too.
-
-    The whole point of children-first: the referencing rows are gone by the
-    time the parent's delete runs, so this edge is not a finding and reporting
-    it would bury the real ones in noise.
-    """
 
     class Session(Model, table="sessions"):
         id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('seq')")
@@ -299,9 +244,7 @@ def test_a_child_the_erasure_also_deletes_is_not_a_surviving_reference(
     registry = Registry(FakeDatabase(), [Person, Session], validate_schema="off")
     privacy = Privacy(registry)
     privacy.subject(Person, key="id", delete=True)
-    privacy.classify(
-        Session, subject="person_id", personal={"token": Erase.REDACT}, delete=True
-    )
+    privacy.classify(Session, subject="person_id", personal={"token": Erase.REDACT}, delete=True)
 
     plan = privacy.plan("4711")
     assert plan.surviving_references == ()
@@ -311,11 +254,6 @@ def test_a_child_the_erasure_also_deletes_is_not_a_surviving_reference(
 def test_a_set_null_edge_is_an_orphan_risk_and_not_a_surviving_reference(
     privacy: Privacy,
 ) -> None:
-    """The two findings are about different failures and must not merge.
-
-    `SET NULL` lets the delete through and strands the child; `NO ACTION` stops
-    the delete. Reporting one as the other would send a reader to the wrong fix.
-    """
     plan = privacy.plan("4711")
     assert plan.orphan_risks
     assert plan.surviving_references == ()
@@ -325,7 +263,6 @@ def test_a_set_null_edge_is_an_orphan_risk_and_not_a_surviving_reference(
 def test_nothing_survives_a_reference_when_the_subject_is_not_deleted(
     orm: Registry,
 ) -> None:
-    """No delete, no refusal: the finding is about a row that goes away."""
 
     class Kept(Model, table="kept_two"):
         id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('seq')")
@@ -341,9 +278,7 @@ def test_nothing_survives_a_reference_when_the_subject_is_not_deleted(
 
 def test_a_plan_with_no_surviving_reference_says_so(privacy: Privacy) -> None:
     text = privacy.render(privacy.plan("4711"))
-    assert (
-        "none: nothing this erasure keeps still points at what it deletes." in text
-    )
+    assert "none: nothing this erasure keeps still points at what it deletes." in text
 
 
 def test_an_exempt_table_is_retained_and_printed_with_its_reason(
@@ -353,9 +288,6 @@ def test_an_exempt_table_is_retained_and_printed_with_its_reason(
     assert [item.table for item in plan.retained] == ["ledger"]
     assert plan.retained[0].reason == "retained seven years under tax law"
     assert "ledger" not in {item.table for item in plan.tables}
-
-
-# -- absence is stated --------------------------------------------------------
 
 
 def test_a_clean_plan_says_so_rather_than_falling_silent(privacy: Privacy) -> None:
@@ -371,12 +303,7 @@ def test_a_blocked_plan_says_so_and_does_not_offer_the_erase_command(
     privacy.classify(Orphaned, personal={"contact_string": Erase.REDACT})
     text = privacy.render(privacy.plan("4711"))
     assert "BLOCKED." in text
-    assert "privacy.erase(" not in text, (
-        "a blocked plan must not hand out a runnable call"
-    )
-
-
-# -- the plan that runs is the plan that was printed ---------------------------
+    assert "privacy.erase(" not in text, "a blocked plan must not hand out a runnable call"
 
 
 def test_prepare_refuses_a_digest_from_a_plan_that_has_moved(
@@ -400,15 +327,11 @@ def test_prepare_refuses_a_blocked_plan_even_with_a_matching_digest(
 def test_the_digest_moves_when_a_finding_appears_without_an_action_changing(
     privacy: Privacy,
 ) -> None:
-    """A newly unreachable table is a different plan even if no action moved."""
     before = privacy.plan("4711")
     privacy.classify(Orphaned, personal={"contact_string": Erase.REDACT})
     after = privacy.plan("4711")
     assert [item.table for item in before.tables] == [item.table for item in after.tables]
     assert before.digest != after.digest
-
-
-# -- what the passes actually say ---------------------------------------------
 
 
 def test_a_directly_classified_table_matches_without_a_subquery(
@@ -436,7 +359,6 @@ def test_a_depth_two_table_matches_through_nested_subqueries(
 def test_an_anonymising_pass_excludes_rows_it_has_already_emptied(
     privacy: Privacy,
 ) -> None:
-    """The guard is what makes a retried chunk a no-op rather than a rewrite."""
     prepared = privacy.prepare("4711")
     comment = next(step for action, step in prepared.steps if action.table == "comments")
     assert comment.work.set_ == {"body": "'[erased]'"}
@@ -444,11 +366,8 @@ def test_an_anonymising_pass_excludes_rows_it_has_already_emptied(
 
 
 def test_a_cascaded_table_gets_no_pass_and_is_still_listed(privacy: Privacy) -> None:
-    """The database removes these rows; hiding that would not be a plan."""
     prepared = privacy.prepare("4711")
-    photo_action, photo_pass = next(
-        step for step in prepared.steps if step[0].table == "photos"
-    )
+    photo_action, photo_pass = next(step for step in prepared.steps if step[0].table == "photos")
     assert photo_action.disposal == Disposal.CASCADE.value
     assert photo_pass is None, (
         "a cascaded table must get no pass: issuing one would be a delete the "
@@ -466,9 +385,6 @@ def test_every_pass_is_a_chunked_pass_rather_than_one_transaction(
     prepared = privacy.prepare("4711")
     assert prepared.passes
     assert all(isinstance(walk, ChunkedPass) for walk in prepared.passes)
-
-
-# -- pseudonymisation is not erasure ------------------------------------------
 
 
 def test_a_pseudonymised_column_is_marked_not_erasure_in_the_plan(
@@ -496,7 +412,6 @@ def test_a_pseudonymised_column_is_marked_not_erasure_in_the_plan(
 def test_a_pseudonymised_column_is_never_written_by_the_generated_pass(
     orm: Registry,
 ) -> None:
-    """The module refuses to invent the transform it refuses to call erasure."""
     from wreath.passes import Declared
 
     privacy = Privacy(orm)
@@ -504,9 +419,6 @@ def test_a_pseudonymised_column_is_never_written_by_the_generated_pass(
     privacy.classify(Comment, personal={"body": Pseudonymise(Declared("kept joinable on purpose"))})
     prepared = privacy.prepare("4711")
     assert not prepared.passes
-
-
-# -- the planner needs a subject ----------------------------------------------
 
 
 def test_planning_without_a_subject_model_refuses_rather_than_guessing(
@@ -525,18 +437,9 @@ def test_a_second_subject_model_is_refused(orm: Registry) -> None:
         privacy.subject(Photo, key="id")
 
 
-# -- the access request renders the same traversal ----------------------------
-
-
 def test_an_access_plan_lists_tables_withheld_rows_and_unreachable_ones(
     privacy: Privacy,
 ) -> None:
-    """An exemption from erasure is not an exemption from access.
-
-    The subject is entitled to know what is held about them even where it
-    cannot be deleted, so the exempt table appears under `withheld` with the
-    reason rather than vanishing from the response.
-    """
     privacy.classify(Orphaned, personal={"contact_string": Erase.REDACT})
     plan = privacy.access("4711")
     text = privacy.render(plan)
@@ -567,25 +470,15 @@ def test_an_access_plan_with_nothing_in_it_says_none_for_tables_too(
 def test_a_cascaded_table_with_no_columns_is_not_listed_for_export(
     privacy: Privacy,
 ) -> None:
-    """A row the parent's cascade removes carries nothing extra to export."""
     plan = privacy.access("4711")
     text = privacy.render(plan)
     people = [line for line in text.splitlines() if "public.people" in line]
     assert people, "the subject's own row is exportable"
 
 
-# -- the graph itself ---------------------------------------------------------
-
-
 def test_the_walk_records_the_shortest_path_when_two_reach_the_same_table(
     orm: Registry,
 ) -> None:
-    """Breadth-first, so a reviewer reads the fewest joins that explain a table.
-
-    A depth-first walk would record whichever path it happened to take, and the
-    execution predicate nests one subquery per edge -- so the path length is a
-    cost as well as a sentence.
-    """
 
     class Album(Model, table="albums"):
         id: Mapped[int] = column(Int64, primary_key=True, server_default="nextval('s')")
@@ -609,7 +502,6 @@ def test_the_walk_records_the_shortest_path_when_two_reach_the_same_table(
 def test_a_reached_table_with_nothing_classified_is_traversed_not_acted_on(
     orm: Registry,
 ) -> None:
-    """`Photo` is the bridge to `Comment` even when nothing about it is personal."""
     privacy = Privacy(orm)
     privacy.subject(Person, key="id")
     privacy.classify(Comment, personal={"body": Erase.REDACT})
@@ -619,11 +511,7 @@ def test_a_reached_table_with_nothing_classified_is_traversed_not_acted_on(
     assert "photos" not in tables
 
 
-# -- erase drives every pass, in order ----------------------------------------
-
-
 def test_erase_runs_each_pass_in_the_planned_order(privacy: Privacy) -> None:
-    """The order is a correctness property, so it is asserted at execution too."""
     import asyncio
 
     ran: list[str] = []
@@ -648,9 +536,5 @@ def test_erase_runs_each_pass_in_the_planned_order(privacy: Privacy) -> None:
                 await walk.run(object())
 
     asyncio.run(drive())
-    assert ran == [
-        action.table
-        for action, walk in prepared.steps
-        if walk is not None
-    ]
+    assert ran == [action.table for action, walk in prepared.steps if walk is not None]
     assert ran.index("comments") < ran.index("people")

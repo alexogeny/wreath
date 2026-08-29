@@ -85,9 +85,7 @@ async def serve(
         inflight: set[asyncio.Task[None]] = set()
 
         async def relay(message: bytes) -> None:
-            response = await client.post(
-                path, content=message, headers=_headers(session)
-            )
+            response = await client.post(path, content=message, headers=_headers(session))
             if response.body:
                 async with lock:
                     write(response.body)
@@ -103,9 +101,7 @@ async def serve(
                 if not session:
                     # Awaited: everything after this needs the session id this
                     # answer carries, and a client sends nothing until it has it.
-                    response = await client.post(
-                        path, content=message, headers=_headers(session)
-                    )
+                    response = await client.post(path, content=message, headers=_headers(session))
                     session = response.header("mcp-session-id") or ""
                     if response.body:
                         async with lock:
@@ -114,9 +110,7 @@ async def serve(
                         # The stream carries everything the server sends unasked,
                         # including the requests it will park a tool on, so it is
                         # opened the moment there is a session to open it for.
-                        stream = asyncio.ensure_future(
-                            _pump(client, path, session, write, lock)
-                        )
+                        stream = asyncio.ensure_future(_pump(client, path, session, write, lock))
                     continue
                 task = asyncio.ensure_future(relay(message))
                 inflight.add(task)

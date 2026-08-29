@@ -29,11 +29,6 @@ def test_static_matcher_preserves_first_registration_precedence() -> None:
 
 
 def test_static_matcher_precedence_is_registration_order_not_prefix_length() -> None:
-    """The narrower mount registered first must still shadow the wider one.
-
-    Registration order, not longest-prefix: a scan that stops at the first hit
-    is only equivalent to the old trie because of this rule.
-    """
 
     async def deep(request):
         return None
@@ -69,7 +64,6 @@ def test_static_matcher_without_mounts_matches_nothing() -> None:
 
 
 def test_static_matcher_requires_the_whole_prefix() -> None:
-    """A path that merely shares a leading substring is not a mount hit."""
 
     async def handler(request):
         return None
@@ -462,9 +456,7 @@ async def test_frozen_native_seam_uses_the_one_shot_without_portable_scope_reads
     monkeypatch.setattr(app_module, "_arm_cancel_on_disconnect", unexpected_arm)
     monkeypatch.setattr(Wreath, "_finish_http_plain", unexpected_general_finisher)
     sender = NativeSend()
-    await app._handle_http_frozen(
-        NativeScope(), None, sender.send, "GET", "/ready", True
-    )
+    await app._handle_http_frozen(NativeScope(), None, sender.send, "GET", "/ready", True)
 
     assert sender.responses == [(response.status, response.headers, response.body)]
 
@@ -503,9 +495,7 @@ async def test_frozen_native_seam_falls_back_for_an_attached_flight(
 
     monkeypatch.setattr(Wreath, "_handle_http", fallback)
     monkeypatch.setattr(app_module._telemetry, "PROPAGATING", False)
-    await app._handle_http_frozen(
-        NativeScope(), None, NativeSend().send, "GET", "/ready", True
-    )
+    await app._handle_http_frozen(NativeScope(), None, NativeSend().send, "GET", "/ready", True)
 
     assert fell_back == ["/ready"]
 
@@ -544,25 +534,14 @@ async def test_frozen_native_seam_arms_only_the_declared_route(
     )
     monkeypatch.setattr(app_module._telemetry, "PROPAGATING", False)
     sender = NativeSend()
-    await app._handle_http_frozen(
-        NativeScope(), None, sender.send, "GET", "/plain", True
-    )
-    await app._handle_http_frozen(
-        NativeScope(), None, sender.send, "GET", "/declared", True
-    )
+    await app._handle_http_frozen(NativeScope(), None, sender.send, "GET", "/plain", True)
+    await app._handle_http_frozen(NativeScope(), None, sender.send, "GET", "/declared", True)
 
     assert armed == [False]
 
 
 @pytest.mark.asyncio
 async def test_a_raising_exception_handler_still_answers_the_client() -> None:
-    """A handler that raises used to escape `Wreath.__call__` entirely.
-
-    The client got no response at all -- a hung request rather than a 500 --
-    and the ASGI server saw an application that never started a response. The
-    handler's failure is a bug in user code, so it has to surface loudly *and*
-    the client still has to get an answer.
-    """
     app = Wreath()
 
     @app.get("/boom")
@@ -623,8 +602,6 @@ async def test_a_raising_status_handler_still_answers_the_client() -> None:
 
 @pytest.mark.asyncio
 async def test_wrong_method_on_a_matching_path_is_405_with_allow() -> None:
-    """`MethodNotAllowed` was defined and raised nowhere: the router answered a
-    method miss with a 404, so a defined exception guarded nothing."""
     app = Wreath()
 
     @app.get("/items")
@@ -764,9 +741,7 @@ async def test_greedy_path_converter_binds_slashes_and_reverses() -> None:
         }
 
     async with TestClient(app) as client:
-        response = await client.get(
-            "/assets/images/logo.svg", headers={"host": "example.test"}
-        )
+        response = await client.get("/assets/images/logo.svg", headers={"host": "example.test"})
 
     assert response.status == 200
     assert response.json() == {
@@ -774,9 +749,7 @@ async def test_greedy_path_converter_binds_slashes_and_reverses() -> None:
         "path": "/assets/css/site.css",
         "url": "http://example.test/assets/css/site.css",
     }
-    assert app.url_path_for("asset", asset_path="docs/index.html") == (
-        "/assets/docs/index.html"
-    )
+    assert app.url_path_for("asset", asset_path="docs/index.html") == ("/assets/docs/index.html")
     assert "/assets/{asset_path}" in generate_openapi(app)["paths"]
 
 
@@ -800,9 +773,7 @@ async def test_static_route_precedes_an_unscoped_greedy_fallback() -> None:
 
     assert response.text == "manifest"
     assert head.status == 200
-    assert dict(head.headers)[b"content-length"] == str(
-        len("fallback:css/site.css")
-    ).encode()
+    assert dict(head.headers)[b"content-length"] == str(len("fallback:css/site.css")).encode()
     assert head.body == b""
 
 

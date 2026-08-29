@@ -30,7 +30,7 @@ than hidden -- the summary always says how many were dismissed and why.
 
 Some test failures are *expected* under a sanitized run and are reported as
 "known artifact" rather than as findings. Every one of them belongs to a tool
-that reads *the repository* -- `wreath-native-lint`, `wreath-map-lint`,
+that reads *the repository* -- `wreath-native-lint`,
 `wreath-request-trace`, `wreath-dup-scan`, `wreath-port-golden` -- and each
 resolves the repository root from the imported package, which under
 `PYTHONPATH` points into the sanitized copy: no C sources live there, no
@@ -118,13 +118,8 @@ _KNOWN_ARTIFACTS = (
     "test_native_error_lint",
     "test_native_memory_lint",
     "test_native_gil_lint",
-    "test_map_lint",
     "test_request_trace",
     "test_complexity_probe",
-    # Discovery resolves its baseline relative to the imported package. The
-    # isolated sanitizer package deliberately contains no docs/ tree, so the
-    # ratchet's baseline cannot exist there; ordinary and explicit discovery
-    # gates still exercise the real repository.
     "test_complexity_discover",
     # This test deliberately caps process RSS. Its three child interpreters
     # inherit LD_PRELOAD from the sanitizer harness, so ASan's shadow mapping
@@ -139,11 +134,6 @@ _KNOWN_ARTIFACTS = (
     # added, so every sanitized run has ended on two failures nobody read.
     "test_dup_scan",
     "test_port_golden",
-    # The generated capability module is copied into the sanitized package,
-    # but its source manifest under docs/ is not.  Only this staleness test
-    # resolves that absent sanitized-tree path; the rest of the capability
-    # suite remains real coverage and must keep running.
-    "test_the_shipped_index_matches_the_manifest_it_is_generated_from",
     # ASan instrumentation stretches the synchronous request/response turn
     # enough for the arrival estimator to observe real idle gaps. The test's
     # premise is a saturated loop with no slack, so its <=2 collection bound is
@@ -186,9 +176,11 @@ def _asan_runtime() -> str | None:
         try:
             out = subprocess.run(
                 [binary, "-print-file-name=libasan.so"],
-                capture_output=True, text=True, check=True,
+                capture_output=True,
+                text=True,
+                check=True,
             ).stdout.strip()
-        except (OSError, subprocess.CalledProcessError):
+        except OSError, subprocess.CalledProcessError:
             continue
         # A compiler that cannot find it echoes the argument back unchanged.
         if out and out != "libasan.so" and Path(out).exists():
@@ -217,9 +209,7 @@ def _build(root: Path, target: str) -> Path | None:
     script = root / "tools/sanitizers" / f"build_{target}.py"
     if not script.exists():
         return None
-    result = subprocess.run(
-        [sys.executable, str(script)], cwd=root, capture_output=True, text=True
-    )
+    result = subprocess.run([sys.executable, str(script)], cwd=root, capture_output=True, text=True)
     if result.returncode != 0:
         sys.stderr.write(result.stdout[-2000:] + result.stderr[-2000:])
         return None
@@ -253,7 +243,6 @@ def run_target(
     environment["PYTHONPATH"] = str(lib)
     # Leak detection off by default: CPython's own allocations dominate, and a
     # summary nobody can read is a summary nobody reads.
-    #
     # `fast_unwind_on_malloc=0` is what makes attribution work at all, and it is
     # not a tuning knob. ASan's default unwinder walks frame pointers, CPython
     # is built with `-fomit-frame-pointer`, and every allocation Wreath's C makes
@@ -261,14 +250,12 @@ def run_target(
     # The walk therefore cannot get back past libpython into our frame: the
     # record's stack jumps straight from `_PyObject_Malloc` to whichever
     # interpreter function called us, with our own frame simply absent.
-    #
     # The effect was that **every** leak in Wreath's C was attributed to
     # libpython and this tool reported "none attributable to Wreath" for all of
     # them. Verified by planting a 4 KiB leak in `kv_new` and running the KV
     # suite over it: 166 passed, "19 leak record(s); none attributable", clean.
     # With the slow unwinder the same run names
     # `kv_new .../_native/kv.c:1148` and the attribution fires.
-    #
     # It costs real time -- the slow unwinder walks DWARF on every allocation --
     # which is why it is scoped to `--leaks` rather than turned on for the
     # ordinary ASan/UBSan run that needs no allocation stacks.
@@ -284,7 +271,10 @@ def run_target(
     # to prevent. `--tb=no` keeps the volume down instead.
     result = subprocess.run(
         [sys.executable, "-m", "pytest", *tests, "--tb=no", "-p", "no:randomly"],
-        cwd=root, env=environment, capture_output=True, text=True,
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
     )
     text = result.stdout + result.stderr
     outcome.ran = True
@@ -292,9 +282,7 @@ def run_target(
     if not re.search(r"\d+ (passed|failed|error)", text):
         # No recognisable summary means the run did not happen as expected;
         # say so rather than reporting a clean zero.
-        outcome.errors.append(
-            "pytest produced no test-count summary; the run cannot be trusted"
-        )
+        outcome.errors.append("pytest produced no test-count summary; the run cannot be trusted")
 
     for line in text.splitlines():
         if line.startswith("FAILED "):
@@ -314,8 +302,7 @@ def run_target(
     # the attribution already accounted for so the count is not double-reported.
     # A LeakSanitizer summary is never a failure on its own; `main` explains why.
     outcome.errors = [
-        e for e in outcome.errors
-        if "LeakSanitizer:" not in e and "byte(s) leaked" not in e
+        e for e in outcome.errors if "LeakSanitizer:" not in e and "byte(s) leaked" not in e
     ]
     return outcome
 
@@ -327,21 +314,27 @@ def _report(outcome: Outcome, target: Target) -> None:
         return
     print(f"    {outcome.passed} passed, exit {outcome.exit_code}")
     if outcome.artifacts:
-        print(f"    {len(outcome.artifacts)} known artifact(s) ignored: "
-              f"{', '.join(sorted({a.split('::')[0] for a in outcome.artifacts}))}")
-        print("      (these inspect repository/runtime properties the isolated "
-              "instrumented process deliberately changes; not a memory finding)")
+        print(
+            f"    {len(outcome.artifacts)} known artifact(s) ignored: "
+            f"{', '.join(sorted({a.split('::')[0] for a in outcome.artifacts}))}"
+        )
+        print(
+            "      (these inspect repository/runtime properties the isolated "
+            "instrumented process deliberately changes; not a memory finding)"
+        )
     for name in outcome.failed:
         print(f"    FAILED {name}")
     if outcome.leak_records:
         verdict = "none attributable to Wreath" if not outcome.attributed else "SEE BELOW"
         print(f"    {outcome.leak_records} leak record(s); {verdict}")
     if outcome.attributed:
-        print("    Frames below are allocations LeakSanitizer saw still live at exit"
-              " and that\n      belong to Wreath's C. Judge them: a module init or a"
-              " startup-compiled\n      route table is retained for the process's"
-              " lifetime by design and is not a\n      defect. A per-request"
-              " allocation appearing here is.")
+        print(
+            "    Frames below are allocations LeakSanitizer saw still live at exit"
+            " and that\n      belong to Wreath's C. Judge them: a module init or a"
+            " startup-compiled\n      route table is retained for the process's"
+            " lifetime by design and is not a\n      defect. A per-request"
+            " allocation appearing here is."
+        )
     for frame in outcome.attributed[:10]:
         print(f"    RETAINED IN WREATH C: {frame}")
     for error in outcome.errors[:10]:
@@ -358,13 +351,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("targets", nargs="*", help="target names; default is 'core'")
     parser.add_argument("--all", action="store_true", help="every buildable target")
     parser.add_argument("--list", action="store_true", help="list targets and exit")
-    parser.add_argument("--leaks", action="store_true",
-                        help="enable leak detection (noisy; frames are attributed)")
-    parser.add_argument("--reuse", action="store_true",
-                        help="reuse an existing sanitized build instead of rebuilding;"
-                             " only safe when src/wreath has not changed since")
-    parser.add_argument("--tests", nargs="+", metavar="PATH",
-                        help="test paths to run instead of the target's defaults")
+    parser.add_argument(
+        "--leaks", action="store_true", help="enable leak detection (noisy; frames are attributed)"
+    )
+    parser.add_argument(
+        "--reuse",
+        action="store_true",
+        help="reuse an existing sanitized build instead of rebuilding;"
+        " only safe when src/wreath has not changed since",
+    )
+    parser.add_argument(
+        "--tests",
+        nargs="+",
+        metavar="PATH",
+        help="test paths to run instead of the target's defaults",
+    )
     args = parser.parse_args(argv)
     selected_tests = tuple(args.tests or ())
 
@@ -407,22 +408,30 @@ def main(argv: list[str] | None = None) -> int:
     failing = [o for o in ran if o.failed]
     retained = [o for o in ran if o.attributed]
     if unsafe:
-        print(f"wreath-sanitize: MEMORY FINDINGS in {len(unsafe)} of {len(ran)} "
-              f"target(s): {', '.join(o.target for o in unsafe)}")
+        print(
+            f"wreath-sanitize: MEMORY FINDINGS in {len(unsafe)} of {len(ran)} "
+            f"target(s): {', '.join(o.target for o in unsafe)}"
+        )
     elif retained:
         total = sum(len(o.attributed) for o in retained)
-        print(f"wreath-sanitize: {len(ran)} target(s) free of sanitizer errors. "
-              f"{total} allocation(s) in Wreath's C were still live at exit and are "
-              "listed above for you to judge — process-lifetime retention is not a "
-              "defect, a per-request allocation is.")
+        print(
+            f"wreath-sanitize: {len(ran)} target(s) free of sanitizer errors. "
+            f"{total} allocation(s) in Wreath's C were still live at exit and are "
+            "listed above for you to judge — process-lifetime retention is not a "
+            "defect, a per-request allocation is."
+        )
     else:
-        print(f"wreath-sanitize: {len(ran)} target(s) clean — no sanitizer error and "
-              "no leak attributable to Wreath's C")
+        print(
+            f"wreath-sanitize: {len(ran)} target(s) clean — no sanitizer error and "
+            "no leak attributable to Wreath's C"
+        )
     if failing:
         total = sum(len(o.failed) for o in failing)
-        print(f"wreath-sanitize: {total} test failure(s) unrelated to memory safety "
-              f"in {', '.join(o.target for o in failing)}; these fail outside the "
-              "sanitizer too unless something else changed")
+        print(
+            f"wreath-sanitize: {total} test failure(s) unrelated to memory safety "
+            f"in {', '.join(o.target for o in failing)}; these fail outside the "
+            "sanitizer too unless something else changed"
+        )
     return 1 if unsafe or failing else 0
 
 

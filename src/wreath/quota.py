@@ -201,9 +201,7 @@ class MemoryQuotaStore:
         would silently consume the other's allowance.
         """
         if self._quota is not None:
-            raise ValueError(
-                "this store is already configured; give each quota its own store"
-            )
+            raise ValueError("this store is already configured; give each quota its own store")
         self._quota = quota
 
     @property
@@ -342,16 +340,12 @@ class PostgresQuotaStore:
         # naming a workload it never asked for, the first time something read a
         # remaining-allowance header. `PostgresRateLimitStore` makes the same
         # choice for the same reason.
-        self._store.define(
-            "used", f"SELECT used FROM {self._store.table} WHERE key = $1"
-        )
+        self._store.define("used", f"SELECT used FROM {self._store.table} WHERE key = $1")
 
     def configure(self, quota: Quota) -> None:
         """Record the allowance bound into every `spend`. Once, and only once."""
         if self._quota is not None:
-            raise ValueError(
-                "this store is already configured; give each quota its own store"
-            )
+            raise ValueError("this store is already configured; give each quota its own store")
         self._quota = quota
 
     def component(self) -> Any:
@@ -483,13 +477,13 @@ class QuotaMeter:
         )
         seconds = max(1, math.ceil(reset))
         response.headers.append((b"retry-after", str(seconds).encode("ascii")))
-        response.headers.append(
-            (b"x-quota-limit", f"{self.quota.limit:g}".encode("ascii"))
-        )
+        response.headers.append((b"x-quota-limit", f"{self.quota.limit:g}".encode("ascii")))
         response.headers.append((b"x-quota-remaining", b"0"))
         response.headers.append(
-            (b"quota-policy", f"{self.quota.name};u={self.quota.limit:g}"
-             f";w={self.quota.period:g}".encode("ascii"))
+            (
+                b"quota-policy",
+                f"{self.quota.name};u={self.quota.limit:g};w={self.quota.period:g}".encode("ascii"),
+            )
         )
         self.refused += 1
         return response
@@ -565,9 +559,7 @@ class Quotas:
         self._states = states
         self._meters: dict[str, QuotaMeter] = {}
 
-    def declare(
-        self, name: str, *, limit: float, period: Any, cost: float = 1.0
-    ) -> QuotaMeter:
+    def declare(self, name: str, *, limit: float, period: Any, cost: float = 1.0) -> QuotaMeter:
         """Declare a quota and build its meter.
 
         Raises `ValueError` on a duplicate name, because two quotas sharing a
@@ -578,9 +570,7 @@ class Quotas:
             raise ValueError(f"quota {name!r} is already declared")
         # Seconds, or any spelling `Duration` reads -- `days(30)` says what
         # `30 * 86400.0` meant, in the vocabulary every other window uses.
-        quota = Quota(
-            name=name, limit=limit, period=Duration.of(period).total_seconds(), cost=cost
-        )
+        quota = Quota(name=name, limit=limit, period=Duration.of(period).total_seconds(), cost=cost)
         store = self._store_factory()
         store.configure(quota)
         meter = QuotaMeter(quota, store, self)
@@ -598,9 +588,7 @@ class Quotas:
             return self._meters[name]
         except KeyError:
             declared = ", ".join(sorted(self._meters)) or "none"
-            raise KeyError(
-                f"no quota named {name!r} is declared; declared: {declared}"
-            ) from None
+            raise KeyError(f"no quota named {name!r} is declared; declared: {declared}") from None
 
     def __getattr__(self, name: str) -> Any:
         """Offer `names` only when the states provider can actually enumerate.

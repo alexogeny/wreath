@@ -22,8 +22,6 @@ find_header: Callable[[list[tuple[bytes, bytes]], bytes], bytes | None] = _core.
 #: occurrence winning. **Bytes on both sides, not decoded**: the caller decodes
 #: latin-1 at the point it hands a value out, so the index costs no decode for
 #: the headers nobody reads.
-build_header_map: Callable[[list[tuple[bytes, bytes]]], dict[bytes, bytes]] = (
-    _core.build_header_map
-)
+build_header_map: Callable[[list[tuple[bytes, bytes]]], dict[bytes, bytes]] = _core.build_header_map
 
 __all__ = ["build_header_map", "find_header"]

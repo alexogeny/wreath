@@ -1,11 +1,3 @@
-"""What a declaration refuses, and when.
-
-Every rejection here is a startup error rather than an empty or wrong chart,
-which is the whole argument for a declaration being a value: the mistakes that
-would otherwise surface as a plunging average or a repainted legend are made
-unwritable instead.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -88,9 +80,7 @@ class TestMeasures:
         with pytest.raises(SeriesError, match="nothing to plot"):
             import asyncio
 
-            asyncio.run(
-                view().run(None, range=Range(utc(2026, 1, 1), utc(2026, 1, 2)), zone="UTC")
-            )
+            asyncio.run(view().run(None, range=Range(utc(2026, 1, 1), utc(2026, 1, 2)), zone="UTC"))
 
 
 class TestIdentityAndFill:
@@ -99,7 +89,6 @@ class TestIdentityAndFill:
             assert measure.has_identity and measure.identity == 0
 
     def test_average_minimum_and_maximum_have_no_identity(self):
-        """An average of no rows is undefined, and zero is not a synonym for it."""
         for measure in (avg(Trek.distance_km), min_(Trek.distance_km), max_(Trek.distance_km)):
             assert not measure.has_identity
 
@@ -148,13 +137,6 @@ class TestGrouping:
         assert declared.group.column is Trek.herd.name.column
 
     def test_grouping_by_a_to_many_relation_is_refused(self, session):
-        """One row would land in several buckets, so every total would be wrong.
-
-        The refusal comes from the ORM's own join planner rather than a second
-        copy of the rule, which is why the message is the ORM's. It arrives at
-        ``run()`` rather than at declaration: cardinality is a fact about the
-        registry, and a declaration written at import time does not have one.
-        """
         import asyncio
 
         from wreath.orm.errors import ORMError
@@ -187,12 +169,7 @@ class TestSources:
         assert declared.sources == (Trek, Herd)
 
     def test_a_model_reached_twice_keeps_its_first_position(self):
-        declared = (
-            view()
-            .measure(n=count())
-            .where(Trek.herd.name == "alpha")
-            .by(Trek.herd.id)
-        )
+        declared = view().measure(n=count()).where(Trek.herd.name == "alpha").by(Trek.herd.id)
         assert declared.sources == (Trek, Herd)
 
 
@@ -225,16 +202,10 @@ class TestLaterStagesRefuseByName:
             getattr(declared, method)(raw="3 days")
 
     def test_seal_is_built_now_and_no_longer_refuses(self):
-        """Stage 7 landed; this is the entry that left the list."""
         declared = view().measure(n=count()).seal(after="2h")
         assert declared.sealed_after == 7200
 
     def test_retain_is_built_now_and_no_longer_refuses(self):
-        """Stage 8 landed; this is the entry that left the list.
-
-        It still destroys nothing -- ``retain`` says how long a grain stays
-        warm, and the two methods that could remove anything are still above.
-        """
         declared = (
             view(stored_in=tz("UTC"))
             .measure(n=count())

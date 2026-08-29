@@ -7,7 +7,6 @@ from __future__ import annotations
 from ..ir import NEEDS_REVIEW, TRANSLATED
 
 ROUTING: dict[str, tuple[str, str, str, str]] = {
-    # -- routing --------------------------------------------------------------
     "route.app": ("app", "routing", TRANSLATED, "FastAPI() becomes Wreath()."),
     "route.router": (
         "router",
@@ -45,7 +44,6 @@ ROUTING: dict[str, tuple[str, str, str, str]] = {
         TRANSLATED,
         "send_json() and receive_json() are unchanged and use Wreath's JSON codec.",
     ),
-    # -- route options (not floor-checked; counted in overall) ----------------
     "route.response_model": (
         "route_option",
         "other",
@@ -99,7 +97,6 @@ ROUTING: dict[str, tuple[str, str, str, str]] = {
 }
 
 DEPENDENCIES: dict[str, tuple[str, str, str, str]] = {
-    # -- dependencies ---------------------------------------------------------
     "depends.use": (
         "depends",
         "dependencies",

@@ -1,11 +1,3 @@
-"""Fixtures for the native-reactor spec.
-
-The reactor does not exist yet, so the `loop` fixture yields an `_UnbuiltLoop`
-that raises on first use. That makes every spec line report as a FAILURE in the
-test body (red) rather than a skip or a collection error. Once
-`wreath.reactor.new_event_loop()` exists, the fixture yields the real loop and
-each test fails instead at its own assertion until that behaviour is built.
-"""
 from __future__ import annotations
 
 import importlib

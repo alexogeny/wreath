@@ -31,8 +31,7 @@ def _request(method: str = "GET", headers: list[tuple[bytes, bytes]] | None = No
             "scheme": "https",
             "path": "/",
             "query_string": b"",
-            "headers": headers
-            or [(b"host", b"example.test"), (b"accept-encoding", b"gzip")],
+            "headers": headers or [(b"host", b"example.test"), (b"accept-encoding", b"gzip")],
         },
         _receive,
     )
@@ -54,9 +53,7 @@ async def profile_compression_skip(iterations: int) -> None:
 
 
 async def profile_security(iterations: int) -> None:
-    middleware = SecurityHeadersPolicy(
-        hsts_max_age=31_536_000, hsts_include_subdomains=True
-    )
+    middleware = SecurityHeadersPolicy(hsts_max_age=31_536_000, hsts_include_subdomains=True)
     request = _request()
     for _ in range(iterations):
         await middleware.after(request, Response(b"ok"))

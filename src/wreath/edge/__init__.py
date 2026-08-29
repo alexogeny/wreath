@@ -45,8 +45,6 @@ kind:
   because each worker's view is independently valid; *global*
   least-connections would need shared state and does not have it.
 
-See `docs/guides/edge.md` for the reasoning and
-`docs/reference/edge.md` for the generated surface.
 """
 
 from __future__ import annotations

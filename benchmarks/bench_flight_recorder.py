@@ -57,9 +57,7 @@ def _cycle_propagated(recorder: Any) -> None:
     req.finish(1_000, 200, 0, 0, 0, 12)
 
 
-def sample(
-    recorder: Any, cycle: Callable[[Any], None], batch: int, trials: int
-) -> list[float]:
+def sample(recorder: Any, cycle: Callable[[Any], None], batch: int, trials: int) -> list[float]:
     """Median-friendly per-request nanoseconds; drain between batches, untimed."""
     samples: list[float] = []
     for _ in range(trials):
@@ -73,6 +71,7 @@ def sample(
 
 def loop_floor(batch: int, trials: int) -> float:
     """The call + loop overhead every arm's timed region shares."""
+
     def noop(_recorder: Any) -> None:
         return None
 
@@ -87,18 +86,22 @@ def loop_floor(batch: int, trials: int) -> float:
 
 def _arm(mode: int, *, summaries: bool = True) -> Any:
     return _flight.Recorder(
-        mode, ring_records=RING, active_requests=ACTIVE,
+        mode,
+        ring_records=RING,
+        active_requests=ACTIVE,
         completion_summaries=summaries,
     )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch", type=int, default=RING,
-                        help="requests per timed batch (<= ring capacity)")
+    parser.add_argument(
+        "--batch", type=int, default=RING, help="requests per timed batch (<= ring capacity)"
+    )
     parser.add_argument("--trials", type=int, default=15)
-    parser.add_argument("--label", default="unlabelled",
-                        help="which build this run measured, e.g. 'baseline'")
+    parser.add_argument(
+        "--label", default="unlabelled", help="which build this run measured, e.g. 'baseline'"
+    )
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
 
@@ -126,23 +129,24 @@ def main() -> None:
         raw = sample(recorder, cycle, batch, args.trials)
         median = statistics.median(raw)
         medians[name] = median
-        rows.append({
-            "arm": name,
-            "mode": recorder.mode,
-            "ns_per_request": {
-                "raw": raw,
-                "median": median,
-                "min": min(raw),
-                "net_median": median - floor,  # loop overhead removed
-            },
-        })
+        rows.append(
+            {
+                "arm": name,
+                "mode": recorder.mode,
+                "ns_per_request": {
+                    "raw": raw,
+                    "median": median,
+                    "min": min(raw),
+                    "net_median": median - floor,  # loop overhead removed
+                },
+            }
+        )
 
     off = min(medians["off_a"], medians["off_b"])
     aa_noise_pct = abs(medians["off_a"] - medians["off_b"]) / off * 100.0
     overheads = {
         name: (medians[name] - off) / off * 100.0
-        for name in ("pulse_counters_only", "pulse_completion",
-                     "pulse_completion_plus_correlation")
+        for name in ("pulse_counters_only", "pulse_completion", "pulse_completion_plus_correlation")
     }
 
     document = {

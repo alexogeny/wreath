@@ -80,9 +80,7 @@ class Contract[T]:
                 f"Contract {self.name!r} JSON is {size} bytes; max_bytes is {self.max_bytes}"
             )
         raw = data.encode("utf-8") if isinstance(data, str) else bytes(data)
-        return self._validator.decode_json_validation_tape(
-            raw, ("contract", self.name)
-        )
+        return self._validator.decode_json_validation_tape(raw, ("contract", self.name))
 
 
 def compile_contract[T](

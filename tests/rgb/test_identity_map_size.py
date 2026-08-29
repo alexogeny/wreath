@@ -1,5 +1,3 @@
-"""What a very large fetch costs the session (report 23: G-37)."""
-
 from __future__ import annotations
 
 import pytest
@@ -81,10 +79,6 @@ class TestIdentityMapWarning:
         assert caught == []
 
     def test_nothing_checks_automatically(self):
-        """The check is called, not scheduled: every automatic placement --
-        per fetch, per session close -- measured at +1 boundary crossing on the
-        realistic scenario, which is too much for a diagnostic that fires for
-        almost nobody."""
         import inspect
 
         from wreath.orm.session import Session

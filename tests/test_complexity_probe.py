@@ -1,4 +1,3 @@
-"""Regression tests for the empirical complexity-contract harness."""
 from __future__ import annotations
 
 import json
@@ -80,11 +79,6 @@ def test_declared_metric_must_be_present_at_every_size() -> None:
 
 
 def test_graphql_depth_probe_reaches_the_bound_it_claims_to_measure() -> None:
-    """The registered probe must execute in the ordinary suite too.
-
-    Otherwise widening its declared depth bound leaves the complexity gate's
-    own control unobserved by mutation confidence.
-    """
     assert _graphql_depth_rejection(32) >= 0.0
 
 
@@ -172,10 +166,12 @@ def test_updating_selected_probes_preserves_the_rest_of_the_baseline(
 ) -> None:
     path = tmp_path / "complexity-baseline.json"
     path.write_text(
-        json.dumps({
-            "version": complexity.BASELINE_VERSION,
-            "probes": {"existing-probe": {"contract": {}, "observation": {}}},
-        }),
+        json.dumps(
+            {
+                "version": complexity.BASELINE_VERSION,
+                "probes": {"existing-probe": {"contract": {}, "observation": {}}},
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setattr(complexity, "_baseline_path", lambda: path)
@@ -191,8 +187,6 @@ def test_updating_selected_probes_preserves_the_rest_of_the_baseline(
     assert set(recorded) == {"existing-probe", "css-no-media-control"}
 
 
-# --- fix-later marks -------------------------------------------------------
-#
 # A mark records a defect rather than a contract, so it is checked from both
 # sides: growing past the recorded degree is a regression, and *shrinking* below
 # it means the defect is gone and the mark is now a lie. The second rule is the
@@ -200,12 +194,17 @@ def test_updating_selected_probes_preserves_the_rest_of_the_baseline(
 # a mark decays into permission and outlives the bug it describes.
 
 _QUADRATIC = Todo(
-    degree=2.0, target=1.0, reason="recorded, not patched", owner="#test",
+    degree=2.0,
+    target=1.0,
+    reason="recorded, not patched",
+    owner="#test",
 )
 
 
 def _marked(
-    *, todo: Todo = _QUADRATIC, tolerance: float = 0.5,
+    *,
+    todo: Todo = _QUADRATIC,
+    tolerance: float = 0.5,
 ) -> Probe:
     return Probe(
         name="marked",
@@ -236,7 +235,6 @@ def test_a_mark_passes_while_the_defect_is_still_there() -> None:
 
 
 def test_a_mark_goes_red_when_the_defect_is_fixed() -> None:
-    """The improvement case: the mark is stale and must not pass quietly."""
     result = Result(_marked(), _LINEAR, [{}] * 4)
 
     assert result.status == "STALE"
@@ -251,12 +249,6 @@ def test_a_mark_goes_red_when_the_defect_gets_worse() -> None:
 
 
 def test_an_unmarked_probe_is_still_one_sided() -> None:
-    """The two-sided rule belongs to marks alone.
-
-    Without this, the change above could have made every ordinary probe fail
-    the moment its subject got faster -- which is the opposite of what an upper
-    bound means.
-    """
     result = Result(_probe(), _LINEAR, [{}] * 4)
     assert result.status == "PASS"
 
@@ -265,8 +257,7 @@ def test_an_unmarked_probe_is_still_one_sided() -> None:
 
 
 def test_a_mark_tolerates_noise_around_the_recorded_degree() -> None:
-    """n^1.88 was the real measurement at k=4000; it must not read as fixed."""
-    noisy = [1.0, 2.0 ** 1.88, 4.0 ** 1.88, 8.0 ** 1.88]
+    noisy = [1.0, 2.0**1.88, 4.0**1.88, 8.0**1.88]
     result = Result(_marked(tolerance=0.6), noisy, [{}] * 4)
 
     assert result.status == "PASS"
@@ -285,12 +276,13 @@ def test_a_mark_needs_a_reason_and_an_owner() -> None:
 
 
 def test_the_contract_carries_the_mark_so_retargeting_is_drift() -> None:
-    """`--check` compares contracts, so a silently edited mark must not slip by."""
     contract = _contract(_marked())
 
     assert contract["todo"] == {
-        "degree": 2.0, "target": 1.0,
-        "reason": "recorded, not patched", "owner": "#test",
+        "degree": 2.0,
+        "target": 1.0,
+        "reason": "recorded, not patched",
+        "owner": "#test",
     }
     assert _contract(_probe())["todo"] is None
     assert _contract(_marked()) != _contract(
@@ -306,7 +298,6 @@ def test_a_probe_pins_a_contract_or_a_defect_but_never_both() -> None:
 
 
 def test_degree_names_reach_past_cubic() -> None:
-    """A scan has to be able to *say* what it measured."""
     assert degree_name(1.0) == "linear"
     assert degree_name(2.05) == "quadratic"
     assert degree_name(3.9) == "quartic"

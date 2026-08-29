@@ -1,7 +1,6 @@
 """HTTP/1, routing, and native storage CPU/memory-pressure benchmarks.
 
-Each scenario isolates one amplification path identified in
-`docs/plans/native-c-http1-routing-storage-pressure.md`:
+Each scenario isolates one amplification path:
 
 * ``http1-slow-head``        incomplete head delivered one byte at a time
 * ``http1-slow-chunk-line``  incomplete chunk-size line, one byte at a time
@@ -98,10 +97,7 @@ def native_module_path() -> str:
 
 
 def compiler_flags() -> str:
-    parts = [
-        sysconfig.get_config_var(name) or ""
-        for name in ("CC", "CFLAGS", "OPT")
-    ]
+    parts = [sysconfig.get_config_var(name) or "" for name in ("CC", "CFLAGS", "OPT")]
     joined = " ".join(p for p in parts if p).strip()
     return joined or "unavailable"
 
@@ -187,14 +183,18 @@ def paired(
     small = per_size[str(sizes[0])]["median_seconds"]
     large = per_size[str(sizes[-1])]["median_seconds"]
     return make_record(
-        scenario, parameters, warmups, trials, all_seconds, raw_rss, errors,
+        scenario,
+        parameters,
+        warmups,
+        trials,
+        all_seconds,
+        raw_rss,
+        errors,
         extra={"per_size": per_size, ratio_name: (large / small) if small > 0 else 0.0},
     )
 
 
-# --------------------------------------------------------------------------
 # server driving (fake transport, no sockets)
-# --------------------------------------------------------------------------
 
 
 class CountingTransport(asyncio.Transport):
@@ -283,9 +283,7 @@ async def _idle_app(scope: dict, receive: Any, send: Any) -> None:
             return
 
 
-# --------------------------------------------------------------------------
 # scenario: http1-slow-head / http1-slow-chunk-line
-# --------------------------------------------------------------------------
 
 
 def _incomplete_head(size: int) -> bytes:
@@ -375,9 +373,7 @@ def scenario_http1_slow_chunk_line(warmups: int, trials: int) -> dict[str, Any]:
     )
 
 
-# --------------------------------------------------------------------------
 # scenario: http1-receive-queue
-# --------------------------------------------------------------------------
 
 
 async def _receive_queue_once(count: int) -> tuple[float, dict[str, Any]]:
@@ -434,9 +430,7 @@ def scenario_http1_receive_queue(warmups: int, trials: int) -> dict[str, Any]:
     )
 
 
-# --------------------------------------------------------------------------
 # scenario: ws-empty-fragments / ws-empty-messages
-# --------------------------------------------------------------------------
 
 WS_UPGRADE = (
     b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
@@ -483,7 +477,6 @@ async def _ws_empty_fragments_once(count: int) -> tuple[float, dict[str, Any]]:
     _feed(protocol, WS_UPGRADE)
     await settle()
     # One empty text frame, then `count` empty continuations, then FIN.
-    #
     # RSS is far too coarse to see per-fragment storage (a list of 20,001
     # pointers is 160 KiB). tracemalloc measures what the accumulator actually
     # retains while the message is still incomplete, which is the quantity the
@@ -580,9 +573,7 @@ def scenario_ws_empty_messages(warmups: int, trials: int) -> dict[str, Any]:
     )
 
 
-# --------------------------------------------------------------------------
 # scenario: trie-adversarial-miss / trie-wide-fanout
-# --------------------------------------------------------------------------
 
 
 def native_route_table() -> Any:
@@ -602,9 +593,7 @@ def _adversarial_table(depth: int) -> tuple[Any, str]:
     table = native_route_table()()
     handler = object()
     for combo in range(1 << depth):
-        segments = [
-            ("a" if (combo >> i) & 1 else f"{{p{i}}}") for i in range(depth)
-        ]
+        segments = [("a" if (combo >> i) & 1 else f"{{p{i}}}") for i in range(depth)]
         table.add("/" + "/".join(segments), "POST", handler)
     return table, "/" + "/".join(["a"] * depth)
 
@@ -658,9 +647,7 @@ def scenario_trie_wide_fanout(warmups: int, trials: int) -> dict[str, Any]:
     )
 
 
-# --------------------------------------------------------------------------
 # scenario: pg-tape-small-consume / pg-retired-slabs / pg-bytea-text
-# --------------------------------------------------------------------------
 
 
 def native_postgres() -> Any:
@@ -693,9 +680,7 @@ def _tape_consume_once(rows: int) -> tuple[float, dict[str, Any]]:
             ),
             3,
         )
-    plan = native._compile_decoder_plan(
-        (16, 23, 25), (1, 1, 1), ("enabled", "number", "label")
-    )
+    plan = native._compile_decoder_plan((16, 23, 25), (1, 1, 1), ("enabled", "number", "label"))
     started = perf_counter_ns()
     decoded = 0
     while tape.row_count:
@@ -712,8 +697,13 @@ def scenario_pg_tape_small_consume(warmups: int, trials: int) -> dict[str, Any]:
     except ImportError as exc:
         return unavailable_record("pg-tape-small-consume", f"{exc}", params)
     return paired(
-        "pg-tape-small-consume", params, [10_000, 20_000], _tape_consume_once,
-        warmups, trials, "scaling_ratio_20k_over_10k",
+        "pg-tape-small-consume",
+        params,
+        [10_000, 20_000],
+        _tape_consume_once,
+        warmups,
+        trials,
+        "scaling_ratio_20k_over_10k",
     )
 
 
@@ -781,7 +771,12 @@ def scenario_pg_retired_slabs(warmups: int, trials: int) -> dict[str, Any]:
         return asyncio.run(_retired_slabs_once(pinned))
 
     return paired(
-        "pg-retired-slabs", params, [128, 256], run, warmups, trials,
+        "pg-retired-slabs",
+        params,
+        [128, 256],
+        run,
+        warmups,
+        trials,
         "scaling_ratio_256_over_128",
     )
 
@@ -804,30 +799,38 @@ def scenario_pg_bytea_text(warmups: int, trials: int) -> dict[str, Any]:
     except ImportError as exc:
         return unavailable_record("pg-bytea-text", f"{exc}", params)
     return paired(
-        "pg-bytea-text", params, [10_000, 20_000], _bytea_text_once, warmups,
-        trials, "scaling_ratio_20k_over_10k",
+        "pg-bytea-text",
+        params,
+        [10_000, 20_000],
+        _bytea_text_once,
+        warmups,
+        trials,
+        "scaling_ratio_20k_over_10k",
     )
 
 
-# --------------------------------------------------------------------------
 # scenario: multipart-peak
-# --------------------------------------------------------------------------
 
 
 def _multipart_body(total: int, boundary: bytes) -> bytes:
     """One large file part plus many smaller field parts."""
     delim = b"--" + boundary
     parts = [
-        delim + b"\r\nContent-Disposition: form-data; name=\"file\"; "
-        b"filename=\"big.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n"
-        + b"x" * (total // 2) + b"\r\n"
+        delim + b'\r\nContent-Disposition: form-data; name="file"; '
+        b'filename="big.bin"\r\nContent-Type: application/octet-stream\r\n\r\n'
+        + b"x" * (total // 2)
+        + b"\r\n"
     ]
     small = total // 2
     each = 4096
     for i in range(small // each):
         parts.append(
-            delim + b"\r\nContent-Disposition: form-data; name=\"f" +
-            str(i).encode() + b"\"\r\n\r\n" + b"y" * each + b"\r\n"
+            delim
+            + b'\r\nContent-Disposition: form-data; name="f'
+            + str(i).encode()
+            + b'"\r\n\r\n'
+            + b"y" * each
+            + b"\r\n"
         )
     parts.append(delim + b"--\r\n")
     return b"".join(parts)
@@ -878,8 +881,10 @@ def _multipart_once(total: int) -> tuple[float, dict[str, Any]]:
 def scenario_multipart_peak(warmups: int, trials: int) -> dict[str, Any]:
     return paired(
         "multipart-peak",
-        {"body_sizes_bytes": [8 * 1024 * 1024, 16 * 1024 * 1024],
-         "shape": "one half-size file part plus 4 KiB field parts"},
+        {
+            "body_sizes_bytes": [8 * 1024 * 1024, 16 * 1024 * 1024],
+            "shape": "one half-size file part plus 4 KiB field parts",
+        },
         [8 * 1024 * 1024, 16 * 1024 * 1024],
         _multipart_once,
         warmups,
@@ -888,19 +893,14 @@ def scenario_multipart_peak(warmups: int, trials: int) -> dict[str, Any]:
     )
 
 
-# --------------------------------------------------------------------------
 # scenario: json-key-churn
-# --------------------------------------------------------------------------
 
 
 def _json_docs(distinct_keys: int, docs: int) -> list[bytes]:
     out = []
     per_doc = 16
     for d in range(docs):
-        obj = {
-            f"k{(d * per_doc + i) % distinct_keys:06d}": i
-            for i in range(per_doc)
-        }
+        obj = {f"k{(d * per_doc + i) % distinct_keys:06d}": i for i in range(per_doc)}
         out.append(json.dumps(obj).encode())
     return out
 
@@ -933,9 +933,7 @@ def scenario_json_key_churn(warmups: int, trials: int) -> dict[str, Any]:
     )
 
 
-# --------------------------------------------------------------------------
 # scenario: request-cookie-repeat
-# --------------------------------------------------------------------------
 
 
 def _cookie_repeat_once(reads: int) -> tuple[float, dict[str, Any]]:
@@ -961,8 +959,7 @@ def _cookie_repeat_once(reads: int) -> tuple[float, dict[str, Any]]:
         if request.cookies is not first:
             identical = False
     elapsed = (perf_counter_ns() - started) / 1e9
-    return elapsed, {"reads": reads, "same_object_each_read": identical,
-                     "cookies": len(first)}
+    return elapsed, {"reads": reads, "same_object_each_read": identical, "cookies": len(first)}
 
 
 def scenario_request_cookie_repeat(warmups: int, trials: int) -> dict[str, Any]:
@@ -994,17 +991,22 @@ RUNNERS = {
 }
 
 
-# --------------------------------------------------------------------------
 # parent / child plumbing
-# --------------------------------------------------------------------------
 
 
 def run_child(scenario: str, warmups: int, trials: int) -> dict[str, Any]:
     """Spawn one scenario in a fresh process so its peak RSS stands alone."""
     cmd = [
-        sys.executable, "-m", "benchmarks.bench_native_http1_storage",
-        "--scenario", scenario, "--warmup", str(warmups),
-        "--trials", str(trials), "--emit",
+        sys.executable,
+        "-m",
+        "benchmarks.bench_native_http1_storage",
+        "--scenario",
+        scenario,
+        "--warmup",
+        str(warmups),
+        "--trials",
+        str(trials),
+        "--emit",
     ]
     proc = subprocess.run(
         cmd, capture_output=True, text=True, cwd=str(Path(__file__).parent.parent)
@@ -1026,7 +1028,8 @@ def main() -> None:
     parser.add_argument("--trials", type=int, default=9)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument(
-        "--emit", action="store_true",
+        "--emit",
+        action="store_true",
         help="internal: run one scenario here and print its record to stdout",
     )
     args = parser.parse_args()

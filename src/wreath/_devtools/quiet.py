@@ -123,26 +123,75 @@ NOISY_SERVICES: tuple[str, ...] = (
 #: careless addition here still cannot take out the desktop.
 HEAVY_APPS: tuple[str, ...] = (
     # Browsers -- the usual worst offender, and the reason this list exists.
-    "firefox", "chrome", "chromium", "brave", "vivaldi", "opera", "epiphany",
-    "microsoft-edge", "zen-browser", "librewolf", "waterfox", "tor-browser",
+    "firefox",
+    "chrome",
+    "chromium",
+    "brave",
+    "vivaldi",
+    "opera",
+    "epiphany",
+    "microsoft-edge",
+    "zen-browser",
+    "librewolf",
+    "waterfox",
+    "tor-browser",
     # Electron and chat, which idle at a few percent forever.
-    "slack", "discord", "element", "signal", "telegram", "whatsapp",
-    "teams", "thunderbird", "spotify", "zoom", "skype",
+    "slack",
+    "discord",
+    "element",
+    "signal",
+    "telegram",
+    "whatsapp",
+    "teams",
+    "thunderbird",
+    "spotify",
+    "zoom",
+    "skype",
     # Editors and IDEs. Language servers and file watchers are the cost here,
     # not the editor.
-    "code", "vscodium", "sublime", "jetbrains", "idea", "pycharm", "webstorm",
-    "goland", "clion", "rubymine", "phpstorm", "datagrip", "zed", "cursor",
+    "code",
+    "vscodium",
+    "sublime",
+    "jetbrains",
+    "idea",
+    "pycharm",
+    "webstorm",
+    "goland",
+    "clion",
+    "rubymine",
+    "phpstorm",
+    "datagrip",
+    "zed",
+    "cursor",
     # Games and launchers.
-    "steam", "lutris", "heroic", "bottles",
+    "steam",
+    "lutris",
+    "heroic",
+    "bottles",
     # Sync daemons: periodic, bursty, and invisible in a short run until they
     # land in the middle of one.
-    "dropbox", "nextcloud", "syncthing", "insync", "megasync", "onedrive",
+    "dropbox",
+    "nextcloud",
+    "syncthing",
+    "insync",
+    "megasync",
+    "onedrive",
     # Update checkers and stores, which wake on a timer. Both spellings: systemd
     # names a GNOME scope from its D-Bus name (`app-gnome-org.gnome.Software-N`),
     # so the hyphenated form alone silently matches nothing.
-    "gnome-software", "gnome.software", "discover", "snap-store", "packagekit",
+    "gnome-software",
+    "gnome.software",
+    "discover",
+    "snap-store",
+    "packagekit",
     # Miscellaneous heavyweights.
-    "obs", "gimp", "blender", "kdenlive", "darktable", "virtualbox", "virt-manager",
+    "obs",
+    "gimp",
+    "blender",
+    "kdenlive",
+    "darktable",
+    "virtualbox",
+    "virt-manager",
 )
 
 #: How a running container is quieted. **`pause`, not `stop`, and the choice is
@@ -165,9 +214,6 @@ _CPU_ROOT = Path("/sys/devices/system/cpu")
 _CGROUP_ROOT = Path("/sys/fs/cgroup")
 
 
-# --- topology ---------------------------------------------------------------
-
-
 def physical_cores() -> dict[int, list[int]]:
     """Map each physical core to its logical CPUs, lowest logical CPU first.
 
@@ -180,7 +226,7 @@ def physical_cores() -> dict[int, list[int]]:
         try:
             cpu = int(path.name[3:])
             listed = siblings.read_text().strip()
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
         members = sorted(_parse_cpu_list(listed))
         if not members:
@@ -252,9 +298,6 @@ def split_cores(server_cores: int = 1) -> CoreSplit:
         f"{server_cores} whole core(s) to the server, "
         f"{len(ordered) - server_cores} to the generator",
     )
-
-
-# --- containers -------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -397,11 +440,35 @@ def _own_process_tree(pid: int | None = None) -> set[int]:
 #: only interesting when the process is something that burns CPU.
 _WORKLOAD_BINARIES = frozenset(
     {
-        "python", "python3", "python3.14", "pypy", "pypy3",
-        "node", "deno", "bun",
-        "cc", "cc1", "cc1plus", "gcc", "g++", "clang", "clang++", "ld", "lto1",
-        "make", "ninja", "cmake", "cargo", "rustc", "go", "java", "javac",
-        "ruff", "ty", "mypy", "pyright",
+        "python",
+        "python3",
+        "python3.14",
+        "pypy",
+        "pypy3",
+        "node",
+        "deno",
+        "bun",
+        "cc",
+        "cc1",
+        "cc1plus",
+        "gcc",
+        "g++",
+        "clang",
+        "clang++",
+        "ld",
+        "lto1",
+        "make",
+        "ninja",
+        "cmake",
+        "cargo",
+        "rustc",
+        "go",
+        "java",
+        "javac",
+        "ruff",
+        "ty",
+        "mypy",
+        "pyright",
     }
 )
 
@@ -489,9 +556,6 @@ def competing_workloads(
     return tuple(found)
 
 
-# --- the benchmark's own ancestry, which must never be frozen ----------------
-
-
 def session_ancestry(pid: int | None = None) -> tuple[str, ...]:
     """Every cgroup path from this process's own cgroup up to the root.
 
@@ -570,8 +634,7 @@ def freezable_targets(pid: int | None = None) -> tuple[Path, ...]:
     protected_children = {
         app_prefix + suffix.partition("/")[0]
         for ancestor in exempt
-        if ancestor.startswith(app_prefix)
-        and (suffix := ancestor.removeprefix(app_prefix))
+        if ancestor.startswith(app_prefix) and (suffix := ancestor.removeprefix(app_prefix))
     }
     targets: list[Path] = []
     for child in sorted(root.iterdir()):
@@ -602,9 +665,6 @@ def named_app_targets(pid: int | None = None) -> tuple[Path, ...]:
         for target in freezable_targets(pid)
         if any(app in target.name.lower() for app in HEAVY_APPS)
     )
-
-
-# --- changes and the journal ------------------------------------------------
 
 
 @dataclass(slots=True)
@@ -656,7 +716,7 @@ class Journal:
     def read(cls, path: Path = JOURNAL) -> Journal:
         try:
             payload: dict[str, Any] = json.loads(path.read_text())
-        except (OSError, ValueError):
+        except OSError, ValueError:
             return cls()
         return cls(
             changes=[Change(**row) for row in payload.get("changes", [])],
@@ -664,9 +724,6 @@ class Journal:
             deadline=float(payload.get("deadline", 0.0)),
             watchdog=str(payload.get("watchdog", "")),
         )
-
-
-# --- restore ----------------------------------------------------------------
 
 
 def restore(path: Path = JOURNAL, *, run: Any = subprocess.run) -> list[str]:
@@ -716,9 +773,6 @@ def _restore_one(change: Change, run: Any) -> None:
         run([runtime, verb, cid], check=False, capture_output=True)
 
 
-# --- the plan ---------------------------------------------------------------
-
-
 @dataclass(slots=True)
 class Step:
     """One planned action, with the command a human would run to do it by hand.
@@ -747,9 +801,7 @@ def plan(tier: int, *, pid: int | None = None) -> list[Step]:
                 "sched_setaffinity(2) -- no shell command, applied in-process",
             )
         )
-        steps.append(
-            Step(0, "disable ASLR for benchmark children", "setarch -R <child>")
-        )
+        steps.append(Step(0, "disable ASLR for benchmark children", "setarch -R <child>"))
         steps.append(Step(0, "renice the benchmark tree to -5", "renice -n -5 -p $$"))
     if tier >= 1:
         for policy in sorted(_CPU_ROOT.glob("cpu[0-9]*/cpufreq/scaling_governor")):
@@ -878,8 +930,7 @@ def _container_steps(*, run: Any = subprocess.run) -> list[Step]:
     steps.append(
         Step(
             1,
-            f"{len(containers)} running container(s); action is "
-            f"{_CONTAINER_ACTION_REASON[action]}",
+            f"{len(containers)} running container(s); action is {_CONTAINER_ACTION_REASON[action]}",
             "# no command -- this line explains the container steps that follow",
         )
     )
@@ -942,14 +993,9 @@ def _service_states(units: Sequence[str]) -> tuple[str, ...]:
     )
     reported = result.stdout.splitlines()
     return tuple(
-        reported[index].strip() or "unknown"
-        if index < len(reported)
-        else "unknown"
+        reported[index].strip() or "unknown" if index < len(reported) else "unknown"
         for index in range(len(units))
     )
-
-
-# --- the watchdog -----------------------------------------------------------
 
 
 def watchdog_scope() -> str:
@@ -1016,8 +1062,7 @@ def arm_watchdog(
             output = (getattr(result, "stderr", "") or "").strip()
             reason.append(
                 f"`{' '.join(command[:3])} ...` exited "
-                f"{getattr(result, 'returncode', '?')}"
-                + (f": {output}" if output else "")
+                f"{getattr(result, 'returncode', '?')}" + (f": {output}" if output else "")
             )
         return ""
     return unit
@@ -1027,8 +1072,7 @@ def disarm_watchdog(unit: str, *, run: Any = subprocess.run) -> None:
     """Cancel the timer once the benchmark has restored the machine itself."""
     if not unit or shutil.which("systemctl") is None:
         return
-    run(["systemctl", watchdog_scope(), "stop", f"{unit}.timer"], check=False,
-        capture_output=True)
+    run(["systemctl", watchdog_scope(), "stop", f"{unit}.timer"], check=False, capture_output=True)
 
 
 def watchdog_armed(unit: str, *, run: Any = subprocess.run) -> bool:
@@ -1042,9 +1086,6 @@ def watchdog_armed(unit: str, *, run: Any = subprocess.run) -> bool:
         check=False,
     )
     return getattr(result, "stdout", "").strip() in {"active", "activating"}
-
-
-# --- applying ---------------------------------------------------------------
 
 
 class QuietRefused(RuntimeError):
@@ -1110,8 +1151,7 @@ def apply(
         competing = competing_workloads(pid=pid)
         if competing:
             listed = "\n".join(
-                f"    pid {w.pid:>7}  {w.why}\n              {w.command}"
-                for w in competing[:12]
+                f"    pid {w.pid:>7}  {w.why}\n              {w.command}" for w in competing[:12]
             )
             more = f"\n    ... and {len(competing) - 12} more" if len(competing) > 12 else ""
             raise QuietRefused(
@@ -1178,9 +1218,6 @@ def _apply_one(change: Change) -> None:
         subprocess.run([runtime, verb, cid], check=False, capture_output=True)
 
 
-# --- variance measurement ---------------------------------------------------
-
-
 def measure_noise(samples: int = 7, spin_ms: int = 40) -> dict[str, float]:
     """An A/A spread for the *machine*, not for any benchmark.
 
@@ -1208,9 +1245,6 @@ def measure_noise(samples: int = 7, spin_ms: int = 40) -> dict[str, float]:
     }
 
 
-# --- CLI --------------------------------------------------------------------
-
-
 def _print_plan(steps: Sequence[Step], tier: int) -> None:
     print(f"\nwreath-bench --quiet={tier} would make {len(steps)} change(s):\n")
     for step in steps:
@@ -1234,19 +1268,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Quiet this machine for benchmarking, reversibly.",
     )
     parser.add_argument("--tier", type=int, default=1, choices=(0, 1, 2))
-    parser.add_argument("--apply", action="store_true",
-                        help="actually make the changes (default is a dry run)")
-    parser.add_argument("--restore", action="store_true",
-                        help="undo everything in the journal and exit")
+    parser.add_argument(
+        "--apply", action="store_true", help="actually make the changes (default is a dry run)"
+    )
+    parser.add_argument(
+        "--restore", action="store_true", help="undo everything in the journal and exit"
+    )
     parser.add_argument("--journal", type=Path, default=JOURNAL)
-    parser.add_argument("--deadline", type=int, default=DEFAULT_DEADLINE_SECONDS,
-                        help="seconds before the watchdog restores unconditionally")
-    parser.add_argument("--measure-noise", action="store_true",
-                        help="report this machine's current A/A spread and exit")
-    parser.add_argument("--check-competing", action="store_true",
-                        help="list processes that would contaminate a run, and exit")
-    parser.add_argument("--allow-competing", action="store_true",
-                        help="quiet the machine even though other work is running")
+    parser.add_argument(
+        "--deadline",
+        type=int,
+        default=DEFAULT_DEADLINE_SECONDS,
+        help="seconds before the watchdog restores unconditionally",
+    )
+    parser.add_argument(
+        "--measure-noise",
+        action="store_true",
+        help="report this machine's current A/A spread and exit",
+    )
+    parser.add_argument(
+        "--check-competing",
+        action="store_true",
+        help="list processes that would contaminate a run, and exit",
+    )
+    parser.add_argument(
+        "--allow-competing",
+        action="store_true",
+        help="quiet the machine even though other work is running",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if args.check_competing:
@@ -1269,23 +1318,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.measure_noise:
         noise = measure_noise()
-        print(f"A/A spread: {noise['spread_pct']:.2f}% "
-              f"(median {noise['median_ops']:,.0f} ops/s)")
+        print(f"A/A spread: {noise['spread_pct']:.2f}% (median {noise['median_ops']:,.0f} ops/s)")
         return 0
     steps = plan(args.tier)
     if not args.apply:
         _print_plan(steps, args.tier)
         return 0
     try:
-        journal = apply(args.tier, deadline_seconds=args.deadline,
-                        journal_path=args.journal,
-                        allow_competing=args.allow_competing)
+        journal = apply(
+            args.tier,
+            deadline_seconds=args.deadline,
+            journal_path=args.journal,
+            allow_competing=args.allow_competing,
+        )
     except QuietRefused as error:
         print(f"wreath-bench-quiet: REFUSED -- {error}")
         return 2
-    print(f"wreath-bench-quiet: applied {len(journal.changes)} change(s); "
-          f"watchdog {journal.watchdog or '(none needed)'} restores in "
-          f"{args.deadline}s if nothing else does.")
+    print(
+        f"wreath-bench-quiet: applied {len(journal.changes)} change(s); "
+        f"watchdog {journal.watchdog or '(none needed)'} restores in "
+        f"{args.deadline}s if nothing else does."
+    )
     return 0
 
 

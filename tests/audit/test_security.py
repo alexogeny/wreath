@@ -1,4 +1,3 @@
-"""Runtime security/compliance audit rules — the downstream-SaaS checks."""
 from __future__ import annotations
 
 from wreath._audit.model import Report, Severity
@@ -15,9 +14,13 @@ def _fire(view: ResponseView) -> dict[str, Severity]:
 
 
 def _view(status=200, scheme="http", headers=None, cookies=()):
-    return ResponseView(status=status, scheme=scheme, surface="runtime:/",
-                        headers={k.lower(): v for k, v in (headers or {}).items()},
-                        set_cookies=tuple(cookies))
+    return ResponseView(
+        status=status,
+        scheme=scheme,
+        surface="runtime:/",
+        headers={k.lower(): v for k, v in (headers or {}).items()},
+        set_cookies=tuple(cookies),
+    )
 
 
 def test_samesite_none_without_secure_is_an_error() -> None:
@@ -50,15 +53,15 @@ def test_missing_cookie_defenses_warn() -> None:
 def test_hsts_required_on_https_only() -> None:
     assert "hsts" in _fire(_view(scheme="https"))
     assert "hsts" not in _fire(_view(scheme="http"))
-    ok = _fire(_view(scheme="https",
-                     headers={"Strict-Transport-Security": "max-age=63072000"}))
+    ok = _fire(_view(scheme="https", headers={"Strict-Transport-Security": "max-age=63072000"}))
     assert "hsts" not in ok and "hsts-max-age" not in ok
 
 
 def test_401_requires_www_authenticate() -> None:
     assert _fire(_view(status=401))["www-authenticate"] is Severity.ERROR
     assert "www-authenticate" not in _fire(
-        _view(status=401, headers={"WWW-Authenticate": "Bearer"}))
+        _view(status=401, headers={"WWW-Authenticate": "Bearer"})
+    )
 
 
 def test_405_requires_allow() -> None:
@@ -67,10 +70,14 @@ def test_405_requires_allow() -> None:
 
 
 def test_cors_wildcard_with_credentials_is_an_error() -> None:
-    fired = _fire(_view(headers={
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Credentials": "true",
-    }))
+    fired = _fire(
+        _view(
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Credentials": "true",
+            }
+        )
+    )
     assert fired["cors-credentials"] is Severity.ERROR
 
 
@@ -84,8 +91,13 @@ def test_runtime_audit_response_runs_security_rules() -> None:
     # End-to-end through the runtime entrypoint: a 401 with an insecure cookie.
     report = Report()
     audit_response(
-        401, {"content-type": "application/json"}, "", "runtime:/login", report,
-        scheme="https", set_cookies=["sid=x; SameSite=None"],
+        401,
+        {"content-type": "application/json"},
+        "",
+        "runtime:/login",
+        report,
+        scheme="https",
+        set_cookies=["sid=x; SameSite=None"],
     )
     ids = {f.rule_id for f in report.findings}
     assert {"www-authenticate", "cookie-samesite-none-insecure", "hsts"} <= ids

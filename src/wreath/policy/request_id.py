@@ -167,9 +167,7 @@ class RequestIdPolicy:
             return
         value = request.state.get(_STATE_KEY)
         if value is not None:
-            replace_response_header(
-                response.headers, self._header_bytes, value.encode("ascii")
-            )
+            replace_response_header(response.headers, self._header_bytes, value.encode("ascii"))
 
     def _egress_sync(self, request: Request, response: Any) -> Any:
         """Reference executor transformer; compiled policy mutates in place."""

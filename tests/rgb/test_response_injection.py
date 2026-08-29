@@ -1,5 +1,3 @@
-"""Header/frame injection through response constructors (report 23: R-37..R-40)."""
-
 from __future__ import annotations
 
 import pytest

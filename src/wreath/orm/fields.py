@@ -259,37 +259,29 @@ _INDEX_TOKEN = re.compile(r"[a-z_][a-z0-9_]*")
 #: can follow it on the line, and `--` closes nothing), but a value that opens a
 #: comment is not a value, and the class already claimed to admit only numbers
 #: and identifiers.
-_INDEX_OPTION_VALUE = re.compile(
-    r"-?[0-9]+(?:\.[0-9]+)?(?:[eE]-?[0-9]+)?|[A-Za-z_][A-Za-z0-9_.]*"
-)
+_INDEX_OPTION_VALUE = re.compile(r"-?[0-9]+(?:\.[0-9]+)?(?:[eE]-?[0-9]+)?|[A-Za-z_][A-Za-z0-9_.]*")
 
 
-def _resolve_index_ops(
-    index_method: str | None, index_ops: str | None
-) -> str | None:
+def _resolve_index_ops(index_method: str | None, index_ops: str | None) -> str | None:
     if index_ops is None:
         return None
     if index_method is None:
         raise DeclarationError("index_ops= requires an index= on the same column")
     if not isinstance(index_ops, str) or not _INDEX_TOKEN.fullmatch(index_ops):
         raise DeclarationError(
-            f"index_ops={index_ops!r} must be an operator class name such as "
-            "'vector_cosine_ops'"
+            f"index_ops={index_ops!r} must be an operator class name such as 'vector_cosine_ops'"
         )
     return index_ops
 
 
-def _resolve_index_with(
-    index_method: str | None, index_with: Any
-) -> tuple[tuple[str, str], ...]:
+def _resolve_index_with(index_method: str | None, index_with: Any) -> tuple[tuple[str, str], ...]:
     if index_with is None:
         return ()
     if index_method is None:
         raise DeclarationError("index_with= requires an index= on the same column")
     if not isinstance(index_with, Mapping):
         raise DeclarationError(
-            f"index_with= must be a mapping of option names to values, got "
-            f"{index_with!r}"
+            f"index_with= must be a mapping of option names to values, got {index_with!r}"
         )
     resolved: list[tuple[str, str]] = []
     for name, value in index_with.items():
@@ -305,8 +297,7 @@ def _resolve_index_with(
             text = value
         else:
             raise DeclarationError(
-                f"index_with[{name!r}] must be a number, string, or bool, got "
-                f"{value!r}"
+                f"index_with[{name!r}] must be a number, string, or bool, got {value!r}"
             )
         if not _INDEX_OPTION_VALUE.fullmatch(text):
             raise DeclarationError(
@@ -397,22 +388,16 @@ def column(
     them with `narrow()`; nothing removes them.
     """
     if not isinstance(pg_type, PgType):
-        raise DeclarationError(
-            f"column() requires a PgType from wreath.orm.types, got {pg_type!r}"
-        )
+        raise DeclarationError(f"column() requires a PgType from wreath.orm.types, got {pg_type!r}")
     if primary_key and nullable:
         raise DeclarationError("a primary-key column cannot be nullable")
     if references is not None and not isinstance(references, ColumnExpr):
-        raise DeclarationError(
-            "references= requires a model column expression such as User.id"
-        )
+        raise DeclarationError("references= requires a model column expression such as User.id")
     if server_default is not None and not isinstance(server_default, str):
         raise DeclarationError("server_default= must be SQL text")
     for label, action in (("on_delete", on_delete), ("on_update", on_update)):
         if action is not None and action not in _FK_ACTIONS:
-            raise DeclarationError(
-                f"{label}={action!r} must be one of {sorted(_FK_ACTIONS)}"
-            )
+            raise DeclarationError(f"{label}={action!r} must be one of {sorted(_FK_ACTIONS)}")
     if (on_delete or on_update or deferrable) and references is None:
         raise DeclarationError(
             "on_delete=/on_update=/deferrable= only apply to a references= column"

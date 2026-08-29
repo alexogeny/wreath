@@ -1,5 +1,3 @@
-"""Real PostgreSQL proof for direct catalog decode and single-schema detection."""
-
 from __future__ import annotations
 
 import os
@@ -138,19 +136,6 @@ async def test_real_catalog_decodes_without_records_and_detects_drift() -> None:
 
 
 async def test_every_builtin_column_type_survives_a_catalog_round_trip() -> None:
-    """Render, apply, then read back: the desired and catalog spellings must agree.
-
-    `test_object_coverage.py` proves each built-in *renders*; that is necessary and
-    not sufficient. The spelling wreath emits into DDL and the one
-    `_SINGLE_CATALOG_SQL` reads back out of `format_type` are produced by different
-    code, and a disagreement of one byte reports the column as drifted on every
-    run forever -- the same silent failure the vector opclass defect had.
-
-    `bit` is the interesting member: it is the only built-in that carries its
-    spelling in the descriptor, so it is the only one where both sides can differ.
-    The rest assert the cheap half -- that a blank spelling on both sides still
-    matches after a real `CREATE TABLE`.
-    """
     db = await connection()
     schema = f"wreath_types_{uuid.uuid4().hex[:12]}"
     try:

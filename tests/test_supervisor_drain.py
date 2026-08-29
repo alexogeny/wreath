@@ -1,11 +1,3 @@
-"""A drain that fails is counted, not silently absorbed.
-
-The supervisor cannot let one service's `drain` abort its siblings' shutdown --
-so the catch around it is broad on purpose. What makes that the exceptional
-minority rather than the rule is `drain_errors`: without it, `stop()` returned
-having quiesced nothing and reported exactly the same as a clean shutdown.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -63,7 +55,6 @@ async def test_a_clean_shutdown_counts_nothing() -> None:
 
 @pytest.mark.asyncio
 async def test_a_service_task_that_dies_on_its_way_out_is_counted() -> None:
-    """`_cancel_all`'s `await task` is the only place that exception is ever seen."""
     supervisor = Supervisor(drain_timeout=0.1)
     supervisor.add(_Service())
     await supervisor.start()
@@ -80,7 +71,6 @@ async def test_a_service_task_that_dies_on_its_way_out_is_counted() -> None:
 
 @pytest.mark.asyncio
 async def test_a_task_we_cancelled_ourselves_is_not_an_error() -> None:
-    """Reaping our own cancellation is expected, and must not inflate the count."""
     supervisor = Supervisor(drain_timeout=0.1)
     supervisor.add(_Service())
     await supervisor.start()

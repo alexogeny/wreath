@@ -1,19 +1,3 @@
-"""Stage 8: the same declaration, materialised at more than one grain.
-
-Three things carry the weight here, and each has a way of being quietly wrong:
-
-* **Not every measure rolls up.** An average of averages weights a quiet hour
-  the same as a busy one and produces a number that looks reasonable.
-* **A materialised grain is zone-specific.** Daily buckets cut in Auckland
-  cannot answer about London days, and re-aggregating does not recover them.
-* **Exactly one tier answers each piece of a range**, or a boundary
-  double-counts or gaps.
-
-What only a live PostgreSQL can settle -- that a rolled-up month agrees with
-``date_trunc('month', ...)`` over the same rows -- lives in
-``tests/postgres/test_series_integration.py``.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -41,9 +25,6 @@ def tiered(*, measures=None, seal="2h", **windows):
 DAY = 86400.0
 
 
-# -- the ladder ---------------------------------------------------------------
-
-
 class TestLadder:
     def test_raw_is_required_because_it_is_the_bottom_rung(self):
         with pytest.raises(SeriesError, match="must name 'raw'"):
@@ -54,17 +35,10 @@ class TestLadder:
             build({"raw": "3 days", "fortnight": "1 year"}, refuse=SeriesError)
 
     def test_tiers_are_ordered_finest_first_whatever_order_they_were_written(self):
-        ladder = build(
-            {"month": None, "raw": "3 days", "day": "1 year"}, refuse=SeriesError
-        )
+        ladder = build({"month": None, "raw": "3 days", "day": "1 year"}, refuse=SeriesError)
         assert [tier.name for tier in ladder] == ["raw", "day", "month"]
 
     def test_retention_must_grow_as_the_grain_coarsens(self):
-        """A coarse tier kept for less than a fine one leaves a hole.
-
-        The range is too old for the fine tier and already past the coarse one,
-        so nothing answers -- a ladder with a rung missing.
-        """
         with pytest.raises(SeriesError, match="less time than a finer tier"):
             build({"raw": "1 year", "day": "3 days"}, refuse=SeriesError)
 
@@ -83,13 +57,6 @@ class TestLadder:
         ],
     )
     def test_a_window_is_written_the_way_people_say_it(self, written, seconds):
-        """Deliberately a wider vocabulary than ``seal(after=)`` accepts.
-
-        A seal allowance is elapsed time and has to be exact, so
-        ``parse_duration`` refuses months and years. A retention window is a
-        promise about roughly how long something stays warm, so "1 year" is an
-        honest thing to write and a mean length is the right precision.
-        """
         ladder = build({"raw": written}, refuse=SeriesError)
         assert ladder.raw.keep == pytest.approx(seconds)
 
@@ -109,17 +76,12 @@ class TestLadder:
             build({"raw": "soonish"}, refuse=SeriesError)
 
 
-# -- what a declaration refuses -----------------------------------------------
-
-
 class TestDeclaration:
     def test_a_coarser_tier_needs_a_seal(self):
-        """A tier stores a value as final; only the seal says when that is true."""
         with pytest.raises(SeriesError, match="needs seal\\(\\)"):
             view().measure(n=count()).retain(raw="3 days", day="1 year")
 
     def test_raw_alone_needs_no_seal(self):
-        """Stating the source window materialises nothing, so nothing is final."""
         declared = view().measure(n=count()).retain(raw="3 days")
         assert [tier.name for tier in declared.tiers] == ["raw"]
 
@@ -133,13 +95,11 @@ class TestDeclaration:
             declared.by(Trek.paddock_id).retain(raw="3 days")
 
     def test_by_after_retain_is_refused_from_the_other_side(self):
-        """Builder methods commute everywhere else, so both orders must refuse."""
         declared = tiered(raw="3 days", day="1 year")
         with pytest.raises(SeriesError, match="cannot be combined with retain"):
             declared.by(Trek.paddock_id)
 
     def test_nothing_on_this_surface_deletes_anything(self):
-        """``retain`` is a promise about what stays warm, not an expiry."""
         declared = tiered(raw="3 days", day="1 year")
         assert "DELETE" not in str(declared.tiers)
         for method in ("archive", "drop"):
@@ -167,21 +127,11 @@ class TestAdditivity:
         assert "sum and a count" in message, "must name the fix that is not built"
 
     def test_an_average_is_fine_when_raw_is_kept_forever(self):
-        """§7.5's other way out: pin raw across the whole query window.
-
-        The coarse tier is still built, and still correct, because it is always
-        recomputed from source rows that are always there.
-        """
-        declared = tiered(
-            measures={"mean": avg(Trek.distance_km)}, raw=None, month=None
-        )
+        declared = tiered(measures={"mean": avg(Trek.distance_km)}, raw=None, month=None)
         assert [tier.name for tier in declared.tiers] == ["raw", "month"]
 
     def test_an_average_is_fine_with_no_tier_coarser_than_the_view(self):
-        """A same-grain tier is the sealed rows themselves -- no rollup happens."""
-        declared = tiered(
-            measures={"mean": avg(Trek.distance_km)}, raw="3 days", day="1 year"
-        )
+        declared = tiered(measures={"mean": avg(Trek.distance_km)}, raw="3 days", day="1 year")
         assert [tier.name for tier in declared.tiers] == ["raw", "day"]
 
     def test_counts_and_sums_and_extremes_all_roll_up(self):
@@ -193,23 +143,14 @@ class TestAdditivity:
         assert len(declared.tiers) == 2
 
     def test_a_measure_added_after_the_ladder_faces_the_same_check(self):
-        """Otherwise `.retain(...).measure(mean=avg(...))` walks straight past it."""
         declared = tiered(raw="3 days", month=None)
         with pytest.raises(SeriesError, match="cannot be rolled up"):
             declared.measure(mean=avg(Trek.distance_km))
 
     def test_the_check_reads_the_same_property_that_folds_a_correction(self):
-        """One predicate, two consequences -- §7.5's "pays for itself twice".
-
-        A measure that can be combined from parts can take a late delta and can
-        be rolled up. Two lists could disagree; one property cannot.
-        """
         assert avg(Trek.distance_km).rollup_safe is False
         assert avg(Trek.distance_km).has_identity is False
         assert count().rollup_safe is True
-
-
-# -- the zone catch -----------------------------------------------------------
 
 
 class TestZoneCompatibility:
@@ -224,7 +165,6 @@ class TestZoneCompatibility:
         assert serves_zone(Day, "Pacific/Auckland", "Pacific/Auckland", at=self.at)
 
     def test_daily_rows_serve_only_the_zone_they_were_cut_in(self):
-        """No offset difference is ever a whole number of days."""
         assert not serves_zone(Day, "Pacific/Auckland", "Europe/London", at=self.at)
         assert not serves_zone(Month, "UTC", "Europe/London", at=self.at)
 
@@ -232,11 +172,8 @@ class TestZoneCompatibility:
         assert serves_zone(Hour, "UTC", "Europe/London", at=self.at)
         assert serves_zone(Hour, "UTC", "Pacific/Auckland", at=self.at)
 
-    @pytest.mark.parametrize(
-        "zone", ["Asia/Kolkata", "Asia/Kathmandu", "Pacific/Chatham"]
-    )
+    @pytest.mark.parametrize("zone", ["Asia/Kolkata", "Asia/Kathmandu", "Pacific/Chatham"])
     def test_hourly_rows_do_not_serve_a_fractional_offset(self, zone):
-        """+5:30, +5:45 and +12:45 are the cases the rule exists for."""
         assert not serves_zone(Hour, "UTC", zone, at=self.at)
 
     def test_minute_rows_serve_even_the_fractional_offsets(self):
@@ -259,12 +196,8 @@ class TestZoneCompatibility:
             )
 
     def test_the_advice_is_to_materialise_finer_when_readers_span_zones(self):
-        """The guide's practical advice, checkable: hourly survives the split."""
         assert serves_zone(Hour, "UTC", "Europe/London", at=self.at)
         assert not serves_zone(Day, "UTC", "Europe/London", at=self.at)
-
-
-# -- planning -----------------------------------------------------------------
 
 
 def _plan(ladder, *, start, end, now, requested=Day, coarsen=False, read="UTC"):
@@ -284,34 +217,22 @@ def _plan(ladder, *, start, end, now, requested=Day, coarsen=False, read="UTC"):
 class TestPlanning:
     def test_a_range_inside_raws_window_is_one_raw_segment(self):
         ladder = tiered(raw="3 days", day="1 year")._tiers
-        segments = _plan(
-            ladder, start=utc(2026, 3, 3), end=utc(2026, 3, 4), now=utc(2026, 3, 4)
-        )
+        segments = _plan(ladder, start=utc(2026, 3, 3), end=utc(2026, 3, 4), now=utc(2026, 3, 4))
         assert [item.grain for item in segments] == ["raw"]
 
     def test_raw_wins_wherever_it_still_covers(self):
-        """Correctness before cost: only raw knows about the watermark.
-
-        A materialised tier asked for the last three days would hand back the
-        rows it happens to hold and silently omit today's still-open bucket.
-        """
         ladder = tiered(raw="3 days", day="1 year")._tiers
-        segments = _plan(
-            ladder, start=utc(2026, 1, 1), end=utc(2026, 3, 4), now=utc(2026, 3, 4)
-        )
+        segments = _plan(ladder, start=utc(2026, 1, 1), end=utc(2026, 3, 4), now=utc(2026, 3, 4))
         assert segments[-1].grain == "raw"
         assert segments[0].grain == "day"
 
     def test_the_boundary_is_the_retention_edge(self):
         ladder = tiered(raw="3 days", day="1 year")._tiers
-        segments = _plan(
-            ladder, start=utc(2026, 1, 1), end=utc(2026, 3, 4), now=utc(2026, 3, 4)
-        )
+        segments = _plan(ladder, start=utc(2026, 1, 1), end=utc(2026, 3, 4), now=utc(2026, 3, 4))
         assert len(segments) == 2
         assert segments[0].end == segments[1].start == utc(2026, 3, 1)
 
     def test_the_design_s_own_four_hundred_day_example(self):
-        """"Monthly rows for the old part, daily for the middle, raw for the rest"."""
         ladder = tiered(raw="3 days", day="1 year", month=None)._tiers
         segments = _plan(
             ladder,
@@ -323,7 +244,6 @@ class TestPlanning:
         assert [item.grain for item in segments] == ["month", "day", "raw"]
 
     def test_segments_are_contiguous_and_half_open(self):
-        """A boundary can neither double-count nor gap."""
         ladder = tiered(raw="3 days", day="1 year", month=None)._tiers
         segments = _plan(
             ladder,
@@ -361,23 +281,17 @@ class TestPlanning:
     def test_the_refusal_says_how_to_accept_it(self):
         ladder = tiered(raw="3 days", day="1 year", month=None)._tiers
         with pytest.raises(SeriesError) as caught:
-            _plan(
-                ladder, start=utc(2025, 1, 20), end=utc(2026, 3, 4), now=utc(2026, 3, 4)
-            )
+            _plan(ladder, start=utc(2025, 1, 20), end=utc(2026, 3, 4), now=utc(2026, 3, 4))
         assert "allow_coarsening=True" in str(caught.value)
 
     def test_a_range_past_every_window_refuses(self):
         ladder = tiered(raw="3 days", day="1 year")._tiers
         with pytest.raises(SeriesError, match="older than every declared tier"):
-            _plan(
-                ladder, start=utc(2020, 1, 1), end=utc(2020, 2, 1), now=utc(2026, 3, 4)
-            )
+            _plan(ladder, start=utc(2020, 1, 1), end=utc(2020, 2, 1), now=utc(2026, 3, 4))
 
     def test_adjacent_pieces_on_one_tier_are_merged(self):
         ladder = tiered(raw=None, day=None)._tiers
-        segments = _plan(
-            ladder, start=utc(2020, 1, 1), end=utc(2026, 3, 4), now=utc(2026, 3, 4)
-        )
+        segments = _plan(ladder, start=utc(2020, 1, 1), end=utc(2026, 3, 4), now=utc(2026, 3, 4))
         assert len(segments) == 1
 
 
@@ -387,9 +301,6 @@ class TestGrainOrdering:
         assert widths == sorted(widths)
 
 
-# -- reading across tiers -----------------------------------------------------
-
-
 def _rows(*pairs):
     return [(bucket, value) for bucket, value in pairs]
 
@@ -397,9 +308,7 @@ def _rows(*pairs):
 class TestTieredRead:
     """The caller never learns there were tiers -- but the envelope says so."""
 
-    async def test_one_spine_comes_back_however_many_tiers_answered(
-        self, session, database
-    ):
+    async def test_one_spine_comes_back_however_many_tiers_answered(self, session, database):
         database.connection.script("generate_series", _rows((utc(2026, 3, 3), 4)))
         database.connection.script("series_buckets", [(utc(2026, 1, 5), {"n": 9}, None)])
         declared = tiered(raw="3 days", day="1 year")
@@ -411,9 +320,7 @@ class TestTieredRead:
         assert len(result.series) == 1, "one measure is one series, tiers or not"
         assert result.bucket == "day"
 
-    async def test_the_envelope_reports_the_grain_used_per_segment(
-        self, session, database
-    ):
+    async def test_the_envelope_reports_the_grain_used_per_segment(self, session, database):
         database.connection.script("generate_series", _rows((utc(2026, 3, 3), 4)))
         database.connection.script("series_buckets", [])
         declared = tiered(raw="3 days", day="1 year")
@@ -428,15 +335,10 @@ class TestTieredRead:
     async def test_an_untiered_view_reports_no_segments(self, session, database):
         database.connection.script("generate_series", _rows((utc(2026, 3, 1), 1)))
         declared = view().measure(n=count())
-        result = await declared.run(
-            session, range=Range(utc(2026, 3, 1), utc(2026, 3, 2))
-        )
+        result = await declared.run(session, range=Range(utc(2026, 3, 1), utc(2026, 3, 2)))
         assert result.segments == ()
 
-    async def test_a_tier_read_never_touches_the_source_table(
-        self, session, database
-    ):
-        """The whole point of materialising: the old part costs one stored read."""
+    async def test_a_tier_read_never_touches_the_source_table(self, session, database):
         database.connection.script("series_buckets", [(utc(2026, 1, 5), {"n": 9}, None)])
         declared = tiered(raw="3 days", day=None)
         await declared.run(
@@ -444,13 +346,9 @@ class TestTieredRead:
             range=Range(utc(2026, 1, 1), utc(2026, 1, 20)),
             now=utc(2026, 3, 4),
         )
-        assert not any(
-            "generate_series" in sql for sql in database.connection.statements
-        )
+        assert not any("generate_series" in sql for sql in database.connection.statements)
 
-    async def test_coarsening_is_refused_on_the_read_path_too(
-        self, session, database
-    ):
+    async def test_coarsening_is_refused_on_the_read_path_too(self, session, database):
         declared = tiered(raw="3 days", day="1 year", month=None)
         with pytest.raises(SeriesError, match="allow_coarsening=True"):
             await declared.run(
@@ -459,9 +357,7 @@ class TestTieredRead:
                 now=utc(2026, 3, 4),
             )
 
-    async def test_allow_coarsening_accepts_it_and_says_where(
-        self, session, database
-    ):
+    async def test_allow_coarsening_accepts_it_and_says_where(self, session, database):
         database.connection.script("generate_series", _rows((utc(2026, 3, 3), 4)))
         database.connection.script("series_buckets", [])
         declared = tiered(raw="3 days", day="1 year", month=None)
@@ -476,7 +372,6 @@ class TestTieredRead:
     async def test_a_read_in_a_foreign_zone_refuses_rather_than_returning_wrong_days(
         self, session, database
     ):
-        """The zone catch, on the path a request actually takes."""
         declared = tiered(raw="3 days", day=None)
         with pytest.raises(SeriesError, match="no tier can answer for zone"):
             await declared.run(
@@ -486,10 +381,7 @@ class TestTieredRead:
                 now=utc(2026, 3, 4),
             )
 
-    async def test_a_foreign_zone_inside_raws_window_is_fine(
-        self, session, database
-    ):
-        """Raw is not cut into anything, so it answers for any zone."""
+    async def test_a_foreign_zone_inside_raws_window_is_fine(self, session, database):
         database.connection.script("generate_series", _rows((utc(2026, 3, 3), 4)))
         declared = tiered(raw="3 days", day=None)
         result = await declared.run(
@@ -500,10 +392,7 @@ class TestTieredRead:
         )
         assert result.zone == "Europe/London"
 
-    async def test_a_runtime_zone_owns_a_tiered_view_with_no_stored_zone(
-        self, session, database
-    ):
-        """A declaration may defer its zone; tier planning must use the run's zone."""
+    async def test_a_runtime_zone_owns_a_tiered_view_with_no_stored_zone(self, session, database):
         database.connection.script("generate_series", _rows((utc(2026, 3, 3), 4)))
         declared = (
             Series(Trek, at=Trek.started_at, bucket=Day)
@@ -518,9 +407,6 @@ class TestTieredRead:
             now=utc(2026, 3, 4),
         )
         assert result.zone == "Europe/London"
-
-
-# -- rollup -------------------------------------------------------------------
 
 
 class TestRollup:
@@ -540,16 +426,8 @@ class TestRollup:
         )
 
     async def test_it_reconciles_before_it_rolls_up(self, session, database):
-        """A late write folded in *after* a coarse bucket was carved is invisible.
-
-        Corrections are recorded against the fine grain; a month built from a
-        stale settled value inherits the error where it is no longer traceable
-        to the row that caused it.
-        """
         database.connection.script("generate_series", _rows((utc(2026, 1, 1), 30)))
-        database.connection.script(
-            "series_buckets", [(utc(2026, 1, 15), {"n": 1}, None)]
-        )
+        database.connection.script("series_buckets", [(utc(2026, 1, 15), {"n": 1}, None)])
         declared = tiered(raw="3 days", month=None)
         await declared.rollup(
             session,
@@ -562,17 +440,13 @@ class TestRollup:
         # arriving before the first source read is the ordering, observably.
         assert "series_buckets" in statements[0], "reconcile has to come first"
         assert any("generate_series" in sql for sql in statements[1:])
-        assert any(
-            "INSERT INTO" in sql and "series_buckets" in sql for sql in statements
-        ), "expected the rollup write"
-
-    async def test_it_does_not_overwrite_a_bucket_it_already_wrote(
-        self, session, database
-    ):
-        database.connection.script("generate_series", _rows((utc(2026, 1, 1), 30)))
-        database.connection.script(
-            "series_buckets", [(utc(2026, 1, 1), {"n": 30}, None)]
+        assert any("INSERT INTO" in sql and "series_buckets" in sql for sql in statements), (
+            "expected the rollup write"
         )
+
+    async def test_it_does_not_overwrite_a_bucket_it_already_wrote(self, session, database):
+        database.connection.script("generate_series", _rows((utc(2026, 1, 1), 30)))
+        database.connection.script("series_buckets", [(utc(2026, 1, 1), {"n": 30}, None)])
         declared = tiered(raw="3 days", month=None)
         written = await declared.rollup(
             session,
@@ -581,10 +455,7 @@ class TestRollup:
         )
         assert written["month"] == (), "already materialised, nothing to add"
 
-    async def test_it_stops_at_the_watermark_for_the_coarse_grain(
-        self, session, database
-    ):
-        """A month is not final until the month has closed plus the allowance."""
+    async def test_it_stops_at_the_watermark_for_the_coarse_grain(self, session, database):
         database.connection.script("generate_series", [])
         database.connection.script("series_buckets", [])
         declared = tiered(raw="3 days", month=None)
@@ -598,19 +469,11 @@ class TestRollup:
     async def test_rollup_without_a_ladder_refuses(self, session):
         declared = view().measure(n=count()).seal(after="2h")
         with pytest.raises(SeriesError, match="needs retain"):
-            await declared.rollup(
-                session, range=Range(utc(2026, 1, 1), utc(2026, 2, 1))
-            )
+            await declared.rollup(session, range=Range(utc(2026, 1, 1), utc(2026, 2, 1)))
 
     async def test_a_coarse_tier_is_built_from_source_rows_not_from_the_fine_tier(
         self, session, database
     ):
-        """At this stage nothing is ever removed, so raw is always available.
-
-        Recomputing from it is correct by construction and cannot average
-        averages. Tier-from-tier rollup becomes necessary only when retention
-        starts genuinely removing rows.
-        """
         database.connection.script("generate_series", _rows((utc(2026, 1, 1), 30)))
         database.connection.script("series_buckets", [])
         declared = tiered(raw="3 days", month=None)
@@ -619,36 +482,25 @@ class TestRollup:
             range=Range(utc(2026, 1, 1), utc(2026, 2, 1)),
             now=utc(2026, 3, 4),
         )
-        assert any(
-            "generate_series" in sql for sql in database.connection.statements
-        ), "the coarse grain is computed from the source table"
+        assert any("generate_series" in sql for sql in database.connection.statements), (
+            "the coarse grain is computed from the source table"
+        )
 
 
 class TestTierIdentity:
     def test_a_tier_is_the_same_declaration_at_another_grain(self):
-        """§7.3's claim, made concrete: the grain is already part of the key.
-
-        No second table and no second kind of identity -- ``view_key`` folds the
-        bucket into the digest, so asking for the same declaration at Month
-        yields the monthly tier's key.
-        """
         declared = tiered(raw="3 days", month=None)
         day_key, _ = declared._identity("UTC", {})
         month_key, _ = declared._identity("UTC", {}, grain=Month)
         assert day_key != month_key
 
     def test_the_same_grain_key_is_the_one_sealing_already_writes(self):
-        """The daily tier of a daily view *is* the settled rows, not a copy."""
         declared = tiered(raw="3 days", day="1 year")
-        assert declared._identity("UTC", {}) == declared._identity(
-            "UTC", {}, grain=Day
-        )
+        assert declared._identity("UTC", {}) == declared._identity("UTC", {}, grain=Day)
 
     def test_a_different_zone_files_separately(self):
         declared = tiered(raw="3 days", month=None)
-        assert declared._identity("UTC", {}) != declared._identity(
-            "Pacific/Auckland", {}
-        )
+        assert declared._identity("UTC", {}) != declared._identity("Pacific/Auckland", {})
 
 
 class TestTierRepr:
@@ -658,15 +510,12 @@ class TestTierRepr:
 
     def test_a_segment_says_which_tier_answered(self):
         ladder = tiered(raw="3 days", day="1 year")._tiers
-        segments = _plan(
-            ladder, start=utc(2026, 1, 1), end=utc(2026, 3, 4), now=utc(2026, 3, 4)
-        )
+        segments = _plan(ladder, start=utc(2026, 1, 1), end=utc(2026, 3, 4), now=utc(2026, 3, 4))
         assert "day" in repr(segments[0])
 
 
 class TestRetentionIsNotDeletion:
     def test_the_module_contains_no_delete_for_a_retention_window(self):
-        """Stage 8 adds no way to remove anything. `drop` is stages away."""
         import wreath._series.tiers as module
 
         text = open(module.__file__).read().upper()
@@ -676,7 +525,6 @@ class TestRetentionIsNotDeletion:
     async def test_an_expired_tier_is_still_read_if_a_coarser_one_covers_it(
         self, session, database
     ):
-        """Past its window a tier is merely no longer *preferred*, not gone."""
         database.connection.script("series_buckets", [(utc(2025, 6, 1), {"n": 7}, None)])
         declared = tiered(raw="3 days", day="1 year", month=None)
         result = await declared.run(

@@ -1,8 +1,3 @@
-"""StatsD / DogStatsD bridge — line format, deltas, tags, UDP batching.
-
-Runs under the built package (``import wreath._statsd``) or, with no native build,
-by loading the stdlib-only modules by path under a stub ``wreath`` package.
-"""
 from __future__ import annotations
 
 import importlib
@@ -36,11 +31,15 @@ def _mod(name: str):
 statsd = _mod("_statsd")
 
 
-# --- duck-typed snapshot fixtures ------------------------------------------
-
 class _Loss:
-    _FIELDS = ("orphan_phase", "orphan_correlation", "pending_evicted",
-               "decode_error", "export_error", "recent_evicted")
+    _FIELDS = (
+        "orphan_phase",
+        "orphan_correlation",
+        "pending_evicted",
+        "decode_error",
+        "export_error",
+        "recent_evicted",
+    )
 
     def __init__(self, **kw):
         for f in self._FIELDS:
@@ -81,13 +80,14 @@ def _parse(lines):
     return out
 
 
-# --- tests ------------------------------------------------------------------
-
 def test_plain_statsd_folds_labels_and_deltas():
     b = statsd.StatsDBridge(_Src(_Snap(0, 0, [], _Loss())), prefix="wreath")
-    snap = _Snap(assembled=10, pending=3,
-                 routes=[_Route(7, count=5, errors=1, dsum=4000.0, dmax=900.0)],
-                 loss=_Loss(decode_error=2))
+    snap = _Snap(
+        assembled=10,
+        pending=3,
+        routes=[_Route(7, count=5, errors=1, dsum=4000.0, dmax=900.0)],
+        loss=_Loss(decode_error=2),
+    )
     p = _parse(b._lines(snap))
     # counter deltas (first flush → full value); gauges absolute; labels folded into name.
     assert p["wreath.http.requests.7"] == ("5", "c", None)
@@ -98,20 +98,22 @@ def test_plain_statsd_folds_labels_and_deltas():
     assert p["wreath.flight.pending"] == ("3", "g", None)
     assert p["wreath.flight.projector_loss.decode_error"] == ("2", "c", None)
     # second flush: only the increment is sent for counters; gauge re-sent absolute.
-    snap2 = _Snap(assembled=14, pending=1,
-                  routes=[_Route(7, count=8, errors=1, dsum=4000.0, dmax=100.0)],
-                  loss=_Loss(decode_error=2))
+    snap2 = _Snap(
+        assembled=14,
+        pending=1,
+        routes=[_Route(7, count=8, errors=1, dsum=4000.0, dmax=100.0)],
+        loss=_Loss(decode_error=2),
+    )
     p2 = _parse(b._lines(snap2))
-    assert p2["wreath.http.requests.7"] == ("3", "c", None)      # 8-5
-    assert p2["wreath.http.errors.7"] == ("0", "c", None)        # 1-1
-    assert p2["wreath.flight.assembled"] == ("4", "c", None)     # 14-10
+    assert p2["wreath.http.requests.7"] == ("3", "c", None)  # 8-5
+    assert p2["wreath.http.errors.7"] == ("0", "c", None)  # 1-1
+    assert p2["wreath.flight.assembled"] == ("4", "c", None)  # 14-10
     assert p2["wreath.flight.pending"] == ("1", "g", None)
     assert p2["wreath.flight.projector_loss.decode_error"] == ("0", "c", None)
 
 
 def test_dogstatsd_tags():
-    b = statsd.StatsDBridge(_Src(_Snap(0, 0, [], _Loss())), dogstatsd=True,
-                            tags={"env": "prod"})
+    b = statsd.StatsDBridge(_Src(_Snap(0, 0, [], _Loss())), dogstatsd=True, tags={"env": "prod"})
     snap = _Snap(1, 0, [_Route(7, 5, 0, 0.0, 0.0)], _Loss(export_error=3))
     lines = b._lines(snap)
     # per-route counter: value on the metric, labels+static tags in `|#...`.
@@ -119,8 +121,11 @@ def test_dogstatsd_tags():
     assert req.startswith("wreath.http.requests:5|c|#")
     assert "route_id:7" in req and "env:prod" in req
     # loss is one line per reason, all sharing the metric name — differ by tag.
-    loss = next(ln for ln in lines
-                if ln.startswith("wreath.flight.projector_loss:") and "reason:export_error" in ln)
+    loss = next(
+        ln
+        for ln in lines
+        if ln.startswith("wreath.flight.projector_loss:") and "reason:export_error" in ln
+    )
     assert loss.startswith("wreath.flight.projector_loss:3|c|#") and "env:prod" in loss
 
 
@@ -128,8 +133,11 @@ def test_route_label_resolvers_and_tag_sanitization():
     snap = _Snap(1, 0, [_Route(7, 5, 0, 0.0, 0.0)], _Loss())
     mapping = {7: {"route:name": "café west", "env": "route"}}
     b = statsd.StatsDBridge(
-        _Src(snap), prefix="my service", dogstatsd=True,
-        tags={"env": "static", "region": "ap:south"}, route_labels=mapping,
+        _Src(snap),
+        prefix="my service",
+        dogstatsd=True,
+        tags={"env": "static", "region": "ap:south"},
+        route_labels=mapping,
     )
 
     request = next(line for line in b._lines(snap) if ".http.requests:" in line)
@@ -139,10 +147,7 @@ def test_route_label_resolvers_and_tag_sanitization():
     callable_bridge = statsd.StatsDBridge(
         _Src(snap), route_labels=lambda route_id: {"endpoint": f"route {route_id}"}
     )
-    request = next(
-        line for line in callable_bridge._lines(snap)
-        if ".http.requests." in line
-    )
+    request = next(line for line in callable_bridge._lines(snap) if ".http.requests." in line)
     assert request == "wreath.http.requests.route_7:5|c"
 
 

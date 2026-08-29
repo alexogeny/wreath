@@ -35,21 +35,16 @@ def dataclass_field_image(
     """Compile declaration-order dataclass facts from already-resolved hints."""
     result: list[DeclaredField] = []
     for field in dataclasses.fields(model):
-        annotation = hints.get(
-            field.name, field.type if fallback is _DECLARED else fallback
-        )
+        annotation = hints.get(field.name, field.type if fallback is _DECLARED else fallback)
         metadata: tuple[Any, ...] = ()
         if typing.get_origin(annotation) is typing.Annotated:
             _base, *items = typing.get_args(annotation)
             metadata = tuple(items)
         required = (
-            field.default is dataclasses.MISSING
-            and field.default_factory is dataclasses.MISSING
+            field.default is dataclasses.MISSING and field.default_factory is dataclasses.MISSING
         )
         default = field.default if field.default is not dataclasses.MISSING else None
-        result.append(
-            DeclaredField(field.name, annotation, required, default, metadata)
-        )
+        result.append(DeclaredField(field.name, annotation, required, default, metadata))
     return tuple(result)
 
 

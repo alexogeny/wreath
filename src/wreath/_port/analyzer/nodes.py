@@ -8,9 +8,7 @@ import ast
 def parent_map(tree: ast.AST) -> dict[int, ast.AST]:
     """`id(child) -> parent` for one module, built in a single walk."""
     return {
-        id(child): parent
-        for parent in ast.walk(tree)
-        for child in ast.iter_child_nodes(parent)
+        id(child): parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)
     }
 
 

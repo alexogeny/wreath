@@ -93,9 +93,6 @@ class UnknownIdentityProvider(SsoRefusal):
         )
 
 
-# --- the per-organisation directory -----------------------------------------
-
-
 @dataclass(frozen=True, slots=True)
 class IdentityProviderConfig:
     """One organisation's identity provider.
@@ -152,9 +149,6 @@ class IdentityProviderDirectory:
 
     def organizations(self) -> tuple[str, ...]:
         return tuple(self._by_organization)
-
-
-# --- the login that began ---------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,15 +256,15 @@ class PendingLoginStore:
         if now < self._next_sweep:
             return
         cutoff = now - self._ttl
-        for key in [k for k, v in self._by_id.items() if v.issued_at <= cutoff]:
+        expired_ids = [
+            request_id for request_id, pending in self._by_id.items() if pending.issued_at <= cutoff
+        ]
+        for key in expired_ids:
             del self._by_id[key]
         self._next_sweep = min(
             (pending.issued_at + self._ttl for pending in self._by_id.values()),
             default=float("inf"),
         )
-
-
-# --- SAML -------------------------------------------------------------------
 
 
 def _request_id() -> str:
@@ -304,7 +298,7 @@ class SamlServiceProvider:
         discover a typo.
         """
         certificates = "".join(
-            "<md:KeyDescriptor use=\"signing\"><ds:KeyInfo><ds:X509Data>"
+            '<md:KeyDescriptor use="signing"><ds:KeyInfo><ds:X509Data>'
             f"<ds:X509Certificate>{_pem_body(certificate)}</ds:X509Certificate>"
             "</ds:X509Data></ds:KeyInfo></md:KeyDescriptor>"
             for certificate in self.certificates
@@ -314,13 +308,13 @@ class SamlServiceProvider:
             '<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" '
             'xmlns:ds="http://www.w3.org/2000/09/xmldsig#" '
             f"entityID={quoteattr(self.entity_id)}>"
-            '<md:SPSSODescriptor protocolSupportEnumeration='
+            "<md:SPSSODescriptor protocolSupportEnumeration="
             '"urn:oasis:names:tc:SAML:2.0:protocol" '
             'AuthnRequestsSigned="false" WantAssertionsSigned="true">'
             f"{certificates}"
             "<md:AssertionConsumerService "
             'Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" '
-            f"Location={quoteattr(self.acs_url)} index=\"0\" isDefault=\"true\"/>"
+            f'Location={quoteattr(self.acs_url)} index="0" isDefault="true"/>'
             "</md:SPSSODescriptor></md:EntityDescriptor>"
         )
 
@@ -362,7 +356,7 @@ class SamlServiceProvider:
         return (
             '<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" '
             'xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" '
-            f"ID={quoteattr(pending.request_id)} Version=\"2.0\" "
+            f'ID={quoteattr(pending.request_id)} Version="2.0" '
             f"IssueInstant={quoteattr(stamp)} "
             f"Destination={quoteattr(provider.sso_url)} "
             'ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" '
@@ -403,13 +397,16 @@ class SamlServiceProvider:
             session_id=session_id,
         )
         config = self.directory.for_organization(pending.organization)
-        idp = IdentityProvider(
-            entity_id=config.entity_id, certificates=config.certificates)
+        idp = IdentityProvider(entity_id=config.entity_id, certificates=config.certificates)
         sp = ServiceProvider(entity_id=self.entity_id, acs_url=self.acs_url)
         try:
             return await verify_response(
-                raw, idp=idp, sp=sp, ledger=ledger,
-                in_response_to=in_response_to, now=now,
+                raw,
+                idp=idp,
+                sp=sp,
+                ledger=ledger,
+                in_response_to=in_response_to,
+                now=now,
             )
         except SamlRefusal as refusal:
             # Re-raised rather than propagated so a caller has one exception
@@ -439,9 +436,6 @@ def _escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-# --- provisioning -----------------------------------------------------------
-
-
 @dataclass(frozen=True, slots=True)
 class AttributeMapping:
     """Which assertion attributes become which fields. Declared, never inferred.
@@ -459,8 +453,7 @@ class AttributeMapping:
 
     def declared(self) -> tuple[str, ...]:
         return tuple(
-            name for name in (self.email, self.display_name, self.external_id)
-            if name is not None
+            name for name in (self.email, self.display_name, self.external_id) if name is not None
         )
 
     def apply(self, attributes: Mapping[str, Any]) -> dict[str, Any]:
@@ -483,10 +476,8 @@ class AttributeMapping:
             )
         return {
             "email": attributes[self.email],
-            "display_name": (
-                attributes.get(self.display_name) if self.display_name else None),
-            "external_id": (
-                attributes.get(self.external_id) if self.external_id else None),
+            "display_name": (attributes.get(self.display_name) if self.display_name else None),
+            "external_id": (attributes.get(self.external_id) if self.external_id else None),
         }
 
 
@@ -568,9 +559,6 @@ class JitProvisioning:
             return 0
         self._memberships.pop(user_id, None)
         return 1
-
-
-# --- OIDC -------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -678,7 +666,11 @@ class OidcRelyingParty:
         return len(self._keys)
 
     def begin_login(
-        self, *, organization: str, session_id: str, now: float | None = None,
+        self,
+        *,
+        organization: str,
+        session_id: str,
+        now: float | None = None,
     ) -> _OidcFlow:
         if not session_id:
             raise SsoRefusal(
@@ -693,8 +685,11 @@ class OidcRelyingParty:
                 f"the OIDC pending-login store is at its ceiling of {self._max_pending}",
             )
         verifier = secrets.token_urlsafe(64)
-        challenge = urlsafe_b64encode(
-            hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
+        challenge = (
+            urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest())
+            .rstrip(b"=")
+            .decode("ascii")
+        )
         flow = _OidcFlow(
             state=secrets.token_urlsafe(24),
             nonce=secrets.token_urlsafe(16),
@@ -708,9 +703,7 @@ class OidcRelyingParty:
         self._next_sweep = min(self._next_sweep, moment + self._ttl)
         return flow
 
-    def consume_state(
-        self, state: str, *, session_id: str, now: float | None = None
-    ) -> _OidcFlow:
+    def consume_state(self, state: str, *, session_id: str, now: float | None = None) -> _OidcFlow:
         """Spend the state, refusing a replay or another browser's callback."""
         flow = self._flows.pop(state, None)
         if flow is None:

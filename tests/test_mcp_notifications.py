@@ -1,15 +1,3 @@
-"""The server-to-client stream: what arrives on it, and when it ends.
-
-`GET /mcp` answered 405 until resources existed, because a stream that can only
-emit keep-alives is worse than no stream at all. It carries two things now: a
-subscribed resource changing, and a running tool's progress -- and the progress
-half is `wreath.progress` relayed onto the session, not a second mechanism.
-
-The queue is what makes these tests readable as well as what makes the server
-safe: a notification is buffered whether or not anyone is reading, so a test can
-enqueue first and open the stream afterwards rather than racing it.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -134,8 +122,9 @@ async def test_a_subscriber_is_told_when_the_resource_changes() -> None:
         # Nobody is subscribed to this one, so nobody is told about it.
         assert mcp.notify_resource_updated("camera://creek") == 0
 
-        stream = asyncio.ensure_future(client.get("/mcp", headers={**STREAM,
-                                                                   "mcp-session-id": session}))
+        stream = asyncio.ensure_future(
+            client.get("/mcp", headers={**STREAM, "mcp-session-id": session})
+        )
         await asyncio.sleep(0)
         await client.delete("/mcp", headers={"mcp-session-id": session})
         response = await asyncio.wait_for(stream, timeout=5)
@@ -178,7 +167,6 @@ async def test_unsubscribing_stops_the_notifications() -> None:
 
 
 async def test_one_stream_per_session() -> None:
-    """Two would split a conversation's notifications between them at random."""
     app, _ = build()
     async with TestClient(app) as client:
         session = await initialize(client)
@@ -193,7 +181,6 @@ async def test_one_stream_per_session() -> None:
 
 
 async def test_a_closed_stream_can_be_reopened() -> None:
-    """A reconnecting client is the normal case, not an error."""
     app, mcp = build()
     async with TestClient(app) as client:
         session = await initialize(client)
@@ -212,7 +199,6 @@ async def test_a_closed_stream_can_be_reopened() -> None:
 
 
 async def test_an_idle_stream_says_something() -> None:
-    """Nothing in `SSEResponse` is on a timer, so this generator has to be."""
     app = Wreath()
     mcp = MCP(
         app,
@@ -237,7 +223,6 @@ async def test_an_idle_stream_says_something() -> None:
 
 
 async def test_a_notification_nobody_reads_is_dropped_and_counted() -> None:
-    """The silent-degradation shape, made loud."""
     app = Wreath()
     mcp = MCP(app, name="x", version="1.0.0", limits=MCPLimits(max_pending_notifications=2))
 
@@ -265,11 +250,6 @@ async def test_a_notification_nobody_reads_is_dropped_and_counted() -> None:
 
 
 async def test_a_tool_s_progress_reaches_the_client_that_asked_for_it() -> None:
-    """`wreath.progress` relayed onto the session, and nothing else.
-
-    The tool holds the call open until its report has actually been queued, so
-    the assertion is about delivery rather than about a sleep being long enough.
-    """
     app = Wreath()
     mcp = MCP(app, name="x", version="1.0.0", progress_interval=0.01)
 
@@ -314,13 +294,6 @@ async def test_a_tool_s_progress_reaches_the_client_that_asked_for_it() -> None:
 
 
 async def test_progress_with_no_message_carries_no_message_key() -> None:
-    """MCP's `message` is optional, and an empty one is not the same as absent.
-
-    `wreath.progress` defaults the message to `""`, so a tool reporting a bare
-    percentage would otherwise publish `"message": ""` -- which a client renders
-    as a caption that blanks whatever it last showed. Only the with-a-message
-    case was covered, so the guard that keeps the key out decided nothing.
-    """
     app = Wreath()
     mcp = MCP(app, name="x", version="1.0.0", progress_interval=0.01)
 
@@ -361,7 +334,6 @@ async def test_progress_with_no_message_carries_no_message_key() -> None:
 
 
 async def test_a_tool_may_report_progress_with_nobody_listening() -> None:
-    """The reporter is always there; only the relay depends on a token."""
     app = Wreath()
     mcp = MCP(app, name="x", version="1.0.0")
     seen: list[object] = []
@@ -383,10 +355,7 @@ async def test_a_tool_may_report_progress_with_nobody_listening() -> None:
         assert seen == [None]
         # Written to the registry regardless, which is what makes the same
         # reporter usable from a status route or a durable job.
-        recorded = [
-            mcp.progress.get(key)
-            for key in (f"mcp:{session}:2",)
-        ]
+        recorded = [mcp.progress.get(key) for key in (f"mcp:{session}:2",)]
         assert recorded[0] is not None
         assert recorded[0].percent == 10.0
         # Nothing was relayed, because nobody asked to be told.
@@ -397,7 +366,5 @@ async def test_the_stream_belongs_to_the_session_that_opened_it() -> None:
     app, _ = build()
     async with TestClient(app) as client:
         await initialize(client)
-        response = await client.get(
-            "/mcp", headers={**STREAM, "mcp-session-id": "not-a-session"}
-        )
+        response = await client.get("/mcp", headers={**STREAM, "mcp-session-id": "not-a-session"})
         assert response.status == 404

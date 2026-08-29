@@ -1,12 +1,3 @@
-"""Models and a fake driver for the calculated-view tests.
-
-The fake connection is the ORM suite's, so these exercise the real compiler,
-the real predicate machinery, and the real envelope assembly without a
-database. What only a live PostgreSQL can settle -- that Python's bucket
-arithmetic agrees with ``date_trunc``, and that the spine steps a calendar day
-across a DST change -- lives in ``tests/postgres/test_series_integration.py``.
-"""
-
 from __future__ import annotations
 
 import datetime
@@ -82,9 +73,7 @@ def database() -> FakeDatabase:
 
 @pytest.fixture
 def registry(database: FakeDatabase) -> Registry:
-    return Registry(
-        database, [Trek, Herd, Paddock, Deploy, Sighting], validate_schema="off"
-    )
+    return Registry(database, [Trek, Herd, Paddock, Deploy, Sighting], validate_schema="off")
 
 
 @pytest.fixture

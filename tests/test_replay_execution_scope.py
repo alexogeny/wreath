@@ -1,12 +1,3 @@
-"""The boundary-double installer, generalised from a request to any execution.
-
-`installed_adapters` was named and documented for a request replay, and nothing
-in its body ever was: it swaps *application*-level registries and restores them
-in a `finally`. These tests pin the generalisation -- the same installer with a
-scope that is not an app, and a boundary held on an attribute rather than in a
-name -> object mapping, which is how a `JobRunner` holds its `Database`.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -47,7 +38,6 @@ def _adapters() -> ReplayAdapters:
 
 
 def test_installed_adapters_is_the_request_spelling_of_one_installer():
-    """The old name still installs, so no request-replay caller had to change."""
     scope = _Scope()
     adapters = _adapters()
     with installed_adapters(scope, adapters):
@@ -74,12 +64,6 @@ def test_a_scope_that_is_not_an_app_still_gets_its_doubles():
 
 
 def test_a_boundary_held_on_an_attribute_is_swapped_and_restored():
-    """A `JobRunner` holds one `Database` on `_db`, not in a registry.
-
-    Without this the runner's own queue statements would reach the live
-    database during a replay, which is the property that makes replaying a
-    production recording unsafe.
-    """
     holder = _Holder()
     adapters = _adapters()
     with installed_boundaries(None, adapters, slots=((holder, "_db", "main"),)):
@@ -88,15 +72,6 @@ def test_a_boundary_held_on_an_attribute_is_swapped_and_restored():
 
 
 def test_a_slot_naming_an_undoubled_database_is_refused():
-    """Silently leaving the slot alone would run the attempt against the live
-    database while every other boundary was doubled -- the exact half-installed
-    state this installer exists to prevent.
-
-    Asserted on the *message*, not on the name: the bare `adapters.databases[name]`
-    a few lines further down raises `KeyError('ledger')` too, so a test matching
-    only the name passes whichever of the two fired -- including the one that
-    fires *after* the other boundaries have been swapped.
-    """
     holder = _Holder()
     with pytest.raises(KeyError) as error:
         with installed_boundaries(None, _adapters(), slots=((holder, "_db", "ledger"),)):
@@ -108,9 +83,6 @@ def test_a_slot_naming_an_undoubled_database_is_refused():
 
 
 def test_no_databases_to_double_leaves_the_binder_alone():
-    """`_dirty` forces a route recompile, and there is nothing to recompile
-    against when the doubles are all clients and stores. Setting it anyway
-    would make every replay pay a recompile for a swap that did not happen."""
     scope = _Scope()
     adapters = ReplayAdapters(clients={"api": FaultyHttpClient("api")})
     with installed_boundaries(scope, adapters):
@@ -120,9 +92,6 @@ def test_no_databases_to_double_leaves_the_binder_alone():
 
 
 def test_a_scope_with_no_registries_at_all_is_installed_into_harmlessly():
-    """A bare object -- a `JobRunner`, which has no `_databases` -- reaches the
-    installer through `slots` and nothing else, and must not raise on the
-    registries it does not have."""
     holder = _Holder()
     with installed_boundaries(holder, _adapters(), slots=((holder, "_db", "main"),)):
         assert holder._db is not None
@@ -148,9 +117,6 @@ def test_no_adapters_installs_nothing_and_leaves_the_slot_alone():
     with installed_boundaries(scope, None, slots=((holder, "_db", "main"),)):
         assert holder._db == "real-database"
         assert scope._databases["main"] == "real-database"
-
-
-# --- the mirror: watching a boundary instead of replacing it -----------------
 
 
 class _Trace:
@@ -235,9 +201,6 @@ async def test_an_observer_records_which_crossing_raised_and_re_raises_it():
 
 
 async def test_a_scope_holding_registries_but_no_binder_is_watched_anyway():
-    """A plain object holding databases -- not a `Wreath` -- has nothing to
-    recompile, and reaching for `_dirty` on it would raise inside the recorder
-    and take the attempt down with it."""
     from wreath._replay_adapters import observed_boundaries
 
     class Registries:
@@ -252,9 +215,6 @@ async def test_a_scope_holding_registries_but_no_binder_is_watched_anyway():
 
 
 async def test_a_scope_with_nothing_to_watch_leaves_the_binder_alone():
-    """A runner whose recorder was given no application has no registries to
-    wrap, and forcing a recompile for a swap that did not happen is a cost
-    every armed attempt would pay."""
     from wreath._replay_adapters import observed_boundaries
 
     class Bare:

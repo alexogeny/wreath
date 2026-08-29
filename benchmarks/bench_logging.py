@@ -1,8 +1,4 @@
-"""What `wreath.logging` costs, measured -- the six numbers the plan owed.
-
-`docs/plans/first-class-logging.md` shipped stages 1-6 with a list of
-measurements under "Nothing is benchmarked", and AGENTS.md forbids any
-performance claim until they exist. This is that list, one suite per item:
+"""What `wreath.logging` costs, one suite per operation:
 
 | Suite      | The question the plan asked                                     |
 | ---------- | --------------------------------------------------------------- |
@@ -87,9 +83,6 @@ try:
     from wreath._native import _flight
 except ImportError:  # pragma: no cover - a pure build has no ring to publish to
     _flight = None  # type: ignore[assignment]
-
-
-# --- shared fixtures --------------------------------------------------------
 
 
 class CountingSink:
@@ -244,9 +237,7 @@ class NativeArm:
             if not drained:
                 return cells
             cells += sum(
-                1
-                for offset in range(1, len(drained), 64)
-                if drained[offset] == EventKind.LOG
+                1 for offset in range(1, len(drained), 64) if drained[offset] == EventKind.LOG
             )
 
 
@@ -275,9 +266,6 @@ def _structlog_logger(level: int) -> Any:
         cache_logger_on_first_use=True,
     )
     return structlog.get_logger()
-
-
-# --- suite: emit ------------------------------------------------------------
 
 
 def suite_emit(rounds: int, iterations: int, warmup: int) -> dict[str, Any]:
@@ -340,9 +328,7 @@ def suite_emit(rounds: int, iterations: int, warmup: int) -> dict[str, Any]:
 
         return payload
 
-    stdlib_null = _stdlib_logger(
-        "bench.null", stdlib_logging.NullHandler(), stdlib_logging.WARNING
-    )
+    stdlib_null = _stdlib_logger("bench.null", stdlib_logging.NullHandler(), stdlib_logging.WARNING)
     stdlib_stream = _stdlib_logger(
         "bench.stream",
         stdlib_logging.StreamHandler(DiscardStream()),
@@ -376,15 +362,11 @@ def suite_emit(rounds: int, iterations: int, warmup: int) -> dict[str, Any]:
             [
                 Arm(
                     "wreath event -> native emitter",
-                    payload=_native_payload(
-                        raw_arm, lambda i: DENIED_RAW(i, "orders")
-                    ),
+                    payload=_native_payload(raw_arm, lambda i: DENIED_RAW(i, "orders")),
                 ),
                 Arm(
                     "wreath event hashed -> native",
-                    payload=_native_payload(
-                        hashed_arm, lambda i: DENIED_HASHED(i, "orders")
-                    ),
+                    payload=_native_payload(hashed_arm, lambda i: DENIED_HASHED(i, "orders")),
                 ),
                 Arm(
                     "wreath log.info(**kwargs) -> native",
@@ -411,9 +393,7 @@ def suite_emit(rounds: int, iterations: int, warmup: int) -> dict[str, Any]:
     document = measure.report(arms, "noop", "noop (A/A)")
     document["structlog"] = "installed" if structlog is not None else "not installed"
     document["integrity"] = _verify_emit(counting)
-    document["integrity"]["native_ring_losses"] = {
-        arm.label: arm.check() for arm in native_arms
-    }
+    document["integrity"]["native_ring_losses"] = {arm.label: arm.check() for arm in native_arms}
     return document
 
 
@@ -450,9 +430,6 @@ def _verify_emit(sink: CountingSink) -> dict[str, Any]:
             "measuring the drop path it is labelled with."
         )
     return checks
-
-
-# --- suite: disabled --------------------------------------------------------
 
 
 def suite_disabled(rounds: int, iterations: int, warmup: int) -> dict[str, Any]:
@@ -508,9 +485,7 @@ def suite_disabled(rounds: int, iterations: int, warmup: int) -> dict[str, Any]:
                 "measuring the scratch-overflow drop path."
             )
 
-    stdlib_off = _stdlib_logger(
-        "bench.off", stdlib_logging.NullHandler(), stdlib_logging.WARNING
-    )
+    stdlib_off = _stdlib_logger("bench.off", stdlib_logging.NullHandler(), stdlib_logging.WARNING)
 
     def stdlib_disabled(n: int) -> None:
         for i in range(n):
@@ -555,9 +530,6 @@ def suite_disabled(rounds: int, iterations: int, warmup: int) -> dict[str, Any]:
         )
     document["integrity"] = {"disabled_published": counting.count}
     return document
-
-
-# --- suite: publish ---------------------------------------------------------
 
 
 def _publish_samples(cycle: Any, recorder: Any, batch: int, trials: int) -> list[float]:
@@ -639,8 +611,15 @@ def suite_publish(trials: int, ring: int) -> dict[str, Any]:
 
         def cycle(_i: int) -> None:
             recorder.log(
-                DENIED_RAW.site_id, int(log.WARN), 1, 0, 0, specs_blob, values,
-                key[0], key[1],
+                DENIED_RAW.site_id,
+                int(log.WARN),
+                1,
+                0,
+                0,
+                specs_blob,
+                values,
+                key[0],
+                key[1],
             )
 
         return cycle
@@ -675,14 +654,9 @@ def suite_publish(trials: int, ring: int) -> dict[str, Any]:
     document = measure.report(arms, "noop", "noop (A/A)", unit="ns")
     document["batch"] = batch
     document["trials"] = trials
-    document["ring_file_bytes"] = os.path.getsize(
-        os.path.join(mapped_dir, "flight.wfrr")
-    )
+    document["ring_file_bytes"] = os.path.getsize(os.path.join(mapped_dir, "flight.wfrr"))
     shutil.rmtree(mapped_dir, ignore_errors=True)
     return document
-
-
-# --- suite: drain -----------------------------------------------------------
 
 
 def suite_drain(trials: int, requests: int, ratios: tuple[int, ...]) -> dict[str, Any]:
@@ -706,9 +680,7 @@ def suite_drain(trials: int, requests: int, ratios: tuple[int, ...]) -> dict[str
         ring = 1 << (total_cells.bit_length() + 1)
         samples: list[float] = []
         for _ in range(trials):
-            recorder = _flight.Recorder(
-                _flight.MODE_PULSE, ring_records=ring, active_requests=4096
-            )
+            recorder = _flight.Recorder(_flight.MODE_PULSE, ring_records=ring, active_requests=4096)
             projector = Projector(
                 recorder,
                 on_log=lambda _record: None,
@@ -749,14 +721,8 @@ def suite_drain(trials: int, requests: int, ratios: tuple[int, ...]) -> dict[str
                 "raw": [round(value, 1) for value in samples],
             }
         )
-        print(
-            f"{ratio:4d} logs/request  {median:7.1f} ns/cell  "
-            f"{1000.0 / median:6.2f}M cells/s"
-        )
+        print(f"{ratio:4d} logs/request  {median:7.1f} ns/cell  {1000.0 / median:6.2f}M cells/s")
     return {"rows": rows, "requests_per_trial": requests, "trials": trials}
-
-
-# --- suite: request ---------------------------------------------------------
 
 
 def _bench_app(records: int, fields: int, level: Severity) -> Any:
@@ -888,9 +854,6 @@ def suite_request(rounds: int, iterations: int, warmup: int) -> dict[str, Any]:
     return document
 
 
-# --- suite: memory ----------------------------------------------------------
-
-
 def _traced(build: Any) -> int:
     """Bytes still allocated for what `build` returns, transients excluded.
 
@@ -988,9 +951,6 @@ def suite_memory(entries: int) -> dict[str, Any]:
     return {"entries": entries, "rows": rows, "limiter_capacity": DEFAULT_LIMITER_CAPACITY}
 
 
-# --- suite: e2e -------------------------------------------------------------
-
-
 def suite_e2e(requests: int, concurrency: int, repeats: int) -> dict[str, Any]:
     """Measurement 5, over a socket: the number a user actually sees.
 
@@ -1070,9 +1030,7 @@ def suite_e2e(requests: int, concurrency: int, repeats: int) -> dict[str, Any]:
                 "latency_ms_median": round(
                     statistics.median(r.latency_ms_median for r in results), 4
                 ),
-                "latency_ms_p99": round(
-                    statistics.median(r.latency_ms_p99 for r in results), 4
-                ),
+                "latency_ms_p99": round(statistics.median(r.latency_ms_p99 for r in results), 4),
                 "errors": sum(r.errors for r in results),
             }
         )
@@ -1090,9 +1048,6 @@ def suite_e2e(requests: int, concurrency: int, repeats: int) -> dict[str, Any]:
         "repeats": repeats,
         "rows": rows,
     }
-
-
-# --- entry point ------------------------------------------------------------
 
 
 SUITES = ("emit", "disabled", "publish", "drain", "request", "memory")
@@ -1148,14 +1103,11 @@ def main() -> int:
         elif name == "drain":
             result = suite_drain(args.trials, args.drain_requests, (0, 1, 10, 100))
         elif name == "request":
-            result = suite_request(args.rounds, max(1000, args.iterations // 10),
-                                   args.warmup // 2)
+            result = suite_request(args.rounds, max(1000, args.iterations // 10), args.warmup // 2)
         elif name == "memory":
             result = suite_memory(args.memory_entries)
         else:
-            result = suite_e2e(
-                args.e2e_requests, args.e2e_concurrency, args.e2e_repeats
-            )
+            result = suite_e2e(args.e2e_requests, args.e2e_concurrency, args.e2e_repeats)
         document["suites"][name] = result
 
     if args.output is not None:

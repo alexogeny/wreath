@@ -1,11 +1,3 @@
-"""Surrogate keys on a response, and the durable purge behind them.
-
-The local cache and the edge cache invalidate from one signal; these tests pin
-both halves of that claim, plus the two things that make it safe -- the keys are
-not guessable, and a purge that could not be enqueued is counted rather than
-lost quietly.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -62,9 +54,6 @@ def _drop_subscriptions():
         unsubscribe_writes(purge._on_write)
 
 
-# -- the keys --------------------------------------------------------------
-
-
 def test_a_secret_is_required_and_says_why():
     with pytest.raises(ValueError) as caught:
         Tags(secret=b"")
@@ -77,7 +66,6 @@ def test_a_str_secret_is_refused_rather_than_encoded():
 
 
 def test_a_key_does_not_contain_the_model_name():
-    """A surrogate key travels in a header anyone downstream can read."""
     key = Tags(secret=SECRET).key(Report)
 
     assert "Report" not in key
@@ -116,9 +104,6 @@ def test_the_header_value_is_space_separated():
     assert all(part.isalnum() for part in value.split(b" "))
 
 
-# -- tagging a response ----------------------------------------------------
-
-
 async def test_a_cached_response_carries_every_tag_header():
     tags = Tags(secret=SECRET)
 
@@ -134,7 +119,6 @@ async def test_a_cached_response_carries_every_tag_header():
 
 
 async def test_a_cache_hit_is_tagged_the_same_as_the_miss_that_filled_it():
-    """A response purgeable exactly once is worse than an untagged one."""
     tags = Tags(secret=SECRET)
 
     @cached(invalidate_on=[Report], tags=tags)
@@ -161,7 +145,6 @@ async def test_tags_without_invalidate_on_is_refused():
 
 
 async def test_a_handler_returning_a_dict_is_left_alone():
-    """The tag has to travel on a response this decorator can see."""
 
     @cached(invalidate_on=[Report], tags=Tags(secret=SECRET))
     async def handler(request):
@@ -171,7 +154,6 @@ async def test_a_handler_returning_a_dict_is_left_alone():
 
 
 async def test_a_reused_response_object_does_not_accumulate_tags():
-    """`Response.__call__` recomputes nothing, so returning one is supported."""
     tags = Tags(secret=SECRET)
     shared = Response(b"body")
 
@@ -210,9 +192,6 @@ async def test_a_handlers_own_cache_tag_is_kept_beside_the_derived_one():
     assert tags.header_value([Report]) in values
 
 
-# -- the purge -------------------------------------------------------------
-
-
 async def test_a_write_enqueues_a_purge_for_the_watched_model(_drop_subscriptions):
     queue = FakeQueue()
     tags = Tags(secret=SECRET)
@@ -241,7 +220,6 @@ async def test_an_unwatched_model_enqueues_nothing(_drop_subscriptions):
 
 
 async def test_the_dedup_key_makes_a_burst_of_writes_one_purge(_drop_subscriptions):
-    """A thousand rows in a loop must not be a thousand CDN calls."""
     queue = FakeQueue()
     tags = Tags(secret=SECRET)
     purge = CDNPurge(queue, tags=tags)
@@ -256,7 +234,6 @@ async def test_the_dedup_key_makes_a_burst_of_writes_one_purge(_drop_subscriptio
 
 
 async def test_a_purge_is_enqueued_and_not_awaited_on_the_write(_drop_subscriptions):
-    """A slow CDN must not become a slow write."""
     queue = FakeQueue()
     purge = CDNPurge(queue, tags=Tags(secret=SECRET))
     _drop_subscriptions.append(purge)
@@ -271,7 +248,6 @@ async def test_a_purge_is_enqueued_and_not_awaited_on_the_write(_drop_subscripti
 
 
 async def test_a_failed_enqueue_is_counted_rather_than_raised(_drop_subscriptions):
-    """The failure mode here is silence, so the counter is the whole signal."""
     queue = FakeQueue(fail=True)
     purge = CDNPurge(queue, tags=Tags(secret=SECRET))
     _drop_subscriptions.append(purge)
@@ -311,7 +287,6 @@ async def test_watching_several_models_purges_each_tag(_drop_subscriptions):
 
 
 async def test_the_purge_tag_matches_the_tag_on_the_response(_drop_subscriptions):
-    """The claim: one declaration, and the two caches agree on the key."""
     tags = Tags(secret=SECRET)
     queue = FakeQueue()
     purge = CDNPurge(queue, tags=tags)

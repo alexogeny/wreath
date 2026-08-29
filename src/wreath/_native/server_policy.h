@@ -40,6 +40,19 @@ enum {
 typedef struct {
     PyObject *descriptor;  /* owned immutable tuple, NULL means no native policy */
     const WreathCoreCAPI *core; /* borrowed immutable capsule table */
+    PyObject *proxy;
+    PyObject *trusted_host;
+    PyObject *ai_scraping;
+    PyObject *rate;
+    PyObject *request_id;
+    PyObject *timing;
+    PyObject *cors;
+    PyObject *csrf;
+    PyObject *security;
+    PyObject *websocket_origin;
+    PyObject *cache;
+    PyObject *compression;
+    PyObject *maintenance;
     unsigned char response_transform;
 } WreathPolicyProgram;
 

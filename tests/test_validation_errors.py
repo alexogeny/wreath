@@ -1,5 +1,3 @@
-"""Validation-error shaping: formatters, catalogues, and Accept-Language."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -34,29 +32,26 @@ def _app() -> Wreath:
     return app
 
 
-# --- select_language ---------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("header", "offered", "expected"),
     [
-        (None, ["en", "fr"], "en"),                     # absent -> fallback
-        ("", ["en", "fr"], "en"),                       # empty -> fallback
+        (None, ["en", "fr"], "en"),  # absent -> fallback
+        ("", ["en", "fr"], "en"),  # empty -> fallback
         ("fr", ["en", "fr"], "fr"),
-        ("fr-CA", ["en", "fr"], "fr"),                  # prefix match
-        ("fr", ["en", "fr-CA"], "fr-CA"),               # reverse prefix match
-        ("fr-CA", ["en", "fr", "fr-CA"], "fr-CA"),      # exact beats prefix
-        ("de", ["en", "fr"], "en"),                     # no match -> fallback
+        ("fr-CA", ["en", "fr"], "fr"),  # prefix match
+        ("fr", ["en", "fr-CA"], "fr-CA"),  # reverse prefix match
+        ("fr-CA", ["en", "fr", "fr-CA"], "fr-CA"),  # exact beats prefix
+        ("de", ["en", "fr"], "en"),  # no match -> fallback
         ("de,fr;q=0.8", ["en", "fr"], "fr"),
-        ("fr;q=0.2,en;q=0.9", ["en", "fr"], "en"),      # highest q wins
-        ("en;q=0.9,fr;q=0.2", ["en", "fr"], "en"),      # lower q cannot replace
-        ("*", ["en", "fr"], "en"),                      # wildcard -> first
-        ("en;q=0,*", ["en", "fr"], "fr"),               # refused, wildcard next
-        ("en;q=0", ["en", "fr"], "en"),                 # refused, no wildcard
-        ("FR", ["en", "fr"], "fr"),                     # case-insensitive
-        (b"fr", ["en", "fr"], "fr"),                    # bytes header
-        ("!!!;;;", ["en", "fr"], "en"),                 # garbage -> fallback
-        ("fr;q=bad", ["en", "fr"], "en"),               # unparseable q -> refused
+        ("fr;q=0.2,en;q=0.9", ["en", "fr"], "en"),  # highest q wins
+        ("en;q=0.9,fr;q=0.2", ["en", "fr"], "en"),  # lower q cannot replace
+        ("*", ["en", "fr"], "en"),  # wildcard -> first
+        ("en;q=0,*", ["en", "fr"], "fr"),  # refused, wildcard next
+        ("en;q=0", ["en", "fr"], "en"),  # refused, no wildcard
+        ("FR", ["en", "fr"], "fr"),  # case-insensitive
+        (b"fr", ["en", "fr"], "fr"),  # bytes header
+        ("!!!;;;", ["en", "fr"], "en"),  # garbage -> fallback
+        ("fr;q=bad", ["en", "fr"], "en"),  # unparseable q -> refused
     ],
 )
 def test_select_language(header, offered, expected) -> None:
@@ -68,14 +63,13 @@ def test_select_language_requires_an_offer() -> None:
         select_language("en", [])
 
 
-# --- catalogue ---------------------------------------------------------------
-
-
 def test_a_catalogue_falls_back_across_languages_then_to_the_validator() -> None:
-    catalogue = MessageCatalogue({
-        "en": {"missing": "Required.", "int": "Whole number."},
-        "fr": {"missing": "Obligatoire."},
-    })
+    catalogue = MessageCatalogue(
+        {
+            "en": {"missing": "Required.", "int": "Whole number."},
+            "fr": {"missing": "Obligatoire."},
+        }
+    )
     assert catalogue.message("fr", "missing", "x") == "Obligatoire."
     # Missing in fr -> the default language's message.
     assert catalogue.message("fr", "int", "x") == "Whole number."
@@ -93,9 +87,6 @@ def test_field_names_reads_the_last_location_segment() -> None:
     assert field_names(errors) == ["name", "page", ""]
 
 
-# --- end to end --------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_the_default_output_is_unchanged_without_a_formatter() -> None:
     client = TestClient(_app())
@@ -106,15 +97,17 @@ async def test_the_default_output_is_unchanged_without_a_formatter() -> None:
     assert body["title"] == "Unprocessable Content"
     assert body["detail"] == "Request validation failed"
     assert body["errors"][0]["type"] == "missing"
-    assert "language" not in body          # nothing added when unconfigured
+    assert "language" not in body  # nothing added when unconfigured
 
 
 @pytest.mark.asyncio
 async def test_a_catalogue_formatter_translates_on_type() -> None:
-    catalogue = MessageCatalogue({
-        "en": {"missing": "This field is required."},
-        "fr": {"missing": "Ce champ est obligatoire."},
-    })
+    catalogue = MessageCatalogue(
+        {
+            "en": {"missing": "This field is required."},
+            "fr": {"missing": "Ce champ est obligatoire."},
+        }
+    )
     app = _app()
     app.set_validation_formatter(catalogue_formatter(catalogue))
     client = TestClient(app)
@@ -124,9 +117,7 @@ async def test_a_catalogue_formatter_translates_on_type() -> None:
     assert english.json()["errors"][0]["msg"] == "This field is required."
     assert english.json()["language"] == "en"
 
-    french = await client.post(
-        "/items", json={"name": "x"}, headers={"accept-language": "fr"}
-    )
+    french = await client.post("/items", json={"name": "x"}, headers={"accept-language": "fr"})
     assert french.json()["errors"][0]["msg"] == "Ce champ est obligatoire."
     assert french.json()["language"] == "fr"
     # The machine-readable type is never translated.
@@ -137,9 +128,7 @@ async def test_a_catalogue_formatter_translates_on_type() -> None:
 async def test_aliases_rename_the_field_in_the_error_location() -> None:
     catalogue = MessageCatalogue({"en": {"missing": "Required."}})
     app = _app()
-    app.set_validation_formatter(
-        catalogue_formatter(catalogue, aliases={"count": "itemCount"})
-    )
+    app.set_validation_formatter(catalogue_formatter(catalogue, aliases={"count": "itemCount"}))
     response = await TestClient(app).post("/items", json={"name": "x"})
 
     assert response.json()["errors"][0]["loc"][-1] == "itemCount"

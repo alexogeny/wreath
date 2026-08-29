@@ -82,11 +82,7 @@ static PyObject *decode_many(PyObject *items) {
     assert "NB001" not in codes(source)
 
 
-# --- error paths are not hot-path boundary traffic ---------------------------
-
-
 def test_object_work_inside_a_loop_still_counts_when_it_is_not_an_error_path() -> None:
-    """The control. Without it, the exclusion below could pass by flagging nothing."""
     source = """
 static PyObject *drive(PyObject *items) {
     for (Py_ssize_t i = 0; i < count; i++) {
@@ -99,12 +95,6 @@ static PyObject *drive(PyObject *items) {
 
 
 def test_objects_built_as_arguments_to_a_raiser_are_not_loop_traffic() -> None:
-    """`raise_render(0, PyUnicode_FromString(...))` is paid on the way out.
-
-    Modelled on `templates.c`, where five of sixteen operations in
-    `wreath_template_render` were arguments to `raise_render` -- work that runs
-    only once the render has already failed.
-    """
     source = """
 static PyObject *drive(PyObject *items) {
     for (Py_ssize_t i = 0; i < count; i++) {
@@ -119,7 +109,6 @@ static PyObject *drive(PyObject *items) {
 
 
 def test_a_raiser_wrapped_across_lines_is_covered_in_full() -> None:
-    """Only the first line names the raiser; the arguments sit on the next two."""
     source = """
 static PyObject *drive(PyObject *items) {
     for (Py_ssize_t i = 0; i < count; i++) {
@@ -135,11 +124,7 @@ static PyObject *drive(PyObject *items) {
     assert "NB001" not in codes(source)
 
 
-# --- a pre-resolved attribute name is not a dynamic lookup -------------------
-
-
 def test_getattr_string_is_still_a_dynamic_lookup() -> None:
-    """The control: `PyObject_GetAttrString` builds the name on every call."""
     source = """
 static PyObject *read_three(PyObject *op) {
     PyObject *a = PyObject_GetAttrString(op, "field_tape");
@@ -151,11 +136,6 @@ static PyObject *read_three(PyObject *op) {
 
 
 def test_getattr_with_an_interned_name_is_not_a_dynamic_lookup() -> None:
-    """`PyObject_GetAttr(op, str_field_tape)` -- resolved once at module init.
-
-    From `postgres/protocol.c`, which caches `str_field_tape`/`str_decoder_plan`
-    and was flagged anyway. That cache *is* the fix the rule recommends.
-    """
     source = """
 static PyObject *read_three(PyObject *op) {
     PyObject *a = PyObject_GetAttr(op, str_field_tape);
@@ -167,7 +147,6 @@ static PyObject *read_three(PyObject *op) {
 
 
 def test_a_dynamic_lookup_beside_a_cached_one_still_counts() -> None:
-    """One cached lookup must not excuse the whole line."""
     source = """
 static PyObject *read_three(PyObject *op) {
     PyObject *a = PyObject_GetAttr(op, str_tape); PyObject *d = PyObject_GetAttrString(op, "x");
@@ -178,11 +157,7 @@ static PyObject *read_three(PyObject *op) {
     assert "NB003" in codes(source)
 
 
-# --- one-time setup is not a hot path ----------------------------------------
-
-
 def test_nb001_excuses_a_one_time_static_table_build() -> None:
-    """`build_static_table` fills the HPACK constant-header cache once."""
     source = """
 static int build_static_table(void) {
     for (size_t i = 0; i < 61; i++) {
@@ -195,7 +170,6 @@ static int build_static_table(void) {
 
 
 def test_nb001_still_fires_on_a_similarly_named_hot_function() -> None:
-    """`build` alone must not excuse anything: `wreath_build_header_map` is per request."""
     source = """
 static int wreath_build_header_map(PyObject *headers) {
     for (size_t i = 0; i < count; i++) {

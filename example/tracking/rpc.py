@@ -113,9 +113,7 @@ def ingest_service(registry: Any, live: LiveMap) -> GrpcService:
         return BatchReceipt(
             accepted=receipt.accepted,
             rejected=receipt.rejected,
-            watermark_ms=(
-                milliseconds(receipt.watermark) if receipt.watermark else 0
-            ),
+            watermark_ms=(milliseconds(receipt.watermark) if receipt.watermark else 0),
         )
 
     return service

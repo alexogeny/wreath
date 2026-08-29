@@ -1,28 +1,3 @@
-"""Geospatial against a real PostgreSQL — the two claims that need a server.
-
-1. `within()` is answered by the index rather than a sequential scan. Asserted
-   on the *query plan*, because a correct answer read off the whole table is
-   exactly the failure this design exists to prevent and it is invisible in the
-   results.
-2. The whole tier-1 surface works with **no extension installed**. That is the
-   claim `wreath.geospatial` rests on, and it holds only because `point` and
-   its GiST `point_ops` opclass are in core PostgreSQL.
-
-Each test opens its own connection, as the other live suites here do: a shared
-async fixture binds to one event loop and pytest-asyncio gives each test
-another.
-
-**This suite runs against a database it creates, not against the one the DSN
-names**, and that is what makes claim 2 an assertion rather than a hope. The
-image tier 2 needs (`postgis/postgis:17-3.5`) installs PostGIS into
-`POSTGRES_DB` at initdb time, so the obvious database is already disqualified
-from proving anything about running without it -- and a claim that holds only
-on the image somebody happened to start is not the claim the guide makes. A
-database created from `template0` carries no extensions on any image, and
-`template0` refuses connections, so several xdist workers can create from it at
-once without racing over template access.
-"""
-
 from __future__ import annotations
 
 import math
@@ -99,6 +74,7 @@ async def _connect() -> Any:
         await admin.close()
     return await connect(target)
 
+
 #: Plain assignment, never `setdefault`: the controller imports this module
 #: during collection and would otherwise hand every worker the same name.
 _WORKER = os.environ.get("PYTEST_XDIST_WORKER", "main")
@@ -156,17 +132,10 @@ async def _live_schema(connection: Any) -> None:
 
 
 async def test_no_extension_is_installed() -> None:
-    """The tier-1 claim, asserted rather than assumed.
-
-    Every other test in this file runs on this same connection, so what this
-    asserts about is the database the whole tier-1 surface was just exercised
-    in -- not a separate probe that proves nothing about where the work ran.
-    """
     connection = await _connect()
     try:
         rows = await connection.fetch(
-            "SELECT extname FROM pg_extension "
-            "WHERE extname IN ('postgis', 'cube', 'earthdistance')"
+            "SELECT extname FROM pg_extension WHERE extname IN ('postgis', 'cube', 'earthdistance')"
         )
         assert list(rows) == [], (
             f"an extension is installed in {_TIER1_DATABASE!r}, so the "
@@ -179,7 +148,6 @@ async def test_no_extension_is_installed() -> None:
 
 
 async def test_within_is_answered_by_the_index(registry: Registry) -> None:
-    """The plan, not the result. This is the test the whole design exists for."""
     connection = await _connect()
     try:
         await _live_schema(connection)
@@ -195,7 +163,6 @@ async def test_within_is_answered_by_the_index(registry: Registry) -> None:
 
 
 async def test_within_returns_only_rows_inside_the_circle(registry: Registry) -> None:
-    """The box is a superset; the exact filter is what makes the answer right."""
     connection = await _connect()
     try:
         await _live_schema(connection)
@@ -212,13 +179,6 @@ async def test_within_returns_only_rows_inside_the_circle(registry: Registry) ->
 
 
 async def test_the_box_alone_would_have_returned_more(registry: Registry) -> None:
-    """Proves the exact filter is doing work rather than being decorative.
-
-    If the box and the circle returned the same rows, the AND would be
-    untested and dropping the haversine would still pass every other test
-    here. The corner of a box reaches about 1.41x its half-width, so at this
-    radius there are always rows between the two.
-    """
     connection = await _connect()
     try:
         await _live_schema(connection)
@@ -232,7 +192,10 @@ async def test_the_box_alone_would_have_returned_more(registry: Registry) -> Non
         box = bounding_boxes(SYDNEY, radius)[0]
         boxed = await connection.fetch(
             f'SELECT id FROM "{_SCHEMA}".stations WHERE at <@ box(point($1,$2), point($3,$4))',
-            box.lon_min, box.lat_min, box.lon_max, box.lat_max,
+            box.lon_min,
+            box.lat_min,
+            box.lon_max,
+            box.lat_max,
         )
         assert len(boxed) > len(exact), (
             "the box returned no more than the circle, so this radius does not "
@@ -243,31 +206,33 @@ async def test_the_box_alone_would_have_returned_more(registry: Registry) -> Non
 
 
 async def test_sql_distance_agrees_with_the_python_twin(registry: Registry) -> None:
-    """Pins the SQL haversine against the module's own implementation."""
     connection = await _connect()
     try:
         await _live_schema(connection)
         target = Coordinate(lat=-33.8, lon=151.0)
         await connection.execute(
             f'INSERT INTO "{_SCHEMA}".stations (id, name, at) VALUES (99999, $1, $2)',
-            "probe", Point.to_wire(target),
+            "probe",
+            Point.to_wire(target),
         )
         compiled = compile_select(
             registry,
-            Station.select().where(Station.id == 99999).order_by(
-                Station.at.nearest(SYDNEY)
-            ).limit(1),
+            Station.select()
+            .where(Station.id == 99999)
+            .order_by(Station.at.nearest(SYDNEY))
+            .limit(1),
         )
         rows = await connection.fetch(compiled.sql, *compiled.bind_values)
         assert len(rows) == 1
         # Round-trip proves the row is the one we planted; the distance itself
         # is compared through the same expression the ORDER BY used.
         got = await connection.fetchrow(
-            f'SELECT 2 * 6371008.8 * asin(sqrt(power(sin(radians((at)[1] - $1) / 2), 2)'
+            f"SELECT 2 * 6371008.8 * asin(sqrt(power(sin(radians((at)[1] - $1) / 2), 2)"
             f" + cos(radians($1)) * cos(radians((at)[1]))"
             f" * power(sin(radians((at)[0] - $2) / 2), 2))) AS d"
             f' FROM "{_SCHEMA}".stations WHERE id = 99999',
-            SYDNEY.lat, SYDNEY.lon,
+            SYDNEY.lat,
+            SYDNEY.lon,
         )
         assert math.isclose(got["d"], distance(SYDNEY, target), rel_tol=1e-9)
     finally:
@@ -289,18 +254,16 @@ async def test_nearest_orders_by_real_distance(registry: Registry) -> None:
 
 
 async def test_a_coordinate_round_trips_through_a_bind(registry: Registry) -> None:
-    """Write a Coordinate, read a Coordinate, through the binary parameter path."""
     connection = await _connect()
     try:
         await _live_schema(connection)
         here = Coordinate(lat=-33.8688, lon=151.2093)
         await connection.execute(
             f'INSERT INTO "{_SCHEMA}".stations (id, name, at) VALUES (99998, $1, $2)',
-            "roundtrip", Point.to_wire(here),
+            "roundtrip",
+            Point.to_wire(here),
         )
-        row = await connection.fetchrow(
-            f'SELECT at FROM "{_SCHEMA}".stations WHERE id = 99998'
-        )
+        row = await connection.fetchrow(f'SELECT at FROM "{_SCHEMA}".stations WHERE id = 99998')
         assert Point.from_wire(row["at"]) == here
     finally:
         await connection.close()

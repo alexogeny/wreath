@@ -157,9 +157,7 @@ class Species(Model, table="species", schema=SCHEMA):
     #: Partial: three protection levels, and only two of them ever need a
     #: lookup. `one_of` rather than two indexes because the authorization check
     #: asks one question -- "is this species withheld from anybody?"
-    _withheld = index(
-        "protection", "id", where=one_of("protection", ["sensitive", "restricted"])
-    )
+    _withheld = index("protection", "id", where=one_of("protection", ["sensitive", "restricted"]))
 
 
 class Deployment(Model, table="deployments", schema=SCHEMA):
@@ -249,9 +247,7 @@ class Sighting(Model, table="sightings", schema=SCHEMA):
     #: Partial: the review console only ever asks for what a human has not
     #: settled. In a healthy network that is a few hundred rows out of 140,000,
     #: which is the ratio that makes a partial index worth declaring.
-    _unreviewed = index(
-        "station_id", "captured_at", where=eq("review_state", "needs-review")
-    )
+    _unreviewed = index("station_id", "captured_at", where=eq("review_state", "needs-review"))
 
 
 class Assignment(Model, table="assignments", schema=SCHEMA):

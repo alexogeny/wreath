@@ -1,6 +1,8 @@
 # Repository map
 
-A quick routing guide for Wreath contributors and coding agents. Start with `AGENTS.md` for repository rules, then use `docs/agents/manifest.json` for the machine-readable subsystem map — it gives every subsystem's guides, reference pages, sources, tests, and the invariant `policy` behind it, and `uv run wreath-map-lint` fails if it drifts from what is actually here.
+A quick routing guide for Wreath contributors and coding agents. Start with
+`AGENTS.md` for repository rules, then inspect the owning module and its focused
+tests.
 
 ## Top level
 
@@ -9,12 +11,10 @@ A quick routing guide for Wreath contributors and coding agents. Start with `AGE
 | `src/wreath/` | Dependency-free Python framework and server package, plus optional C accelerators. |
 | `tests/` | Framework, protocol, native-parity, ORM, and PostgreSQL tests. |
 | `benchmarks/` | Reproducible framework/server/ORM benchmarks, competitor apps, load tooling, and reports. |
-| `docs/` | User guides, API reference, internals, plans, and agent guidance. |
 | `tools/` | Native checks and sanitizer build helpers. |
 | `example/` | The canonical camera-trap application built on wreath. Not shipped to users who install the package. |
 | `setup.py` | Optional C-extension build definitions and feature detection. |
 | `pyproject.toml` | Package metadata, dependency groups, test markers, lint/type configuration, and CLI entry points. |
-| `wreath_docs.py` | Documentation site structure and theme, built by `wreath docs`. |
 | `README.md` | Public project overview and quick start. |
 | `AGENTS.md` | Repository-wide engineering, testing, documentation, and benchmark rules. |
 | `CLAUDE.md` | Pointer file so a coding agent loads those rules without being told to. |
@@ -29,9 +29,8 @@ so `wreath.pagination` is `src/wreath/pagination.py` and `wreath.jobs` is
 underscore means implementation — reach it through the facade that exports it,
 not directly.
 
-The table below is the shape of the package. For a specific subsystem's tests,
-invariants, and design decisions, look it up in `docs/agents/manifest.json`
-rather than reading here.
+The table below is the shape of the package. Focused tests follow the public
+module name or live in the corresponding subsystem directory under `tests/`.
 
 ### Main Python surfaces
 
@@ -62,14 +61,18 @@ rather than reading here.
 
 - `src/wreath/_native/` contains CPython C accelerators. Base-wheel module entry files include `_coremodule.c`, `_clientmodule.c`, `_docsmodule.c`, `_dupscanmodule.c`, `_edgemodule.c`, `_servermodule.c`, `_postgresmodule.c`, and `_testrunnermodule.c`; optional wheels add reactor, Flight, and HTTP/3 extensions.
 - `src/wreath/_native/postgres/` owns native PostgreSQL protocol, buffering, decoding, codecs, model storage/hydration, and related plans/records.
-- `src/wreath/_devtools/` contains native complexity, boundary, GIL, memory, and error linters, profiling support, and `request_trace.py` (`wreath-request-trace`), which counts the Python/native boundary crossings of one request against the realistic app in `sample_app.py` and diffs them against `docs/agents/request-boundary-baseline.json`. `tape_decomp.py` (`wreath-tape-decomp`) prices that same tape, reporting a measured noise floor and refusing to attribute deltas below it. `decomp.py` (`wreath-decomp`) prices the rest of the request -- lifecycle stages, one ORM read, and ns-per-frame/ns-per-await calibrations -- over the shared harness in `measure.py`, which documents the measurement rules. `map_lint.py` (`wreath-map-lint`) checks that this file, `AGENTS.md`, `docs/llms.txt`, and the manifest still describe the repository. `tasks.py` provides `wreath-check`/`wreath-docs`/`wreath-bench`, which install their own dependency group with `uv sync --inexact` so one job never uninstalls another's.
+- `src/wreath/_devtools/` contains native complexity, boundary, GIL, memory,
+  and error linters, profiling support, and `request_trace.py`
+  (`wreath-request-trace`), which compares request crossings with
+  `tools/baselines/request-boundary-baseline.json`. `tape_decomp.py` and
+  `decomp.py` price request work over the shared harness in `measure.py`.
+  `tasks.py` provides `wreath-check` and `wreath-bench`.
 
 When changing an accelerated feature, keep its public facade, its `_native` implementation and its tests in step. Keep framework and server layers separable.
 
 ## Tests
 
-Every subsystem's focused tests are listed in `docs/agents/manifest.json`; look
-there before grepping. The broad shape:
+The broad test layout is:
 
 - Root `tests/test_*.py` files cover application behavior, binding, routing, request/response handling, middleware/auth/security, server behavior, the Flight Recorder, native parity/lints, and benchmark contracts.
 - Subsystem packages hold their own: `tests/orm/`, `tests/postgres/`, `tests/migrations/`, `tests/jobs/`, `tests/messaging/`, `tests/storage/`, `tests/pagination/`, `tests/audit/`, `tests/health/`, `tests/flags/`, `tests/versioning/`, `tests/port/`, `tests/reactor/`, `tests/typegen/`.
@@ -86,20 +89,5 @@ Prefer a focused test near the changed subsystem. The canonical commands and mar
 - `tools/sanitizers/` builds isolated server, PostgreSQL, and HTTP/3 sanitizer variants.
 - Keep raw benchmark results and environment metadata; follow `AGENTS.md` before making performance claims.
 
-## Documentation routing
-
-| Need | Start here |
-| --- | --- |
-| Agent workflow and subsystem lookup | `docs/cookbook/agents/index.md`, `docs/agents/manifest.json` |
-| Behavioral invariants | `AGENTS.md`, per-subsystem `policy` fields in `docs/agents/manifest.json` |
-| Change playbooks | `docs/cookbook/agents/` (add-an-endpoint, verify-a-change, checks, documenting-a-module) |
-| User-facing behavior | `docs/guides/`, `docs/getting-started/`, `docs/cookbook/recipes/` |
-| Public API | `docs/reference/` |
-| Coming from the FastAPI stack | `docs/from-fastapi/` |
-| What is deliberately not shipped yet | `docs/reference/roadmap.md` |
-| Native implementation details | `docs/plans/` (the `native-*` designs), `docs/agents/python-complexity-audit.md` |
-| Why the code is shaped the way it is | [`AGENTS.md`](AGENTS.md), and the module docstring of whatever you are reading |
-| Active or historical design work | `docs/plans/` |
-| Compact LLM documentation index | `docs/llms.txt` |
-
-Update the relevant guide, reference page, and `docs/agents/manifest.json` whenever public behavior or subsystem routing changes; `uv run wreath-map-lint` enforces the manifest half of that.
+Use `rg --files src/wreath tests` and `rg` for deterministic source and test
+lookup. The code, tests, and `AGENTS.md` are authoritative.

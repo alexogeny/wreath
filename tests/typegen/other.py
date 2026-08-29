@@ -1,5 +1,3 @@
-"""A second module defining a same-named model, to exercise name collisions."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass

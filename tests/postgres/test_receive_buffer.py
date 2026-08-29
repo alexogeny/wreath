@@ -105,12 +105,6 @@ async def test_oversized_message_uses_chained_fixed_slabs() -> None:
 @requires_native
 @pytest.mark.asyncio
 async def test_control_message_queue_drains_in_order_across_compaction() -> None:
-    """The control queue is a list plus a head index, compacted occasionally.
-
-    Queue well past the compaction threshold (head >= 64 and head * 2 >= size),
-    drain it fully, then queue and drain again: order must be exact, nothing
-    lost, and the queue must stay reusable after it resets.
-    """
     protocol = native.BufferedProtocol()
     payloads = [f"m{i:04d}".encode() for i in range(200)]
     _feed(protocol, b"".join(_message(b"N", p) for p in payloads))
@@ -121,9 +115,7 @@ async def test_control_message_queue_drains_in_order_across_compaction() -> None
     # The queue drained to empty and reset; it must still work afterwards.
     again = [f"z{i:04d}".encode() for i in range(150)]
     _feed(protocol, b"".join(_message(b"N", p) for p in again))
-    assert [await protocol.read_message() for _ in range(len(again))] == [
-        (b"N", p) for p in again
-    ]
+    assert [await protocol.read_message() for _ in range(len(again))] == [(b"N", p) for p in again]
 
 
 @requires_native
@@ -168,13 +160,6 @@ async def test_native_connection_uses_buffered_protocol_without_stream_reader() 
 @requires_native
 @pytest.mark.asyncio
 async def test_retired_slab_reclamation_is_budgeted_per_receive() -> None:
-    """A pinned prefix must not be rescanned on every receive.
-
-    Holding DataRow memoryviews pins their slabs in the retired list. Each
-    get_buffer() inspects at most a small fixed budget and resumes from where
-    it stopped, so cost per receive stays flat as the pinned count grows. The
-    scan counter makes that assertable without any timing.
-    """
     protocol = native.BufferedProtocol()
     pinned = 128
     held = []
@@ -200,7 +185,6 @@ async def test_retired_slab_reclamation_is_budgeted_per_receive() -> None:
 @requires_native
 @pytest.mark.asyncio
 async def test_rotating_scan_eventually_reclaims_released_slabs() -> None:
-    """The cursor must rotate, so every retained entry is examined eventually."""
     protocol = native.BufferedProtocol()
     held = []
     row = struct.pack("!Hi", 1, 60_000) + b"x" * 60_000

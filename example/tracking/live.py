@@ -154,9 +154,7 @@ class Subscriber:
         yield ServerSentEvent(retry=RETRY_MS, comment="tracking live map")
         while True:
             try:
-                payload = await asyncio.wait_for(
-                    self._queue.get(), timeout=KEEPALIVE_SECONDS
-                )
+                payload = await asyncio.wait_for(self._queue.get(), timeout=KEEPALIVE_SECONDS)
             except TimeoutError:
                 yield ServerSentEvent(comment="keep-alive")
                 continue

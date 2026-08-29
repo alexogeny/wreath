@@ -1,9 +1,3 @@
-"""Native timing wheel (wreath._native._reactor) — the first C reactor primitive.
-
-O(1) insert/cancel with a fixed slot array; the backing store the loop's
-call_later/call_at will use in place of asyncio's heap. Unlike the rest of this
-directory these are GREEN now — the C primitive exists ahead of its wiring.
-"""
 from __future__ import annotations
 
 import pytest
@@ -36,7 +30,7 @@ def test_timers_fire_in_deadline_order_across_rounds():
     order = []
     # Deadlines span several full rotations of the 8-slot wheel.
     for i in (30, 5, 17, 2, 25):
-        w.schedule(i * 0.001, (lambda n: (lambda: order.append(n)))(i))
+        w.schedule(i * 0.001, (lambda n: lambda: order.append(n))(i))
     now = 0.0
     for _ in range(40):
         now += 0.001
@@ -60,13 +54,10 @@ def test_cancel_prevents_fire_and_frees_slot():
 
 
 def test_exact_rotation_timers_fire_on_time():
-    """A timer at exactly N*slots ticks must fire after N rotations, not N+1.
-    Regression for rounds = ticks/slots (off by a full rotation on exact multiples).
-    """
     for ticks in (8, 16, 24, 9, 1):
         w = TimingWheel(resolution=0.001, slots=8, base=0.0)
         fired = []
-        w.schedule(ticks * 0.001, (lambda tk, f: (lambda: f.append(tk)))(ticks, fired))
+        w.schedule(ticks * 0.001, (lambda tk, f: lambda: f.append(tk))(ticks, fired))
         fire_at = None
         for i in range(1, 60):
             for cb in w.advance(i * 0.001):
@@ -114,8 +105,7 @@ def test_double_cancel_is_safe():
 
 def test_cancelling_earliest_timer_rescans_only_its_bucket():
     wheel = TimingWheel(resolution=0.001, slots=512, base=0.0)
-    handles = [wheel.schedule(index * 0.001, lambda: None)
-               for index in range(1, 257)]
+    handles = [wheel.schedule(index * 0.001, lambda: None) for index in range(1, 257)]
     rescans = wheel.slot_rescans
     updates = wheel.tree_node_updates
 
@@ -160,11 +150,11 @@ def test_advance_over_idle_gap_skips_parked_timers():
     # interval tree; a long-parked timer must not be touched (let alone
     # decremented once per rotation) while the wheel sweeps idle ticks.
     wheel = TimingWheel(resolution=0.001, slots=64, base=0.0)
-    wheel.schedule(10.0, lambda: None)          # ~156 rotations away
+    wheel.schedule(10.0, lambda: None)  # ~156 rotations away
     rescans = wheel.slot_rescans
     updates = wheel.tree_node_updates
 
-    assert wheel.advance(5.0) == []             # 5000 ticks, nothing due
+    assert wheel.advance(5.0) == []  # 5000 ticks, nothing due
     # No node visited, so neither counter moves for the parked timer.
     assert wheel.slot_rescans == rescans
     assert wheel.tree_node_updates == updates
@@ -184,15 +174,12 @@ def test_wheel_releases_pending_timers_on_dealloc():
         h.cancel()
 
 
-# --- colliding slots -------------------------------------------------------
-#
 # A slot is a hash of the deadline, so deadlines congruent modulo `slots` share
 # one. Every test above either spreads deadlines one per slot or gives a whole
 # cohort the *same* deadline; neither builds the arrangement that actually
 # hurts, which is many *distinct* deadlines in one slot. That gap is why the
 # chain this heap replaced stayed quadratic in both cancel and fire without any
 # test noticing.
-#
 # `SLOTS` is small so a modest timer count makes a deep chain.
 
 SLOTS = 8
@@ -226,8 +213,7 @@ def test_cancelling_from_the_middle_of_a_colliding_slot_leaves_the_rest_intact()
     wheel = TimingWheel(resolution=0.001, slots=SLOTS, base=0.0)
     delays = _colliding_delays()
     handles = [
-        wheel.schedule(delay, lambda i=index: fired.append(i))
-        for index, delay in enumerate(delays)
+        wheel.schedule(delay, lambda i=index: fired.append(i)) for index, delay in enumerate(delays)
     ]
     doomed = [index for index in range(len(delays)) if index % 3 == 1]
     for index in doomed:
@@ -263,7 +249,8 @@ def test_cancelling_the_minimum_of_a_colliding_slot_republishes_the_next_one():
         for callback in wheel.advance(delays[survivor] + 0.0005):
             callback()
         assert fired == [survivor], (
-            f"after cancelling {cancelled + 1}, expected only timer {survivor}")
+            f"after cancelling {cancelled + 1}, expected only timer {survivor}"
+        )
 
 
 def test_colliding_slot_survives_interleaved_schedule_cancel_and_fire():
@@ -290,7 +277,8 @@ def test_colliding_slot_survives_interleaved_schedule_cancel_and_fire():
             # heap-ordering failure rather than the test's own mistake.
             deadline = now + SLOTS * rng.randint(1, 40) * 0.001
             handles[key] = wheel.schedule(
-                deadline - now, lambda k=key, d=deadline: fired.append((d, k)))
+                deadline - now, lambda k=key, d=deadline: fired.append((d, k))
+            )
             live[key] = deadline
         elif action < 0.75 and live:
             doomed = rng.choice(sorted(live))
@@ -302,12 +290,10 @@ def test_colliding_slot_survives_interleaved_schedule_cancel_and_fire():
                 callback()
             for expired in [k for k, when in live.items() if when <= now]:
                 del live[expired]
-        assert wheel.count == len(live), (
-            f"wheel holds {wheel.count}, model holds {len(live)}")
+        assert wheel.count == len(live), f"wheel holds {wheel.count}, model holds {len(live)}"
 
     deadlines = [deadline for deadline, _ in fired]
-    assert deadlines == sorted(deadlines), (
-        "callbacks left the wheel out of deadline order")
+    assert deadlines == sorted(deadlines), "callbacks left the wheel out of deadline order"
     assert fired, "the run never fired anything, so it proved nothing"
 
 
@@ -318,8 +304,7 @@ def test_a_deep_colliding_slot_is_released_on_dealloc():
     import gc
 
     wheel = TimingWheel(resolution=0.001, slots=SLOTS, base=0.0)
-    handles = [wheel.schedule(delay, lambda: None)
-               for delay in _colliding_delays(4000)]
+    handles = [wheel.schedule(delay, lambda: None) for delay in _colliding_delays(4000)]
     assert wheel.count == 4000
     del wheel
     gc.collect()

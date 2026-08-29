@@ -1,13 +1,3 @@
-"""Stage 5 slice 5a — native forensic capture-slab core.
-
-Drives the native ``_flight.Recorder`` capture path directly and checks it
-byte-for-byte against the reference recorder in ``wreath._flight_reference``. The whole
-point of this slice is the deny-by-default, bounded, redact-before-retention
-slab mechanism, so the tests lean on secret canaries, slab exhaustion, and
-per-field truncation as hard as on the differential parity. The extension is
-optional; tests skip cleanly if it was not built.
-"""
-
 from __future__ import annotations
 
 import random
@@ -44,16 +34,10 @@ def _pure(**kw: object) -> ReferenceRecorder:
     return ReferenceRecorder(fs.Mode.FORENSIC, **kw)
 
 
-# --- SipHash vector ---------------------------------------------------------
-
-
 def test_siphash_matches_reference_vector() -> None:
     # Canonical SipHash-2-4 test vector (key 00..0f, input bytes(0..14)).
     k0, k1 = 0x0706050403020100, 0x0F0E0D0C0B0A0908
     assert siphash24(bytes(range(15)), k0, k1) == 0xA129CA6149BE45E5
-
-
-# --- deny by default --------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -62,8 +46,13 @@ def test_siphash_matches_reference_vector() -> None:
 )
 def test_non_forensic_modes_capture_nothing(mode: int) -> None:
     rec = _flight.Recorder(
-        mode, ring_records=256, active_requests=16, capture_slabs=8,
-        slab_bytes=4096, detailed_sample_rate=1.0, capture_hash_key=KEY,
+        mode,
+        ring_records=256,
+        active_requests=16,
+        capture_slabs=8,
+        slab_bytes=4096,
+        detailed_sample_rate=1.0,
+        capture_hash_key=KEY,
     )
     req = rec.begin(protocol=_flight.PROTO_HTTP1, start_ns=0)
     req.capture(int(FC.REQUEST_BODY), 0, _flight.CAP_RAW, b"secret-payload")
@@ -82,9 +71,6 @@ def test_forensic_but_unarmed_captures_nothing() -> None:
     assert req.capture_slot == -1
     req.finish(now_ns=1000, status=200)
     assert rec.drain_captures() == []
-
-
-# --- differential parity ----------------------------------------------------
 
 
 def _drive(rec: object, *, raw: int, hashed: int, masked: int, length: int) -> None:
@@ -112,10 +98,14 @@ def _drive(rec: object, *, raw: int, hashed: int, masked: int, length: int) -> N
 def test_native_and_pure_slabs_are_byte_identical() -> None:
     n = _native(capture_slabs=8, slab_bytes=4096)
     p = _pure(capture_slabs=8, slab_bytes=4096)
-    _drive(n, raw=_flight.CAP_RAW, hashed=_flight.CAP_HASHED,
-           masked=_flight.CAP_MASKED, length=_flight.CAP_LENGTH)
-    _drive(p, raw=int(D.RAW), hashed=int(D.HASHED), masked=int(D.MASKED),
-           length=int(D.LENGTH))
+    _drive(
+        n,
+        raw=_flight.CAP_RAW,
+        hashed=_flight.CAP_HASHED,
+        masked=_flight.CAP_MASKED,
+        length=_flight.CAP_LENGTH,
+    )
+    _drive(p, raw=int(D.RAW), hashed=int(D.HASHED), masked=int(D.MASKED), length=int(D.LENGTH))
     assert n.drain() == p.drain()  # completion cells identical too
     assert n.drain_captures() == p.drain_captures()
     assert n.capture_in_use == p.capture_in_use
@@ -156,9 +146,6 @@ def test_random_differential_parity() -> None:
         assert n.loss(int(reason)) == p.loss(int(reason)), reason.name
 
 
-# --- redaction canaries -----------------------------------------------------
-
-
 def test_hashed_disposition_never_stores_plaintext() -> None:
     rec = _native(capture_slabs=4, slab_bytes=4096)
     secret = b"super-secret-bearer-token-value"
@@ -190,9 +177,6 @@ def test_masked_and_length_store_only_length() -> None:
         assert field.original_length == len(secret)
 
 
-# --- bounds and truncation --------------------------------------------------
-
-
 def test_raw_body_truncates_to_slab_and_flags() -> None:
     # slab_bytes is small; a large RAW body cannot fit and is clipped.
     rec = _native(capture_slabs=2, slab_bytes=128)
@@ -200,8 +184,7 @@ def test_raw_body_truncates_to_slab_and_flags() -> None:
     big = bytes(range(256)) * 4  # 1 KiB, far over the 128-byte slab
     for r in (rec, pure):
         req = r.begin(start_ns=0)
-        req.capture(int(FC.REQUEST_BODY), 0, int(D.RAW)
-                    if r is pure else _flight.CAP_RAW, big)
+        req.capture(int(FC.REQUEST_BODY), 0, int(D.RAW) if r is pure else _flight.CAP_RAW, big)
         req.finish(now_ns=1000, status=200)
     (nslab,) = rec.drain_captures()
     (pslab,) = pure.drain_captures()
@@ -262,9 +245,6 @@ def test_drained_slabs_recycle_through_the_pool() -> None:
         (slab,) = rec.drain_captures()  # frees the slab back to the pool
         assert fs.CaptureSlab.decode(slab).request_id == i + 1
     assert rec.loss(fs.LossReason.CAPTURE_POOL_FULL) == 0
-
-
-# --- lifecycle edges --------------------------------------------------------
 
 
 def test_abandon_releases_slab_without_committing() -> None:

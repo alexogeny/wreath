@@ -3,7 +3,7 @@
 Each rule maps a recognized source construct to (construct-name, coverage-category,
 verdict-tag, message). The message names the wreath target idiom or the reason a
 site needs review. Rule ids are stable and appear in the report so a reviewer can
-`grep` a worklist. Seeded from docs/from-fastapi/{index,pydantic,sqlmodel,alembic}.md.
+`grep` a worklist.
 """
 
 from __future__ import annotations

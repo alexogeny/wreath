@@ -74,8 +74,6 @@ def escape(value: str) -> str:
     )
 
 
-# --- parsing / compilation --------------------------------------------------
-
 _IDENT = str.isidentifier
 
 
@@ -92,7 +90,6 @@ def _parse_path(expr: str, line: int) -> tuple[str, ...]:
         # reads a module global straight into the output. There is no call
         # opcode, so the ceiling is disclosure rather than execution -- but
         # disclosure of exactly the credentials worth stealing.
-        #
         # It only bites a template whose *source* came from outside, which is
         # already a mistake. It is refused here anyway, because the cost is one
         # comparison at compile time and the alternative is that the mistake is
@@ -215,23 +212,15 @@ def compile_tape(
         elif keyword == "include":
             include_name = _parse_include_target(rest, line)
             if resolver is None:
-                raise TemplateSyntaxError(
-                    "include requires a TemplateDirectory", line=line
-                )
+                raise TemplateSyntaxError("include requires a TemplateDirectory", line=line)
             if include_name in _stack:
-                raise TemplateSyntaxError(
-                    f"include cycle through {include_name!r}", line=line
-                )
+                raise TemplateSyntaxError(f"include cycle through {include_name!r}", line=line)
             included = resolver(include_name)
             if included is None:
                 raise TemplateSyntaxError(
                     f"included template {include_name!r} not found", line=line
                 )
-            tape.extend(
-                compile_tape(
-                    included, include_name, resolver, _stack | {include_name}
-                )
-            )
+            tape.extend(compile_tape(included, include_name, resolver, _stack | {include_name}))
         else:
             raise TemplateSyntaxError(f"unknown tag {keyword!r}", line=line)
 

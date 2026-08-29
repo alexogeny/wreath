@@ -105,7 +105,7 @@ from wreath.request import UploadedFile
 from wreath.response import HTMLResponse, SSEResponse
 from wreath.rooms import RoomRegistry
 from wreath.router import Router
-from wreath.series import Range, Series, avg, count, project_chart_text, sum_
+from wreath.series import ChartData, Range, Series, avg, count, sum_
 from wreath.sync import Sync
 from wreath.templates import Template
 from wreath.temporal import (
@@ -308,6 +308,15 @@ _PAGE = Template.from_string(
     "</main>",
     name="holistic-e2e.html",
 )
+_PAGE_PREFIX = Template.from_string(
+    "<!doctype html><title>{{ view.title }}</title>"
+    '<main data-trace="{{ view.trace }}" data-session="{{ view.session }}" '
+    'data-client-country="{{ client_country }}" '
+    'data-client-agent="{{ client_agent }}" data-client-bot="{{ client_bot }}">'
+    "<h1>{{ principal }} / {{ view.id }}</h1>"
+    "<p>{{ dependency }}",
+    name="holistic-e2e-prefix.html",
+)
 
 # A full in-memory calculated-view result. The sparse readings are immutable
 # benchmark fixture data; every request still pays for the DST-correct dense
@@ -352,6 +361,7 @@ _SERIES_SPARSE = {
     }
     for tenant in range(48)
 }
+_SERIES_CHART = ChartData(_SERIES_BUCKETS, _SERIES_SPARSE, _SERIES_FILLS)
 _DEPOT = Coordinate(lat=-27.4698, lon=153.0251)
 _SITE = Coordinate(lat=-33.8688, lon=151.2093)
 _HOURLY_START = Instant.of(datetime.datetime(2026, 3, 20, 11, tzinfo=datetime.UTC))
@@ -573,13 +583,16 @@ _COMPRESSION = CompressionPolicy(
     minimum_size=512,
     compress_authenticated=True,
 )
-if os.environ.get("WREATH_BENCH_OPTIMAL_COMPRESSION") == "1":
+_OPTIMAL_COMPRESSION = os.environ.get("WREATH_BENCH_OPTIMAL_COMPRESSION") == "1"
+if _OPTIMAL_COMPRESSION:
     # A retained response for neighbouring resource 41 is the client-held raw
     # dictionary for resource 42.  It differs at two dynamic byte positions;
     # bytes 249 onward are an independently verified stable template span.
     _DICTIONARY = (
-        FilePath(__file__).with_name("data").joinpath("holistic-dictionary-v1.html")
-    ).read_bytes().removesuffix(b"\n")
+        (FilePath(__file__).with_name("data").joinpath("holistic-dictionary-v1.html"))
+        .read_bytes()
+        .removesuffix(b"\n")
+    )
     _COMPRESSION._configure_dcz_dictionary("html", _DICTIONARY)
     _COMPRESSION._configure_gzip_fragment(
         "html",
@@ -776,14 +789,12 @@ async def holistic(
         buckets=(Week, Month),
         in_zone=_SERIES_ZONE,
     )
-    series_count, series_keys, paths, tick_text, tick_count = project_chart_text(
-        _SERIES_BUCKETS,
-        _SERIES_SPARSE,
-        _SERIES_FILLS,
+    series_count, series_keys, paths, tick_text, tick_count = _SERIES_CHART.project_chart_text(
         downsample_rows=_SERIES_DOWNSAMPLE_ROWS,
         full_rows=_SERIES_FULL_ROWS,
         threshold=128,
         tick_target=9,
+        cache=False,
     )
     next_run = _SCHEDULE.next_after(_HOURLY_START)
     occupied_cells, trail_speed = _TRAJECTORY.grid_summary(_SERIES_START, _SERIES_END, _MAP_GRID)
@@ -867,49 +878,49 @@ async def holistic(
         ),
         namespace="holistic",
     )
-    document = _PAGE.render_bytes(
-        {
-            "view": view,
-            "principal": request.identity.id,
-            "dependency": dependency,
-            "upstream_status": upstream.status,
-            "lines": selected_lines,
-            "chart_buckets": daily_count,
-            "chart_lines": series_count,
-            "chart_spines": daily_count + hourly_count + weekly_count + monthly_count,
-            "chart_paths": len(paths),
-            "chart_age": relative(_SERIES_START, now=_SERIES_END),
-            "chart_span": format_duration(_SERIES_END - _SERIES_START),
-            "chart_distance": round(distance(_DEPOT, _SITE) / 1000),
-            "chart_speed": round(trail_speed or 0.0, 3),
-            "chart_grid": f"{_MAP_GRID.rows}x{_MAP_GRID.columns}:{len(occupied_cells)}",
-            "chart_next": exported_at,
-            "vector_shape": (
-                f"{len(projection.embedding)}:{len(projection.compact_embedding)}:"
-                f"{projection.terms.dim}/{len(projection.terms)}"
-            ),
-            "incident_page": f"{len(incident_page.items)}/{incident_page.total}",
-            "protobuf_bytes": len(protobuf_blob),
-            "msgpack_bytes": len(messagepack_blob),
-            "metric_count": len(counters),
-            "client_country": (
-                "unknown"
-                if client_facts.ip is None or client_facts.ip.geo is None
-                else client_facts.ip.geo.country or "unknown"
-            ),
-            "client_agent": client_facts.user_agent.browser or "unknown",
-            "client_bot": str(client_facts.user_agent.bot).lower(),
-            "chart_path": "".join(paths),
-            "chart_ticks": tick_text,
-        }
+    context = {
+        "view": view,
+        "principal": request.identity.id,
+        "dependency": dependency,
+        "upstream_status": upstream.status,
+        "lines": selected_lines,
+        "chart_buckets": daily_count,
+        "chart_lines": series_count,
+        "chart_spines": daily_count + hourly_count + weekly_count + monthly_count,
+        "chart_paths": len(paths),
+        "chart_age": relative(_SERIES_START, now=_SERIES_END),
+        "chart_span": format_duration(_SERIES_END - _SERIES_START),
+        "chart_distance": round(distance(_DEPOT, _SITE) / 1000),
+        "chart_speed": round(trail_speed or 0.0, 3),
+        "chart_grid": f"{_MAP_GRID.rows}x{_MAP_GRID.columns}:{len(occupied_cells)}",
+        "chart_next": exported_at,
+        "vector_shape": (
+            f"{len(projection.embedding)}:{len(projection.compact_embedding)}:"
+            f"{projection.terms.dim}/{len(projection.terms)}"
+        ),
+        "incident_page": f"{len(incident_page.items)}/{incident_page.total}",
+        "protobuf_bytes": len(protobuf_blob),
+        "msgpack_bytes": len(messagepack_blob),
+        "metric_count": len(counters),
+        "client_country": (
+            "unknown"
+            if client_facts.ip is None or client_facts.ip.geo is None
+            else client_facts.ip.geo.country or "unknown"
+        ),
+        "client_agent": client_facts.user_agent.browser or "unknown",
+        "client_bot": str(client_facts.user_agent.bot).lower(),
+        "chart_path": "".join(paths),
+        "chart_ticks": tick_text,
+    }
+    document = (
+        _COMPRESSION._gzip_fragment_render("html", _PAGE_PREFIX, context)
+        if _OPTIMAL_COMPRESSION
+        else _PAGE.render_bytes(context)
     )
     return HTMLResponse(
         document,
         background=BackgroundTask(_record_report_projection, export),
     )
-
-
-# -- calculated series ------------------------------------------------------
 
 
 @_V1.get("/accounts/{account_id}/activity-series")
@@ -925,9 +936,6 @@ async def account_activity_series(
         zone=_SERIES_ZONE,
     )
     return result.as_dict()
-
-
-# -- tenancy and organizations ---------------------------------------------
 
 
 @_V1.get("/enterprise/accounts/{account_id}")
@@ -949,13 +957,7 @@ async def enterprise_account(
     }
 
 
-# -- generated administration ---------------------------------------------
-
-
 _V1.include_router(_ADMIN.router("/admin"))
-
-
-# -- organization provisioning ---------------------------------------------
 
 
 _V1.include_router(
@@ -971,17 +973,11 @@ _V1.include_router(
 )
 
 
-# -- bounded sync snapshot --------------------------------------------------
-
-
 @_V1.get("/sync/accounts/mine")
 @permissions("sync:read")
 async def sync_accounts(request: Any) -> Any:
     snapshot = await _ACCOUNT_SYNC.evaluate(_SyncSession(), "mine", request.identity)
     return snapshot
-
-
-# -- live room --------------------------------------------------------------
 
 
 @_V1.websocket("/live/accounts/{account_id}", permissions=("events:read",))
@@ -994,9 +990,6 @@ async def live_account_room(websocket: Any) -> None:
             await _ROOMS.broadcast(room, payload)
     finally:
         await _ROOMS.leave(room, websocket)
-
-
-# -- workflow ---------------------------------------------------------------
 
 
 @_V1.post("/workflows/reports")
@@ -1012,9 +1005,6 @@ async def run_report_workflow(request: Any) -> dict[str, Any]:
         "completed": outcome.completed,
         "results": outcome.results,
     }
-
-
-# -- signed webhook ---------------------------------------------------------
 
 
 _WEBHOOK_KEYS = {"operations": b"holistic-webhook-secret-material-2026"}
@@ -1041,9 +1031,6 @@ async def receive_field_observation(
             generated_at=context.envelope.timestamp.isoformat(),
         )
     )
-
-
-# -- operational endpoints --------------------------------------------------
 
 
 async def _database_ready() -> dict[str, Any]:
@@ -1076,8 +1063,6 @@ _V1.include_router(
 )
 
 
-# -- GraphQL ---------------------------------------------------------------
-
 _GRAPHQL = GraphQL(
     _REGISTRY,
     models=[OperationsAccount],
@@ -1108,9 +1093,6 @@ _V1.include_router(
 )
 
 
-# -- generated CRUD --------------------------------------------------------
-
-
 def _open_read_session(request: Any) -> Session:
     return Session(_REGISTRY, "read")
 
@@ -1125,9 +1107,6 @@ _V1.include_router(
         authorize=Access.permissions("crud:read"),
     )
 )
-
-
-# -- negotiated representations -------------------------------------------
 
 
 def _operations_export(account_id: int) -> OperationsExport:
@@ -1167,9 +1146,6 @@ async def messagepack_export(
     )
 
 
-# -- multipart --------------------------------------------------------------
-
-
 @_V1.post("/imports")
 @permissions("imports:write")
 async def import_observations(
@@ -1187,8 +1163,6 @@ async def import_observations(
         "checksum": checksum,
     }
 
-
-# -- MCP --------------------------------------------------------------------
 
 _MCP_ROUTER = Router()
 _MCP = MCP(
@@ -1235,8 +1209,6 @@ _MCP.mount(_MCP_ROUTER)
 _V1.include_router(_MCP_ROUTER, permissions=("mcp:use",))
 
 
-# -- gRPC -------------------------------------------------------------------
-
 _GRPC = GrpcService("wreath.operations.Reports")
 
 
@@ -1261,9 +1233,6 @@ async def CompileReport(request: Any, query: OperationsQuery) -> OperationsExpor
 
 
 _V1.include_router(_GRPC.router())
-
-
-# -- finite realtime stream -------------------------------------------------
 
 
 @_V1.get("/events")

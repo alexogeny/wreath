@@ -1,23 +1,15 @@
-"""Port intermediate representation: findings, tags, and the coverage report.
+"""Port findings, tags, and coverage reports."""
 
-Phase 0 is a pure-stdlib static analyzer, so `_port` defines its OWN lightweight
-frozen records here rather than importing `wreath.typegen.model` at runtime — the
-analyzer must be runnable without importing the `wreath` package (or its native
-`_core`). # TODO: converge with the typegen IR (Diagnostic/TypeRef) once the tool
-runs inside a built wreath, per design 07 §1.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Finding tags (the human-facing vocabulary; hyphenated per design 07 §3).
 TRANSLATED = "translated"
 NEEDS_REVIEW = "needs-review"
 UNSUPPORTED = "unsupported"
 
 VALID_TAGS = frozenset({TRANSLATED, NEEDS_REVIEW, UNSUPPORTED})
 
-# JSON `counts` keys are underscored (a stable machine contract).
 _COUNT_KEY = {TRANSLATED: "translated", NEEDS_REVIEW: "needs_review", UNSUPPORTED: "unsupported"}
 
 
@@ -96,23 +88,33 @@ class Report:
         self.detection = detection
         # Deterministic ordering: by file, then line, then rule — so re-runs and
         # merged reports are byte-stable (idempotency, design 07 §3).
-        self.findings = sorted(findings, key=lambda f: (f.file, f.line, f.rule_id, f.construct))
+        self.findings = sorted(
+            findings,
+            key=lambda finding: (
+                finding.file,
+                finding.line,
+                finding.rule_id,
+                finding.construct,
+            ),
+        )
         self.roots = list(roots or [])
-        self.skipped = sorted(skipped or [], key=lambda s: (s.file, s.reason))
+        self.skipped = sorted(
+            skipped or [], key=lambda skipped_file: (skipped_file.file, skipped_file.reason)
+        )
         self.files_analyzed = files_analyzed
 
-    # -- counts ---------------------------------------------------------------
     @property
     def recognized_constructs(self) -> int:
         return len(self.findings)
 
     def _count(self, tag: str) -> int:
-        return sum(1 for f in self.findings if f.tag == tag)
+        return sum(1 for finding in self.findings if finding.tag == tag)
 
     def counts(self) -> dict:
-        return {_COUNT_KEY[t]: self._count(t) for t in (TRANSLATED, NEEDS_REVIEW, UNSUPPORTED)}
+        return {
+            _COUNT_KEY[tag]: self._count(tag) for tag in (TRANSLATED, NEEDS_REVIEW, UNSUPPORTED)
+        }
 
-    # -- coverage -------------------------------------------------------------
     def coverage(self, category: str) -> float | None:
         """translated / recognized within `category`; `None` if none recognized.
 
@@ -120,11 +122,11 @@ class Report:
         recognized nothing here, which is the absence of an answer and not a
         perfect score. Callers must render it as "n/a" (see `_percent`).
         """
-        in_cat = [f for f in self.findings if f.category == category]
-        if not in_cat:
+        category_findings = [finding for finding in self.findings if finding.category == category]
+        if not category_findings:
             return None
-        translated = sum(1 for f in in_cat if f.tag == TRANSLATED)
-        return translated / len(in_cat)
+        translated = sum(1 for finding in category_findings if finding.tag == TRANSLATED)
+        return translated / len(category_findings)
 
     def coverage_overall(self) -> float | None:
         """translated / recognized across every category; `None` if none recognized."""
@@ -146,25 +148,28 @@ class Report:
         then by rule id so equal counts are stable.
         """
         tally: dict[tuple[str, str, str], int] = {}
-        for f in self.findings:
-            if f.tag == TRANSLATED:
+        for finding in self.findings:
+            if finding.tag == TRANSLATED:
                 continue
-            tally[(f.rule_id, f.category, f.tag)] = tally.get((f.rule_id, f.category, f.tag), 0) + 1
+            key = (finding.rule_id, finding.category, finding.tag)
+            tally[key] = tally.get(key, 0) + 1
         return [
-            (rule, cat, tag, n)
-            for (rule, cat, tag), n in sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))
+            (rule, category, tag, count)
+            for (rule, category, tag), count in sorted(
+                tally.items(), key=lambda item: (-item[1], item[0])
+            )
         ]
 
     def categories(self) -> dict:
-        cats: dict[str, dict] = {}
-        for f in self.findings:
-            slot = cats.setdefault(
-                f.category, {"translated": 0, "needs_review": 0, "unsupported": 0}
+        categories: dict[str, dict] = {}
+        for finding in self.findings:
+            slot = categories.setdefault(
+                finding.category,
+                {"translated": 0, "needs_review": 0, "unsupported": 0},
             )
-            slot[_COUNT_KEY[f.tag]] += 1
-        return cats
+            slot[_COUNT_KEY[finding.tag]] += 1
+        return categories
 
-    # -- renderings -----------------------------------------------------------
     def as_dict(self) -> dict:
         overall = self.coverage_overall()
         return {
@@ -183,12 +188,12 @@ class Report:
                 cat: {**slot, "coverage": _round(self.coverage(cat))}
                 for cat, slot in sorted(self.categories().items())
             },
-            "findings": [f.as_dict() for f in self.findings],
-            "skipped": [s.as_dict() for s in self.skipped],
+            "findings": [finding.as_dict() for finding in self.findings],
+            "skipped": [skipped_file.as_dict() for skipped_file in self.skipped],
         }
 
     def to_markdown(self) -> str:
-        c = self.counts()
+        counts = self.counts()
         lines = [
             "# wreath port — analysis report",
             "",
@@ -198,11 +203,11 @@ class Report:
             for warning in self.detection.warnings():
                 lines += ["", f"> **{warning}**", ""]
         lines += [
-            f"- files analyzed: **{self.files_analyzed}**  ·  "
-            f"skipped: **{len(self.skipped)}**",
+            f"- files analyzed: **{self.files_analyzed}**  ·  skipped: **{len(self.skipped)}**",
             f"- recognized constructs: **{self.recognized_constructs}**",
-            f"- translated: **{c['translated']}**  ·  needs-review: **{c['needs_review']}**  "
-            f"·  unsupported: **{c['unsupported']}**",
+            f"- translated: **{counts['translated']}**  ·  "
+            f"needs-review: **{counts['needs_review']}**  ·  "
+            f"unsupported: **{counts['unsupported']}**",
         ]
         if self.coverage_overall() is None:
             lines.append(
@@ -233,15 +238,20 @@ class Report:
                 "above — coverage describes only the files that were read."
             )
             lines.append("")
-            for s in self.skipped:
-                lines.append(f"- `{s.reason}` {s.file} — {s.detail}")
+            for skipped_file in self.skipped:
+                lines.append(
+                    f"- `{skipped_file.reason}` {skipped_file.file} — {skipped_file.detail}"
+                )
         lines += ["", "## Findings needing review or unsupported", ""]
-        flagged = [f for f in self.findings if f.tag != TRANSLATED]
+        flagged = [finding for finding in self.findings if finding.tag != TRANSLATED]
         if not flagged:
             lines.append("_none_")
-        for f in flagged:
-            lines.append(f"- `{f.tag}` **{f.construct}** — {f.file}:{f.line} — "
-                         f"{f.message} _[{f.rule_id}]_")
+        for finding in flagged:
+            lines.append(
+                f"- `{finding.tag}` **{finding.construct}** — "
+                f"{finding.file}:{finding.line} — {finding.message} "
+                f"_[{finding.rule_id}]_"
+            )
         return "\n".join(lines) + "\n"
 
     @classmethod
@@ -250,16 +260,19 @@ class Report:
         roots: list[str] = []
         skipped: list[SkippedFile] = []
         analyzed = 0
-        for r in reports:
-            findings.extend(r.findings)
-            roots.extend(r.roots)
-            skipped.extend(r.skipped)
-            analyzed += r.files_analyzed
+        for report in reports:
+            findings.extend(report.findings)
+            roots.extend(report.roots)
+            skipped.extend(report.skipped)
+            analyzed += report.files_analyzed
         from .detect import Detection
 
         return cls(
-            findings, roots, skipped, analyzed,
-            detection=Detection.merge([r.detection for r in reports]),
+            findings,
+            roots,
+            skipped,
+            analyzed,
+            detection=Detection.merge([report.detection for report in reports]),
         )
 
 

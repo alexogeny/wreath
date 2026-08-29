@@ -1,9 +1,3 @@
-"""Poller backends: epoll (stage 1) and io_uring (stage 4) must be swappable and
-observably identical at the loop-behaviour level.
-
-`backend=None` picks the best available. Selecting a backend the host cannot
-provide must raise a clear error rather than silently degrade.
-"""
 from __future__ import annotations
 
 import asyncio

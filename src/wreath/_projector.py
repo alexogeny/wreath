@@ -69,6 +69,7 @@ __all__ = [
     "Projector",
 ]
 
+
 class _RecorderLike(_Protocol):
     """The recorder surface the projector reads, also implemented by test doubles."""
 
@@ -319,11 +320,7 @@ class Projector:
             Severity,
             ClientFactsCell,
         )
-        self._drain = DrainThread(
-            "wreath-flight-projector", interval, self.poll, self._flush
-        )
-
-    # --- lifecycle ---------------------------------------------------------
+        self._drain = DrainThread("wreath-flight-projector", interval, self.poll, self._flush)
 
     def start(self) -> None:
         """Spawn the drain thread. Idempotent; a stopped projector can restart."""
@@ -347,8 +344,6 @@ class Projector:
         self.poll()
         self.poll()
 
-    # --- draining and assembly --------------------------------------------
-
     def poll(self) -> int:
         """Run one drain cycle synchronously: drain, ingest, settle. Returns the
         number of traces finalized this cycle. Exposed for deterministic tests
@@ -364,16 +359,13 @@ class Projector:
         """Decode a drained buffer and fold each cell into the pending table.
         Nothing finalizes here -- a completion settles only after a quiet cycle
         (see `_settle`), so its whole tail has a chance to arrive first."""
-        self._loss.decode_error += _core.flight_project_cells(
-            self, raw, self._cell_config
-        )
+        self._loss.decode_error += _core.flight_project_cells(self, raw, self._cell_config)
 
     def _emit_standalone_log(self, cell: LogCell) -> None:
         """Deliver a non-request log immediately after native decoding."""
         if cell.request_id != 0:
             raise ValueError(
-                "standalone flight log must have request_id 0; "
-                f"received {cell.request_id}"
+                f"standalone flight log must have request_id 0; received {cell.request_id}"
             )
         self._emit_log(ProjectedLog(cell=cell, observed_unix_nano=time.time_ns()))
 
@@ -391,9 +383,7 @@ class Projector:
     def _finalize(self, request_id: int, entry: Any) -> None:
         completion = entry.completion
         if completion is None:
-            raise ValueError(
-                f"flight assembly {request_id} has no completion cell to finalize"
-            )
+            raise ValueError(f"flight assembly {request_id} has no completion cell to finalize")
         del self._pending[request_id]
         corr = entry.correlation
         phases = tuple(sorted(entry.phases, key=lambda p: p.sequence))
@@ -529,8 +519,6 @@ class Projector:
             # other consumers. A permanently broken sink is a rising counter.
             self._loss.export_error += 1
 
-    # --- snapshots ---------------------------------------------------------
-
     def snapshot(
         self, *, recent: int | None = None, failures: int | None = None
     ) -> ProjectorSnapshot:
@@ -553,11 +541,6 @@ class Projector:
                 )
                 for m in self._routes.values()
             )
-            # `replace` with no changes copies *every* field, including ones
-            # added later. The field-by-field copy this used to be silently
-            # dropped `orphan_log` when it was introduced -- the counter rose
-            # and the snapshot reported zero, which is the exact failure mode a
-            # loss counter exists to prevent.
             loss = replace(self._loss)
             return ProjectorSnapshot(
                 assembled=self._assembled,

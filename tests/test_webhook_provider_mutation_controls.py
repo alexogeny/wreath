@@ -1,5 +1,3 @@
-"""Focused objections for third-party webhook verification profiles."""
-
 from __future__ import annotations
 
 import base64
@@ -33,16 +31,12 @@ BODY = dumps({"id": "evt_1", "type": "invoice.paid", "api_version": "2026-08"})
 
 def test_hmac_verifier_refuses_delete_in_a_signed_field_before_mac_check() -> None:
     secret = b"s" * 32
-    envelope = WebhookEnvelope(
-        "evt_1", "invoice.paid", "1", NOW, "application/json", BODY
-    )
+    envelope = WebhookEnvelope("evt_1", "invoice.paid", "1", NOW, "application/json", BODY)
     headers = dict(HMACWebhookSigner({"key": secret}, key_id="key").headers(envelope))
     headers[b"wreath-webhook-id"] = b"evt_1\x7f"
 
     with pytest.raises(ValueError, match="id contains a control character"):
-        HMACWebhookVerifier({"key": secret}).verify(
-            body=BODY, headers=headers, now=NOW
-        )
+        HMACWebhookVerifier({"key": secret}).verify(body=BODY, headers=headers, now=NOW)
 
 
 def test_provider_event_requires_a_json_object() -> None:
@@ -117,9 +111,7 @@ def test_constant_time_signature_match_checks_bytes_after_a_digest_collision(
         def digest(self) -> bytes:
             return b"same bucket"
 
-    monkeypatch.setattr(
-        webhook_module.hashlib, "sha256", lambda _value: _CollidingDigest()
-    )
+    monkeypatch.setattr(webhook_module.hashlib, "sha256", lambda _value: _CollidingDigest())
 
     assert not _constant_time_signature_match((b"wanted",), (b"different",))
 
@@ -168,9 +160,9 @@ def test_standard_verifier_ignores_other_signature_versions() -> None:
     headers = _standard_headers(b"secret")
     headers[b"webhook-signature"] = b"v0,%%% " + headers[b"webhook-signature"]
 
-    assert StandardWebhookVerifier(b"secret").verify(
-        body=BODY, headers=headers, now=NOW
-    ).id == "evt_1"
+    assert (
+        StandardWebhookVerifier(b"secret").verify(body=BODY, headers=headers, now=NOW).id == "evt_1"
+    )
 
 
 def test_standard_verifier_refuses_a_header_without_v1_signatures() -> None:
@@ -178,9 +170,7 @@ def test_standard_verifier_refuses_a_header_without_v1_signatures() -> None:
     headers[b"webhook-signature"] = b"v0,AAAA"
 
     with pytest.raises(ValueError, match="invalid Standard Webhooks signature"):
-        StandardWebhookVerifier(b"secret").verify(
-            body=BODY, headers=headers, now=NOW
-        )
+        StandardWebhookVerifier(b"secret").verify(body=BODY, headers=headers, now=NOW)
 
 
 def test_standard_verifier_refuses_a_malformed_v1_signature() -> None:
@@ -188,9 +178,7 @@ def test_standard_verifier_refuses_a_malformed_v1_signature() -> None:
     headers[b"webhook-signature"] = b"v1,%%%"
 
     with pytest.raises(ValueError, match="invalid Standard Webhooks signature"):
-        StandardWebhookVerifier(b"secret").verify(
-            body=BODY, headers=headers, now=NOW
-        )
+        StandardWebhookVerifier(b"secret").verify(body=BODY, headers=headers, now=NOW)
 
 
 def test_standard_verifier_binds_header_id_to_body_id() -> None:
@@ -207,9 +195,9 @@ def test_standard_verifier_binds_header_id_to_body_id() -> None:
 def _stripe_headers(
     secret: bytes, *, body: bytes = BODY, timestamp: bytes = SECONDS
 ) -> dict[bytes, bytes]:
-    signature = hmac.new(
-        secret, timestamp + b"." + body, hashlib.sha256
-    ).hexdigest().encode("ascii")
+    signature = (
+        hmac.new(secret, timestamp + b"." + body, hashlib.sha256).hexdigest().encode("ascii")
+    )
     return {b"stripe-signature": b"t=" + timestamp + b",v1=" + signature}
 
 
@@ -231,12 +219,10 @@ def test_stripe_verifier_refuses_nonpositive_max_age() -> None:
 def test_stripe_verifier_accepts_string_and_byte_secrets() -> None:
     headers = _stripe_headers(b"secret")
 
-    assert StripeWebhookVerifier("secret").verify(
-        body=BODY, headers=headers, now=NOW
-    ).id == "evt_1"
-    assert StripeWebhookVerifier(b"secret").verify(
-        body=BODY, headers=headers, now=NOW
-    ).id == "evt_1"
+    assert StripeWebhookVerifier("secret").verify(body=BODY, headers=headers, now=NOW).id == "evt_1"
+    assert (
+        StripeWebhookVerifier(b"secret").verify(body=BODY, headers=headers, now=NOW).id == "evt_1"
+    )
 
 
 def test_stripe_verifier_requires_equals_in_each_field() -> None:
@@ -274,21 +260,20 @@ def test_github_verifier_refuses_nonpositive_replay_ttl() -> None:
 
 
 def test_github_verifier_accepts_string_and_byte_secrets() -> None:
-    signature = b"sha256=" + hmac.new(
-        b"secret", BODY, hashlib.sha256
-    ).hexdigest().encode("ascii")
+    signature = b"sha256=" + hmac.new(b"secret", BODY, hashlib.sha256).hexdigest().encode("ascii")
     headers = {
         b"x-hub-signature-256": signature,
         b"x-github-delivery": b"delivery",
         b"x-github-event": b"push",
     }
 
-    assert GitHubWebhookVerifier("secret").verify(
-        body=BODY, headers=headers, now=NOW
-    ).timestamp == NOW
-    assert GitHubWebhookVerifier(b"secret").verify(
-        body=BODY, headers=headers, now=NOW
-    ).id == "delivery"
+    assert (
+        GitHubWebhookVerifier("secret").verify(body=BODY, headers=headers, now=NOW).timestamp == NOW
+    )
+    assert (
+        GitHubWebhookVerifier(b"secret").verify(body=BODY, headers=headers, now=NOW).id
+        == "delivery"
+    )
 
 
 def test_github_verifier_refuses_an_invalid_signature() -> None:
@@ -301,9 +286,7 @@ def test_github_verifier_refuses_an_invalid_signature() -> None:
 
 
 def test_github_verifier_uses_current_clock_when_now_is_absent() -> None:
-    signature = b"sha256=" + hmac.new(
-        b"secret", BODY, hashlib.sha256
-    ).hexdigest().encode("ascii")
+    signature = b"sha256=" + hmac.new(b"secret", BODY, hashlib.sha256).hexdigest().encode("ascii")
     before = datetime.now(UTC)
 
     result = GitHubWebhookVerifier(b"secret").verify(

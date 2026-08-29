@@ -1,36 +1,3 @@
-"""Live-PostgreSQL proof that a planned erasure actually erases, and records it.
-
-Skipped unless ``WREATH_TEST_POSTGRES_DSN`` points at a throwaway database. The
-fake-driver suites in ``tests/test_privacy_plan.py`` prove the *shapes* -- which
-tables, in what order, matched by what predicate. They cannot prove the thing
-that matters, which is that running the plan leaves the subject's rows gone and
-everybody else's rows untouched.
-
-That second half is where an erasure fails in practice, and it fails in one of
-two directions: a nested subquery that matches nothing (the subject is told
-they were erased and were not) or one that matches too much (somebody else's
-data is destroyed, irreversibly). Both look identical from inside the planner.
-So this suite runs the generated passes against real rows and asserts both
-directions, at two levels of foreign-key depth.
-
-**These models declare a logical `SchemaRef`, and that is load-bearing.** An
-earlier version of this file put its tables in ``public`` and serialised the
-xdist workers with an advisory lock, because a `wreath.passes.ChunkedPass` over
-a model whose ``schema=`` is a plain string renders the table *unqualified* --
-only a logical ``SchemaRef`` is qualified into the statement -- and a plain
-`Database` binds no ``search_path``. That reasoning was right about the
-mechanism and wrong about where it lands: PostgreSQL's default ``search_path``
-is ``"$user", public``, this suite connects as the role ``wreath``, and the
-framework's own furniture lives in a schema *called* ``wreath``. So the moment
-any other suite on the same database creates that schema, every unqualified
-``CREATE TABLE`` here silently lands in it instead of in ``public`` -- the
-erasure tests still pass, because they are unqualified in both directions, and
-the catalog check fails because it asks the catalog about a schema the tables
-are no longer in. A fixed `SchemaRef` is qualified end to end by
-`wreath.passes._resolve_source`, so nothing here depends on ``search_path`` at
-all, and each worker gets its own schema the way `AGENTS.md` requires.
-"""
-
 from __future__ import annotations
 
 import os
@@ -192,8 +159,7 @@ async def _seed(database) -> Seeded:
                 caption,
             )
             await connection.execute(
-                f'INSERT INTO "{_SCHEMA}".wpriv_comments (photo_id, body) '
-                "VALUES ($1, $2)",
+                f'INSERT INTO "{_SCHEMA}".wpriv_comments (photo_id, body) VALUES ($1, $2)',
                 photo,
                 caption,
             )
@@ -207,7 +173,6 @@ async def _seed(database) -> Seeded:
 async def test_erasing_a_subject_empties_their_rows_at_every_depth(
     database, privacy: Privacy
 ) -> None:
-    """The direction that matters most: the subject's data is actually gone."""
     seeded = await _seed(database)
     await privacy.erase(database, str(seeded.erased), schema=_SCHEMA)
 
@@ -218,8 +183,7 @@ async def test_erasing_a_subject_empties_their_rows_at_every_depth(
     assert [tuple(row)[0] for row in captions] == ["[erased]"]
     bodies = await _rows(
         database,
-        f'SELECT body FROM "{_SCHEMA}".wpriv_comments '
-        f"WHERE photo_id = {seeded.erased_photo}",
+        f'SELECT body FROM "{_SCHEMA}".wpriv_comments WHERE photo_id = {seeded.erased_photo}',
     )
     assert [tuple(row)[0] for row in bodies] == ["[erased]"], (
         "a depth-two table is reached through the nested subquery, or it is not "
@@ -230,11 +194,6 @@ async def test_erasing_a_subject_empties_their_rows_at_every_depth(
 async def test_erasing_one_subject_leaves_every_other_subject_untouched(
     database, privacy: Privacy
 ) -> None:
-    """The other direction, and the irreversible one.
-
-    A predicate that matches too much destroys somebody else's data, and no
-    plan review catches it because the plan looks identical either way.
-    """
     seeded = await _seed(database)
     await privacy.erase(database, str(seeded.erased), schema=_SCHEMA)
 
@@ -245,8 +204,7 @@ async def test_erasing_one_subject_leaves_every_other_subject_untouched(
     assert [tuple(row)[0] for row in captions] == ["stays"]
     bodies = await _rows(
         database,
-        f'SELECT body FROM "{_SCHEMA}".wpriv_comments '
-        f"WHERE photo_id = {seeded.kept_photo}",
+        f'SELECT body FROM "{_SCHEMA}".wpriv_comments WHERE photo_id = {seeded.kept_photo}',
     )
     assert [tuple(row)[0] for row in bodies] == ["stays"]
 
@@ -254,22 +212,11 @@ async def test_erasing_one_subject_leaves_every_other_subject_untouched(
 async def test_running_the_erasure_twice_changes_nothing_the_second_time(
     database, privacy: Privacy
 ) -> None:
-    """Job delivery is at-least-once, so the chunk has to be a no-op re-run.
-
-    The `IS DISTINCT FROM '[erased]'` guard is what makes that true; without it
-    a retried chunk rewrites rows it has already rewritten, and the pass's
-    idempotence promise is false in a way nothing would notice until a trigger
-    made it matter.
-    """
     seeded = await _seed(database)
     await privacy.erase(database, str(seeded.erased), schema=_SCHEMA)
-    before = await _rows(
-        database, f'SELECT id, caption FROM "{_SCHEMA}".wpriv_photos ORDER BY id'
-    )
+    before = await _rows(database, f'SELECT id, caption FROM "{_SCHEMA}".wpriv_photos ORDER BY id')
     await privacy.erase(database, str(seeded.erased), schema=_SCHEMA)
-    after = await _rows(
-        database, f'SELECT id, caption FROM "{_SCHEMA}".wpriv_photos ORDER BY id'
-    )
+    after = await _rows(database, f'SELECT id, caption FROM "{_SCHEMA}".wpriv_photos ORDER BY id')
     assert [tuple(row) for row in before] == [tuple(row) for row in after]
     kept_captions = await _rows(
         database,
@@ -281,16 +228,10 @@ async def test_running_the_erasure_twice_changes_nothing_the_second_time(
 async def test_the_catalog_check_finds_a_foreign_key_the_orm_does_not_model(
     database, privacy: Privacy
 ) -> None:
-    """The one method that opens a connection, and why it is worth having.
-
-    A foreign key added by hand in a migration the ORM does not model is a path
-    an erasure will never walk. It is invisible to the planner by construction,
-    so it needs a check that reads the catalog and compares.
-    """
     await _apply(
         database,
         f'CREATE TABLE IF NOT EXISTS "{_SCHEMA}".wpriv_tags (\n'
-        f'  id bigint PRIMARY KEY DEFAULT nextval(\'"{_SCHEMA}".wpriv_seq\'),\n'
+        f"  id bigint PRIMARY KEY DEFAULT nextval('\"{_SCHEMA}\".wpriv_seq'),\n"
         f'  photo_id bigint NOT NULL REFERENCES "{_SCHEMA}".wpriv_photos (id),\n'
         "  label text NOT NULL\n"
         ")",
@@ -302,9 +243,6 @@ async def test_the_catalog_check_finds_a_foreign_key_the_orm_does_not_model(
         f"{_SCHEMA}.wpriv_photos",
         "id",
     ) in missing
-
-
-# -- the erasure record -------------------------------------------------------
 
 
 async def _records(database) -> list[tuple]:
@@ -319,39 +257,23 @@ async def _records(database) -> list[tuple]:
     ]
 
 
-async def test_a_completed_erasure_writes_exactly_one_record(
-    database, privacy: Privacy
-) -> None:
-    """The evidence the erasure happened, which is the whole argument for it.
-
-    Without this row a restore from a backup taken before the erasure silently
-    un-erases the subject, because nothing knows there is anything to replay.
-    """
+async def test_a_completed_erasure_writes_exactly_one_record(database, privacy: Privacy) -> None:
     seeded = await _seed(database)
     plan = privacy.plan(str(seeded.erased))
-    await privacy.erase(
-        database, str(seeded.erased), digest=plan.digest, schema=_SCHEMA
-    )
+    await privacy.erase(database, str(seeded.erased), digest=plan.digest, schema=_SCHEMA)
 
     records = await _records(database)
     assert len(records) == 1, "one erasure, one record"
     subject, model, column_name, digest, tables, rows = records[0]
     assert (subject, model, column_name) == (str(seeded.erased), "Person", "id")
     assert digest == plan.digest, (
-        "the record names the plan that ran, so a reviewer can tell which "
-        "traversal produced it"
+        "the record names the plan that ran, so a reviewer can tell which traversal produced it"
     )
     assert tables == 3
     assert rows > 0
 
 
 async def test_the_record_holds_no_erased_value(database, privacy: Privacy) -> None:
-    """A record of *what* was erased would be a re-identification store.
-
-    The one thing the record must never grow. Asserted against the catalog
-    rather than against a row, so a column added later fails here even if no
-    test happens to write a value into it.
-    """
     seeded = await _seed(database)
     await privacy.erase(database, str(seeded.erased), schema=_SCHEMA)
 
@@ -377,26 +299,14 @@ async def test_the_record_holds_no_erased_value(database, privacy: Privacy) -> N
     }
 
 
-async def test_re_running_an_erasure_does_not_record_it_twice(
-    database, privacy: Privacy
-) -> None:
-    """At-least-once delivery must not produce two receipts for one erasure."""
+async def test_re_running_an_erasure_does_not_record_it_twice(database, privacy: Privacy) -> None:
     seeded = await _seed(database)
     await privacy.erase(database, str(seeded.erased), schema=_SCHEMA)
     await privacy.erase(database, str(seeded.erased), schema=_SCHEMA)
     assert len(await _records(database)) == 1
 
 
-async def test_an_unfinished_erasure_records_nothing(
-    database, privacy: Privacy
-) -> None:
-    """The refusal that makes the record worth reading.
-
-    A receipt written for an erasure that stopped part-way is worse than no
-    receipt: the subject has already been told it is done. The pass is left
-    blocked here by dropping the table out from under the walk, which is how a
-    pass fails for real.
-    """
+async def test_an_unfinished_erasure_records_nothing(database, privacy: Privacy) -> None:
     seeded = await _seed(database)
     prepared = privacy.prepare(str(seeded.erased), schema=_SCHEMA)
     # Run nothing at all: every declared pass is missing from the ledger, which
@@ -409,19 +319,9 @@ async def test_an_unfinished_erasure_records_nothing(
     assert await _records(database) == []
 
 
-async def test_the_record_survives_the_erasure_it_describes(
-    database, privacy: Privacy
-) -> None:
-    """The subject's row is gone; the row saying so is not.
-
-    An erasure that deleted the record of itself would be a compliance failure
-    in the other direction, and the record lives in the wreath schema rather
-    than in the application's, so no traversal can reach it.
-    """
+async def test_the_record_survives_the_erasure_it_describes(database, privacy: Privacy) -> None:
     seeded = await _seed(database)
     await privacy.erase(database, str(seeded.erased), schema=_SCHEMA)
-    people = await _rows(
-        database, f'SELECT id FROM "{_SCHEMA}".wpriv_people ORDER BY id'
-    )
+    people = await _rows(database, f'SELECT id FROM "{_SCHEMA}".wpriv_people ORDER BY id')
     assert seeded.erased not in [tuple(row)[0] for row in people]
     assert [record[0] for record in await _records(database)] == [str(seeded.erased)]

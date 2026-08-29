@@ -88,9 +88,7 @@ def _reap(key: _SubscriptionKey, dead: weakref.ref[Any]) -> None:
             _remove_subscription(key)
 
 
-def subscribe_writes(
-    callback: Callable[[frozenset[str]], None], *, owner: Any = None
-) -> None:
+def subscribe_writes(callback: Callable[[frozenset[str]], None], *, owner: Any = None) -> None:
     """Call `callback(model_names)` after each committed flush that wrote.
 
     `owner` is held weakly and removes the subscription when collected.
@@ -187,7 +185,4 @@ class WriteBroadcast:
             publish_write(names, remote=True)
 
     def __repr__(self) -> str:
-        return (
-            f"<WriteBroadcast channel={self._bridge.channel!r} "
-            f"origin={self._bridge.origin}>"
-        )
+        return f"<WriteBroadcast channel={self._bridge.channel!r} origin={self._bridge.origin}>"

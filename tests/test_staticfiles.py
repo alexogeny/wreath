@@ -1,11 +1,3 @@
-"""Lifecycle of a `StaticFiles` handler: what `close()` releases, and when.
-
-The lookup pool and the pinned root descriptor are the two resources an
-instance holds. Both have to go, and they have to go in that order -- a root
-descriptor closed while a lookup is still queued would have that lookup call
-``openat`` on a number the process may already have handed to something else.
-"""
-
 from __future__ import annotations
 
 import os
@@ -33,11 +25,8 @@ def test_close_releases_the_root_descriptor(tmp_path) -> None:
         os.fstat(root_fd)
 
 
-@pytest.mark.skipif(
-    not os.path.isdir("/proc/self/fd"), reason="needs /proc to count descriptors"
-)
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="needs /proc to count descriptors")
 def test_closed_instances_do_not_leak_descriptors(tmp_path) -> None:
-    """One fd per instance was leaking; twenty instances made it obvious."""
     StaticFiles(tmp_path).close()  # warm any lazy imports the first one does
     before = _fd_count()
 
@@ -54,7 +43,6 @@ def test_close_is_idempotent(tmp_path) -> None:
 
 
 def test_close_waits_for_work_already_in_the_pool(tmp_path, monkeypatch) -> None:
-    """The wait is the precondition for closing the root fd at all."""
     files = StaticFiles(tmp_path, max_workers=1)
     finished: list[str] = []
     worker_started = threading.Event()
@@ -87,7 +75,6 @@ def test_close_waits_for_work_already_in_the_pool(tmp_path, monkeypatch) -> None
 
 @pytest.mark.asyncio
 async def test_serving_still_works_before_close(tmp_path) -> None:
-    """A guard on the fd-closing change: lookups must be unaffected."""
     (tmp_path / "hello.txt").write_bytes(b"hi")
     files = StaticFiles(tmp_path, cache_control=None)
     try:
@@ -101,8 +88,6 @@ async def test_serving_still_works_before_close(tmp_path) -> None:
         files.close()
 
 
-# --- reachability through the public API -------------------------------------
-#
 # `Wreath.static()` builds the instance itself and stores it only as an opaque
 # route handler, so before lifespan closed it there was no way for an
 # application to satisfy `close()`'s own "call it at shutdown" instruction. The
@@ -132,8 +117,6 @@ async def test_lifespan_shutdown_closes_a_static_mount(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_a_failed_startup_also_closes_a_static_mount(tmp_path) -> None:
-    """Startup failure is the path where nothing else ever will: the server is
-    told startup failed and never calls shutdown."""
     app = Wreath()
     app.static("/assets", str(tmp_path))
 
@@ -159,8 +142,6 @@ async def test_a_failed_startup_also_closes_a_static_mount(tmp_path) -> None:
         os.fstat(root_fd)
 
 
-# --- the four response shapes nothing was watching ----------------------------
-#
 # `wreath mutant` survived every conditional in `__call__` below the resolve:
 # the directory redirect, the cache-control header, the conditional 304 and the
 # unsatisfiable-range 416. All four are HTTP behaviours a client depends on and
@@ -178,12 +159,6 @@ def _static_app(root, **kwargs):
 
 @pytest.mark.asyncio
 async def test_a_directory_without_a_trailing_slash_redirects_canonically(tmp_path) -> None:
-    """Serving the index from the un-slashed path breaks every relative link.
-
-    `/assets/docs` and `/assets/docs/` resolve relative URLs one level apart, so
-    the index has to be reached at the canonical path or its own `<img src="a.png">`
-    asks for `/assets/a.png`. 308 rather than 301 so the method and body survive.
-    """
     from wreath.testing import TestClient
 
     (tmp_path / "docs").mkdir()
@@ -202,12 +177,6 @@ async def test_a_directory_without_a_trailing_slash_redirects_canonically(tmp_pa
 
 @pytest.mark.asyncio
 async def test_a_root_static_mount_cannot_emit_a_scheme_relative_redirect(tmp_path) -> None:
-    """A doubled leading slash in Location changes the browser's destination.
-
-    Root mounts used to normalize ``/`` to ``//``.  Besides making ordinary
-    ``/docs`` miss the mount, that admitted ``//docs`` and reflected it as
-    ``Location: //docs/`` -- an authority-form redirect to host ``docs``.
-    """
     from wreath import Wreath
     from wreath.testing import TestClient
 
@@ -239,7 +208,6 @@ async def test_a_missing_file_is_a_404(tmp_path) -> None:
 async def test_cache_control_is_sent_when_configured_and_absent_when_not(
     tmp_path,
 ) -> None:
-    """Both halves: asserting only the presence passes with the condition gone."""
     from wreath.staticfiles import CacheControl
     from wreath.testing import TestClient
 
@@ -259,7 +227,6 @@ async def test_cache_control_is_sent_when_configured_and_absent_when_not(
 
 @pytest.mark.asyncio
 async def test_a_matching_etag_is_answered_304_with_no_body(tmp_path) -> None:
-    """The conditional request, which is most of a static server's traffic."""
     from wreath.testing import TestClient
 
     (tmp_path / "a.txt").write_bytes(b"hello")
@@ -282,7 +249,6 @@ async def test_a_matching_etag_is_answered_304_with_no_body(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_a_range_beyond_the_file_is_416_with_the_real_length(tmp_path) -> None:
-    """416 must carry `Content-Range: bytes * /size` or the client cannot recover."""
     from wreath.testing import TestClient
 
     (tmp_path / "a.txt").write_bytes(b"hello")

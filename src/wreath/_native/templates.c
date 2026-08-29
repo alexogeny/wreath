@@ -522,7 +522,8 @@ find_typed_loop(compiled_template *compiled)
  * genuine rendering error from an input that needs the generic VM. */
 static PyObject *
 render_typed_loop(compiled_template *compiled, PyObject *context,
-                  Py_ssize_t max_output, int *matched)
+                  Py_ssize_t max_output, const char *tail,
+                  Py_ssize_t tail_size, int *matched)
 {
     const decoded *program = compiled->program;
     Py_ssize_t start = compiled->typed_for;
@@ -553,6 +554,8 @@ render_typed_loop(compiled_template *compiled, PyObject *context,
     Py_ssize_t initial = atomic_load_explicit(
         &compiled->output_hint, memory_order_relaxed);
     if (initial > max_output) initial = max_output;
+    if (tail_size > max_output - initial) initial = max_output;
+    else initial += tail_size;
     if (initial > 0 && outbuf_reserve(&buf, initial) < 0) {
         *matched = 1;
         return NULL;
@@ -594,8 +597,11 @@ render_typed_loop(compiled_template *compiled, PyObject *context,
                           PyBytes_GET_SIZE(fragment)) < 0) goto render_error;
     }
     *matched = 1;
+    Py_ssize_t dynamic_size = buf.len;
+    if (tail_size != 0 && outbuf_append(&buf, tail, tail_size) < 0)
+        goto render_error;
     atomic_store_explicit(
-        &compiled->output_hint, buf.len, memory_order_relaxed);
+        &compiled->output_hint, dynamic_size, memory_order_relaxed);
     if (buf.owner == NULL) return PyBytes_FromStringAndSize("", 0);
     if (buf.len != buf.cap && _PyBytes_Resize(&buf.owner, buf.len) < 0)
         return NULL;
@@ -612,7 +618,8 @@ render_error:
 
 static PyObject *
 render_program(const decoded *program, Py_ssize_t n, PyObject *context,
-               Py_ssize_t max_output, _Atomic Py_ssize_t *output_hint)
+               Py_ssize_t max_output, _Atomic Py_ssize_t *output_hint,
+               const char *tail, Py_ssize_t tail_size)
 {
     outbuf buf = {NULL, NULL, 0, 0, max_output, 0};
     if (output_hint != NULL && max_output > 0) {
@@ -620,6 +627,8 @@ render_program(const decoded *program, Py_ssize_t n, PyObject *context,
         if (initial > max_output) {
             initial = max_output;
         }
+        if (tail_size > max_output - initial) initial = max_output;
+        else initial += tail_size;
         if (initial > 0 && outbuf_reserve(&buf, initial) < 0) {
             return NULL;
         }
@@ -901,8 +910,16 @@ render_program(const decoded *program, Py_ssize_t n, PyObject *context,
         Py_XDECREF(buf.owner);
         return NULL;
     }
+    Py_ssize_t dynamic_size = buf.len;
+    if (tail_size != 0 && outbuf_append(&buf, tail, tail_size) < 0) {
+        if (buf.overflow && !PyErr_Occurred()) {
+            raise_render(0, PyUnicode_FromString("template output too large"));
+        }
+        Py_XDECREF(buf.owner);
+        return NULL;
+    }
     if (output_hint != NULL) {
-        atomic_store_explicit(output_hint, buf.len, memory_order_relaxed);
+        atomic_store_explicit(output_hint, dynamic_size, memory_order_relaxed);
     }
     if (buf.owner == NULL) {
         return PyBytes_FromStringAndSize("", 0);
@@ -1003,10 +1020,46 @@ wreath_template_render_compiled(PyObject *self, PyObject *args)
     }
     int matched = 0;
     PyObject *typed = render_typed_loop(
-        compiled, context, max_output, &matched);
+        compiled, context, max_output, NULL, 0, &matched);
     if (matched || typed != NULL || PyErr_Occurred()) return typed;
     return render_program(compiled->program, compiled->length, context,
-                          max_output, &compiled->output_hint);
+                          max_output, &compiled->output_hint, NULL, 0);
+}
+
+PyObject *
+wreath_template_render_compiled_tail(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *capsule;
+    PyObject *context;
+    PyObject *tail;
+    Py_ssize_t max_output;
+    if (!PyArg_ParseTuple(
+            args, "OOOn:template_render_compiled_tail", &capsule, &context,
+            &tail, &max_output)) return NULL;
+    if (RenderError == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "templates not configured");
+        return NULL;
+    }
+    if (!PyDict_Check(context)) {
+        PyErr_SetString(PyExc_TypeError, "context must be a dict");
+        return NULL;
+    }
+    if (!PyBytes_CheckExact(tail)) {
+        PyErr_SetString(PyExc_TypeError, "template tail must be exact bytes");
+        return NULL;
+    }
+    compiled_template *compiled = PyCapsule_GetPointer(
+        capsule, TEMPLATE_CAPSULE_NAME);
+    if (compiled == NULL) return NULL;
+    const char *tail_data = PyBytes_AS_STRING(tail);
+    Py_ssize_t tail_size = PyBytes_GET_SIZE(tail);
+    int matched = 0;
+    PyObject *typed = render_typed_loop(
+        compiled, context, max_output, tail_data, tail_size, &matched);
+    if (matched || typed != NULL || PyErr_Occurred()) return typed;
+    return render_program(
+        compiled->program, compiled->length, context, max_output,
+        &compiled->output_hint, tail_data, tail_size);
 }
 
 /* template_render(tape, context, max_output) -> bytes */
@@ -1048,7 +1101,8 @@ wreath_template_render(PyObject *self, PyObject *args)
         }
         return NULL;
     }
-    PyObject *result = render_program(program, n, context, max_output, NULL);
+    PyObject *result = render_program(
+        program, n, context, max_output, NULL, NULL, 0);
     if (program != stack_program) {
         PyMem_Free(program);
     }

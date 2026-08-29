@@ -366,9 +366,7 @@ class Environment(Mapping[str, str]):
             raise KeyError(key)
         return self._sources[key]
 
-    def bind[SettingsT](
-        self, settings: type[SettingsT], *, prefix: str = ""
-    ) -> SettingsT:
+    def bind[SettingsT](self, settings: type[SettingsT], *, prefix: str = "") -> SettingsT:
         """Construct a typed dataclass from this environment snapshot.
 
         Field names become uppercase keys. At the root, `prefix="APP"` maps
@@ -401,8 +399,7 @@ class Environment(Mapping[str, str]):
             hints = typing.get_type_hints(settings, include_extras=True)
         except NameError as error:
             raise TypeError(
-                f"settings model {settings.__qualname__} has an unresolvable annotation: "
-                f"{error}"
+                f"settings model {settings.__qualname__} has an unresolvable annotation: {error}"
             ) from error
         kwargs: dict[str, Any] = {}
         for field in dataclasses.fields(settings):

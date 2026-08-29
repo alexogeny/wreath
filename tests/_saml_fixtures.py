@@ -1,15 +1,3 @@
-"""A real signing identity provider, for the SAML suite to be checked against.
-
-The assertions here are signed by `cryptography` (a test dependency, never a
-runtime one), so nothing in `wreath.saml` is verifying its own arithmetic. The
-one place the builder does reach for Wreath is exclusive canonicalization, and
-it reaches for it **independently of the code under test**: the digest input is
-derived by parsing the assertion as it would look without its signature and
-canonicalizing that, while `wreath.saml` derives the same bytes by splicing the
-`Signature` out of the signed document. Two derivations that must agree is the
-point -- if the enveloped-signature splice were wrong, every digest would miss.
-"""
-
 from __future__ import annotations
 
 import base64

@@ -24,9 +24,7 @@ _HEAD = struct.Struct("<4sQ8H2I")
 _HEADER = struct.Struct("<II")
 _HEADERS_REDACTED = 1
 _KNOWN_FLAGS = _HEADERS_REDACTED
-_NEVER_CAPTURE_HEADER_BYTES = frozenset(
-    name.encode("ascii") for name in NEVER_CAPTURE_HEADERS
-)
+_NEVER_CAPTURE_HEADER_BYTES = frozenset(name.encode("ascii") for name in NEVER_CAPTURE_HEADERS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,15 +58,16 @@ def _encode_exchange_reference(exchange: RecordedHttpExchange) -> bytes:
     target = exchange.target.encode("ascii")
     version = exchange.http_version.encode("ascii")
     idempotency = (
-        b"" if exchange.idempotency_key is None
-        else exchange.idempotency_key.encode("utf-8")
+        b"" if exchange.idempotency_key is None else exchange.idempotency_key.encode("utf-8")
     )
     reason = bytes(exchange.reason)
     request_headers, request_redacted = _safe_headers(exchange.request_headers)
     response_headers, response_redacted = _safe_headers(exchange.response_headers)
-    flags = _HEADERS_REDACTED if (
-        exchange.headers_redacted or request_redacted or response_redacted
-    ) else 0
+    flags = (
+        _HEADERS_REDACTED
+        if (exchange.headers_redacted or request_redacted or response_redacted)
+        else 0
+    )
     short = {
         "dependency id": exchange.dependency_id,
         "response status": exchange.response_status,
@@ -182,9 +181,7 @@ def _decode_exchange_reference(data: bytes) -> RecordedHttpExchange:
         sequence = 0
         offset = _HEAD_V1.size
     else:
-        raise HttpReplayError(
-            f"bad outbound exchange magic {magic!r}; expected WHX1 or WHX2"
-        )
+        raise HttpReplayError(f"bad outbound exchange magic {magic!r}; expected WHX1 or WHX2")
 
     def take(length: int, label: str) -> bytes:
         nonlocal offset
@@ -211,9 +208,7 @@ def _decode_exchange_reference(data: bytes) -> RecordedHttpExchange:
     offset += _HEADER.size
     unknown_flags = flags & ~_KNOWN_FLAGS
     if unknown_flags:
-        raise HttpReplayError(
-            f"outbound exchange has unknown flags 0x{unknown_flags:x}"
-        )
+        raise HttpReplayError(f"outbound exchange has unknown flags 0x{unknown_flags:x}")
     response_headers, offset = _decode_headers(data, offset, response_header_count)
     request_body = data[offset : offset + request_body_len]
     offset += request_body_len
@@ -260,9 +255,7 @@ def _decode_headers(
 
 def encode_exchange(exchange: RecordedHttpExchange) -> bytes:
     """Encode one complete exchange in the native wire kernel."""
-    return _core.http_exchange_encode(
-        exchange, _NEVER_CAPTURE_HEADER_BYTES, HttpReplayError
-    )
+    return _core.http_exchange_encode(exchange, _NEVER_CAPTURE_HEADER_BYTES, HttpReplayError)
 
 
 def decode_exchange(data: bytes) -> RecordedHttpExchange:

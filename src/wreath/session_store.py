@@ -69,9 +69,9 @@ class PostgresSessionStore:
         session_key: which session key holds the principal, matching
             `user_router(session_key=...)` and
             `SessionIdentityBackend(session_key=...)`. Only `delete_for` reads
-            inside the payload, so this affects nothing else -- but it affects
-            that, and it used to be hardcoded, so ending a user's other sessions
-            silently ended none whenever the application had renamed the key.
+            inside the payload, so this affects nothing else. It must match the
+            key used by the router and identity backend for session revocation
+            to find the principal.
     """
 
     __slots__ = ("_database", "_session_key", "_store")
@@ -108,8 +108,7 @@ class PostgresSessionStore:
             # text. `$2::text` is explicit because `jsonb -> unknown` is
             # ambiguous between the text and the integer operator, and an
             # untyped parameter would leave PostgreSQL to guess.
-            f"DELETE FROM {self._store.table} "
-            "WHERE data -> $2::text ->> 'sub' = $1",
+            f"DELETE FROM {self._store.table} WHERE data -> $2::text ->> 'sub' = $1",
         )
         self._store.define(
             "save",
@@ -248,7 +247,9 @@ class PostgresSessionStore:
 
         return keyed_purge_pass(
             self._store.declaration,
-            name=f"purge_{self._store.table}", chunk=chunk, **options,
+            name=f"purge_{self._store.table}",
+            chunk=chunk,
+            **options,
         )
 
     async def purge(self) -> str:

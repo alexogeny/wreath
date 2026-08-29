@@ -80,12 +80,11 @@ async def _wreath_samples(
         backend.Connection._batch_decode = previous
 
 
-async def _asyncpg_samples(
-    dsn: str, sql: str, rows: int, warmup: int, trials: int
-) -> list[float]:
+async def _asyncpg_samples(dsn: str, sql: str, rows: int, warmup: int, trials: int) -> list[float]:
     asyncpg: Any = importlib.import_module("asyncpg")
     connection = await asyncpg.connect(dsn)
     try:
+
         async def operation() -> None:
             _verify(await connection.fetch(sql), rows)
 
@@ -94,12 +93,11 @@ async def _asyncpg_samples(
         await connection.close()
 
 
-async def _psycopg3_samples(
-    dsn: str, sql: str, rows: int, warmup: int, trials: int
-) -> list[float]:
+async def _psycopg3_samples(dsn: str, sql: str, rows: int, warmup: int, trials: int) -> list[float]:
     psycopg: Any = importlib.import_module("psycopg")
     connection = await psycopg.AsyncConnection.connect(dsn)
     try:
+
         async def operation() -> None:
             async with connection.cursor() as cursor:
                 await cursor.execute(sql)
@@ -110,9 +108,7 @@ async def _psycopg3_samples(
         await connection.close()
 
 
-async def _psycopg2_samples(
-    dsn: str, sql: str, rows: int, warmup: int, trials: int
-) -> list[float]:
+async def _psycopg2_samples(dsn: str, sql: str, rows: int, warmup: int, trials: int) -> list[float]:
     psycopg2: Any = importlib.import_module("psycopg2")
 
     def blocking() -> list[float]:
@@ -166,9 +162,8 @@ async def run(args: argparse.Namespace) -> int:
         "psycopg3": _summary(psycopg3, args.rows),
         "psycopg2": _summary(psycopg2, args.rows),
     }
-    improvement = (
-        float(summaries["wreath_slice4_batch"]["rows_per_second"])
-        / float(summaries["wreath_slice3_scalar"]["rows_per_second"])
+    improvement = float(summaries["wreath_slice4_batch"]["rows_per_second"]) / float(
+        summaries["wreath_slice3_scalar"]["rows_per_second"]
     )
     document = {
         "metadata": {

@@ -1,14 +1,3 @@
-"""Second factors, stage two: step-up, the policy seam, and factor removal.
-
-One test per requirement, deliberately not merged. A single test that logged in,
-stepped up, and deleted a factor would pass with the freshness check missing,
-with the ownership check missing, or with the rotation missing -- and each of
-those three is the whole of a different attack.
-
-Run under `python -O` as well as normally: every check here is a `raise` or a
-refusal, and `-O` is the mode where an `assert` would not be.
-"""
-
 from __future__ import annotations
 
 import time
@@ -67,26 +56,20 @@ def _cookie(response: Any) -> str:
     return value.split(";", 1)[0]
 
 
-# --- the requirement itself, with no HTTP in the way -------------------------
-
-
 def _identity(**claims: Any) -> Identity:
     return Identity(id="user-1", claims=claims)
 
 
 def test_an_identity_that_never_proved_a_factor_has_no_age() -> None:
-    """None is a refusal, not a zero -- a bearer token must not read as fresh."""
     assert second_factor_age(_identity(), 1_700_000_000.0) is None
 
 
 def test_a_stamp_in_the_future_reads_as_age_zero_not_a_negative_age() -> None:
-    """A clock that stepped back must not make a factor fresher than fresh."""
     age = second_factor_age(_identity(second_factor_at=1_700_000_600), 1_700_000_000.0)
     assert age == 0
 
 
 def test_a_boolean_stamp_is_not_a_timestamp() -> None:
-    """`True` is an `int` in Python, and would otherwise read as 1970."""
     assert second_factor_age(_identity(second_factor_at=True), 1_700_000_000.0) is None
 
 
@@ -97,7 +80,6 @@ def test_the_age_is_an_integer_because_cedar_has_no_floats() -> None:
 
 
 def test_merging_requirements_keeps_the_strictest_window() -> None:
-    """A route mounted inside a strict router must not relax it."""
     merged = merge_requirements(
         AuthRequirement(second_factor=60.0), AuthRequirement(second_factor=3600.0)
     )
@@ -127,9 +109,6 @@ def test_stacking_the_decorator_keeps_the_shorter_window() -> None:
 def test_the_decorator_refuses_a_window_that_can_never_be_satisfied() -> None:
     with pytest.raises(ValueError):
         second_factor(max_age=0)
-
-
-# --- the requirement, enforced on a route ------------------------------------
 
 
 def _sign_in_routes(app: Wreath) -> None:
@@ -174,7 +153,6 @@ def _guarded_app(window: float = 300.0) -> Wreath:
 
 
 async def test_an_authenticated_caller_without_a_factor_is_refused() -> None:
-    """Authenticated is not enough; the route asks *when*, and gets no answer."""
     async with TestClient(_guarded_app()) as client:
         cookie = _cookie(await client.post("/sign-in"))
         # The same identity is admitted where no factor is demanded, so this is
@@ -193,7 +171,6 @@ async def test_a_freshly_proved_factor_admits_the_same_caller() -> None:
 
 
 async def test_a_stale_factor_is_refused() -> None:
-    """The point of the whole stage: having one is not having proved one lately."""
     async with TestClient(_guarded_app(window=300.0)) as client:
         cookie = _cookie(await client.post("/sign-in"))
         proved = await client.post("/prove?age=3600", headers={"cookie": cookie})
@@ -203,12 +180,9 @@ async def test_a_stale_factor_is_refused() -> None:
 
 
 async def test_an_anonymous_caller_is_a_401_not_a_403() -> None:
-    """Different remediations: sign in, versus prove a factor."""
     async with TestClient(_guarded_app()) as client:
         assert (await client.get("/vault")).status == 401
 
-
-# --- the Cedar seam ----------------------------------------------------------
 
 STEP_UP_POLICY = """
 permit(principal, action == Action::"close", resource)
@@ -234,7 +208,6 @@ def _policy_app() -> Wreath:
 
 
 async def test_a_policy_requiring_a_recent_factor_denies_without_one() -> None:
-    """`context has second_factor_age` is false, so the permit does not apply."""
     async with TestClient(_policy_app()) as client:
         cookie = _cookie(await client.post("/sign-in"))
         assert (await client.post("/close", headers={"cookie": cookie})).status == 403
@@ -256,7 +229,6 @@ async def test_a_policy_requiring_a_recent_factor_denies_a_stale_one() -> None:
 
 
 def test_the_cedar_context_omits_the_age_rather_than_faking_one() -> None:
-    """Absent, not a sentinel: `when` and `unless` policies both fail closed."""
     from wreath._auth.cedar import _default_context
 
     class _Request:
@@ -267,9 +239,6 @@ def test_the_cedar_context_omits_the_age_rather_than_faking_one() -> None:
     assert "second_factor_age" not in _default_context(_Request())
 
 
-# --- the flows over HTTP -----------------------------------------------------
-
-
 def _app(
     users: InMemoryUserStore,
     factors: InMemorySecondFactorStore,
@@ -278,14 +247,10 @@ def _app(
 ) -> Wreath:
     app = Wreath()
     app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
-    app.include_router(
-        user_router(users, secret="u" * 32, second_factors=factors, clock=clock)
-    )
+    app.include_router(user_router(users, secret="u" * 32, second_factors=factors, clock=clock))
     # No `pytest.warns` wrapper: building without `enrolments=` no longer warns,
     # because it no longer degrades. See `test_users_webauthn.py`.
-    router = second_factor_router(
-        users, factors, issuer="Wreath", clock=clock, **options
-    )
+    router = second_factor_router(users, factors, issuer="Wreath", clock=clock, **options)
     app.include_router(router)
 
     @app.get("/session")
@@ -312,9 +277,7 @@ async def _enrol(client: Any, clock: _Clock, cookie: str) -> tuple[str, list[str
     return secret_b32, confirmed.json()["recovery_codes"], _cookie(confirmed) or cookie
 
 
-async def _seeded(
-    client: Any, users: InMemoryUserStore, clock: _Clock
-) -> tuple[str, str, Any]:
+async def _seeded(client: Any, users: InMemoryUserStore, clock: _Clock) -> tuple[str, str, Any]:
     """A signed-in, enrolled user; returns (base32 secret, cookie, user)."""
     user = await users.create("ann@example.test", PASSWORD_HASH)
     secret_b32, _, cookie = await _enrol(client, clock, _cookie(await _login(client)))
@@ -322,7 +285,6 @@ async def _seeded(
 
 
 async def test_confirming_an_enrolment_stamps_the_session() -> None:
-    """The code just checked *is* a proved factor; not stamping it is a dance."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock)) as client:
         _, cookie, _ = await _seeded(client, users, clock)
@@ -342,9 +304,7 @@ async def test_promotion_stamps_the_session() -> None:
             "/auth/2fa/verify", json={"code": code}, headers={"cookie": pending}
         )
         assert promoted.status == 200
-        session = (
-            await client.get("/session", headers={"cookie": _cookie(promoted)})
-        ).json()
+        session = (await client.get("/session", headers={"cookie": _cookie(promoted)})).json()
         assert session["principal"]["second_factor_at"] == int(clock.now)
 
 
@@ -359,14 +319,11 @@ async def test_step_up_restamps_an_already_signed_in_session() -> None:
         )
         assert stepped.status == 200
         assert stepped.json() == {"status": "second_factor_verified"}
-        session = (
-            await client.get("/session", headers={"cookie": _cookie(stepped)})
-        ).json()
+        session = (await client.get("/session", headers={"cookie": _cookie(stepped)})).json()
         assert session["principal"]["second_factor_at"] == int(clock.now)
 
 
 async def test_step_up_rotates_the_session_id() -> None:
-    """Gaining the right to delete things is a privilege change like any other."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock)) as client:
         secret_b32, cookie, _ = await _seeded(client, users, clock)
@@ -393,7 +350,6 @@ async def test_a_wrong_code_leaves_the_stamp_alone() -> None:
 
 
 async def test_step_up_is_throttled_per_user() -> None:
-    """Otherwise the guard on a destructive action is a million-guess loop."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     app = _app(users, factors, clock, max_verify_attempts=2, verify_window=300.0)
     async with TestClient(app) as client:
@@ -424,8 +380,7 @@ async def test_step_up_without_a_session_is_refused() -> None:
         assert response.status == 401
 
 
-async def test_step_up_with_nothing_enrolled_says_so(
-) -> None:
+async def test_step_up_with_nothing_enrolled_says_so() -> None:
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock)) as client:
         await users.create("ann@example.test", PASSWORD_HASH)
@@ -437,9 +392,6 @@ async def test_step_up_with_nothing_enrolled_says_so(
         assert response.json() == {"error": "no_second_factor_enrolled"}
 
 
-# --- DELETE /auth/2fa/{id} ---------------------------------------------------
-
-
 async def test_the_router_mounts_the_removal_route() -> None:
     users, factors = InMemoryUserStore(), InMemorySecondFactorStore()
     router = second_factor_router(users, factors)
@@ -448,7 +400,6 @@ async def test_the_router_mounts_the_removal_route() -> None:
 
 
 async def test_removal_requires_a_fresh_second_factor() -> None:
-    """The act somebody holding a stolen session wants most."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     app = _app(users, factors, clock, step_up_ttl=300.0)
     async with TestClient(app) as client:
@@ -457,9 +408,7 @@ async def test_removal_requires_a_fresh_second_factor() -> None:
         factor_id = listed["factors"][0]["id"]
 
         clock.now += 301
-        refused = await client.delete(
-            f"/auth/2fa/{factor_id}", headers={"cookie": cookie}
-        )
+        refused = await client.delete(f"/auth/2fa/{factor_id}", headers={"cookie": cookie})
         assert refused.status == 403
         assert refused.json() == {"error": "second_factor_required"}
         assert len(await factors.credentials(user.id)) == 11
@@ -479,22 +428,19 @@ async def test_removal_succeeds_after_stepping_up() -> None:
             "/auth/2fa/verify", json={"code": code}, headers={"cookie": cookie}
         )
         cookie = _cookie(stepped) or cookie
-        removed = await client.delete(
-            f"/auth/2fa/{factor_id}", headers={"cookie": cookie}
-        )
+        removed = await client.delete(f"/auth/2fa/{factor_id}", headers={"cookie": cookie})
         assert removed.status == 200
         assert removed.json()["id"] == factor_id
 
 
 async def test_removal_is_scoped_to_the_owner() -> None:
-    """The credential id is the only thing an HTTP caller supplies."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     app = _app(users, factors, clock)
     async with TestClient(app) as client:
         _, victim_cookie, victim = await _seeded(client, users, clock)
-        victim_factor = (
-            await client.get("/auth/2fa", headers={"cookie": victim_cookie})
-        ).json()["factors"][0]["id"]
+        victim_factor = (await client.get("/auth/2fa", headers={"cookie": victim_cookie})).json()[
+            "factors"
+        ][0]["id"]
 
         await users.create("bob@example.test", PASSWORD_HASH)
         attacker_cookie = _cookie(await _login(client, "bob@example.test"))
@@ -515,13 +461,12 @@ async def test_removal_needs_an_authenticated_session() -> None:
 
 
 async def test_removing_the_last_factor_takes_the_recovery_codes_with_it() -> None:
-    """"Off" must mean off, not a login that still demands a code."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock)) as client:
         _, cookie, user = await _seeded(client, users, clock)
-        factor_id = (
-            await client.get("/auth/2fa", headers={"cookie": cookie})
-        ).json()["factors"][0]["id"]
+        factor_id = (await client.get("/auth/2fa", headers={"cookie": cookie})).json()["factors"][
+            0
+        ]["id"]
         removed = await client.delete(f"/auth/2fa/{factor_id}", headers={"cookie": cookie})
         assert removed.status == 200
         assert await factors.credentials(user.id) == []
@@ -532,27 +477,25 @@ async def test_removing_the_last_factor_takes_the_recovery_codes_with_it() -> No
 
 
 async def test_a_recovery_credential_cannot_be_deleted_by_id() -> None:
-    """One at a time only ever moves a user closer to being locked out."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock)) as client:
         _, cookie, user = await _seeded(client, users, clock)
-        recovery = next(
-            row for row in await factors.credentials(user.id) if row.kind == "recovery"
-        )
-        response = await client.delete(
-            f"/auth/2fa/{recovery.id}", headers={"cookie": cookie}
-        )
+        recovery = next(row for row in await factors.credentials(user.id) if row.kind == "recovery")
+        response = await client.delete(f"/auth/2fa/{recovery.id}", headers={"cookie": cookie})
         assert response.status == 404
         assert any(row.id == recovery.id for row in await factors.credentials(user.id))
 
 
 async def test_remove_second_factor_refuses_another_users_credential() -> None:
-    """The flow, without HTTP: an id that is not this user's is simply not found."""
     factors = InMemorySecondFactorStore()
     await factors.add(
         SecondFactor(
-            id="cred-1", user_id="user-1", kind="totp", label="Phone",
-            created_at=datetime.now(UTC), last_used_at=None,
+            id="cred-1",
+            user_id="user-1",
+            kind="totp",
+            label="Phone",
+            created_at=datetime.now(UTC),
+            last_used_at=None,
             material=b"a-twenty-byte-secret",
         )
     )
@@ -584,16 +527,31 @@ async def test_removing_one_of_two_factors_keeps_the_recovery_codes() -> None:
     now = datetime.now(UTC)
     for factor in (
         SecondFactor(
-            id="totp-1", user_id="user-1", kind="totp", label="Phone",
-            created_at=now, last_used_at=None, material=b"a-twenty-byte-secret",
+            id="totp-1",
+            user_id="user-1",
+            kind="totp",
+            label="Phone",
+            created_at=now,
+            last_used_at=None,
+            material=b"a-twenty-byte-secret",
         ),
         SecondFactor(
-            id="key-1", user_id="user-1", kind="webauthn", label="Key",
-            created_at=now, last_used_at=None, material=b"packed-key",
+            id="key-1",
+            user_id="user-1",
+            kind="webauthn",
+            label="Key",
+            created_at=now,
+            last_used_at=None,
+            material=b"packed-key",
         ),
         SecondFactor(
-            id="rec-1", user_id="user-1", kind="recovery", label="Recovery code",
-            created_at=now, last_used_at=None, material=b"sha256$digest",
+            id="rec-1",
+            user_id="user-1",
+            kind="recovery",
+            label="Recovery code",
+            created_at=now,
+            last_used_at=None,
+            material=b"sha256$digest",
         ),
     ):
         await factors.add(factor)
@@ -621,12 +579,22 @@ async def test_removing_the_last_factor_removes_each_row_once() -> None:
     now = datetime.now(UTC)
     for factor in (
         SecondFactor(
-            id="totp-1", user_id="user-1", kind="totp", label="Phone",
-            created_at=now, last_used_at=None, material=b"a-twenty-byte-secret",
+            id="totp-1",
+            user_id="user-1",
+            kind="totp",
+            label="Phone",
+            created_at=now,
+            last_used_at=None,
+            material=b"a-twenty-byte-secret",
         ),
         SecondFactor(
-            id="rec-1", user_id="user-1", kind="recovery", label="Recovery code",
-            created_at=now, last_used_at=None, material=b"sha256$digest",
+            id="rec-1",
+            user_id="user-1",
+            kind="recovery",
+            label="Recovery code",
+            created_at=now,
+            last_used_at=None,
+            material=b"sha256$digest",
         ),
     ):
         await factors.add(factor)

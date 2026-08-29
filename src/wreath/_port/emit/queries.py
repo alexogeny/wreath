@@ -105,9 +105,7 @@ class _QueryPlan:
             ):
                 return False
             self.create_pairs = pairs
-            self.wheres = [
-                f"{self.model}.{name} == {value}" for name, value in pairs
-            ]
+            self.wheres = [f"{self.model}.{name} == {value}" for name, value in pairs]
             self.write_values = [f"{name}={value}" for name, value in pairs]
             self.runner = "get_or_create"
             return True
@@ -180,9 +178,7 @@ class _QueryPlan:
                     if not isinstance(name, str):
                         return False
                     column = f"{self.model}.{name.lstrip('-')}"
-                    self.orders.append(
-                        f"{column}.desc()" if name.startswith("-") else column
-                    )
+                    self.orders.append(f"{column}.desc()" if name.startswith("-") else column)
                 else:
                     self.orders.append(emitter._seg(argument))
             return bool(self.orders)
@@ -251,9 +247,7 @@ class _QueryPlan:
         selected = ", ".join(
             f"{self.model}.{attribute}" for _key, attribute in self.projection_pairs
         )
-        query = [
-            f"{self.model}.select({selected})" if selected else f"{self.model}.select()"
-        ]
+        query = [f"{self.model}.select({selected})" if selected else f"{self.model}.select()"]
         if self.wheres:
             query.append(f".where({', '.join(self.wheres)})")
         for relation in self.includes:
@@ -269,14 +263,12 @@ class _QueryPlan:
             return rendered
         if self.runner == "values" and self.row_name is not None:
             pairs = ", ".join(
-                f"{key!r}: {self.row_name}.{attribute}"
-                for key, attribute in self.projection_pairs
+                f"{key!r}: {self.row_name}.{attribute}" for key, attribute in self.projection_pairs
             )
             return f"[{{{pairs}}} for {self.row_name} in await {session}.fetch({rendered})]"
         if self.runner == "values_list" and self.row_name is not None:
             values = ", ".join(
-                f"{self.row_name}.{attribute}"
-                for _key, attribute in self.projection_pairs
+                f"{self.row_name}.{attribute}" for _key, attribute in self.projection_pairs
             )
             if len(self.projection_pairs) == 1:
                 values += ","
@@ -392,7 +384,6 @@ class _QueryRewrite(_EmitterState):
             )
         self.generic_visit(node)
 
-    # -- queries -----------------------------------------------------------------
     def _query_chain(self, head: ast.Attribute):
         """`[(verb, call), …]` for a `Model.objects.…` chain, and its last node."""
         steps: list[tuple[str, ast.Call | None]] = []
@@ -464,9 +455,7 @@ class _QueryRewrite(_EmitterState):
             return None
         column, suffix = split_lookup(keyword.arg)
         if "__" in column:
-            if not _resolved_column_path(
-                model, column, self.orm_relations, self.orm_columns
-            ):
+            if not _resolved_column_path(model, column, self.orm_relations, self.orm_columns):
                 return None
             column = ".".join(column.split("__"))
         value = self._seg(keyword.value)
