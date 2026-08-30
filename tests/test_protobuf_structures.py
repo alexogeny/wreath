@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import enum
+import struct
+from array import array
+from typing import Any, cast
 
 import pytest
 
@@ -34,6 +37,12 @@ class Repeats:
 
 
 @message
+class PackedFloats:
+    doubles: list[float] = field(1)
+    floats: list[float] = field(2, kind="float")
+
+
+@message
 class Nested:
     label: str = field(1)
     inner: Inner | None = field(2)
@@ -60,6 +69,23 @@ class Maps:
 def test_repeated_scalars_pack_into_one_length_delimited_field() -> None:
     # field 1, LEN -> tag 0x0A; three varints in one body.
     assert encode(Repeats(numbers=[1, 2, 300])) == b"\x0a\x04\x01\x02\xac\x02"
+
+
+def test_packed_float_buffers_match_boxed_sequences_and_the_wire_format() -> None:
+    doubles = array("d", (1.5, -0.0, 3.25))
+    floats = array("f", (0.5, -2.0, 7.25))
+    buffered = encode(
+        PackedFloats(doubles=cast(Any, doubles), floats=cast(Any, floats))
+    )
+    boxed = encode(PackedFloats(doubles=list(doubles), floats=list(floats)))
+    expected = (
+        b"\x0a\x18"
+        + struct.pack("<3d", *doubles)
+        + b"\x12\x0c"
+        + struct.pack("<3f", *floats)
+    )
+
+    assert buffered == boxed == expected
 
 
 def test_packed_false_emits_one_tagged_field_per_item() -> None:

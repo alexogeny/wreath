@@ -100,8 +100,9 @@ class TestContentDisposition:
     def test_control_character_in_filename_is_refused(self, tmp_path):
         target = tmp_path / "x.txt"
         target.write_text("hi")
-        with pytest.raises(ValueError):
-            FileResponse(target, filename="a\r\nX-Evil: 1")
+        for filename in ("a\r\nX-Evil: 1", "a\x7f.txt"):
+            with pytest.raises(ValueError):
+                FileResponse(target, filename=filename)
 
 
 class TestRedirectScheme:

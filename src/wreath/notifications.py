@@ -472,13 +472,13 @@ class InMemoryPushSubscriptions:
     async def add(self, key: str, subscription: PushSubscription) -> None:
         """Register a subscription, replacing one with the same endpoint."""
         entries = self._by_recipient.setdefault(key, [])
-        entries[:] = [e for e in entries if e.endpoint != subscription.endpoint]
+        entries[:] = [entry for entry in entries if entry.endpoint != subscription.endpoint]
         entries.append(subscription)
 
     async def remove(self, endpoint: str) -> None:
         """Forget every subscription with this endpoint."""
         for entries in self._by_recipient.values():
-            entries[:] = [e for e in entries if e.endpoint != endpoint]
+            entries[:] = [entry for entry in entries if entry.endpoint != endpoint]
 
 
 @dataclass(slots=True)

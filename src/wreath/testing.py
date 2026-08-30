@@ -559,7 +559,9 @@ class TestClient:
         first = sent[0]
         if first["type"] == "wreath.response":
             return TestResponse(first["status"], list(first["headers"]), first.get("body", b""))
-        payload = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+        payload = b"".join(
+            message.get("body", b"") for message in sent if message["type"] == "http.response.body"
+        )
         return TestResponse(first["status"], list(first["headers"]), payload)
 
     def _scope(

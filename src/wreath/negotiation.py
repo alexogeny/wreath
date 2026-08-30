@@ -195,7 +195,7 @@ def serialize(
     """
     chosen = negotiate(request.header("accept"), serializers)
     if chosen is None:
-        available = ", ".join(s.media_type for s in serializers)
+        available = ", ".join(serializer.media_type for serializer in serializers)
         return ProblemResponse(
             status=406,
             detail=f"none of the acceptable media types are available; offered: {available}",

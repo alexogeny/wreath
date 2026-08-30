@@ -79,6 +79,7 @@ def test_session_creation_does_not_scan_before_expiry_is_possible() -> None:
     store.create(protocol_version=PROTOCOL_VERSION, client_info={}, now=110)
     assert store.visits == 5
     assert len(store) == 5
+    assert store._next_sweep == 111
 
 
 def test_session_subscriber_index_tracks_unsubscribe_and_discard() -> None:

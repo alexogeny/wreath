@@ -65,17 +65,10 @@ __all__ = [
     "watched_name",
 ]
 
-#: The headers a tag is written to, because the CDNs disagree and an application
-#: should not have to care which one is in front of it. Fastly reads
-#: `Surrogate-Key`, Cloudflare reads `Cache-Tag`, Akamai reads
-#: `Edge-Cache-Tag`; all three ignore the others, so emitting all three costs a
-#: few dozen bytes and removes a deployment-time decision from the application.
+#: Compatible purge-tag headers for Fastly, Cloudflare, and Akamai.
 TAG_HEADERS: Final = (b"cache-tag", b"surrogate-key", b"edge-cache-tag")
 
-#: Bytes of digest in a surrogate key. Short because it travels on every
-#: response and long enough that two model names in one application do not
-#: collide -- a collision here over-purges, which is safe, so this is sized for
-#: header weight rather than for certainty.
+#: Digest bytes carried in each surrogate key.
 _TAG_BYTES: Final = 8
 
 #: Response types whose body is produced lazily/streamed and must never be cached.
@@ -84,9 +77,9 @@ _UNCACHEABLE_BODY = ("StreamingResponse", "FileResponse", "SSEResponse", "Prepar
 
 def default_cache_key(request: Any) -> str:
     """`"GET /path?query"` — a shared, public-cache key (no per-user identity)."""
-    query = request.query_string.decode("latin-1")
+    query = request.query_string
     base = f"{request.method} {request.path}"
-    return f"{base}?{query}" if query else base
+    return f"{base}?{query.decode('latin-1')}" if query else base
 
 
 def cache_key_for(names: Iterable[str]) -> Callable[[Any], str]:
@@ -115,9 +108,7 @@ def cache_key_for(names: Iterable[str]) -> Callable[[Any], str]:
             request.method, request.path, request.query_string, declared
         )
 
-    # This helper deliberately builds a shared key with no principal.  Keep the
-    # marker on the callable so `cached(key=cache_key_for(...))` and the
-    # `query_params=` shorthand both enforce the authenticated-request bypass.
+    # Mark keys that contain no principal for the authenticated-request guard.
     key._wreath_public = True  # ty: ignore[unresolved-attribute]
     return key
 
@@ -125,10 +116,7 @@ def cache_key_for(names: Iterable[str]) -> Callable[[Any], str]:
 def _cacheable_response(response: Response) -> bool:
     if type(response).__name__ in _UNCACHEABLE_BODY:
         return False
-    # 2xx only. A 3xx used to qualify as "not an error", but a redirect is
-    # exactly the response whose `Location` is most often per-caller -- an OAuth
-    # hand-off, a post-login bounce, a signed download URL -- and serving one
-    # caller's Location to the next is the same leak a cached body would be.
+    # Redirect locations are commonly caller-specific, so only 2xx is cacheable.
     if not (200 <= response.status < 300):
         return False
     # The native scan refuses Set-Cookie, non-empty Vary, and private/no-store
@@ -141,17 +129,11 @@ def _snapshot(result: Any) -> tuple[str, Any] | None:
     if isinstance(result, Response):
         if not _cacheable_response(result):
             return None
-        # Body is immutable bytes (shareable); headers are copied on revive.
         return ("response", (result.status, tuple(result.headers), result.body))
     if isinstance(result, (str, bytes)):
-        # Immutable: the same object is safe to hand out repeatedly.
         return ("value", result)
     if isinstance(result, (dict, list)):
-        # Copied on the way in *and* on the way out. A cache entry is shared by
-        # every later caller, so storing the handler's own object means one
-        # mutation anywhere -- the handler keeping a reference, a serializer
-        # normalising in place, a caller editing what it was given -- silently
-        # rewrites what everyone else is served.
+        # Isolate mutable results from both the handler and later callers.
         return ("copy", deepcopy(result))
     return None
 
@@ -196,11 +178,6 @@ class Tags:
         if isinstance(self.secret, str):
             raise TypeError("Tags(secret=...) must be bytes, not str")
         if not self.secret:
-            # Not defaulted to something derived, and not optional: a tag with
-            # no secret is a plain hash of a name anyone can guess and then
-            # purge, which turns an edge cache into something a stranger can
-            # empty. Making the caller supply it is the only way that decision
-            # gets made by somebody.
             raise ValueError(
                 "Tags(secret=...) is required: an unkeyed surrogate key can be "
                 "computed by anyone who knows your model names, and computing "
@@ -216,12 +193,7 @@ class Tags:
         return digest.hexdigest()
 
     def keys(self, models: Iterable[Any]) -> tuple[str, ...]:
-        """The surrogate keys for several models, sorted and de-duplicated.
-
-        Sorted so a response's tag header does not change with the order the
-        handler happened to declare its models in -- a header that varies for no
-        reason defeats any downstream comparison of two responses.
-        """
+        """Sorted, de-duplicated surrogate keys for several models."""
         return tuple(sorted({self.key(model) for model in models}))
 
     def header_value(self, models: Iterable[Any]) -> bytes:
@@ -323,28 +295,15 @@ class CDNPurge:
             self._schedule(self._tags.key(name))
 
     def _schedule(self, tag: str) -> None:
-        """Hand one purge to the job queue without making the writer wait.
-
-        The write has already committed, so this cannot fail the transaction --
-        which is exactly why it has to be counted instead. `progress` and
-        `_orm_events` use the same deliberate fire-and-forget shape; the
-        difference between that and a bug is the counter below.
-        """
+        """Hand one purge to the job queue without delaying the committed write."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            # No loop: a synchronous test, or a write on a worker thread with
-            # nothing to schedule onto. Counted rather than raised, because the
-            # row is already committed and there is nothing to undo.
+            # A committed write has no transaction left to fail.
             self._dropped += 1
             return
         task = loop.create_task(self._enqueue(tag))
-        # Held only until it completes. `create_task` keeps no strong reference
-        # of its own, so a task nobody holds can be collected mid-await and the
-        # purge simply never happens -- silently, which is the one failure this
-        # class exists to make visible. Added before the callback is attached,
-        # so there is no ordering in which `discard` runs against a set the
-        # task was never in.
+        # Hold the task strongly until its callback runs.
         _PENDING.add(task)
         task.add_done_callback(_PENDING.discard)
 
@@ -352,21 +311,13 @@ class CDNPurge:
         try:
             await self._jobs.enqueue(self._task, tag, key=self._key(tag))
         except Exception:  # noqa: BLE001 - counted; the write already committed
-            # Broad and counted, per the `MessageBus` reference: what `enqueue`
-            # can raise is a driver error, a pool timeout or a queue that is not
-            # running, and none of them may surface as a failed write.
+            # Purge infrastructure failure cannot reverse the committed write.
             self._dropped += 1
             return
         self._enqueued += 1
 
     def counters(self) -> Any:
-        """This purger's counters, for `wreath.metrics.collect`.
-
-        `dropped` is the reason this exists. Its failure mode is *silence* --
-        the edge keeps serving stale content and nothing in the application
-        looks wrong -- so a number nobody scrapes is a number that cannot do
-        the one job it was added for.
-        """
+        """This purger's counters, for `wreath.metrics.collect`."""
         from .metrics import Counters
 
         return Counters(
@@ -387,33 +338,17 @@ _PENDING: set[asyncio.Task[None]] = set()
 
 
 def _apply_tags(result: Any, value: bytes) -> None:
-    """Write the surrogate-key headers onto a `Response`, if it is one.
-
-    A handler that returns a dict or a string is left alone: the tag has to
-    travel on the response, and the response for those is built downstream by
-    the serializer, which this decorator does not see. Silently doing nothing
-    is right here rather than raising -- a handler returning a dict is the
-    ordinary case, and the tag it did not get is visible as a missing header
-    rather than as a broken route. `Response` is the documented way to tag one.
-    """
+    """Write surrogate-key headers when the handler returned a `Response`."""
     if not isinstance(result, Response):
         return
     headers = result.headers
     for name in TAG_HEADERS:
-        # Appended rather than replaced: a handler that set its own
-        # `Cache-Tag` has said something this decorator has no basis to
-        # overrule, and both keys purging the response is the correct union.
-        # Skipped when this exact pair is already present, which makes this
-        # idempotent -- and it has to be. `Response.__call__` recomputes
-        # nothing, so returning one module-level response object from a handler
-        # is a supported pattern, and a handler that does it would otherwise
-        # accumulate three more headers on every cache miss, forever.
+        # Preserve handler tags and keep reused response objects idempotent.
         if (name, value) not in headers:
             headers.append((name, value))
 
 
 def _copy_if_mutable(value: Any) -> Any:
-    """A private copy of a shared result, for the same reason `_snapshot` copies."""
     return deepcopy(value) if isinstance(value, (dict, list)) else value
 
 
@@ -421,8 +356,6 @@ def _revive(entry: tuple[str, Any]) -> Any:
     kind, payload = entry
     if kind == "response":
         status, headers, body = payload
-        # A fresh headers list per hit, so downstream middleware mutations do
-        # not poison the shared cache entry.
         return Response(body, status=status, headers=list(headers))
     if kind == "copy":
         return deepcopy(payload)
@@ -490,8 +423,6 @@ def cached(
             "there is no tag to emit and no purge could ever reach this response"
         )
     tag_value = tags.header_value(watched) if tags is not None else None
-    # Whether this is the shared/public key or one the caller wrote. A public
-    # key cannot be used for an identified caller; see the wrapper below.
     public_key = key is default_cache_key or getattr(key, "_wreath_public", False)
 
     window = None if ttl is None else Duration.of(ttl).total_seconds()
@@ -500,12 +431,7 @@ def cached(
     )
 
     def decorate(handler: Callable[..., Any]) -> Callable[..., Any]:
-        # One in-flight computation per key. Without it, every request that
-        # arrives while a cold key is being computed runs the handler too -- so
-        # the moment an entry expires, the expensive rollup this decorator exists
-        # to avoid runs once per concurrent caller. The waiters share the first
-        # result; a handler that raises fails them all and leaves nothing cached,
-        # so the next request retries rather than inheriting a wedged key.
+        # Share one in-flight computation per cold key.
         inflight: dict[str, asyncio.Future[Any]] = {}
 
         @wraps(handler)
@@ -513,12 +439,7 @@ def cached(
             if request.method not in methods:
                 return await handler(request, *args, **kwargs)
             if public_key and getattr(request, "identity", None) is not None:
-                # The default key is a *shared* key: it carries no principal, so
-                # an entry stored for one caller would be served to the next.
-                # The docstring said to pass a `key` that includes the
-                # principal; nothing enforced it, and the failure is silent and
-                # cross-user. An identified caller therefore bypasses the cache
-                # entirely rather than being served -- or stored -- under it.
+                # A principal must never read or populate a shared key.
                 return await handler(request, *args, **kwargs)
             cache_key = key(request)
             hit = the_store.get(cache_key)
@@ -526,22 +447,15 @@ def cached(
                 return _revive(hit)
             pending = inflight.get(cache_key)
             if pending is not None:
-                # Somebody else is already computing this key. Awaiting their
-                # result is both cheaper and more correct than racing them.
                 return _copy_if_mutable(await asyncio.shield(pending))
             future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
             inflight[cache_key] = future
             try:
                 result = await handler(request, *args, **kwargs)
             except BaseException as error:
-                # Deliberately `BaseException`, and deliberately re-raised:
-                # nothing is swallowed here. Waiters are parked on this future,
-                # so whatever ends the handler has to reach them -- including
-                # `CancelledError`, which is the one that would otherwise leave
-                # them awaiting a future that never resolves.
+                # Every termination, including cancellation, must wake waiters.
                 future.set_exception(error)
-                # Consumed here so a future nobody awaits does not log
-                # "exception was never retrieved"; every waiter still sees it.
+                # Prevent an unobserved-future warning when there are no waiters.
                 future.exception()
                 raise
             finally:
@@ -549,9 +463,7 @@ def cached(
                 if not future.done():
                     future.set_result(result)
             if tag_value is not None:
-                # Applied before the snapshot, so a cache hit is served with the
-                # same tags as the miss that filled it. A response that carried
-                # its tag only on the cold path would be purgeable exactly once.
+                # Snapshot the same purge tags served on the cold response.
                 _apply_tags(result, tag_value)
             entry = _snapshot(result)
             if entry is not None:
@@ -567,26 +479,11 @@ def cached(
         if watched:
 
             def _on_write(written: frozenset[str]) -> None:
-                # Model-grained, not row-grained: dropping a model's responses
-                # when that model is written costs one set intersection per
-                # write and nothing per read. Row-grained would need a read set
-                # recorded per request -- real work on the hot path to save a
-                # few misses on the cold one.
-                # Clears the *whole* store, including entries other handlers
-                # sharing it put there. That coupling is the documented price of
-                # sharing a store -- one budget and one invalidation surface --
-                # and `tests/test_cache_invalidation.py` pins it. Give a handler
-                # its own store when it should not be swept by its neighbours.
+                # A shared store intentionally has one model-grained invalidation surface.
                 if written & watched:
                     the_store.clear()
 
-            # Owned by the wrapper, because there is no later moment to
-            # unsubscribe at: the subscription is made when the handler is
-            # *decorated*. A handler registered on an app lives as long as the
-            # app does and this changes nothing; one that goes out of scope
-            # takes its subscription with it, instead of leaving a closure in a
-            # process-global list that makes `has_subscribers()` true forever
-            # and kills the session's skip-collection fast path.
+            # Wrapper ownership removes the subscription with the decorated handler.
             subscribe_writes(_on_write, owner=wrapper)
             wrapper.invalidated_by = watched  # ty: ignore[unresolved-attribute]
 

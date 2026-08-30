@@ -173,7 +173,7 @@ async def test_synchronous_completion_owns_no_asyncio_task(make_driver):
     finally:
         loop.set_task_factory(previous)
 
-    assert created == []
+    assert created == [], [task.get_coro().__qualname__ for task in created]
     assert _decode_response(d)[1]["body"] == b"done"
 
 

@@ -819,8 +819,8 @@ class MessageBus:
         """
         from .schema import Component, Step
 
-        t = self._table
-        g = self._groups_table
+        table = self._table
+        groups_table = self._groups_table
         return Component(
             name="messaging",
             schema=self._schema,
@@ -829,7 +829,7 @@ class MessageBus:
                 Step(
                     version=1,
                     statements=(
-                        f"CREATE TABLE IF NOT EXISTS {t} (\n"
+                        f"CREATE TABLE IF NOT EXISTS {table} (\n"
                         "  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n"
                         "  channel text NOT NULL,\n"
                         '  "group" text NOT NULL,\n'
@@ -847,11 +847,11 @@ class MessageBus:
                         "  created_at timestamptz NOT NULL DEFAULT now(),\n"
                         "  updated_at timestamptz NOT NULL DEFAULT now()\n"
                         ")",
-                        f"CREATE INDEX IF NOT EXISTS messages_claim_idx ON {t} "
+                        f"CREATE INDEX IF NOT EXISTS messages_claim_idx ON {table} "
                         "(channel, \"group\", run_at) WHERE state = 'ready'",
-                        f"CREATE INDEX IF NOT EXISTS messages_lease_idx ON {t} "
+                        f"CREATE INDEX IF NOT EXISTS messages_lease_idx ON {table} "
                         "(lease_expiry) WHERE state = 'leased'",
-                        f"CREATE UNIQUE INDEX IF NOT EXISTS messages_dedup_idx ON {t} "
+                        f"CREATE UNIQUE INDEX IF NOT EXISTS messages_dedup_idx ON {table} "
                         '(channel, "group", dedup_key) WHERE dedup_key IS NOT NULL',
                         # Keyed on (channel, group) and not on the bus name,
                         # because that is what identifies a competing-consumer
@@ -861,7 +861,7 @@ class MessageBus:
                         # recently registered the group; `seen_at` is when, so a
                         # long-dead consumer is visible in a SELECT rather than
                         # only in a growing queue.
-                        f"CREATE TABLE IF NOT EXISTS {g} (\n"
+                        f"CREATE TABLE IF NOT EXISTS {groups_table} (\n"
                         "  channel text NOT NULL,\n"
                         '  "group" text NOT NULL,\n'
                         "  bus text NOT NULL,\n"
@@ -878,7 +878,9 @@ class MessageBus:
                 # keeps working against an upgraded database mid-rollout.
                 Step(
                     version=2,
-                    statements=(f"ALTER TABLE {t} ADD COLUMN IF NOT EXISTS trace_context text",),
+                    statements=(
+                        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS trace_context text",
+                    ),
                 ),
             ),
         )
@@ -918,16 +920,22 @@ class MessageBus:
         # all: a service that only *publishes* is exactly the one that needs to
         # discover other services' groups.
         supervisor.spawn(f"messaging:{self._name}:groups", self._group_refresher())
-        ephemeral_channels = sorted({s.channel for s in self._subs if not s.durable})
-        durable_subs = [s for s in self._subs if s.durable]
+        ephemeral_channels = sorted(
+            {subscription.channel for subscription in self._subs if not subscription.durable}
+        )
+        durable_subs = [subscription for subscription in self._subs if subscription.durable]
         # One held connection multiplexing every channel we care about for the
         # doorbell (ephemeral delivery + durable wakeups).
-        listen_channels = sorted({self._channel_wire(s.channel) for s in self._subs})
+        listen_channels = sorted(
+            {self._channel_wire(subscription.channel) for subscription in self._subs}
+        )
         if listen_channels:
             self._doorbell.channels = listen_channels
             # Map wire channel -> user channel for ephemeral dispatch, once,
             # rather than on every reconnect.
-            self._wire_to_channel = {self._channel_wire(c): c for c in ephemeral_channels}
+            self._wire_to_channel = {
+                self._channel_wire(channel): channel for channel in ephemeral_channels
+            }
             self._ephemeral_subs = {}
             for sub in self._subs:
                 if not sub.durable:

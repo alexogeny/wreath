@@ -265,13 +265,33 @@ append_missing(PyObject *headers, PyObject *additions)
 
 
 static int
-append_vary(PyObject *headers, const char *token, Py_ssize_t token_size)
+append_vary_tokens(PyObject *headers, const char *const *tokens,
+                   const Py_ssize_t *token_sizes, Py_ssize_t token_count)
 {
     PyObject *vary_name = PyBytes_FromStringAndSize("vary", 4);
     if (vary_name == NULL) return -1;
     int index = response_header_index(headers, vary_name);
     if (index < 0) {
-        PyObject *value = PyBytes_FromStringAndSize(token, token_size);
+        Py_ssize_t value_size = token_count > 0 ? (token_count - 1) * 2 : 0;
+        for (Py_ssize_t i = 0; i < token_count; i++) {
+            if (token_sizes[i] > PY_SSIZE_T_MAX - value_size) {
+                Py_DECREF(vary_name);
+                return PyErr_NoMemory(), -1;
+            }
+            value_size += token_sizes[i];
+        }
+        PyObject *value = PyBytes_FromStringAndSize(NULL, value_size);
+        if (value != NULL) {
+            char *out = PyBytes_AS_STRING(value);
+            for (Py_ssize_t i = 0; i < token_count; i++) {
+                if (i != 0) {
+                    memcpy(out, ", ", 2);
+                    out += 2;
+                }
+                memcpy(out, tokens[i], (size_t)token_sizes[i]);
+                out += token_sizes[i];
+            }
+        }
         int result = value != NULL ? append_pair(headers, vary_name, value) : -1;
         Py_XDECREF(value);
         Py_DECREF(vary_name);
@@ -282,6 +302,9 @@ append_vary(PyObject *headers, const char *token, Py_ssize_t token_size)
     const char *data = PyBytes_AS_STRING(old);
     Py_ssize_t size = PyBytes_GET_SIZE(old);
     Py_ssize_t start = 0;
+    unsigned char present[2] = {0, 0};
+    int has_value = 0;
+    int wildcard = 0;
     while (start <= size) {
         Py_ssize_t end = start;
         while (end < size && data[end] != ',') end++;
@@ -295,26 +318,80 @@ append_vary(PyObject *headers, const char *token, Py_ssize_t token_size)
                (part[part_size - 1] == ' ' || part[part_size - 1] == '\t')) {
             part_size--;
         }
-        if (ascii_equal_ci(part, part_size, token, token_size)) {
-            Py_DECREF(vary_name);
-            return 0;
+        if (part_size > 0) {
+            has_value = 1;
+            if (part_size == 1 && *part == '*') wildcard = 1;
+            for (Py_ssize_t i = 0; i < token_count; i++) {
+                if (ascii_equal_ci(part, part_size, tokens[i], token_sizes[i]))
+                    present[i] = 1;
+            }
         }
         if (end == size) break;
         start = end + 1;
     }
-    PyObject *merged = PyBytes_FromStringAndSize(NULL, size + 2 + token_size);
+    if (wildcard) {
+        PyObject *star = PyBytes_FromStringAndSize("*", 1);
+        int result = star != NULL ? replace_header(headers, vary_name, star) : -1;
+        Py_XDECREF(star);
+        Py_DECREF(vary_name);
+        return result;
+    }
+    Py_ssize_t missing = 0;
+    Py_ssize_t added_size = 0;
+    for (Py_ssize_t i = 0; i < token_count; i++) {
+        if (present[i]) continue;
+        if (token_sizes[i] > PY_SSIZE_T_MAX - added_size) {
+            Py_DECREF(vary_name);
+            return PyErr_NoMemory(), -1;
+        }
+        added_size += token_sizes[i];
+        missing++;
+    }
+    if (missing == 0) {
+        Py_DECREF(vary_name);
+        return 0;
+    }
+    Py_ssize_t separators = (missing - 1 + has_value) * 2;
+    if (size > PY_SSIZE_T_MAX - added_size - separators) {
+        Py_DECREF(vary_name);
+        return PyErr_NoMemory(), -1;
+    }
+    Py_ssize_t prefix_size = has_value ? size : 0;
+    PyObject *merged = PyBytes_FromStringAndSize(
+        NULL, prefix_size + separators + added_size);
     if (merged == NULL) {
         Py_DECREF(vary_name);
         return -1;
     }
     char *out = PyBytes_AS_STRING(merged);
-    memcpy(out, data, (size_t)size);
-    memcpy(out + size, ", ", 2);
-    memcpy(out + size + 2, token, (size_t)token_size);
+    if (has_value) {
+        memcpy(out, data, (size_t)size);
+        out += size;
+    }
+    int needs_separator = has_value;
+    for (Py_ssize_t i = 0; i < token_count; i++) {
+        if (present[i]) continue;
+        if (needs_separator) {
+            memcpy(out, ", ", 2);
+            out += 2;
+        }
+        memcpy(out, tokens[i], (size_t)token_sizes[i]);
+        out += token_sizes[i];
+        needs_separator = 1;
+    }
     int result = replace_header(headers, vary_name, merged);
     Py_DECREF(vary_name);
     Py_DECREF(merged);
     return result;
+}
+
+
+static int
+append_vary(PyObject *headers, const char *token, Py_ssize_t token_size)
+{
+    const char *tokens[1] = {token};
+    Py_ssize_t token_sizes[1] = {token_size};
+    return append_vary_tokens(headers, tokens, token_sizes, 1);
 }
 
 
@@ -476,10 +553,12 @@ compression_config_valid(PyObject *config)
     for (Py_ssize_t i = 0; i < 7; i++) {
         PyObject *dictionary = PyTuple_GET_ITEM(dictionaries, i);
         if (dictionary != Py_None &&
-            (!PyTuple_CheckExact(dictionary) || PyTuple_GET_SIZE(dictionary) != 3 ||
+            (!PyTuple_CheckExact(dictionary) || PyTuple_GET_SIZE(dictionary) != 4 ||
              !PyBytes_CheckExact(PyTuple_GET_ITEM(dictionary, 0)) ||
              !PyBytes_CheckExact(PyTuple_GET_ITEM(dictionary, 1)) ||
-             PyBytes_GET_SIZE(PyTuple_GET_ITEM(dictionary, 1)) != 32)) goto invalid;
+             PyBytes_GET_SIZE(PyTuple_GET_ITEM(dictionary, 1)) != 32 ||
+             (PyTuple_GET_ITEM(dictionary, 3) != Py_None &&
+              !PyCapsule_CheckExact(PyTuple_GET_ITEM(dictionary, 3))))) goto invalid;
         PyObject *fragment = PyTuple_GET_ITEM(fragments, i);
         if (fragment != Py_None &&
             (!PyTuple_CheckExact(fragment) || PyTuple_GET_SIZE(fragment) != 5 ||
@@ -586,7 +665,7 @@ wreath_policy_program_load(WreathPolicyProgram *program, PyObject *app)
     }
     PyObject *tag = PyTuple_GET_ITEM(program->descriptor, WREATH_POLICY_TAG);
     if (!PyUnicode_Check(tag) ||
-        PyUnicode_CompareWithASCIIString(tag, "wreath.http-policy.v4") != 0) {
+        PyUnicode_CompareWithASCIIString(tag, "wreath.http-policy.v5") != 0) {
         PyErr_SetString(PyExc_RuntimeError, "unsupported native HTTP policy descriptor");
         return -1;
     }
@@ -1472,7 +1551,7 @@ matching_dcz_dictionary(WreathPolicyProgram *program, PyObject *compression,
     if (program->core->gzip_format(content_type, &format) < 0) return NULL;
     PyObject *entry = PyTuple_GET_ITEM(table, format);
     if (entry == Py_None || !PyTuple_CheckExact(entry) ||
-        PyTuple_GET_SIZE(entry) != 3) return NULL;
+        PyTuple_GET_SIZE(entry) != 4) return NULL;
     PyObject *expected = PyTuple_GET_ITEM(entry, 0);
     return PyBytes_Check(expected) && PyBytes_GET_SIZE(expected) == token_size &&
         memcmp(PyBytes_AS_STRING(expected), token, (size_t)token_size) == 0
@@ -1483,35 +1562,13 @@ static PyObject *
 compress_dcz(PyObject *compressor, PyObject *dictionary, PyObject *body,
              PyObject *level)
 {
-    static const unsigned char magic[8] = {
-        0x5e, 0x2a, 0x4d, 0x18, 0x20, 0x00, 0x00, 0x00
-    };
-    PyObject *arguments[4] = {
-        body, level, Py_None, PyTuple_GET_ITEM(dictionary, 2)
-    };
-    PyObject *payload = PyObject_Vectorcall(compressor, arguments, 4, NULL);
-    if (payload == NULL) return NULL;
-    if (!PyBytes_CheckExact(payload)) {
-        Py_DECREF(payload);
-        PyErr_SetString(PyExc_RuntimeError,
-                        "native DCZ compressor did not return bytes");
-        return NULL;
-    }
-    PyObject *digest = PyTuple_GET_ITEM(dictionary, 1);
-    Py_ssize_t payload_size = PyBytes_GET_SIZE(payload);
-    if (payload_size > PY_SSIZE_T_MAX - 40) {
-        Py_DECREF(payload);
-        return PyErr_NoMemory();
-    }
-    PyObject *result = PyBytes_FromStringAndSize(NULL, payload_size + 40);
-    if (result != NULL) {
-        char *out = PyBytes_AS_STRING(result);
-        memcpy(out, magic, sizeof(magic));
-        memcpy(out + 8, PyBytes_AS_STRING(digest), 32);
-        memcpy(out + 40, PyBytes_AS_STRING(payload), (size_t)payload_size);
-    }
+    PyObject *arguments[3] = {dictionary, body, level};
+    PyObject *payload = PyObject_Vectorcall(compressor, arguments, 3, NULL);
+    if (payload == NULL || PyBytes_CheckExact(payload)) return payload;
     Py_DECREF(payload);
-    return result;
+    PyErr_SetString(PyExc_RuntimeError,
+                    "native DCZ compressor did not return bytes");
+    return NULL;
 }
 
 int
@@ -1547,8 +1604,10 @@ wreath_policy_response(WreathPolicyProgram *program, WreathPolicyState *state,
     if ((status == -1 && PyErr_Occurred()) || status == 204 || status == 304 ||
         status == 206) return PyErr_Occurred() ? -1 : 0;
     Py_ssize_t minimum = PyLong_AsSsize_t(PyTuple_GET_ITEM(compression, 0));
-    if ((minimum == -1 && PyErr_Occurred()) || PyBytes_GET_SIZE(*body) < minimum)
-        return PyErr_Occurred() ? -1 : 0;
+    if (minimum == -1 && PyErr_Occurred()) return -1;
+    Py_ssize_t body_size = PyObject_Length(*body);
+    if (body_size < 0) return -1;
+    if (body_size < minimum) return 0;
     PyObject *content_type = response_value(headers, "content-type", 12);
     if (response_index_literal(headers, "content-encoding", 16) >= 0 ||
         response_index_literal(headers, "content-range", 13) >= 0 ||
@@ -1579,7 +1638,8 @@ wreath_policy_response(WreathPolicyProgram *program, WreathPolicyState *state,
     PyObject *compressed;
     if (coding == 3) {
         compressed = compress_dcz(
-            PyTuple_GET_ITEM(compression, 4), dcz_dictionary, *body, level);
+            PyTuple_GET_ITEM(compression, 7),
+            dcz_dictionary, *body, level);
     }
     else if (coding == 2) {
         PyObject *compressor = PyTuple_GET_ITEM(compression, 4);
@@ -1610,9 +1670,16 @@ wreath_policy_response(WreathPolicyProgram *program, WreathPolicyState *state,
     }
     Py_DECREF(length);
     const char *coding_name = coding == 3 ? "dcz" : (coding == 2 ? "zstd" : "gzip");
+    int vary_result;
+    if (coding == 3) {
+        const char *vary_tokens[2] = {"accept-encoding", "available-dictionary"};
+        Py_ssize_t vary_sizes[2] = {15, 20};
+        vary_result = append_vary_tokens(headers, vary_tokens, vary_sizes, 2);
+    }
+    else
+        vary_result = append_vary(headers, "accept-encoding", 15);
     if (append_literal(headers, "content-encoding", coding_name) < 0 ||
-        append_vary(headers, "accept-encoding", 15) < 0 ||
-        (coding == 3 && append_vary(headers, "available-dictionary", 20) < 0) ||
+        vary_result < 0 ||
         (new_etag != NULL && replace_literal_header(headers, "etag", 4, new_etag) < 0)) {
         Py_XDECREF(new_etag);
         return -1;

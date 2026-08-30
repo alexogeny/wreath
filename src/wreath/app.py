@@ -555,6 +555,9 @@ class _MountedResponse(Response):
             if message.get("type") != "http.response.start":
                 await send(message)
                 return
+            if not self.headers and self.status == 200:
+                await send(message)
+                return
             parent_names = {name.lower() for name, _value in self.headers}
             child_headers = [
                 pair for pair in message.get("headers", ()) if pair[0].lower() not in parent_names

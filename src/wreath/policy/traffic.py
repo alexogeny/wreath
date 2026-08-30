@@ -288,8 +288,11 @@ class _CompiledTrafficClass:
 def _traffic_matches(rule: Any, facts: ClientFacts) -> bool:
     """The one predicate used by declarations and membership-compiled rules."""
     ip = facts.ip
-    geo = None if ip is None else ip.geo
-    country = None if geo is None or geo.country is None else geo.country.upper()
+    country = None
+    if rule.countries:
+        geo = None if ip is None else ip.geo
+        if geo is not None and geo.country is not None:
+            country = geo.country.upper()
     ua = facts.user_agent
     agent = facts.agent
     return (
@@ -373,10 +376,11 @@ class TrafficPolicy:
 
     def _ingress_sync(self, request: Any) -> ProblemResponse | None:
         facts = self._provider.resolve(request)
-        selected = next(
-            (declaration for declaration in self._classes if declaration.matches(facts)),
-            None,
-        )
+        selected = None
+        for declaration in self._classes:
+            if declaration.matches(facts):
+                selected = declaration
+                break
         name = self._default if selected is None else selected.name
         request.state.__setattr__(_STATE_SLOT, name)
         denied = selected is not None and selected.deny
@@ -393,7 +397,6 @@ class TrafficPolicy:
         return None
 
     async def _ingress(self, request: Any) -> ProblemResponse | None:
-        """Reference executor wrapper for the fixed synchronous program."""
         return self._ingress_sync(request)
 
     def counters(self) -> Any:

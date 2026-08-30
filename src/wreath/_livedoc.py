@@ -77,7 +77,12 @@ TagFor = Callable[[str], str | None]
 
 def _model_name(model: Any) -> str:
     """A model name as `wreath._orm_events` announces it: the class name."""
-    return model if isinstance(model, str) else getattr(model, "__name__", str(model))
+    if isinstance(model, str):
+        return model
+    try:
+        return model.__name__
+    except AttributeError:
+        return str(model)
 
 
 def _as_text(data: Any) -> str:

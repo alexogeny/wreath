@@ -91,6 +91,7 @@ PLATFORM_ACTIONS: tuple[str, ...] = (
 #: How many tenants one bulk action may touch. An unbounded bulk action is a
 #: console that can take the fleet down with one checkbox.
 BULK_CEILING = 500
+_MISSING = object()
 
 
 class PlatformError(Exception):
@@ -142,14 +143,12 @@ def tenant_overview(
             try:
                 values[name] = reader(tenant)
             except Exception:  # noqa: BLE001 - counted below as unavailable
-                # Counted rather than swallowed: the name reaches the row, so
-                # the operator sees a gap instead of a zero. Broad because a
-                # source is arbitrary application-adjacent code and every way it
-                # can fail costs the same one column.
+                # Every source failure is exposed as one unavailable column.
                 unavailable.append(name)
+        key: Any = getattr(tenant, "key", _MISSING)
         rows.append(
             TenantOverview(
-                key=getattr(tenant, "key", str(tenant)),
+                key=str(tenant) if key is _MISSING else key,
                 migration_state=str(values.get("migrations", "unknown")),
                 dead_letters=int(values.get("jobs", 0) or 0),
                 stalled_passes=int(values.get("passes", 0) or 0),
@@ -235,8 +234,6 @@ def impersonate(
         )
     held = frozenset(user_permissions)
     wanted = frozenset(scope)
-    # Intersection, never union. This is the whole law, and it is arithmetic
-    # here so that no policy set can make it false.
     permitted = held & wanted
     return Impersonation(
         operator=operator,

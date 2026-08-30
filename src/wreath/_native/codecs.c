@@ -264,10 +264,8 @@ wreath_map_nullable(PyObject *Py_UNUSED(self), PyObject *args)
  * One definition because the bound and its message are a pgvector contract:
  * two copies of a range check is two places for the limit to be wrong in. */
 static int
-sparsevector_open_mapping(PyObject *dim_obj, PyObject *elements,
-                          long long *dim_out, PyObject **mapping_out)
+sparsevector_dimension(PyObject *dim_obj, long long *dim_out)
 {
-    *mapping_out = NULL;
     if (!PyLong_CheckExact(dim_obj)) {
         PyErr_Format(PyExc_TypeError, "SparseVector dimension must be int, not %s",
                      Py_TYPE(dim_obj)->tp_name);
@@ -281,11 +279,20 @@ sparsevector_open_mapping(PyObject *dim_obj, PyObject *elements,
                      dim_obj);
         return -1;
     }
+    *dim_out = dim;
+    return 0;
+}
+
+static int
+sparsevector_open_mapping(PyObject *dim_obj, PyObject *elements,
+                          long long *dim_out, PyObject **mapping_out)
+{
+    *mapping_out = NULL;
+    if (sparsevector_dimension(dim_obj, dim_out) < 0) return -1;
     PyObject *mapping = PyDict_Check(elements)
         ? Py_NewRef(elements)
         : PyObject_CallOneArg((PyObject *)&PyDict_Type, elements);
     if (mapping == NULL) return -1;
-    *dim_out = dim;
     *mapping_out = mapping;
     return 0;
 }
@@ -364,6 +371,7 @@ sparsevector_element(PyObject *mapping, PyObject *index, long long dim,
 typedef struct {
     int32_t index;
     double value;
+    Py_ssize_t order;
 } SparseVectorPair;
 
 static int
@@ -371,7 +379,140 @@ sparsevector_pair_compare(const void *left_pointer, const void *right_pointer)
 {
     const SparseVectorPair *left = left_pointer;
     const SparseVectorPair *right = right_pointer;
-    return (left->index > right->index) - (left->index < right->index);
+    int index_order = (left->index > right->index) - (left->index < right->index);
+    if (index_order != 0) return index_order;
+    return (left->order > right->order) - (left->order < right->order);
+}
+
+static PyObject *
+sparsevector_data_from_pairs(long long dim, SparseVectorPair *pairs,
+                             Py_ssize_t source_count, Py_ssize_t max_nnz)
+{
+    if (source_count <= 64) {
+        for (Py_ssize_t source = 1; source < source_count; source++) {
+            SparseVectorPair pair = pairs[source];
+            Py_ssize_t position = source;
+            while (position > 0 &&
+                   sparsevector_pair_compare(&pairs[position - 1], &pair) > 0) {
+                pairs[position] = pairs[position - 1];
+                position--;
+            }
+            pairs[position] = pair;
+        }
+    }
+    else
+        qsort(pairs, (size_t)source_count, sizeof(*pairs), sparsevector_pair_compare);
+    Py_ssize_t count = 0;
+    for (Py_ssize_t source = 0; source < source_count;) {
+        Py_ssize_t next = source + 1;
+        while (next < source_count && pairs[next].index == pairs[source].index)
+            next++;
+        SparseVectorPair pair = pairs[next - 1];
+        if (pair.value != 0.0) {
+            if (count == max_nnz) {
+                PyErr_Format(PyExc_ValueError,
+                             "a sparsevec holds at most %zd non-zero elements; this one has more. A value that dense wants `Vector` or `Halfvec`, which store every position and index far better",
+                             max_nnz);
+                return NULL;
+            }
+            pairs[count++] = pair;
+        }
+        source = next;
+    }
+    WreathSparseVector *data = PyMem_Calloc(1, sizeof(*data));
+    if (data == NULL) return PyErr_NoMemory();
+    data->dimension = (int32_t)dim;
+    data->count = count;
+    if (count != 0) {
+        size_t index_bytes = (size_t)count * sizeof(*data->indices);
+        size_t value_offset = (index_bytes + sizeof(double) - 1) &
+                              ~(sizeof(double) - 1);
+        if ((size_t)count > (SIZE_MAX - value_offset) / sizeof(*data->values)) {
+            PyMem_Free(data);
+            return PyErr_NoMemory();
+        }
+        data->indices = PyMem_Malloc(
+            value_offset + (size_t)count * sizeof(*data->values));
+        if (data->indices == NULL) {
+            PyMem_Free(data);
+            return PyErr_NoMemory();
+        }
+        data->values = (double *)((char *)data->indices + value_offset);
+        for (Py_ssize_t sparse = 0; sparse < count; sparse++) {
+            data->indices[sparse] = pairs[sparse].index;
+            data->values[sparse] = pairs[sparse].value;
+        }
+    }
+    PyObject *capsule = PyCapsule_New(
+        data, WREATH_SPARSE_VECTOR_CAPSULE, wreath_sparse_vector_destroy);
+    if (capsule == NULL) {
+        PyMem_Free(data->indices);
+        PyMem_Free(data);
+    }
+    return capsule;
+}
+
+static inline int
+sparsevector_pair_from_entry(PyObject *entry, long long dim,
+                             Py_ssize_t order, SparseVectorPair *output)
+{
+    PyObject *pair = PySequence_Fast(
+        entry, "sparsevec elements must be index-value pairs");
+    if (pair == NULL) return -1;
+    if (PySequence_Fast_GET_SIZE(pair) != 2) {
+        Py_DECREF(pair);
+        PyErr_SetString(PyExc_ValueError,
+                        "sparsevec elements must be index-value pairs");
+        return -1;
+    }
+    long long sparse_index;
+    double number;
+    int invalid = sparsevector_element_value(
+        PySequence_Fast_GET_ITEM(pair, 0), PySequence_Fast_GET_ITEM(pair, 1),
+        dim, &sparse_index, &number);
+    Py_DECREF(pair);
+    if (invalid < 0) return -1;
+    *output = (SparseVectorPair){(int32_t)sparse_index, number, order};
+    return 0;
+}
+
+static PyObject *
+sparsevector_data_from_sequence(PyObject *dim_obj, PyObject *elements,
+                                Py_ssize_t max_nnz)
+{
+    Py_ssize_t count = PySequence_Size(elements);
+    if (count < 0) return NULL;
+    if (count > 64) return NULL;
+    long long dim;
+    if (sparsevector_dimension(dim_obj, &dim) < 0) return NULL;
+    PyObject *sequence = PySequence_Fast(
+        elements, "sparsevec elements must be index-value pairs");
+    if (sequence == NULL) return NULL;
+    if ((size_t)count > SIZE_MAX / sizeof(SparseVectorPair)) {
+        Py_DECREF(sequence);
+        return PyErr_NoMemory();
+    }
+    SparseVectorPair *pairs = count != 0
+        ? PyMem_Malloc((size_t)count * sizeof(*pairs)) : NULL;
+    if (count != 0 && pairs == NULL) {
+        Py_DECREF(sequence);
+        return PyErr_NoMemory();
+    }
+    PyObject **items = PySequence_Fast_ITEMS(sequence);
+    for (Py_ssize_t index = 0; index < count; index++) {
+        if (sparsevector_pair_from_entry(
+                items[index], dim, index, &pairs[index]) < 0) {
+            PyErr_Clear();
+            PyMem_Free(pairs);
+            Py_DECREF(sequence);
+            return NULL;
+        }
+    }
+    PyObject *result = sparsevector_data_from_pairs(
+        dim, pairs, count, max_nnz);
+    PyMem_Free(pairs);
+    Py_DECREF(sequence);
+    return result;
 }
 
 PyObject *
@@ -433,6 +574,11 @@ wreath_sparsevector_data(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject *mapping;
     if (!PyArg_ParseTuple(args, "OOn:sparsevector_data", &dim_obj, &elements,
                           &max_nnz)) return NULL;
+    if (PyList_CheckExact(elements) || PyTuple_CheckExact(elements)) {
+        PyObject *fast = sparsevector_data_from_sequence(
+            dim_obj, elements, max_nnz);
+        if (fast != NULL || PyErr_Occurred()) return fast;
+    }
     if (sparsevector_open_mapping(
             dim_obj, elements, &dim, &mapping) < 0) return NULL;
     Py_ssize_t source_count = PyDict_GET_SIZE(mapping);
@@ -450,7 +596,6 @@ wreath_sparsevector_data(PyObject *Py_UNUSED(self), PyObject *args)
     Py_ssize_t position = 0;
     PyObject *index = NULL;
     PyObject *item = NULL;
-    WreathSparseVector *data = NULL;
     while (PyDict_Next(mapping, &position, &index, &item)) {
         long long sparse_index;
         double number;
@@ -464,47 +609,16 @@ wreath_sparsevector_data(PyObject *Py_UNUSED(self), PyObject *args)
                          max_nnz);
             goto sparse_data_error;
         }
-        pairs[count++] = (SparseVectorPair){(int32_t)sparse_index, number};
+        pairs[count] = (SparseVectorPair){(int32_t)sparse_index, number, count};
+        count++;
     }
-    if (count > 1)
-        qsort(pairs, (size_t)count, sizeof(*pairs), sparsevector_pair_compare);
-    data = PyMem_Calloc(1, sizeof(*data));
-    if (data == NULL) goto sparse_data_memory;
-    data->dimension = (int32_t)dim;
-    data->count = count;
-    if (count != 0) {
-        size_t index_bytes = (size_t)count * sizeof(*data->indices);
-        size_t value_offset = (index_bytes + sizeof(double) - 1) &
-                              ~(sizeof(double) - 1);
-        if ((size_t)count > (SIZE_MAX - value_offset) / sizeof(*data->values))
-            goto sparse_data_memory;
-        data->indices = PyMem_Malloc(
-            value_offset + (size_t)count * sizeof(*data->values));
-        if (data->indices == NULL) goto sparse_data_memory;
-        data->values = (double *)((char *)data->indices + value_offset);
-        for (Py_ssize_t sparse = 0; sparse < count; sparse++) {
-            data->indices[sparse] = pairs[sparse].index;
-            data->values[sparse] = pairs[sparse].value;
-        }
-    }
+    PyObject *capsule = sparsevector_data_from_pairs(dim, pairs, count, max_nnz);
     PyMem_Free(pairs);
     Py_DECREF(mapping);
-    PyObject *capsule = PyCapsule_New(
-        data, WREATH_SPARSE_VECTOR_CAPSULE, wreath_sparse_vector_destroy);
-    if (capsule == NULL) {
-        PyMem_Free(data->indices);
-        PyMem_Free(data);
-    }
     return capsule;
 
-sparse_data_memory:
-    PyErr_NoMemory();
 sparse_data_error:
     PyMem_Free(pairs);
-    if (data != NULL) {
-        PyMem_Free(data->indices);
-        PyMem_Free(data);
-    }
     Py_DECREF(mapping);
     return NULL;
 }

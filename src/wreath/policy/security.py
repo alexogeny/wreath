@@ -102,16 +102,7 @@ class TrustedHostPolicy:
             if pattern is None:
                 raise ValueError(f"invalid trusted-host pattern: {value!r}")
             patterns.append(pattern)
-        # Unreachable today, and kept deliberately. `_normalize_host(pattern=True)`
-        # admits `*` only as the whole pattern or as a leading `*.` label -- every
-        # other spelling fails its `_HOST_CHARS` check and is refused above -- so
-        # nothing containing `*` can reach here and fail this. It stays because it
-        # is the shape rule stated where a reader looks for it, and because the
-        # thing it backstops is an allowlist: `*example.com` reads like a
-        # subdomain rule and matches `evilexample.com`, and that mistake must not
-        # survive a future loosening of `_normalize_host`. The coupling is pinned
-        # by `test_normalize_host_is_the_gate_that_makes_the_shape_check_dead`,
-        # which fails if that ever stops being true.
+        # Preserve the wildcard shape if host normalization is ever widened.
         for pattern in patterns:
             if "*" in pattern and not (pattern == "*" or pattern.startswith("*.")):
                 raise ValueError(f"invalid trusted-host pattern: {pattern!r}")
@@ -135,7 +126,6 @@ class TrustedHostPolicy:
         )
 
     def _ingress_sync(self, request: Request):
-        """Return None for an allowed unique Host, or a 400 otherwise."""
         # Host is not list-valued. Reject duplicates so an upstream proxy and
         # Wreath cannot apply different first/last interpretations.
         value_bytes: bytes | None = None
@@ -313,15 +303,16 @@ class SecurityHeadersPolicy:
             csp = content_security_policy
             if nonce_directives:
                 segments = [item.strip() for item in csp.split(";") if item.strip()]
-                present = {item.split(None, 1)[0] for item in segments}
+                nonce_directive_set = frozenset(nonce_directives)
+                present: set[str] = set()
+                addition = "'nonce-{nonce}'"
+                for index, segment in enumerate(segments):
+                    directive = segment.split(None, 1)[0]
+                    if directive in nonce_directive_set:
+                        segments[index] = f"{segment} {addition}"
+                        present.add(directive)
                 for directive in nonce_directives:
-                    addition = "'nonce-{nonce}'"
-                    if directive in present:
-                        segments = [
-                            f"{item} {addition}" if item.split(None, 1)[0] == directive else item
-                            for item in segments
-                        ]
-                    else:
+                    if directive not in present:
                         segments.append(f"{directive} {addition}")
                 self._csp_template = "; ".join(segments).encode("latin-1")
             else:
@@ -406,12 +397,10 @@ class SecurityHeadersPolicy:
             )
 
     def _egress_sync(self, request: Request, response):
-        """Reference executor transformer; compiled policy mutates in place."""
         self._egress_inplace(request, response)
         return response
 
     async def _egress(self, request: Request, response):
-        """Reference executor wrapper; compiled policy mutates in place."""
         return self._egress_sync(request, response)
 
 

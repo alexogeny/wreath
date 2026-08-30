@@ -497,7 +497,8 @@ class PostgresStore(_Statements):
                     # The payload is reset as well as the deadline: a reclaimed
                     # row must look exactly like a fresh one, or the next reader
                     # replays the previous holder's answer.
-                    update={stamp: window} | {c.name: Sql("NULL") for c in declaration.columns},
+                    update={stamp: window}
+                    | {column.name: Sql("NULL") for column in declaration.columns},
                     where=self.expired,
                     # Presence is the whole answer, so return the cheapest proof
                     # of it. See `claim`.

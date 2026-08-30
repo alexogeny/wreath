@@ -112,35 +112,14 @@ class AuthRequirement:
     role_checks: tuple[SetRequirement, ...] = ()
     permission_checks: tuple[SetRequirement, ...] = ()
     policies: tuple[PolicyRequirement, ...] = ()
-    #: Seconds within which the identity must have proved a second factor, or
-    #: None for "no such requirement". Not a boolean, because *recency* is the
-    #: whole point: an identity that entered a code eight hours ago has a second
-    #: factor and has not proved it lately, and only one of those two facts is
-    #: interesting before a destructive action.
+    #: Maximum age in seconds of the identity's second-factor proof.
     second_factor: float | None = None
-    #: An explicit declaration that this endpoint intentionally admits an
-    #: anonymous caller. It changes no request behavior; its value is that a
-    #: strict application can distinguish a reviewed public route from an
-    #: endpoint whose authentication decorator was forgotten.
+    #: Whether the endpoint explicitly admits anonymous callers.
     public: bool = False
 
     @property
     def needs_backend(self) -> bool:
-        """Whether the authentication backend has to run for this endpoint.
-
-        Both requirements need the backend; only `authenticated` refuses when it
-        yields nothing. Dispatch asks this rather than reading `authenticated`
-        directly, because an `identify()` route that skipped the backend would
-        publish `None` to a handler holding a perfectly good session -- the
-        defect this flag exists to fix.
-
-        Derived from `access_level` rather than from `authenticated`, so every
-        way of asking something of the caller runs the backend. The two spellings
-        agreed only because every decorator sets `authenticated` alongside
-        whatever else it sets; a requirement built directly does not have to,
-        and one whose checks never ran because the backend never ran is a check
-        that reports safety while providing none.
-        """
+        """Whether this endpoint needs identity resolution or an access check."""
         return self.identify or self.access_level > 0
 
     @property
@@ -185,41 +164,46 @@ class AuthRequirement:
         return 1
 
 
+_EMPTY_REQUIREMENT = AuthRequirement()
+
+
 def requirement_for(endpoint: Any) -> AuthRequirement:
-    return getattr(endpoint, _METADATA, AuthRequirement())
+    return getattr(endpoint, _METADATA, _EMPTY_REQUIREMENT)
 
 
 def merge_requirements(*requirements: AuthRequirement) -> AuthRequirement:
     """Combine inherited requirements without allowing a child to weaken a parent."""
-    public = any(requirement.public for requirement in requirements)
-    protected = any(
-        requirement.identify or requirement.access_level > 0 for requirement in requirements
-    )
+    public = False
+    protected = False
+    authenticated = False
+    identify = False
+    second_factor: float | None = None
+    role_checks: list[SetRequirement] = []
+    permission_checks: list[SetRequirement] = []
+    policies: list[PolicyRequirement] = []
+    for requirement in requirements:
+        public = public or requirement.public
+        protected = protected or requirement.identify or requirement.access_level > 0
+        authenticated = authenticated or requirement.authenticated
+        identify = identify or requirement.identify
+        window = requirement.second_factor
+        if window is not None and (second_factor is None or window < second_factor):
+            second_factor = window
+        role_checks.extend(requirement.role_checks)
+        permission_checks.extend(requirement.permission_checks)
+        policies.extend(requirement.policies)
     if public and protected:
         raise ValueError(
             "public() cannot be combined with authentication or authorization requirements"
         )
-    # The strictest window wins, which is the same rule the rest of this
-    # function follows in a different shape: a router that demands a factor
-    # within five minutes must not be relaxed to an hour by a route mounted
-    # inside it. `None` is absence rather than "unbounded", so it is skipped.
-    windows = [
-        requirement.second_factor
-        for requirement in requirements
-        if requirement.second_factor is not None
-    ]
     return AuthRequirement(
         public=public,
-        second_factor=min(windows) if windows else None,
-        authenticated=any(requirement.authenticated for requirement in requirements),
-        identify=any(requirement.identify for requirement in requirements),
-        role_checks=tuple(
-            check for requirement in requirements for check in requirement.role_checks
-        ),
-        permission_checks=tuple(
-            check for requirement in requirements for check in requirement.permission_checks
-        ),
-        policies=tuple(policy for requirement in requirements for policy in requirement.policies),
+        second_factor=second_factor,
+        authenticated=authenticated,
+        identify=identify,
+        role_checks=tuple(role_checks),
+        permission_checks=tuple(permission_checks),
+        policies=tuple(policies),
     )
 
 
@@ -278,7 +262,6 @@ def add_permissions(endpoint: Any, values: frozenset[str], mode: Mode) -> Any:
 
 
 def _append_check(endpoint: Any, field: str, check: Any) -> Any:
-    """Append one authentication check without three copies of the merge."""
     current = _protected_requirement(endpoint)
     return set_requirement(
         endpoint,

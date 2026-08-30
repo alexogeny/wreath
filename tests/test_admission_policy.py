@@ -155,7 +155,7 @@ def test_maintenance_policy_keeps_the_native_policy_program_available() -> None:
     policy = HttpPolicy(maintenance=MaintenancePolicy(active=True, exempt_paths=("/ready",)))
     descriptor = policy._native_descriptor
     assert descriptor is not None
-    assert descriptor[0] == "wreath.http-policy.v4"
+    assert descriptor[0] == "wreath.http-policy.v5"
     assert descriptor[-1] is not None
 
 

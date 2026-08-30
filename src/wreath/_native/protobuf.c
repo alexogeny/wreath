@@ -614,6 +614,52 @@ pb_encode_delimited(WreathBytesWriter *w, PyObject *subplan, PyObject *pair, int
 }
 
 static int
+pb_encode_packed_float_buffer(WreathBytesWriter *w, uint64_t number, int kind,
+                              PyObject *items)
+{
+    if ((kind != PB_KIND_DOUBLE && kind != PB_KIND_FLOAT) ||
+        !PyObject_CheckBuffer(items)) return 0;
+    Py_buffer view = {0};
+    if (PyObject_GetBuffer(
+            items, &view, PyBUF_FORMAT | PyBUF_ND | PyBUF_STRIDES) < 0) return -1;
+    const char *expected = kind == PB_KIND_DOUBLE ? "d" : "f";
+    Py_ssize_t item_size = kind == PB_KIND_DOUBLE
+        ? (Py_ssize_t)sizeof(double) : (Py_ssize_t)sizeof(float);
+    if (view.ndim != 1 || view.itemsize != item_size || view.format == NULL ||
+        strcmp(view.format, expected) != 0 || !PyBuffer_IsContiguous(&view, 'C')) {
+        PyBuffer_Release(&view);
+        return 0;
+    }
+    Py_ssize_t count = view.len / item_size;
+    if (pb_put_tag(w, number, PB_WIRE_LEN) < 0 ||
+        pb_put_varint(w, (uint64_t)view.len) < 0) {
+        PyBuffer_Release(&view);
+        return -1;
+    }
+    const unsigned char *source = view.buf;
+    int failed = 0;
+    for (Py_ssize_t i = 0; i < count; i++) {
+        if (kind == PB_KIND_DOUBLE) {
+            double value;
+            uint64_t bits;
+            memcpy(&value, source + (size_t)i * sizeof(value), sizeof(value));
+            memcpy(&bits, &value, sizeof(bits));
+            failed = pb_put_u64(w, bits) < 0;
+        }
+        else {
+            float value;
+            uint32_t bits;
+            memcpy(&value, source + (size_t)i * sizeof(value), sizeof(value));
+            memcpy(&bits, &value, sizeof(bits));
+            failed = pb_put_u32(w, bits) < 0;
+        }
+        if (failed) break;
+    }
+    PyBuffer_Release(&view);
+    return failed ? -1 : 1;
+}
+
+static int
 pb_encode_repeated(WreathBytesWriter *w, uint64_t number, int kind, int flags,
                    PyObject *subplan, PyObject *items, int depth)
 {
@@ -623,6 +669,10 @@ pb_encode_repeated(WreathBytesWriter *w, uint64_t number, int kind, int flags,
     }
     if (count == 0) {
         return 0;
+    }
+    if (flags & PB_FLAG_PACKED) {
+        int buffered = pb_encode_packed_float_buffer(w, number, kind, items);
+        if (buffered != 0) return buffered < 0 ? -1 : 0;
     }
     /* One sequence-protocol call for the whole field, then a contiguous array.
      * `PySequence_GetItem` per element is an out-of-line call through `sq_item`

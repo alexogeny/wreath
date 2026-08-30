@@ -107,7 +107,10 @@ def merge_into(api: ApiModel, schema: Schema, *, path: str = "/graphql") -> ApiM
     collide with a derived REST id.
     """
     existing = {model.name for model in api.models}
-    merged_models = (*api.models, *(m for m in graphql_models(schema) if m.name not in existing))
+    merged_models = (
+        *api.models,
+        *(model for model in graphql_models(schema) if model.name not in existing),
+    )
     existing_ops = {operation.id for operation in api.operations}
     merged_operations = (
         *api.operations,

@@ -109,7 +109,7 @@ def _scope(event: Mapping[str, Any], context: Any) -> tuple[str, dict[str, Any],
             raise LambdaEventError("Lambda HTTP event body is not valid base64") from exc
     else:
         body = raw_body.encode("utf-8")
-    header_map = {name: value for name, value in header_pairs}
+    header_map = dict(header_pairs)
     host = header_map.get(b"host", b"lambda").decode("latin-1")
     scheme = header_map.get(b"x-forwarded-proto", b"https").decode("ascii", "strict")
     scope = {
@@ -122,7 +122,7 @@ def _scope(event: Mapping[str, Any], context: Any) -> tuple[str, dict[str, Any],
         "raw_path": raw_path,
         "query_string": query.encode("ascii"),
         "root_path": "",
-        "headers": list(header_pairs),
+        "headers": header_pairs,
         "client": (source_ip, None) if source_ip else None,
         "server": (host, None),
         "extensions": (
@@ -145,7 +145,7 @@ def _header(name: Any, value: Any) -> tuple[bytes, bytes]:
     return _encode_http_header(name, value, owner="Lambda", error_type=LambdaEventError)
 
 
-def _v2_headers(event: Mapping[str, Any]) -> tuple[tuple[bytes, bytes], ...]:
+def _v2_headers(event: Mapping[str, Any]) -> list[tuple[bytes, bytes]]:
     raw = event.get("headers", {})
     if not isinstance(raw, Mapping):
         raise LambdaEventError("payload v2 headers must be an object")
@@ -155,21 +155,21 @@ def _v2_headers(event: Mapping[str, Any]) -> tuple[tuple[bytes, bytes], ...]:
         raise LambdaEventError("payload v2 cookies must be a list of strings")
     if cookies:
         headers.append((b"cookie", b"; ".join(item.encode("latin-1") for item in cookies)))
-    return tuple(headers)
+    return headers
 
 
-def _v1_headers(event: Mapping[str, Any]) -> tuple[tuple[bytes, bytes], ...]:
+def _v1_headers(event: Mapping[str, Any]) -> list[tuple[bytes, bytes]]:
     multiple = event.get("multiValueHeaders")
     if isinstance(multiple, Mapping):
-        return tuple(
+        return [
             _header(name, value)
             for name, values in multiple.items()
             for value in (values if isinstance(values, list) else [values])
-        )
+        ]
     raw = event.get("headers", {})
     if not isinstance(raw, Mapping):
         raise LambdaEventError("payload v1 headers must be an object")
-    return tuple(_header(name, value) for name, value in raw.items())
+    return [_header(name, value) for name, value in raw.items()]
 
 
 def _v1_query(event: Mapping[str, Any]) -> str:

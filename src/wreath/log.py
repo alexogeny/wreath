@@ -679,15 +679,16 @@ class PostgresLog(_Statements):
                 if not column.null:
                     raise ValueError(
                         f"{self.table}.{column.name} is NOT NULL and was not supplied; "
-                        f"append() takes {', '.join(c.name for c in self._declaration.columns)}"
+                        "append() takes "
+                        f"{', '.join(column.name for column in self._declaration.columns)}"
                     )
                 bound.append(None)
                 continue
             matched += 1
             bound.append(value)
         if matched != len(values):
-            declared = ", ".join(c.name for c in self._declaration.columns) or "none"
-            extra = set(values) - {c.name for c in self._declaration.columns}
+            declared = ", ".join(column.name for column in self._declaration.columns) or "none"
+            extra = set(values) - {column.name for column in self._declaration.columns}
             raise ValueError(
                 f"{self.table} declares no column named "
                 f"{', '.join(sorted(extra))}; it has {declared}"

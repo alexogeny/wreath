@@ -43,8 +43,8 @@ def _components(relative: str) -> list[str]:
         # `%00` in a request path decodes to exactly this, so the refusal has to
         # be in the vocabulary callers already catch.
         raise ContainmentError("path contains a NUL byte")
-    parts = [p for p in relative.replace(os.sep, "/").split("/") if p not in ("", ".")]
-    if any(part == ".." for part in parts):
+    parts = [part for part in relative.replace(os.sep, "/").split("/") if part not in ("", ".")]
+    if ".." in parts:
         # `..` is not a symlink, so O_NOFOLLOW cannot catch it; refuse it here.
         raise ContainmentError("path escapes the root")
     return parts

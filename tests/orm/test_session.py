@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any, cast
 
 import pytest
 
@@ -20,6 +21,7 @@ from wreath.orm.model import DETACHED, PERSISTENT
 from wreath.orm.registry import Registry
 from wreath.orm.session import Session
 from wreath.orm.types import Int64, Text, Timestamp, TsVector
+from wreath.postgres import PipelineFullError
 
 from .conftest import FakeDatabase, Membership, Post, User, post_row, user_row
 
@@ -195,25 +197,6 @@ async def test_selectin_deduplicates_keys(database: FakeDatabase, session: Sessi
     _, args = database.connection.calls[1]
     assert args == (5,)
     assert posts[0].author is posts[1].author
-
-
-async def test_native_fetch_collapses_repeated_identity_objects(
-    monkeypatch: pytest.MonkeyPatch, session: Session
-) -> None:
-    first = object()
-    second = object()
-
-    class NativeConnection:
-        async def _fetch_into(self, sql, args, destination):
-            return [first, first, second]
-
-    monkeypatch.setattr(Session, "_hydrate_plan", lambda *_args: object())
-
-    objects = await session._fetch_objects(
-        NativeConnection(), object(), "SELECT duplicate identities", ()
-    )
-
-    assert objects == [first, second]
 
 
 async def test_a_null_foreign_key_loads_as_none_without_a_query() -> None:
@@ -637,6 +620,146 @@ async def test_insert_uses_returning_for_unloaded_columns(
     assert user._orm_state == PERSISTENT
 
 
+async def test_insert_batches_adjacent_rows_with_the_same_complete_shape(
+    database: FakeDatabase, session: Session
+) -> None:
+    users = [
+        User(id=index, email=f"{index}@b.c", name=f"U{index}", created_at=None)
+        for index in range(1, 4)
+    ]
+    for user in users:
+        session.add(user)
+
+    await session.flush()
+
+    inserts = [(sql, args) for sql, args in database.connection.calls if sql.startswith("INSERT")]
+    assert inserts == [
+        (
+            'INSERT INTO "public"."users" ("id", "email", "name", "created_at") '
+            "VALUES ($1, $2, $3, $4), ($5, $6, $7, $8), ($9, $10, $11, $12)",
+            (
+                1,
+                "1@b.c",
+                "U1",
+                None,
+                2,
+                "2@b.c",
+                "U2",
+                None,
+                3,
+                "3@b.c",
+                "U3",
+                None,
+            ),
+        )
+    ]
+    assert all(user._orm_state == PERSISTENT for user in users)
+    assert [
+        session._identity[(session._registry.spec_for(User), (index,))]
+        for index in range(1, 4)
+    ] == users
+
+
+async def test_insert_does_not_batch_across_a_different_shape(
+    database: FakeDatabase, session: Session
+) -> None:
+    complete_one = User(id=1, email="1@b.c", name="U1", created_at=None)
+    partial = User(id=2, email="2@b.c", name="U2")
+    complete_two = User(id=3, email="3@b.c", name="U3", created_at=None)
+    database.connection.script("RETURNING", [[None]])
+    for user in (complete_one, partial, complete_two):
+        session.add(user)
+
+    await session.flush()
+
+    inserts = [(sql, args) for sql, args in database.connection.calls if sql.startswith("INSERT")]
+    assert len(inserts) == 3
+    assert [args[0] for _sql, args in inserts] == [1, 2, 3]
+
+
+async def test_insert_keeps_server_generated_keys_on_the_ordered_single_row_path(
+    monkeypatch: pytest.MonkeyPatch, database: FakeDatabase, session: Session
+) -> None:
+    returned = iter(((7, None), (8, None)))
+
+    async def fetchrow(sql: str, *args: object) -> tuple[object, ...]:
+        database.connection._record(sql, args)
+        return next(returned)
+
+    monkeypatch.setattr(database.connection, "fetchrow", fetchrow)
+    users = [User(email="a@b.c", name="A"), User(email="b@b.c", name="B")]
+    for user in users:
+        session.add(user)
+
+    await session.flush()
+
+    inserts = [sql for sql in database.connection.statements if sql.startswith("INSERT")]
+    assert len(inserts) == 2
+    assert all("RETURNING" in sql for sql in inserts)
+    assert [user.id for user in users] == [7, 8]
+
+
+async def test_insert_batch_stays_within_the_parameter_limit(
+    monkeypatch: pytest.MonkeyPatch, database: FakeDatabase, session: Session
+) -> None:
+    monkeypatch.setattr("wreath.orm.session.MAX_BIND_PARAMETERS", 8)
+    users = [
+        User(id=index, email=f"{index}@b.c", name=f"U{index}", created_at=None)
+        for index in range(1, 4)
+    ]
+    for user in users:
+        session.add(user)
+
+    await session.flush()
+
+    inserts = [(sql, args) for sql, args in database.connection.calls if sql.startswith("INSERT")]
+    assert [len(args) for _sql, args in inserts] == [8, 4]
+
+
+async def test_insert_batch_splits_when_the_encoded_packet_is_too_large(
+    monkeypatch: pytest.MonkeyPatch, database: FakeDatabase, session: Session
+) -> None:
+    execute = database.connection.execute
+
+    async def bounded_execute(sql: str, *args: object) -> str:
+        if sql.startswith("INSERT") and "), (" in sql:
+            raise PipelineFullError("operation exceeds maximum outbound batch")
+        return await execute(sql, *args)
+
+    monkeypatch.setattr(database.connection, "execute", bounded_execute)
+    users = [
+        User(id=index, email=f"{index}@b.c", name=f"U{index}", created_at=None)
+        for index in range(1, 4)
+    ]
+    for user in users:
+        session.add(user)
+
+    await session.flush()
+
+    inserts = [sql for sql in database.connection.statements if sql.startswith("INSERT")]
+    assert len(inserts) == 3
+    assert all(user._orm_state == PERSISTENT for user in users)
+
+
+async def test_a_failed_insert_batch_preserves_every_pending_instance(
+    database: FakeDatabase, session: Session
+) -> None:
+    database.connection.fail_on["INSERT"] = RuntimeError("constraint")
+    users = [
+        User(id=index, email=f"{index}@b.c", name=f"U{index}", created_at=None)
+        for index in range(1, 4)
+    ]
+    for user in users:
+        session.add(user)
+
+    with pytest.raises(RuntimeError, match="constraint"):
+        await session.flush()
+
+    assert session._new == users
+    assert all(user._orm_state != PERSISTENT for user in users)
+    assert "ROLLBACK" in database.connection.statements
+
+
 async def test_an_inserted_object_enters_the_identity_map(
     database: FakeDatabase, session: Session
 ) -> None:
@@ -770,9 +893,9 @@ async def test_interleaved_models_flush_in_model_then_insertion_order(
     await session.flush()
     inserts = [s for s in database.connection.statements if s.startswith("INSERT")]
     tables = ["users" if '"users"' in item else "posts" for item in inserts]
-    assert tables == ["users"] * 3 + ["posts"] * 3
-    # Insertion order is preserved within each model.
-    titles = [args[2] for sql, args in database.connection.calls if '"posts"' in sql]
+    assert tables == ["users", "posts"]
+    post_args = next(args for sql, args in database.connection.calls if '"posts"' in sql)
+    titles = list(post_args[2::3])
     assert titles == ["p0", "p1", "p2"]
 
 
@@ -959,7 +1082,7 @@ async def test_native_fetch_hands_back_a_result_with_no_repeats_untouched(
     monkeypatch.setattr(Session, "_hydrate_plan", lambda *_args: object())
 
     objects = await session._fetch_objects(
-        NativeConnection(), object(), "SELECT distinct identities", ()
+        NativeConnection(), cast(Any, object()), "SELECT distinct identities", ()
     )
 
     assert objects is rows

@@ -79,6 +79,26 @@ def _rank_indices(
     )
 
 
+def _rank_projection(
+    scores: Sequence[float],
+    *,
+    page: int,
+    size: int,
+    descending: bool,
+    candidates: int | None = None,
+    absolute: bool = False,
+) -> tuple[tuple[int, ...], list[float]]:
+    return _core.rank_indices(
+        scores,
+        (page - 1) * size,
+        size,
+        descending,
+        -1 if candidates is None else candidates,
+        absolute,
+        True,
+    )
+
+
 __all__ = [
     "DEFAULT_SIZE",
     "MAX_PAGE",

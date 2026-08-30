@@ -76,7 +76,18 @@ class CapabilityMap:
         keep_deadline: bool = False,
     ) -> bool:
         current = self._now(now)
-        new = self.peek(key, now=current) is None
+        new = self._table.peek(key, None, current) is None
+        return self._put(key, value, ttl, current, keep_deadline, new)
+
+    def _put(
+        self,
+        key: Any,
+        value: Any,
+        ttl: float | None,
+        current: float,
+        keep_deadline: bool,
+        new: bool,
+    ) -> bool:
         if new and self._table.count(now=current) >= self._table.max_entries:
             if self.overflow == "refuse":
                 return False
@@ -99,13 +110,14 @@ class CapabilityMap:
         ttl: float | None = None,
         now: float | None = None,
     ) -> bool:
-        if self.peek(key, now=now) is not None:
+        current = self._now(now)
+        if self._table.peek(key, None, current) is not None:
             return False
-        return self.put(key, value, ttl=ttl, now=now)
+        return self._put(key, value, ttl, current, False, True)
 
     def complete(self, key: Any, value: Any, *, now: float | None = None) -> bool:
         current = self._now(now)
-        if self.peek(key, now=current) is None:
+        if self._table.peek(key, None, current) is None:
             return False
         self._table.set(key, value, None, current, True)
         return True

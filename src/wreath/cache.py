@@ -118,6 +118,13 @@ class RefreshWatch:
         self._stop()
 
 
+def _model_name(model: Any) -> str:
+    try:
+        return model.__name__
+    except AttributeError:
+        return str(model)
+
+
 def refresh_on(
     cache: Any,
     models: Iterable[Any],
@@ -147,7 +154,7 @@ def refresh_on(
     Returns a `RefreshWatch`: call it to stop watching, and read
     `refresh_errors` to find out whether the reloads are actually working.
     """
-    watched = frozenset(getattr(model, "__name__", str(model)) for model in models)
+    watched = frozenset(map(_model_name, models))
     inflight: set[Any] = set()
 
     def _on_write(written: frozenset[str]) -> None:
@@ -162,20 +169,10 @@ def refresh_on(
         future.add_done_callback(inflight.discard)
 
     async def _reload() -> None:
-        # A loader that raises must not surface as a failed write, and must not
-        # disturb the generation readers are already on.
         try:
             await cache.refresh(load)
         except Exception as error:  # noqa: BLE001
-            # `load` is application code and may raise anything, so this is the
-            # exceptional case a broad catch is for. What it must not be is
-            # silent: a permanently failing loader leaves readers on the last
-            # good generation *forever*, and because every read still succeeds,
-            # nothing else in the system degrades to signal it. The count is
-            # what makes that visible; the exception is what makes it
-            # diagnosable without reproducing it.
-            # `CancelledError` is a `BaseException` and still propagates, so a
-            # reload cancelled at shutdown is not recorded as a loader fault.
+            # Keep the last good generation and expose arbitrary loader failures.
             watch.refresh_errors += 1
             watch.last_error = error
 

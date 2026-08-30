@@ -58,9 +58,10 @@ def lookup(term: str) -> tuple[Match, ...]:
     if not needle:
         return ()
     word = re.compile(rf"\b{re.escape(needle)}\b", re.IGNORECASE)
+    qualified = needle if needle.startswith("wreath.") else f"wreath.{needle}"
     found: list[tuple[int, int, Match]] = []
     for position, capability in enumerate(_INDEX):
-        matched = _reason(capability, needle, word)
+        matched = _reason(capability, needle, qualified, word)
         if matched is None:
             continue
         reason, token = matched
@@ -71,12 +72,12 @@ def lookup(term: str) -> tuple[Match, ...]:
 def _reason(
     capability: Capability,
     needle: str,
+    qualified: str,
     word: re.Pattern[str],
 ) -> tuple[Reason, str] | None:
     """The strongest reason this capability answers the term, or `None`."""
     if capability.name == needle:
         return "subsystem", capability.name
-    qualified = needle if needle.startswith("wreath.") else f"wreath.{needle}"
     for module in capability.modules:
         if module == qualified:
             return "module", module

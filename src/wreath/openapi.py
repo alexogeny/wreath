@@ -270,6 +270,7 @@ def generate_openapi(
         operations = paths.setdefault(openapi_path, {})
         spec = binding_specs[index]
         returns = return_annotations[index]
+        doc = inspect.getdoc(definition.endpoint)
         for method in definition.methods:
             operation: dict[str, Any] = {
                 "operationId": resolved_ids[(index, method)],
@@ -294,7 +295,6 @@ def generate_openapi(
                 operation["security"] = [
                     {name: list(scopes)} for name, scopes in definition.security
                 ]
-            doc = inspect.getdoc(definition.endpoint)
             if doc:
                 operation["description"] = doc
             parameters: list[dict[str, Any]] = []

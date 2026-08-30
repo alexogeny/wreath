@@ -321,7 +321,12 @@ PyObject *wreath_series_data_chart_text(PyObject *self, PyObject *args);
 PyObject *wreath_series_data_chart_plan(PyObject *self, PyObject *args);
 PyObject *wreath_series_chart_plan(PyObject *self, PyObject *plan);
 PyObject *wreath_series_chart_plan_text(PyObject *self, PyObject *plan);
+PyObject *wreath_series_chart_plan_text_joined(PyObject *self, PyObject *plan);
 int wreath_series_ready(void);
+
+PyObject *wreath_dcz_encoder_new(PyObject *self, PyObject *dictionary);
+PyObject *wreath_dcz_compress_with(PyObject *self, PyObject *args);
+PyObject *wreath_dcz_compress_fragments_with(PyObject *self, PyObject *args);
 
 /* proxy.c: adds the TrustedNetworks type; returns -1 on failure. */
 int wreath_register_proxy(PyObject *module);

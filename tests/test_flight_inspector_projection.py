@@ -116,6 +116,25 @@ async def test_timeline_lists_recent_traces_newest_first(tmp_path) -> None:
     assert "loss" in body
 
 
+@pytest.mark.asyncio
+async def test_timeline_offset_beyond_the_window_is_empty(tmp_path) -> None:
+    projector = _fed_projector()
+    server = await serve_inspector(
+        projector._recorder,
+        _app(),
+        InspectorConfig(path=str(tmp_path / "wfi.sock")),
+        projector=projector,
+    )
+    try:
+        async with InspectorClient(server.path) as client:
+            body = await client.call(Command.TIMELINE, {"offset": 5, "limit": 2})
+    finally:
+        await server.close()
+
+    assert body["total"] == 4
+    assert body["traces"] == []
+
+
 def test_trace_payload_names_ai_scraping_refusals() -> None:
     trace = ProjectedTrace(
         request_id=1,

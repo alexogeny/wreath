@@ -370,7 +370,7 @@ class GraphQL:
         """
         validate_dependencies(
             self._resolvers,
-            {name: set(t.fields) for name, t in self._schema.types.items()},
+            {name: set(type_info.fields) for name, type_info in self._schema.types.items()},
         )
         self._ensure_policy_schema()
         self._frozen = True

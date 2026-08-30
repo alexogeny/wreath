@@ -2232,10 +2232,13 @@ wreath_http_client_request_default(PyObject *self, PyObject *args)
     PyObject *transport_error;
     PyObject *client_error;
     PyObject *request_timeout;
+    PyObject *headers;
+    PyObject *body;
     if (!PyArg_ParseTuple(
-            args, "OOOOOOOOOO:_request_default", &client, &method, &target,
+            args, "OOOOOOOOOOOO:_request_default", &client, &method, &target,
             &response_type, &protocol_error, &too_large, &response_timeout,
-            &transport_error, &client_error, &request_timeout)) return NULL;
+            &transport_error, &client_error, &request_timeout, &headers,
+            &body)) return NULL;
     if (fast_client_type == NULL || !Py_IS_TYPE(client, fast_client_type) ||
         !PyUnicode_Check(method) || !PyUnicode_Check(target)) Py_RETURN_NONE;
     if (PyUnicode_GET_LENGTH(target) == 0 ||
@@ -2253,6 +2256,57 @@ wreath_http_client_request_default(PyObject *self, PyObject *args)
     PyObject *plan = NULL;
     PyObject *method_upper;
     PyObject *request;
+    PyObject *payload = NULL;
+    int prepared = headers != Py_GetConstantBorrowed(Py_CONSTANT_EMPTY_TUPLE) ||
+        body != Py_GetConstantBorrowed(Py_CONSTANT_EMPTY_BYTES);
+    if (prepared) {
+        method_upper = PyObject_CallMethodNoArgs(method, client_str_upper);
+        if (method_upper == NULL) return NULL;
+        PyObject *base = FAST_SLOT(client, fast_client_off.base_path);
+        PyObject *combined = PyUnicode_GET_LENGTH(base) == 0
+            ? Py_NewRef(target) : PyUnicode_Concat(base, target);
+        if (combined == NULL) {
+            Py_DECREF(method_upper);
+            return NULL;
+        }
+        PyObject *target_bytes = PyUnicode_AsASCIIString(combined);
+        Py_DECREF(combined);
+        if (target_bytes == NULL) {
+            Py_DECREF(method_upper);
+            PyErr_Clear();
+            PyErr_SetString(PyExc_ValueError,
+                            "request target must be ASCII/percent-encoded");
+            return NULL;
+        }
+        payload = PyBytes_FromObject(body);
+        PyObject *header_tuple = payload == NULL ? NULL : PySequence_Tuple(headers);
+        if (header_tuple == NULL || payload == NULL) {
+            Py_XDECREF(header_tuple);
+            Py_XDECREF(payload);
+            Py_DECREF(target_bytes);
+            Py_DECREF(method_upper);
+            return NULL;
+        }
+        PyObject *serialize_args = PyTuple_Pack(
+            5, method_upper, target_bytes,
+            FAST_SLOT(client, fast_client_off.authority_bytes), header_tuple,
+            payload);
+        Py_DECREF(header_tuple);
+        Py_DECREF(target_bytes);
+        if (serialize_args == NULL) {
+            Py_DECREF(payload);
+            Py_DECREF(method_upper);
+            return NULL;
+        }
+        request = wreath_http_serialize_request(NULL, serialize_args);
+        Py_DECREF(serialize_args);
+        if (request == NULL) {
+            Py_DECREF(payload);
+            Py_DECREF(method_upper);
+            return NULL;
+        }
+        goto request_prepared;
+    }
     if (PyTuple_CheckExact(last) && PyTuple_GET_SIZE(last) == 4 &&
         PyTuple_GET_ITEM(last, 0) == method &&
         PyTuple_GET_ITEM(last, 1) == target) {
@@ -2348,18 +2402,21 @@ wreath_http_client_request_default(PyObject *self, PyObject *args)
             FAST_SLOT(client, fast_client_off.request_last_plan), retained);
         Py_DECREF(key);
     }
-    /* With an empty body the serialized length is exactly the request head. */
+request_prepared:
     PyObject *limits = FAST_SLOT(client, fast_client_off.limits);
     Py_ssize_t request_limit = PyLong_AsSsize_t(
         FAST_SLOT(limits, fast_limit_off.max_request_header_bytes));
     if (request_limit == -1 && PyErr_Occurred()) {
+        Py_XDECREF(payload);
         Py_DECREF(method_upper);
         Py_DECREF(request);
         return NULL;
     }
-    if (PyBytes_GET_SIZE(request) > request_limit) {
+    Py_ssize_t payload_size = payload == NULL ? 0 : PyBytes_GET_SIZE(payload);
+    if (PyBytes_GET_SIZE(request) - payload_size > request_limit) {
         PyObject *error = PyObject_CallFunction(
             client_error, "s", "request headers exceed configured limit");
+        Py_XDECREF(payload);
         Py_DECREF(method_upper);
         Py_DECREF(request);
         if (error == NULL) return NULL;
@@ -2371,6 +2428,7 @@ wreath_http_client_request_default(PyObject *self, PyObject *args)
     PyObject *awaited = http_client_request_once_parts(
         client, method_upper, request, response_type, protocol_error,
         too_large, response_timeout, transport_error, request_timeout, total);
+    Py_XDECREF(payload);
     Py_DECREF(method_upper);
     Py_DECREF(request);
     return awaited;

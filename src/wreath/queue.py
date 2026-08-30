@@ -380,9 +380,13 @@ class RoundRobin(Awaiting):
 
     def _next_index(self) -> int | None:
         """The index of the lane the rotation would serve, or None if all empty."""
-        for step in range(len(self._order)):
-            index = (self._cursor + step) % len(self._order)
-            if len(self._lanes[self._order[index]]):
+        order = self._order
+        lane_count = len(order)
+        cursor = self._cursor
+        lanes = self._lanes
+        for step in range(lane_count):
+            index = (cursor + step) % lane_count
+            if lanes[order[index]]:
                 return index
         return None
 
@@ -393,13 +397,14 @@ class RoundRobin(Awaiting):
         starts after it. Advancing only on a hit would let one busy lane hold
         the cursor and reinvent the starvation this exists to prevent.
         """
-        if not self._order:
+        order = self._order
+        if not order:
             raise QueueEmpty("no lanes")
         index = self._next_index()
         if index is None:
             raise QueueEmpty("every lane is empty")
-        item = self._lanes[self._order[index]].get_nowait()
-        self._cursor = (index + 1) % len(self._order)
+        item = self._lanes[order[index]].get_nowait()
+        self._cursor = (index + 1) % len(order)
         return item
 
     def get(self) -> Any:

@@ -6,6 +6,7 @@ import importlib
 from typing import Any
 
 from ._asgi_driver import ASGI, WarmASGIDriver, _encode_http_header
+from ._headers import find_header
 
 __all__ = [
     "GoogleFunctionAdapter",
@@ -52,7 +53,7 @@ class GoogleFunctionAdapter:
         if not isinstance(body, bytes):
             raise TypeError("Google HTTP request get_data() must return bytes")
         host = getattr(request, "host", None)
-        if isinstance(host, str) and host and not any(name == b"host" for name, _value in headers):
+        if isinstance(host, str) and host and find_header(headers, b"host") is None:
             headers.append(_google_header("host", host))
         scheme = getattr(request, "scheme", None)
         if not isinstance(scheme, str) or not scheme:

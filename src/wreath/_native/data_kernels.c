@@ -255,20 +255,39 @@ PyObject *
 wreath_rank_indices(PyObject *Py_UNUSED(self), PyObject *args)
 {
     PyObject *scores_source;
+    Py_buffer score_buffer = {0};
+    const unsigned char *buffer_scores = NULL;
     Py_ssize_t offset, limit, candidates = -1;
-    int descending, absolute = 0;
-    if (!PyArg_ParseTuple(args, "Onnp|np:rank_indices", &scores_source,
+    int descending, absolute = 0, include_scores = 0;
+    if (!PyArg_ParseTuple(args, "Onnp|npp:rank_indices", &scores_source,
                           &offset, &limit, &descending, &candidates,
-                          &absolute)) return NULL;
+                          &absolute, &include_scores)) return NULL;
     if (offset < 0 || limit < 0 || candidates < -1) {
         PyErr_SetString(
             PyExc_ValueError,
             "rank offset and limit must be non-negative and candidates must be -1 or non-negative");
         return NULL;
     }
-    PyObject *scores = PySequence_Fast(scores_source, "scores must be a sequence");
-    if (scores == NULL) return NULL;
-    Py_ssize_t count = PySequence_Fast_GET_SIZE(scores);
+    if (PyObject_CheckBuffer(scores_source)) {
+        if (PyObject_GetBuffer(
+                scores_source, &score_buffer,
+                PyBUF_FORMAT | PyBUF_ND | PyBUF_STRIDES) < 0) return NULL;
+        if (score_buffer.ndim == 1 && score_buffer.itemsize == sizeof(double) &&
+            score_buffer.format != NULL && strcmp(score_buffer.format, "d") == 0 &&
+            PyBuffer_IsContiguous(&score_buffer, 'C')) {
+            buffer_scores = score_buffer.buf;
+        }
+        else {
+            PyBuffer_Release(&score_buffer);
+            score_buffer.obj = NULL;
+        }
+    }
+    PyObject *scores = buffer_scores == NULL ? PySequence_Fast(
+        scores_source, "scores must be a sequence") : NULL;
+    if (buffer_scores == NULL && scores == NULL) return NULL;
+    Py_ssize_t count = buffer_scores != NULL
+        ? score_buffer.len / score_buffer.itemsize
+        : PySequence_Fast_GET_SIZE(scores);
     if (candidates >= 0 && candidates < count) count = candidates;
     Py_ssize_t start = offset < count ? offset : count;
     Py_ssize_t available = count - start;
@@ -278,27 +297,33 @@ wreath_rank_indices(PyObject *Py_UNUSED(self), PyObject *args)
     int partial = !empty && prefix_count < count / 2;
     Py_ssize_t workspace_count = empty ? 0 : partial ? prefix_count : count;
     if ((size_t)workspace_count > SIZE_MAX / sizeof(NumericRank)) {
-        Py_DECREF(scores);
+        Py_XDECREF(scores);
+        if (score_buffer.obj != NULL) PyBuffer_Release(&score_buffer);
         return PyErr_NoMemory();
     }
     NumericRank *ranks = workspace_count != 0
         ? PyMem_Malloc((size_t)workspace_count * sizeof(*ranks)) : NULL;
     if (workspace_count != 0 && ranks == NULL) {
-        Py_DECREF(scores);
+        Py_XDECREF(scores);
+        if (score_buffer.obj != NULL) PyBuffer_Release(&score_buffer);
         return PyErr_NoMemory();
     }
-    PyObject **items = PySequence_Fast_ITEMS(scores);
+    PyObject **items = scores != NULL ? PySequence_Fast_ITEMS(scores) : NULL;
     Py_ssize_t heap_used = 0;
     for (Py_ssize_t index = 0; index < count; index++) {
-        if (PyBool_Check(items[index]) ||
-            (!PyFloat_Check(items[index]) && !PyLong_Check(items[index]))) {
+        if (buffer_scores == NULL && (PyBool_Check(items[index]) ||
+            (!PyFloat_Check(items[index]) && !PyLong_Check(items[index])))) {
             PyErr_Format(PyExc_TypeError,
                          "rank score %zd must be int or float, got %.200s",
                          index, Py_TYPE(items[index])->tp_name);
             goto rank_error;
         }
-        double score = PyFloat_Check(items[index])
-            ? PyFloat_AS_DOUBLE(items[index]) : PyFloat_AsDouble(items[index]);
+        double score;
+        if (buffer_scores != NULL)
+            memcpy(&score, buffer_scores + (size_t)index * sizeof(score), sizeof(score));
+        else
+            score = PyFloat_Check(items[index])
+                ? PyFloat_AS_DOUBLE(items[index]) : PyFloat_AsDouble(items[index]);
         if ((score == -1.0 && PyErr_Occurred()) || !isfinite(score)) {
             if (!PyErr_Occurred())
                 PyErr_Format(PyExc_ValueError, "rank score %zd must be finite", index);
@@ -318,21 +343,35 @@ wreath_rank_indices(PyObject *Py_UNUSED(self), PyObject *args)
               ? numeric_rank_descending : numeric_rank_ascending);
     PyObject *result = PyTuple_New(output_count);
     if (result == NULL) goto rank_error;
+    PyObject *projected_scores = include_scores ? PyList_New(output_count) : NULL;
+    if (include_scores && projected_scores == NULL) {
+        Py_DECREF(result);
+        goto rank_error;
+    }
     for (Py_ssize_t index = 0; index < output_count; index++) {
         PyObject *position = PyLong_FromSsize_t(ranks[start + index].index);
-        if (position == NULL) {
+        PyObject *projected = include_scores
+            ? PyFloat_FromDouble(ranks[start + index].score) : NULL;
+        if (position == NULL || (include_scores && projected == NULL)) {
+            Py_XDECREF(position);
+            Py_XDECREF(projected);
             Py_DECREF(result);
+            Py_XDECREF(projected_scores);
             goto rank_error;
         }
         PyTuple_SET_ITEM(result, index, position);
+        if (include_scores) PyList_SET_ITEM(projected_scores, index, projected);
     }
     PyMem_Free(ranks);
-    Py_DECREF(scores);
-    return result;
+    Py_XDECREF(scores);
+    if (score_buffer.obj != NULL) PyBuffer_Release(&score_buffer);
+    return include_scores
+        ? wreath_tuple2_from_owned(result, projected_scores) : result;
 
 rank_error:
     PyMem_Free(ranks);
-    Py_DECREF(scores);
+    Py_XDECREF(scores);
+    if (score_buffer.obj != NULL) PyBuffer_Release(&score_buffer);
     return NULL;
 }
 

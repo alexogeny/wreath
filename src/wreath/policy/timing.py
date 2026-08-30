@@ -123,12 +123,10 @@ class ServerTimingPolicy:
         )
 
     def _ingress_sync(self, request: Request) -> None:
-        """Start the timer for this request."""
         request.state.__setattr__(_STATE_START, time.perf_counter())
         return None
 
     async def _ingress(self, request: Request) -> None:
-        """Reference executor wrapper; compiled policy uses `_ingress_sync`."""
         return self._ingress_sync(request)
 
     def _egress_inplace(self, request: Request, response: Any) -> None:
@@ -150,12 +148,10 @@ class ServerTimingPolicy:
             )
 
     def _egress_sync(self, request: Request, response: Any) -> Any:
-        """Reference executor transformer; compiled policy mutates in place."""
         self._egress_inplace(request, response)
         return response
 
     async def _egress(self, request: Request, response: Any) -> Any:
-        """Reference executor wrapper; compiled policy mutates in place."""
         return self._egress_sync(request, response)
 
 

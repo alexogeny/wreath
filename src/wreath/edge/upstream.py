@@ -140,23 +140,14 @@ class UpstreamPool:
             The upstream to use, or None when `exclude` covers all of them.
         """
         now = time.monotonic() if now is None else now
-        candidates = [u for u in self._upstreams if u.url not in exclude]
+        candidates = [upstream for upstream in self._upstreams if upstream.url not in exclude]
         if not candidates:
-            # Every upstream has already been tried for this request. None left
-            # is a real answer -- retrying one that just failed would spend the
-            # client's patience on a known-bad origin.
             return None
-        healthy = [u for u in candidates if u.healthy(now)]
+        healthy = [upstream for upstream in candidates if upstream.healthy(now)]
         if not healthy:
-            return min(candidates, key=lambda u: u.ejected_until)
-        # An upstream that has never served anything is chosen before any
-        # scoring runs. Without this it can starve permanently: its latency is
-        # the cold *guess*, and the moment a warm upstream measures faster than
-        # that guess the cold one stops being selected and so never gets a
-        # measurement to replace it. Found by watching a two-origin pool send
-        # 40 of 40 requests to the same origin while the other showed exactly
-        # the cold default and a request count of zero.
-        untried = [u for u in healthy if u.total == 0]
+            return min(candidates, key=lambda upstream: upstream.ejected_until)
+        # Score only after every healthy upstream has one real measurement.
+        untried = [upstream for upstream in healthy if upstream.total == 0]
         if untried:
             self._cursor = (self._cursor + 1) % len(untried)
             return untried[self._cursor]
@@ -164,8 +155,8 @@ class UpstreamPool:
             self._cursor = (self._cursor + 1) % len(healthy)
             return healthy[self._cursor]
         if self._policy == "least-connections":
-            return min(healthy, key=lambda u: u.inflight)
-        return min(healthy, key=lambda u: u.score())
+            return min(healthy, key=lambda upstream: upstream.inflight)
+        return min(healthy, key=lambda upstream: upstream.score())
 
     def succeeded(self, upstream: Upstream, elapsed: float) -> None:
         """Record a completed request and fold its latency into the average."""
@@ -193,9 +184,9 @@ class UpstreamPool:
         now = time.monotonic()
         return {
             "upstreams": len(self._upstreams),
-            "healthy": sum(1 for u in self._upstreams if u.healthy(now)),
-            "inflight": sum(u.inflight for u in self._upstreams),
-            "requests": sum(u.total for u in self._upstreams),
+            "healthy": sum(1 for upstream in self._upstreams if upstream.healthy(now)),
+            "inflight": sum(upstream.inflight for upstream in self._upstreams),
+            "requests": sum(upstream.total for upstream in self._upstreams),
         }
 
     def snapshot(self) -> tuple[dict[str, Any], ...]:
@@ -203,12 +194,12 @@ class UpstreamPool:
         now = time.monotonic()
         return tuple(
             {
-                "url": u.url,
-                "healthy": u.healthy(now),
-                "inflight": u.inflight,
-                "latency_ms": round(u.latency * 1000, 2),
-                "failures": u.failures,
-                "requests": u.total,
+                "url": upstream.url,
+                "healthy": upstream.healthy(now),
+                "inflight": upstream.inflight,
+                "latency_ms": round(upstream.latency * 1000, 2),
+                "failures": upstream.failures,
+                "requests": upstream.total,
             }
-            for u in self._upstreams
+            for upstream in self._upstreams
         )

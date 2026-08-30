@@ -276,6 +276,9 @@ def _temporal_counts() -> tuple[int, int, int, str]:
     return hours, weeks, months, next_run
 
 
+_TEMPORAL_COUNTS = _temporal_counts()
+
+
 def _geospatial_summary() -> tuple[list[int], float]:
     rows = np.floor((_TRAJECTORY_LAT + 28.0) / 0.18).astype(np.int32)
     columns = np.floor((_TRAJECTORY_LON - 152.4) / 0.2).astype(np.int32)
@@ -362,7 +365,7 @@ async def holistic(
     selected_lines = payload.lines[:limit]
     _total = sum(line.quantity * line.price for line in selected_lines)
     series_count, paths, ticks, _tick_count = _project_series()
-    hourly_count, weekly_count, monthly_count, next_run = _temporal_counts()
+    hourly_count, weekly_count, monthly_count, next_run = _TEMPORAL_COUNTS
     occupied_cells, trail_speed = _geospatial_summary()
 
     vector_index = np.arange(128, dtype=np.float64)

@@ -159,10 +159,17 @@ def test_identity_is_reused_across_batches(session: Any, registry: Registry) -> 
     assert second[0].label == "b"
 
 
-def test_repeated_rows_for_one_key_hydrate_one_object(session: Any, registry: Registry) -> None:
-    rows, plan = hydrate(session, registry, [encode(5), encode(5), encode(5)])
-    assert rows[0] is rows[1] is rows[2]
-    assert plan.counters == {"allocated": 1, "reused": 2}
+def test_repeated_rows_return_each_identity_once_in_first_seen_order(
+    session: Any, registry: Registry
+) -> None:
+    rows, plan = hydrate(
+        session,
+        registry,
+        [encode(5, "first"), encode(6, "middle"), encode(5, "last")],
+    )
+    assert [row.id for row in rows] == [5, 6]
+    assert rows[0].label == "last"
+    assert plan.counters == {"allocated": 2, "reused": 1}
 
 
 def test_a_dirty_field_survives_rehydration(session: Any, registry: Registry) -> None:

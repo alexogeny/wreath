@@ -72,21 +72,19 @@ def _with_entities(entities: object, additions: object) -> object:
     if additions is None:
         return entities
     if isinstance(additions, CedarEntity):
-        added = (additions,)
-    elif isinstance(additions, Iterable) and not isinstance(additions, str | Mapping):
-        added = tuple(additions)
-    else:
+        additions = (additions,)
+    elif not isinstance(additions, Iterable) or isinstance(additions, str | Mapping):
         raise TypeError(
             "resource_entities must return a CedarEntity or an iterable of them; "
             f"got {type(additions).__name__}"
         )
     checked: list[CedarEntity] = []
-    for item in added:
+    for item in additions:
         if not isinstance(item, CedarEntity):
             raise TypeError("resource_entities must contain only CedarEntity instances")
         checked.append(item)
     if entities is None:
-        return added
+        return tuple(checked)
     if isinstance(entities, CedarEntity):
         held = (entities,)
     elif isinstance(entities, Iterable) and not isinstance(entities, str | Mapping):
@@ -97,25 +95,17 @@ def _with_entities(entities: object, additions: object) -> object:
             f"or an iterable of CedarEntity instances; got {type(entities).__name__}"
         )
     replaced = {item.uid for item in checked}
-    return (
-        *tuple(item for item in held if getattr(item, "uid", None) not in replaced),
-        *checked,
-    )
+    merged = [item for item in held if getattr(item, "uid", None) not in replaced]
+    merged.extend(checked)
+    return tuple(merged)
 
 
-#: Where one request's resolved flag set lives for the rest of that request.
-#: The same slot `SetFact` derives, so the compatibility function below and the
-#: fact share one cache rather than resolving twice for one decision.
 _FLAGS_SLOT = "_cedar_fact_flags"
 
-#: The same, for the geofence region set.
 _REGIONS_SLOT = "_cedar_fact_regions"
 
-#: One authorization request observes one instant across every policy decision.
 _NOW_SLOT = "_cedar_context_now"
 
-#: The answer for an application with no provider. Shared rather than rebuilt,
-#: and *always supplied* -- see `request_flags` for why absence is not an option.
 _NO_FLAGS: frozenset[str] = EMPTY
 
 
@@ -660,28 +650,6 @@ class CedarAuthorizer:
     def schema_owners(self) -> tuple[Any, ...]:
         """Stores delegated through the organisation fact provider."""
         return self._schema_owners
-
-    # A cached permission manifest is tagged by the policy set behind the
-    # authorizer, and the tag is found by probing `fingerprint`, `source`, then
-    # `policies` (`_auth/permissions.py::_policy_fingerprint`). Those live on
-    # the engine, and the tag used to be found by reaching through
-    # `authorizer._engine` from that module — a private name owned by this file
-    # and read from another one, where a rename would not raise but would
-    # quietly drop every ETag to a per-instance token and stop cross-worker
-    # revalidation with no error at all.
-    # Delegating keeps the private name in the file that owns it, so a rename
-    # moves the readers with it, and hands out only the *value*. Deliberately
-    # not a public `engine` accessor: the five mappers above are the work this
-    # class exists to do, and a caller holding the engine could call
-    # `is_authorized` straight past all of them.
-    # Absence stays absent. An engine offering none of these lets `AttributeError`
-    # out of the property, which `getattr(..., None)` reports as missing, so the
-    # probe falls through to a per-instance token exactly as it does for a bare
-    # engine. A property that always resolved and usually returned `None` would
-    # promise something else — "there is a source, and it is nothing" rather
-    # than "there is no source to offer". Each body is a single attribute
-    # access, so there is no room for an unrelated `AttributeError` to be
-    # swallowed here.
 
     def flags_for(self, request: Request) -> frozenset[str]:
         """This request's enabled flags, from the same resolution `authorize` uses.

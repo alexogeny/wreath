@@ -195,13 +195,14 @@ def test_holistic_counter_parser_names_every_required_event() -> None:
 def test_holistic_wreath_reuses_compact_chart_data_without_caching_the_projection() -> None:
     source = (ROOT / "benchmarks/holistic_e2e.py").read_text()
     assert "_SERIES_CHART = ChartData(" in source
-    assert "_SERIES_CHART.project_chart_text(" in source
+    assert "_SERIES_CHART.project_chart_text_joined(" in source
+    assert '"".join(paths)' not in source
     assert "cache=False" in source
 
 
 def test_holistic_optimal_compression_renders_only_the_dynamic_prefix() -> None:
     source = (ROOT / "benchmarks/holistic_e2e.py").read_text()
-    assert '_COMPRESSION._gzip_fragment_render("html", _PAGE_PREFIX, context)' in source
+    assert '_COMPRESSION._dcz_fragment_render(request, "html", _PAGE_PREFIX, context)' in source
 
 
 def test_holistic_derived_cache_hits_use_accesses_less_misses() -> None:

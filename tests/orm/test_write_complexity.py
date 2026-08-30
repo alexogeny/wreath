@@ -34,7 +34,7 @@ async def _flush(session: Session) -> None:
 
 
 @pytest.mark.parametrize("count", [1, 2, 8, 64])
-async def test_insert_compiles_once_per_shape_not_per_row(
+async def test_complete_insert_compiles_and_submits_once_per_shape(
     session: Session, database: FakeDatabase, count: int
 ) -> None:
     for index in range(count):
@@ -44,7 +44,7 @@ async def test_insert_compiles_once_per_shape_not_per_row(
         await _flush(session)
 
     assert builds[0] == 1
-    assert sum("INSERT INTO" in sql for sql in database.connection.statements) == count
+    assert sum("INSERT INTO" in sql for sql in database.connection.statements) == 1
 
 
 async def test_insert_compiles_once_per_distinct_column_set(
@@ -186,7 +186,7 @@ def _count_change_checks(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     return calls
 
 
-def test_first_changed_field_registers_the_dirty_object_once(registry: Registry) -> None:
+async def test_first_changed_field_registers_the_dirty_object_once(registry: Registry) -> None:
     session = Session(registry, "write")
     instance = _loaded_user(session, 1)
     instance.name = "changed"

@@ -538,7 +538,7 @@ def crud_router(
     def clean_input(body: Any) -> dict[str, Any] | None:
         if not isinstance(body, dict):
             return None
-        return {k: v for k, v in body.items() if k in writable_fields}
+        return {key: value for key, value in body.items() if key in writable_fields}
 
     rules = {op: _rule_for(authorize, op) for op in _DEFAULT_OPERATIONS}
 

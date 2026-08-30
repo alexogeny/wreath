@@ -358,6 +358,60 @@ async def test_client_sends_request_and_reads_fixed_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reused_default_client_fuses_headers_and_body_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    received: list[tuple[bytes, bytes]] = []
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        for _ in range(2):
+            head = await reader.readuntil(b"\r\n\r\n")
+            content_length = 0
+            for field in head.split(b"\r\n")[1:]:
+                name, separator, value = field.partition(b":")
+                if separator and name.lower() == b"content-length":
+                    content_length = int(value)
+            body = await reader.readexactly(content_length)
+            received.append((head, body))
+            writer.write(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+            await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server, port = await _serve(handler)
+    client = HTTPClient(
+        "fused-preparation",
+        base_url=f"http://127.0.0.1:{port}",
+        destination=_local_policy(),
+    )
+    try:
+        await client.start()
+        assert (await client.get("/warm")).body == b"ok"
+
+        async def unexpected_python_preparation(*args: object, **kwargs: object) -> None:
+            raise AssertionError("request preparation returned to Python")
+
+        monkeypatch.setattr(HTTPClient, "_request_timed", unexpected_python_preparation)
+        response = await client.post(
+            "/events",
+            headers=((b"content-type", b"application/json"), (b"x-sequence", b"7")),
+            body=bytearray(b'{"ready":true}'),
+        )
+        plan_count = len(client._request_plans)
+    finally:
+        await client.close()
+        server.close()
+        await server.wait_closed()
+
+    assert response.body == b"ok"
+    assert received[1][0].startswith(b"POST /events HTTP/1.1\r\n")
+    assert b"content-type: application/json\r\n" in received[1][0]
+    assert b"x-sequence: 7\r\n" in received[1][0]
+    assert received[1][1] == b'{"ready":true}'
+    assert plan_count == 1
+
+
+@pytest.mark.asyncio
 async def test_client_hands_taskless_entry_to_a_task_before_total_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

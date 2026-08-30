@@ -1291,8 +1291,6 @@ class HTTPClient:
         if marker is None:
             if (
                 idempotency_key is None
-                and not headers
-                and not body
                 and self._retry is _DEFAULT_RETRY
                 and self._redirect is _DEFAULT_REDIRECT
                 and self._rate_bucket is None
@@ -1309,6 +1307,8 @@ class HTTPClient:
                     _TransportError,
                     ClientError,
                     RequestTimeout,
+                    headers,
+                    body,
                 )
                 if native is not None:
                     return await cast(Awaitable[ClientResponse], native)

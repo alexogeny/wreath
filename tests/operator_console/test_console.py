@@ -73,6 +73,24 @@ def test_the_overview_composes_the_sources_that_already_exist() -> None:
     assert rows[0].quota_used == 41.5
 
 
+def test_a_named_tenant_does_not_need_a_string_fallback() -> None:
+    class NamedTenant:
+        key = "named"
+
+        def __str__(self) -> str:
+            raise AssertionError("the key makes this fallback unnecessary")
+
+    assert tenant_overview([NamedTenant()])[0].key == "named"
+
+
+def test_an_unnamed_tenant_uses_its_string_form() -> None:
+    class UnnamedTenant:
+        def __str__(self) -> str:
+            return "unnamed"
+
+    assert tenant_overview([UnnamedTenant()])[0].key == "unnamed"
+
+
 def test_a_source_that_raises_costs_its_column_rather_than_the_page() -> None:
     rows = tenant_overview([ACME], sources={"jobs": _raises, "quota": lambda t: 1.0})
     assert rows[0].unavailable == ("jobs",)

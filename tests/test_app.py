@@ -833,3 +833,50 @@ async def test_mount_dispatches_a_child_asgi_application_with_root_path() -> Non
     assert dict(response.headers)[b"x-parent"] == b"wreath"
     assert observed == [("/health", "/service")]
     assert app.url_path_for("service", path="health/live") == "/service/health/live"
+
+
+@pytest.mark.asyncio
+async def test_mount_forwards_an_unmodified_start_message_directly() -> None:
+    from wreath.app import _MountedResponse
+
+    start = {"type": "http.response.start", "status": 201, "headers": []}
+
+    async def child(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        await send(start)
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.disconnect"}
+
+    sent: list[dict[str, Any]] = []
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    response = _MountedResponse(child, {}, receive)
+    await response(send)
+
+    assert sent[0] is start
+
+
+@pytest.mark.asyncio
+async def test_mount_parent_status_overrides_the_child_without_parent_headers() -> None:
+    from wreath.testing import TestClient
+
+    async def child(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        await send({"type": "http.response.start", "status": 201, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    app = Wreath()
+
+    class ParentStatus:
+        def after_inplace(self, request: Any, response: Any) -> None:
+            response.status = 202
+
+    app.add_global_middleware(ParentStatus())
+    app.mount("/service", child)
+
+    async with TestClient(app) as client:
+        response = await client.get("/service")
+
+    assert response.status == 202

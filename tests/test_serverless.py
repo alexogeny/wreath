@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from types import SimpleNamespace
 
@@ -68,6 +69,82 @@ def test_google_function_refuses_headers_without_a_mapping_interface() -> None:
             adapter(request)
     finally:
         adapter.close()
+
+
+def test_google_function_does_not_append_a_second_host_header() -> None:
+    app = Wreath()
+
+    @app.post("/hello")
+    async def hello(request):
+        return {
+            "hosts": [
+                value.decode("latin-1")
+                for name, value in request.scope["headers"]
+                if name == b"host"
+            ]
+        }
+
+    request = GoogleRequest()
+    request.headers = {"host": "header.example"}
+    request.host = "attribute.example"
+    adapter = GoogleFunctionAdapter(app)
+    try:
+        body, status, _headers = adapter(request)
+    finally:
+        adapter.close()
+
+    assert status == 200
+    assert json.loads(body) == {"hosts": ["header.example"]}
+
+
+@pytest.mark.parametrize("host", ["", object()])
+def test_google_function_ignores_an_invalid_host_attribute(host) -> None:
+    app = Wreath()
+
+    @app.post("/hello")
+    async def hello(request):
+        return {
+            "hosts": [
+                value.decode("latin-1")
+                for name, value in request.scope["headers"]
+                if name == b"host"
+            ]
+        }
+
+    request = GoogleRequest()
+    request.host = host
+    adapter = GoogleFunctionAdapter(app)
+    try:
+        body, status, _headers = adapter(request)
+    finally:
+        adapter.close()
+
+    assert status == 200
+    assert json.loads(body) == {"hosts": []}
+
+
+def test_google_function_uses_a_valid_host_attribute_as_the_fallback() -> None:
+    app = Wreath()
+
+    @app.post("/hello")
+    async def hello(request):
+        return {
+            "hosts": [
+                value.decode("latin-1")
+                for name, value in request.scope["headers"]
+                if name == b"host"
+            ]
+        }
+
+    request = GoogleRequest()
+    adapter = GoogleFunctionAdapter(app)
+    try:
+        body, status, _headers = adapter(request)
+    finally:
+        adapter.close()
+
+    assert status == 200
+    assert json.loads(body) == {"hosts": ["functions.example"]}
 
 
 def test_azure_uses_the_platforms_native_asgi_adapter(monkeypatch) -> None:

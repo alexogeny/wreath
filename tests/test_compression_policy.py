@@ -3,13 +3,20 @@ from __future__ import annotations
 import gzip
 import zlib
 from compression import zstd
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from wreath import JSONResponse, Wreath
-from wreath._compression import _dcz_decompress
+from wreath._compression import (
+    _dcz_compress,
+    _dcz_decompress,
+    _prepare_dcz_dictionary,
+    _RenderedFragments,
+)
+from wreath._native import _core
 from wreath.cache_control import CacheControl
 from wreath.compression import (
     ZSTD_MAX_LEVEL,
@@ -38,6 +45,93 @@ def test_gzip_facade_round_trip_and_state() -> None:
     assert zlib.decompress(encoded, wbits=31) == payload
     with pytest.raises(RuntimeError):
         compressor.finish()
+
+
+def test_dcz_workspace_lease_is_safe_across_request_threads() -> None:
+    dictionary = b'<li data-kind="incident">wreath</li>' * 128
+    prepared = _prepare_dcz_dictionary(dictionary)
+    documents = [
+        _RenderedFragments(f'<main data-id="{index}">'.encode(), dictionary) for index in range(32)
+    ]
+
+    with ThreadPoolExecutor(max_workers=8) as workers:
+        encoded = tuple(workers.map(lambda body: _dcz_compress(prepared, body, 3), documents))
+
+    assert tuple(
+        _dcz_decompress(body, dictionary, max_output_bytes=100_000) for body in encoded
+    ) == tuple(document.materialize() for document in documents)
+
+
+@pytest.mark.parametrize(
+    ("prefix", "tail", "level"),
+    [
+        (b"", b"x", 1),
+        (b"prefix", b"", 3),
+        (b"p" * 257, b"tail" * 16_385, 9),
+    ],
+)
+def test_dcz_fragment_workspace_matches_the_materialized_stream(
+    prefix: bytes, tail: bytes, level: int
+) -> None:
+    dictionary = (b"dictionary-row:" + tail[-128:]) * 64
+    prepared = _prepare_dcz_dictionary(dictionary)
+    fragments = _RenderedFragments(prefix, tail)
+
+    encoded = _dcz_compress(prepared, fragments, level)
+
+    assert (
+        _dcz_decompress(
+            encoded,
+            dictionary,
+            max_output_bytes=max(1, len(prefix) + len(tail)),
+        )
+        == prefix + tail
+    )
+
+
+def test_dcz_workspace_rebuilds_its_dictionary_when_the_level_changes() -> None:
+    dictionary = b'<li data-kind="incident">wreath</li>' * 128
+    prepared = _prepare_dcz_dictionary(dictionary)
+    document = b"<main>" + dictionary + b"</main>"
+
+    encoded = tuple(_dcz_compress(prepared, document, level) for level in (1, 9, 3))
+
+    assert tuple(
+        _dcz_decompress(body, dictionary, max_output_bytes=len(document)) for body in encoded
+    ) == (document, document, document)
+
+
+def test_dcz_workspace_falls_back_to_the_python_codec_when_libzstd_is_unavailable() -> None:
+    dictionary = b'<li data-kind="incident">wreath</li>' * 128
+    token, digest, prepared_dictionary, _workspace = _prepare_dcz_dictionary(dictionary)
+    prepared = (token, digest, prepared_dictionary, None)
+    document = _RenderedFragments(b'<main data-id="42">', dictionary)
+
+    encoded = _dcz_compress(prepared, document, 3)
+
+    assert _dcz_decompress(encoded, dictionary, max_output_bytes=100_000) == (
+        document.materialize()
+    )
+    plain = b'<main data-id="43">' + dictionary
+    encoded_plain = _dcz_compress(prepared, plain, 3)
+    assert _dcz_decompress(encoded_plain, dictionary, max_output_bytes=100_000) == plain
+
+
+def test_dcz_workspace_uses_the_native_encoder_when_one_was_prepared(monkeypatch) -> None:
+    dictionary = b'<li data-kind="incident">wreath</li>' * 128
+    token, digest, prepared_dictionary, _workspace = _prepare_dcz_dictionary(dictionary)
+    workspace = object()
+    monkeypatch.setattr(
+        _core,
+        "dcz_compress_with",
+        lambda actual, actual_digest, body, level: (
+            b"native"
+            if (actual, actual_digest, body, level) == (workspace, digest, b"body", 3)
+            else b"wrong"
+        ),
+    )
+
+    assert _dcz_compress((token, digest, prepared_dictionary, workspace), b"body", 3) == (b"native")
 
 
 @pytest.mark.asyncio
@@ -134,11 +228,202 @@ def test_prepared_fragment_can_render_dynamic_prefix_into_final_body() -> None:
         suffix_bytes=0,
     )
 
-    body = policy._gzip_fragment_render(
-        "html", template, {"title": "Wreath & Co"}
-    )
+    body = policy._gzip_fragment_render("html", template, {"title": "Wreath & Co"})
 
     assert body == prefix + stable
+
+
+@pytest.mark.asyncio
+async def test_dcz_fragment_render_keeps_complete_bytes_for_non_dcz_observers() -> None:
+    template = Template.from_string("<h1>{{ title }}</h1>")
+    prefix = b"<h1>Wreath &amp; Co</h1>"
+    stable = b"<main>stable</main>" * 1_000
+    dictionary = b"<h1>Neighbour</h1>" + stable
+    policy = CompressionPolicy(minimum_size=0)
+    token = policy._configure_dcz_dictionary("html", dictionary)
+    policy._configure_gzip_fragment(
+        "html", prefix + stable, prefix_bytes=len(prefix), suffix_bytes=0
+    )
+    headers = {b"accept-encoding": b"dcz, gzip", b"available-dictionary": token}
+    request = SimpleNamespace(
+        method="GET",
+        identity=None,
+        scheme="https",
+        _header_bytes=headers.get,
+    )
+
+    body = policy._dcz_fragment_render(request, "html", template, {"title": "Wreath & Co"})
+
+    assert bytes(body) == prefix + stable
+    assert body == prefix + stable
+    assert body[:] == prefix + stable
+    assert memoryview(body).tobytes() == prefix + stable
+    assert len(body) == len(prefix) + len(stable)
+    response = Response(body, media_type=b"text/html")
+    await policy.after(request, response)
+    assert _dcz_decompress(response.body, dictionary, max_output_bytes=len(prefix + stable)) == (
+        prefix + stable
+    )
+
+
+def test_dcz_fragment_render_requires_every_request_and_preparation_condition() -> None:
+    template = Template.from_string("<h1>{{ title }}</h1>")
+    prefix = b"<h1>Wreath &amp; Co</h1>"
+    stable = b"<main>stable</main>"
+    dictionary = b"<h1>Neighbour</h1>" + stable
+
+    def configured(*, with_dictionary: bool = True, with_fragment: bool = True):
+        policy = CompressionPolicy(minimum_size=0)
+        token = (
+            policy._configure_dcz_dictionary("html", dictionary)
+            if with_dictionary
+            else b":missing:"
+        )
+        if with_fragment:
+            policy._configure_gzip_fragment(
+                "html", prefix + stable, prefix_bytes=len(prefix), suffix_bytes=0
+            )
+        return policy, token
+
+    cases = []
+    policy, token = configured(with_dictionary=False)
+    cases.append((policy, "https", None, b"dcz, gzip", token, prefix + stable))
+    policy, token = configured()
+    cases.extend(
+        (
+            (policy, "http", None, b"dcz, gzip", token, prefix + stable),
+            (policy, "https", None, None, token, prefix + stable),
+            (policy, "https", None, b"dcz, gzip", b":wrong:", prefix + stable),
+            (policy, "https", None, b"gzip", token, prefix + stable),
+        )
+    )
+    private, token = configured()
+    private.compress_authenticated = False
+    cases.append((private, "https", object(), b"dcz, gzip", token, prefix + stable))
+
+    for policy, scheme, identity, accepted, available, expected in cases:
+        headers = {b"accept-encoding": accepted, b"available-dictionary": available}
+        request = SimpleNamespace(
+            identity=identity,
+            scheme=scheme,
+            _header_bytes=headers.get,
+        )
+        body = policy._dcz_fragment_render(request, "html", template, {"title": "Wreath & Co"})
+        assert type(body) is bytes
+        assert body == expected
+
+    authenticated, token = configured()
+    authenticated.compress_authenticated = True
+    headers = {b"accept-encoding": b"dcz, gzip", b"available-dictionary": token}
+    request = SimpleNamespace(
+        identity=object(),
+        scheme="https",
+        _header_bytes=headers.get,
+    )
+    body = authenticated._dcz_fragment_render(request, "html", template, {"title": "Wreath & Co"})
+    assert type(body) is _RenderedFragments
+    assert bytes(body) == prefix + stable
+    assert body.prefix == prefix
+    assert body.tail == stable
+
+    policy, token = configured(with_fragment=False)
+    headers = {b"accept-encoding": b"dcz, gzip", b"available-dictionary": token}
+    request = SimpleNamespace(
+        identity=None,
+        scheme="https",
+        _header_bytes=headers.get,
+    )
+    with pytest.raises(RuntimeError, match="gzip fragment format 'html' is not prepared"):
+        policy._dcz_fragment_render(request, "html", template, {"title": "Wreath & Co"})
+
+
+def test_dcz_fragment_render_refuses_stale_or_unfusable_preparation() -> None:
+    template = Template.from_string("<h1>{{ title }}</h1>")
+    prefix = b"<h1>Wreath &amp; Co</h1>"
+    stable = b"<main>stable</main>"
+    dictionary = b"<h1>Neighbour</h1>" + stable
+    policy = CompressionPolicy(minimum_size=0)
+    token = policy._configure_dcz_dictionary("html", dictionary)
+    headers = {b"accept-encoding": b"dcz, gzip", b"available-dictionary": token}
+    request = SimpleNamespace(
+        identity=None,
+        scheme="https",
+        _header_bytes=headers.get,
+    )
+
+    policy._configure_gzip_fragment(
+        "html", prefix + stable, prefix_bytes=len(prefix), suffix_bytes=0
+    )
+    policy.gzip_level += 1
+    with pytest.raises(RuntimeError, match="no longer matches"):
+        policy._dcz_fragment_render(request, "html", template, {"title": "Wreath & Co"})
+
+    policy.gzip_level -= 1
+    policy._configure_gzip_fragment(
+        "html", prefix + stable + b"!", prefix_bytes=len(prefix), suffix_bytes=1
+    )
+    with pytest.raises(ValueError, match="zero-byte suffix"):
+        policy._dcz_fragment_render(request, "html", template, {"title": "Wreath & Co"})
+
+    policy._configure_gzip_fragment(
+        "html", prefix + stable, prefix_bytes=len(prefix) + 1, suffix_bytes=0
+    )
+    with pytest.raises(ValueError, match=f"exactly {len(prefix) + 1} bytes"):
+        policy._dcz_fragment_render(request, "html", template, {"title": "Wreath & Co"})
+
+
+@pytest.mark.asyncio
+async def test_zstd_materializes_a_fragment_body_before_compressing() -> None:
+    prefix = b'<main data-id="42">'
+    tail = b"<section>stable</section>" * 128
+    request = SimpleNamespace(
+        method="GET",
+        identity=None,
+        scheme="https",
+        _header_bytes={b"accept-encoding": b"zstd"}.get,
+    )
+    response = Response(_RenderedFragments(prefix, tail), media_type=b"text/html")
+
+    await CompressionPolicy(minimum_size=0).after(request, response)
+
+    assert zstd.decompress(response.body) == prefix + tail
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "media_type"),
+    [
+        (206, (), b"text/html"),
+        (200, ((b"content-encoding", b"identity"),), b"text/html"),
+        (200, ((b"content-range", b"bytes 0-1/2"),), b"text/html"),
+        (200, ((b"cache-control", b"no-transform"),), b"text/html"),
+        (200, (), b"image/png"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_fragment_body_remains_complete_across_compression_early_returns(
+    status: int,
+    headers: tuple[tuple[bytes, bytes], ...],
+    media_type: bytes,
+) -> None:
+    prefix = b'<main data-id="42">'
+    tail = b"<section>stable</section>" * 128
+    request = SimpleNamespace(
+        method="GET",
+        identity=None,
+        scheme="https",
+        _header_bytes={b"accept-encoding": b"dcz, gzip"}.get,
+    )
+    response = Response(
+        _RenderedFragments(prefix, tail),
+        status=status,
+        headers=headers,
+        media_type=media_type,
+    )
+
+    await CompressionPolicy(minimum_size=0).after(request, response)
+
+    assert bytes(response.body) == prefix + tail
+    assert dict(response.headers)[b"content-length"] == str(len(prefix + tail)).encode()
 
 
 @pytest.mark.asyncio

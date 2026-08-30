@@ -141,7 +141,6 @@ class RequestIdPolicy:
         return value.decode("ascii")
 
     def _ingress_sync(self, request: Request) -> None:
-        """Record the inbound id, or a freshly minted one, on request state."""
         value = self._inbound(request) if self._trust_inbound else None
         if value is None:
             # 16 bytes of randomness, hex-encoded: collision-free in practice
@@ -153,7 +152,6 @@ class RequestIdPolicy:
         return None
 
     async def _ingress(self, request: Request) -> None:
-        """Reference executor wrapper; compiled policy uses `_ingress_sync`."""
         return self._ingress_sync(request)
 
     def _egress_inplace(self, request: Request, response: Any) -> None:
@@ -170,12 +168,10 @@ class RequestIdPolicy:
             replace_response_header(response.headers, self._header_bytes, value.encode("ascii"))
 
     def _egress_sync(self, request: Request, response: Any) -> Any:
-        """Reference executor transformer; compiled policy mutates in place."""
         self._egress_inplace(request, response)
         return response
 
     async def _egress(self, request: Request, response: Any) -> Any:
-        """Reference executor wrapper; compiled policy mutates in place."""
         return self._egress_sync(request, response)
 
 

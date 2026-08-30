@@ -135,6 +135,79 @@ class TestChartProjection:
         assert tick_text == ";".join(",".join(f"{tick:g}" for tick in axis) for axis in regular[3])
         assert tick_count == sum(len(axis) for axis in regular[3])
 
+    def test_joined_text_projection_writes_one_path_document(self):
+        buckets = tuple(range(12))
+        sparse = {
+            ("alpha", False): {
+                bucket: {"count": bucket / 7} for bucket in buckets if bucket not in (3, 8)
+            }
+        }
+        prepared = ChartData(buckets, sparse, {"count": None})
+        regular = prepared.project_chart_text(
+            downsample_rows=(0,), full_rows=(0,), threshold=6, tick_target=5
+        )
+
+        row_count, keys, path_text, path_count, tick_text, tick_count = (
+            prepared.project_chart_text_joined(
+                downsample_rows=(0,), full_rows=(0,), threshold=6, tick_target=5
+            )
+        )
+
+        assert (row_count, keys) == regular[:2]
+        assert path_text == "".join(regular[2])
+        assert path_count == len(regular[2])
+        assert (tick_text, tick_count) == regular[3:]
+
+        first = prepared.project_chart_text_joined(
+            downsample_rows=(0,), full_rows=(0,), threshold=6, tick_target=5, cache=False
+        )
+        second = prepared.project_chart_text_joined(
+            downsample_rows=(0,), full_rows=(0,), threshold=6, tick_target=5, cache=False
+        )
+        assert first == second
+        assert first[2] is not second[2]
+        assert first[4] is not second[4]
+
+        cached_first = prepared.project_chart_text_joined(
+            downsample_rows=(0,), full_rows=(0,), threshold=6, tick_target=5
+        )
+        cached_second = prepared.project_chart_text_joined(
+            downsample_rows=(0,), full_rows=(0,), threshold=6, tick_target=5
+        )
+        changed = prepared.project_chart_text_joined(
+            downsample_rows=(0,), full_rows=(0,), threshold=5, tick_target=5
+        )
+        assert cached_first is cached_second
+        assert changed is not cached_first
+
+        fresh = ChartData(buckets, sparse, {"count": None})
+        uncached = fresh.project_chart_text_joined(
+            downsample_rows=(0,), full_rows=(0,), threshold=6, tick_target=5, cache=False
+        )
+        first_cached = fresh.project_chart_text_joined(
+            downsample_rows=(0,), full_rows=(0,), threshold=6, tick_target=5
+        )
+        second_cached = fresh.project_chart_text_joined(
+            downsample_rows=(0,), full_rows=(0,), threshold=6, tick_target=5
+        )
+        assert uncached is not first_cached
+        assert first_cached is second_cached
+
+    def test_joined_text_projection_refuses_each_non_integer_row_collection(self):
+        prepared = ChartData((0,), {("alpha", False): {0: {"count": 1.0}}}, {"count": 0.0})
+
+        with pytest.raises(TypeError, match="requires integer row indices"):
+            prepared.project_chart_text_joined(downsample_rows=("0",))
+        with pytest.raises(TypeError, match="requires integer row indices"):
+            prepared.project_chart_text_joined(downsample_rows=(0,), full_rows=("0",))
+
+    def test_joined_empty_projection_returns_an_empty_document_and_path_count(self):
+        prepared = ChartData((), {("alpha", False): {}}, {"count": 0.0})
+
+        assert prepared.project_chart_text_joined(
+            downsample_rows=(0,), full_rows=(0,), threshold=3, tick_target=5
+        ) == (1, (("alpha", False),), "", 2, "0", 1)
+
     def test_one_shot_text_projection_matches_numeric_tick_projection(self):
         buckets = tuple(range(12))
         sparse = {

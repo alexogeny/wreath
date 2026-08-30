@@ -318,16 +318,7 @@ type _Instruction = (
 _UNSET = object()
 
 
-#: Instruction opcodes, decided once at compile time. The dispatch loop used to
-#: re-derive them per instruction per request with an `isinstance` ladder --
-#: one boundary crossing per test, up to three per instruction. The kind of an
-#: instruction is fixed when the tape is compiled, so the ladder was re-deriving
-#: a constant on every request.
-#:
-#: The traced sample app registers global middleware, which runs from
-#: `_global_hooks` rather than
-#: a route tape, so that scenario never enters this loop. The
-#: `middleware-tape-mixed-dispatch` complexity probe covers it instead.
+#: Instruction kinds resolved while the middleware tape is compiled.
 _OP_FUSED_BEFORE = 0
 _OP_BEFORE = 1
 _OP_ENDPOINT = 2
@@ -448,18 +439,15 @@ _HOOK_ATTRIBUTES = ("before", "before_sync", "after", "after_sync", "after_inpla
 def _is_fused(middleware: Middleware) -> bool:
     if isinstance(middleware, MiddlewareHooks):
         return True
-    hooks = any(hasattr(middleware, attribute) for attribute in _HOOK_ATTRIBUTES)
-    if not hooks:
+    if not any(hasattr(middleware, attribute) for attribute in _HOOK_ATTRIBUTES):
         return False
-    # A hook middleware and a legacy `(request, call_next)` middleware are told
-    # apart by which attributes they carry, so an object carrying both is
-    # ambiguous -- and the ambiguity used to resolve silently in favour of the
-    # hooks, which meant a legacy middleware that happened to define `after`
-    # never had its `__call__` invoked at all. Nothing in the response said so.
     if callable(middleware) and not isinstance(middleware, type):
+        hook_attributes = (
+            attribute for attribute in _HOOK_ATTRIBUTES if hasattr(middleware, attribute)
+        )
         raise TypeError(
             f"{type(middleware).__name__} defines both __call__ and "
-            f"{', '.join(a for a in _HOOK_ATTRIBUTES if hasattr(middleware, a))}; "
+            f"{', '.join(hook_attributes)}; "
             "a middleware is either the legacy (request, call_next) form or the "
             "hook form, and which one this is cannot be guessed. Remove one."
         )
@@ -574,18 +562,15 @@ def _compile_tape(endpoint: CallNext, middleware: tuple[Middleware, ...]) -> Mid
         if after
     ]
     endpoint_position = len(before_entries)
-    after_positions = {
-        middleware_index: endpoint_position + 1 + offset
-        for offset, (middleware_index, _, _, _) in enumerate(after_entries)
-    }
     final_position = endpoint_position + 1 + len(after_entries)
 
     instructions: list[_Instruction] = []
+    after_cursor = len(after_entries) - 1
+    failure_target = final_position
     for middleware_index, hook, sync in before_entries:
-        failure_target = min(
-            (position for index, position in after_positions.items() if index <= middleware_index),
-            default=final_position,
-        )
+        while after_cursor >= 0 and after_entries[after_cursor][0] <= middleware_index:
+            failure_target = endpoint_position + 1 + after_cursor
+            after_cursor -= 1
         instructions.append(_BeforeInstruction(cast(BeforeHook, hook), failure_target, sync))
     instructions.append(_EndpointInstruction(endpoint))
     instructions.extend(

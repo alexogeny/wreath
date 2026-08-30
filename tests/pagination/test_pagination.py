@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from array import array
+
 import pytest
 
 from wreath.pagination import (
@@ -34,6 +36,37 @@ def test_numeric_rank_can_bound_and_transform_the_owned_source() -> None:
         candidates=3,
         absolute=True,
     ) == (0, 2)
+
+
+def test_numeric_rank_reads_contiguous_doubles_without_boxing_the_source() -> None:
+    from wreath.pagination import _rank_indices
+
+    scores = array("d", (-9.0, 2.0, -4.0, 100.0))
+    assert _rank_indices(
+        scores,
+        page=1,
+        size=2,
+        descending=True,
+        candidates=3,
+        absolute=True,
+    ) == (0, 2)
+
+    scores[1] = float("nan")
+    with pytest.raises(ValueError, match="rank score 1 must be finite"):
+        _rank_indices(scores, page=1, size=0, descending=False)
+
+
+def test_numeric_rank_can_return_the_transformed_scores_with_the_indices() -> None:
+    from wreath.pagination import _rank_projection
+
+    assert _rank_projection(
+        array("d", (-9.0, 2.0, -4.0, 100.0)),
+        page=1,
+        size=2,
+        descending=True,
+        candidates=3,
+        absolute=True,
+    ) == ((0, 2), [9.0, 4.0])
 
 
 def test_numeric_rank_partial_workspace_matches_python_sort() -> None:

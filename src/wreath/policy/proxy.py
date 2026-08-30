@@ -107,10 +107,6 @@ class ProxyPolicy:
         """
         if not self._peer_trusted(request):
             return None
-        # One index rather than three scans of the header list. The index is
-        # request-scoped and shared, so CSRF and the auth backend reuse it
-        # instead of rescanning; measured at ~3x cheaper than repeated
-        # per-name lookups once a request performs more than a couple.
         headers = request._index_headers()
 
         forwarded_for = headers.get(b"x-forwarded-for")
@@ -142,7 +138,6 @@ class ProxyPolicy:
         return None
 
     async def _ingress(self, request: Request) -> None:
-        """Reference executor wrapper; compiled policy uses `_ingress_sync`."""
         return self._ingress_sync(request)
 
 

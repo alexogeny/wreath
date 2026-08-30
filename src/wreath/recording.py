@@ -104,21 +104,21 @@ def _validate_dispositions(
     """Lower-case and validate a name -> single-disposition mapping (headers or
     query parameters): forbidden names are refused, and a name may sit in at most
     one of the allow/hash/mask sets."""
-    allow = frozenset(n.lower() for n in allow)
-    hashed = frozenset(n.lower() for n in hashed)
-    masked = frozenset(n.lower() for n in masked)
+    allow = frozenset(name.lower() for name in allow)
+    hashed = frozenset(name.lower() for name in hashed)
+    masked = frozenset(name.lower() for name in masked)
     banned = (allow | hashed | masked) & forbidden
     if banned:
         raise RecordingPolicyError(
             f"{kind}s {sorted(banned)} are never capturable and cannot be added to "
             "any redaction set"
         )
-    for a, b, label in (
+    for left, right, label in (
         (allow, hashed, "allowlist/hash"),
         (allow, masked, "allowlist/mask"),
         (hashed, masked, "hash/mask"),
     ):
-        overlap = a & b
+        overlap = left & right
         if overlap:
             raise RecordingPolicyError(
                 f"{kind}s {sorted(overlap)} appear in both the {label} sets; a "
