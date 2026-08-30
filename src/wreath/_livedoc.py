@@ -164,11 +164,7 @@ class Subscription:
         if self._closed:
             return
         pending = self._pending
-        if pending is not None and (pending.etag is None or change.etag is None):
-            # Merged, and *unknown wins*. Coalescing an unknown tag into a known
-            # one would let a client compare tags and skip a refetch for the
-            # change we could not describe -- which is how a narrowing gets lost
-            # rather than merely delayed.
+        if pending is not None and pending.etag is None:
             change = Change(change.reason, None)
         self._pending = change
         self._wake.set()

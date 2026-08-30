@@ -253,13 +253,33 @@ decode_float_text(const unsigned char *data, Py_ssize_t length, int format, uint
 static PyObject *
 decode_float_binary(const unsigned char *data, Py_ssize_t length, int format, uint32_t oid)
 {
+    double value;
     (void)format;
-    if (oid == PG_FLOAT4 && length == 4)
-        return PyFloat_FromDouble(PyFloat_Unpack4((const char *)data, 0));
-    if (oid == PG_FLOAT8 && length == 8)
-        return PyFloat_FromDouble(PyFloat_Unpack8((const char *)data, 0));
-    PyErr_SetString(PyExc_ValueError, "invalid binary float length");
-    return NULL;
+    if (oid == PG_FLOAT4 && length == 4) {
+#if defined(__STDC_IEC_559__) && !defined(WREATH_PG_NO_FAST_FLOAT4)
+        if (sizeof(float) == 4) {
+            uint32_t bits = read_u32(data);
+            float single;
+            memcpy(&single, &bits, sizeof(bits));
+            return PyFloat_FromDouble(single);
+        }
+#endif
+        value = PyFloat_Unpack4((const char *)data, 0);
+    } else if (oid == PG_FLOAT8 && length == 8) {
+#if defined(__STDC_IEC_559__) && !defined(WREATH_PG_NO_FAST_FLOAT8)
+        if (sizeof(double) == 8) {
+            uint64_t bits = ((uint64_t)read_u32(data) << 32) | read_u32(data + 4);
+            memcpy(&value, &bits, sizeof(bits));
+            return PyFloat_FromDouble(value);
+        }
+#endif
+        value = PyFloat_Unpack8((const char *)data, 0);
+    } else {
+        PyErr_SetString(PyExc_ValueError, "invalid binary float length");
+        return NULL;
+    }
+    if (value == -1.0 && PyErr_Occurred()) return NULL;
+    return PyFloat_FromDouble(value);
 }
 
 static PyObject *
@@ -330,10 +350,30 @@ wreath_pg_select_decoder(uint32_t oid, int format)
 }
 
 static int
+record_oid_is_atomic(uint32_t oid)
+{
+    switch (oid) {
+    case PG_BOOL:
+    case PG_BYTEA:
+    case PG_INT8:
+    case PG_INT2:
+    case PG_INT4:
+    case PG_TEXT:
+    case PG_FLOAT4:
+    case PG_FLOAT8:
+    case PG_VARCHAR:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int
 decoder_plan_traverse(WreathPgDecoderPlan *self, visitproc visit, void *arg)
 {
     Py_VISIT(self->names);
     Py_VISIT(self->name_index);
+    Py_VISIT(self->record_descriptor);
     return 0;
 }
 
@@ -342,6 +382,7 @@ decoder_plan_clear(WreathPgDecoderPlan *self)
 {
     Py_CLEAR(self->names);
     Py_CLEAR(self->name_index);
+    Py_CLEAR(self->record_descriptor);
     return 0;
 }
 
@@ -376,7 +417,9 @@ wreath_pg_decoder_plan_new(PyObject *oids, PyObject *formats, PyObject *names)
     self->columns = PyMem_Calloc((size_t)count, sizeof(WreathPgColumnDecoder));
     self->name_index = PyDict_New();
     self->names = Py_NewRef(names);
+    self->record_descriptor = NULL;
     self->column_count = count;
+    self->record_gc_safe = PyTuple_CheckExact(names);
     if ((self->columns == NULL && count > 0) || self->name_index == NULL) {
         Py_DECREF(self);
         return PyErr_NoMemory();
@@ -399,6 +442,10 @@ wreath_pg_decoder_plan_new(PyObject *oids, PyObject *formats, PyObject *names)
         self->columns[i].destination = (uint16_t)i;
         self->columns[i].decoder = wreath_pg_select_decoder((uint32_t)oid, (int)format);
         self->decoder_selections++;
+        if (!PyUnicode_CheckExact(PyTuple_GET_ITEM(names, i)) ||
+            !record_oid_is_atomic((uint32_t)oid)) {
+            self->record_gc_safe = 0;
+        }
         position = PyLong_FromSsize_t(i);
         if (position == NULL || PyDict_SetItem(
                 self->name_index, PyTuple_GET_ITEM(names, i), position) < 0) {
@@ -407,6 +454,12 @@ wreath_pg_decoder_plan_new(PyObject *oids, PyObject *formats, PyObject *names)
             return NULL;
         }
         Py_DECREF(position);
+    }
+    self->record_descriptor = wreath_pg_record_descriptor(
+        self->names, self->name_index);
+    if (self->record_descriptor == NULL) {
+        Py_DECREF(self);
+        return NULL;
     }
     return (PyObject *)self;
 }
@@ -649,7 +702,7 @@ fetch_into(WreathPgDecoderPlan *plan, WreathPgFieldTape *tape, Py_ssize_t rows,
         return -1;
     }
     for (Py_ssize_t row = 0; row < rows; row++) {
-        records[row] = wreath_pg_record_alloc(plan->names, plan->name_index, columns);
+        records[row] = wreath_pg_record_alloc(plan->record_descriptor, columns);
         if (records[row] == NULL) goto done;
     }
     for (Py_ssize_t column = 0; column < columns; column++) {
@@ -671,6 +724,11 @@ fetch_into(WreathPgDecoderPlan *plan, WreathPgFieldTape *tape, Py_ssize_t rows,
             }
             if (value == NULL) goto done;
             wreath_pg_record_set_value(records[row], decoder->destination, value);
+        }
+    }
+    if (plan->record_gc_safe) {
+        for (Py_ssize_t row = 0; row < rows; row++) {
+            wreath_pg_record_untrack(records[row]);
         }
     }
     {
@@ -806,6 +864,64 @@ error:
 }
 
 int
+wreath_pg_decode_datarow_record(PyObject *plan_object, PyObject *rows,
+                                const unsigned char *data, Py_ssize_t length)
+{
+    WreathPgDecoderPlan *plan = (WreathPgDecoderPlan *)plan_object;
+    PyObject *record = NULL;
+    Py_ssize_t offset = 2;
+
+    if (Py_TYPE(plan_object) != WreathPgDecoderPlanType ||
+        !PyList_Check(rows) || data == NULL || length < 2) {
+        PyErr_SetString(PyExc_ValueError, "invalid direct DataRow record request");
+        return -1;
+    }
+    if ((Py_ssize_t)read_u16(data) != plan->column_count) {
+        PyErr_SetString(PyExc_ValueError, "DataRow column count does not match plan");
+        return -1;
+    }
+    record = wreath_pg_record_alloc(plan->record_descriptor, plan->column_count);
+    if (record == NULL) return -1;
+    for (Py_ssize_t column = 0; column < plan->column_count; column++) {
+        WreathPgColumnDecoder *decoder = &plan->columns[column];
+        int32_t field_length;
+        PyObject *value;
+        if (offset > length - 4) {
+            PyErr_SetString(PyExc_ValueError, "truncated DataRow field length");
+            goto error;
+        }
+        field_length = (int32_t)read_u32(data + offset);
+        offset += 4;
+        if (field_length < -1 ||
+            (field_length >= 0 && offset > length - field_length)) {
+            PyErr_SetString(PyExc_ValueError, "invalid DataRow field length");
+            goto error;
+        }
+        if (field_length == -1) {
+            value = Py_NewRef(Py_None);
+        } else {
+            value = decoder->decoder(
+                data + offset, field_length, decoder->format, decoder->oid);
+            offset += field_length;
+        }
+        if (value == NULL) goto error;
+        wreath_pg_record_set_value(record, decoder->destination, value);
+    }
+    if (offset != length) {
+        PyErr_SetString(PyExc_ValueError, "invalid DataRow length");
+        goto error;
+    }
+    if (plan->record_gc_safe) wreath_pg_record_untrack(record);
+    if (PyList_Append(rows, record) < 0) goto error;
+    Py_DECREF(record);
+    return 0;
+
+error:
+    Py_DECREF(record);
+    return -1;
+}
+
+int
 wreath_pg_decode_fetch_extend(PyObject *plan_object, PyObject *tape_object,
                            Py_ssize_t limit, PyObject *dest)
 {
@@ -870,8 +986,7 @@ decode_field_tape(PyObject *module, PyObject *args)
             goto done;
         }
         result = wreath_pg_record_alloc(
-            plan->names, plan->name_index, tape->stored_columns
-        );
+            plan->record_descriptor, tape->stored_columns);
         if (result == NULL) goto done;
         for (Py_ssize_t column = 0; column < tape->stored_columns; column++) {
             PyObject *value = decode_ref(plan, tape, 0, column, buffers);
@@ -881,6 +996,7 @@ decode_field_tape(PyObject *module, PyObject *args)
             }
             wreath_pg_record_set_value(result, column, value);
         }
+        if (plan->record_gc_safe) wreath_pg_record_untrack(result);
         if (wreath_pg_tape_consume(tape, tape->row_count) < 0) Py_CLEAR(result);
         goto done;
     }

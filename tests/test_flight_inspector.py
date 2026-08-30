@@ -225,8 +225,11 @@ async def test_slow_client_is_disconnected_by_the_idle_timeout(tmp_path) -> None
     )
     try:
         reader, writer = await asyncio.open_unix_connection(server.path)
-        assert await asyncio.wait_for(reader.read(), timeout=2.0) == b""
-        writer.close()
+        try:
+            assert await asyncio.wait_for(reader.read(), timeout=0.5) == b""
+        finally:
+            writer.close()
+            await writer.wait_closed()
     finally:
         await server.close()
 

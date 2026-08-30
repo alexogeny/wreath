@@ -2913,27 +2913,118 @@ aws_encode(PyObject *text, int slash)
     const unsigned char *data = (const unsigned char *)PyUnicode_AsUTF8AndSize(
         text, &length);
     if (data == NULL) return NULL;
-    WreathBytesWriter writer;
-    if (wreath_writer_init(&writer, length + 16) < 0) return NULL;
+    size_t encoded_length = 0;
+    for (Py_ssize_t i = 0; i < length; i++) {
+        size_t width = urlencode_safe(data[i]) || (slash && data[i] == '/')
+            ? 1 : 3;
+        if (width > (size_t)PY_SSIZE_T_MAX - encoded_length)
+            return PyErr_NoMemory();
+        encoded_length += width;
+    }
+    PyObject *result = PyUnicode_New((Py_ssize_t)encoded_length, 127);
+    if (result == NULL) return NULL;
+    char *output = (char *)PyUnicode_1BYTE_DATA(result);
     static const char hex[] = "0123456789ABCDEF";
+    size_t written = 0;
     for (Py_ssize_t i = 0; i < length; i++) {
         unsigned char byte = data[i];
         if (urlencode_safe(byte) || (slash && byte == '/')) {
-            if (wreath_writer_byte(&writer, (char)byte) < 0) goto aws_error;
+            output[written++] = (char)byte;
         } else {
-            char escaped[3] = {'%', hex[byte >> 4], hex[byte & 15]};
-            if (wreath_writer_write(&writer, escaped, 3) < 0) goto aws_error;
+            output[written++] = '%';
+            output[written++] = hex[byte >> 4];
+            output[written++] = hex[byte & 15];
         }
     }
-    PyObject *encoded = wreath_writer_finish(&writer);
-    if (encoded == NULL) return NULL;
-    PyObject *result = PyUnicode_DecodeASCII(PyBytes_AS_STRING(encoded),
-                                             PyBytes_GET_SIZE(encoded), NULL);
-    Py_DECREF(encoded);
     return result;
-aws_error:
-    Py_XDECREF(writer.bytes);
-    return NULL;
+}
+
+static PyObject *
+canonical_ascii_header_key(PyObject *key)
+{
+    const Py_UCS1 *data = PyUnicode_1BYTE_DATA(key);
+    Py_ssize_t left = 0;
+    Py_ssize_t right = PyUnicode_GET_LENGTH(key);
+    while (left < right && Py_UNICODE_ISSPACE(data[left])) left++;
+    while (right > left && Py_UNICODE_ISSPACE(data[right - 1])) right--;
+    PyObject *result = PyUnicode_New(right - left, 127);
+    if (result == NULL) return NULL;
+    Py_UCS1 *output = PyUnicode_1BYTE_DATA(result);
+    for (Py_ssize_t i = left; i < right; i++) {
+        Py_UCS1 character = data[i];
+        output[i - left] = character >= 'A' && character <= 'Z'
+            ? (Py_UCS1)(character + ('a' - 'A')) : character;
+    }
+    return result;
+}
+
+static PyObject *
+canonical_header_key(PyObject *key)
+{
+    if (PyUnicode_CheckExact(key) && PyUnicode_IS_ASCII(key))
+        return canonical_ascii_header_key(key);
+    PyObject *lower = call_noargs_attr(key, "lower");
+    if (lower == NULL) return NULL;
+    PyObject *result = call_noargs_attr(lower, "strip");
+    Py_DECREF(lower);
+    return result;
+}
+
+static PyObject *
+canonical_ascii_header_value(PyObject *text)
+{
+    const Py_UCS1 *data = PyUnicode_1BYTE_DATA(text);
+    Py_ssize_t length = PyUnicode_GET_LENGTH(text);
+    Py_ssize_t output_length = 0;
+    Py_ssize_t word_count = 0;
+    Py_ssize_t index = 0;
+    while (index < length) {
+        while (index < length && Py_UNICODE_ISSPACE(data[index])) index++;
+        Py_ssize_t start = index;
+        while (index < length && !Py_UNICODE_ISSPACE(data[index])) index++;
+        if (index != start) {
+            output_length += index - start + (word_count != 0);
+            word_count++;
+        }
+    }
+    PyObject *result = PyUnicode_New(output_length, 127);
+    if (result == NULL) return NULL;
+    Py_UCS1 *output = PyUnicode_1BYTE_DATA(result);
+    Py_ssize_t written = 0;
+    word_count = 0;
+    index = 0;
+    while (index < length) {
+        while (index < length && Py_UNICODE_ISSPACE(data[index])) index++;
+        Py_ssize_t start = index;
+        while (index < length && !Py_UNICODE_ISSPACE(data[index])) index++;
+        if (index == start) continue;
+        if (word_count != 0) output[written++] = ' ';
+        memcpy(output + written, data + start, (size_t)(index - start));
+        written += index - start;
+        word_count++;
+    }
+    return result;
+}
+
+static PyObject *
+canonical_header_value(PyObject *value, PyObject *space)
+{
+    PyObject *text = PyObject_Str(value);
+    if (text == NULL) return NULL;
+    if (PyUnicode_CheckExact(text) && PyUnicode_IS_ASCII(text)) {
+        PyObject *result = canonical_ascii_header_value(text);
+        Py_DECREF(text);
+        return result;
+    }
+    PyObject *stripped = call_noargs_attr(text, "strip");
+    Py_DECREF(text);
+    if (stripped == NULL) return NULL;
+    PyObject *words = call_noargs_attr(stripped, "split");
+    Py_DECREF(stripped);
+    if (words == NULL) return NULL;
+    PyObject *result = PyUnicode_Join(space, words);
+    Py_DECREF(words);
+    return result;
 }
 
 static PyObject *
@@ -2952,20 +3043,9 @@ canonical_header_items(PyObject *headers)
         PyObject *pair = PyList_GET_ITEM(source, i);
         PyObject *key = PyTuple_GET_ITEM(pair, 0);
         PyObject *value = PyTuple_GET_ITEM(pair, 1);
-        PyObject *lower = call_noargs_attr(key, "lower");
-        PyObject *clean_key = lower == NULL ? NULL
-            : call_noargs_attr(lower, "strip");
-        Py_XDECREF(lower);
-        PyObject *text = clean_key == NULL ? NULL : PyObject_Str(value);
-        PyObject *stripped = text == NULL ? NULL
-            : call_noargs_attr(text, "strip");
-        Py_XDECREF(text);
-        PyObject *words = stripped == NULL ? NULL
-            : call_noargs_attr(stripped, "split");
-        Py_XDECREF(stripped);
-        PyObject *clean_value = words == NULL ? NULL
-            : PyUnicode_Join(space, words);
-        Py_XDECREF(words);
+        PyObject *clean_key = canonical_header_key(key);
+        PyObject *clean_value = clean_key == NULL ? NULL
+            : canonical_header_value(value, space);
         PyObject *normalized = wreath_tuple2_from_owned(
             clean_key, clean_value);
         if (normalized == NULL) {
@@ -2983,44 +3063,104 @@ canonical_header_items(PyObject *headers)
     return items;
 }
 
+static int
+sigv4_add_length(Py_ssize_t *total, Py_ssize_t addition)
+{
+    if (addition > PY_SSIZE_T_MAX - *total) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    *total += addition;
+    return 0;
+}
+
+static int
+sigv4_add_unicode_length(Py_ssize_t *total, Py_UCS4 *maxchar,
+                         PyObject *value)
+{
+    if (!PyUnicode_Check(value)) {
+        PyUnicode_AsUTF8AndSize(value, NULL);
+        return -1;
+    }
+    if (sigv4_add_length(total, PyUnicode_GET_LENGTH(value)) < 0) return -1;
+    Py_UCS4 value_maxchar = PyUnicode_MAX_CHAR_VALUE(value);
+    if (value_maxchar > *maxchar) *maxchar = value_maxchar;
+    return 0;
+}
+
+static int
+sigv4_copy_unicode(PyObject *output, Py_ssize_t *written, PyObject *source)
+{
+    Py_ssize_t length = PyUnicode_GET_LENGTH(source);
+    if (PyUnicode_CopyCharacters(output, *written, source, 0, length) < 0)
+        return -1;
+    *written += length;
+    return 0;
+}
+
+static int
+sigv4_write_character(PyObject *output, Py_ssize_t *written, Py_UCS4 character)
+{
+    if (PyUnicode_WriteChar(output, *written, character) < 0) return -1;
+    (*written)++;
+    return 0;
+}
+
 static PyObject *
 render_headers(PyObject *items)
 {
-    WreathBytesWriter canonical, signed_names;
-    if (wreath_writer_init(&canonical, 256) < 0) return NULL;
-    if (wreath_writer_init(&signed_names, 128) < 0) {
-        Py_DECREF(canonical.bytes);
-        return NULL;
-    }
     Py_ssize_t count = PyList_GET_SIZE(items);
+    Py_ssize_t canonical_length = 0;
+    Py_ssize_t signed_length = count > 0 ? count - 1 : 0;
+    Py_UCS4 canonical_maxchar = 127;
+    Py_UCS4 signed_maxchar = 127;
     for (Py_ssize_t i = 0; i < count; i++) {
         PyObject *pair = PyList_GET_ITEM(items, i);
         PyObject *key = PyTuple_GET_ITEM(pair, 0);
         PyObject *value = PyTuple_GET_ITEM(pair, 1);
-        Py_ssize_t key_length, value_length;
-        const char *key_data = PyUnicode_AsUTF8AndSize(key, &key_length);
-        const char *value_data = key_data == NULL ? NULL
-            : PyUnicode_AsUTF8AndSize(value, &value_length);
-        if (value_data == NULL || wreath_writer_write(&canonical, key_data, key_length) < 0 ||
-            wreath_writer_byte(&canonical, ':') < 0 ||
-            wreath_writer_write(&canonical, value_data, value_length) < 0 ||
-            wreath_writer_byte(&canonical, '\n') < 0 ||
-            (i != 0 && wreath_writer_byte(&signed_names, ';') < 0) ||
-            wreath_writer_write(&signed_names, key_data, key_length) < 0) {
-            Py_DECREF(canonical.bytes); Py_DECREF(signed_names.bytes);
+        if (sigv4_add_unicode_length(
+                &canonical_length, &canonical_maxchar, key) < 0 ||
+            sigv4_add_unicode_length(
+                &canonical_length, &canonical_maxchar, value) < 0 ||
+            sigv4_add_length(&canonical_length, 2) < 0 ||
+            sigv4_add_unicode_length(
+                &signed_length, &signed_maxchar, key) < 0)
+            return NULL;
+    }
+    PyObject *canonical = PyUnicode_New(canonical_length, canonical_maxchar);
+    PyObject *signed_names = PyUnicode_New(signed_length, signed_maxchar);
+    if (canonical == NULL || signed_names == NULL) {
+        Py_XDECREF(canonical);
+        Py_XDECREF(signed_names);
+        return NULL;
+    }
+    Py_ssize_t canonical_written = 0;
+    Py_ssize_t signed_written = 0;
+    for (Py_ssize_t i = 0; i < count; i++) {
+        PyObject *pair = PyList_GET_ITEM(items, i);
+        PyObject *key = PyTuple_GET_ITEM(pair, 0);
+        PyObject *value = PyTuple_GET_ITEM(pair, 1);
+        if (sigv4_copy_unicode(canonical, &canonical_written, key) < 0 ||
+            sigv4_write_character(canonical, &canonical_written, ':') < 0 ||
+            sigv4_copy_unicode(canonical, &canonical_written, value) < 0 ||
+            sigv4_write_character(canonical, &canonical_written, '\n') < 0 ||
+            (i != 0 && sigv4_write_character(
+                signed_names, &signed_written, ';') < 0) ||
+            sigv4_copy_unicode(signed_names, &signed_written, key) < 0) {
+            Py_DECREF(canonical);
+            Py_DECREF(signed_names);
             return NULL;
         }
     }
-    PyObject *canonical_bytes = wreath_writer_finish(&canonical);
-    PyObject *signed_bytes = wreath_writer_finish(&signed_names);
-    PyObject *canon = canonical_bytes == NULL ? NULL
-        : PyUnicode_DecodeUTF8(PyBytes_AS_STRING(canonical_bytes),
-                               PyBytes_GET_SIZE(canonical_bytes), "strict");
-    PyObject *signed_text = signed_bytes == NULL ? NULL
-        : PyUnicode_DecodeUTF8(PyBytes_AS_STRING(signed_bytes),
-                               PyBytes_GET_SIZE(signed_bytes), "strict");
-    Py_XDECREF(canonical_bytes); Py_XDECREF(signed_bytes);
-    return wreath_tuple2_from_owned(canon, signed_text);
+    if (canonical_written != canonical_length ||
+        signed_written != signed_length) {
+        Py_DECREF(canonical);
+        Py_DECREF(signed_names);
+        PyErr_SetString(PyExc_RuntimeError,
+                        "SigV4 header size changed while writing");
+        return NULL;
+    }
+    return wreath_tuple2_from_owned(canonical, signed_names);
 }
 
 PyObject *
@@ -3081,42 +3221,69 @@ wreath_sigv4_canonical(PyObject *Py_UNUSED(self), PyObject *args)
     if (encoded_path != NULL && PyUnicode_GET_LENGTH(encoded_path) == 0) {
         Py_SETREF(encoded_path, PyUnicode_FromString("/"));
     }
-    WreathBytesWriter writer;
-    if (encoded_path == NULL || wreath_writer_init(&writer, 512) < 0)
+    if (encoded_path == NULL) goto canonical_error;
+    Py_ssize_t canonical_length = 0;
+    Py_UCS4 canonical_maxchar = 127;
+    if (sigv4_add_unicode_length(
+            &canonical_length, &canonical_maxchar, upper) < 0 ||
+        sigv4_add_unicode_length(
+            &canonical_length, &canonical_maxchar, encoded_path) < 0 ||
+        sigv4_add_unicode_length(
+            &canonical_length, &canonical_maxchar, canonical_headers) < 0 ||
+        sigv4_add_unicode_length(
+            &canonical_length, &canonical_maxchar, signed_headers) < 0 ||
+        sigv4_add_unicode_length(
+            &canonical_length, &canonical_maxchar, payload_hash) < 0 ||
+        sigv4_add_length(&canonical_length, 5) < 0)
         goto canonical_error;
-#define WRITE_UNICODE(value) do { \
-    Py_ssize_t n; const char *p = PyUnicode_AsUTF8AndSize((value), &n); \
-    if (p == NULL || wreath_writer_write(&writer, p, n) < 0) goto writer_error; \
-} while (0)
-    WRITE_UNICODE(upper);
-    if (wreath_writer_byte(&writer, '\n') < 0) goto writer_error;
-    WRITE_UNICODE(encoded_path);
-    if (wreath_writer_byte(&writer, '\n') < 0) goto writer_error;
     for (Py_ssize_t i = 0; i < param_count; i++) {
         PyObject *pair = PyList_GET_ITEM(encoded_params, i);
-        if (i != 0 && wreath_writer_byte(&writer, '&') < 0) goto writer_error;
-        WRITE_UNICODE(PyTuple_GET_ITEM(pair, 0));
-        if (wreath_writer_byte(&writer, '=') < 0) goto writer_error;
-        WRITE_UNICODE(PyTuple_GET_ITEM(pair, 1));
+        if (sigv4_add_unicode_length(
+                &canonical_length, &canonical_maxchar,
+                PyTuple_GET_ITEM(pair, 0)) < 0 ||
+            sigv4_add_unicode_length(
+                &canonical_length, &canonical_maxchar,
+                PyTuple_GET_ITEM(pair, 1)) < 0 ||
+            sigv4_add_length(&canonical_length, i != 0 ? 2 : 1) < 0)
+            goto canonical_error;
     }
-    if (wreath_writer_byte(&writer, '\n') < 0) goto writer_error;
-    WRITE_UNICODE(canonical_headers);
-    if (wreath_writer_byte(&writer, '\n') < 0) goto writer_error;
-    WRITE_UNICODE(signed_headers);
-    if (wreath_writer_byte(&writer, '\n') < 0) goto writer_error;
-    WRITE_UNICODE(payload_hash);
-#undef WRITE_UNICODE
-    PyObject *canonical_bytes = wreath_writer_finish(&writer);
-    PyObject *canonical = canonical_bytes == NULL ? NULL
-        : PyUnicode_DecodeUTF8(PyBytes_AS_STRING(canonical_bytes),
-                               PyBytes_GET_SIZE(canonical_bytes), "strict");
-    Py_XDECREF(canonical_bytes);
-    PyObject *result = canonical == NULL ? NULL
-        : wreath_tuple2_from_owned(canonical, Py_NewRef(signed_headers));
+    PyObject *canonical = PyUnicode_New(canonical_length, canonical_maxchar);
+    if (canonical == NULL) goto canonical_error;
+    Py_ssize_t written = 0;
+    if (sigv4_copy_unicode(canonical, &written, upper) < 0 ||
+        sigv4_write_character(canonical, &written, '\n') < 0 ||
+        sigv4_copy_unicode(canonical, &written, encoded_path) < 0 ||
+        sigv4_write_character(canonical, &written, '\n') < 0)
+        goto canonical_write_error;
+    for (Py_ssize_t i = 0; i < param_count; i++) {
+        PyObject *pair = PyList_GET_ITEM(encoded_params, i);
+        if ((i != 0 && sigv4_write_character(
+                canonical, &written, '&') < 0) ||
+            sigv4_copy_unicode(
+                canonical, &written, PyTuple_GET_ITEM(pair, 0)) < 0 ||
+            sigv4_write_character(canonical, &written, '=') < 0 ||
+            sigv4_copy_unicode(
+                canonical, &written, PyTuple_GET_ITEM(pair, 1)) < 0)
+            goto canonical_write_error;
+    }
+    if (sigv4_write_character(canonical, &written, '\n') < 0 ||
+        sigv4_copy_unicode(canonical, &written, canonical_headers) < 0 ||
+        sigv4_write_character(canonical, &written, '\n') < 0 ||
+        sigv4_copy_unicode(canonical, &written, signed_headers) < 0 ||
+        sigv4_write_character(canonical, &written, '\n') < 0 ||
+        sigv4_copy_unicode(canonical, &written, payload_hash) < 0)
+        goto canonical_write_error;
+    if (written != canonical_length) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "SigV4 canonical request size changed while writing");
+        goto canonical_write_error;
+    }
+    PyObject *result = wreath_tuple2_from_owned(
+        canonical, Py_NewRef(signed_headers));
     Py_DECREF(upper); Py_DECREF(encoded_path); Py_DECREF(encoded_params); Py_DECREF(rendered);
     return result;
-writer_error:
-    Py_XDECREF(writer.bytes);
+canonical_write_error:
+    Py_DECREF(canonical);
 canonical_error:
     Py_XDECREF(upper); Py_XDECREF(encoded_path); Py_DECREF(encoded_params); Py_DECREF(rendered);
     return NULL;

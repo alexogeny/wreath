@@ -1103,7 +1103,7 @@ class MessageBus:
         if message._disposition == _ACK:
             await self._complete(message)
         elif message._disposition == _REJECT:
-            await self._dead(message, errored or "rejected")
+            await self._dead(message, "rejected")
         else:
             await self._retry(sub, message, errored or "nacked")
 

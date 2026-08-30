@@ -38,11 +38,12 @@ from .compiler import (
     LoadPlan,
     SelectinStep,
     compile_count,
-    compile_delete,
+    compile_delete_many,
     compile_delete_where,
     compile_insert,
+    compile_insert_many,
     compile_select,
-    compile_update,
+    compile_update_many,
     compile_update_where,
     qualified,
     quote,
@@ -65,6 +66,7 @@ from .model import DELETED, DETACHED, PERSISTENT, TRANSIENT, Model, validate_ide
 from .query import Select
 from .relations import LoadOption, Relationship, RelationshipExpr
 from .schema import ColumnSpec, ModelSpec, RelationshipSpec
+from .types import WireList
 
 _WRITE_WORKLOADS = frozenset({"write"})
 
@@ -334,6 +336,27 @@ def _join_cursors(steps: tuple[JoinedStep, ...]) -> tuple[_JoinCursor, ...]:
 
 
 @dataclass(frozen=True, slots=True)
+class _InsertResult:
+    instance: Any
+    spec: ModelSpec
+    returned: tuple[tuple[ColumnSpec, Any], ...]
+    key: tuple[Any, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _FlushResult:
+    written: frozenset[str]
+    inserts: list[_InsertResult]
+    updates: list[tuple[list[Any], ModelSpec, int]]
+    deletes: list[tuple[list[Any], ModelSpec]]
+
+
+@dataclass(slots=True)
+class _SessionUndo:
+    instances: tuple[Any, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class TenantContext:
     """A validated, request-scoped tenant binding for an isolated registry.
 
@@ -406,6 +429,7 @@ class Session:
         "_new_items",
         "_new_stale",
         "_registry",
+        "_rollback_state",
         "_statement_timeout",
         "_tenant",
         "_workload",
@@ -464,6 +488,7 @@ class Session:
         self._deleted_ids: set[int] = set()
         self._dirty_items: list[Any] = []
         self._depth = 0
+        self._rollback_state: list[list[_SessionUndo]] = []
         # Model names written inside an open transaction, published on commit.
         self._written: frozenset[str] = frozenset()
         self._closed = False
@@ -1190,17 +1215,18 @@ class Session:
         self._check_usable()
         if not self._has_pending():
             return
-        if self._depth:
-            # Inside a caller's transaction: names accumulate on the session and
-            # the outermost commit publishes them. A flush that is later rolled
-            # back must not have invalidated anything.
-            self._written |= await self._flush_inner()
-            return
         async with self.begin():
-            written = await self._flush_inner()
+            result = await self._flush_inner()
+            undo = self._snapshot_flush(result)
+            self._rollback_state[-1].append(undo)
+            self._finish_flush(result)
+        self._clear_pending()
+        if self._depth:
+            self._written |= result.written
+            return
         # Published only once the transaction has committed.
-        if written:
-            _publish_write(written)
+        if result.written:
+            _publish_write(result.written)
 
     def _collect_written(self, dirty: list[Any]) -> frozenset[str]:
         names = {type(item).__name__ for item in self._new}
@@ -1240,42 +1266,145 @@ class Session:
             batches[self._order(type(instance))].append(instance)
         return batches
 
-    async def _flush_inner(self) -> frozenset[str]:
+    async def _flush_inner(self) -> _FlushResult:
         dirty = self._dirty_objects()
         written = (
             self._collect_written(dirty)
             if (_has_write_subscribers() or self._depth)
             else frozenset()
         )
+        inserts: list[_InsertResult] = []
+        updates: list[tuple[list[Any], ModelSpec, int]] = []
+        deletes: list[tuple[list[Any], ModelSpec]] = []
         try:
             for batch in self._new_batches():
-                await self._insert_batch(batch)
-            updates = sorted(
+                inserts += await self._insert_batch(batch)
+            ordered_updates = sorted(
                 dirty,
                 key=lambda item: (self._order(type(item)), _sort_key(item)),
             )
-            for instance in updates:
-                await self._update(instance)
-            for instance in sorted(
+            update_groups: dict[tuple[ModelSpec, int], list[Any]] = {}
+            for instance in ordered_updates:
+                spec = self._registry.spec_for(type(instance))
+                mask = _update_mask(spec, instance)
+                if mask:
+                    update_groups.setdefault((spec, mask), []).append(instance)
+            for (spec, mask), instances in update_groups.items():
+                await self._update_batch(instances, mask)
+                updates.append((instances, spec, mask))
+            ordered_deletes = sorted(
                 self._deleted,
                 key=lambda item: (-self._order(type(item)), _sort_key(item)),
-            ):
-                await self._delete(instance)
+            )
+            delete_groups: dict[ModelSpec, list[Any]] = {}
+            for instance in ordered_deletes:
+                spec = self._registry.spec_for(type(instance))
+                delete_groups.setdefault(spec, []).append(instance)
+            for spec, instances in delete_groups.items():
+                await self._delete_batch(instances)
+                deletes.append((instances, spec))
+            for result in inserts:
+                self._audit_write(
+                    result.instance,
+                    result.spec,
+                    "insert",
+                    None,
+                    key=result.key,
+                    returned=result.returned,
+                )
+            for instances, spec, mask in updates:
+                for instance in instances:
+                    self._audit_write(instance, spec, "update", mask)
+            for instances, spec in deletes:
+                for instance in instances:
+                    self._audit_write(instance, spec, "delete", None)
             if self._audit_pending:
                 await self._drain_audit()
         except BaseException:
             # Failed writes must not survive into the next audit batch.
             self._audit_pending = []
             raise
-        self._clear_pending()
-        return written
+        return _FlushResult(written, inserts, updates, deletes)
+
+    def _finish_flush(self, result: _FlushResult) -> None:
+        for insert in result.inserts:
+            self._identity[(insert.spec, insert.key)] = insert.instance
+        for insert in result.inserts:
+            for column, value in insert.returned:
+                insert.instance._orm_set_loaded(column.index, value)
+            insert.instance._orm_state = PERSISTENT
+            insert.instance._orm_clear_dirty()
+        for instances, _spec, _mask in result.updates:
+            for instance in instances:
+                instance._orm_clear_dirty()
+        for instances, spec in result.deletes:
+            for instance in instances:
+                key = instance._orm_primary_key()
+                if key is not None:
+                    self._identity.pop((spec, key), None)
+                instance._orm_state = DETACHED
+                instance._orm_owner = None
+
+    def _snapshot_flush(self, result: _FlushResult) -> _SessionUndo:
+        instances: list[Any] = []
+        seen: set[int] = set()
+        for insert in result.inserts:
+            if id(insert.instance) not in seen:
+                seen.add(id(insert.instance))
+                instances.append(insert.instance)
+        for group, _spec, _mask in result.updates:
+            for instance in group:
+                if id(instance) not in seen:
+                    seen.add(id(instance))
+                    instances.append(instance)
+        for group, _spec in result.deletes:
+            for instance in group:
+                if id(instance) not in seen:
+                    seen.add(id(instance))
+                    instances.append(instance)
+
+        return _SessionUndo(
+            instances=tuple(instances),
+        )
+
+    def _invalidate_undo_frame(self, frame: list[_SessionUndo]) -> None:
+        earliest: dict[int, Any] = {}
+        for undo in frame:
+            for instance in undo.instances:
+                earliest.setdefault(id(instance), instance)
+        if not earliest:
+            return
+        touched = earliest.keys()
+        self._new_items = [instance for instance in self._new_items if id(instance) not in touched]
+        self._new_ids.difference_update(touched)
+        self._new_stale = False
+        self._deleted = [instance for instance in self._deleted if id(instance) not in touched]
+        self._deleted_ids.difference_update(touched)
+        self._dirty_items = [
+            instance for instance in self._dirty_items if id(instance) not in touched
+        ]
+        for key, instance in tuple(self._identity.items()):
+            if id(instance) in touched:
+                self._identity.pop(key)
+        for instance in earliest.values():
+            instance._orm_state = DETACHED
+            instance._orm_owner = None
 
     def _audit_facet(self, instance: Any) -> Any:
         if self._audit is None:
             return None
         return getattr(type(instance), "__wreath_facets__", {}).get("audit")
 
-    def _audit_write(self, instance: Any, spec: Any, operation: str, mask: int | None) -> None:
+    def _audit_write(
+        self,
+        instance: Any,
+        spec: Any,
+        operation: str,
+        mask: int | None,
+        *,
+        key: tuple[Any, ...] | None = None,
+        returned: tuple[tuple[ColumnSpec, Any], ...] = (),
+    ) -> None:
         """Hold the record for a write that has just happened.
 
         Called *after* the statement, because an insert's primary key is only
@@ -1298,14 +1427,20 @@ class Session:
         facet = self._audit_facet(instance)
         if facet is None:
             return
-        key = instance._orm_primary_key()
+        if key is None:
+            key = instance._orm_primary_key()
+        fields = changed_fields(instance, spec, facet, mask=mask)
+        redact = facet.redact
+        for column, value in returned:
+            if column.python_name not in redact:
+                fields[column.python_name] = value
         self._audit_pending.append(
             Change(
                 table=spec.qualified_name,
                 key="" if key is None else ":".join(str(part) for part in key),
                 operation=operation,
                 actor=self._audit.attribute(),
-                fields=changed_fields(instance, spec, facet, mask=mask),
+                fields=fields,
             )
         )
 
@@ -1336,40 +1471,32 @@ class Session:
         if self._audit_facet(instance) is not None:
             self._audit.attribute()
 
-    async def _insert(self, instance: Any) -> None:
-        spec = self._registry.spec_for(type(instance))
-        # The mask `_insert_columns` splits on is also what keys the compiled
-        # statement, so the linear split and the plan cache cannot disagree
-        # about which columns an insert supplies.
-        plan = compile_insert(self._registry, spec, _insert_mask(spec.columns, instance))
-        await self._insert_one(instance, spec, plan)
-
-    async def _insert_batch(self, instances: list[Any]) -> None:
+    async def _insert_batch(self, instances: list[Any]) -> list[_InsertResult]:
+        staged: list[_InsertResult] = []
         start = 0
         while start < len(instances):
             first = instances[start]
             spec = self._registry.spec_for(type(first))
             mask = _insert_mask(spec.columns, first)
-            plan = compile_insert(self._registry, spec, mask)
             stop = start + 1
             while stop < len(instances) and _insert_mask(spec.columns, instances[stop]) == mask:
                 stop += 1
             batch = instances[start:stop]
-            if plan.returning:
+            if not mask:
+                plan = compile_insert(self._registry, spec, mask)
                 for instance in batch:
-                    await self._insert_one(instance, spec, plan)
+                    staged.append(await self._insert_one(instance, spec, plan))
             else:
-                width = len(plan.columns)
-                limit = max(1, MAX_BIND_PARAMETERS // width)
-                for offset in range(0, len(batch), limit):
-                    await self._insert_many(batch[offset : offset + limit], spec, plan)
+                staged += await self._insert_many(batch, spec, mask)
             start = stop
+        return staged
 
-    async def _insert_one(self, instance: Any, spec: Any, plan: Any) -> None:
+    async def _insert_one(self, instance: Any, spec: Any, plan: Any) -> _InsertResult:
         returning = plan.returning
         values = [_wire_value(instance, item) for item in plan.columns]
         self._audit_attribute(instance)
         connection = await self._acquire()
+        decoded: tuple[Any, ...] = ()
         if returning:
             row = await connection.fetchrow(plan.sql, *values)
             if row is None:
@@ -1377,87 +1504,209 @@ class Session:
                     f"INSERT into {spec.qualified_name} returned no row for "
                     f"{spec.model_type.__name__}"
                 )
-            for index, item in enumerate(returning):
-                instance._orm_set_loaded(item.index, item.pg_type.from_wire(row[index]))
+            decoded = tuple(
+                item.pg_type.from_wire(row[index])
+                for index, item in enumerate(returning)
+            )
         else:
             await connection.execute(plan.sql, *values)
-        self._finish_insert(instance, spec)
+        return _stage_insert(instance, spec, returning, decoded)
 
-    async def _insert_many(self, instances: list[Any], spec: Any, plan: Any) -> None:
+    async def _insert_many(
+        self, instances: list[Any], spec: Any, mask: int
+    ) -> list[_InsertResult]:
         for instance in instances:
             self._audit_attribute(instance)
         connection = await self._acquire()
-        await self._execute_insert_many(connection, instances, plan)
-        for instance in instances:
-            self._finish_insert(instance, spec)
+        width = mask.bit_count()
+        limit = max(1, MAX_BIND_PARAMETERS // width)
+        rows: list[Any] = []
+        for offset in range(0, len(instances), limit):
+            rows += await self._execute_insert_many(
+                connection, instances[offset : offset + limit], spec, mask
+            )
+        plan = compile_insert_many(
+            self._registry, spec, mask, min(len(instances), limit)
+        )
+        decoded: list[tuple[Any, ...]]
+        if plan.returning:
+            if len(rows) != len(instances):
+                raise ORMError(
+                    f"INSERT into {spec.qualified_name} returned {len(rows)} rows for "
+                    f"a batch of {len(instances)} {spec.model_type.__name__} instances"
+                )
+            decoded = [
+                tuple(
+                    item.pg_type.from_wire(row[index])
+                    for index, item in enumerate(plan.returning)
+                )
+                for row in rows
+            ]
+        else:
+            decoded = [()] * len(instances)
+        return [
+            _stage_insert(instance, spec, plan.returning, values)
+            for instance, values in zip(instances, decoded, strict=True)
+        ]
 
     async def _execute_insert_many(
-        self, connection: Any, instances: list[Any], plan: Any
-    ) -> None:
+        self, connection: Any, instances: list[Any], spec: Any, mask: int
+    ) -> list[Any]:
+        plan = compile_insert_many(self._registry, spec, mask, len(instances))
         values = [
             _wire_value(instance, column)
             for instance in instances
             for column in plan.columns
         ]
-        sql = _multi_insert_sql(plan.sql, len(plan.columns), len(instances))
         try:
-            await connection.execute(sql, *values)
+            if plan.returning:
+                return await connection.fetch(plan.sql, *values)
+            await connection.execute(plan.sql, *values)
+            return []
         except PipelineFullError:
             if len(instances) == 1:
                 raise
             middle = len(instances) // 2
-            await self._execute_insert_many(connection, instances[:middle], plan)
-            await self._execute_insert_many(connection, instances[middle:], plan)
+            first = await self._execute_insert_many(connection, instances[:middle], spec, mask)
+            second = await self._execute_insert_many(connection, instances[middle:], spec, mask)
+            return first + second
 
-    def _finish_insert(self, instance: Any, spec: Any) -> None:
-        instance._orm_state = PERSISTENT
-        instance._orm_clear_dirty()
-        key = instance._orm_primary_key()
-        if key is None:
-            raise ORMError(
-                f"{spec.model_type.__name__} has no primary key after INSERT; declare "
-                "the key column so RETURNING can fill it"
+    async def _update_batch(self, instances: list[Any], mask: int) -> None:
+        spec = self._registry.spec_for(type(instances[0]))
+        for instance in instances:
+            self._audit_attribute(instance)
+        connection = await self._acquire()
+        width = len(spec.primary_key) + mask.bit_count()
+        probe = compile_update_many(self._registry, spec, mask, 1)
+        limit = (
+            MAX_BIND_PARAMETERS
+            if probe.array_oids
+            else max(1, MAX_BIND_PARAMETERS // width)
+        )
+        returned: list[Any] = []
+        for offset in range(0, len(instances), limit):
+            returned += await self._execute_update_many(
+                connection,
+                instances[offset : offset + limit],
+                spec,
+                mask,
+                probe if probe.array_oids else None,
             )
-        self._identity[(spec, key)] = instance
-        self._audit_write(instance, spec, "insert", None)
+        _check_returned_keys(instances, returned, spec, "UPDATE")
 
-    async def _update(self, instance: Any) -> None:
-        spec = self._registry.spec_for(type(instance))
-        mask = 0
-        for position, item in enumerate(spec.columns):
-            if instance._orm_is_dirty(item.index) and not item.primary_key:
-                mask |= 1 << position
-        if not mask:
-            return
-        plan = compile_update(self._registry, spec, mask)
-        values = [_wire_value(instance, item) for item in plan.columns]
-        values += [_wire_value(instance, item) for item in plan.key_columns]
-        self._audit_attribute(instance)
-        connection = await self._acquire()
-        status = await connection.execute(plan.sql, *values)
-        _check_affected(status, spec, "UPDATE")
-        # Recorded before the dirty mask is cleared: the mask *is* the record of
-        # which fields this write set, and clearing it first would leave the
-        # audit row saying "something changed" without saying what.
-        self._audit_write(instance, spec, "update", mask)
-        instance._orm_clear_dirty()
+    async def _execute_update_many(
+        self,
+        connection: Any,
+        instances: list[Any],
+        spec: Any,
+        mask: int,
+        plan: Any = None,
+    ) -> list[Any]:
+        if plan is None:
+            plan = compile_update_many(self._registry, spec, mask, len(instances))
+        batch_columns = plan.columns + plan.key_columns
+        values = (
+            [
+                WireList(
+                    # complexity: allow SL-COMP-LOOP -- each bind-matrix cell is encoded once
+                    [_wire_value(instance, column) for instance in instances],
+                    oid,
+                )
+                for column, oid in zip(batch_columns, plan.array_oids, strict=True)
+            ]
+            if plan.array_oids
+            else [
+                _wire_value(instance, column)
+                for instance in instances
+                for column in batch_columns
+            ]
+        )
+        try:
+            return await connection.fetch(plan.sql, *values)
+        except PipelineFullError:
+            if len(instances) == 1:
+                raise
+            middle = len(instances) // 2
+            first = await self._execute_update_many(
+                connection,
+                instances[:middle],
+                spec,
+                mask,
+                plan if plan.array_oids else None,
+            )
+            second = await self._execute_update_many(
+                connection,
+                instances[middle:],
+                spec,
+                mask,
+                plan if plan.array_oids else None,
+            )
+            return first + second
 
-    async def _delete(self, instance: Any) -> None:
-        spec = self._registry.spec_for(type(instance))
-        plan = compile_delete(self._registry, spec)
-        values = [_wire_value(instance, item) for item in plan.key_columns]
-        self._audit_attribute(instance)
+    async def _delete_batch(self, instances: list[Any]) -> None:
+        spec = self._registry.spec_for(type(instances[0]))
+        for instance in instances:
+            self._audit_attribute(instance)
         connection = await self._acquire()
-        status = await connection.execute(plan.sql, *values)
-        _check_affected(status, spec, "DELETE")
-        # Before the identity map drops it and the instance is detached: the
-        # record needs the primary key, and detaching takes it away.
-        self._audit_write(instance, spec, "delete", None)
-        key = instance._orm_primary_key()
-        if key is not None:
-            self._identity.pop((spec, key), None)
-        instance._orm_state = DETACHED
-        instance._orm_owner = None
+        width = len(spec.primary_key)
+        probe = compile_delete_many(self._registry, spec, 1)
+        limit = (
+            MAX_BIND_PARAMETERS
+            if probe.array_oids
+            else max(1, MAX_BIND_PARAMETERS // width)
+        )
+        returned: list[Any] = []
+        for offset in range(0, len(instances), limit):
+            returned += await self._execute_delete_many(
+                connection,
+                instances[offset : offset + limit],
+                spec,
+                probe if probe.array_oids else None,
+            )
+        _check_returned_keys(instances, returned, spec, "DELETE")
+
+    async def _execute_delete_many(
+        self, connection: Any, instances: list[Any], spec: Any, plan: Any = None
+    ) -> list[Any]:
+        if plan is None:
+            plan = compile_delete_many(self._registry, spec, len(instances))
+        values = (
+            [
+                WireList(
+                    # complexity: allow SL-COMP-LOOP -- each key-matrix cell is encoded once
+                    [_wire_value(instance, column) for instance in instances],
+                    oid,
+                )
+                for column, oid in zip(
+                    plan.key_columns, plan.array_oids, strict=True
+                )
+            ]
+            if plan.array_oids
+            else [
+                _wire_value(instance, column)
+                for instance in instances
+                for column in plan.key_columns
+            ]
+        )
+        try:
+            return await connection.fetch(plan.sql, *values)
+        except PipelineFullError:
+            if len(instances) == 1:
+                raise
+            middle = len(instances) // 2
+            first = await self._execute_delete_many(
+                connection,
+                instances[:middle],
+                spec,
+                plan if plan.array_oids else None,
+            )
+            second = await self._execute_delete_many(
+                connection,
+                instances[middle:],
+                spec,
+                plan if plan.array_oids else None,
+            )
+            return first + second
 
     @asynccontextmanager
     async def begin(self) -> Any:
@@ -1483,16 +1732,28 @@ class Session:
             for statement in self._tenant._bind_statements():
                 await connection.execute(statement)
         self._depth = depth + 1
+        self._rollback_state.append([])
         try:
             yield self
         except BaseException:
             self._depth = depth
-            await self._unwind(connection, depth, savepoint, commit=False)
-            self._written = written_before
+            frame = self._rollback_state.pop()
+            try:
+                await self._unwind(connection, depth, savepoint, commit=False)
+            finally:
+                self._invalidate_undo_frame(frame)
+                self._written = written_before
             raise
         else:
             self._depth = depth
-            await self._unwind(connection, depth, savepoint, commit=True)
+            frame = self._rollback_state.pop()
+            try:
+                await self._unwind(connection, depth, savepoint, commit=True)
+            except BaseException:
+                self._invalidate_undo_frame(frame)
+                raise
+            if depth:
+                self._rollback_state[-1] += frame
             if depth == 0 and self._written:
                 # Publish only after the outermost commit is durable.
                 written, self._written = self._written, frozenset()
@@ -1502,12 +1763,16 @@ class Session:
         if self._closed:
             # `close()` already returned this connection to the pool.
             return
-        if commit:
-            statement = "COMMIT" if depth == 0 else f"RELEASE SAVEPOINT {savepoint}"
-        else:
-            statement = "ROLLBACK" if depth == 0 else f"ROLLBACK TO SAVEPOINT {savepoint}"
         try:
-            await connection.execute(statement)
+            if commit:
+                await connection.execute(
+                    "COMMIT" if depth == 0 else f"RELEASE SAVEPOINT {savepoint}"
+                )
+            elif depth == 0:
+                await connection.execute("ROLLBACK")
+            else:
+                await connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                await connection.execute(f"RELEASE SAVEPOINT {savepoint}")
         except BaseException:
             # Never return a connection with unproven transaction state.
             self._broken = True
@@ -1620,17 +1885,52 @@ def _affected_count(status: Any, verb: str) -> int:
     )
 
 
-def _multi_insert_sql(sql: str, width: int, rows: int) -> str:
-    prefix, separator, _values = sql.partition(" VALUES ")
-    if not separator:
-        raise ORMError("a batched INSERT needs a VALUES statement")
-    groups = ", ".join(
-        "("
-        + ", ".join(f"${row * width + column + 1}" for column in range(width))
-        + ")"
-        for row in range(rows)
+def _check_returned_keys(
+    instances: list[Any], rows: list[Any], spec: ModelSpec, verb: str
+) -> None:
+    expected = Counter(instance._orm_primary_key() for instance in instances)
+    actual = Counter(
+        tuple(column.pg_type.from_wire(row[index]) for index, column in enumerate(spec.primary_key))
+        for row in rows
     )
-    return f"{prefix} VALUES {groups}"
+    unexpected = actual - expected
+    if unexpected:
+        key = next(iter(unexpected))
+        raise ORMError(
+            f"{verb} on {spec.model_type.__name__} returned an unexpected primary key {key}"
+        )
+    missing = expected - actual
+    if missing:
+        key = next(iter(missing))
+        raise StaleDataError(
+            f"{verb} on {spec.model_type.__name__} matched no row for key {key}; "
+            "it was deleted or its key changed in another session"
+        )
+
+
+def _stage_insert(
+    instance: Any,
+    spec: ModelSpec,
+    columns: tuple[ColumnSpec, ...],
+    values: tuple[Any, ...],
+) -> _InsertResult:
+    returned = tuple(zip(columns, values, strict=True))
+    by_index = {column.index: value for column, value in returned}
+    key: list[Any] = []
+    for column in spec.primary_key:
+        if column.index in by_index:
+            value = by_index[column.index]
+        elif instance._orm_is_loaded(column.index):
+            value = instance._orm_get(column.index)
+        else:
+            value = None
+        if value is None:
+            raise ORMError(
+                f"{spec.model_type.__name__} has no primary key after INSERT; declare "
+                "the key column so RETURNING can fill it"
+            )
+        key.append(value)
+    return _InsertResult(instance, spec, returned, tuple(key))
 
 
 def _insert_mask(columns: Any, instance: Any) -> int:
@@ -1644,6 +1944,14 @@ def _insert_mask(columns: Any, instance: Any) -> int:
     mask = 0
     for position, item in enumerate(columns):
         if instance._orm_is_loaded(item.index) and item.server_default is None:
+            mask |= 1 << position
+    return mask
+
+
+def _update_mask(spec: ModelSpec, instance: Any) -> int:
+    mask = 0
+    for position, item in enumerate(spec.columns):
+        if instance._orm_is_dirty(item.index) and not item.primary_key:
             mask |= 1 << position
     return mask
 

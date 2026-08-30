@@ -887,7 +887,7 @@ def _registry_descriptor(registry: Any, *, fleet: bool = False) -> bytes:
                     # which builds the identical index: naming the default and
                     # omitting it are the same statement to PostgreSQL.
                     ops = column.index_ops or ""
-                    if ops and default_opclasses.get((method, column.oid)) == ops:
+                    if default_opclasses.get((method, column.oid)) == ops:
                         ops = ""
                     signature += f"\x1f\x1f{ops}\x1f{options}"
                 records.append(

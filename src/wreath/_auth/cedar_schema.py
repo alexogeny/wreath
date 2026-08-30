@@ -73,8 +73,6 @@ def _statements(source: str) -> tuple[str, ...]:
     tail = source[start:].strip()
     if tail:
         raise ValueError(f"Cedar schema declaration is missing ';': {tail[:60]!r}")
-    if depth or quoted:
-        raise ValueError("Cedar schema has an unterminated record, set, or string")
     return tuple(statements)
 
 
@@ -178,7 +176,7 @@ class CedarSchema:
                 aliases[match.group(1)] = _type(match.group(2), aliases)
                 continue
             match = re.fullmatch(
-                r"entity\s+([A-Za-z_][\w:]*)\s*(?:in\s*\[[^]]*\])?\s*(?:=\s*(\{.*\}))?",
+                r"entity\s+([A-Za-z_][\w:]*)\s*(?:in\s*\[[^]]*\])?\s*(?:=\s*(.+))?",
                 statement,
                 re.S,
             )

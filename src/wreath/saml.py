@@ -760,7 +760,7 @@ def _verify_signature(
     declared_digest = _b64_bytes(digest_element.text, reason="digest-value", what="a <DigestValue>")
 
     digest_input = _canonical_digest_input(
-        document, covered, signature if (enveloped and inside) else None, prefixes
+        document, covered, signature if inside else None, prefixes
     )
     computed = hashlib.new(_DIGESTS[digest_algorithm], digest_input).digest()
     if not hmac.compare_digest(computed, declared_digest):

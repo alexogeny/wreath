@@ -7,8 +7,11 @@ from wreath.orm import compiler as compiler_module
 from wreath.orm.compiler import (
     _collect_binds,
     compile_count,
+    compile_delete_many,
+    compile_insert_many,
     compile_rebind,
     compile_select,
+    compile_update_many,
     shape_of,
 )
 from wreath.orm.errors import DeclarationError, ORMError
@@ -20,6 +23,94 @@ from wreath.queries import Placeholder
 from .conftest import FakeDatabase, Membership, Post, User
 
 USERS = '"public"."users" AS "t0"'
+
+
+def test_returning_multi_insert_compiles_every_row_and_unloaded_column(
+    registry: Registry,
+) -> None:
+    spec = registry.spec_for(User)
+    mask = (1 << 1) | (1 << 2)
+
+    plan = compile_insert_many(registry, spec, mask, 2)
+
+    assert plan.sql == (
+        'INSERT INTO "public"."users" ("email", "name") '
+        'VALUES ($1, $2), ($3, $4) RETURNING "id", "created_at"'
+    )
+    assert [column.python_name for column in plan.columns] == ["email", "name"]
+    assert [column.python_name for column in plan.returning] == ["id", "created_at"]
+
+
+def test_update_many_unnests_fixed_shape_arrays_and_returns_the_complete_key(
+    registry: Registry,
+) -> None:
+    spec = registry.spec_for(Membership)
+    mask = 1 << 2
+
+    plan = compile_update_many(registry, spec, mask, 2)
+
+    assert plan.sql == (
+        'UPDATE "public"."memberships" AS "wreath_target" '
+        'SET "role" = "wreath_batch"."role" '
+        'FROM UNNEST($1::text[], $2::bigint[], $3::bigint[]) '
+        'AS "wreath_batch" ("role", "org_id", "user_id") '
+        'WHERE "wreath_target"."org_id" = "wreath_batch"."org_id" AND '
+        '"wreath_target"."user_id" = "wreath_batch"."user_id" '
+        'RETURNING "wreath_target"."org_id", "wreath_target"."user_id"'
+    )
+    assert [column.python_name for column in plan.key_columns] == ["org_id", "user_id"]
+    assert plan.returning == plan.key_columns
+
+
+def test_delete_many_unnests_fixed_shape_arrays_and_returns_the_complete_key(
+    registry: Registry,
+) -> None:
+    spec = registry.spec_for(Membership)
+
+    plan = compile_delete_many(registry, spec, 2)
+
+    assert plan.sql == (
+        'DELETE FROM "public"."memberships" AS "wreath_target" '
+        'USING UNNEST($1::bigint[], $2::bigint[]) '
+        'AS "wreath_batch" ("org_id", "user_id") '
+        'WHERE "wreath_target"."org_id" = "wreath_batch"."org_id" AND '
+        '"wreath_target"."user_id" = "wreath_batch"."user_id" '
+        'RETURNING "wreath_target"."org_id", "wreath_target"."user_id"'
+    )
+    assert plan.returning == plan.key_columns
+
+
+@pytest.mark.parametrize(
+    "compile_plan,args",
+    [
+        (compile_insert_many, (0, 0)),
+        (compile_update_many, (1 << 2, 0)),
+        (compile_delete_many, (0,)),
+    ],
+)
+def test_many_write_compilers_refuse_a_non_positive_row_count(
+    registry: Registry, compile_plan, args: tuple[int, ...]
+) -> None:
+    with pytest.raises(ValueError, match="row count must be at least 1"):
+        compile_plan(registry, registry.spec_for(Membership), *args)
+
+
+def test_many_write_compilers_refuse_an_unchunked_parameter_overflow(
+    registry: Registry,
+) -> None:
+    with pytest.raises(ValueError, match=r"row count must be at most 65535"):
+        compile_delete_many(registry, registry.spec_for(Membership), 65536)
+
+
+def test_unnest_write_plan_is_independent_of_row_count(registry: Registry) -> None:
+    spec = registry.spec_for(Membership)
+
+    assert compile_update_many(registry, spec, 1 << 2, 2) is compile_update_many(
+        registry, spec, 1 << 2, 200
+    )
+    assert compile_delete_many(registry, spec, 2) is compile_delete_many(
+        registry, spec, 200
+    )
 
 
 def test_an_in_expression_rebinds_a_placeholder_among_fixed_values() -> None:

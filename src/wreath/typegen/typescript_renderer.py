@@ -53,7 +53,7 @@ def _ts_literal(value: Any) -> str:
         return "false"
     if isinstance(value, str):
         return '"' + _escape(value) + '"'
-    return repr(value) if isinstance(value, float) else str(value)
+    return str(value)
 
 
 def _escape(text: str) -> str:
@@ -291,10 +291,7 @@ def _method_lines(operation: tuple[Any, ...]) -> list[str]:
     body.append("          await decodeBody(response).catch(() => undefined),")
     body.append("        );")
     body.append("      }")
-    if return_type == "unknown":
-        body.append("      return (await decodeBody(response)) as unknown;")
-    else:
-        body.append(f"      return (await decodeBody(response)) as {return_type};")
+    body.append(f"      return (await decodeBody(response)) as {return_type};")
     body.append("    }")
     return body
 

@@ -160,7 +160,11 @@ class _CallRewrite(
             return
         if tail == "HTTPException":
             self._rewrite_http_exception(node)
-        elif origin == "fastapi.encoders.jsonable_encoder" and len(node.args) == 1:
+        elif (
+            origin == "fastapi.encoders.jsonable_encoder"
+            and len(node.args) == 1
+            and not node.keywords
+        ):
             # Wreath's JSON codec already serializes dataclasses, ORM rows,
             # UUIDs and datetimes, so the wrapper is the whole change: it goes,
             # and the value it wrapped stays.

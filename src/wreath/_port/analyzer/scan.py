@@ -450,7 +450,7 @@ class _Analyzer(ast.NodeVisitor):
         defaults = dict(zip([a.arg for a in defaulted], args.defaults, strict=True))
         for arg in list(args.args) + list(args.kwonlyargs):
             default = defaults.get(arg.arg)
-            ann_origin = self.imports.origin(arg.annotation) if arg.annotation else ""
+            ann_origin = self.imports.origin(arg.annotation)
             if isinstance(default, ast.Call):
                 marker = self.imports.origin(default.func).split(".")[-1]
                 if marker == "Body":
@@ -466,9 +466,9 @@ class _Analyzer(ast.NodeVisitor):
                     )
                     continue
                 rule_id = _MARKER_RULE.get(marker)
-                if rule_id == "param.query" and any(
+                if (rule_id, any(
                     k.arg in _STR_CONSTRAINTS for k in default.keywords
-                ):
+                )) == ("param.query", True):
                     self._emit("param.query_strconstraint", arg.lineno)
                     continue
                 if rule_id:
@@ -476,7 +476,7 @@ class _Analyzer(ast.NodeVisitor):
                     continue
             if ann_origin.split(".")[-1] == "UploadFile":
                 self._emit("param.file", arg.lineno)
-            elif arg.annotation is not None and self._annotation_is_model(arg.annotation):
+            elif self._annotation_is_model(arg.annotation):
                 self._emit("param.body", arg.lineno)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -646,9 +646,9 @@ class _Analyzer(ast.NodeVisitor):
         else:
             return False
         ancestor: ast.AST | None = parent
-        while ancestor is not None and not isinstance(
-            ancestor, (ast.FunctionDef, ast.AsyncFunctionDef)
-        ):
+        while not isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if ancestor is None:
+                return False
             ancestor = self._parents.get(id(ancestor))
         if not isinstance(ancestor, ast.AsyncFunctionDef):
             return False
@@ -875,14 +875,14 @@ class _Analyzer(ast.NodeVisitor):
         """Whether `sa.String(length=80)` / `postgresql.JSONB()` has a wreath PgType."""
         if isinstance(node, ast.Call):
             node = node.func
-        if not isinstance(node, (ast.Name, ast.Attribute)):
-            return False
         origin = self.imports.origin(node)
-        return origin in _MODELLED_TYPE_ORIGINS or origin.split(".")[-1] in _SA_MODELLED_TYPES
+        tail = origin.split(".")[-1]
+
+        return origin in _MODELLED_TYPE_ORIGINS or tail in _SA_MODELLED_TYPES
 
     def _scan_add_middleware(self, node: ast.Call) -> None:
         first = node.args[0] if node.args else None
-        origin = self.imports.origin(first) if first else ""
+        origin = self.imports.origin(first)
         tail = origin.split(".")[-1]
         if tail == "CORSMiddleware":
             self._emit("mw.cors", node.lineno)

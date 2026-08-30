@@ -31,8 +31,6 @@ FLAG_TRUNCATED = 1 << 1
 MAX_PAYLOAD_BYTES = 64 * 1024
 #: Rows per page, applied to ACTIVE_REQUESTS and METADATA.
 MAX_PAGE_ROWS = 256
-#: A client that sends nothing for this long is disconnected.
-IDLE_TIMEOUT = 30.0
 
 
 class Command(IntEnum):
@@ -97,7 +95,7 @@ class InspectorConfig:
 
     path: str
     max_payload_bytes: int = MAX_PAYLOAD_BYTES
-    idle_timeout: float = IDLE_TIMEOUT
+    idle_timeout: float = 30.0
     #: Shared secret gating the mutating capture-control commands. When unset,
     #: capture control is disabled entirely (the commands are neither advertised
     #: nor answered), so a read-only Inspector can never arm capture.

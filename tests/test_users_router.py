@@ -67,6 +67,44 @@ async def test_ormuserstore_write_path_uses_unit_of_work():
     assert s.flushes == 2 and inst.email == "new@b.co"
 
 
+async def test_ormuserstore_batch_lookup_uses_one_query_and_restores_input_order():
+    from wreath.orm import Mapped, Model, column
+    from wreath.orm.types import Bool, Varchar
+
+    class TextUser(Model, table="batch_lookup_users"):
+        id: Mapped[str] = column(Varchar, primary_key=True)
+        email: Mapped[str] = column(Varchar)
+        hashed_password: Mapped[str] = column(Varchar)
+        is_active: Mapped[bool] = column(Bool, default=True)
+        is_verified: Mapped[bool] = column(Bool, default=False)
+
+    first = TextUser(id="first", email="first@example.com", hashed_password="h1")
+    second = TextUser(id="second", email="second@example.com", hashed_password="h2")
+
+    class FakeSession:
+        def __init__(self):
+            self.queries = []
+
+        async def fetch(self, query):
+            self.queries.append(query)
+            return [second, first]
+
+    session = FakeSession()
+    store = OrmUserStore(session, TextUser)
+    found = await store.get_many_by_id((first.id, "missing", second.id, first.id))
+
+    assert [record.email if record is not None else None for record in found] == [
+        "first@example.com",
+        None,
+        "second@example.com",
+        "first@example.com",
+    ]
+    assert len(session.queries) == 1
+
+    assert await store.get_many_by_id(()) == []
+    assert len(session.queries) == 1
+
+
 # A sweep over `src/wreath/users.py` reported these as `unreached`: no test executed
 # them at all. They are the same shape as the `orm/types.py` findings -- the behaviour
 # was covered and the *validation* was not -- with one that is a live branch rather

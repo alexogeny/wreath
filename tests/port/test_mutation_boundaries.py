@@ -14,7 +14,7 @@ from wreath._port.analyzer.models import (
 from wreath._port.analyzer.orm import _index_tree
 from wreath._port.analyzer.queries import plain_filter_mappings, query_rule
 from wreath._port.analyzer.responses import response_class_rule
-from wreath._port.analyzer.sessions import _function_query_names
+from wreath._port.analyzer.sessions import _function_query_names, session_functions, session_sites
 from wreath._port.emit.queries import _QueryPlan
 
 
@@ -43,6 +43,46 @@ def test_called_and_bare_manager_attributes_have_different_session_needs() -> No
 
     assert runs == {"rows"}
     assert defined == {"rows", "manager"}
+
+
+def test_duplicate_named_callers_do_not_gain_a_session(tmp_path) -> None:
+    query = tmp_path / "query.py"
+    query.write_text(
+        "async def load():\n"
+        "    return await Llama.objects.all()\n"
+        "async def report():\n"
+        "    return await load()\n",
+        encoding="utf-8",
+    )
+    duplicate = tmp_path / "duplicate.py"
+    duplicate.write_text("async def report():\n    return None\n", encoding="utf-8")
+
+    assert session_functions([query, duplicate]) == frozenset({"load"})
+
+
+def test_a_route_does_not_thread_a_session_into_a_test_module(tmp_path) -> None:
+    root = tmp_path / "app"
+    tests = root / "tests"
+    tests.mkdir(parents=True)
+    route = root / "route.py"
+    route.write_text(
+        "from fastapi import APIRouter\n"
+        "router = APIRouter()\n"
+        "@router.get('/')\n"
+        "async def endpoint():\n"
+        "    return await helper()\n",
+        encoding="utf-8",
+    )
+    helper = tests / "helper.py"
+    helper.write_text(
+        "async def helper():\n    return await Llama.objects.all()\n",
+        encoding="utf-8",
+    )
+
+    definition_sites, call_sites = session_sites([route, helper])
+
+    assert definition_sites == frozenset({(str(route.resolve()), 4)})
+    assert call_sites == frozenset()
 
 
 def test_relative_local_pydantic_module_is_not_rewritten_as_the_dependency(

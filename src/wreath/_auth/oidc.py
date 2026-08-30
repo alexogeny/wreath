@@ -55,7 +55,6 @@ def _require_same_origin(issuer: str, url: str) -> str:
         target.scheme == iss.scheme
         and target.hostname == iss.hostname
         and target.username is None
-        and target.password is None
         and not target.fragment
         and (target.port or _default_ports(target.scheme))
         == (iss.port or _default_ports(iss.scheme))
@@ -110,7 +109,6 @@ class OidcProvider:
             parsed_issuer.scheme != "https"
             or parsed_issuer.hostname is None
             or parsed_issuer.username is not None
-            or parsed_issuer.password is not None
             or parsed_issuer.query
             or parsed_issuer.fragment
         ):

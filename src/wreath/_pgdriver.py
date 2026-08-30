@@ -95,6 +95,25 @@ _NUMERIC = 1700
 _UUID = 2950
 _JSONB = 3802
 
+_ARRAY_ELEMENT_OID = {
+    199: _JSON,
+    1000: _BOOL,
+    1001: _BYTEA,
+    1005: _INT2,
+    1007: _INT4,
+    1009: _TEXT,
+    1015: _VARCHAR,
+    1016: _INT8,
+    1021: _FLOAT4,
+    1022: _FLOAT8,
+    1115: _TIMESTAMP,
+    1182: _DATE,
+    1185: _TIMESTAMPTZ,
+    1231: _NUMERIC,
+    2951: _UUID,
+    3807: _JSONB,
+}
+
 # An extension's OIDs are assigned by CREATE EXTENSION, so they cannot be
 # constants here the way every OID above is. They arrive at startup through
 # `_register_extension_type` and land in one bounded table, consulted only after
@@ -749,6 +768,23 @@ def _decode_numeric(data: bytes) -> Decimal:
     return Decimal(f"{'-' if sign == _NUMERIC_NEG else ''}{unscaled}E{exponent}")
 
 
+def _encode_text_array(value: object, element_oid: int) -> bytes:
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("array codec requires a list or tuple")
+    elements: list[bytes] = []
+    for item in value:
+        if item is None:
+            elements.append(b"NULL")
+            continue
+        encoded = _encode_text(item, element_oid)
+        if encoded is None:
+            elements.append(b"NULL")
+            continue
+        escaped = encoded.replace(b"\\", b"\\\\").replace(b'"', b'\\"')
+        elements.append(b'"' + escaped + b'"')
+    return b"{" + b",".join(elements) + b"}"
+
+
 def _encode_text(value: object, oid: int) -> bytes | None:
     if value is None:
         return None
@@ -799,6 +835,9 @@ def _encode_text(value: object, oid: int) -> bytes | None:
         return _as_json(value).encode("utf-8")
     if oid == _BIT:
         return _as_bit_string(value).encode("ascii")
+    element_oid = _ARRAY_ELEMENT_OID.get(oid)
+    if element_oid is not None:
+        return _encode_text_array(value, element_oid)
     extension_kind = _extension_kinds.get(oid)
     if extension_kind in _EXT_DENSE_KINDS:
         # `vector` and `halfvec` print identically -- "[1,2,3]" -- so one text
@@ -862,6 +901,28 @@ def _encode_geography(value: object) -> bytes:
         return binascii.unhexlify(text)
     except binascii.Error:
         raise TypeError("geography codec requires EWKB hex") from None
+
+
+def _encode_binary_array(value: object, element_oid: int) -> bytes:
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("array codec requires a list or tuple")
+    pieces: list[bytes] = []
+    has_null = False
+    for item in value:
+        encoded = _encode_binary(item, element_oid)
+        if encoded is None:
+            has_null = True
+            pieces.append(struct.pack("!i", -1))
+        else:
+            pieces.append(struct.pack("!I", len(encoded)))
+            pieces.append(encoded)
+
+    count = len(value)
+    header = [struct.pack("!III", bool(count), has_null, element_oid)]
+    if count:
+        header.append(struct.pack("!II", count, 1))
+    header.extend(pieces)
+    return b"".join(header)
 
 
 def _encode_binary(value: object, oid: int) -> bytes | None:
@@ -946,6 +1007,9 @@ def _encode_binary(value: object, oid: int) -> bytes | None:
         # both; parsing it back here keeps the column type's contract in one
         # place rather than splitting it across two encoders.
         return _encode_point(value)
+    element_oid = _ARRAY_ELEMENT_OID.get(oid)
+    if element_oid is not None:
+        return _encode_binary_array(value, element_oid)
     extension_kind = _extension_kinds.get(oid)
     if extension_kind == _EXT_KIND_VECTOR:
         return _encode_vector(value)
@@ -2200,7 +2264,11 @@ class Connection:
             return
         selected = 1 if operation.mode == "fetchval" else len(operation.result_oids)
         operation.field_tape.append(payload, selected)
-        if operation.mode in {"fetch", "fetch_batch"} and operation.field_tape.row_count >= 256:
+        if (
+            operation.mode in {"fetch", "fetch_batch"}
+            and operation.field_tape.row_count >= 256
+            and not isinstance(operation.dest, tuple)
+        ):
             self._flush_decode_batch(operation)
 
     def _flush_decode_batch(self, operation: Operation) -> None:
@@ -2215,7 +2283,14 @@ class Connection:
         if operation.dest is not None:
             if operation.rows is None:
                 raise ProtocolError("fetch destination has no result collection")
-            self._decode_dest(operation.decoder_plan, tape, operation.dest, 256, operation.rows)
+            limit = tape.row_count if isinstance(operation.dest, tuple) else 256
+            self._decode_dest(
+                operation.decoder_plan,
+                tape,
+                operation.dest,
+                limit,
+                operation.rows,
+            )
             return
         if operation.mode == "fetch_batch" and self._decode_fetch_extend is not None:
             if operation.rows is None:

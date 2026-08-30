@@ -586,6 +586,7 @@ class _ManagedConnection:
         "heartbeat_ack",
         "key",
         "queue",
+        "send_task",
         "service",
         "stopping",
         "websocket",
@@ -602,6 +603,7 @@ class _ManagedConnection:
         self.key = key
         self.websocket = websocket
         self.queue: asyncio.Queue[_Outbound] = asyncio.Queue(maxsize=service.queue_capacity)
+        self.send_task: asyncio.Task[None] | None = None
         self.write_lock = asyncio.Lock()
         self.done = asyncio.Event()
         self.closed = False
@@ -776,7 +778,7 @@ class WebSocketService:
         try:
             await websocket.accept(subprotocol=subprotocol)
             async with asyncio.TaskGroup() as tasks:
-                tasks.create_task(
+                connection.send_task = tasks.create_task(
                     self._send_loop(connection),
                     name=f"wreath.websocket.send:{connection_key}",
                 )
@@ -816,11 +818,25 @@ class WebSocketService:
         except asyncio.QueueFull as error:
             self._queue_refusals += 1
             if self._overflow == "disconnect":
+                send_task = connection.send_task
+                if send_task is not None:
+                    send_task.cancel()
+                    await asyncio.gather(send_task, return_exceptions=True)
                 await connection.close(1013, "outbound queue capacity exceeded")
             raise ConnectionBackpressure(f"connection {key!r} outbound queue is full") from error
 
     async def broadcast(self, frame: _Frame) -> int:
         """Enqueue one frame for each current connection; return acceptances."""
+        if self._overflow == "reject":
+            delivered = 0
+            for connection in tuple(self._connections.values()):
+                try:
+                    connection.queue.put_nowait(frame)
+                except asyncio.QueueFull:
+                    self._queue_refusals += 1
+                    continue
+                delivered += 1
+            return delivered
         delivered = 0
         for key in tuple(self._connections):
             try:
@@ -860,8 +876,9 @@ class WebSocketService:
                 if reply is not None:
                     await self.send(connection.key, reply)
         finally:
-            connection.stopping.set()
-            await connection.queue.put(_Close(1000, ""))
+            if not connection.stopping.is_set():
+                connection.stopping.set()
+                await connection.queue.put(_Close(1000, ""))
 
     async def _heartbeat_loop(
         self,

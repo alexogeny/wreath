@@ -141,6 +141,7 @@ static PyObject *fn_parse_row_description = NULL;
 static PyObject *fn_parse_error = NULL;
 static PyObject *fn_data_fields = NULL;
 static PyObject *fn_build_cold_query_packet = NULL;
+static PyObject *fn_connection_map = NULL;
 static PyObject *connection_type_ref = NULL;
 static PyObject *statement_type_ref = NULL;
 static PyObject *pool_type_ref = NULL;
@@ -170,6 +171,10 @@ static PyObject *hook_build_cold = NULL;
 static PyObject *hook_build_cached = NULL;
 static PyObject *hook_join_packets = NULL;
 static PyObject *hook_field_tape_type = NULL;
+static PyObject *hook_decode_tape = NULL;
+static PyObject *hook_finish_operation = NULL;
+static PyObject *hook_submit = NULL;
+static PyObject *hook_publish_completed = NULL;
 static int hook_batch_decode = 0;
 
 /* `_eager_flush_idle` is deliberately NOT cached beside the hooks above.
@@ -257,6 +262,9 @@ static PyObject *str_operation_type = NULL;
 static PyObject *str_statement_name = NULL;
 static PyObject *str_join = NULL;
 static PyObject *str_publish_completed = NULL;
+static PyObject *str_finish_operation = NULL;
+static PyObject *str_sql_attr = NULL;
+static PyObject *str_submit = NULL;
 static PyObject *str_binary_results = NULL;
 static PyObject *str_call = NULL;
 static PyObject *str_try_acquire_shared = NULL;
@@ -269,6 +277,13 @@ static PyObject *str_shared = NULL;
 static PyObject *str_asyncio_future_blocking = NULL;
 static PyObject *str_context = NULL;
 static PyObject *tuple_context = NULL;
+static PyObject *tuple_max_in_flight = NULL;
+
+typedef struct MapAwait MapAwait;
+static PyTypeObject *map_await_type = NULL;
+static int map_operation_completed(MapAwait *self, PyObject *operation,
+                                   PyObject *value, int is_error);
+static int map_is_abandoned(MapAwait *self);
 
 /* Mode strings, interned so a mode test is a pointer compare. */
 static PyObject *mode_execute = NULL;
@@ -886,6 +901,38 @@ publish_completed(PyObject *self)
 
         future = SLOT(operation, op_off.future);
         if (future == NULL) { Py_DECREF(operation); return -1; }
+        if (map_await_type != NULL && Py_TYPE(future) == map_await_type) {
+            if (!slot_is_true(operation, op_off.discarded) &&
+                !map_is_abandoned((MapAwait *)future)) {
+                error = SLOT(operation, op_off.error);
+                if (error != NULL && error != Py_None) {
+                    if (map_operation_completed(
+                            (MapAwait *)future, operation, error, 1) < 0) {
+                        Py_DECREF(operation);
+                        return -1;
+                    }
+                } else {
+                    mode = SLOT(operation, op_off.mode);
+                    if (mode == mode_execute) {
+                        value = SLOT(operation, op_off.command);
+                    } else if (mode == mode_fetch || mode == mode_fetch_batch) {
+                        value = SLOT(operation, op_off.rows);
+                    } else if (mode == mode_fetchrow) {
+                        value = SLOT(operation, op_off.one_row);
+                    } else {
+                        value = SLOT(operation, op_off.one_value);
+                    }
+                    if (value == NULL) value = Py_None;
+                    if (map_operation_completed(
+                            (MapAwait *)future, operation, value, 0) < 0) {
+                        Py_DECREF(operation);
+                        return -1;
+                    }
+                }
+            }
+            Py_DECREF(operation);
+            continue;
+        }
         done = future_is_done(future);
         if (done < 0) { Py_DECREF(operation); return -1; }
         if (done || slot_is_true(operation, op_off.discarded)) {
@@ -1050,47 +1097,81 @@ connection_publish_completed(PyObject *self, PyObject *unused)
 
 static int schedule_flush(PyObject *self);
 
-/* Complete the steady-state one-scalar result while the fused transport still
- * owns the receive slab.  DataRow bytes stayed in the native tape, the scalar
- * is the public materialization boundary, and ReadyForQuery updates the
+static int
+finish_hook_is_unchanged(PyObject *connection)
+{
+    PyObject *current = PyObject_GetAttr(
+        (PyObject *)Py_TYPE(connection), str_finish_operation);
+    int unchanged;
+    if (current == NULL) return -1;
+    unchanged = current == hook_finish_operation;
+    Py_DECREF(current);
+    return unchanged;
+}
+
+/* Complete a steady-state cached result while the fused transport still owns
+ * the receive slab. DataRow bytes have either been decoded directly into the
+ * result list or retained in the one-row tape, and ReadyForQuery updates the
  * connection without waking the otherwise-idle Python reader coroutine. */
 int
-wreath_pg_pipeline_complete_fetchval(PyObject *connection,
-                                     PyObject *operation,
-                                     PyObject *tape,
-                                     PyObject *plan,
-                                     char transaction_status)
+wreath_pg_pipeline_complete_cached(PyObject *connection,
+                                   PyObject *operation,
+                                   PyObject *tape,
+                                   PyObject *plan,
+                                   char transaction_status)
 {
+    PyObject *mode = SLOT(operation, op_off.mode);
+    PyObject *value = NULL;
+    int finish_unchanged;
     if ((PyObject *)Py_TYPE(connection) != connection_type_ref ||
-        SLOT(operation, op_off.mode) != mode_fetchval ||
+        (mode != mode_execute && mode != mode_fetch && mode != mode_fetch_batch &&
+         mode != mode_fetchrow && mode != mode_fetchval) ||
         slot_is_true(operation, op_off.cold) ||
         slot_is_true(operation, op_off.discarded) ||
         SLOT(operation, op_off.error) != Py_None ||
         SLOT(operation, op_off.dest) != Py_None) {
         return 0;
     }
-    PyObject *value = wreath_pg_decode_fetchval(plan, tape);
-    if (value == NULL) return -1;
+    finish_unchanged = finish_hook_is_unchanged(connection);
+    if (finish_unchanged <= 0) return finish_unchanged;
+
+    if (mode == mode_fetchval) {
+        if (tape == Py_None || plan == Py_None) {
+            value = Py_NewRef(Py_None);
+        } else {
+            value = wreath_pg_decode_fetchval(plan, tape);
+            if (value == NULL) return -1;
+        }
+        slot_steal(operation, op_off.one_value, value);
+        slot_set(operation, op_off.have_value, Py_True);
+    } else if (mode == mode_fetchrow) {
+        if (tape == Py_None || plan == Py_None) {
+            value = Py_NewRef(Py_None);
+        } else {
+            PyObject *limit = PyLong_FromLong(1);
+            PyObject *args[4] = {plan, tape, mode_fetchrow, limit};
+            if (limit == NULL) return -1;
+            value = PyObject_Vectorcall(hook_decode_tape, args, 4, NULL);
+            Py_DECREF(limit);
+            if (value == NULL) return -1;
+        }
+        slot_steal(operation, op_off.one_row, value);
+    }
     PyObject *emitted = SLOT_BORROW(connection, conn_off.emitted, "_emitted");
     if (emitted == NULL) {
-        Py_DECREF(value);
         return -1;
     }
     PyObject *head = operation_queue_popleft(emitted);
     if (head == NULL) {
-        Py_DECREF(value);
         return -1;
     }
     if (head != operation) {
         Py_DECREF(head);
-        Py_DECREF(value);
         PyErr_SetString(PyExc_RuntimeError,
                         "PostgreSQL native completion lost pipeline order");
         return -1;
     }
     Py_DECREF(head);
-    slot_steal(operation, op_off.one_value, value);
-    slot_set(operation, op_off.have_value, Py_True);
     {
         PyObject *current_status = SLOT(connection, conn_off.transaction_status);
         if (!PyBytes_CheckExact(current_status) ||
@@ -3252,6 +3333,977 @@ direct_query_later(PyObject *connection, PyObject *mode, PyObject *sql,
 }
 
 /* ------------------------------------------------------------------ *
+ * Connection.map grouped awaitable
+ * ------------------------------------------------------------------ */
+
+typedef struct {
+    PyObject *operation;
+    PyObject *value;
+    PyObject *error;
+    int done;
+} MapEntry;
+
+struct MapAwait {
+    PyObject_HEAD
+    PyObject *connection;
+    PyObject *method;
+    PyObject *statement;
+    PyObject *argument_sets;
+    PyObject *max_in_flight;
+    PyObject *arguments;
+    PyObject *sql;
+    PyObject *mode;
+    PyObject *results;
+    PyObject *iterator;
+    PyObject *error;
+    PyObject *callback;
+    PyObject *callback_context;
+    PyObject *callbacks;
+    PyObject *loop;
+    PyObject *blocking;
+    MapEntry *entries;
+    Py_ssize_t window;
+    Py_ssize_t head;
+    Py_ssize_t tail;
+    Py_ssize_t occupied;
+    int state;
+    int exhausted;
+    int completion_done;
+    int completion_cancelled;
+    int terminal_done;
+    int abandoned;
+};
+
+enum {
+    MAP_INITIAL,
+    MAP_NATIVE,
+    MAP_FALLBACK,
+    MAP_DONE
+};
+
+static void
+map_entry_clear(MapEntry *entry)
+{
+    Py_CLEAR(entry->operation);
+    Py_CLEAR(entry->value);
+    Py_CLEAR(entry->error);
+    entry->done = 0;
+}
+
+static int
+map_await_traverse(MapAwait *self, visitproc visit, void *arg)
+{
+    Py_VISIT(Py_TYPE(self));
+    Py_VISIT(self->connection);
+    Py_VISIT(self->method);
+    Py_VISIT(self->statement);
+    Py_VISIT(self->argument_sets);
+    Py_VISIT(self->max_in_flight);
+    Py_VISIT(self->arguments);
+    Py_VISIT(self->sql);
+    Py_VISIT(self->mode);
+    Py_VISIT(self->results);
+    Py_VISIT(self->iterator);
+    Py_VISIT(self->error);
+    Py_VISIT(self->callback);
+    Py_VISIT(self->callback_context);
+    Py_VISIT(self->callbacks);
+    Py_VISIT(self->loop);
+    Py_VISIT(self->blocking);
+    if (self->entries != NULL) {
+        for (Py_ssize_t index = 0; index < self->window; index++) {
+            Py_VISIT(self->entries[index].operation);
+            Py_VISIT(self->entries[index].value);
+            Py_VISIT(self->entries[index].error);
+        }
+    }
+    return 0;
+}
+
+static int
+map_await_clear(MapAwait *self)
+{
+    Py_CLEAR(self->connection);
+    Py_CLEAR(self->method);
+    Py_CLEAR(self->statement);
+    Py_CLEAR(self->argument_sets);
+    Py_CLEAR(self->max_in_flight);
+    Py_CLEAR(self->arguments);
+    Py_CLEAR(self->sql);
+    Py_CLEAR(self->mode);
+    Py_CLEAR(self->results);
+    Py_CLEAR(self->iterator);
+    Py_CLEAR(self->error);
+    Py_CLEAR(self->callback);
+    Py_CLEAR(self->callback_context);
+    Py_CLEAR(self->callbacks);
+    Py_CLEAR(self->loop);
+    Py_CLEAR(self->blocking);
+    if (self->entries != NULL) {
+        for (Py_ssize_t index = 0; index < self->window; index++)
+            map_entry_clear(&self->entries[index]);
+    }
+    return 0;
+}
+
+static void
+map_await_dealloc(MapAwait *self)
+{
+    PyTypeObject *type = Py_TYPE(self);
+    PyObject_GC_UnTrack(self);
+    map_await_clear(self);
+    PyMem_Free(self->entries);
+    type->tp_free((PyObject *)self);
+    Py_DECREF(type);
+}
+
+static int
+map_schedule_callback(MapAwait *self, PyObject *callback, PyObject *context)
+{
+    PyObject *scheduled;
+    PyObject *values[3] = {callback, (PyObject *)self, context};
+    PyObject *call_soon = self->connection == NULL
+        ? NULL : SLOT(self->connection, conn_off.call_soon);
+    if (call_soon == NULL) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "map connection has no completion scheduler");
+        return -1;
+    }
+    scheduled = PyObject_Vectorcall(
+        call_soon, values, 2, context == Py_None ? NULL : tuple_context);
+    if (scheduled == NULL) return -1;
+    Py_DECREF(scheduled);
+    return 0;
+}
+
+static int
+map_schedule_callbacks(MapAwait *self)
+{
+    if (self->callback != NULL) {
+        if (map_schedule_callback(
+                self, self->callback, self->callback_context) < 0) return -1;
+        Py_CLEAR(self->callback);
+        Py_CLEAR(self->callback_context);
+    }
+    if (self->callbacks != NULL) {
+        Py_ssize_t count = PyList_GET_SIZE(self->callbacks);
+        for (Py_ssize_t index = 0; index < count; index++) {
+            PyObject *entry = PyList_GET_ITEM(self->callbacks, index);
+            if (map_schedule_callback(
+                    self, PyTuple_GET_ITEM(entry, 0),
+                    PyTuple_GET_ITEM(entry, 1)) < 0) return -1;
+        }
+        if (PyList_SetSlice(self->callbacks, 0, count, NULL) < 0) return -1;
+    }
+    return 0;
+}
+
+static int
+map_notify(MapAwait *self)
+{
+    if (self->completion_done) return 0;
+    self->completion_done = 1;
+    return map_schedule_callbacks(self);
+}
+
+static int
+map_abandon(MapAwait *self)
+{
+    int failed = 0;
+    if (self->abandoned) return 0;
+    self->abandoned = 1;
+    if (self->entries != NULL) {
+        for (Py_ssize_t index = 0; index < self->window; index++) {
+            MapEntry *entry = &self->entries[index];
+            if (entry->operation != NULL && !entry->done &&
+                cancel_operation(self->connection, entry->operation) < 0) {
+                failed = -1;
+            }
+            map_entry_clear(entry);
+        }
+    }
+    self->occupied = 0;
+    self->head = 0;
+    self->tail = 0;
+    return failed;
+}
+
+static void
+map_drop_entries(MapAwait *self)
+{
+    self->abandoned = 1;
+    if (self->entries != NULL) {
+        for (Py_ssize_t index = 0; index < self->window; index++)
+            map_entry_clear(&self->entries[index]);
+    }
+    self->occupied = 0;
+    self->head = 0;
+    self->tail = 0;
+}
+
+static void
+map_release_terminal(MapAwait *self)
+{
+    Py_CLEAR(self->connection);
+    Py_CLEAR(self->method);
+    Py_CLEAR(self->statement);
+    Py_CLEAR(self->argument_sets);
+    Py_CLEAR(self->max_in_flight);
+    Py_CLEAR(self->arguments);
+    Py_CLEAR(self->sql);
+    Py_CLEAR(self->mode);
+    Py_CLEAR(self->iterator);
+    Py_CLEAR(self->callback);
+    Py_CLEAR(self->callback_context);
+    Py_CLEAR(self->callbacks);
+    Py_CLEAR(self->loop);
+    if (self->entries != NULL) {
+        for (Py_ssize_t index = 0; index < self->window; index++)
+            map_entry_clear(&self->entries[index]);
+        PyMem_Free(self->entries);
+        self->entries = NULL;
+    }
+    self->window = 0;
+    self->occupied = 0;
+    self->head = 0;
+    self->tail = 0;
+}
+
+static int
+map_is_abandoned(MapAwait *self)
+{
+    return self->abandoned;
+}
+
+static int
+map_advance_ready(MapAwait *self)
+{
+    int advanced = 0;
+    while (self->occupied > 0) {
+        MapEntry *entry = &self->entries[self->head];
+        if (!entry->done) break;
+        advanced = 1;
+        if (entry->error != NULL) {
+            Py_XSETREF(self->error, Py_NewRef(entry->error));
+            map_entry_clear(entry);
+            self->head = (self->head + 1) % self->window;
+            self->occupied--;
+            if (map_abandon(self) < 0) PyErr_Clear();
+            self->terminal_done = 1;
+            return map_notify(self);
+        }
+        if (PyList_Append(self->results,
+                          entry->value != NULL ? entry->value : Py_None) < 0)
+            return -1;
+        map_entry_clear(entry);
+        self->head = (self->head + 1) % self->window;
+        self->occupied--;
+    }
+    if (self->exhausted && self->occupied == 0)
+        self->terminal_done = 1;
+    if (advanced || self->terminal_done)
+        return map_notify(self);
+    return 0;
+}
+
+static int
+map_operation_completed(MapAwait *self, PyObject *operation,
+                        PyObject *value, int is_error)
+{
+    MapEntry *entry;
+    if (self->abandoned) return 0;
+    if (self->occupied == 0) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "PostgreSQL map completed an unowned operation");
+        return -1;
+    }
+    entry = &self->entries[self->head];
+    if (entry->operation != operation || entry->done) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "PostgreSQL map completion lost input order");
+        return -1;
+    }
+    if (is_error) entry->error = Py_NewRef(value);
+    else entry->value = Py_NewRef(value);
+    entry->done = 1;
+    return map_advance_ready(self);
+}
+
+static int
+map_start_fallback(MapAwait *self)
+{
+    PyObject *call_args[5] = {
+        self->connection, self->method, self->statement,
+        self->argument_sets, self->max_in_flight
+    };
+    PyObject *coroutine = PyObject_Vectorcall(
+        fn_connection_map, call_args, 4, tuple_max_in_flight);
+    if (coroutine == NULL) return -1;
+    self->iterator = await_iterator(coroutine);
+    Py_DECREF(coroutine);
+    if (self->iterator == NULL) return -1;
+    self->state = MAP_FALLBACK;
+    return 0;
+}
+
+static int
+map_hook_is_unchanged(PyObject *connection, PyObject *name,
+                      PyObject *expected)
+{
+    PyObject *current = PyObject_GetAttr(
+        (PyObject *)Py_TYPE(connection), name);
+    int unchanged;
+    if (current == NULL) return -1;
+    unchanged = current == expected;
+    Py_DECREF(current);
+    return unchanged;
+}
+
+static int
+map_start(MapAwait *self)
+{
+    Py_ssize_t requested;
+    Py_ssize_t outstanding;
+    Py_ssize_t capacity;
+    int unchanged;
+
+    if ((PyObject *)Py_TYPE(self->connection) != connection_type_ref ||
+        !PyLong_CheckExact(self->max_in_flight)) return map_start_fallback(self);
+    requested = PyLong_AsSsize_t(self->max_in_flight);
+    if (requested < 1 || PyErr_Occurred()) {
+        PyErr_Clear();
+        return map_start_fallback(self);
+    }
+    if (!PyUnicode_CheckExact(self->method)) return map_start_fallback(self);
+    if (PyUnicode_CompareWithASCIIString(self->method, "execute") == 0)
+        self->mode = Py_NewRef(mode_execute);
+    else if (PyUnicode_CompareWithASCIIString(self->method, "fetch") == 0)
+        self->mode = Py_NewRef(mode_fetch);
+    else if (PyUnicode_CompareWithASCIIString(self->method, "fetchrow") == 0)
+        self->mode = Py_NewRef(mode_fetchrow);
+    else if (PyUnicode_CompareWithASCIIString(self->method, "fetchval") == 0)
+        self->mode = Py_NewRef(mode_fetchval);
+    else
+        return map_start_fallback(self);
+
+    if (PyUnicode_CheckExact(self->statement)) {
+        self->sql = Py_NewRef(self->statement);
+    } else {
+        self->sql = PyObject_GetAttr(self->statement, str_sql_attr);
+        if (self->sql == NULL) {
+            if (!PyErr_ExceptionMatches(PyExc_AttributeError)) return -1;
+            PyErr_Clear();
+            return map_start_fallback(self);
+        }
+        if (!PyUnicode_CheckExact(self->sql)) return map_start_fallback(self);
+    }
+    unchanged = map_hook_is_unchanged(
+        self->connection, str_submit, hook_submit);
+    if (unchanged < 0) return -1;
+    if (!unchanged) return map_start_fallback(self);
+    unchanged = map_hook_is_unchanged(
+        self->connection, str_publish_completed, hook_publish_completed);
+    if (unchanged < 0) return -1;
+    if (!unchanged) return map_start_fallback(self);
+
+    {
+        PyObject *status = SLOT(self->connection, conn_off.transaction_status);
+        int in_transaction = !PyBytes_CheckExact(status) ||
+            PyBytes_GET_SIZE(status) != 1 || PyBytes_AS_STRING(status)[0] != 'I' ||
+            slot_is_true(self->connection, conn_off.transaction_barrier);
+        self->window = in_transaction ? 1 : requested;
+    }
+    outstanding = slot_as_ssize(
+        self->connection, conn_off.waiting_live, "_waiting_live");
+    if (outstanding < 0 && PyErr_Occurred()) return -1;
+    {
+        Py_ssize_t emitted = operation_queue_size(
+            SLOT(self->connection, conn_off.emitted));
+        if (emitted < 0) return -1;
+        outstanding += emitted;
+    }
+    capacity = class_bound(self->connection, str_max_queued);
+    if (capacity < 0) return -1;
+    if (self->window > capacity - outstanding) return map_start_fallback(self);
+
+    self->arguments = PyObject_GetIter(self->argument_sets);
+    if (self->arguments == NULL) return -1;
+    self->results = PyList_New(0);
+    self->loop = Py_XNewRef(SLOT(self->connection, conn_off.loop));
+    self->entries = PyMem_Calloc((size_t)self->window, sizeof(MapEntry));
+    if (self->results == NULL || self->loop == NULL || self->entries == NULL) {
+        if (self->entries == NULL) PyErr_NoMemory();
+        return -1;
+    }
+    self->state = MAP_NATIVE;
+    return 0;
+}
+
+static int
+map_fill_window(MapAwait *self)
+{
+    Py_ssize_t available = self->window - self->occupied;
+    PyObject *prepared = PyList_New(0);
+    if (prepared == NULL) return -1;
+
+    while (PyList_GET_SIZE(prepared) < available && !self->exhausted) {
+        PyObject *item = PyIter_Next(self->arguments);
+        PyObject *args;
+        if (item == NULL) {
+            if (PyErr_Occurred()) goto conversion_error;
+            self->exhausted = 1;
+            break;
+        }
+        args = PySequence_Tuple(item);
+        Py_DECREF(item);
+        if (args == NULL) goto conversion_error;
+        if (PyList_Append(prepared, args) < 0) {
+            Py_DECREF(args);
+            goto conversion_error;
+        }
+        Py_DECREF(args);
+    }
+
+    for (Py_ssize_t index = 0; index < PyList_GET_SIZE(prepared); index++) {
+        MapEntry *entry = &self->entries[self->tail];
+        PyObject *operation;
+        if (entry->operation != NULL || entry->value != NULL ||
+            entry->error != NULL || entry->done) {
+            Py_DECREF(prepared);
+            PyErr_SetString(PyExc_RuntimeError,
+                            "PostgreSQL map ring slot is still occupied");
+            return -1;
+        }
+        operation = submit(
+            self->connection, self->mode, self->sql,
+            PyList_GET_ITEM(prepared, index), Py_None, (PyObject *)self);
+        if (operation == NULL) {
+            entry->error = PyErr_GetRaisedException();
+            if (entry->error == NULL) {
+                Py_DECREF(prepared);
+                return -1;
+            }
+            entry->done = 1;
+        } else {
+            entry->operation = operation;
+        }
+        self->tail = (self->tail + 1) % self->window;
+        self->occupied++;
+    }
+    Py_DECREF(prepared);
+    return map_advance_ready(self);
+
+conversion_error:
+    {
+        PyObject *error = PyErr_GetRaisedException();
+        Py_DECREF(prepared);
+        if (map_abandon(self) < 0) PyErr_Clear();
+        self->terminal_done = 1;
+        PyErr_SetRaisedException(error);
+        return -1;
+    }
+}
+
+static PyObject *
+map_finish(MapAwait *self)
+{
+    PyObject *result;
+    self->state = MAP_DONE;
+    self->terminal_done = 1;
+    if (self->error != NULL) {
+        PyObject *error = self->error;
+        self->error = NULL;
+        Py_CLEAR(self->results);
+        map_release_terminal(self);
+        PyErr_SetRaisedException(error);
+        return NULL;
+    }
+    result = self->results != NULL ? self->results : PyList_New(0);
+    self->results = NULL;
+    map_release_terminal(self);
+    if (result == NULL) return NULL;
+    {
+        PyObject *stop = PyObject_CallOneArg(PyExc_StopIteration, result);
+        Py_DECREF(result);
+        if (stop == NULL) return NULL;
+        PyErr_SetRaisedException(stop);
+    }
+    return NULL;
+}
+
+static PyObject *
+map_await_step(MapAwait *self, PyObject *sent)
+{
+    (void)sent;
+    if (self->state == MAP_INITIAL && map_start(self) < 0) {
+        self->state = MAP_DONE;
+        self->terminal_done = 1;
+        Py_CLEAR(self->results);
+        map_release_terminal(self);
+        return NULL;
+    }
+    if (self->state == MAP_FALLBACK) {
+        PyObject *yielded = NULL;
+        PySendResult result = PyIter_Send(
+            self->iterator, sent != NULL ? sent : Py_None, &yielded);
+        if (result == PYGEN_NEXT) return yielded;
+        self->state = MAP_DONE;
+        self->terminal_done = 1;
+        map_release_terminal(self);
+        if (result == PYGEN_ERROR) return NULL;
+        {
+            PyObject *stop = PyObject_CallOneArg(PyExc_StopIteration, yielded);
+            Py_DECREF(yielded);
+            if (stop == NULL) return NULL;
+            PyErr_SetRaisedException(stop);
+            return NULL;
+        }
+    }
+    if (self->state == MAP_DONE) {
+        PyErr_SetString(PyExc_RuntimeError, "map awaitable already consumed");
+        return NULL;
+    }
+    if (self->completion_done) {
+        self->completion_done = 0;
+        Py_SETREF(self->blocking, Py_NewRef(Py_False));
+    }
+    if (self->error != NULL) return map_finish(self);
+    if (map_fill_window(self) < 0) {
+        self->state = MAP_DONE;
+        self->terminal_done = 1;
+        Py_CLEAR(self->results);
+        map_release_terminal(self);
+        return NULL;
+    }
+    if (self->error != NULL) return map_finish(self);
+    if (self->exhausted && self->occupied == 0) return map_finish(self);
+    Py_SETREF(self->blocking, Py_NewRef(Py_True));
+    return Py_NewRef((PyObject *)self);
+}
+
+static PyObject *
+map_await_iternext(MapAwait *self)
+{
+    return map_await_step(self, Py_None);
+}
+
+static PyObject *
+map_await_await(MapAwait *self)
+{
+    return Py_NewRef((PyObject *)self);
+}
+
+static PyObject *
+map_await_send(MapAwait *self, PyObject *value)
+{
+    return map_await_step(self, value);
+}
+
+static PyObject *
+map_completion_done(MapAwait *self, PyObject *unused)
+{
+    (void)unused;
+    return PyBool_FromLong(self->terminal_done);
+}
+
+static PyObject *
+map_completion_cancelled(MapAwait *self, PyObject *unused)
+{
+    (void)unused;
+    return PyBool_FromLong(self->completion_cancelled);
+}
+
+static PyObject *
+map_completion_get_loop(MapAwait *self, PyObject *unused)
+{
+    (void)unused;
+    if (self->loop == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "map has not started");
+        return NULL;
+    }
+    return Py_NewRef(self->loop);
+}
+
+static PyObject *
+map_completion_result(MapAwait *self, PyObject *unused)
+{
+    (void)unused;
+    if (!self->completion_done) {
+        PyErr_SetString(PyExc_RuntimeError, "map completion is not ready");
+        return NULL;
+    }
+    if (self->error != NULL) {
+        PyErr_SetRaisedException(Py_NewRef(self->error));
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+map_completion_exception(MapAwait *self, PyObject *unused)
+{
+    (void)unused;
+    if (!self->completion_done) {
+        PyErr_SetString(PyExc_RuntimeError, "map completion is not ready");
+        return NULL;
+    }
+    if (self->completion_cancelled && self->error != NULL) {
+        PyErr_SetRaisedException(Py_NewRef(self->error));
+        return NULL;
+    }
+    return Py_XNewRef(self->error != NULL ? self->error : Py_None);
+}
+
+static PyObject *
+map_completion_set_exception(MapAwait *self, PyObject *error)
+{
+    PyObject *instance;
+    if (self->terminal_done) Py_RETURN_NONE;
+    if (PyExceptionClass_Check(error)) {
+        instance = PyObject_CallNoArgs(error);
+        if (instance == NULL) return NULL;
+    } else if (PyExceptionInstance_Check(error)) {
+        instance = Py_NewRef(error);
+    } else {
+        PyErr_SetString(PyExc_TypeError, "exception must derive from BaseException");
+        return NULL;
+    }
+    Py_XSETREF(self->error, instance);
+    self->terminal_done = 1;
+    map_drop_entries(self);
+    if (map_notify(self) < 0) return NULL;
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+map_completion_add_done_callback(
+    MapAwait *self, PyObject *const *args, Py_ssize_t nargs,
+    PyObject *kwnames)
+{
+    PyObject *context = NULL;
+    if (nargs != 1) {
+        PyErr_SetString(PyExc_TypeError, "add_done_callback expects one callback");
+        return NULL;
+    }
+    if (kwnames != NULL && PyTuple_GET_SIZE(kwnames) > 0) {
+        if (PyTuple_GET_SIZE(kwnames) != 1 ||
+            PyUnicode_CompareWithASCIIString(
+                PyTuple_GET_ITEM(kwnames, 0), "context") != 0) {
+            PyErr_SetString(PyExc_TypeError,
+                            "unexpected add_done_callback keyword");
+            return NULL;
+        }
+        context = args[nargs];
+    }
+    if (context == NULL || context == Py_None) {
+        context = PyContext_CopyCurrent();
+        if (context == NULL) return NULL;
+    } else {
+        Py_INCREF(context);
+    }
+    if (self->completion_done) {
+        int scheduled = map_schedule_callback(self, args[0], context);
+        Py_DECREF(context);
+        if (scheduled < 0) return NULL;
+    } else if (self->callback == NULL) {
+        self->callback = Py_NewRef(args[0]);
+        self->callback_context = context;
+    } else {
+        PyObject *entry;
+        if (self->callbacks == NULL) {
+            self->callbacks = PyList_New(0);
+            if (self->callbacks == NULL) {
+                Py_DECREF(context);
+                return NULL;
+            }
+        }
+        entry = PyTuple_Pack(2, args[0], context);
+        Py_DECREF(context);
+        if (entry == NULL) return NULL;
+        if (PyList_Append(self->callbacks, entry) < 0) {
+            Py_DECREF(entry);
+            return NULL;
+        }
+        Py_DECREF(entry);
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+map_completion_remove_done_callback(MapAwait *self, PyObject *callback)
+{
+    Py_ssize_t removed = 0;
+    if (self->callback != NULL) {
+        int same = PyObject_RichCompareBool(self->callback, callback, Py_EQ);
+        if (same < 0) return NULL;
+        if (same) {
+            Py_CLEAR(self->callback);
+            Py_CLEAR(self->callback_context);
+            removed++;
+        }
+    }
+    if (self->callbacks != NULL) {
+        for (Py_ssize_t index = PyList_GET_SIZE(self->callbacks);
+             index > 0; index--) {
+            PyObject *entry = PyList_GET_ITEM(self->callbacks, index - 1);
+            int same = PyObject_RichCompareBool(
+                PyTuple_GET_ITEM(entry, 0), callback, Py_EQ);
+            if (same < 0) return NULL;
+            if (same && PySequence_DelItem(
+                    self->callbacks, index - 1) < 0) return NULL;
+            removed += same;
+        }
+    }
+    return PyLong_FromSsize_t(removed);
+}
+
+static PyObject *
+map_completion_cancel(
+    MapAwait *self, PyObject *const *args, Py_ssize_t nargs,
+    PyObject *kwnames)
+{
+    PyObject *message = Py_None;
+    PyObject *error;
+    Py_ssize_t keyword_count =
+        kwnames == NULL ? 0 : PyTuple_GET_SIZE(kwnames);
+    if (nargs + keyword_count > 1) {
+        PyErr_SetString(PyExc_TypeError, "cancel accepts at most one message");
+        return NULL;
+    }
+    if (nargs == 1) message = args[0];
+    if (keyword_count == 1) {
+        if (PyUnicode_CompareWithASCIIString(
+                PyTuple_GET_ITEM(kwnames, 0), "msg") != 0) {
+            PyErr_SetString(PyExc_TypeError, "unexpected cancel keyword");
+            return NULL;
+        }
+        message = args[nargs];
+    }
+    if (self->terminal_done || self->completion_cancelled) Py_RETURN_FALSE;
+    error = message == Py_None
+        ? PyObject_CallNoArgs(exc_cancelled_error)
+        : PyObject_CallOneArg(exc_cancelled_error, message);
+    if (error == NULL) return NULL;
+    Py_XSETREF(self->error, error);
+    self->completion_cancelled = 1;
+    self->terminal_done = 1;
+    if (map_abandon(self) < 0) return NULL;
+    if (map_notify(self) < 0) return NULL;
+    Py_RETURN_TRUE;
+}
+
+static int
+map_set_thrown_error(MapAwait *self, PyObject *args)
+{
+    Py_ssize_t count = PyTuple_GET_SIZE(args);
+    PyObject *kind;
+    PyObject *value;
+    if (count < 1 || count > 3) {
+        PyErr_SetString(PyExc_TypeError, "throw expected 1 to 3 arguments");
+        return -1;
+    }
+    kind = PyTuple_GET_ITEM(args, 0);
+    if (PyExceptionInstance_Check(kind)) {
+        if (count != 1) {
+            PyErr_SetString(PyExc_TypeError,
+                            "instance exception may not have a separate value");
+            return -1;
+        }
+        PyErr_SetObject((PyObject *)Py_TYPE(kind), kind);
+    } else if (PyExceptionClass_Check(kind)) {
+        value = count >= 2 ? PyTuple_GET_ITEM(args, 1) : NULL;
+        if (value == NULL) PyErr_SetNone(kind);
+        else PyErr_SetObject(kind, value);
+    } else {
+        PyErr_SetString(PyExc_TypeError,
+                        "exceptions must derive from BaseException");
+        return -1;
+    }
+    Py_XSETREF(self->error, PyErr_GetRaisedException());
+    if (count == 3 && PyTuple_GET_ITEM(args, 2) != Py_None &&
+        PyException_SetTraceback(
+            self->error, PyTuple_GET_ITEM(args, 2)) < 0) return -1;
+    return 0;
+}
+
+static PyObject *
+map_await_throw(MapAwait *self, PyObject *args)
+{
+    if (self->state == MAP_INITIAL && map_start(self) < 0) return NULL;
+    if (self->state == MAP_FALLBACK) {
+        PyObject *method = PyObject_GetAttr(self->iterator, str_throw);
+        PyObject *result;
+        if (method == NULL) return NULL;
+        result = PyObject_Call(method, args, NULL);
+        Py_DECREF(method);
+        return result;
+    }
+    if (self->state == MAP_DONE) {
+        PyErr_SetString(PyExc_RuntimeError, "map awaitable already consumed");
+        return NULL;
+    }
+    if (map_set_thrown_error(self, args) < 0) return NULL;
+    if (map_abandon(self) < 0) {
+        Py_CLEAR(self->error);
+        return NULL;
+    }
+    return map_finish(self);
+}
+
+static PyObject *
+map_await_close(MapAwait *self, PyObject *unused)
+{
+    (void)unused;
+    if (self->state == MAP_FALLBACK) {
+        PyObject *closed = PyObject_CallMethodNoArgs(self->iterator, str_close);
+        if (closed == NULL) return NULL;
+        Py_DECREF(closed);
+    } else if (self->state == MAP_NATIVE && map_abandon(self) < 0) {
+        return NULL;
+    }
+    self->state = MAP_DONE;
+    self->terminal_done = 1;
+    Py_CLEAR(self->results);
+    map_release_terminal(self);
+    Py_RETURN_NONE;
+}
+
+static PyMethodDef map_await_methods[] = {
+    {"send", (PyCFunction)map_await_send, METH_O, NULL},
+    {"throw", (PyCFunction)map_await_throw, METH_VARARGS, NULL},
+    {"close", (PyCFunction)map_await_close, METH_NOARGS, NULL},
+    {"done", (PyCFunction)map_completion_done, METH_NOARGS, NULL},
+    {"cancelled", (PyCFunction)map_completion_cancelled, METH_NOARGS, NULL},
+    {"get_loop", (PyCFunction)map_completion_get_loop, METH_NOARGS, NULL},
+    {"result", (PyCFunction)map_completion_result, METH_NOARGS, NULL},
+    {"exception", (PyCFunction)map_completion_exception, METH_NOARGS, NULL},
+    {"set_exception", (PyCFunction)map_completion_set_exception, METH_O, NULL},
+    {"add_done_callback",
+     (PyCFunction)(void (*)(void))map_completion_add_done_callback,
+     METH_FASTCALL | METH_KEYWORDS, NULL},
+    {"remove_done_callback",
+     (PyCFunction)map_completion_remove_done_callback, METH_O, NULL},
+    {"cancel", (PyCFunction)(void (*)(void))map_completion_cancel,
+     METH_FASTCALL | METH_KEYWORDS, NULL},
+    {NULL, NULL, 0, NULL}
+};
+
+static PyMemberDef map_await_members[] = {
+    {"_asyncio_future_blocking", T_OBJECT,
+     offsetof(MapAwait, blocking), 0, NULL},
+    {NULL, 0, 0, 0, NULL}
+};
+
+static PyType_Slot map_await_slots[] = {
+    {Py_tp_dealloc, map_await_dealloc},
+    {Py_tp_traverse, map_await_traverse},
+    {Py_tp_clear, map_await_clear},
+    {Py_am_await, map_await_await},
+    {Py_tp_iter, PyObject_SelfIter},
+    {Py_tp_iternext, map_await_iternext},
+    {Py_tp_methods, map_await_methods},
+    {Py_tp_members, map_await_members},
+    {0, NULL}
+};
+
+static PyType_Spec map_await_spec = {
+    .name = "wreath._native._postgres._MapAwait",
+    .basicsize = sizeof(MapAwait),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .slots = map_await_slots,
+};
+
+static PyObject *
+connection_map(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+               PyObject *kwnames)
+{
+    MapAwait *awaitable;
+    PyObject *method = NULL;
+    PyObject *statement = NULL;
+    PyObject *argument_sets = NULL;
+    PyObject *max_in_flight = NULL;
+    if (nargs > 3) {
+        PyErr_SetString(PyExc_TypeError, "map accepts three positional arguments");
+        return NULL;
+    }
+    if (nargs > 0) method = args[0];
+    if (nargs > 1) statement = args[1];
+    if (nargs > 2) argument_sets = args[2];
+    if (kwnames != NULL) {
+        Py_ssize_t count = PyTuple_GET_SIZE(kwnames);
+        for (Py_ssize_t index = 0; index < count; index++) {
+            PyObject *name = PyTuple_GET_ITEM(kwnames, index);
+            PyObject *value = args[nargs + index];
+            PyObject **target;
+            if (PyUnicode_CompareWithASCIIString(name, "method") == 0)
+                target = &method;
+            else if (PyUnicode_CompareWithASCIIString(name, "statement") == 0)
+                target = &statement;
+            else if (PyUnicode_CompareWithASCIIString(name, "argument_sets") == 0)
+                target = &argument_sets;
+            else if (PyUnicode_CompareWithASCIIString(name, "max_in_flight") == 0)
+                target = &max_in_flight;
+            else {
+                PyErr_SetString(PyExc_TypeError, "unexpected map keyword");
+                return NULL;
+            }
+            if (*target != NULL) {
+                PyErr_Format(PyExc_TypeError,
+                             "map got multiple values for %R", name);
+                return NULL;
+            }
+            *target = value;
+        }
+    }
+    if (method == NULL || statement == NULL || argument_sets == NULL) {
+        PyErr_SetString(PyExc_TypeError,
+                        "map requires method, statement, and argument_sets");
+        return NULL;
+    }
+    if (max_in_flight == NULL) {
+        max_in_flight = PyLong_FromLong(32);
+        if (max_in_flight == NULL) return NULL;
+    } else {
+        Py_INCREF(max_in_flight);
+    }
+    awaitable = PyObject_GC_New(MapAwait, map_await_type);
+    if (awaitable == NULL) {
+        Py_DECREF(max_in_flight);
+        return NULL;
+    }
+    Py_INCREF(map_await_type);
+    awaitable->connection = Py_NewRef(self);
+    awaitable->method = Py_NewRef(method);
+    awaitable->statement = Py_NewRef(statement);
+    awaitable->argument_sets = Py_NewRef(argument_sets);
+    awaitable->max_in_flight = max_in_flight;
+    awaitable->arguments = NULL;
+    awaitable->sql = NULL;
+    awaitable->mode = NULL;
+    awaitable->results = NULL;
+    awaitable->iterator = NULL;
+    awaitable->error = NULL;
+    awaitable->callback = NULL;
+    awaitable->callback_context = NULL;
+    awaitable->callbacks = NULL;
+    awaitable->loop = NULL;
+    awaitable->blocking = Py_NewRef(Py_None);
+    awaitable->entries = NULL;
+    awaitable->window = 0;
+    awaitable->head = 0;
+    awaitable->tail = 0;
+    awaitable->occupied = 0;
+    awaitable->state = MAP_INITIAL;
+    awaitable->exhausted = 0;
+    awaitable->completion_done = 0;
+    awaitable->completion_cancelled = 0;
+    awaitable->terminal_done = 0;
+    awaitable->abandoned = 0;
+    PyObject_GC_Track(awaitable);
+    return (PyObject *)awaitable;
+}
+
+/* ------------------------------------------------------------------ *
  * Registration
  * ------------------------------------------------------------------ */
 
@@ -3269,6 +4321,8 @@ static PyMethodDef pipeline_methods[] = {
      METH_FASTCALL, NULL},
     {"fetchrow", (PyCFunction)(void (*)(void))connection_fetchrow, METH_FASTCALL, NULL},
     {"fetchval", (PyCFunction)(void (*)(void))connection_fetchval, METH_FASTCALL, NULL},
+    {"map", (PyCFunction)(void (*)(void))connection_map,
+     METH_FASTCALL | METH_KEYWORDS, NULL},
     {"_fetch_into", (PyCFunction)(void (*)(void))connection_fetch_into,
      METH_FASTCALL, NULL},
     {NULL, NULL, 0, NULL}
@@ -3306,6 +4360,8 @@ wreath_pg_pipeline_init(PyObject *module, PyObject *connection_type)
     operation_base = PyObject_GetAttrString(pure_module, "Operation");
     if (connection_base == NULL || operation_base == NULL) goto error;
     if (resolve_offsets(connection_base, operation_base) < 0) goto error;
+    fn_connection_map = PyObject_GetAttrString(connection_base, "map");
+    if (fn_connection_map == NULL) goto error;
     Py_CLEAR(connection_base);
     Py_CLEAR(operation_base);
 
@@ -3377,6 +4433,9 @@ wreath_pg_pipeline_init(PyObject *module, PyObject *connection_type)
     INTERN(str_statement_name, "statement_name");
     INTERN(str_join, "join");
     INTERN(str_publish_completed, "_publish_completed");
+    INTERN(str_finish_operation, "_finish_operation");
+    INTERN(str_sql_attr, "sql");
+    INTERN(str_submit, "_submit");
     INTERN(str_binary_results, "binary_results");
     INTERN(str_call, "_call");
     INTERN(str_try_acquire_shared, "try_acquire_shared");
@@ -3400,8 +4459,13 @@ wreath_pg_pipeline_init(PyObject *module, PyObject *connection_type)
     bytes_idle = PyBytes_FromStringAndSize("I", 1);
     tuple_empty = PyTuple_New(0);
     tuple_context = PyTuple_Pack(1, str_context);
+    {
+        PyObject *max_name = intern("max_in_flight");
+        if (max_name != NULL) tuple_max_in_flight = PyTuple_Pack(1, max_name);
+        Py_XDECREF(max_name);
+    }
     if (bytes_empty == NULL || bytes_idle == NULL || tuple_empty == NULL ||
-        tuple_context == NULL) goto error;
+        tuple_context == NULL || tuple_max_in_flight == NULL) goto error;
 
     submit_await_type = (PyTypeObject *)PyType_FromSpec(&submit_await_spec);
     if (submit_await_type == NULL) goto error;
@@ -3411,6 +4475,10 @@ wreath_pg_pipeline_init(PyObject *module, PyObject *connection_type)
     if (statement_await_type == NULL) goto error;
     if (PyModule_AddObjectRef(module, "_StatementAwait",
                               (PyObject *)statement_await_type) < 0) goto error;
+    map_await_type = (PyTypeObject *)PyType_FromSpec(&map_await_spec);
+    if (map_await_type == NULL) goto error;
+    if (PyModule_AddObjectRef(module, "_MapAwait",
+                              (PyObject *)map_await_type) < 0) goto error;
 
     /* Graft the pipeline onto the already-created Connection type.
      *
@@ -3448,6 +4516,10 @@ wreath_pg_pipeline_init(PyObject *module, PyObject *connection_type)
     HOOK(hook_build_cached, "_build_cached");
     HOOK(hook_join_packets, "_join_packets");
     HOOK(hook_field_tape_type, "_field_tape_type");
+    HOOK(hook_decode_tape, "_decode_tape");
+    HOOK(hook_finish_operation, "_finish_operation");
+    HOOK(hook_submit, "_submit");
+    HOOK(hook_publish_completed, "_publish_completed");
 #undef HOOK
     {
         PyObject *flag = PyObject_GetAttrString(connection_type, "_batch_decode");

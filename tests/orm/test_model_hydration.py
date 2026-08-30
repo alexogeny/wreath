@@ -278,9 +278,29 @@ def test_a_failure_partway_through_a_batch_publishes_no_rows(
     plan = storage._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1, 2, 3, 4, 5))
     with pytest.raises(ValueError):
         storage._decode_models(decoder, tape, (plan, session._identity, session), 256, rows)
-    # The batch is all-or-nothing for the caller's list.
     assert rows == []
+    assert session._identity == {}
     gc.collect()
+
+
+def test_a_failure_partway_through_a_batch_restores_reused_models(
+    session: Any, registry: Registry
+) -> None:
+    original, _ = hydrate(session, registry, [encode(1, "original")])
+    good = encode(1, "changed")
+    bad = data_row((struct.pack("!q", 2), b"x", struct.pack("!d", 1.0), b"\x01\x02", None, None))
+    rows: list[Any] = []
+    tape = storage._FieldTape(len(OIDS))
+    tape.append(good, len(OIDS))
+    tape.append(bad, len(OIDS))
+    decoder = storage._compile_decoder_plan(OIDS, (1,) * len(OIDS), NAMES)
+    plan = storage._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1, 2, 3, 4, 5))
+
+    with pytest.raises(ValueError):
+        storage._decode_models(decoder, tape, (plan, session._identity, session), 256, rows)
+
+    assert rows == []
+    assert original[0].label == "original"
 
 
 def test_infinity_timestamps_are_rejected_not_wrapped(session: Any, registry: Registry) -> None:
@@ -313,7 +333,7 @@ def test_hydrated_objects_survive_collection(session: Any, registry: Registry) -
 
 
 @pytest.mark.asyncio
-async def test_every_batch_reaches_the_model_destination_not_only_the_last(
+async def test_every_direct_row_reaches_the_model_destination(
     session: Any, registry: Registry
 ) -> None:
     protocol = storage.BufferedProtocol()
@@ -333,7 +353,8 @@ async def test_every_batch_reaches_the_model_destination_not_only_the_last(
             self.rows = rows
             self.dest = (plan, session._identity, session)
 
-    protocol.register_operations((_Operation(),))
+    operation = _Operation()
+    protocol.register_operations((operation,))
     total = 600
     for value in range(total):
         payload = data_row((struct.pack("!q", value), f"label-{value}".encode()))
@@ -343,11 +364,51 @@ async def test_every_batch_reaches_the_model_destination_not_only_the_last(
         del view
         protocol.buffer_updated(len(message))
 
-    # Two full batches were flushed inside the parser; the rest waits on the
-    # tape for the driver to flush at ReadyForQuery.
-    assert len(rows) == 512
-    assert tape.row_count == total - 512
+    assert rows == []
+    assert session._identity == {}
+    while tape.row_count:
+        storage._decode_models(decoder, tape, operation.dest, 256, rows)
+
+    assert len(rows) == total
+    assert tape.row_count == 0
     assert {type(item).__name__ for item in rows} == {"Row"}
     assert [item.id for item in rows[:3]] == [0, 1, 2]
-    assert rows[511].label == "label-511"
-    assert len(session._identity) == 512
+    assert rows[-1].label == "label-599"
+    assert len(session._identity) == total
+
+
+@pytest.mark.asyncio
+async def test_discarded_direct_model_rows_never_enter_the_identity_map(
+    session: Any, registry: Registry
+) -> None:
+    protocol = storage.BufferedProtocol()
+    plan = storage._compile_hydrate_plan(Row, registry.spec_for(Row), (0, 1))
+    tape = storage._FieldTape(2)
+    decoder = storage._compile_decoder_plan((Int64.oid, Text.oid), (1, 1), ("id", "label"))
+    rows: list[Any] = []
+
+    class _Operation:
+        mode = "fetch"
+        discarded = False
+        command = ""
+
+        def __init__(self) -> None:
+            self.field_tape = tape
+            self.decoder_plan = decoder
+            self.rows = rows
+            self.dest = (plan, session._identity, session)
+
+    operation = _Operation()
+    protocol.register_operations((operation,))
+    first = data_row((struct.pack("!q", 1), b"first"))
+    second = data_row((struct.pack("!q", 2), b"second"))
+    for payload in (first, second):
+        message = b"D" + struct.pack("!I", len(payload) + 4) + payload
+        view = protocol.get_buffer(-1)
+        view[: len(message)] = message
+        del view
+        protocol.buffer_updated(len(message))
+        operation.discarded = True
+
+    assert rows == []
+    assert session._identity == {}

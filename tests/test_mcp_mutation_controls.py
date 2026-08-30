@@ -13,6 +13,7 @@ import wreath._mcp.server as server_module
 from wreath import Wreath
 from wreath._auth.requirements import AuthRequirement, PolicyRequirement, SetRequirement
 from wreath._mcp.auth import Unauthenticated
+from wreath._mcp.outbound import ClientChannel
 from wreath._mcp.protocol import INVALID_PARAMS, METHOD_NOT_FOUND, JsonRpcError, Message
 from wreath._mcp.server import MCP, _Gate, _holds, _sampling_messages
 from wreath._mcp.session import Session, ToolContext
@@ -23,6 +24,23 @@ from wreath.request import Request
 
 async def _no_receive() -> dict[str, Any]:
     raise AssertionError("the receive channel must not be read")
+
+
+async def test_failing_a_channel_wakes_pending_requests_and_preserves_answers() -> None:
+    channel = ClientChannel(lambda _message: True, max_pending=2, timeout=1)
+    loop = asyncio.get_running_loop()
+    pending = loop.create_future()
+    answered = loop.create_future()
+    answered.set_result("kept")
+    channel._pending.update({"pending": pending, "answered": answered})
+
+    channel.fail_all("session ended")
+
+    assert pending.done()
+    with pytest.raises(ClientRequestError, match="session ended"):
+        pending.result()
+    assert answered.result() == "kept"
+    assert len(channel) == 0
 
 
 def _messages(*messages: object) -> Any:

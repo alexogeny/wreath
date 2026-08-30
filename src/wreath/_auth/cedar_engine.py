@@ -378,12 +378,14 @@ def _tokenize(source: str) -> list[_Token]:
             continue
         if char.isdigit():
             start = index
+            index += 1
             while index < length and source[index].isdigit():
                 index += 1
             tokens.append(_Token("int", source[start:index], line, column))
             continue
         if char.isalpha() or char == "_":
             start = index
+            index += 1
             while index < length and (source[index].isalnum() or source[index] == "_"):
                 index += 1
             word = source[start:index]

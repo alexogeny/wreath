@@ -85,12 +85,13 @@ async def test_the_pipeline_refuses_work_past_its_queue_bound(
     await asyncio.sleep(0)
     await asyncio.sleep(0)
 
-    async with refuses(backend.PipelineFullError, "pipeline is full"):
-        await connection.fetchval("select $1::int4", depth)
-
-    for task in parked:
-        task.cancel()
-    await asyncio.gather(*parked, return_exceptions=True)
+    try:
+        async with refuses(backend.PipelineFullError, "pipeline is full"):
+            await connection.fetchval("select $1::int4", depth)
+    finally:
+        for task in parked:
+            task.cancel()
+        await asyncio.gather(*parked, return_exceptions=True)
 
 
 @pytest.mark.parametrize("backend", POSTGRES_BACKENDS)

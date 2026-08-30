@@ -174,11 +174,13 @@ async def test_one_stream_per_session() -> None:
         headers = {**STREAM, "mcp-session-id": session}
         first = asyncio.ensure_future(client.get("/mcp", headers=headers))
         await asyncio.sleep(0)
-        second = await client.get("/mcp", headers=headers)
-        assert second.status == 409
-        assert "one per session" in second.json()["error"]["message"]
-        await client.delete("/mcp", headers={"mcp-session-id": session})
-        await asyncio.wait_for(first, timeout=5)
+        try:
+            second = await asyncio.wait_for(client.get("/mcp", headers=headers), timeout=0.5)
+            assert second.status == 409
+            assert "one per session" in second.json()["error"]["message"]
+        finally:
+            await client.delete("/mcp", headers={"mcp-session-id": session})
+            await asyncio.wait_for(first, timeout=1)
 
 
 async def test_a_closed_stream_can_be_reopened() -> None:

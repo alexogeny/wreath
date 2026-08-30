@@ -720,6 +720,7 @@ def test_a_module_is_named_by_walking_up_while_there_is_an_init(tmp_path: Path) 
     (package / "__init__.py").write_text("")
     (package / "routes.py").write_text("")
     assert module_name_for(package / "routes.py") == "shop.web.routes"
+    assert module_name_for(package / "__init__.py") == "shop.web"
 
 
 def test_planning_declines_a_mutation_it_cannot_build_and_says_why(tmp_path: Path) -> None:
@@ -1544,6 +1545,101 @@ def test_live_mutant_completed_at_baseline_seal_keeps_its_kill(
     assert completed == 1
     assert cancelled == 0
     assert first_started is not None
+
+
+def test_native_candidates_put_the_focused_control_first(tmp_path: Path) -> None:
+    mutation = mutant_runner.Mutation(
+        "guard.never-fires@src/wreath/http_client.py:1519",
+        "guard.never-fires",
+        "the guarded branch `if bucket is None`",
+        mutant_runner.Site("src/wreath/http_client.py", 1519, "HTTPClient._throttle"),
+        "wreath.http_client",
+    )
+    plan = mutant_runner.Plan(watch={mutation.identifier: (1519,)})
+    source = str((tmp_path / mutation.site.path).resolve())
+    broad = "tests/test_http_client.py::test_request_round_trip"
+    focused = "tests/test_http_client_rate_retry.py::test_throttle_disabled_is_noop"
+    baseline = mutant_runner.Baseline(
+        passed=frozenset((broad, focused)),
+        failed=(),
+        index={(source, 1519): (broad, focused)},
+        per_file={},
+        seconds=0.0,
+    )
+
+    assert mutant_runner.candidates_for(mutation, plan, baseline, tmp_path) == (
+        focused,
+        broad,
+    )
+
+
+def test_native_baseline_keeps_test_import_roots_during_execution(tmp_path: Path) -> None:
+    support = tmp_path / "baseline_support.py"
+    support.write_text("VALUE = 7\n", encoding="utf-8")
+    test_file = tmp_path / "test_baseline_import.py"
+    test_file.write_text(
+        "def test_sibling_import():\n"
+        "    from baseline_support import VALUE\n"
+        "    assert VALUE == 7\n",
+        encoding="utf-8",
+    )
+
+    baseline = mutant_runner.run_native_baseline(
+        (str(test_file),),
+        mutant_runner.Plan(),
+        workdir=tmp_path,
+    )
+
+    assert baseline.failed == ()
+    assert len(baseline.passed) == 1
+    assert next(iter(baseline.passed)).endswith("test_baseline_import.py::test_sibling_import")
+
+
+def test_native_baseline_rechecks_a_monitoring_only_failure_without_tracing(
+    tmp_path: Path,
+) -> None:
+    test_file = tmp_path / "test_monitoring_transparency.py"
+    test_file.write_text(
+        "import sys\n"
+        "def test_monitoring_is_not_a_semantic_requirement():\n"
+        "    assert sys.monitoring.get_tool(4) is None\n",
+        encoding="utf-8",
+    )
+    watched = tmp_path / "watched.py"
+    watched.write_text("VALUE = 1\n", encoding="utf-8")
+
+    baseline = mutant_runner.run_native_baseline(
+        (str(test_file),),
+        mutant_runner.Plan(watched={str(watched): {1}}),
+        workdir=tmp_path,
+    )
+
+    assert baseline.failed == ()
+    assert len(baseline.passed) == 1
+
+
+def test_native_baseline_retry_preserves_order_dependent_failures(tmp_path: Path) -> None:
+    test_file = tmp_path / "test_ordered_baseline.py"
+    test_file.write_text(
+        "STATE = []\n"
+        "def test_first_changes_module_state():\n"
+        "    STATE.append('changed')\n"
+        "def test_second_observes_the_change():\n"
+        "    assert STATE == []\n",
+        encoding="utf-8",
+    )
+    watched = tmp_path / "watched.py"
+    watched.write_text("VALUE = 1\n", encoding="utf-8")
+
+    baseline = mutant_runner.run_native_baseline(
+        (str(test_file),),
+        mutant_runner.Plan(watched={str(watched): {1}}),
+        workdir=tmp_path,
+    )
+
+    assert len(baseline.passed) == 1
+    assert len(baseline.failed) == 1
+    assert baseline.failed[0].endswith("test_ordered_baseline.py::test_second_observes_the_change")
 
 
 def test_completed_test_blocks_shift_cpu_from_tests_to_mutation() -> None:

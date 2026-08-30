@@ -7,6 +7,7 @@
  */
 #include "http3.h"
 #include "ascii.h"
+#include "simd.h"
 
 #include <string.h>
 
@@ -248,7 +249,6 @@ static PyObject *k_receive = NULL;
 static PyObject *k_send = NULL;
 static PyObject *k_done = NULL;
 static PyObject *k_wreath_flight = NULL;
-static PyObject *k_default_response_headers = NULL;
 static PyObject *k_host_name = NULL;  /* b"host", synthesized once per absence */
 
 int
@@ -271,8 +271,6 @@ wreath_h3_init_message_keys(void)
         (k_send = PyUnicode_InternFromString("_send")) == NULL ||
         (k_done = PyUnicode_InternFromString("_done")) == NULL ||
         (k_wreath_flight = PyUnicode_InternFromString("_wreath_flight")) == NULL ||
-        (k_default_response_headers =
-            PyUnicode_InternFromString("_default_response_headers")) == NULL ||
         (k_host_name = PyBytes_FromString("host")) == NULL) {
         return -1;
     }
@@ -282,6 +280,61 @@ wreath_h3_init_message_keys(void)
 /* --- Http3Stream: ASGI plumbing ------------------------------------------ */
 
 static int submit_response(WreathH3Stream *s, int default_status);
+
+static int
+h3_response_header_parts(PyObject *pair, PyObject **name, PyObject **value)
+{
+    if (PyTuple_Check(pair) && PyTuple_GET_SIZE(pair) == 2) {
+        *name = PyTuple_GET_ITEM(pair, 0);
+        *value = PyTuple_GET_ITEM(pair, 1);
+    }
+    else if (PyList_Check(pair) && PyList_GET_SIZE(pair) == 2) {
+        *name = PyList_GET_ITEM(pair, 0);
+        *value = PyList_GET_ITEM(pair, 1);
+    }
+    else {
+        PyErr_SetString(PyExc_RuntimeError, "response header must be a pair");
+        return -1;
+    }
+    if (!PyBytes_Check(*name) || !PyBytes_Check(*value)) {
+        PyErr_SetString(PyExc_RuntimeError, "response header must be bytes");
+        return -1;
+    }
+    const char *name_data = PyBytes_AS_STRING(*name);
+    Py_ssize_t name_size = PyBytes_GET_SIZE(*name);
+    if (!(name_size > 0 && name_data[0] == ':')) {
+        if (name_size == 0) {
+            PyErr_SetString(PyExc_RuntimeError, "invalid response header");
+            return -1;
+        }
+        for (Py_ssize_t i = 0; i < name_size; i++) {
+            if (!wreath_ascii_token[(unsigned char)name_data[i]]) {
+                PyErr_SetString(PyExc_RuntimeError, "invalid response header");
+                return -1;
+            }
+        }
+    }
+    if (wreath_value_run(PyBytes_AS_STRING(*value), PyBytes_GET_SIZE(*value)) !=
+        PyBytes_GET_SIZE(*value)) {
+        PyErr_SetString(PyExc_RuntimeError, "invalid response header");
+        return -1;
+    }
+    return 0;
+}
+
+int
+wreath_h3_validate_response_headers(PyObject *headers)
+{
+    for (Py_ssize_t i = 0; i < PySequence_Fast_GET_SIZE(headers); i++) {
+        PyObject *name;
+        PyObject *value;
+        if (h3_response_header_parts(
+                PySequence_Fast_GET_ITEM(headers, i), &name, &value) < 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
 
 static PyObject *
 h3_take_buffered_body(WreathH3Stream *s)
@@ -388,8 +441,8 @@ h3_response_start(WreathH3Stream *s, PyObject *status_obj, PyObject *headers)
     if (header_items == NULL) return NULL;
     s->status = (int)status;
     Py_XSETREF(s->resp_headers, header_items);
-    s->response_started = 1;
     if (submit_response(s, 200) < 0) return NULL;
+    s->response_started = 1;
     return resolved_future(loop, Py_None);
 }
 
@@ -593,26 +646,12 @@ submit_response(WreathH3Stream *s, int default_status)
     PyOS_snprintf(status_buf, sizeof(status_buf), "%d", status);
 
     Py_ssize_t hcount = s->resp_headers ? PySequence_Fast_GET_SIZE(s->resp_headers) : 0;
-    PyObject *defaults = PyObject_GetAttr(
-        s->conn->endpoint->config, k_default_response_headers);
-    PyObject *default_headers = defaults ? PyObject_GetAttr(defaults, k_headers) : NULL;
-    Py_XDECREF(defaults);
-    if (default_headers == NULL) {
-        return -1;
-    }
-    PyObject *default_items = PySequence_Fast(
-        default_headers, "default response headers must be a sequence"
-    );
-    Py_DECREF(default_headers);
-    if (default_items == NULL) {
-        return -1;
-    }
+    PyObject *default_items = s->conn->endpoint->default_response_headers;
     Py_ssize_t dcount = PySequence_Fast_GET_SIZE(default_items);
     nghttp3_nv *nva = PyMem_Malloc(
         sizeof(nghttp3_nv) * (size_t)(hcount + dcount + 1)
     );
     if (nva == NULL) {
-        Py_DECREF(default_items);
         PyErr_NoMemory();
         return -1;
     }
@@ -627,15 +666,17 @@ submit_response(WreathH3Stream *s, int default_status)
     n++;
     for (Py_ssize_t i = 0; i < hcount; i++) {
         PyObject *pair = PySequence_Fast_GET_ITEM(s->resp_headers, i);
-        PyObject *name = PySequence_GetItem(pair, 0);
-        PyObject *value = PySequence_GetItem(pair, 1);
-        if (name == NULL || value == NULL) {
-            Py_XDECREF(name); Py_XDECREF(value); PyErr_Clear(); continue;
+        PyObject *name;
+        PyObject *value;
+        if (h3_response_header_parts(pair, &name, &value) < 0) {
+            PyMem_Free(nva);
+            return -1;
         }
-        char *np, *vp; Py_ssize_t nl, vl;
-        if (PyBytes_AsStringAndSize(name, &np, &nl) == 0 &&
-            PyBytes_AsStringAndSize(value, &vp, &vl) == 0 &&
-            !(nl > 0 && np[0] == ':')) {
+        char *np = PyBytes_AS_STRING(name);
+        char *vp = PyBytes_AS_STRING(value);
+        Py_ssize_t nl = PyBytes_GET_SIZE(name);
+        Py_ssize_t vl = PyBytes_GET_SIZE(value);
+        if (!(nl > 0 && np[0] == ':')) {
             if (wreath_ascii_equal_ci(np, nl, "date", 4)) has_date = 1;
             if (wreath_ascii_equal_ci(np, nl, "server", 6)) has_server = 1;
             nva[n].name = (uint8_t *)np;
@@ -645,20 +686,19 @@ submit_response(WreathH3Stream *s, int default_status)
             nva[n].flags = NGHTTP3_NV_FLAG_NONE;
             n++;
         }
-        Py_DECREF(name);
-        Py_DECREF(value);
     }
     for (Py_ssize_t i = 0; i < dcount; i++) {
         PyObject *pair = PySequence_Fast_GET_ITEM(default_items, i);
-        PyObject *name = PyTuple_GET_ITEM(pair, 0);
-        PyObject *value = PyTuple_GET_ITEM(pair, 1);
-        char *np, *vp;
-        Py_ssize_t nl, vl;
-        if (PyBytes_AsStringAndSize(name, &np, &nl) < 0 ||
-            PyBytes_AsStringAndSize(value, &vp, &vl) < 0) {
-            PyErr_Clear();
-            continue;
+        PyObject *name;
+        PyObject *value;
+        if (h3_response_header_parts(pair, &name, &value) < 0) {
+            PyMem_Free(nva);
+            return -1;
         }
+        char *np = PyBytes_AS_STRING(name);
+        char *vp = PyBytes_AS_STRING(value);
+        Py_ssize_t nl = PyBytes_GET_SIZE(name);
+        Py_ssize_t vl = PyBytes_GET_SIZE(value);
         if ((has_date && wreath_ascii_equal_ci(np, nl, "date", 4)) ||
             (has_server && wreath_ascii_equal_ci(np, nl, "server", 6))) continue;
         nva[n].name = (uint8_t *)np;
@@ -671,7 +711,6 @@ submit_response(WreathH3Stream *s, int default_status)
     nghttp3_data_reader dr = {read_response_data};
     int rc = nghttp3_conn_submit_response(s->conn->h3, s->stream_id, nva, n, &dr);
     PyMem_Free(nva);
-    Py_DECREF(default_items);
     if (rc != 0) {
         PyErr_Format(PyExc_RuntimeError, "nghttp3 response submission failed: %d", rc);
         return -1;

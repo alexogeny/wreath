@@ -573,7 +573,7 @@ def session_ancestry(pid: int | None = None) -> tuple[str, ...]:
     own = ""
     for line in raw.splitlines():
         parts = line.split(":", 2)
-        if len(parts) == 3 and parts[0] == "0":
+        if len(parts) == 3 and parts[0] == "0" and not parts[1]:
             own = parts[2]
             break
     if not own:

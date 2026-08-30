@@ -23,35 +23,25 @@ from .targets import (
 class _ImportRewrite(_EmitterState):
     def rewrite_imports(self, tree: ast.Module) -> None:
         last_import_line = 0
-        live_httpx = {
-            node.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Name)
-            and self.imports.origin(node).startswith("httpx")
-            and id(node) not in self._rewritten
-            and not self._inside_replaced(node)
-        }
-        # The django names still mentioned once the walk is finished. A name is
-        # live where a reference to it survived un-rewritten and outside every
-        # replaced span -- the same question `live_httpx` above asks, and the
-        # only honest one: `_retain` is an allow-list of specific origins, not a
-        # record of what the module still uses.
-        live_django = {
-            node.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Name)
-            and self.imports.origin(node).startswith("django.")
-            and id(node) not in self._rewritten
-            and not self._inside_replaced(node)
-        }
-        live_optional_models = {
-            node.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Name)
-            and self.imports.origin(node).split(".")[0] in {"pydantic_settings", "pydantic_partial"}
-            and id(node) not in self._rewritten
-            and not self._inside_replaced(node)
-        }
+        live_names: set[str] = set()
+        live_httpx: set[str] = set()
+        live_django: set[str] = set()
+        live_optional_models: set[str] = set()
+        for candidate in ast.walk(tree):
+            if (
+                not isinstance(candidate, ast.Name)
+                or id(candidate) in self._rewritten
+                or self._inside_replaced(candidate)
+            ):
+                continue
+            live_names.add(candidate.id)
+            origin = self.imports.origin(candidate)
+            if origin.startswith("httpx"):
+                live_httpx.add(candidate.id)
+            elif origin.startswith("django."):
+                live_django.add(candidate.id)
+            elif origin.split(".", 1)[0] in {"pydantic_settings", "pydantic_partial"}:
+                live_optional_models.add(candidate.id)
         # Only the imports at the *top* of the file decide where new ones go. One
         # module that imports something halfway down the file, and following the
         # last import anywhere put `from wreath.orm import Session` below the
@@ -146,7 +136,7 @@ class _ImportRewrite(_EmitterState):
                     alias.name
                     for alias in node.names
                     if alias.name in self._removed_middleware_imports
-                    and (alias.asname or alias.name) not in self._retain
+                    and (alias.asname or alias.name) not in live_names
                 }
                 if gone:
                     self.buf.replace(node, self._keep_leftover(node, gone, node.module or ""))

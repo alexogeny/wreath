@@ -217,7 +217,7 @@ class TrafficClass:
                 f"traffic class country {invalid_country!r} must be an uppercase "
                 "two-letter ISO code"
             )
-        if any(isinstance(version, bool) or version not in (4, 6) for version in self.ip_versions):
+        if any(version not in (4, 6) for version in self.ip_versions):
             raise ValueError("traffic class ip_versions may contain only 4 and 6")
         invalid_source = next(
             (source for source in self.address_sources if source not in {"socket", "forwarded"}),

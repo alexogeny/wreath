@@ -973,6 +973,234 @@ parse_document(const char *data, Py_ssize_t len)
     return value;
 }
 
+/* Parse the common successful typed-body shape without first materialising the
+ * top-level dict.  Field values still use the canonical JSON parser, then run
+ * through their startup-compiled child plans in declaration order before the
+ * dataclass is constructed.  Anything outside that exact success path returns
+ * NotImplemented: the caller replays the bytes through the full decoder and
+ * validator, which owns every refusal and uncommon plan shape. */
+static PyObject *
+parse_dataclass_document(const char *data, Py_ssize_t len, PyObject *plan,
+                         PyObject *loc_seq)
+{
+    enum { OP_DATACLASS = 9 };
+    if (!PyTuple_Check(plan) || PyTuple_GET_SIZE(plan) != 6) {
+        return Py_NewRef(Py_NotImplemented);
+    }
+    long opcode = PyLong_AsLong(PyTuple_GET_ITEM(plan, 0));
+    if (opcode == -1 && PyErr_Occurred()) return NULL;
+    if (opcode != OP_DATACLASS) return Py_NewRef(Py_NotImplemented);
+
+    PyObject *fields = PyTuple_GET_ITEM(plan, 2);
+    PyObject *field_indices = PyTuple_GET_ITEM(plan, 5);
+    if (!PyTuple_Check(fields) || !PyDict_Check(field_indices)) {
+        return Py_NewRef(Py_NotImplemented);
+    }
+    Py_ssize_t field_count = PyTuple_GET_SIZE(fields);
+    PyObject **values = field_count == 0 ? NULL
+        : PyMem_Calloc((size_t)field_count, sizeof(*values));
+    if (field_count != 0 && values == NULL) {
+        PyMem_Free(values);
+        return PyErr_NoMemory();
+    }
+
+    Parser p = {0};
+    p.start = data;
+    p.cur = data;
+    p.end = data + len;
+    if (++p.tokens % json_token_tape == 0 && PyErr_CheckSignals() < 0) {
+        PyMem_Free(values);
+        return NULL;
+    }
+    PyObject *loc = NULL;
+    PyObject *errors = NULL;
+    PyObject *instance = NULL;
+    int fallback = 0;
+    Py_ssize_t present_count = 0;
+
+    skip_ws(&p);
+    if (p.cur >= p.end || *p.cur != '{') {
+        fallback = 1;
+        goto done;
+    }
+    p.cur++;
+    skip_ws(&p);
+    if (p.cur < p.end && *p.cur == '}') {
+        p.cur++;
+        goto parsed;
+    }
+    for (;;) {
+        skip_ws(&p);
+        if (p.cur >= p.end || *p.cur != '"') {
+            fallback = 1;
+            goto done;
+        }
+        p.cur++;
+        PyObject *key = parse_string_ex(&p, 1);
+        if (key == NULL) {
+            if (PyErr_ExceptionMatches(PyExc_ValueError)) {
+                PyErr_Clear();
+                fallback = 1;
+            }
+            goto done;
+        }
+        skip_ws(&p);
+        if (p.cur >= p.end || *p.cur != ':') {
+            Py_DECREF(key);
+            fallback = 1;
+            goto done;
+        }
+        p.cur++;
+
+        PyObject *field_index_value = PyDict_GetItemWithError(field_indices, key);
+        Py_DECREF(key);
+        if (field_index_value == NULL) {
+            if (PyErr_Occurred()) goto done;
+            fallback = 1;
+            goto done;
+        }
+        Py_ssize_t field_index = PyLong_AsSsize_t(field_index_value);
+        if (field_index < 0 && PyErr_Occurred()) goto done;
+        if (field_index >= field_count || values[field_index] != NULL) {
+            fallback = 1;
+            goto done;
+        }
+        PyObject *value = parse_value(&p);
+        if (value == NULL) {
+            if (PyErr_ExceptionMatches(PyExc_ValueError)) {
+                PyErr_Clear();
+                fallback = 1;
+            }
+            goto done;
+        }
+        values[field_index] = value;
+        present_count++;
+
+        skip_ws(&p);
+        if (p.cur < p.end && *p.cur == ',') {
+            p.cur++;
+            continue;
+        }
+        if (p.cur < p.end && *p.cur == '}') {
+            p.cur++;
+            break;
+        }
+        fallback = 1;
+        goto done;
+    }
+
+parsed:
+    skip_ws(&p);
+    if (p.cur != p.end) {
+        fallback = 1;
+        goto done;
+    }
+    for (Py_ssize_t index = 0; index < field_count; index++) {
+        PyObject *field = PyTuple_GET_ITEM(fields, index);
+        if (values[index] == NULL) {
+            long required = PyLong_AsLong(PyTuple_GET_ITEM(field, 3));
+            if (required == -1 && PyErr_Occurred()) goto done;
+            if (required) {
+                fallback = 1;
+                goto done;
+            }
+        }
+    }
+
+    loc = PySequence_List(loc_seq);
+    errors = PyList_New(0);
+    if (loc == NULL || errors == NULL) goto done;
+    long steps = WREATH_VALIDATE_MAX_STEPS - 1; /* the dataclass node */
+    for (Py_ssize_t index = 0; index < field_count; index++) {
+        if (values[index] == NULL) continue;
+        PyObject *field = PyTuple_GET_ITEM(fields, index);
+        PyObject *wire_name = PyTuple_GET_ITEM(field, 1);
+        if (PyList_Append(loc, wire_name) < 0) goto done;
+        PyObject *validated = wreath_validate_node(
+            PyTuple_GET_ITEM(field, 2), values[index], loc, errors, &steps);
+        if (PyList_SetSlice(
+                loc, PyList_GET_SIZE(loc) - 1, PyList_GET_SIZE(loc), NULL) < 0) {
+            Py_XDECREF(validated);
+            goto done;
+        }
+        if (validated == NULL) goto done;
+        Py_SETREF(values[index], validated);
+        if (PyList_GET_SIZE(errors) != 0 || steps < 0) {
+            fallback = 1;
+            goto done;
+        }
+    }
+
+    PyObject *cls = PyTuple_GET_ITEM(plan, 1);
+    int positional = PyObject_IsTrue(PyTuple_GET_ITEM(plan, 4));
+    if (positional < 0) goto done;
+    if (positional && present_count == field_count) {
+        instance = PyObject_Vectorcall(cls, values, (size_t)field_count, NULL);
+    }
+    else {
+        PyObject *kwargs = PyDict_New();
+        if (kwargs == NULL) goto done;
+        for (Py_ssize_t index = 0; index < field_count; index++) {
+            if (values[index] == NULL) continue;
+            PyObject *name = PyTuple_GET_ITEM(PyTuple_GET_ITEM(fields, index), 0);
+            if (PyDict_SetItem(kwargs, name, values[index]) < 0) {
+                Py_DECREF(kwargs);
+                goto done;
+            }
+        }
+        instance = PyObject_VectorcallDict(cls, NULL, 0, kwargs);
+        Py_DECREF(kwargs);
+    }
+
+done:
+    parser_clear(&p);
+    for (Py_ssize_t index = 0; index < field_count; index++) {
+        Py_XDECREF(values[index]);
+    }
+    PyMem_Free(values);
+    Py_XDECREF(loc);
+    if (fallback) {
+        Py_XDECREF(errors);
+        Py_XDECREF(instance);
+        if (PyErr_Occurred()) PyErr_Clear();
+        return Py_NewRef(Py_NotImplemented);
+    }
+    if (instance == NULL) {
+        Py_XDECREF(errors);
+        return NULL;
+    }
+    return wreath_tuple2_from_owned(instance, errors);
+}
+
+PyObject *
+wreath_json_loads_validation(PyObject *arg, PyObject *plan, PyObject *loc_seq)
+{
+    if (!PyBytes_Check(arg) && !PyByteArray_Check(arg)) {
+        return Py_NewRef(Py_NotImplemented);
+    }
+    Py_buffer view;
+    if (PyObject_GetBuffer(arg, &view, PyBUF_SIMPLE) < 0) return NULL;
+    const char *data = view.buf;
+    Py_ssize_t len = view.len;
+    PyObject *result;
+    if ((len >= 3 && memcmp(data, "\xef\xbb\xbf", 3) == 0) ||
+        (len >= 2 && (data[0] == '\0' || data[1] == '\0' ||
+                      (uint8_t)data[0] == 0xFF || (uint8_t)data[0] == 0xFE))) {
+        result = Py_NewRef(Py_NotImplemented);
+    }
+    else {
+        if (Py_EnterRecursiveCall(" while decoding a JSON document")) {
+            result = NULL;
+        }
+        else {
+            result = parse_dataclass_document(data, len, plan, loc_seq);
+            Py_LeaveRecursiveCall();
+        }
+    }
+    PyBuffer_Release(&view);
+    return result;
+}
+
 /* Fall back to stdlib json.loads for inputs whose encoding detection we do
  * not reimplement (UTF-16/32 payloads and strs that cannot encode to UTF-8).
  */

@@ -200,10 +200,8 @@ class RedactionPolicy:
         object.__setattr__(self, "query_allowlist", q_allow)
         object.__setattr__(self, "query_hash", q_hash)
         object.__setattr__(self, "query_mask", q_mask)
-        if not isinstance(self.body, BodyCapture):
-            object.__setattr__(self, "body", BodyCapture(self.body))
-        if not isinstance(self.dependency, BodyCapture):
-            object.__setattr__(self, "dependency", BodyCapture(self.dependency))
+        object.__setattr__(self, "body", BodyCapture(self.body))
+        object.__setattr__(self, "dependency", BodyCapture(self.dependency))
         _require(self.max_body_bytes >= 0, "max_body_bytes must be >= 0")
         _require(self.max_body_bytes <= _MAX_CAPTURE_BYTES, "max_body_bytes too large")
         _require(0 <= self.max_fields <= _MAX_FIELDS, "max_fields out of range")
@@ -346,10 +344,8 @@ class RecordingPolicy:
             (arm.query_allowlist, arm.query_hash, arm.query_mask),
             (ceiling.query_allowlist, ceiling.query_hash, ceiling.query_mask),
         )
-        within_body = arm.body.value in _BODY_ORDER and (
-            _BODY_ORDER[arm.body.value] <= _BODY_ORDER[ceiling.body.value]
-        )
-        within_dependency = arm.dependency.value in _BODY_ORDER and (
+        within_body = _BODY_ORDER[arm.body.value] <= _BODY_ORDER[ceiling.body.value]
+        within_dependency = (
             _BODY_ORDER[arm.dependency.value] <= _BODY_ORDER[ceiling.dependency.value]
         )
         return (
@@ -765,9 +761,9 @@ class AttemptPolicy:
         _require(self.max_boundaries <= _MAX_FIELDS, "max_boundaries out of range")
         allowlist = frozenset(self.argument_allowlist)
         for key in sorted(allowlist):
-            task, dot, parameter = key.rpartition(".")
+            task, _, parameter = key.rpartition(".")
             _require(
-                bool(dot) and bool(task) and bool(parameter),
+                bool(task) and bool(parameter),
                 f"argument allowlist entry {key!r} must be 'task.parameter'",
             )
         object.__setattr__(self, "argument_allowlist", allowlist)
@@ -815,7 +811,7 @@ class AttemptPolicy:
             One pair per allowed parameter the call actually supplied, in
             signature order.
         """
-        if not self.argument_allowlist or handler is None:
+        if handler is None:
             return ()
         wanted = {
             key.rpartition(".")[2]

@@ -366,8 +366,10 @@ async def test_a_queued_acquire_still_times_out() -> None:
     try:
         pool = db.pool("read")
         held = await pool.acquire()
-        with pytest.raises(TimeoutError, match="timed out acquiring"):
-            await pool.acquire()
-        await pool.release(held)
+        try:
+            with pytest.raises(TimeoutError, match="timed out acquiring"):
+                await asyncio.wait_for(pool.acquire(), timeout=1)
+        finally:
+            await pool.release(held)
     finally:
         await db.stop()

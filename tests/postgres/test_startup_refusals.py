@@ -53,6 +53,7 @@ async def test_md5_authentication_is_refused_without_the_legacy_opt_in(
     monkeypatch.delenv(postgres.LEGACY_MD5_ENV, raising=False)
     reader = asyncio.StreamReader()
     reader.feed_data(_md5_challenge(b"salt"))
+    reader.feed_eof()
     writer = _Writer()
     info = postgres._parse_dsn("postgresql://wreath:secret@127.0.0.1/wreath_test")
 
@@ -67,6 +68,7 @@ async def test_md5_authentication_is_refused_off_loopback_even_when_opted_in(
     monkeypatch.setenv(postgres.LEGACY_MD5_ENV, postgres.LEGACY_MD5_VALUE)
     reader = asyncio.StreamReader()
     reader.feed_data(_md5_challenge(b"salt"))
+    reader.feed_eof()
     writer = _Writer()
     info = postgres._parse_dsn("postgresql://wreath:secret@db.internal/wreath_test")
 
@@ -101,6 +103,7 @@ async def test_md5_authentication_needs_a_password(
     monkeypatch.setenv(postgres.LEGACY_MD5_ENV, postgres.LEGACY_MD5_VALUE)
     reader = asyncio.StreamReader()
     reader.feed_data(_md5_challenge(b"salt"))
+    reader.feed_eof()
     writer = _Writer()
     info = postgres._parse_dsn("postgresql://wreath@127.0.0.1/wreath_test")
 
@@ -132,6 +135,7 @@ async def test_md5_is_refused_when_the_peer_is_remote_however_the_dsn_reads(
     monkeypatch.setenv(postgres.LEGACY_MD5_ENV, postgres.LEGACY_MD5_VALUE)
     reader = asyncio.StreamReader()
     reader.feed_data(_md5_challenge(b"salt"))
+    reader.feed_eof()
     writer = _Writer()
     info = postgres._parse_dsn("postgresql://wreath:secret@localhost/wreath_test")
 

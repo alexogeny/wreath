@@ -46,6 +46,56 @@ def _buffered_reader(wire: bytes) -> asyncio.StreamReader:
     return reader
 
 
+@pytest.mark.asyncio
+async def test_timed_handles_bytes_finished_futures_and_coroutines() -> None:
+    loop = asyncio.get_running_loop()
+    finished = loop.create_future()
+    finished.set_result(b"future")
+    pending = loop.create_future()
+    loop.call_soon(pending.set_result, b"pending")
+
+    async def later() -> bytes:
+        return b"coroutine"
+
+    assert await http_client_module._timed(b"bytes", 1) == b"bytes"
+    assert await http_client_module._timed(finished, 1) == b"future"
+    assert await http_client_module._timed(pending, 1) == b"pending"
+    assert await http_client_module._timed(later(), 1) == b"coroutine"
+
+
+@pytest.mark.asyncio
+async def test_request_timed_enters_a_configured_total_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered: list[float] = []
+
+    class Deadline:
+        def __init__(self, seconds: float) -> None:
+            self.seconds = seconds
+
+        async def __aenter__(self) -> None:
+            entered.append(self.seconds)
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    async def request_flow(*_args: object, **_kwargs: object) -> object:
+        return object()
+
+    monkeypatch.setattr(http_client_module.asyncio, "timeout", Deadline)
+    monkeypatch.setattr(HTTPClient, "_request_flow", request_flow)
+    client = HTTPClient(
+        "total-deadline-unit",
+        base_url="http://127.0.0.1",
+        destination=_local_policy(),
+        timeout=ClientTimeout(total=0.25),
+    )
+
+    await client._request_timed("GET", "/", headers=(), body=b"", idempotency_key=None)
+
+    assert entered == [0.25]
+
+
 def test_ipv6_socket_scope_is_preserved_exactly_once() -> None:
     assert HTTPClient._address(socket.AF_INET6, ("fe80::1", 443, 0, 7)) == "fe80::1%7"
     assert HTTPClient._address(socket.AF_INET6, ("fe80::1%eth0", 443, 0, 7)) == ("fe80::1%eth0")
@@ -96,6 +146,51 @@ async def test_python_chunk_reader_refuses_a_malformed_chunk_terminator() -> Non
 
     with pytest.raises(ProtocolError, match="malformed response chunk terminator"):
         await client._read_chunked(reader)
+
+
+@pytest.mark.asyncio
+async def test_chunk_iterator_stops_at_the_empty_trailer_line() -> None:
+    client = HTTPClient(
+        "chunk-trailer-unit",
+        base_url="http://127.0.0.1",
+        destination=_local_policy(),
+    )
+
+    assert [chunk async for chunk in client._iter_chunked(_buffered_reader(b"0\r\n\r\n"))] == []
+
+
+@pytest.mark.asyncio
+async def test_chunk_iterator_yields_buffered_payload_before_the_chunk_is_complete() -> None:
+    client = HTTPClient(
+        "chunk-stream-unit",
+        base_url="http://127.0.0.1",
+        destination=_local_policy(),
+    )
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"10000\r\npartial")
+    chunks = client._iter_chunked(reader)
+
+    try:
+        assert await asyncio.wait_for(anext(chunks), 0.1) == b"partial"
+    finally:
+        await chunks.aclose()
+
+
+@pytest.mark.asyncio
+async def test_response_head_skips_informational_status_and_returns_the_final_head() -> None:
+    client = HTTPClient(
+        "response-head-unit",
+        base_url="http://127.0.0.1",
+        destination=_local_policy(),
+    )
+    reader = _buffered_reader(
+        b"HTTP/1.1 100 Continue\r\n\r\n"
+        b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n"
+    )
+
+    minor, status, reason, headers = await client._read_head(reader)
+
+    assert (minor, status, reason, headers) == (1, 200, b"OK", [(b"content-length", b"0")])
 
 
 @pytest.mark.parametrize(("over_tls", "keep_open"), [(False, True), (True, False)])
@@ -313,6 +408,44 @@ async def test_release_fast_path_checks_every_pool_state(blocked_by: str) -> Non
     await client._release(connection, True)
 
     assert condition.entered == 1
+
+
+@pytest.mark.asyncio
+async def test_non_reusable_release_closes_the_connection() -> None:
+    class Reader:
+        @staticmethod
+        def at_eof() -> bool:
+            return False
+
+    class Writer:
+        closed = False
+        waited = False
+
+        @staticmethod
+        def is_closing() -> bool:
+            return False
+
+        def close(self) -> None:
+            self.closed = True
+
+        async def wait_closed(self) -> None:
+            self.waited = True
+
+    writer = Writer()
+    connection = http_client_module._Connection(Reader(), writer)
+    client = HTTPClient(
+        "release-close",
+        base_url="http://127.0.0.1:8000",
+        destination=_local_policy(),
+    )
+    client._started = True
+    client._open = 1
+    client._active.add(connection)
+
+    await client._release(connection, False)
+
+    assert writer.closed
+    assert writer.waited
 
 
 @pytest.mark.asyncio
@@ -688,6 +821,7 @@ async def test_client_rejects_redirect_loop_at_configured_bound() -> None:
         base_url=f"http://127.0.0.1:{port}",
         destination=_local_policy(),
         redirect=RedirectPolicy(enabled=True, max_hops=1),
+        timeout=ClientTimeout(total=0.25),
     )
     try:
         await client.start()
@@ -697,6 +831,41 @@ async def test_client_rejects_redirect_loop_at_configured_bound() -> None:
         await client.close()
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_redirect_limit_is_checked_before_another_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    async def redirect(*_args: object, **_kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0)
+        return http_client_module.ClientResponse(
+            302,
+            ((b"location", b"/loop"),),
+            b"",
+            "1.1",
+        )
+
+    monkeypatch.setattr(HTTPClient, "_send_with_retries", redirect)
+    client = HTTPClient(
+        "redirect-limit-unit",
+        base_url="http://127.0.0.1",
+        destination=_local_policy(),
+        redirect=RedirectPolicy(enabled=True, max_hops=1),
+    )
+    client._started = True
+
+    with pytest.raises(RedirectError, match="limit"):
+        await asyncio.wait_for(
+            client._request_flow("GET", "/", headers=(), body=b"", idempotency_key=None),
+            0.1,
+        )
+
+    assert calls == 2
 
 
 @pytest.mark.asyncio
@@ -724,7 +893,7 @@ async def test_total_timeout_bounds_all_retry_attempts_and_backoff() -> None:
     try:
         await client.start()
         with pytest.raises(RequestTimeout, match="total"):
-            await client.get("/")
+            await asyncio.wait_for(client.get("/"), 0.25)
     finally:
         await client.close()
         server.close()

@@ -1972,6 +1972,16 @@ def _reap_owned_worker(pids: Iterable[int]) -> tuple[int, int]:
     return 0, 0
 
 
+def _terminate_owned_worker(pid: int) -> None:
+    if pid <= 0:
+        raise ValueError(f"expected a positive worker PID, got {pid}")
+    try:
+        os.kill(pid, 9)
+    except ProcessLookupError:
+        pass
+    os.waitpid(pid, 0)
+
+
 def _run_parallel(
     collection: Collection,
     *,
@@ -1989,6 +1999,7 @@ def _run_parallel(
     fuzz_directory: Path | None = None,
 ) -> tuple[tuple[Result, ...], Any | None]:
     """Run module-local C dispatch loops in isolated fork workers."""
+    controller_pid = os.getpid()
     append_stage_event = None
     if stage_events is not None:
         from ._test_runner import _append_stage_event
@@ -2207,6 +2218,8 @@ def _run_parallel(
                 write_control = None
             pid = os.fork()
             if pid == 0:  # pragma: no cover - worker process
+                if os.getpid() == controller_pid:
+                    os.kill(os.getpid(), 9)
                 os.close(read_progress)
                 if write_control is not None:
                     os.close(write_control)
@@ -2266,6 +2279,8 @@ def _run_parallel(
                     else:
                         os.close(write_progress)
                     os._exit(exit_code)
+            if os.getpid() != controller_pid:
+                os.kill(os.getpid(), 9)
             os.close(write_progress)
             if read_control is not None:
                 os.close(read_control)
@@ -2383,11 +2398,7 @@ def _run_parallel(
         if progress_stream is not None:
             progress_stream.close()
         for pid, (_, _, _, descriptor, control_descriptor) in tuple(children.items()):
-            try:
-                os.kill(pid, 9)
-            except ProcessLookupError:
-                pass
-            os.waitpid(pid, 0)
+            _terminate_owned_worker(pid)
             os.close(descriptor)
             if control_descriptor is not None:
                 os.close(control_descriptor)

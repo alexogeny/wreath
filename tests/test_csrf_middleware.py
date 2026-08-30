@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from wreath.policy import CsrfPolicy, csrf_token
+from wreath.policy.csrf import _referer_origin
 from wreath.request import Request
 from wreath.response import Response
 
@@ -216,14 +217,6 @@ def test_csrf_configuration_validation() -> None:
         CsrfPolicy("s" * 32, form_field="")
 
 
-# `wreath mutant` reported every branch of the origin normaliser and every one
-# of these refusals UNREACHED across each file that exercises CSRF: no test ever
-# passed `trusted_origins=`, so the whole cross-origin allowlist -- the thing
-# that lets a separate front-end POST to this API at all -- was unexercised.
-# The normaliser is now shared with `WebSocketOriginPolicy` (they had a
-# byte-identical copy each), so these cover both callers' input handling.
-
-
 async def _admits(
     middleware: CsrfPolicy,
     *,
@@ -285,6 +278,30 @@ async def test_a_trusted_origin_also_covers_the_referer_fallback() -> None:
     middleware = CsrfPolicy("s" * 32, trusted_origins=["https://app.example"])
     assert await _admits(middleware, referer=b"https://app.example/page?x=1")
     assert not await _admits(middleware, referer=b"https://evil.example/page")
+
+
+@pytest.mark.parametrize(
+    "referer",
+    [b"ftp://example.test/page", b"https:///page"],
+    ids=["scheme", "hostname"],
+)
+async def test_an_invalid_referer_is_refused(referer: bytes) -> None:
+    assert _referer_origin(referer.decode("ascii")) is None
+    assert not await _admits(CsrfPolicy("s" * 32), referer=referer)
+
+
+@pytest.mark.parametrize(
+    ("referer", "origin"),
+    [
+        ("http://example.test:80/page", b"http://example.test"),
+        ("https://example.test:443/page", b"https://example.test"),
+        ("http://example.test:8080/page", b"http://example.test:8080"),
+        ("https://example.test:8443/page", b"https://example.test:8443"),
+        ("https://[2001:DB8::1]:443/page", b"https://[2001:db8::1]"),
+    ],
+)
+def test_referer_origin_normalizes_authority(referer: str, origin: bytes) -> None:
+    assert _referer_origin(referer) == origin
 
 
 @pytest.mark.parametrize(

@@ -86,6 +86,43 @@ def test_keyword_only_dataclass_keeps_its_defaulted_constructor_path() -> None:
 
 
 @pytest.mark.parametrize(
+    "data",
+    [
+        b'{"lines":[{"stockCode":"alpha-1","quantity":2}]}',
+        b'{"lines":[{"stockCode":"X","quantity":101}]}',
+        b'{"lines":[]}',
+        b'{"lines":[],"extra":true}',
+        b'{"lines":[],"lines":[{"stockCode":"beta-2","quantity":3}]}',
+    ],
+)
+def test_fused_json_dataclass_matches_decode_then_validate(data: bytes) -> None:
+    plan = _compile_plan(ConstrainedPayload, frozenset())
+
+    expected = _core.run_validation(plan, _core.json_loads(data), ("body",))
+    actual = _core.decode_json_validation_tape(data, plan, ("body",))
+
+    assert actual == expected
+
+
+@pytest.mark.parametrize(
+    "data",
+    [b'{"value":7}', bytearray(b'{"value":7,"label":"named"}')],
+)
+def test_fused_json_dataclass_preserves_keyword_only_defaults(
+    data: bytes | bytearray,
+) -> None:
+    plan = _compile_plan(KeywordPayload, frozenset())
+
+    result, errors = _core.decode_json_validation_tape(data, plan, ("body",))
+
+    assert errors == []
+    assert result == KeywordPayload(
+        value=7,
+        label="named" if isinstance(data, bytearray) else "default",
+    )
+
+
+@pytest.mark.parametrize(
     ("annotation", "value"),
     [
         (Annotated[int, Field(gt=0, ge=1, lt=11, le=10)], 5),

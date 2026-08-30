@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+import wreath._auth.cedar_engine as cedar_engine
 from wreath import Wreath
 from wreath._auth.cedar import _request_now
 from wreath._auth.models import AuthorizationDecision
@@ -27,6 +28,17 @@ ALICE = EntityUid("User", "alice")
 BOB = EntityUid("User", "bob")
 READ = EntityUid("Action", "read")
 DOC = EntityUid("Document", "42")
+
+
+def test_cedar_tokenizer_keeps_integer_and_underscored_identifier_boundaries() -> None:
+    tokens = cedar_engine._tokenize("9 snake_case snake9")
+
+    assert [(token.kind, token.value) for token in tokens] == [
+        ("int", "9"),
+        ("ident", "snake_case"),
+        ("ident", "snake9"),
+        ("eof", ""),
+    ]
 
 
 def _request_for(identity: Identity | None) -> Request:

@@ -258,6 +258,30 @@ async def test_a_store_without_a_member_directory_is_refused_at_build_time() -> 
         )
 
 
+def test_a_user_store_without_batch_lookup_is_refused_at_build_time() -> None:
+    class SingleLookupStore:
+        async def get_by_id(self, user_id: str) -> None:
+            return None
+
+        async def get_by_email(self, email: str) -> None:
+            return None
+
+        async def create(self, email: str, hashed_password: str) -> None:
+            return None
+
+        async def update(self, user: Any) -> None:
+            return None
+
+    fixture = directory()
+    with pytest.raises(ValueError, match="get_many_by_id"):
+        scim_router(
+            fixture.app,
+            users=SingleLookupStore(),
+            organizations=fixture.organizations,
+            organization="acme",
+        )
+
+
 @pytest.mark.asyncio
 async def test_an_organization_id_that_would_break_the_entity_reference_is_refused() -> None:
     fixture = directory()
@@ -453,6 +477,42 @@ async def test_a_list_is_a_list_response_with_one_based_paging() -> None:
         "user1@example.com",
         "user2@example.com",
     ]
+
+
+@pytest.mark.asyncio
+async def test_user_lists_issue_one_ordered_batch_lookup() -> None:
+    class CountingStore(InMemoryUserStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.batch_calls: list[tuple[str, ...]] = []
+
+        async def get_many_by_id(self, user_ids):
+            ordered = tuple(user_ids)
+            self.batch_calls.append(ordered)
+            return await super().get_many_by_id(ordered)
+
+    fixture = directory()
+    fixture.users = CountingStore()
+    fixture.app.include_router(
+        scim_router(
+            fixture.app,
+            users=fixture.users,
+            organizations=fixture.organizations,
+            organization="acme",
+            prefix="/scim/v3",
+        )
+    )
+    async with fixture.client() as client:
+        await client.post("/scim/v3/Users", json={"userName": "b@example.com"}, headers=AUTH)
+        await client.post("/scim/v3/Users", json={"userName": "a@example.com"}, headers=AUTH)
+        page = await client.get("/scim/v3/Users", headers=AUTH)
+        filtered = await client.get("/scim/v3/Users?filter=userName pr", headers=AUTH)
+        empty = await client.get("/scim/v3/Users?count=0", headers=AUTH)
+
+    assert page.status == 200
+    assert filtered.status == 200
+    assert empty.status == 200
+    assert fixture.users.batch_calls == [("1", "2"), ("1", "2")]
 
 
 @pytest.mark.asyncio

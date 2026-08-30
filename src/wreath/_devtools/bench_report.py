@@ -169,12 +169,12 @@ def _range(row: dict[str, Any], metric: str) -> tuple[float, float] | None:
 
 
 def _separated(rows: list[dict[str, Any]], metric: str, lower_better: bool) -> bool:
-    """Is the leader's advantage bigger than the run-to-run spread?
-
-    With one run per row there is no spread to compare against, so this answers
-    True and the caller falls back to the plain median ordering.
-    """
-    valid = [r for r in rows if int(r.get("errors", 0)) == 0 and metric in r]
+    """Is the leader's advantage bigger than the run-to-run spread?"""
+    valid = [
+        r
+        for r in rows
+        if not int(r.get("errors", 0)) and isinstance(r.get(metric), int | float)
+    ]
     if len(valid) < 2:
         return True
     ordered = sorted(valid, key=lambda r: float(r[metric]), reverse=not lower_better)
@@ -346,10 +346,10 @@ def _overview(rows: list[dict[str, Any]], scenarios: list[str]) -> str:
 
 def _extreme_class(value: float, values: list[float], lower_better: bool) -> dict[str, bool]:
     """Green on the best, red on the worst -- only when there is a real spread."""
-    if len(values) < 2 or max(values) == min(values):
+    if len(values) < 2 or (maximum := max(values)) == (minimum := min(values)):
         return {}
-    best, worst = (min(values), max(values)) if lower_better else (max(values), min(values))
-    if max(values) / min(values) < 1.05:  # a 5% spread is not a story
+    best, worst = (minimum, maximum) if lower_better else (maximum, minimum)
+    if minimum > 0 and maximum / minimum < 1.05:  # a 5% spread is not a story
         return {}
     return {"best": value == best, "worst": value == worst}
 

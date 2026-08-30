@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterable, AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 from .._compression import (
     _dcz_compress,
@@ -33,7 +33,7 @@ from ..compression import (
     zstd_compress,
 )
 from ..request import Request
-from ..response import FileResponse, Response, StreamingResponse
+from ..response import Response, StreamingResponse
 
 _BODYLESS = {204, 304}
 
@@ -416,8 +416,12 @@ class CompressionPolicy:
             if prepared_body is not None and response.body is prepared_body[0]:
                 fragment_parts = prepared_body[1:]
             response.body = (
-                _dcz_compress(dcz_entry, response.body, level)
-                if coding == "dcz" and dcz_entry is not None
+                _dcz_compress(
+                    cast(tuple[bytes, bytes, Any, object | None], dcz_entry),
+                    response.body,
+                    level,
+                )
+                if coding == "dcz"
                 else _gzip_fragment_compress_with(
                     self._gzip_workspace,
                     fragment_parts if fragment_parts is not None else response.body,
@@ -437,8 +441,6 @@ class CompressionPolicy:
         elif isinstance(response, StreamingResponse) and self.compress_streaming:
             response.body = _compressed_stream(response.body, coding, level, content_type)
             replace_content_length(headers, None)
-        elif isinstance(response, FileResponse):
-            return response
         else:
             return response
 

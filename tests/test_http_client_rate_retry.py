@@ -86,7 +86,7 @@ async def test_throttle_disabled_is_noop() -> None:
 
 
 async def test_throttle_admits_first_request() -> None:
-    client = _client(rate=RatePolicy(enabled=True, capacity=5, rate=5))
+    client = _client(rate=RatePolicy(enabled=True, capacity=5, rate=5, max_wait=0.01))
     await client._throttle()  # first token available, no wait/raise
     assert client._rate_bucket is not None
 

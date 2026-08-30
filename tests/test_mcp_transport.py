@@ -373,22 +373,27 @@ async def test_a_session_is_bounded_in_concurrent_calls() -> None:
             )
         )
         await asyncio.wait_for(started.wait(), timeout=5)
-        second = await client.post(
-            "/mcp",
-            json={
-                "jsonrpc": "2.0",
-                "id": 12,
-                "method": "tools/call",
-                "params": {"name": "wait_forever"},
-            },
-            headers={"mcp-session-id": session_id},
-        )
-        error = second.json()["error"]
-        assert error["code"] == -32004
-        assert "in flight" in error["message"]
-        assert mcp.throttled == 1
-        await client.delete("/mcp", headers={"mcp-session-id": session_id})
-        await asyncio.wait_for(first, timeout=5)
+        try:
+            second = await asyncio.wait_for(
+                client.post(
+                    "/mcp",
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 12,
+                        "method": "tools/call",
+                        "params": {"name": "wait_forever"},
+                    },
+                    headers={"mcp-session-id": session_id},
+                ),
+                timeout=1,
+            )
+            error = second.json()["error"]
+            assert error["code"] == -32004
+            assert "in flight" in error["message"]
+            assert mcp.throttled == 1
+        finally:
+            await client.delete("/mcp", headers={"mcp-session-id": session_id})
+            await asyncio.wait_for(first, timeout=5)
 
 
 async def test_a_server_refuses_more_tools_than_its_ceiling() -> None:

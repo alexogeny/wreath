@@ -190,6 +190,48 @@ def test_per_chunk_covers_several_buckets_in_one_range():
     assert units.advance(start) == datetime.datetime(2026, 7, 24, 6, tzinfo=datetime.UTC)
 
 
+async def test_a_bucket_cursor_resumes_without_reanchoring(database, world):
+    walk = rollup_pass()
+    connection = await database.acquire()
+    start = datetime.datetime(2026, 7, 25, tzinfo=datetime.UTC)
+    expected = ((start,), (datetime.datetime(2026, 7, 26, tzinfo=datetime.UTC),))
+
+    bounded = await walk.units.next_range(
+        connection,
+        walk=walk,
+        cursor=(start,),
+        ceiling=[NOW.isoformat()],
+        frontier_sql=None,
+    )
+    unbounded = await walk.units.next_range(
+        connection,
+        walk=walk,
+        cursor=(start,),
+        ceiling=None,
+        frontier_sql=None,
+    )
+
+    assert bounded == expected
+    assert unbounded == expected
+    assert world.statements == []
+
+
+async def test_a_bucket_frontier_stops_the_next_range(database):
+    walk = rollup_pass()
+    connection = await database.acquire()
+    start = datetime.datetime(2026, 7, 27, tzinfo=datetime.UTC)
+
+    span = await walk.units.next_range(
+        connection,
+        walk=walk,
+        cursor=(start,),
+        ceiling=[NOW.isoformat()],
+        frontier_sql=None,
+    )
+
+    assert span is None
+
+
 async def test_a_bucketed_walk_drops_into_the_existing_machinery(database, world):
     walk = rollup_pass()
 

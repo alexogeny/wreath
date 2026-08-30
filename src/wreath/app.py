@@ -4363,10 +4363,9 @@ class Wreath:
                     await send({"type": "websocket.close", "code": 1008})
                     return
         if needs_auth:
-            if request is None:
-                raise RuntimeError("WebSocket authentication request was not constructed")
+            auth_request = cast(Request, request)
             try:
-                await self._authorize_request(request, requirement)
+                await self._authorize_request(auth_request, requirement)
             except Exception:  # noqa: BLE001 -- security ingress fails closed
                 # `Exception`, not `HTTPException`, and for the same reason the
                 # ingress hooks three lines above catch broadly: a handshake
@@ -4379,7 +4378,7 @@ class Wreath:
                 # application task nobody awaits.
                 await send({"type": "websocket.close", "code": 1008})
                 return
-            identity = request.identity
+            identity = auth_request.identity
         websocket = WebSocket(scope, receive, send, path_params, identity=identity)
         try:
             await handler(websocket)

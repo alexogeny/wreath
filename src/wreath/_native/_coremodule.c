@@ -20,6 +20,14 @@ wreath_decode_json_validation_tape(PyObject *Py_UNUSED(self), PyObject *args)
             args, "decode_json_validation_tape", 3, 3, &data, &plan, &loc)) {
         return NULL;
     }
+    result = wreath_json_loads_validation(data, plan, loc);
+    if (result == NULL) {
+        return NULL;
+    }
+    if (result != Py_NotImplemented) {
+        return result;
+    }
+    Py_DECREF(result);
     payload = wreath_json_loads(NULL, data);
     if (payload == NULL) {
         return NULL;

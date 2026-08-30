@@ -50,7 +50,7 @@ async def test_complete_insert_compiles_and_submits_once_per_shape(
 async def test_insert_compiles_once_per_distinct_column_set(
     session: Session, database: FakeDatabase
 ) -> None:
-    database.connection.script("RETURNING", [[_CREATED]])
+    database.connection.script("RETURNING", [[_CREATED] for _ in range(8)])
     for index in range(8):
         session.add(_user(index))
     for index in range(100, 108):
@@ -87,6 +87,7 @@ async def test_update_compiles_once_per_dirty_column_set(
 
     for user in users:
         user.name = "renamed"
+    database.connection.script("UPDATE", [[user.id] for user in users])
 
     with _count_write_sql_builds() as builds:
         await _flush(session)
@@ -110,6 +111,8 @@ async def test_update_distinct_dirty_sets_compile_separately(
             user.name = "renamed"
         else:
             user.email = f"changed{position}@e.x"
+    database.connection.script('SET "email"', [[user.id] for user in users[::2]])
+    database.connection.script("SET \"name\"", [[user.id] for user in users[1::2]])
 
     with _count_write_sql_builds() as builds:
         await _flush(session)
@@ -128,6 +131,7 @@ async def test_delete_compiles_once_per_model(registry: Registry, database: Fake
 
     for user in users:
         session.delete(user)
+    database.connection.script("DELETE", [[user.id] for user in users])
 
     with _count_write_sql_builds() as builds:
         await _flush(session)
@@ -196,12 +200,16 @@ async def test_first_changed_field_registers_the_dirty_object_once(registry: Reg
 
 @pytest.mark.parametrize("size", [16, 64, 256])
 async def test_one_flush_checks_only_the_dirty_identity(
-    registry: Registry, monkeypatch: pytest.MonkeyPatch, size: int
+    registry: Registry,
+    database: FakeDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+    size: int,
 ) -> None:
     session = Session(registry, "write")
     for index in range(size):
         _loaded_user(session, index)
     session._identity[(registry.spec_for(User), (size - 1,))].name = "changed"
+    database.connection.script("UPDATE", [[size - 1]])
 
     calls = _count_change_checks(monkeypatch)
     await _flush(session)
@@ -228,6 +236,7 @@ async def test_a_write_is_still_found_when_it_is_the_last_object(
     for index in range(8):
         _loaded_user(session, index)
     session._identity[(registry.spec_for(User), (7,))].name = "changed"
+    database.connection.script("UPDATE", [[7]])
 
     await _flush(session)
 

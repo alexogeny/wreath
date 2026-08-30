@@ -159,6 +159,35 @@ def test_maintenance_policy_keeps_the_native_policy_program_available() -> None:
     assert descriptor[-1] is not None
 
 
+@pytest.mark.parametrize("limit", [True, 1.0, 0, -1])
+def test_concurrency_policy_refuses_invalid_limits(limit) -> None:
+    with pytest.raises(ValueError, match="limit must be a positive integer"):
+        ConcurrencyPolicy(limit)
+
+
+@pytest.mark.parametrize("retry_after", [True, "1", -1])
+def test_concurrency_policy_refuses_invalid_retry_after(retry_after) -> None:
+    with pytest.raises(ValueError, match="retry_after must be a non-negative integer"):
+        ConcurrencyPolicy(1, retry_after=retry_after)
+
+
+@pytest.mark.parametrize("detail", ["", 1])
+def test_concurrency_policy_refuses_invalid_detail(detail) -> None:
+    with pytest.raises(ValueError, match="detail must not be empty"):
+        ConcurrencyPolicy(1, detail=detail)
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "expected_header"),
+    [(None, None), (0, b"0")],
+)
+def test_concurrency_refusal_only_advertises_configured_retry_after(
+    retry_after, expected_header
+) -> None:
+    response = ConcurrencyPolicy(1, retry_after=retry_after)._refusal()
+    assert dict(response.headers).get(b"retry-after") == expected_header
+
+
 @pytest.mark.parametrize(
     ("factory", "message"),
     [

@@ -50,7 +50,7 @@ from .. import _nplusone
 from .. import telemetry as _telemetry
 from .._jobcore import compute_backoff
 from . import keyset
-from .ledger import APPLYING, BLOCKED, DONE, STOPPED, UNVERIFIED, VERIFIED, VERIFYING, WALKING
+from .ledger import APPLYING, BLOCKED, DONE, UNVERIFIED, VERIFIED, VERIFYING, WALKING
 
 #: Backoff between attempts at one chunk, doubling and capped. Short, because
 #: these retries happen inside a shift whose whole budget is seconds.
@@ -432,13 +432,6 @@ async def _shift_bound(
 ) -> ShiftResult:
     ledger = walk.ledger
     keys = walk.units.keys
-    if row.phase in STOPPED:
-        # A stopped pass stays stopped until someone acts. Retrying it
-        # automatically is how a halt turns back into a silent skip -- and for
-        # `unverified` it would burn a maintenance window to fail at the same
-        # row. `wreath passes retry` is the way out of the first and there is
-        # deliberately no way out of the second but fixing the walk.
-        return ShiftResult(stopped="blocked", error=f"pass is {row.phase}")
     if row.phase in (VERIFYING, VERIFIED, APPLYING):
         # The walk finished and the gate is mid-sequence. Re-entering it is
         # safe: verification is idempotent, and every transition is a CAS.

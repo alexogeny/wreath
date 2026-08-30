@@ -129,6 +129,7 @@ typedef struct WreathH3Endpoint {
     PyObject *native_app;               /* bound Wreath._wreath_http, or NULL */
     WreathPolicyProgram policy;
     PyObject *config;
+    PyObject *default_response_headers;
     PyObject *loop;
     PyObject *registry;
     PyObject *transport;              /* DatagramTransport */
@@ -188,6 +189,7 @@ extern PyTypeObject *WreathH3StreamType;
 /* asgi.c: nghttp3 wiring + ASGI */
 int wreath_h3_setup_httpconn(WreathH3Conn *c);     /* create nghttp3_conn + bind streams */
 int wreath_h3_init_message_keys(void);          /* intern the ASGI message keys once */
+int wreath_h3_validate_response_headers(PyObject *headers);
 void wreath_h3_stream_disconnect(WreathH3Stream *s);
 int wreath_h3_alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen,
                           const unsigned char *in, unsigned int inlen, void *arg);

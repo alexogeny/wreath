@@ -14,5 +14,10 @@ void wreath_pg_hydrate_fini(void);
 int wreath_pg_hydrate_models(PyObject *decoder_plan, PyObject *tape_object,
                           PyObject *hydrate_plan, Py_ssize_t limit, PyObject *dest,
                           PyObject *identity_map, PyObject *owner);
+int wreath_pg_hydrate_validate(PyObject *decoder_plan, PyObject *hydrate_plan);
+int wreath_pg_hydrate_datarow(PyObject *decoder_plan, PyObject *hydrate_plan,
+                             PyObject *dest, PyObject *identity_map,
+                             PyObject *owner, PyObject *seen,
+                             const unsigned char *data, Py_ssize_t length);
 
 #endif

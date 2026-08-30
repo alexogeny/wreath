@@ -1,4 +1,4 @@
-"""Benchmark Wreath column-batch decoding against Slice 3 and PostgreSQL drivers."""
+"""Benchmark materialized and compact Wreath reads against PostgreSQL drivers."""
 
 from __future__ import annotations
 
@@ -65,19 +65,17 @@ async def _wreath_samples(
     *,
     batch: bool,
 ) -> list[float]:
-    previous = backend.Connection._batch_decode
-    backend.Connection._batch_decode = batch
     connection = await backend.connect(dsn)
     try:
-        _verify(await connection.fetch(sql), rows)
+        fetch = connection.fetch_batch if batch else connection.fetch
+        _verify(await fetch(sql), rows)
 
         async def operation() -> None:
-            _verify(await connection.fetch(sql), rows)
+            _verify(await fetch(sql), rows)
 
         return await _measure(operation, warmup, trials)
     finally:
         await connection.close()
-        backend.Connection._batch_decode = previous
 
 
 async def _asyncpg_samples(dsn: str, sql: str, rows: int, warmup: int, trials: int) -> list[float]:
@@ -130,7 +128,7 @@ async def _psycopg2_samples(dsn: str, sql: str, rows: int, warmup: int, trials: 
     return await asyncio.to_thread(blocking)
 
 
-def _summary(samples: list[float], rows: int) -> dict[str, object]:
+def _summary(samples: list[float], rows: int) -> dict[str, Any]:
     median = statistics.median(samples)
     ordered = sorted(samples)
     return {
@@ -144,10 +142,10 @@ def _summary(samples: list[float], rows: int) -> dict[str, object]:
 async def run(args: argparse.Namespace) -> int:
     backend = _native_backend()
     sql = _query(args.rows)
-    slice3 = await _wreath_samples(
+    records = await _wreath_samples(
         backend, args.dsn, sql, args.rows, args.warmup, args.trials, batch=False
     )
-    slice4 = await _wreath_samples(
+    batch = await _wreath_samples(
         backend, args.dsn, sql, args.rows, args.warmup, args.trials, batch=True
     )
     asyncpg, psycopg3, psycopg2 = await asyncio.gather(
@@ -156,14 +154,14 @@ async def run(args: argparse.Namespace) -> int:
         _psycopg2_samples(args.dsn, sql, args.rows, args.warmup, args.trials),
     )
     summaries = {
-        "wreath_slice3_scalar": _summary(slice3, args.rows),
-        "wreath_slice4_batch": _summary(slice4, args.rows),
+        "wreath_fetch_records": _summary(records, args.rows),
+        "wreath_fetch_batch": _summary(batch, args.rows),
         "asyncpg": _summary(asyncpg, args.rows),
         "psycopg3": _summary(psycopg3, args.rows),
         "psycopg2": _summary(psycopg2, args.rows),
     }
-    improvement = float(summaries["wreath_slice4_batch"]["rows_per_second"]) / float(
-        summaries["wreath_slice3_scalar"]["rows_per_second"]
+    improvement = float(summaries["wreath_fetch_batch"]["rows_per_second"]) / float(
+        summaries["wreath_fetch_records"]["rows_per_second"]
     )
     document = {
         "metadata": {
@@ -175,7 +173,7 @@ async def run(args: argparse.Namespace) -> int:
             "columns": 3,
         },
         "results": summaries,
-        "slice4_over_slice3_speedup": improvement,
+        "compact_batch_over_records_speedup": improvement,
     }
     print(json.dumps(document, indent=2))
     return 1 if args.require_improvement and improvement <= 1.0 else 0

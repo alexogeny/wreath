@@ -49,8 +49,6 @@ enum {
  * one "too_complex" error instead of hanging. The pure binding._validate uses
  * the same ceiling; raise both together if max_body_bytes is raised far above
  * the default. */
-#define WREATH_VALIDATE_MAX_STEPS 2000000
-
 /* Append {"loc": list(loc), "msg": msg, "type": kind} to errors. Returns -1 on
  * a C-API failure with an exception set, 0 otherwise. */
 static int
@@ -171,9 +169,9 @@ flat_scalar_accepts(PyObject *plan, PyObject *value)
 /* Returns a new reference to the validated value, or NULL only on a hard
  * C-API failure (exception set). Validation failures are accumulated into
  * errors and still return a (new-reference) value, mirroring the Python code. */
-static PyObject *
-validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors,
-              long *steps)
+PyObject *
+wreath_validate_node(PyObject *plan, PyObject *value, PyObject *loc,
+                     PyObject *errors, long *steps)
 {
     if (*steps <= 0) {
         /* Budget exhausted: mark it (negative sentinel) and stop descending.
@@ -283,8 +281,8 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors,
                 return NULL;
             }
             Py_DECREF(key);
-            PyObject *item = validate_node(item_plan, PyList_GET_ITEM(value, index), loc,
-                                           errors, steps);
+            PyObject *item = wreath_validate_node(
+                item_plan, PyList_GET_ITEM(value, index), loc, errors, steps);
             loc_pop(loc);
             if (item == NULL) {
                 Py_DECREF(result);
@@ -344,7 +342,8 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors,
                 Py_DECREF(result);
                 return NULL;
             }
-            PyObject *validated = validate_node(value_plan, item, loc, errors, steps);
+            PyObject *validated = wreath_validate_node(
+                value_plan, item, loc, errors, steps);
             loc_pop(loc);
             if (validated == NULL) {
                 Py_DECREF(result);
@@ -375,8 +374,8 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors,
             if (attempt == NULL) {
                 return NULL;
             }
-            PyObject *result = validate_node(PyTuple_GET_ITEM(options, index), value, loc,
-                                             attempt, steps);
+            PyObject *result = wreath_validate_node(
+                PyTuple_GET_ITEM(options, index), value, loc, attempt, steps);
             if (result == NULL) {
                 Py_DECREF(attempt);
                 return NULL;
@@ -463,8 +462,8 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors,
                 if (loc_push(loc, wire_name) < 0) {
                     goto dataclass_error;
                 }
-                PyObject *validated = validate_node(field_plan, present, loc, errors,
-                                                    steps);
+                PyObject *validated = wreath_validate_node(
+                    field_plan, present, loc, errors, steps);
                 loc_pop(loc);
                 if (validated == NULL) goto dataclass_error;
                 if (positional) {
@@ -575,7 +574,7 @@ dataclass_error:
 
     case OP_FIELD: {
         Py_ssize_t before = PyList_GET_SIZE(errors);
-        PyObject *validated = validate_node(
+        PyObject *validated = wreath_validate_node(
             PyTuple_GET_ITEM(plan, 1), value, loc, errors, steps);
         if (validated == NULL || PyList_GET_SIZE(errors) != before || *steps < 0) {
             return validated;
@@ -688,7 +687,7 @@ wreath_run_validation(PyObject *self, PyObject *args)
         return NULL;
     }
     long steps = WREATH_VALIDATE_MAX_STEPS;
-    PyObject *result = validate_node(plan, value, loc, errors, &steps);
+    PyObject *result = wreath_validate_node(plan, value, loc, errors, &steps);
     if (result != NULL && steps < 0) {
         /* Validation was cut short by the step budget: report it once, at the
          * root, regardless of which subtree exhausted it. */

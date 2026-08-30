@@ -46,6 +46,33 @@ def _public_app(**options) -> Wreath:
     return app
 
 
+def test_ai_scraping_ingress_empty_block_table_robots_method_and_user_agent_guards() -> None:
+    assert AIScrapingPolicy(allow=True)._ingress_sync(SimpleNamespace()) is None
+
+    robots = SimpleNamespace(
+        path="/robots.txt",
+        method="GET",
+        header=lambda *_args: pytest.fail("robots.txt read a User-Agent"),
+    )
+    assert AIScrapingPolicy()._ingress_sync(robots) is None
+
+    posted = SimpleNamespace(
+        path="/robots.txt",
+        method="POST",
+        header=lambda *_args: "GPTBot/1.0",
+    )
+    refusal = AIScrapingPolicy()._ingress_sync(posted)
+    assert refusal is not None
+    assert refusal.status == 403
+
+    missing = SimpleNamespace(
+        path="/",
+        method="GET",
+        header=lambda *_args: None,
+    )
+    assert AIScrapingPolicy()._ingress_sync(missing) is None
+
+
 @pytest.mark.asyncio
 async def test_ai_scrapers_are_refused_by_default_but_user_fetchers_are_not() -> None:
     async with TestClient(_public_app()) as client:

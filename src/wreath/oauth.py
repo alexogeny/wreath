@@ -56,7 +56,7 @@ import time
 from base64 import urlsafe_b64encode
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Any, Final, cast
 from urllib.parse import urlsplit
 
 __all__ = [
@@ -204,6 +204,16 @@ class Es256Signer:
     #: pick during a rotation instead of trying every key.
     kid: str = "wreath-es256"
 
+    def __post_init__(self) -> None:
+        from ._curves import P256_N
+
+        if (
+            isinstance(self.private, bool)
+            or not isinstance(self.private, int)
+            or not 1 <= self.private < P256_N
+        ):
+            raise ValueError("P-256 scalar is in [1, n)")
+
     @classmethod
     def generate(cls, *, kid: str = "wreath-es256") -> Es256Signer:
         """Mint a fresh key. Store `private_bytes`; it is not recoverable."""
@@ -222,10 +232,7 @@ class Es256Signer:
     def _public_point(self) -> tuple[int, int]:
         from ._webpush import P256_G, _mul
 
-        point = _mul(self.private, P256_G)
-        if point is None:  # pragma: no cover - the scalar is 1..n-1 by construction
-            raise OAuthRefusal("bad-key", "this private scalar has no public point")
-        return point
+        return cast(tuple[int, int], _mul(self.private, P256_G))
 
     def public_jwks(self) -> list[dict[str, str]]:
         """This key as JWKS entries -- the public half only, by construction.
@@ -313,7 +320,6 @@ class AuthorizationServer:
             parsed_issuer.scheme != "https"
             or parsed_issuer.hostname is None
             or parsed_issuer.username is not None
-            or parsed_issuer.password is not None
             or parsed_issuer.query
             or parsed_issuer.fragment
         ):
