@@ -51,3 +51,13 @@ def test_a_built_extension_resolves_and_an_unbuilt_one_is_none(name: str) -> Non
 def test_an_unknown_extension_is_an_error_not_a_none() -> None:
     with pytest.raises(AttributeError):
         _native.extension("_no_such_extension")
+
+
+def test_a_loader_refusal_keeps_its_real_diagnostic(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(_name: str) -> None:
+        raise ImportError("module does not support loading in subinterpreters")
+
+    monkeypatch.setattr(importlib, "import_module", refuse)
+
+    with pytest.raises(ImportError, match="does not support loading in subinterpreters"):
+        _native.extension("_core")

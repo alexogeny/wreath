@@ -911,7 +911,11 @@ def _check_subject(
         raise _refuse("nameid-empty", "the assertion's NameID is empty, so it names nobody")
 
     confirmations = _children(subject, _ASSERTION, "SubjectConfirmation")
-    bearer = [c for c in confirmations if c.attrib.get("Method") == _BEARER]
+    bearer = [
+        confirmation
+        for confirmation in confirmations
+        if confirmation.attrib.get("Method") == _BEARER
+    ]
     if not bearer:
         raise _refuse(
             "confirmation-method",

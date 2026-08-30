@@ -452,11 +452,11 @@ def _feed(protocol: Any, data: bytes) -> None:
     view = memoryview(data)
     while True:
         target = memoryview(protocol.get_buffer(len(view) or -1))
-        n = min(len(target), len(view))
-        target[:n] = view[:n]
-        protocol.buffer_updated(n)
+        copied = min(len(target), len(view))
+        target[:copied] = view[:copied]
+        protocol.buffer_updated(copied)
         target.release()
-        view = view[n:]
+        view = view[copied:]
         if not len(view):
             return
 
@@ -503,9 +503,15 @@ class H2ReplayResult:
     def _canonical(self) -> tuple[Any, ...]:
         # Drop the variable `date` header so two builds compare equal.
         streams: dict[int, tuple[Any, ...]] = {}
-        for sid, stream in self.streams.items():
-            headers = tuple((k, v) for k, v in stream.headers if k != b"date")
-            streams[sid] = (stream.status, headers, stream.body, stream.reset, stream.ended)
+        for stream_id, stream in self.streams.items():
+            headers = tuple((name, value) for name, value in stream.headers if name != b"date")
+            streams[stream_id] = (
+                stream.status,
+                headers,
+                stream.body,
+                stream.reset,
+                stream.ended,
+            )
         return (streams, self.terminal, self.goaway)
 
     def matches(self, other: H2ReplayResult) -> bool:
@@ -1334,7 +1340,7 @@ async def reproduce_from_ring(
         if len(candidates) > 1:
             raise ReplayError(
                 f"the ring file shows {len(candidates)} requests in flight "
-                f"({', '.join(str(c) for c in candidates)}); name one with "
+                f"({', '.join(str(candidate) for candidate in candidates)}); name one with "
                 "request_id rather than having this pick"
             )
         request_id = candidates[0]
@@ -1707,7 +1713,9 @@ async def replay_attempt(
 
 
 def _attempt_test_name(record: Any) -> str:
-    slug = "".join(c if c.isalnum() else "_" for c in record.task).strip("_")
+    slug = "".join(character if character.isalnum() else "_" for character in record.task).strip(
+        "_"
+    )
     return f"test_{slug}_attempt_{record.attempt}".replace("__", "_")
 
 

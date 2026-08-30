@@ -626,6 +626,26 @@ def test_protocol_config_rejects_empty_unknown_and_duplicate_values() -> None:
     assert ServerConfig(protocols=("h2", "http/1.1")).protocols == ("h2", "http/1.1")
 
 
+def test_tls_alpn_excludes_the_quic_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Context:
+        advertised: list[str] | None = None
+
+        def __init__(self, protocol: int) -> None:
+            pass
+
+        def load_cert_chain(self, certfile: str, keyfile: str, password: str | None) -> None:
+            pass
+
+        def set_alpn_protocols(self, protocols: list[str]) -> None:
+            self.advertised = protocols
+
+    monkeypatch.setattr(ssl, "SSLContext", Context)
+
+    context = TLSConfig("cert.pem", "key.pem").build_ssl_context(("h3", "h2", "http/1.1"))
+
+    assert context.advertised == ["h2", "http/1.1"]
+
+
 @pytest.mark.asyncio
 async def test_requesting_unbuilt_http3_fails_without_downgrade(
     monkeypatch: pytest.MonkeyPatch,

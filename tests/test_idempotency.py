@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from _pgfidelity import check_for
 
+from wreath._compression import _RenderedFragments
 from wreath.policy import IdempotencyPolicy
 from wreath.request import Request
 from wreath.response import Response
@@ -58,6 +59,23 @@ async def test_first_call_passes_through_then_replays() -> None:
     assert replay is not None
     assert replay.status == 201 and replay.body == b"created"
     assert (b"idempotency-replayed", b"true") in replay.headers
+
+
+async def test_fragment_response_replay_keeps_the_complete_body() -> None:
+    mw = IdempotencyPolicy()
+    prefix = b"dynamic-prefix"
+    tail = b"stable-tail" * 128
+
+    first = _request()
+    assert await mw.action(first) is None
+    await mw.after(first, Response(_RenderedFragments(prefix, tail), status=201))
+
+    replay = await mw.action(_request())
+
+    assert replay is not None
+    assert replay.body == prefix + tail
+    assert bytes(replay.body) == prefix + tail
+    assert dict(replay.headers)[b"content-length"] == str(len(prefix + tail)).encode()
 
 
 async def test_concurrent_duplicate_gets_409() -> None:

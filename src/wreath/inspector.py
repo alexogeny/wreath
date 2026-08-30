@@ -1,41 +1,4 @@
-"""Read-only local Inspector for the Native Flight Recorder (Stage 3 slice 4).
-
-A small, versioned, length-prefixed binary protocol over a Unix-domain socket.
-The server runs inside the application process next to the recorder; the CLI
-(`wreath inspect`) and `InspectorClient` are protocol clients — they
-never import the target application. Formatting happens after receipt.
-
-Security model (v1, read-only):
-
-- Disabled unless configured: nothing binds a socket without an
-  `InspectorConfig`.
-- The socket is created owner-only (`0600`) and never over an existing
-  non-socket path.
-- Peer credentials are checked where available (`SO_PEERCRED` on Linux): the
-  peer must be the same UID (or root).
-- Strict frame and response limits; a malformed or oversized frame closes the
-  connection after one error frame.
-- v1 exposes no mutating command, so no capability token exists yet; the token
-  requirement starts with `ARM_CAPTURE` (stage 5).
-
-Frame layout (16-byte header, network byte order):
-
-```text
-magic     4s  b"WFI1"
-version   u8  PROTOCOL_VERSION
-command   u8  Command
-flags     u16 bit 0 = error, bit 1 = truncated
-request   u32 client-chosen id, echoed in the response
-length    u32 payload byte length
-```
-
-Payloads are UTF-8 JSON objects. The stage-2 plan sketches TLV payloads keyed
-by metadata IDs; that binary projection belongs with the stage-4 native
-drain/projector, so v1 keeps the payloads JSON while the framing, limits, and
-command surface already match the spec. Responses carry `generation` (the
-worker's request counter at snapshot time), `truncated` flags on paged
-lists, and loss counters so clients can detect races or incomplete data.
-"""
+"""Read-only Unix-socket Inspector for Native Flight Recorder snapshots."""
 
 from __future__ import annotations
 
@@ -49,7 +12,7 @@ import struct
 import time
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any
+from typing import Any, cast
 
 from ._flight_schema import (
     FLAG_AI_SCRAPING_REFUSED,
@@ -80,19 +43,14 @@ class Command(IntEnum):
     EXPLAIN_ROUTE = 5
     EXPLAIN_PLAN = 6
     METADATA = 7
-    # Projection-backed (stage 4c): answered only when a projector is attached.
     TIMELINE = 8
     RECENT_FAILURES = 9
     ROUTE_DISTRIBUTIONS = 10
-    # Capture control (stage 5d): the first mutating commands. Answered only when
-    # an arm registry and a capability token are configured, and every one of
-    # them requires that token (capture permission is separate from read-only).
     ARM_CAPTURE = 11
     DISARM_CAPTURE = 12
     CAPTURE_STATUS = 13
 
 
-#: Commands answered even without a projector attached.
 _CORE_COMMANDS = frozenset(
     {
         Command.HELLO,
@@ -104,13 +62,9 @@ _CORE_COMMANDS = frozenset(
         Command.METADATA,
     }
 )
-#: Commands that require the off-path projector (recent traces / failures /
-#: route distributions all read a projector snapshot).
 _PROJECTION_COMMANDS = frozenset(
     {Command.TIMELINE, Command.RECENT_FAILURES, Command.ROUTE_DISTRIBUTIONS}
 )
-#: Capture-control commands. Every one requires the capability token and an arm
-#: registry; they are advertised only when both are configured.
 _CAPTURE_COMMANDS = frozenset({Command.ARM_CAPTURE, Command.DISARM_CAPTURE, Command.CAPTURE_STATUS})
 
 _METADATA_TABLES = (
@@ -208,6 +162,13 @@ def _protocol_name(value: int) -> str:
         return "unknown"
 
 
+def _metadata_name(names: dict[int, str], identifier: int) -> str:
+    try:
+        return names[identifier]
+    except KeyError:
+        return str(identifier)
+
+
 class InspectorServer:
     """Serves the read-only protocol beside a recorder, inside the app process."""
 
@@ -228,6 +189,10 @@ class InspectorServer:
         self._arm_registry: Any = arm_registry if config.capture_token else None
         self._server: asyncio.AbstractServer | None = None
         self._image: Any = None
+        self._routes_by_id: dict[int, Any] | None = None
+        self._routes_by_key: dict[tuple[str, str], Any] | None = None
+        self._plans_by_id: dict[int, Any] | None = None
+        self._metadata_names: dict[str, dict[int, str]] | None = None
 
     def _capabilities(self) -> list[str]:
         """The commands this server answers. Projection-backed and capture-control
@@ -238,7 +203,7 @@ class InspectorServer:
         )
         if self._arm_registry is not None:
             available = available | _CAPTURE_COMMANDS
-        return [c.name for c in Command if c in available]
+        return [command.name for command in Command if command in available]
 
     @property
     def path(self) -> str:
@@ -275,10 +240,27 @@ class InspectorServer:
             pass
 
     def _metadata_image(self) -> Any:
-        if self._image is None:
+        image = self._image
+        if image is None:
             from ._flight_metadata import build_metadata_image
 
-            self._image = build_metadata_image(self._app)
+            image = build_metadata_image(self._app)
+            self._image = image
+        if self._routes_by_id is None:
+            self._routes_by_id = {route.route_id: route for route in image.routes}
+            self._routes_by_key = {(route.method, route.path): route for route in image.routes}
+            self._plans_by_id = {plan.plan_id: plan for plan in image.plans}
+            self._metadata_names = {
+                table: {entry.entry_id: entry.name for entry in getattr(image, table)}
+                for table in (
+                    "dependencies",
+                    "middleware",
+                    "auth_policies",
+                    "serializers",
+                    "validators",
+                    "limits",
+                )
+            }
         return self._image
 
     def _generation(self) -> int:
@@ -403,25 +385,26 @@ class InspectorServer:
     def _paged_traces(
         self, payload: dict[str, Any], rows: Any, snapshot: Any
     ) -> tuple[dict[str, Any], int]:
-        # Newest first: the projector keeps its windows oldest-to-newest.
-        ordered = list(reversed(rows))
         offset = _page_int(payload, "offset", 0)
         limit = min(_page_int(payload, "limit", MAX_PAGE_ROWS), MAX_PAGE_ROWS)
-        page = ordered[offset : offset + limit]
-        truncated = offset + limit < len(ordered)
+        total = len(rows)
+        stop = total - offset
+        start = max(stop - limit, 0)
+        page = list(reversed(rows[start:stop])) if stop > 0 else []
+        truncated = offset + limit < total
         return {
             "generation": self._generation(),
             "assembled": snapshot.assembled,
-            "total": len(ordered),
+            "total": total,
             "truncated": truncated,
             "loss": _projector_loss(snapshot.loss),
-            "traces": [_trace_payload(t) for t in page],
+            "traces": [_trace_payload(trace) for trace in page],
         }, FLAG_TRUNCATED if truncated else 0
 
     def _route_distributions(self, payload: dict[str, Any]) -> dict[str, Any]:
         snapshot = self._snapshot()
-        image = self._metadata_image()
-        routes = {r.route_id: r for r in image.routes}
+        self._metadata_image()
+        routes = cast(dict[int, Any], self._routes_by_id)
         distributions = []
         for metric in sorted(snapshot.routes, key=lambda m: m.count, reverse=True):
             route = routes.get(metric.route_id)
@@ -467,24 +450,27 @@ class InspectorServer:
         }, FLAG_TRUNCATED if truncated else 0
 
     def _explain_route(self, payload: dict[str, Any]) -> dict[str, Any]:
-        image = self._metadata_image()
+        self._metadata_image()
+        routes_by_id = cast(dict[int, Any], self._routes_by_id)
+        routes_by_key = cast(dict[tuple[str, str], Any], self._routes_by_key)
+        names = cast(dict[str, dict[int, str]], self._metadata_names)
         route_id = payload.get("route_id")
         if route_id is not None:
-            route = next((r for r in image.routes if r.route_id == route_id), None)
+            try:
+                route = routes_by_id.get(route_id)
+            except TypeError:
+                route = None
         else:
             method = payload.get("method")
             path = payload.get("path")
             if not isinstance(method, str) or not isinstance(path, str):
                 raise InspectorError("EXPLAIN_ROUTE needs route_id or method+path")
-            route = next(
-                (r for r in image.routes if r.method == method and r.path == path),
-                None,
-            )
+            route = routes_by_key.get((method, path))
         if route is None:
             raise InspectorError("route not found")
-        dependencies = {n.entry_id: n.name for n in image.dependencies}
-        middleware = {n.entry_id: n.name for n in image.middleware}
-        auth_policies = {n.entry_id: n.name for n in image.auth_policies}
+        dependencies = names["dependencies"]
+        middleware = names["middleware"]
+        auth_policies = names["auth_policies"]
         return {
             "route_id": route.route_id,
             "method": route.method,
@@ -493,20 +479,29 @@ class InspectorServer:
             "plan_id": route.plan_id,
             "tags": list(route.tags),
             "coverage": route.coverage,
-            "dependencies": [dependencies.get(i, str(i)) for i in route.dependency_ids],
-            "middleware": [middleware.get(i, str(i)) for i in route.middleware_ids],
+            "dependencies": [
+                _metadata_name(dependencies, identifier) for identifier in route.dependency_ids
+            ],
+            "middleware": [
+                _metadata_name(middleware, identifier) for identifier in route.middleware_ids
+            ],
             "auth_policy": auth_policies.get(route.auth_policy_id),
         }
 
     def _explain_plan(self, payload: dict[str, Any]) -> dict[str, Any]:
-        image = self._metadata_image()
+        self._metadata_image()
+        plans_by_id = cast(dict[int, Any], self._plans_by_id)
+        names = cast(dict[str, dict[int, str]], self._metadata_names)
         plan_id = payload.get("plan_id")
-        plan = next((p for p in image.plans if p.plan_id == plan_id), None)
+        try:
+            plan = plans_by_id.get(plan_id)
+        except TypeError:
+            plan = None
         if plan is None:
             raise InspectorError("plan not found")
-        serializers = {n.entry_id: n.name for n in image.serializers}
-        validators = {n.entry_id: n.name for n in image.validators}
-        limits = {n.entry_id: n.name for n in image.limits}
+        serializers = names["serializers"]
+        validators = names["validators"]
+        limits = names["limits"]
         return {
             "plan_id": plan.plan_id,
             "params": list(plan.params),
@@ -514,7 +509,7 @@ class InspectorServer:
             "returns_type": plan.returns_type,
             "serializer": serializers.get(plan.serializer_id),
             "validator": validators.get(plan.validator_id),
-            "limits": [limits.get(i, str(i)) for i in plan.limit_ids],
+            "limits": [_metadata_name(limits, identifier) for identifier in plan.limit_ids],
         }
 
     def _metadata(self, payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
@@ -522,30 +517,32 @@ class InspectorServer:
         if table not in _METADATA_TABLES:
             raise InspectorError(f"unknown metadata table: {table!r}")
         image = self._metadata_image()
+        records = getattr(image, table)
+        offset = _page_int(payload, "offset", 0)
+        limit = min(_page_int(payload, "limit", MAX_PAGE_ROWS), MAX_PAGE_ROWS)
+        selected = records[offset : offset + limit]
         if table == "routes":
             rows = [
                 {
-                    "id": r.route_id,
-                    "method": r.method,
-                    "path": r.path,
-                    "operation_id": r.operation_id,
-                    "plan_id": r.plan_id,
+                    "id": route.route_id,
+                    "method": route.method,
+                    "path": route.path,
+                    "operation_id": route.operation_id,
+                    "plan_id": route.plan_id,
                 }
-                for r in image.routes
+                for route in selected
             ]
         elif table == "plans":
-            rows = [{"id": p.plan_id, "params": list(p.params)} for p in image.plans]
+            rows = [{"id": plan.plan_id, "params": list(plan.params)} for plan in selected]
         else:
-            rows = [{"id": n.entry_id, "name": n.name} for n in getattr(image, table)]
-        offset = _page_int(payload, "offset", 0)
-        limit = min(_page_int(payload, "limit", MAX_PAGE_ROWS), MAX_PAGE_ROWS)
-        page = rows[offset : offset + limit]
-        truncated = offset + limit < len(rows)
+            rows = [{"id": entry.entry_id, "name": entry.name} for entry in selected]
+        total = len(records)
+        truncated = offset + limit < total
         return {
             "table": table,
-            "total": len(rows),
+            "total": total,
             "truncated": truncated,
-            "rows": page,
+            "rows": rows,
         }, FLAG_TRUNCATED if truncated else 0
 
 
@@ -576,14 +573,14 @@ def _trace_payload(trace: Any) -> dict[str, Any]:
         "observed_unix_nano": trace.observed_unix_nano,
         "phases": [
             {
-                "phase": p.phase_id.name.lower(),
-                "coverage": p.coverage.name.lower(),
-                "dependency_id": p.dependency_id,
-                "start_offset_us": p.start_offset_us,
-                "duration_us": p.duration_us,
-                "sequence": p.sequence,
+                "phase": phase.phase_id.name.lower(),
+                "coverage": phase.coverage.name.lower(),
+                "dependency_id": phase.dependency_id,
+                "start_offset_us": phase.start_offset_us,
+                "duration_us": phase.duration_us,
+                "sequence": phase.sequence,
             }
-            for p in trace.phases
+            for phase in trace.phases
         ],
     }
 
@@ -607,10 +604,13 @@ def _page_int(payload: dict[str, Any], key: str, default: int) -> int:
 
 
 def _str_set(payload: dict[str, Any], key: str) -> frozenset[str]:
-    value = payload.get(key, [])
-    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+    value: Any = payload.get(key, [])
+    if not isinstance(value, list):
         raise InspectorError(f"{key} must be a list of strings")
-    return frozenset(v for v in value if isinstance(v, str))
+    for entry in value:
+        if not isinstance(entry, str):
+            raise InspectorError(f"{key} must be a list of strings")
+    return frozenset(cast(list[str], value))
 
 
 def _capture_policy_from_payload(payload: dict[str, Any]) -> Any:
@@ -839,8 +839,6 @@ class InspectorClient:
             body["truncated"] = True
         return body
 
-    # Typed conveniences ------------------------------------------------------
-
     async def hello(self) -> dict[str, Any]:
         return await self.call(Command.HELLO)
 
@@ -848,18 +846,18 @@ class InspectorClient:
         body = await self.call(Command.WORKERS)
         return [
             WorkerSnapshot(
-                mode=w["mode"],
-                requests=w["requests"],
-                completions=w["completions"],
-                active_count=w["active_count"],
-                ring_occupancy=w["ring_occupancy"],
-                ring_high_water=w["ring_high_water"],
-                phase_capacity=w["phase_capacity"],
-                phase_in_use=w["phase_in_use"],
-                phase_high_water=w["phase_high_water"],
-                losses=w["losses"],
+                mode=worker["mode"],
+                requests=worker["requests"],
+                completions=worker["completions"],
+                active_count=worker["active_count"],
+                ring_occupancy=worker["ring_occupancy"],
+                ring_high_water=worker["ring_high_water"],
+                phase_capacity=worker["phase_capacity"],
+                phase_in_use=worker["phase_in_use"],
+                phase_high_water=worker["phase_high_water"],
+                losses=worker["losses"],
             )
-            for w in body["workers"]
+            for worker in body["workers"]
         ]
 
     async def active_requests(
@@ -868,12 +866,12 @@ class InspectorClient:
         body = await self.call(Command.ACTIVE_REQUESTS, {"offset": offset, "limit": limit})
         return [
             ActiveRequest(
-                request_id=r["request_id"],
-                age_us=r["age_us"],
-                protocol=r["protocol"],
-                route_id=r["route_id"],
+                request_id=request["request_id"],
+                age_us=request["age_us"],
+                protocol=request["protocol"],
+                route_id=request["route_id"],
             )
-            for r in body["requests"]
+            for request in body["requests"]
         ]
 
     async def pressure(self) -> dict[str, Any]:
@@ -913,8 +911,6 @@ class InspectorClient:
 
     async def route_distributions(self) -> dict[str, Any]:
         return await self.call(Command.ROUTE_DISTRIBUTIONS)
-
-    # Capture control --------------------------------------------------------
 
     async def arm_capture(
         self,

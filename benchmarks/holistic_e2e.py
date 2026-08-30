@@ -32,6 +32,7 @@ import asyncio
 import datetime
 import math
 import os
+from array import array
 from dataclasses import dataclass
 from pathlib import Path as FilePath
 from typing import Annotated, Any
@@ -83,7 +84,7 @@ from wreath.orm.types import (
     TimestampTz,
     Vector,
 )
-from wreath.pagination import Page, PageParams, _rank_indices, page_params
+from wreath.pagination import Page, PageParams, _rank_projection, page_params
 from wreath.policy import AIScrapingPolicy, HttpPolicy
 from wreath.policy.cache import CachePolicy
 from wreath.policy.compression import CompressionPolicy
@@ -243,6 +244,14 @@ class IncidentProjection(Model, table="incident_projections"):
     )
 
 
+@dataclass(frozen=True, slots=True)
+class PackedIncidentProjection:
+    values: memoryview
+    terms: SparseVector
+    selected: tuple[int, ...]
+    scores: list[float]
+
+
 class ActivityReading(Model, table="activity_readings"):
     """Source rows for the declared calculated-series arm."""
 
@@ -366,6 +375,18 @@ _DEPOT = Coordinate(lat=-27.4698, lon=153.0251)
 _SITE = Coordinate(lat=-33.8688, lon=151.2093)
 _HOURLY_START = Instant.of(datetime.datetime(2026, 3, 20, 11, tzinfo=datetime.UTC))
 _HOURLY_END = Instant.of(datetime.datetime(2026, 5, 1, 12, tzinfo=datetime.UTC))
+_WEEKLY_COUNT, _MONTHLY_COUNT = spine_lengths(
+    _SERIES_START,
+    _SERIES_END,
+    buckets=(Week, Month),
+    in_zone=_SERIES_ZONE,
+)
+_TEMPORAL_COUNTS = (
+    len(_SERIES_BUCKETS),
+    spine_length(_HOURLY_START, _HOURLY_END, bucket=Hour, in_zone=_SERIES_ZONE),
+    _WEEKLY_COUNT,
+    _MONTHLY_COUNT,
+)
 _SCHEDULE = Recurrence.calendar(
     "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=3;BYMINUTE=15",
     tz=_SERIES_ZONE,
@@ -781,43 +802,41 @@ async def holistic(
         active=(payload.labels.get("active", False) and feature_flags.enabled("dense_dashboard")),
         total=total,
     )
-    daily_count = len(_SERIES_BUCKETS)
-    hourly_count = spine_length(_HOURLY_START, _HOURLY_END, bucket=Hour, in_zone=_SERIES_ZONE)
-    weekly_count, monthly_count = spine_lengths(
-        _SERIES_START,
-        _SERIES_END,
-        buckets=(Week, Month),
-        in_zone=_SERIES_ZONE,
-    )
-    series_count, series_keys, paths, tick_text, tick_count = _SERIES_CHART.project_chart_text(
-        downsample_rows=_SERIES_DOWNSAMPLE_ROWS,
-        full_rows=_SERIES_FULL_ROWS,
-        threshold=128,
-        tick_target=9,
-        cache=False,
+    daily_count, hourly_count, weekly_count, monthly_count = _TEMPORAL_COUNTS
+    series_count, series_keys, chart_path, path_count, tick_text, tick_count = (
+        _SERIES_CHART.project_chart_text_joined(
+            downsample_rows=_SERIES_DOWNSAMPLE_ROWS,
+            full_rows=_SERIES_FULL_ROWS,
+            threshold=128,
+            tick_target=9,
+            cache=False,
+        )
     )
     next_run = _SCHEDULE.next_after(_HOURLY_START)
     occupied_cells, trail_speed = _TRAJECTORY.grid_summary(_SERIES_START, _SERIES_END, _MAP_GRID)
-    embedding = [
-        math.sin((index + account_id) / 17.0) * math.cos((index + item_id) / 29.0)
-        for index in range(128)
-    ]
+    embedding = memoryview(
+        array(
+            "d",
+            (
+                math.sin((index + account_id) / 17.0)
+                * math.cos((index + item_id) / 29.0)
+                for index in range(128)
+            ),
+        )
+    )
     terms = SparseVector(
         30_000,
-        {
-            1 + ((index * 1229 + item_id) % 30_000): abs(value) + 0.01
-            for index, value in enumerate(embedding[::4])
-        },
-    )
-    projection = IncidentProjection(
-        id=item_id,
-        embedding=embedding,
-        compact_embedding=embedding,
-        terms=terms,
+        (
+            (
+                1 + ((sparse_index * 1229 + item_id) % 30_000),
+                abs(embedding[source_index]) + 0.01,
+            )
+            for sparse_index, source_index in enumerate(range(0, 128, 4))
+        ),
     )
     reverse = pagination.sort == ("-score",)
     candidate_count = 48
-    selected = _rank_indices(
+    selected, similarity_scores = _rank_projection(
         embedding,
         page=pagination.page,
         size=pagination.size,
@@ -825,14 +844,15 @@ async def holistic(
         candidates=candidate_count,
         absolute=True,
     )
+    projection = PackedIncidentProjection(embedding, terms, selected, similarity_scores)
     incident_page = Page(
         tuple(
             {
                 "id": index + 1,
-                "score": abs(embedding[index]),
+                "score": score,
                 "tenant": series_keys[index][0],
             }
-            for index in selected
+            for index, score in zip(projection.selected, projection.scores, strict=True)
         ),
         total=candidate_count,
         page=pagination.page,
@@ -843,7 +863,7 @@ async def holistic(
         account_id=account_id,
         bucket_count=daily_count,
         incident_ids=[item["id"] for item in incident_page.items],
-        similarity_scores=[item["score"] for item in incident_page.items],
+        similarity_scores=projection.scores,
         generated_at=exported_at,
     )
     protobuf_blob = protobuf_encode(export)
@@ -866,7 +886,7 @@ async def holistic(
                 "operations",
                 {
                     "dense_cells": daily_count * series_count,
-                    "paths": len(paths),
+                    "paths": path_count,
                     "ticks": tick_count,
                 },
             ),
@@ -887,7 +907,7 @@ async def holistic(
         "chart_buckets": daily_count,
         "chart_lines": series_count,
         "chart_spines": daily_count + hourly_count + weekly_count + monthly_count,
-        "chart_paths": len(paths),
+        "chart_paths": path_count,
         "chart_age": relative(_SERIES_START, now=_SERIES_END),
         "chart_span": format_duration(_SERIES_END - _SERIES_START),
         "chart_distance": round(distance(_DEPOT, _SITE) / 1000),
@@ -895,7 +915,7 @@ async def holistic(
         "chart_grid": f"{_MAP_GRID.rows}x{_MAP_GRID.columns}:{len(occupied_cells)}",
         "chart_next": exported_at,
         "vector_shape": (
-            f"{len(projection.embedding)}:{len(projection.compact_embedding)}:"
+            f"{len(projection.values)}:{len(projection.values)}:"
             f"{projection.terms.dim}/{len(projection.terms)}"
         ),
         "incident_page": f"{len(incident_page.items)}/{incident_page.total}",
@@ -909,11 +929,11 @@ async def holistic(
         ),
         "client_agent": client_facts.user_agent.browser or "unknown",
         "client_bot": str(client_facts.user_agent.bot).lower(),
-        "chart_path": "".join(paths),
+        "chart_path": chart_path,
         "chart_ticks": tick_text,
     }
     document = (
-        _COMPRESSION._gzip_fragment_render("html", _PAGE_PREFIX, context)
+        _COMPRESSION._dcz_fragment_render(request, "html", _PAGE_PREFIX, context)
         if _OPTIMAL_COMPRESSION
         else _PAGE.render_bytes(context)
     )

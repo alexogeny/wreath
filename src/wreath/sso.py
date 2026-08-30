@@ -256,15 +256,19 @@ class PendingLoginStore:
         if now < self._next_sweep:
             return
         cutoff = now - self._ttl
-        expired_ids = [
-            request_id for request_id, pending in self._by_id.items() if pending.issued_at <= cutoff
-        ]
-        for key in expired_ids:
-            del self._by_id[key]
-        self._next_sweep = min(
-            (pending.issued_at + self._ttl for pending in self._by_id.values()),
-            default=float("inf"),
-        )
+        next_sweep = float("inf")
+        expired_ids: list[str] = []
+        ttl = self._ttl
+        for request_id, pending in self._by_id.items():
+            if pending.issued_at <= cutoff:
+                expired_ids.append(request_id)
+            else:
+                deadline = pending.issued_at + ttl
+                if deadline < next_sweep:
+                    next_sweep = deadline
+        for request_id in expired_ids:
+            del self._by_id[request_id]
+        self._next_sweep = next_sweep
 
 
 def _request_id() -> str:
@@ -737,12 +741,19 @@ class OidcRelyingParty:
         if now <= self._next_sweep:
             return
         cutoff = now - self._ttl
-        for state in [key for key, flow in self._flows.items() if flow.issued_at < cutoff]:
+        next_sweep = float("inf")
+        expired_states: list[str] = []
+        ttl = self._ttl
+        for state, flow in self._flows.items():
+            if flow.issued_at < cutoff:
+                expired_states.append(state)
+            else:
+                deadline = flow.issued_at + ttl
+                if deadline < next_sweep:
+                    next_sweep = deadline
+        for state in expired_states:
             del self._flows[state]
-        self._next_sweep = min(
-            (flow.issued_at + self._ttl for flow in self._flows.values()),
-            default=float("inf"),
-        )
+        self._next_sweep = next_sweep
 
     def check_nonce(self, claims: Mapping[str, Any], *, expected_nonce: str) -> None:
         """The claim that binds an id token to one authorization request."""

@@ -570,7 +570,7 @@ class MigrationBlockedByPass(RuntimeError):
         self.schema = schema
         self.hazards = hazards
         listing = "\n".join(f"  - {hazard.explain()}" for hazard in hazards)
-        blocked = tuple(h for h in hazards if h.holes_open)
+        blocked = tuple(hazard for hazard in hazards if hazard.holes_open)
         remedy = (
             "Let the pass finish -- `wreath passes status` shows where it is -- and "
             "apply this migration afterwards. The pass's gate publishes when it has "
@@ -1533,17 +1533,17 @@ class FleetApplyResult:
     @property
     def applied(self) -> tuple[str, ...]:
         """Schemas this run migrated."""
-        return tuple(o.schema for o in self.outcomes if o.state == "applied")
+        return tuple(outcome.schema for outcome in self.outcomes if outcome.state == "applied")
 
     @property
     def skipped(self) -> tuple[str, ...]:
         """Schemas already at the target before this run."""
-        return tuple(o.schema for o in self.outcomes if o.state == "skipped")
+        return tuple(outcome.schema for outcome in self.outcomes if outcome.state == "skipped")
 
     @property
     def failed(self) -> tuple[TenantOutcome, ...]:
         """Schemas that refused, each with the reason."""
-        return tuple(o for o in self.outcomes if o.state == "failed")
+        return tuple(outcome for outcome in self.outcomes if outcome.state == "failed")
 
     @property
     def complete(self) -> bool:
@@ -1613,9 +1613,14 @@ async def apply_fleet(
         raise ValueError("apply_fleet needs at least one tenant schema")
     if len(set(targets)) != len(targets):
         seen: set[str] = set()
-        repeated = sorted({s for s in targets if s in seen or seen.add(s)})  # type: ignore[func-returns-value]
+        repeated: set[str] = set()
+        for schema in targets:
+            if schema in seen:
+                repeated.add(schema)
+            else:
+                seen.add(schema)
         raise ValueError(
-            f"apply_fleet was given the same schema twice: {', '.join(repeated)}; "
+            f"apply_fleet was given the same schema twice: {', '.join(sorted(repeated))}; "
             "a fleet is a set of tenants and a repeat is a directory bug"
         )
     for schema in targets:

@@ -16,7 +16,7 @@ class _Req:
 pytestmark = pytest.mark.asyncio
 
 
-def test_default_key_has_no_dangling_query_separator() -> None:
+async def test_default_key_has_no_dangling_query_separator() -> None:
     assert default_cache_key(_Req(method="GET", path="/treks")) == "GET /treks"
     assert (
         default_cache_key(_Req(method="GET", path="/treks", query=b"page=2")) == "GET /treks?page=2"

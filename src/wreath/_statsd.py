@@ -108,11 +108,11 @@ class StatsDBridge:
             suffix = ""
             if merged:
                 suffix = "|#" + ",".join(
-                    f"{_san_tag(k)}:{_san_tag(str(v))}" for k, v in merged.items()
+                    f"{_san_tag(key)}:{_san_tag(str(value))}" for key, value in merged.items()
                 )
             out.append(f"{_san(metric)}:{_fmt(value)}|{kind}{suffix}")
         else:
-            parts = [_san(str(v)) for v in labels.values()]
+            parts = [_san(str(value)) for value in labels.values()]
             full = ".".join([_san(metric), *parts]) if parts else _san(metric)
             out.append(f"{full}:{_fmt(value)}|{kind}")
 
@@ -173,12 +173,12 @@ class StatsDBridge:
         packet: list[str] = []
         size = 0
         for line in lines:
-            n = len(line.encode("utf-8")) + 1
-            if packet and size + n > MAX_PACKET_BYTES:
+            line_size = len(line.encode("utf-8")) + 1
+            if packet and size + line_size > MAX_PACKET_BYTES:
                 self._send_packet(packet)
                 packet, size = [], 0
             packet.append(line)
-            size += n
+            size += line_size
         if packet:
             self._send_packet(packet)
 

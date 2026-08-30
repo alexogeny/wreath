@@ -67,12 +67,15 @@ def extension(name: str) -> Any | None:
     """
     if name not in _EXTENSIONS:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name = f"wreath._native.{name}"
     try:
-        return importlib.import_module(f"wreath._native.{name}")
-    except ImportError as error:
+        return importlib.import_module(module_name)
+    except ModuleNotFoundError as error:
+        if error.name != module_name:
+            raise
         if name in _REQUIRED_EXTENSIONS:
             raise ImportError(
-                f"wreath._native.{name} is missing from this installation; "
+                f"{module_name} is missing from this installation; "
                 "install a compiled Wreath wheel"
             ) from error
         return None

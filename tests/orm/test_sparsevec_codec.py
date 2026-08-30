@@ -102,6 +102,40 @@ def test_an_explicit_zero_is_dropped_rather_than_stored() -> None:
     assert len(SparseVector(5, {2: 0.0})) == 0
 
 
+def test_iterator_construction_keeps_the_last_duplicate_before_dropping_zero() -> None:
+    pairs = iter(((3, 1.5), (1, 0.5), (3, 0.0), (1, 2.5)))
+
+    assert SparseVector(5, pairs).to_dict() == {1: 2.5}
+
+
+@pytest.mark.parametrize("discarded", [object(), float("nan")])
+def test_iterables_validate_only_the_last_duplicate(discarded: object) -> None:
+    pairs = [(1, discarded), (1, 2.0)]
+
+    for elements in (pairs, tuple(pairs), iter(pairs)):
+        assert SparseVector(5, elements).to_dict() == {1: 2.0}
+
+
+def test_large_duplicate_sequence_deduplicates_before_native_pair_storage() -> None:
+    pairs = [(1, float(index)) for index in range(10_000)]
+
+    assert SparseVector(5, pairs).to_dict() == {1: 9_999.0}
+
+
+def test_iterator_construction_accepts_more_than_thirty_two_elements() -> None:
+    vector = SparseVector(40, ((index, float(index)) for index in range(1, 34)))
+
+    assert len(vector) == 33
+    assert vector.to_dict()[33] == 33.0
+
+
+@pytest.mark.parametrize("pairs", [((3, 1.5), (1, 2.5)), [(3, 1.5), (1, 2.5)]])
+def test_sequence_construction_writes_native_pairs_without_a_temporary_dict(
+    pairs: object,
+) -> None:
+    assert SparseVector(5, pairs).to_dict() == {1: 2.5, 3: 1.5}
+
+
 def test_len_is_the_stored_count_not_the_dimension() -> None:
     assert len(SparseVector(1_000_000, {5: 1.0, 900: 2.0})) == 2
 

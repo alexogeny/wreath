@@ -106,6 +106,10 @@ async def test_explain_route_and_plan_join_metadata_names(tmp_path) -> None:
         _recorder(), app, InspectorConfig(path=str(tmp_path / "wfi.sock"))
     )
     try:
+        image = server._metadata_image()
+        routes_by_id = server._routes_by_id
+        assert server._metadata_image() is image
+        assert server._routes_by_id is routes_by_id
         async with InspectorClient(server.path) as client:
             route = await client.explain_route(method="GET", path="/widgets/{widget_id}")
             assert route["route_id"] != 0

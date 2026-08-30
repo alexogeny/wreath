@@ -299,6 +299,30 @@ async def test_native_first_class_cache_and_compression_transform_before_egress(
 
 
 @pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.parametrize(("initial", "expected"), [(b"*", b"*"), (b"", b"accept-encoding")])
+@pytest.mark.asyncio
+async def test_native_compression_preserves_vary_wildcard_and_drops_empty_members(
+    initial: bytes, expected: bytes
+) -> None:
+    app = Wreath(http_policy=HttpPolicy(compression=CompressionPolicy(minimum_size=0)))
+
+    @app.get("/")
+    async def payload(request: Any) -> Response:
+        return Response(
+            b"native-policy" * 100,
+            headers=[(b"vary", initial)],
+            media_type=b"text/plain",
+        )
+
+    request = GET[:-2] + b"Accept-Encoding: gzip\r\n\r\n"
+    transport = await drive(_NativeHttpProtocol, app, [request])
+    head, body = bytes(transport.buffer).split(b"\r\n\r\n", 1)
+
+    assert b"vary: " + expected + b"\r\n" in head
+    assert gzip.decompress(body) == b"native-policy" * 100
+
+
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
 @pytest.mark.asyncio
 async def test_native_dcz_uses_the_registered_dictionary_and_standard_frame() -> None:
     dictionary = b'{"kind":"dashboard","rows":[' + (b'{"id":41},' * 1000) + b"]}"

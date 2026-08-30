@@ -299,6 +299,7 @@ lookup_path(PyObject *context, PyObject *path, int line,
         PyObject *segment = PyTuple_GET_ITEM(path, i);
         PyObject *found = NULL;
         int record_missed = 0;
+        int attribute_checked = 0;
         if (bound_frame != NULL && bound_frame->sequence_kind == 3 &&
             i == start) {
             PyObject *borrowed = NULL;
@@ -345,6 +346,13 @@ lookup_path(PyObject *context, PyObject *path, int line,
                 Py_XDECREF(owned);
                 return NULL;
             }
+        } else if (!record_missed && Py_TYPE(current)->tp_as_mapping == NULL) {
+            found = PyObject_GetAttr(current, segment);
+            attribute_checked = 1;
+            if (found == NULL && !PyErr_ExceptionMatches(PyExc_AttributeError)) {
+                Py_XDECREF(owned);
+                return NULL;
+            }
         } else if (!record_missed) {
             found = PyObject_GetItem(current, segment);
             if (found == NULL) {
@@ -359,8 +367,8 @@ lookup_path(PyObject *context, PyObject *path, int line,
             }
         }
         if (found == NULL) {
-            /* Subscript missed; mirror the Python lookup's attribute fallback. */
-            found = PyObject_GetAttr(current, segment);
+            if (!attribute_checked)
+                found = PyObject_GetAttr(current, segment);
             if (found == NULL) {
                 if (PyErr_ExceptionMatches(PyExc_AttributeError)) {
                     PyErr_Clear();

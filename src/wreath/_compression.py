@@ -37,6 +37,20 @@ else:
 _DCZ_MAGIC = b"\x5e\x2a\x4d\x18\x20\x00\x00\x00"
 
 
+class _RenderedFragments(bytes):
+    prefix: bytes
+    tail: bytes
+
+    def __new__(cls, prefix: bytes, tail: bytes):
+        rendered = super().__new__(cls, prefix + tail)
+        rendered.prefix = prefix
+        rendered.tail = tail
+        return rendered
+
+    def materialize(self) -> bytes:
+        return bytes(self)
+
+
 def require_zstd() -> Any:
     """Return the codec or refuse when this CPython build omitted ``_zstd``."""
     if _zstd is None:
@@ -68,18 +82,31 @@ def _gzip_fragment_compress_with(
     return _core.gzip_fragment_compress_with(workspace, data, level, format, fragments)
 
 
-def _prepare_dcz_dictionary(dictionary: bytes) -> tuple[bytes, bytes, Any]:
+def _prepare_dcz_dictionary(dictionary: bytes) -> tuple[bytes, bytes, Any, object | None]:
     """Prepare one raw RFC 9842 dictionary outside the request path."""
     codec = require_zstd()
     content = bytes(dictionary)
     digest = sha256(content).digest()
     prepared = codec.ZstdDict(content, is_raw=True)
-    return b":" + b64encode(digest) + b":", digest, prepared
+    workspace = _core.dcz_encoder_new(content)
+    return b":" + b64encode(digest) + b":", digest, prepared, workspace
 
 
-def _dcz_compress(prepared: tuple[bytes, bytes, Any], data: bytes, level: int) -> bytes:
+def _dcz_compress(
+    prepared: tuple[bytes, bytes, Any, object | None],
+    data: bytes,
+    level: int,
+) -> bytes:
     """Emit one RFC 9842 Dictionary-Compressed Zstandard stream."""
-    _token, digest, dictionary = prepared
+    _token, digest, dictionary, workspace = prepared
+    if workspace is not None:
+        if isinstance(data, _RenderedFragments):
+            return _core.dcz_compress_fragments_with(
+                workspace, digest, data.prefix, data.tail, level
+            )
+        return _core.dcz_compress_with(workspace, digest, data, level)
+    if isinstance(data, _RenderedFragments):
+        data = data.materialize()
     payload = require_zstd().compress(
         data,
         level=level,
@@ -93,7 +120,7 @@ def _dcz_decompress(data: bytes, dictionary: bytes, *, max_output_bytes: int) ->
     if max_output_bytes < 1:
         raise ValueError(f"max_output_bytes must be positive, got {max_output_bytes}")
     prepared = _prepare_dcz_dictionary(dictionary)
-    _token, digest, zstd_dictionary = prepared
+    _token, digest, zstd_dictionary, _workspace = prepared
     if len(data) < 40 or data[:8] != _DCZ_MAGIC or data[8:40] != digest:
         raise ValueError("not a readable dcz stream for this dictionary")
     decoder = require_zstd().ZstdDecompressor(zstd_dict=zstd_dictionary)

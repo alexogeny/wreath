@@ -531,7 +531,7 @@ def check_logging_streams(*, active: bool | None = None) -> list[str]:
         if name in bridged:
             continue
         if (
-            all(isinstance(h, _stdlib_logging.NullHandler) for h in logger.handlers)
+            all(isinstance(handler, _stdlib_logging.NullHandler) for handler in logger.handlers)
             and not logger.propagate
         ):
             # A NullHandler on a non-propagating logger is a library silencing
@@ -742,11 +742,11 @@ class Preflight:
 
     @property
     def blocking(self) -> tuple[PreflightFinding, ...]:
-        return tuple(f for f in self.findings if f.severity == "blocking")
+        return tuple(finding for finding in self.findings if finding.severity == "blocking")
 
     @property
     def advisory(self) -> tuple[PreflightFinding, ...]:
-        return tuple(f for f in self.findings if f.severity == "advisory")
+        return tuple(finding for finding in self.findings if finding.severity == "advisory")
 
 
 #: What preflight cannot see from a built application, and what does see it.

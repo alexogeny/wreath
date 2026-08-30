@@ -96,19 +96,7 @@ def b64url_decode(text: str) -> bytes:
     if not text:
         raise WebAuthnError("value is not base64url")
     try:
-        # The alphabet check that used to sit here was a Python set scan over
-        # every character of every payload; `_b64.b64url_decode` makes the same
-        # refusal inside the decode loop. Empty stays a local check because this
-        # caller rejects it and the shared decoder, like native `jose.c`,
-        # answers `b""`.
-        # `rstrip` because the set this replaced contained `=`, so a *padded*
-        # value was accepted here and the shared decoder is unpadded-only.
-        # Stripping first keeps every input that used to decode decoding, and
-        # every one that used to fail failing: `"QQ=="` still yields a byte,
-        # `"Q==="` still raises -- one character is not a base64 length either
-        # way -- and `"Q=Q"` is still refused, now for holding `=` rather than
-        # for failing to re-pad. Tightening what authentication accepts is not
-        # a side effect worth taking on the way past.
+        # WebAuthn accepts optional trailing padding; the shared decoder does not.
         return _b64url_decode(text.rstrip("="))
     except ValueError as exc:  # binascii.Error is a ValueError
         raise WebAuthnError("value is not base64url") from exc
@@ -526,7 +514,10 @@ def is_loopback_host(host: str) -> bool:
     parts = name.split(".")
     if len(parts) != 4 or parts[0] != "127":
         return False
-    return all(part.isdigit() and len(part) <= 3 and int(part) <= 255 for part in parts)
+    for part in parts:
+        if not part.isdigit() or len(part) > 3 or int(part) > 255:
+            return False
+    return True
 
 
 def default_origins(rp_id: str) -> tuple[str, ...]:

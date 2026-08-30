@@ -175,17 +175,7 @@ class ObjectError(Exception):
     """
 
 
-#: The characters `normalize_key` refuses inside a segment: the C0 controls
-#: (`\x00`-`\x1f`) and `DEL`. Compiled once, at import, and searched once per
-#: segment -- the predicate it replaces read `any(ord(c) < 0x20 or ord(c) ==
-#: 0x7F for c in part)`, one interpreter step per character of every key on the
-#: containment gate every backend routes through. Ablated over the whole call
-#: (15 rounds, 20k iterations, A/A floor 0.00-0.02us): 1.10 -> 0.40us on a
-#: 15-character key, 2.74 -> 0.75us on 45, 4.78 -> 1.16us on 85. The class of
-#: win is deleting work rather than widening it -- one C-level scan over the
-#: segment instead of a Python loop over its characters -- so there is nothing
-#: here for `_native/`. The set is literal code points, not a shorthand class,
-#: so it is exactly the predicate and not a Unicode-aware approximation of it.
+#: The exact C0 and DEL code points forbidden inside an object-key segment.
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -808,16 +798,12 @@ class MemoryObjectStore:
         return _verify_local(self._secret, key, method=method, expires=expires, signature=signature)
 
     def path(self, key: str) -> ObjectPath:
-        """An `ObjectPath` bound to this store and `key`."""
         return ObjectPath(self, key)
 
 
 def _iter_chunks(data: bytes) -> Iterable[bytes]:
-    # An empty object yields nothing at all, which is what the other two
-    # backends do; yielding one empty chunk instead made "the stream ended"
-    # and "the object is empty" different shapes depending on the backend.
-    for i in range(0, len(data), _CHUNK):
-        yield data[i : i + _CHUNK]
+    for offset in range(0, len(data), _CHUNK):
+        yield data[offset : offset + _CHUNK]
 
 
 def _etag(data: bytes) -> str:
@@ -2656,7 +2642,8 @@ def sniff_content_type(prefix: bytes) -> str | None:
     for signature, media_type in _SIGNATURES:
         if prefix.startswith(signature):
             return media_type
-    if prefix[:5].lower() in (b"<html", b"<!doc") or prefix[:6].lower() == b"<?xml ":
+    lowered = prefix[:6].lower()
+    if lowered.startswith((b"<html", b"<!doc")) or lowered == b"<?xml ":
         return "text/plain"
     return None
 

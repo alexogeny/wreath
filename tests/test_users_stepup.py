@@ -91,6 +91,41 @@ def test_merging_leaves_the_window_absent_when_nobody_asked() -> None:
     assert merged.second_factor is None
 
 
+def test_merging_keeps_boolean_requirements_regardless_of_order() -> None:
+    authenticated = merge_requirements(AuthRequirement(authenticated=True), AuthRequirement())
+    identified = merge_requirements(AuthRequirement(identify=True), AuthRequirement())
+    public = merge_requirements(AuthRequirement(public=True), AuthRequirement())
+    trailing = merge_requirements(AuthRequirement(), AuthRequirement(public=True))
+
+    assert authenticated.authenticated is True
+    assert identified.identify is True
+    assert public.public is True
+    assert trailing.public is True
+
+
+def test_a_later_public_requirement_cannot_erase_earlier_protection() -> None:
+    with pytest.raises(ValueError, match=r"public\(\) cannot be combined"):
+        merge_requirements(
+            AuthRequirement(authenticated=True),
+            AuthRequirement(),
+            AuthRequirement(public=True),
+        )
+
+
+def test_identification_alone_still_conflicts_with_public_access() -> None:
+    with pytest.raises(ValueError, match=r"public\(\) cannot be combined"):
+        merge_requirements(AuthRequirement(public=True), AuthRequirement(identify=True))
+
+
+def test_strictest_window_is_kept_after_absent_and_looser_requirements() -> None:
+    merged = merge_requirements(
+        AuthRequirement(second_factor=3600.0),
+        AuthRequirement(),
+        AuthRequirement(second_factor=60.0),
+    )
+    assert merged.second_factor == 60.0
+
+
 def test_stacking_the_decorator_keeps_the_shorter_window() -> None:
     @second_factor(max_age=3600)
     @second_factor(max_age=30)

@@ -1387,7 +1387,7 @@ def _convert_scalar(annotation: Any, raw: str, loc: tuple[Any, ...]) -> Any:
             ) from None
     origin = typing.get_origin(annotation)
     if origin in (types.UnionType, typing.Union):
-        options = [o for o in typing.get_args(annotation) if o is not _NONE_TYPE]
+        options = [option for option in typing.get_args(annotation) if option is not _NONE_TYPE]
         if len(options) == 1:
             return _convert_scalar(options[0], raw, loc)
     raise ValidationError(
@@ -2045,7 +2045,7 @@ def _unwrap_form_type(annotation: Any) -> Any:
     :func:`_convert_scalar` understands; leave anything else unchanged."""
     origin = typing.get_origin(annotation)
     if origin in (types.UnionType, typing.Union):
-        options = [o for o in typing.get_args(annotation) if o is not _NONE_TYPE]
+        options = [option for option in typing.get_args(annotation) if option is not _NONE_TYPE]
         if len(options) == 1:
             return _unwrap_form_type(options[0])
         return annotation

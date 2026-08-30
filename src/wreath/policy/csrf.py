@@ -579,12 +579,10 @@ class CsrfPolicy:
         replace_response_header(response.headers, b"cache-control", b"private, no-store")
 
     def _egress_sync(self, request: Request, response):
-        """Reference executor transformer; compiled policy mutates in place."""
         self._egress_inplace(request, response)
         return response
 
     async def _egress(self, request: Request, response):
-        """Reference executor wrapper; compiled policy mutates in place."""
         return self._egress_sync(request, response)
 
 

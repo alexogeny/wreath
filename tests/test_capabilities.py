@@ -33,6 +33,12 @@ def test_a_module_is_found_by_its_import_path() -> None:
     assert "wreath.messaging" in matches[0].capability.modules
 
 
+def test_an_unqualified_module_name_is_resolved_inside_wreath() -> None:
+    matches = lookup("messaging")
+    assert matches[0].capability.name == "jobs"
+    assert matches[0].reason == "module"
+
+
 def test_a_word_in_the_capability_sentence_is_the_weakest_match() -> None:
     matches = lookup("csrf")
     assert [match.capability.name for match in matches] == ["middleware"]

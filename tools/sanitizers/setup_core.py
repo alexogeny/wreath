@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from setuptools import Extension, setup
@@ -69,6 +70,7 @@ SOURCES = (
     "queue.c",
     "scheduler.c",
     "gzip_codec.c",
+    "zstd_codec.c",
     "gzip/portable_isa.c",
     "gzip/encode/cpu.c",
     "gzip/encode/crc32.c",
@@ -92,6 +94,7 @@ setup(
             define_macros=[("WREATH_GZIP_PORTABLE", "1")],
             extra_compile_args=FLAGS,
             extra_link_args=["-fsanitize=address,undefined"],
+            libraries=["dl"] if sys.platform.startswith("linux") else [],
         )
     ],
 )

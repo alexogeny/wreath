@@ -8,7 +8,7 @@ and their ordering is fixed by `HttpPolicy` rather than by priorities.
 from __future__ import annotations
 
 from os import urandom as _urandom
-from typing import Any, cast
+from typing import Any
 
 from .._compression import _dcz_compress, require_zstd
 from .._webpolicy import origin_matches as _native_origin_matches
@@ -560,16 +560,7 @@ class HttpPolicy:
 
         compression = self.compression
         if compression is not None:
-            native_dcz = tuple(
-                None
-                if entry is None
-                else (
-                    entry[0],
-                    entry[1],
-                    cast(Any, entry[2]).as_digested_dict,
-                )
-                for entry in compression._dcz_dictionaries
-            )
+            native_dcz = tuple(compression._dcz_dictionaries)
             compression = (
                 compression.minimum_size,
                 compression.gzip_level,
@@ -587,7 +578,7 @@ class HttpPolicy:
             maintenance = maintenance._native()
 
         return (
-            "wreath.http-policy.v4",
+            "wreath.http-policy.v5",
             proxy,
             trusted,
             ai_scraping,

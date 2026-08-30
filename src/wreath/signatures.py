@@ -601,8 +601,7 @@ class SignatureFacts:
     covered: tuple[str, ...] = ()
 
 
-#: The answer for a request that carried no signature at all. Shared rather than
-#: rebuilt per request: the overwhelmingly common case allocates nothing.
+#: Shared result for the unsigned-request fast path.
 _UNSIGNED: Final = SignatureFacts(reason="absent")
 
 
@@ -841,24 +840,11 @@ class Signatures:
         if abs(now - created) > self.max_age:
             raise SignatureError("signature created outside the accepted window")
         expires = params.get("expires")
-        # The `isinstance` half of this survives mutation and always will, which
-        # is worth writing down rather than re-investigating: the signature
-        # parameters are themselves covered by `@signature-params`, so a header
-        # carrying a non-integer `expires` cannot also carry a valid signature,
-        # and no test can reach this branch through the front door. It is not
-        # redundant either -- deleting it turns a malformed value into a
-        # `TypeError` from `now > expires` instead of a clean refusal, on a path
-        # that runs before the key is known. Type guard, deliberately unreachable.
+        # A malformed value must reach signature refusal, not an early TypeError.
         if isinstance(expires, int) and now > expires:
             raise SignatureError("signature has expired")
 
         alg = params.get("alg")
-        # No `isinstance` guard: `_ALGORITHMS` holds strings, so `not in` already
-        # refuses every non-string a parameter can be -- int, float, bool, bytes,
-        # all of which the structured-field parser can produce and none of which
-        # can be unhashable. A second spelling of one condition is how the two
-        # drift apart later, and mutation testing reported this one as the
-        # redundancy it is.
         if alg is not None and alg not in _ALGORITHMS:
             raise SignatureError(f"unsupported signature algorithm {alg!r}")
 
@@ -875,39 +861,18 @@ class Signatures:
             if not isinstance(nonce, str):
                 raise SignatureError("signature has no nonce")
             ledger_key = f"{key_id}\x00{nonce}"
-            # **Looked up here; spent below the verify.** A ledger is a bounded
-            # resource reachable by anyone who can name a `keyid`, and a `keyid`
-            # is published in the operator's directory. Claiming here would let
-            # an unauthenticated caller fill it with garbage signatures until it
-            # fails closed on every legitimate agent -- and, worse, burn the
-            # nonce a real agent is about to present. `saml.py:1213-1219` states
-            # the same rule for the same problem; this module used to take the
-            # opposite position.
-            # The *lookup* stays here because it is cheap and refuses a genuine
-            # replay without paying for the verify -- see the cost note below.
+            # Check before verification, but spend bounded ledger capacity only after it.
             if nonces.seen(ledger_key):
                 raise SignatureError("signature nonce was already used")
 
-        # Everything above this line is cheap; everything below is not, and the
-        # ordering is load-bearing rather than stylistic.
-        # Curve verification is the expensive operation an unauthenticated
-        # caller can trigger for the price of one header. Every check that can
-        # refuse *without* it -- covered components, the created
-        # window, expiry, the algorithm, an unknown keyid, a replayed nonce --
-        # is therefore placed above. Moving `verify_ed25519` earlier would not
-        # fail a test about correctness, so
-        # `test_a_bad_keyid_never_reaches_the_verify` exists to fail about this.
-        # Rate limiting is still the deployment's job: the ordering shrinks the
-        # cost of a *rejected* request, not of an accepted one.
+        # Curve verification follows every cheap refusal available to an untrusted caller.
         base = signature_base(_message(request, headers), components, params)
         from ._auth._ecverify import verify_ed25519
 
         if not verify_ed25519(key.public, base, raw_bytes):
             raise SignatureError("signature does not verify")
         if nonces is not None:
-            # Spent last, and only once everything above has passed. The window
-            # between the lookup and here is one verification wide and closes on
-            # the same answer, so a genuine racing replay is still refused.
+            # The claim closes a race with the earlier read after verification succeeds.
             if not nonces.claim(ledger_key, now=None):
                 raise SignatureError("signature nonce was already used")
         if expected_digest is not None:
@@ -1058,14 +1023,15 @@ def sign_request(
         for name, value in (headers or {}).items()
     }
     raw.setdefault(b"host", authority.encode("latin-1"))
+    covered = tuple((name.lower(), {}) for name in components)
     digest_header: str | None = None
     if body is not None:
         digest_header = (
             "sha-256=:" + base64.b64encode(_digest("sha-256", body)).decode("ascii") + ":"
         )
         raw[b"content-digest"] = digest_header.encode("ascii")
-        if _DIGEST_COMPONENT not in {name.lower() for name in components}:
-            components = (*components, _DIGEST_COMPONENT)
+        if all(name != _DIGEST_COMPONENT for name, _params in covered):
+            covered = (*covered, (_DIGEST_COMPONENT, {}))
     message = RequestMessage(
         method=method,
         scheme=scheme,
@@ -1082,7 +1048,6 @@ def sign_request(
         params["nonce"] = nonce
     if tag is not None:
         params["tag"] = tag
-    covered = tuple((name.lower(), {}) for name in components)
     base = signature_base(message, covered, params)
     signature = key.sign(base)
     if len(signature) != 64:

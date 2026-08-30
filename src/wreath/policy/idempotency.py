@@ -446,7 +446,7 @@ class IdempotencyPolicy:
         self._store: IdempotencyStore = (
             store if store is not None else MemoryIdempotencyStore(ttl=ttl, max_entries=max_entries)
         )
-        self._methods = frozenset(m.upper() for m in methods)
+        self._methods = frozenset(method.upper() for method in methods)
         self._header = header.lower()
         # A replay holds a whole response body for the TTL, in memory or in a
         # table, and nothing bounded it -- so an endpoint that returns something

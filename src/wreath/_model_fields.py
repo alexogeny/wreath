@@ -38,8 +38,7 @@ def dataclass_field_image(
         annotation = hints.get(field.name, field.type if fallback is _DECLARED else fallback)
         metadata: tuple[Any, ...] = ()
         if typing.get_origin(annotation) is typing.Annotated:
-            _base, *items = typing.get_args(annotation)
-            metadata = tuple(items)
+            metadata = typing.get_args(annotation)[1:]
         required = (
             field.default is dataclasses.MISSING and field.default_factory is dataclasses.MISSING
         )

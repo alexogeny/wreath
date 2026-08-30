@@ -11,6 +11,7 @@ from .._compression import (
     _gzip_encoder_new,
     _gzip_fragment_compress_with,
     _prepare_dcz_dictionary,
+    _RenderedFragments,
     require_zstd,
 )
 from .._native import _core
@@ -174,7 +175,9 @@ class CompressionPolicy:
         self.minimum_size = minimum_size
         self.gzip_level = gzip_level
         self._gzip_workspace = _gzip_encoder_new()
-        self._dcz_dictionaries: list[tuple[bytes, bytes, object] | None] = [None] * _FORMAT_COUNT
+        self._dcz_dictionaries: list[tuple[bytes, bytes, object, object | None] | None] = [
+            None
+        ] * _FORMAT_COUNT
         self._gzip_fragments: tuple[tuple[int, int, bytes, bytes, int] | None, ...] = (
             None,
         ) * _FORMAT_COUNT
@@ -292,6 +295,39 @@ class CompressionPolicy:
         self._gzip_fragment_bodies = tuple(bodies)
         return body
 
+    def _dcz_fragment_render(
+        self,
+        request: Request,
+        format: str | bytes,
+        template: Any,
+        context: dict[str, Any],
+    ) -> bytes:
+        index = _format_index(format)
+        dictionary = self._dcz_dictionaries[index]
+        fragment = self._gzip_fragments[index]
+        accepted = request._header_bytes(b"accept-encoding")
+        available = request._header_bytes(b"available-dictionary")
+        eligible = (
+            dictionary is not None
+            and fragment is not None
+            and request.scheme == "https"
+            and accepted is not None
+            and available == dictionary[0]
+            and _select_prepared_content_encoding(accepted, True) == "dcz"
+            and (request.identity is None or self.compress_authenticated)
+        )
+        if not eligible:
+            return self._gzip_fragment_render(format, template, context)
+        prefix_bytes, suffix_bytes, stable, _cached, prepared_level = fragment
+        if prepared_level != self.gzip_level:
+            raise RuntimeError("prepared gzip fragment no longer matches gzip_level")
+        if suffix_bytes != 0:
+            raise ValueError("fused DCZ rendering requires a zero-byte suffix")
+        prefix = template.render_bytes(context)
+        if len(prefix) != prefix_bytes:
+            raise ValueError(f"DCZ fragment prefix must be exactly {prefix_bytes} bytes")
+        return _RenderedFragments(prefix, stable)
+
     def describe(self):
         """What negotiation this policy takes part in.
 
@@ -390,7 +426,12 @@ class CompressionPolicy:
                     self._gzip_fragments,
                 )
                 if coding == "gzip"
-                else zstd_compress(response.body, level)
+                else zstd_compress(
+                    response.body.materialize()
+                    if isinstance(response.body, _RenderedFragments)
+                    else response.body,
+                    level,
+                )
             )
             replace_content_length(headers, len(response.body))
         elif isinstance(response, StreamingResponse) and self.compress_streaming:

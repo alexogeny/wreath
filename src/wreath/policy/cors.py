@@ -220,7 +220,6 @@ class CorsPolicy:
         return response
 
     async def _ingress(self, request: Request) -> Any | None:
-        """Reference executor wrapper; compiled policy uses `_ingress_sync`."""
         return self._ingress_sync(request)
 
     # Preflight requests target routes that usually declare no OPTIONS
@@ -278,12 +277,10 @@ class CorsPolicy:
                 append_vary(headers, b"origin")
 
     def _egress_sync(self, request: Request, response: Any) -> Any:
-        """Reference executor transformer; compiled policy mutates in place."""
         self._egress_inplace(request, response)
         return response
 
     async def _egress(self, request: Request, response: Any) -> Any:
-        """Reference executor wrapper; compiled policy mutates in place."""
         return self._egress_sync(request, response)
 
 

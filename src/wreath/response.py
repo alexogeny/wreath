@@ -26,10 +26,7 @@ from ._conditional import STATUS_WITHOUT_BODY as _STATUS_WITHOUT_BODY
 from ._json import dumps as _json_dumps
 from ._native import _core
 
-# The portable implementation replays two prebuilt ASGI messages. Wreath's own
-# server recognizes the exact type and emits the same status, headers, and body
-# through its one-shot response ABI, avoiding ASGI message interpretation while
-# keeping this dependency-free implementation authoritative on every server.
+# Portable ASGI replays these messages; Wreath's server emits them directly.
 from ._prepared import PreparedResponse as PreparedResponse
 from .background import Background
 from .cache_control import CacheControl
@@ -38,11 +35,9 @@ Send = Callable[[dict[str, Any]], Awaitable[None]]
 
 _CONTENT_TYPE = b"content-type"
 _CONTENT_LENGTH = b"content-length"
-# Small content-length values are overwhelmingly common; formatting them once
-# keeps str+encode out of the per-response path. Two KiB includes ordinary HTML
-# pages such as Fortunes (1,224 bytes) while retaining only ~40 KiB at startup.
+# Prebuild common content lengths once for response construction.
 _CONTENT_LENGTH_CACHE_SIZE = 2048
-_CONTENT_LENGTHS = tuple(str(n).encode("ascii") for n in range(_CONTENT_LENGTH_CACHE_SIZE))
+_CONTENT_LENGTHS = tuple(str(size).encode("ascii") for size in range(_CONTENT_LENGTH_CACHE_SIZE))
 _HTML_TYPE_HEADER = (_CONTENT_TYPE, b"text/html; charset=utf-8")
 _HTML_HEADERS = tuple((_HTML_TYPE_HEADER, (_CONTENT_LENGTH, length)) for length in _CONTENT_LENGTHS)
 
@@ -82,8 +77,6 @@ class Response:
     __slots__ = ("_headers", "background", "body", "status")
 
     media_type = b"application/octet-stream"
-    # The default content-type pair never varies per instance, so each class
-    # carries it prebuilt (None when the media type is empty).
     _media_type_header: tuple[bytes, bytes] | None = (_CONTENT_TYPE, media_type)
 
     def __init_subclass__(cls, **kwargs: object) -> None:
@@ -121,12 +114,6 @@ class Response:
                 [media_type_header] if media_type_header is not None else []
             )
             if not bodyless:
-                # `_content_length` inlined on this branch alone. It is one
-                # Python call, and one Python call is 49ns of the 412ns this
-                # constructor costs -- 12%, on the path every ordinary response
-                # takes. The function stays for the `headers is not None`
-                # branch below and for external callers, where it runs once
-                # against much more surrounding work.
                 size = len(body)
                 response_headers.append(
                     (
@@ -147,6 +134,8 @@ class Response:
                     has_type = True
                 elif key == _CONTENT_LENGTH:
                     has_length = True
+                if has_type and has_length:
+                    break
             if media_type and not has_type:
                 response_headers.append((_CONTENT_TYPE, media_type))
             if not bodyless and not has_length:
@@ -311,12 +300,7 @@ class JSONResponse(Response):
         super().__init__(_json_dumps(data), status=status, background=background)
 
 
-# Handlers overwhelmingly return str/bytes/dict with the default 200 status.
-# _coerce_response builds those into a Response in one frame -- skipping the
-# subclass __init__ -> Response.__init__ double call and its branch logic --
-# producing byte-for-byte the same result as the constructors above. The type
-# headers derive from each class's media_type so they cannot drift. Guarded by
-# the equivalence test in tests/test_response_fast_path.py.
+# Common handler values take their fixed 200-response shape directly.
 _TEXT_TYPE_HEADER = (_CONTENT_TYPE, TextResponse.media_type)
 _JSON_TYPE_HEADER = (_CONTENT_TYPE, JSONResponse.media_type)
 _OCTET_TYPE_HEADER = (_CONTENT_TYPE, Response.media_type)
@@ -539,11 +523,6 @@ class HTMLResponse(Response):
     ) -> None:
         document = body if isinstance(body, bytes) else body.encode("utf-8")
         if status == 200:
-            # HTMLResponse exposes no headers or media-type override, and 200
-            # can never be bodyless. Entering Response.__init__ made this fixed
-            # shape pay its status-set lookup and both configuration branches
-            # before arriving at these same four assignments. Keep subclasses'
-            # compiled media-type pair just as the general constructor does.
             type_header = self._media_type_header
             self.body = document
             self.status = status
@@ -994,8 +973,10 @@ def _disposition(filename: str) -> bytes:
     ASCII fallback, which is also what keeps the latin-1 encode below from
     raising on an ordinary accented name.
     """
-    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in filename):
-        raise ValueError("attachment filename contains a control character")
+    for character in filename:
+        codepoint = ord(character)
+        if codepoint < 0x20 or codepoint == 0x7F:
+            raise ValueError("attachment filename contains a control character")
     escaped = filename.replace("\\", "\\\\").replace('"', '\\"')
     if filename.isascii():
         return f'attachment; filename="{escaped}"'.encode("ascii")

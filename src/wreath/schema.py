@@ -241,7 +241,7 @@ def emit_sql(
     ]
     lines += [f"{statement};" for statement in marker_statements(schema)]
     for component in components:
-        pending = [s for s in component.steps if s.version > from_version]
+        pending = [step for step in component.steps if step.version > from_version]
         if not pending:
             continue
         lines.append("")
@@ -325,7 +325,11 @@ async def _missing_relations(
         if component.qualified:
             if component.schema not in present:
                 present[component.schema] = await _present_in(connection, component.schema)
-            absent = tuple(r for r in component.relations if r not in present[component.schema])
+            absent = tuple(
+                relation
+                for relation in component.relations
+                if relation not in present[component.schema]
+            )
         else:
             unresolved = []
             for relation in component.relations:
@@ -339,7 +343,7 @@ async def _missing_relations(
 
 def _refusal(component: Component, relations: Sequence[str]) -> str:
     if component.qualified:
-        listed = ", ".join(f'"{component.schema}"."{r}"' for r in relations)
+        listed = ", ".join(f'"{component.schema}"."{relation}"' for relation in relations)
         where = f'as a role with CREATE privilege on schema "{component.schema}"'
     else:
         listed = ", ".join(relations)
@@ -378,7 +382,7 @@ async def verify(
         await database.release(workload, connection)
     if missing:
         name, relations = next(iter(missing.items()))
-        component = next(c for c in components if c.name == name)
+        component = next(candidate for candidate in components if candidate.name == name)
         raise SchemaNotManaged(_refusal(component, relations))
 
 

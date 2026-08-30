@@ -268,7 +268,13 @@ class ChartData:
     database-derived snapshot serves more than one projection.
     """
 
-    __slots__ = ("_chart_cache", "_chart_plan_cache", "_chart_text_cache", "_data")
+    __slots__ = (
+        "_chart_cache",
+        "_chart_joined_text_cache",
+        "_chart_plan_cache",
+        "_chart_text_cache",
+        "_data",
+    )
 
     def __init__(
         self,
@@ -281,6 +287,7 @@ class ChartData:
         # only its latest projection: operation-owned, bounded, and enough to
         # turn a repeated application write into a close-object cache hit.
         self._chart_cache = None
+        self._chart_joined_text_cache = None
         self._chart_plan_cache = None
         self._chart_text_cache = None
 
@@ -375,6 +382,32 @@ class ChartData:
         )
         if cache and cacheable:
             self._chart_text_cache = (key, result)
+        return result
+
+    def project_chart_text_joined(
+        self,
+        *,
+        downsample_rows: Any,
+        full_rows: Any = (),
+        threshold: int = 128,
+        tick_target: int = 9,
+        cache: bool = True,
+    ) -> tuple[int, tuple[tuple[Any, bool], ...], str, int, str, int]:
+        """Write all SVG paths contiguously and serialize the tick axes."""
+
+        downsample = tuple(downsample_rows)
+        full = tuple(full_rows)
+        key = (downsample, full, threshold, tick_target)
+        if not all(type(row) is int for row in downsample) or not all(
+            type(row) is int for row in full
+        ):
+            raise TypeError("joined chart projection requires integer row indices")
+        cached = self._chart_joined_text_cache
+        if cache and cached is not None and cached[0] == key:
+            return cached[1]
+        result = _core.series_chart_plan_text_joined(self._chart_plan(key))
+        if cache:
+            self._chart_joined_text_cache = (key, result)
         return result
 
 

@@ -149,6 +149,20 @@ def test_an_expired_login_releases_a_small_pending_store_slot() -> None:
     )
 
 
+def test_pending_login_sweep_tracks_the_next_live_deadline() -> None:
+    store = PendingLoginStore(ttl=10)
+    store.put(PendingLogin("_first", "first", ACME, 100.0, _SESSION))
+    store.put(PendingLogin("_second", "second", ACME, 108.0, _SESSION))
+    store.put(PendingLogin("_third", "third", ACME, 109.0, _SESSION))
+
+    store._sweep(111.0)
+
+    assert "_first" not in store._by_id
+    assert "_second" in store._by_id
+    assert "_third" in store._by_id
+    assert store._next_sweep == 118.0
+
+
 async def test_a_signed_solicited_assertion_is_accepted(provider, signers, ledger) -> None:
     begun = _begin(provider)
     raw = signed_response(signers[ACME], in_response_to=begun.request_id)

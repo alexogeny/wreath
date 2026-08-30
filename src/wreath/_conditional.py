@@ -1,21 +1,4 @@
-"""Conditional-request comparison, in one place.
-
-`If-None-Match` was parsed twice -- once in `wreath.staticfiles` for a file's
-`ETag` and once in `wreath._auth.permissions` for the permission manifest's --
-from the same clause of RFC 9110, with the same three cases and two spellings of
-the loop. Two copies of a specification parser is how they drift, and the
-direction they drift in is *serve a stale body* or *refetch every time*: both
-call sites recorded, in their own docstrings, that they had already shipped the
-naive `==` comparison and paid for it.
-
-Minting an entity tag stays with whatever produced the representation -- bytes,
-a `stat`, a policy fingerprint, a content coding -- because each knows something
-the others do not. Only the *comparison* is one function, and this is it.
-
-The statuses a response may not carry a body under are here for the same
-reason. `frozenset({204, 304})` was written in four modules; it is one fact
-about HTTP.
-"""
+"""Shared RFC 9110 conditional-request facts."""
 
 from __future__ import annotations
 
@@ -50,7 +33,10 @@ def etag_matches(header: str | None, tag: str) -> bool:
     if header.strip() == "*":
         return True
     target = tag.removeprefix("W/")
-    return any(candidate.strip().removeprefix("W/") == target for candidate in header.split(","))
+    for candidate in header.split(","):
+        if candidate.strip().removeprefix("W/") == target:
+            return True
+    return False
 
 
 __all__ = ["STATUS_WITHOUT_BODY", "etag_matches"]

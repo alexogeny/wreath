@@ -113,11 +113,11 @@ class SessionPolicy:
         "_cookie",
         "_http_only",
         "_max_age",
-        "_previous",
         "_same_site",
         "_secret",
         "_secure",
         "_store",
+        "_verification_secrets",
     )
 
     def __init__(
@@ -158,7 +158,7 @@ class SessionPolicy:
                     f"previous_secrets[{index}] must contain at least {MIN_SECRET_BYTES} bytes"
                 )
             previous.append(encoded)
-        self._previous = tuple(previous)
+        self._verification_secrets = (self._secret, *previous)
         self._cookie = cookie
         self._max_age = max_age
         self._same_site = same_site
@@ -207,21 +207,10 @@ class SessionPolicy:
         )
 
     def _sign(self, payload: bytes, issued_at: int) -> str:
-        # `b64url_encode` answers in `str` and the HMAC needs `bytes`, so this
-        # trades the stdlib encode/rstrip/decode chain for a native call plus
-        # one ascii encode of a short string. That is not obviously a win, so it
-        # was measured over the whole `_sign` rather than over the encode:
-        # against an A/A floor of 0.15-1.29%, three runs gave 3.6-4.9% on a
-        # 94-byte payload, 5.9-7.1% on 142, 16.6-17.1% on 302 and 31.9-32.6% on
-        # 1070. The extra encode is real and the chain it replaces is bigger.
         body = b64url_encode(payload)
         stamp = str(issued_at).encode("ascii")
         mac = hmac.new(self._secret, body.encode("ascii") + b"." + stamp, "sha256").hexdigest()
         return f"{body}.{issued_at}.{mac}"
-
-    def _secrets(self) -> tuple[bytes, ...]:
-        """Every secret a cookie may verify under, current one first."""
-        return (self._secret, *self._previous)
 
     def _load(self, value: str) -> tuple[dict[str, Any], bytes] | None:
         """The session and the exact payload bytes it was decoded from.
@@ -235,10 +224,11 @@ class SessionPolicy:
         try:
             body, stamp, mac = value.split(".")
             signed = f"{body}.{stamp}".encode("ascii")
-            if not any(
-                hmac.compare_digest(mac, hmac.new(secret, signed, "sha256").hexdigest())
-                for secret in self._secrets()
-            ):
+            for secret in self._verification_secrets:
+                expected = hmac.new(secret, signed, "sha256").hexdigest()
+                if hmac.compare_digest(mac, expected):
+                    break
+            else:
                 return None
             if int(stamp) + self._max_age < int(time.time()):
                 return None
@@ -298,12 +288,7 @@ class SessionPolicy:
                     # is a revoked session, even with a valid signed cookie --
                     # that is the whole point of storing server-side.
                     sid, session = decoded, stored
-        # Serialize before publishing anything. `_json_dumps` is the one call
-        # here that can raise, and doing it first means the four assignments
-        # below are plain stores with no failure point between them -- so
-        # `after` can never observe a half-initialised session. It used to sit
-        # third, which made "session is set but its baseline is not" reachable
-        # rather than merely theoretical.
+        # Serialization must succeed before request state becomes observable.
         baseline = _json_dumps(session)
         state = request.state
         state.session = session
@@ -316,12 +301,7 @@ class SessionPolicy:
         session = state.get("session")
         loaded = state.get("_session_loaded")
         if session is None or loaded is None:
-            # Read through `.get` uniformly: every field `before` publishes is
-            # optional here, because an `after` whose `before` did not complete
-            # must degrade rather than raise. Reading one of the four by
-            # attribute made that case an unrelated `AttributeError` 500 instead
-            # of a session that is simply not written. `_session_loaded` is
-            # always bytes when present, so None is unambiguously "absent".
+            # `before` can fail before it publishes either field.
             return response
         sid = state.get("_session_sid")
         rotate = bool(state.get("_session_rotate"))
@@ -370,10 +350,11 @@ class SessionPolicy:
         try:
             body, stamp, mac = value.split(".")
             signed = f"{body}.{stamp}".encode("ascii")
-            if not any(
-                hmac.compare_digest(mac, hmac.new(secret, signed, "sha256").hexdigest())
-                for secret in self._secrets()
-            ):
+            for secret in self._verification_secrets:
+                expected = hmac.new(secret, signed, "sha256").hexdigest()
+                if hmac.compare_digest(mac, expected):
+                    break
+            else:
                 return None
             if int(stamp) + self._max_age < int(time.time()):
                 return None

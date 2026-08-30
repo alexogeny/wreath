@@ -241,9 +241,11 @@ def _unwrap_optional(annotation: Any) -> tuple[Any, bool]:
     """
     origin = typing.get_origin(annotation)
     if origin is typing.Union:
-        args = [a for a in typing.get_args(annotation) if a is not type(None)]
-        if len(args) == 1:
-            return args[0], True
+        arguments = [
+            argument for argument in typing.get_args(annotation) if argument is not type(None)
+        ]
+        if len(arguments) == 1:
+            return arguments[0], True
     return annotation, False
 
 

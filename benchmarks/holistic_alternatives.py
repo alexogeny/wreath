@@ -29,12 +29,12 @@ from .holistic_fastapi import (
     _CEDAR_REQUEST,
     _DAYS,
     _TEMPLATE,
+    _TEMPORAL_COUNTS,
     CompactExport,
     _Dependencies,
     _geospatial_summary,
     _OperationsExport,
     _project_series,
-    _temporal_counts,
 )
 
 FRAMEWORK = os.environ.get("WREATH_HOLISTIC_FRAMEWORK", "sanic")
@@ -145,7 +145,7 @@ async def _dashboard(
     selected_lines = payload.lines[:limit]
     _total = sum(line.quantity * line.price for line in selected_lines)
     series_count, paths, ticks, _tick_count = _project_series()
-    hourly_count, weekly_count, monthly_count, next_run = _temporal_counts()
+    hourly_count, weekly_count, monthly_count, next_run = _TEMPORAL_COUNTS
     occupied_cells, trail_speed = _geospatial_summary()
 
     vector_index = np.arange(128, dtype=np.float64)

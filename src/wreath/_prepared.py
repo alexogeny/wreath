@@ -45,6 +45,8 @@ def _headers_for(
             has_type = True
         elif lowered == _CONTENT_LENGTH:
             has_length = True
+        if has_type and has_length:
+            break
     if media_type and not has_type:
         headers.append((_CONTENT_TYPE, media_type))
     if status not in _STATUS_WITHOUT_BODY and not has_length:

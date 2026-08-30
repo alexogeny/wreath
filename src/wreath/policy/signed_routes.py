@@ -119,12 +119,14 @@ class SignedRoutePolicy:
             return None
         token: str | None = None
         unsigned: list[bytes] = []
+        parameter = self._parameter_bytes
+        parameter_length = len(parameter)
         for part in request.query_string.split(b"&"):
-            if part.startswith(self._parameter_bytes):
+            if part.startswith(parameter):
                 if token is not None:
                     return self._refusal()
                 try:
-                    token = part[len(self._parameter_bytes) :].decode("ascii")
+                    token = part[parameter_length:].decode("ascii")
                 except UnicodeDecodeError:
                     return self._refusal()
             elif part:

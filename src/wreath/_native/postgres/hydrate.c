@@ -491,13 +491,17 @@ row_identity(WreathPgHydratePlan *plan, WreathPgDecoderPlan *decoder, WreathPgFi
 static int
 hydrate_row(WreathPgHydratePlan *plan, WreathPgDecoderPlan *decoder, WreathPgFieldTape *tape,
             Py_buffer *buffers, Py_ssize_t row, PyObject *dest, PyObject *identity_map,
-            PyObject *owner)
+            PyObject *owner, PyObject *seen)
 {
     PyObject *key = NULL;
     PyObject *identity = NULL;
     PyObject *instance = NULL;
+    PyObject *raised = NULL;
     int has_null = 0;
     int fresh = 0;
+    int identity_added = 0;
+    int seen_before;
+    int seen_added = 0;
     int failed = -1;
 
     key = row_identity(plan, decoder, tape, buffers, row, &has_null);
@@ -507,6 +511,8 @@ hydrate_row(WreathPgHydratePlan *plan, WreathPgDecoderPlan *decoder, WreathPgFie
     }
     identity = PyTuple_Pack(2, plan->identity_spec, key);
     if (identity == NULL) goto done;
+    seen_before = PySet_Contains(seen, identity);
+    if (seen_before < 0) goto done;
 
     if (PyDict_GetItemRef(identity_map, identity, &instance) < 0) goto done;
     if (instance == NULL) {
@@ -563,20 +569,28 @@ hydrate_row(WreathPgHydratePlan *plan, WreathPgDecoderPlan *decoder, WreathPgFie
         model->state_flags = 1; /* PERSISTENT */
         Py_XSETREF(model->identity_owner, Py_NewRef(owner));
         if (PyDict_SetItem(identity_map, identity, instance) < 0) goto done;
+        identity_added = 1;
     }
-    if (PyList_Append(dest, instance) < 0) {
-        if (fresh) PyDict_DelItem(identity_map, identity);
-        goto done;
+    if (!seen_before) {
+        if (PySet_Add(seen, identity) < 0) goto done;
+        seen_added = 1;
+        if (PyList_Append(dest, instance) < 0) goto done;
     }
     failed = 0;
 
 done:
+    if (failed) raised = PyErr_GetRaisedException();
+    if (failed && identity_added && PyDict_DelItem(identity_map, identity) < 0)
+        PyErr_Clear();
     if (failed && fresh && instance != NULL) {
         /* Leave nothing partially visible: the provisional object never entered
            the identity map, and dropping the last reference releases whatever
            cells were filled before the failure. */
         Py_CLEAR(instance);
     }
+    if (failed && seen_added && PySet_Discard(seen, identity) < 0)
+        PyErr_Clear();
+    if (failed) PyErr_SetRaisedException(raised);
     Py_XDECREF(instance);
     Py_XDECREF(identity);
     Py_XDECREF(key);
@@ -595,6 +609,7 @@ wreath_pg_hydrate_models(PyObject *decoder_plan, PyObject *tape_object,
     Py_ssize_t owner_limit = 0;
     Py_buffer *buffers;
     Py_ssize_t start;
+    PyObject *seen = NULL;
     int result = 0;
 
     if (!PyObject_TypeCheck(decoder_plan, WreathPgDecoderPlanType) ||
@@ -608,8 +623,13 @@ wreath_pg_hydrate_models(PyObject *decoder_plan, PyObject *tape_object,
 
     rows = tape->row_count < limit ? tape->row_count : limit;
     if (rows == 0) return 0;
+    seen = PySet_New(NULL);
+    if (seen == NULL) return -1;
     buffers = wreath_pg_acquire_owner_buffers(tape, rows, &owner_limit);
-    if (buffers == NULL) return -1;
+    if (buffers == NULL) {
+        Py_DECREF(seen);
+        return -1;
+    }
 
     start = PyList_GET_SIZE(dest);
     for (Py_ssize_t row = 0; row < rows; row++) {
@@ -617,7 +637,8 @@ wreath_pg_hydrate_models(PyObject *decoder_plan, PyObject *tape_object,
             result = -1;
             break;
         }
-        if (hydrate_row(plan, decoder, tape, buffers, row, dest, identity_map, owner) < 0) {
+        if (hydrate_row(plan, decoder, tape, buffers, row, dest, identity_map, owner,
+                        seen) < 0) {
             result = -1;
             break;
         }
@@ -627,6 +648,7 @@ wreath_pg_hydrate_models(PyObject *decoder_plan, PyObject *tape_object,
         PyList_SetSlice(dest, start, PyList_GET_SIZE(dest), NULL);
     }
     wreath_pg_release_owner_buffers(buffers, owner_limit);
+    Py_DECREF(seen);
     return result;
 }
 

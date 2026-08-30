@@ -212,6 +212,35 @@ def test_compiled_traffic_membership_matches_the_public_declaration() -> None:
     assert [compiled.matches(facts) for facts in cases] == [
         declaration.matches(facts) for facts in cases
     ]
+    assert declaration.matches(cases[0]) is True
+    assert declaration.matches(cases[1]) is False
+    assert declaration.matches(cases[2]) is False
+
+
+def test_a_class_without_country_rules_does_not_resolve_geography() -> None:
+    class IPWithoutGeography:
+        @property
+        def geo(self):
+            raise AssertionError("country-free traffic rules do not need geography")
+
+    declaration = TrafficClass("claimed", claimed_agent=True)
+    facts = ClientFacts(
+        IPWithoutGeography(),
+        UserAgentFacts(""),
+        AgentFacts(claimed=True),
+    )
+
+    assert declaration.matches(facts)
+
+
+def test_a_missing_country_does_not_match_a_country_rule() -> None:
+    facts = ClientFacts(
+        SimpleNamespace(geo=SimpleNamespace(country=None)),
+        UserAgentFacts(""),
+        AgentFacts(),
+    )
+
+    assert TrafficClass("australian", countries=("AU",)).matches(facts) is False
 
 
 def test_traffic_compilation_preserves_subclass_match_overrides() -> None:

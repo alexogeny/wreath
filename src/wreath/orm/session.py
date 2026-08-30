@@ -28,7 +28,7 @@ from .._native import _core as _native_core
 from .._nplusone import query_ledger as _query_ledger
 from .._orm_events import has_subscribers as _has_write_subscribers
 from .._orm_events import publish_write as _publish_write
-from ..postgres import _WORKLOADS, Workload
+from ..postgres import _WORKLOADS, PipelineFullError, Workload
 from ..sql import Statement
 from .compiler import (
     MAX_BIND_PARAMETERS,
@@ -728,17 +728,7 @@ class Session:
     ) -> list[Any]:
         plan = self._hydrate_plan(connection, compiled)
         if plan is not None:
-            rows = await connection._fetch_into(sql, args, (plan, self._identity, self))
-            identities = set(map(id, rows))
-            if len(identities) == len(rows):
-                return rows
-            seen: set[int] = set()
-            objects = []
-            for item in rows:
-                if id(item) not in seen:
-                    seen.add(id(item))
-                    objects.append(item)
-            return objects
+            return await connection._fetch_into(sql, args, (plan, self._identity, self))
         records = await connection.fetch(sql, *args)
         return self._hydrate_rows(compiled, records)
 
@@ -1259,8 +1249,7 @@ class Session:
         )
         try:
             for batch in self._new_batches():
-                for instance in batch:
-                    await self._insert(instance)
+                await self._insert_batch(batch)
             updates = sorted(
                 dirty,
                 key=lambda item: (self._order(type(item)), _sort_key(item)),
@@ -1353,6 +1342,30 @@ class Session:
         # statement, so the linear split and the plan cache cannot disagree
         # about which columns an insert supplies.
         plan = compile_insert(self._registry, spec, _insert_mask(spec.columns, instance))
+        await self._insert_one(instance, spec, plan)
+
+    async def _insert_batch(self, instances: list[Any]) -> None:
+        start = 0
+        while start < len(instances):
+            first = instances[start]
+            spec = self._registry.spec_for(type(first))
+            mask = _insert_mask(spec.columns, first)
+            plan = compile_insert(self._registry, spec, mask)
+            stop = start + 1
+            while stop < len(instances) and _insert_mask(spec.columns, instances[stop]) == mask:
+                stop += 1
+            batch = instances[start:stop]
+            if plan.returning:
+                for instance in batch:
+                    await self._insert_one(instance, spec, plan)
+            else:
+                width = len(plan.columns)
+                limit = max(1, MAX_BIND_PARAMETERS // width)
+                for offset in range(0, len(batch), limit):
+                    await self._insert_many(batch[offset : offset + limit], spec, plan)
+            start = stop
+
+    async def _insert_one(self, instance: Any, spec: Any, plan: Any) -> None:
         returning = plan.returning
         values = [_wire_value(instance, item) for item in plan.columns]
         self._audit_attribute(instance)
@@ -1368,6 +1381,35 @@ class Session:
                 instance._orm_set_loaded(item.index, item.pg_type.from_wire(row[index]))
         else:
             await connection.execute(plan.sql, *values)
+        self._finish_insert(instance, spec)
+
+    async def _insert_many(self, instances: list[Any], spec: Any, plan: Any) -> None:
+        for instance in instances:
+            self._audit_attribute(instance)
+        connection = await self._acquire()
+        await self._execute_insert_many(connection, instances, plan)
+        for instance in instances:
+            self._finish_insert(instance, spec)
+
+    async def _execute_insert_many(
+        self, connection: Any, instances: list[Any], plan: Any
+    ) -> None:
+        values = [
+            _wire_value(instance, column)
+            for instance in instances
+            for column in plan.columns
+        ]
+        sql = _multi_insert_sql(plan.sql, len(plan.columns), len(instances))
+        try:
+            await connection.execute(sql, *values)
+        except PipelineFullError:
+            if len(instances) == 1:
+                raise
+            middle = len(instances) // 2
+            await self._execute_insert_many(connection, instances[:middle], plan)
+            await self._execute_insert_many(connection, instances[middle:], plan)
+
+    def _finish_insert(self, instance: Any, spec: Any) -> None:
         instance._orm_state = PERSISTENT
         instance._orm_clear_dirty()
         key = instance._orm_primary_key()
@@ -1576,6 +1618,19 @@ def _affected_count(status: Any, verb: str) -> int:
         f"the PostgreSQL adapter returned {status!r} for {verb}; expected "
         f"a {verb} <row-count> command tag"
     )
+
+
+def _multi_insert_sql(sql: str, width: int, rows: int) -> str:
+    prefix, separator, _values = sql.partition(" VALUES ")
+    if not separator:
+        raise ORMError("a batched INSERT needs a VALUES statement")
+    groups = ", ".join(
+        "("
+        + ", ".join(f"${row * width + column + 1}" for column in range(width))
+        + ")"
+        for row in range(rows)
+    )
+    return f"{prefix} VALUES {groups}"
 
 
 def _insert_mask(columns: Any, instance: Any) -> int:

@@ -344,15 +344,8 @@ class PostgresWorkflowStore:
         finally:
             await self._database.release(self._workload, connection)
         record = await self.load(key)
-        # mutant: allow guard.never-fires/guard.remove-raise -- no test reaches this
-        # branch and none can without injecting a failure between the two
-        # statements above. The `INSERT ... ON CONFLICT DO NOTHING` guarantees a row
-        # exists by the time the `SELECT` runs, so `None` here means something
-        # deleted the instance in the microseconds between them: a concurrent purge,
-        # or a `DROP SCHEMA` mid-run. Kept as a real `raise` rather than an `assert`
-        # (which `python -O` would strip) and rather than deleted, because the
-        # alternative is `_execute` reading `record.get` off `None` and reporting an
-        # AttributeError from a stack frame that says nothing about the cause.
+        # mutant: allow guard.never-fires/guard.remove-raise -- only a concurrent
+        # deletion between the guaranteed INSERT and SELECT can reach this guard.
         if record is None:  # pragma: no cover - unreachable without such an injection
             raise WorkflowError(
                 f"workflow instance {key!r} vanished between its INSERT and its "
@@ -386,22 +379,14 @@ class PostgresWorkflowStore:
             )
         finally:
             await self._database.release(self._workload, connection)
-        # `jsonb` decodes to `str`, always -- both columns are written by
-        # `_json.dumps` and read back as text, so there is no already-parsed case
-        # to hedge against. This was an `isinstance(..., (bytes, str))` ternary
-        # until `wreath mutant` reported the else-branch as dead: forcing the
-        # decode kept every test green, which is what an unreachable alternative
-        # looks like. A hedge over behaviour you can go and check is not defensive,
-        # it is an unread branch that will be wrong whenever it is finally taken.
+        # This driver returns these JSONB columns as encoded text.
         return {
             "workflow": row["workflow"],
             "steps": _loads(row["steps"]),
             "results": {entry["name"]: _loads(entry["result"]) for entry in done},
             "state": row["state"],
             "compensation_errors": row["compensation_errors"],
-            # Absent from the row when the column is not there; `_execute` reads
-            # it with `.get`, so an older schema resumes untraced rather than
-            # raising a KeyError from a stack frame that says nothing useful.
+            # Older schemas omit this selected column and resume without tracing.
             "trace_context": row["trace_context"] if trace else None,
         }
 
@@ -477,11 +462,12 @@ class Workflow:
             workflow it belongs to.
     """
 
-    __slots__ = ("_steps", "name")
+    __slots__ = ("_step_names", "_steps", "name")
 
     def __init__(self, name: str) -> None:
         self.name = name
         self._steps: list[Step] = []
+        self._step_names: set[str] = set()
 
     @property
     def steps(self) -> tuple[Step, ...]:
@@ -512,11 +498,6 @@ class Workflow:
         _nplusone.check_budget(query_budget, f"a step of workflow {self.name!r}")
 
         def register(function: Callable[..., Any]) -> Callable[..., Any]:
-            # `getattr` rather than `function.__name__`: a `functools.partial`, a
-            # callable instance, or a lambda bound to a name has no `__name__`, and
-            # the step name is what durable records key on -- so a nameless step
-            # would be unresumable. Refuse it here, where the traceback still points
-            # at the declaration, rather than at a resume weeks later.
             name = getattr(function, "__name__", None)
             if not isinstance(name, str) or not name or name == "<lambda>":
                 raise WorkflowError(
@@ -525,12 +506,13 @@ class Workflow:
                     "completed, so a step must be a named function -- wrap a partial "
                     "or a callable object in `async def`."
                 )
-            if any(existing.name == name for existing in self._steps):
+            if name in self._step_names:
                 raise WorkflowError(
                     f"workflow {self.name!r} already has a step named {name!r}; "
                     "step names key durable records, so two of them would share one row"
                 )
             self._steps.append(Step(name, function, compensate, query_budget))
+            self._step_names.add(name)
             return function
 
         if handler is not None:
@@ -572,7 +554,7 @@ class Workflow:
                 chain has run.
         """
         instance_key = key if key is not None else f"{self.name}:{uuid.uuid4().hex}"
-        record = await store.begin(instance_key, self.name, [s.name for s in self._steps])
+        record = await store.begin(instance_key, self.name, [step.name for step in self._steps])
         if record.get("state") == "completed":
             return Outcome(
                 key=instance_key,
@@ -628,9 +610,8 @@ class Workflow:
             raise UnknownWorkflowInstance(
                 f"no workflow instance {key!r}; `run` starts one, `resume` continues it"
             )
-        declared = {step.name for step in self._steps}
         for stored in record.get("steps") or ():
-            if stored not in declared:
+            if stored not in self._step_names:
                 raise WorkflowDefinitionChanged(
                     f"instance {key!r} of workflow {self.name!r} recorded a step "
                     f"{stored!r} that the workflow no longer declares. Resuming would "

@@ -268,7 +268,7 @@ class TLSConfig:
 
         context = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(os.fspath(self.certfile), os.fspath(self.keyfile), self.password)
-        alpn = [p for p in protocols if p in ("http/1.1", "h2")]
+        alpn = [protocol for protocol in protocols if protocol in ("http/1.1", "h2")]
         if alpn:
             context.set_alpn_protocols(alpn)
         return context
@@ -513,10 +513,13 @@ class ServerConfig:
 
     def __post_init__(self) -> None:
         server_header = self.server_header
-        if server_header is not None and (
-            not server_header or any(ord(char) < 0x20 or ord(char) > 0x7E for char in server_header)
-        ):
-            raise ValueError("server_header must contain printable ASCII")
+        if server_header is not None:
+            if not server_header:
+                raise ValueError("server_header must contain printable ASCII")
+            for character in server_header:
+                codepoint = ord(character)
+                if codepoint < 0x20 or codepoint > 0x7E:
+                    raise ValueError("server_header must contain printable ASCII")
         if not isinstance(self.date_header, bool):
             raise ValueError("date_header must be bool")
         object.__setattr__(

@@ -135,8 +135,10 @@ class WebhookEnvelope:
         # what was signed. Refused here rather than escaped, because no real
         # event id or type contains a control character.
         for name, value in (("id", self.id), ("type", self.type), ("version", self.version)):
-            if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
-                raise ValueError(f"webhook {name} contains a control character")
+            for character in value:
+                codepoint = ord(character)
+                if codepoint < 0x20 or codepoint == 0x7F:
+                    raise ValueError(f"webhook {name} contains a control character")
         if self.timestamp.tzinfo is None:
             raise ValueError("webhook timestamp must include a timezone")
         if len(self.relay_path) > 32 or any(
@@ -442,8 +444,10 @@ class HMACWebhookVerifier(_NormalizedWebhookVerifier):
             ("type", event_type_text),
             ("version", version_text),
         ):
-            if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
-                raise ValueError(f"webhook {name} contains a control character")
+            for character in value:
+                codepoint = ord(character)
+                if codepoint < 0x20 or codepoint == 0x7F:
+                    raise ValueError(f"webhook {name} contains a control character")
         try:
             key_id = key_id_data.decode("utf-8")
         except UnicodeDecodeError as error:

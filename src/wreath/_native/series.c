@@ -2148,7 +2148,16 @@ typedef struct {
     size_t *selected_offsets;
     Py_ssize_t *selected;
     double *bounds;
+    size_t joined_path_size;
 } SeriesChartPlan;
+
+static size_t series_chart_planned_path_size(
+    const SeriesData *data, size_t row_offset,
+    const Py_ssize_t *indices, Py_ssize_t index_count);
+static PyObject *series_chart_plan_build_joined_path(SeriesChartPlan *plan);
+static int series_chart_write_ticks(
+    WreathBytesWriter *writer, double minimum, double maximum,
+    Py_ssize_t target, int separate, Py_ssize_t *total);
 
 static void
 series_data_free(SeriesData *data)
@@ -2611,6 +2620,15 @@ series_chart_plan_compile(
             &selected_count, &minimum, &maximum);
         if (selected == NULL && data->bucket_count != 0) goto plan_error;
         selected_used += (size_t)selected_count;
+        size_t path_size = series_chart_planned_path_size(
+            data, offset,
+            selected_count != 0 ? plan->selected + plan->selected_offsets[output] : NULL,
+            selected_count);
+        if (path_size > SIZE_MAX - plan->joined_path_size) {
+            PyErr_NoMemory();
+            goto plan_error;
+        }
+        plan->joined_path_size += path_size;
         plan->bounds[(size_t)output * 2] = minimum;
         plan->bounds[(size_t)output * 2 + 1] = maximum;
     }
@@ -2625,6 +2643,12 @@ series_chart_plan_compile(
             goto plan_error;
         }
         plan->rows[downsample_count + output] = row;
+        size_t path_size = data->path_offsets[row + 1] - data->path_offsets[row];
+        if (path_size > SIZE_MAX - plan->joined_path_size) {
+            PyErr_NoMemory();
+            goto plan_error;
+        }
+        plan->joined_path_size += path_size;
     }
     Py_DECREF(downsample);
     Py_DECREF(full);
@@ -2724,6 +2748,140 @@ render_error:
     return NULL;
 }
 
+static size_t
+series_chart_planned_path_size(const SeriesData *data, size_t row_offset,
+                               const Py_ssize_t *indices,
+                               Py_ssize_t index_count)
+{
+    size_t size = 0;
+    for (Py_ssize_t position = 0; position < index_count; position++) {
+        Py_ssize_t index = indices[position];
+        size_t cell = row_offset + (size_t)index;
+        if (!data->present[cell]) continue;
+        size += 2 + data->index_plan[(size_t)index * 21] +
+                data->value_lengths[cell];
+    }
+    return size;
+}
+
+static size_t
+series_chart_write_planned_path(char *buffer, const SeriesData *data,
+                                size_t row_offset,
+                                const Py_ssize_t *indices,
+                                Py_ssize_t index_count)
+{
+    size_t written = 0;
+    int open = 0;
+    for (Py_ssize_t position = 0; position < index_count; position++) {
+        Py_ssize_t index = indices[position];
+        size_t cell = row_offset + (size_t)index;
+        if (!data->present[cell]) {
+            open = 0;
+            continue;
+        }
+        const unsigned char *planned =
+            data->index_plan + (size_t)index * 21;
+        buffer[written++] = open ? 'L' : 'M';
+        memcpy(buffer + written, planned + 1, planned[0]);
+        written += planned[0];
+        buffer[written++] = ',';
+        memcpy(buffer + written,
+               data->value_text + data->value_offsets[cell],
+               data->value_lengths[cell]);
+        written += data->value_lengths[cell];
+        open = 1;
+    }
+    return written;
+}
+
+static PyObject *
+series_chart_plan_build_joined_path(SeriesChartPlan *plan)
+{
+    SeriesData *data = plan->data;
+    size_t path_size = plan->joined_path_size;
+    if (path_size > (size_t)PY_SSIZE_T_MAX) return PyErr_NoMemory();
+    PyObject *path = PyBytes_FromStringAndSize(NULL, (Py_ssize_t)path_size);
+    if (path == NULL) return NULL;
+    char *path_buffer = PyBytes_AS_STRING(path);
+    size_t path_written = 0;
+    for (Py_ssize_t output = 0; output < plan->downsample_count; output++) {
+        Py_ssize_t row = plan->rows[output];
+        size_t selected_start = plan->selected_offsets[output];
+        size_t selected_end = plan->selected_offsets[output + 1];
+        path_written += series_chart_write_planned_path(
+            path_buffer + path_written, data,
+            (size_t)row * (size_t)data->bucket_count,
+            selected_end != selected_start
+                ? plan->selected + selected_start : NULL,
+            (Py_ssize_t)(selected_end - selected_start));
+    }
+    for (Py_ssize_t output = 0; output < plan->full_count; output++) {
+        Py_ssize_t row = plan->rows[plan->downsample_count + output];
+        size_t start = data->path_offsets[row];
+        size_t size = data->path_offsets[row + 1] - start;
+        if (size != 0) {
+            memcpy(path_buffer + path_written, data->path_text + start, size);
+            path_written += size;
+        }
+    }
+    if (path_written != path_size) {
+        Py_DECREF(path);
+        PyErr_SetString(PyExc_RuntimeError,
+                        "joined chart path size changed while writing");
+        return NULL;
+    }
+    return path;
+}
+
+static PyObject *
+series_chart_trusted_ascii(PyObject *text)
+{
+    Py_ssize_t size = PyBytes_GET_SIZE(text);
+    PyObject *unicode = PyUnicode_New(size, 127);
+    if (unicode == NULL) return NULL;
+    memcpy(PyUnicode_1BYTE_DATA(unicode), PyBytes_AS_STRING(text), (size_t)size);
+    return unicode;
+}
+
+static PyObject *
+series_chart_plan_render_text_joined(SeriesChartPlan *plan)
+{
+    SeriesData *data = plan->data;
+    Py_ssize_t output_count = plan->downsample_count + plan->full_count;
+    PyObject *path_bytes = series_chart_plan_build_joined_path(plan);
+    if (path_bytes == NULL) return NULL;
+    PyObject *path = series_chart_trusted_ascii(path_bytes);
+    Py_DECREF(path_bytes);
+    if (path == NULL) return NULL;
+    WreathBytesWriter tick_writer = {0};
+    if (wreath_writer_init(&tick_writer, 256) < 0) goto joined_error;
+    Py_ssize_t tick_count = 0;
+    for (Py_ssize_t output = 0; output < plan->downsample_count; output++) {
+        if (series_chart_write_ticks(
+                &tick_writer, plan->bounds[(size_t)output * 2],
+                plan->bounds[(size_t)output * 2 + 1], plan->tick_target,
+                output != 0, &tick_count) < 0) {
+            Py_XDECREF(tick_writer.bytes);
+            goto joined_error;
+        }
+    }
+    PyObject *tick_bytes = wreath_writer_finish(&tick_writer);
+    if (tick_bytes == NULL) goto joined_error;
+    PyObject *tick_text = series_chart_trusted_ascii(tick_bytes);
+    Py_DECREF(tick_bytes);
+    if (tick_text == NULL) goto joined_error;
+    PyObject *result = Py_BuildValue(
+        "nOOnOn", data->series_count * data->measure_count, data->keys,
+        path, output_count, tick_text, tick_count);
+    Py_DECREF(path);
+    Py_DECREF(tick_text);
+    return result;
+
+joined_error:
+    Py_DECREF(path);
+    return NULL;
+}
+
 PyObject *
 wreath_series_data_chart_plan(PyObject *Py_UNUSED(self), PyObject *args)
 {
@@ -2756,6 +2914,14 @@ wreath_series_chart_plan_text(PyObject *Py_UNUSED(self), PyObject *plan_capsule)
 {
     SeriesChartPlan *plan = series_chart_plan_get(plan_capsule);
     return plan == NULL ? NULL : series_chart_plan_render(plan, 1);
+}
+
+PyObject *
+wreath_series_chart_plan_text_joined(PyObject *Py_UNUSED(self),
+                                     PyObject *plan_capsule)
+{
+    SeriesChartPlan *plan = series_chart_plan_get(plan_capsule);
+    return plan == NULL ? NULL : series_chart_plan_render_text_joined(plan);
 }
 
 static PyObject *

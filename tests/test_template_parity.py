@@ -332,3 +332,13 @@ def test_ordinary_dotted_lookups_still_resolve() -> None:
             self.tags = {"role": "owner"}
 
     assert Template.from_string("{{ u.name }}/{{ u.tags.role }}").render(u=User()) == ("alex/owner")
+
+
+def test_custom_subscript_still_precedes_attribute_lookup() -> None:
+    class User:
+        name = "attribute"
+
+        def __getitem__(self, key: str) -> str:
+            return f"item:{key}"
+
+    assert Template.from_string("{{ u.name }}").render(u=User()) == "item:name"

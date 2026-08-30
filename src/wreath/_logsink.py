@@ -86,7 +86,7 @@ class TextRenderer:
         if self.show_attributes:
             values = _attributes(registry, cell)
             if values:
-                parts.append(" ".join(f"{k}={v!r}" for k, v in values.items()))
+                parts.append(" ".join(f"{key}={value!r}" for key, value in values.items()))
         if cell.dropped_siblings:
             parts.append(f"(+{cell.dropped_siblings} sampled out)")
         words = [word for bit, word in _FLAG_WORDS if cell.flags & bit]
@@ -335,7 +335,7 @@ def canonical_text(registry: SiteRegistry, trace: ProjectedTrace) -> str:
         parts.append(f"terminal={trace.terminal.name}")
     if trace.has_correlation:
         parts.append(f"trace={trace.trace_id:032x}")
-    parts.extend(f"{k}={v}" for k, v in attributes.items())
+    parts.extend(f"{key}={value}" for key, value in attributes.items())
     if records:
         parts.append(f"records={records}")
     return "  ".join(parts)

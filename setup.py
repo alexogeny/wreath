@@ -347,6 +347,7 @@ ext_modules = [
             "src/wreath/_native/webpolicy.c",
             "src/wreath/_native/observability.c",
             "src/wreath/_native/series.c",
+            "src/wreath/_native/zstd_codec.c",
             "src/wreath/_native/proxy.c",
             "src/wreath/_native/ratelimit.c",
             "src/wreath/_native/kv.c",
@@ -376,6 +377,7 @@ ext_modules = [
             *_gzip_headers,
         ],
         define_macros=([] if _gzip_x86_isa else [("WREATH_GZIP_PORTABLE", "1")]),
+        libraries=["dl"] if sys.platform.startswith("linux") else [],
         extra_compile_args=extra_compile_args,
     ),
     Extension(

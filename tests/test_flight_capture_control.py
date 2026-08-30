@@ -142,6 +142,21 @@ async def test_arm_requires_expiry(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_arm_header_sets_contain_only_strings(tmp_path) -> None:
+    server = await _serve(tmp_path)
+    try:
+        async with InspectorClient(server.path) as client:
+            with pytest.raises(InspectorError, match="list of strings"):
+                await client.arm_capture(
+                    token=TOKEN,
+                    redaction={"header_allowlist": ["x-trace", 1]},
+                    expiry_seconds=60,
+                )
+    finally:
+        await server.close()
+
+
+@pytest.mark.asyncio
 async def test_arm_status_disarm_round_trip(tmp_path) -> None:
     server = await _serve(tmp_path)
     try:

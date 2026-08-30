@@ -51,8 +51,7 @@ from .outbound import ClientChannel
 #: counter or a uuid4 hex.
 _SESSION_ID_BYTES = 32
 
-#: Enqueued on a session's notification queue to end its stream. A distinct
-#: object rather than `None`, so it can never collide with a framed payload.
+#: Sentinel that cannot collide with a framed stream payload.
 CLOSE_STREAM = object()
 
 
@@ -63,43 +62,24 @@ class Session:
     id: str
     protocol_version: str
     client_info: dict[str, Any] = field(default_factory=dict)
-    #: Request id -> the task running it. Populated only while a call is in
-    #: flight, so cancelling an id that already returned is a no-op rather than
-    #: an error -- the race is normal, not exceptional.
+    #: Request id to its currently running task.
     in_flight: dict[Any, asyncio.Task[Any]] = field(default_factory=dict)
-    #: Framed JSON-RPC notifications waiting for this session's `GET` stream,
-    #: bounded by `MCPLimits.max_pending_notifications`.
+    #: Framed JSON-RPC notifications bounded by `MCPLimits.max_pending_notifications`.
     notifications: Queue = field(default_factory=Queue)
-    #: Resource URIs this session asked to be told about.
     subscriptions: set[str] = field(default_factory=set)
-    #: Whether a server-to-client stream is open. The specification allows one
-    #: per session: two would split the notifications between them at random.
+    #: Whether the session's single allowed server-to-client stream is open.
     stream_open: bool = False
-    #: Notifications this session lost to a full queue. Counted per session as
-    #: well as per server, because "one client is not reading" and "the server
-    #: is over-producing" look identical in a single total.
+    #: Notifications this session lost to a full queue.
     dropped: int = 0
-    #: `time.monotonic()` at the last message on this session. Monotonic rather
-    #: than wall time: a session must not outlive its idle bound because someone
-    #: stepped the clock back, nor die early because NTP stepped it forward.
+    #: `time.monotonic()` at the last session message.
     last_seen: float = 0.0
-    #: The subject of the verified token that opened it, when the endpoint is
-    #: protected. A later message on this session must come from the same
-    #: subject; otherwise a leaked session id would be a credential in its own
-    #: right, which is exactly what it must not be.
+    #: Verified token subject bound to this session, when protected.
     principal: str | None = None
-    #: What the client said it could do in `initialize`. A server-to-client
-    #: request for a capability that is not in here is refused immediately and
-    #: with a message, rather than sent to a client that will never answer it --
-    #: which would be a hang the client author has no way to diagnose.
+    #: Capabilities declared by the client during initialization.
     client_capabilities: dict[str, Any] = field(default_factory=dict)
-    #: This session's outstanding server-to-client requests, or None until
-    #: `SessionStore.create` builds one.
+    #: Outstanding server-to-client requests after session creation.
     channel: ClientChannel | None = None
-    #: Filesystem roots the client declared, or None when they have not been
-    #: asked for yet. Cached because `roots/list` is a round trip to a client
-    #: that may be a person's laptop, and invalidated by
-    #: `notifications/roots/list_changed` rather than by a clock.
+    #: Cached client roots, invalidated by `notifications/roots/list_changed`.
     roots: tuple[str, ...] | None = None
 
     def touch(self, now: float) -> None:
@@ -112,11 +92,6 @@ class Session:
         is a tool reporting progress or a handler saying a row changed, and
         neither may be made to wait on a client that is not reading.
         """
-        # `offer` *is* this policy: keep it if there is room, otherwise refuse
-        # and count. The try/except around `put_nowait` said the same thing in
-        # four more lines, and the queue counts its own drops now -- `dropped`
-        # here stays because per-session and per-server totals answer different
-        # questions, as the field's own comment says.
         if self.notifications.offer(payload):
             return True
         self.dropped += 1
@@ -182,19 +157,13 @@ class SessionStore:
         self._max_pending_requests = max_pending_requests
         self._request_seconds = client_request_seconds
         self._next_sweep = float("inf")
-        # One funnel for everything the server puts on a session's queue, so a
-        # dropped server-to-client *request* is counted in exactly the same
-        # place as a dropped notification. Defaults to the session's own
-        # `publish` when nothing is watching, which is what a bare store in a
-        # test wants.
+        # Funnel every outbound frame through the same bounded-queue policy.
         self._publish: Callable[[Session, bytes], bool] = (
             (lambda session, payload: session.publish(payload)) if publish is None else publish
         )
         self._sessions: dict[str, Session] = {}
         self._subscribers: dict[str, dict[str, Session]] = {}
-        #: Sessions collected for going idle. Counted because "the client says
-        #: it re-initializes constantly" and "the idle bound is too short" look
-        #: identical from the outside until this number is read.
+        #: Sessions collected for exceeding the idle bound.
         self.expired = 0
 
     def __len__(self) -> int:
@@ -297,13 +266,18 @@ class SessionStore:
         moment = time.monotonic() if now is None else now
         if not force and moment < self._next_sweep:
             return 0
-        stale = [session for session in self._sessions.values() if self._expired(session, moment)]
+        stale: list[Session] = []
+        next_sweep = float("inf")
+        for session in self._sessions.values():
+            if self._expired(session, moment):
+                stale.append(session)
+            else:
+                deadline = session.last_seen + idle_seconds
+                if deadline < next_sweep:
+                    next_sweep = deadline
         for session in stale:
             self._collect(session)
-        self._next_sweep = min(
-            (session.last_seen + idle_seconds for session in self._sessions.values()),
-            default=float("inf"),
-        )
+        self._next_sweep = next_sweep
         return len(stale)
 
     def discard(self, identifier: str) -> bool:
@@ -341,11 +315,7 @@ class SessionStore:
 
 
 def _cancel_all(session: Session) -> None:
-    # Outstanding questions first, then the tasks that asked them. A tool parked
-    # on `elicitation/create` is woken with a failure it can act on rather than
-    # a bare cancellation, and anything the failure does not reach is cancelled
-    # a line later -- neither order alone covers both, because a request may be
-    # outstanding from a resource read that is not in `in_flight` at all.
+    # Wake client-request waiters before cancelling the tasks that own them.
     if session.channel is not None:
         session.channel.fail_all("the MCP session ended while this request was outstanding")
     for task in list(session.in_flight.values()):
@@ -353,9 +323,6 @@ def _cancel_all(session: Session) -> None:
     session.in_flight.clear()
     session.subscriptions.clear()
     session.roots = None
-    # The stream goes with the session. A `GET` left running against a session
-    # that has been deleted or collected would hold a connection open forever
-    # and deliver nothing, which is worse than either half of that alone.
     session.close_stream()
 
 
