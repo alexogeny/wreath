@@ -26,9 +26,9 @@ attribution trailer is not permission.
   report what you did, and leave the tree dirty. Deciding what lands, and when,
   belongs to the human.
 - **An explicit request for the Git/PR lifecycle is the narrow exception.**
-  When Mara asks to create or babysit a PR, that permission covers creating a
-  branch, staging the in-scope work, committing with the configured human
-  identity, pushing, opening or updating the PR, and supervising its CI. It
+  When the user asks to create or babysit a PR, that permission covers
+  creating a branch, staging the in-scope work, committing with the configured
+  human identity, pushing, opening or updating the PR, and supervising its CI. It
   does not permit force-pushing, merging, discarding work, or rewriting history;
   those actions still require separate explicit permission where allowed.
 - **Never `git checkout`, `git stash`, `git reset`, or anything else that
