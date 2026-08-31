@@ -14,10 +14,52 @@ from wreath.testing import TestClient
 def test_cache_control_validation_and_serialization() -> None:
     policy = CacheControl(public=True, max_age=3600, immutable=True)
     assert policy.to_header() == b"public, immutable, max-age=3600"
+    assert policy.to_targeted_header() == b"public, immutable, max-age=3600"
     with pytest.raises(ValueError):
         CacheControl(public=True, private=True)
     with pytest.raises(ValueError):
         CacheControl(immutable=True)
+
+
+def test_targeted_cache_control_uses_structured_dictionary_types() -> None:
+    policy = CacheControl(
+        private=True,
+        no_store=True,
+        no_transform=True,
+        must_revalidate=True,
+        proxy_revalidate=True,
+        max_age=60,
+        shared_max_age=120,
+        stale_while_revalidate=30,
+        stale_if_error=300,
+    )
+
+    assert policy.to_targeted_header() == (
+        b"private, no-store, no-transform, must-revalidate, proxy-revalidate, "
+        b"max-age=60, s-maxage=120, stale-while-revalidate=30, stale-if-error=300"
+    )
+
+
+def test_response_sets_cdn_cache_control_independently() -> None:
+    response = Response(
+        b"ok",
+        headers=[
+            (b"cache-control", b"private, max-age=60"),
+            (b"CDN-Cache-Control", b"max-age=120"),
+        ],
+    )
+
+    response.set_cdn_cache_control(CacheControl(public=True, max_age=600))
+
+    assert (b"cache-control", b"private, max-age=60") in response.headers
+    assert [
+        value for name, value in response.headers if name.lower() == b"cdn-cache-control"
+    ] == [b"public, max-age=600"]
+
+
+def test_response_refuses_an_empty_cdn_cache_policy() -> None:
+    with pytest.raises(ValueError, match="at least one directive"):
+        Response(b"ok").set_cdn_cache_control(CacheControl())
 
 
 @pytest.mark.parametrize(
@@ -94,6 +136,42 @@ async def test_cache_middleware_policy_wins_over_default() -> None:
     await middleware.after(_request(), response)
 
     assert response.headers[-1] == (b"cache-control", b"private")
+
+
+@pytest.mark.asyncio
+async def test_cache_middleware_can_set_browser_and_cdn_policies() -> None:
+    middleware = CachePolicy(
+        CacheControl(private=True, max_age=60),
+        cdn_default=CacheControl(public=True, max_age=600),
+    )
+    response = Response(b"ok")
+
+    await middleware.after(_request(), response)
+
+    assert (b"cache-control", b"private, max-age=60") in response.headers
+    assert (b"cdn-cache-control", b"public, max-age=600") in response.headers
+
+
+@pytest.mark.asyncio
+async def test_cache_middleware_preserves_an_explicit_cdn_policy() -> None:
+    middleware = CachePolicy(cdn_default=CacheControl(public=True, max_age=600))
+    response = Response(b"ok", headers=[(b"cdn-cache-control", b"no-store")])
+
+    await middleware.after(_request(), response)
+
+    assert [
+        value for name, value in response.headers if name.lower() == b"cdn-cache-control"
+    ] == [b"no-store"]
+
+
+@pytest.mark.asyncio
+async def test_cache_middleware_protects_cdn_policy_when_a_cookie_is_set() -> None:
+    middleware = CachePolicy(cdn_default=CacheControl(public=True, max_age=600))
+    response = Response(b"ok", headers=[(b"set-cookie", b"session=x")])
+
+    await middleware.after(_request(), response)
+
+    assert (b"cdn-cache-control", b"private, no-store") in response.headers
 
 
 @pytest.mark.asyncio

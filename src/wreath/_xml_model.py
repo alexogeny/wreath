@@ -1,12 +1,10 @@
-"""The XML document model: the tree both parsers build, and its bounds.
+"""The XML document model and its bounds.
 
-The parser is `_native/xml.c`; what it builds is defined here. It returns plain
-node tuples and `wreath.xml` assembles `Element`s from them, precisely so the
-dataclass definition, and therefore the shape a caller reads, lives in exactly
-one place. A second
-`Element` would be two trees that agree until they do not, on a security
-boundary where a verifier reading one and a consumer reading the other is the
-whole shape of a signature-wrapping bug.
+The parser is `_native/xml.c`; it owns a native tree for parsing and
+canonicalization, then materializes this `Element` shape once when `parse()`
+returns. A second public `Element` would be two trees that agree until they do
+not, on a security boundary where a verifier reading one and a consumer reading
+the other is the whole shape of a signature-wrapping bug.
 
 `XMLRefusal` is the sharpest case. `wreath.xml` hands this very class to
 `_core.xml_configure`, so the C parser raises it rather than minting its own:

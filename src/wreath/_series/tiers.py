@@ -44,6 +44,7 @@ import datetime
 from dataclasses import dataclass
 from typing import Any
 
+from .._duration import decimal_unit
 from ..temporal import BUCKETS, Bucket
 from ..temporal import zone as _zone_of
 
@@ -258,16 +259,15 @@ def _window(value: Any, name: str, refuse: Any) -> float | None:
             f"seconds, or None for forever; got {value!r}"
         )
     if isinstance(value, str):
-        import re
-
-        match = re.fullmatch(r"\s*([0-9]*\.?[0-9]+)\s*([A-Za-z]+)\s*", value)
-        if match is None or match.group(2).lower() not in _UNITS:
+        parsed = decimal_unit(value, require_unit=True)
+        if parsed is None or parsed[1].lower() not in _UNITS:
             raise refuse(
                 f"retain({name}={value!r}) is not a duration. Write it as a "
                 "number and a unit -- '3 days', '14 days', '1 year', '2h' -- or "
                 "as a number of seconds, or None to keep it indefinitely"
             )
-        seconds = float(match.group(1)) * _UNITS[match.group(2).lower()]
+        number, unit = parsed
+        seconds = float(number) * _UNITS[unit.lower()]
     else:
         seconds = float(value)
     if seconds <= 0:

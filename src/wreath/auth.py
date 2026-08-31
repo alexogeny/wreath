@@ -8,7 +8,7 @@ facades over the private `wreath._auth` implementation package.
 from __future__ import annotations
 
 from ._auth.backends import AuthenticationBackend, BearerTokenBackend
-from ._auth.decorators import authenticated, identify, public, second_factor
+from ._auth.decorators import authenticated, identify, oauth_step_up, public, second_factor
 from ._auth.jwt import (
     JwtError,
     JwtVerifier,
@@ -43,6 +43,7 @@ __all__ = [
     "identify",
     "key_from_jwk",
     "key_from_pem",
+    "oauth_step_up",
     "public",
     "second_factor",
 ]

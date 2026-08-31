@@ -6,12 +6,12 @@ boost: 1.4
 
 # Versions and upgrades
 
-**Current documentation version: `0.3.4`.** This site is generated from the default
+**Current documentation version: `0.4.0`.** This site is generated from the default
 branch whose package version is declared in `pyproject.toml`. The immutable source for
-the released version is [`v0.3.4`](https://github.com/alexogeny/wreath/tree/v0.3.4),
+the released version is [`v0.4.0`](https://github.com/alexogeny/wreath/tree/v0.4.0),
 and its human release record is on
-[GitHub Releases](https://github.com/alexogeny/wreath/releases/tag/v0.3.4). Read the
-[0.3.4 release note](../release_notes/0.3.4.md) for the upgrade summary.
+[GitHub Releases](https://github.com/alexogeny/wreath/releases/tag/v0.4.0). Read the
+[0.4.0 release note](../release_notes/0.4.0.md) for the upgrade summary.
 
 The generated API reference imports the code from that site build. It therefore
 describes the source revision that produced the site, not whichever Wreath happens to
@@ -25,10 +25,10 @@ PyPy and free-threaded `3.14t` are not accepted by the published wheels.
 
 | Installation | Published platforms | Adds |
 |---|---|---|
-| `wreath==0.3.4` | Linux glibc x86-64/aarch64; macOS x86-64/arm64; Windows AMD64 | dependency-free framework core, portable native kernels and ASGI server |
-| `wreath[linux]==0.3.4` | Linux glibc x86-64/aarch64 | io_uring `metal` loop and native TLS transport |
-| `wreath[h3]==0.3.4` | Linux glibc x86-64/aarch64 | native HTTP/3 and bundled QUIC stack |
-| `wreath[http3]==0.3.4` | same as `h3` | alias for the HTTP/3 extra |
+| `wreath==0.4.0` | Linux glibc x86-64/aarch64; macOS x86-64/arm64; Windows AMD64 | dependency-free framework core, portable native kernels and ASGI server |
+| `wreath[linux]==0.4.0` | Linux glibc x86-64/aarch64 | io_uring `metal` loop and native TLS transport |
+| `wreath[h3]==0.4.0` | Linux glibc x86-64/aarch64 | native HTTP/3 and bundled QUIC stack |
+| `wreath[http3]==0.4.0` | same as `h3` | alias for the HTTP/3 extra |
 
 Musl/musllinux and 32-bit wheels are not published. Releases are wheel-only; there is
 no source-distribution fallback that quietly compiles a different capability set on
@@ -39,7 +39,7 @@ The Wreath application remains ASGI and can run behind another conforming ASGI s
 Wreath's network HTTP/2 server requires TLS with ALPN. HTTP/3 requires TLS and the
 `h3`/`http3` companion wheel. The optional CPython JIT and free-threaded interpreter
 are separately exercised by repository checks, but they are not additional published
-wheel targets for `0.3.4`.
+wheel targets for `0.4.0`.
 
 ## What counts as public
 

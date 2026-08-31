@@ -5,7 +5,7 @@ boost: 2
 ---
 
 ```hero
-eyebrow: Wreath 0.3.4 · Python 3.14 · ASGI
+eyebrow: Wreath 0.4.0 · Python 3.14 · ASGI
 title: Build the systems that become somebody's operating surface.
 lede: Realtime rooms, durable work, PostgreSQL, policy and a native server belong to one application—not a week of integration before the interesting work begins.
 signal: realtime under contention
@@ -58,7 +58,7 @@ requirements stop being ordinary: only one worker may own a device; a job must
 survive a process; an enterprise identity provider removes a person; a model may
 read freely but must involve a human before it deletes.
 
-This site documents **Wreath 0.3.4**. Check the
+This site documents **Wreath 0.4.0**. Check the
 [version, platform and upgrade contract](start/releases.md) before choosing an extra
 or moving an existing application between releases.
 

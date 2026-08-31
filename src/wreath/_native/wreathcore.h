@@ -262,6 +262,9 @@ PyObject *wreath_flight_metadata_decode(PyObject *self, PyObject *args);
 int wreath_register_flight_project(PyObject *module);
 PyObject *wreath_signature_parse_dictionary(PyObject *self, PyObject *args);
 PyObject *wreath_signature_parse_string(PyObject *self, PyObject *args);
+PyObject *wreath_signature_compile_pair(PyObject *self, PyObject *args);
+PyObject *wreath_signature_plan_facts(PyObject *self, PyObject *capsule);
+PyObject *wreath_signature_plan_base(PyObject *self, PyObject *args);
 PyObject *wreath_signature_base(PyObject *self, PyObject *args);
 PyObject *wreath_curve_ed_add(PyObject *self, PyObject *args);
 PyObject *wreath_curve_ed_negate(PyObject *self, PyObject *args);
@@ -356,6 +359,11 @@ PyObject *wreath_build_header_map(PyObject *self, PyObject *args);
 #define WREATH_VALIDATE_MAX_STEPS 2000000
 PyObject *wreath_validate_node(PyObject *plan, PyObject *value, PyObject *loc,
                                PyObject *errors, long *steps);
+PyObject *wreath_compile_validation_plan(PyObject *self, PyObject *source);
+PyObject *wreath_validation_plan_source(PyObject *object);
+PyObject *wreath_validate_plan_field(PyObject *plan, Py_ssize_t field_index,
+                                     PyObject *value, PyObject *loc,
+                                     PyObject *errors, long *steps);
 PyObject *wreath_run_validation(PyObject *self, PyObject *args);
 PyObject *wreath_run_validation_json(PyObject *self, PyObject *args);
 
@@ -364,8 +372,8 @@ PyObject *wreath_orm_shape(PyObject *self, PyObject *args);
 PyObject *wreath_orm_shape_configure(PyObject *self, PyObject *args);
 PyObject *wreath_orm_relationship_keys(PyObject *self, PyObject *args);
 PyObject *wreath_orm_attach_relationships(PyObject *self, PyObject *args);
+PyObject *wreath_orm_compile_hydrate_plan(PyObject *self, PyObject *args);
 PyObject *wreath_orm_hydrate_records(PyObject *self, PyObject *args);
-PyObject *wreath_orm_assemble_joins(PyObject *self, PyObject *args);
 PyObject *wreath_orm_collect_values(PyObject *self, PyObject *args);
 
 /* codecs.c */
@@ -390,6 +398,7 @@ PyObject *wreath_recording_event_cells(PyObject *self, PyObject *args);
 /* scim.c */
 int wreath_scim_ready(void);
 PyObject *wreath_scim_parse(PyObject *self, PyObject *args);
+PyObject *wreath_scim_compile(PyObject *self, PyObject *args);
 PyObject *wreath_scim_values_at(PyObject *self, PyObject *args);
 PyObject *wreath_scim_matches(PyObject *self, PyObject *args);
 PyObject *wreath_scim_filter(PyObject *self, PyObject *args);
@@ -511,7 +520,6 @@ PyObject *wreath_xml_c14n(PyObject *self, PyObject *args);
 
 /* templates.c */
 PyObject *wreath_template_compile(PyObject *self, PyObject *arg);
-PyObject *wreath_template_render(PyObject *self, PyObject *args);
 PyObject *wreath_template_render_compiled(PyObject *self, PyObject *args);
 PyObject *wreath_template_render_compiled_tail(PyObject *self, PyObject *args);
 PyObject *wreath_template_configure(PyObject *self, PyObject *args);

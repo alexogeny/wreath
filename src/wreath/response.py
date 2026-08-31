@@ -29,7 +29,9 @@ from ._native import _core
 # Portable ASGI replays these messages; Wreath's server emits them directly.
 from ._prepared import PreparedResponse as PreparedResponse
 from .background import Background
-from .cache_control import CacheControl
+from .cache_control import CacheControl, _set_cdn_cache_control
+from .digest import Digest, DigestPreferences
+from .link_template import LinkTemplate, _set_link_templates
 
 Send = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -40,6 +42,15 @@ _CONTENT_LENGTH_CACHE_SIZE = 2048
 _CONTENT_LENGTHS = tuple(str(size).encode("ascii") for size in range(_CONTENT_LENGTH_CACHE_SIZE))
 _HTML_TYPE_HEADER = (_CONTENT_TYPE, b"text/html; charset=utf-8")
 _HTML_HEADERS = tuple((_HTML_TYPE_HEADER, (_CONTENT_LENGTH, length)) for length in _CONTENT_LENGTHS)
+
+
+def _set_digest_header(
+    headers: list[tuple[bytes, bytes]],
+    name: bytes,
+    value: bytes,
+) -> None:
+    headers[:] = [(key, item) for key, item in headers if key.lower() != name]
+    headers.append((name, value))
 
 
 def _content_length(size: int) -> bytes:
@@ -64,8 +75,8 @@ class Response:
     either status is dropped at construction and no `content-length` is emitted.
 
     The header list is a plain mutable list of `(name, value)` byte pairs and
-    stays writable after construction; `set_cookie()` and `set_cache_control()`
-    are the two supported ways to edit it.
+    stays writable after construction; the `set_*` methods are the supported
+    ways to edit it.
 
     Args:
         status: HTTP status code, defaulting to 200.
@@ -262,6 +273,53 @@ class Response:
             (name, value) for name, value in self.headers if name.lower() != b"cache-control"
         ]
         self.headers.append((b"cache-control", policy.to_header()))
+
+    def set_cdn_cache_control(self, policy: CacheControl) -> None:
+        """Replace `CDN-Cache-Control` with an RFC 9213 targeted policy."""
+        _set_cdn_cache_control(self.headers, policy)
+
+    def set_link_templates(self, *templates: LinkTemplate) -> None:
+        """Replace `Link-Template` with validated RFC 9652 templated links."""
+        _set_link_templates(self.headers, templates)
+
+    def set_content_digest(
+        self,
+        *algorithms: str,
+        content: bytes | None = None,
+    ) -> None:
+        """Replace Content-Digest with RFC 9530 digests of the message content."""
+        _set_digest_header(
+            self.headers,
+            b"content-digest",
+            Digest.compute(self.body if content is None else content, *algorithms).header,
+        )
+
+    def set_repr_digest(
+        self,
+        *algorithms: str,
+        representation: bytes | None = None,
+    ) -> None:
+        """Replace Repr-Digest with digests of the complete selected representation."""
+        if representation is None:
+            if self.status == 206:
+                raise ValueError(
+                    "a partial response needs the complete selected representation "
+                    "to compute Repr-Digest"
+                )
+            representation = self.body
+        _set_digest_header(
+            self.headers,
+            b"repr-digest",
+            Digest.compute(representation, *algorithms).header,
+        )
+
+    def set_want_content_digest(self, preferences: DigestPreferences) -> None:
+        """Ask the peer for Content-Digest on future requests."""
+        _set_digest_header(self.headers, b"want-content-digest", preferences.header)
+
+    def set_want_repr_digest(self, preferences: DigestPreferences) -> None:
+        """Ask the peer for Repr-Digest on future requests."""
+        _set_digest_header(self.headers, b"want-repr-digest", preferences.header)
 
 
 class TextResponse(Response):
@@ -609,12 +667,14 @@ class RedirectResponse(Response):
 class StreamingResponse:
     """A response whose body is produced chunk by chunk by an async iterable.
 
-    Not a `Response` subclass, and it invents no headers: it sends exactly the
-    `headers` given. In particular there is **no `content-type`** and **no
-    `content-length`**, so an HTTP/1.1 server frames the body with chunked
-    transfer encoding (an HTTP/1.0 one has to frame it by closing the
-    connection). A caller who knows the length sets the header itself. Status
-    defaults to 200.
+    Not a `Response` subclass. It adds `Incremental: ?1` by default so an
+    intermediary knows not to buffer the complete message (RFC 10036); pass
+    `incremental=False` to emit `?0` when buffering is acceptable. Apart from
+    that signal, it sends exactly the `headers` given. In particular there is
+    **no `content-type`** and **no `content-length`**, so an HTTP/1.1 server
+    frames the body with chunked transfer encoding (an HTTP/1.0 one has to frame
+    it by closing the connection). A caller who knows the length sets the
+    header itself. Status defaults to 200.
 
     Each `bytes` the iterable yields becomes one `http.response.body` message
     with `more_body=True`, sent as it is produced, and a terminal empty message
@@ -626,6 +686,7 @@ class StreamingResponse:
         body: Async iterable of `bytes` chunks; a `str` chunk is not encoded for you.
         headers: The complete header list to send, empty by default.
         background: Awaited by the application after the response has been sent.
+        incremental: Whether intermediaries should forward chunks as they arrive.
     """
 
     __slots__ = ("_cleanup", "background", "body", "headers", "status")
@@ -636,10 +697,21 @@ class StreamingResponse:
         status: int = 200,
         headers: Iterable[tuple[bytes, bytes]] | None = None,
         background: Background | None = None,
+        *,
+        incremental: bool = True,
     ) -> None:
+        if type(incremental) is not bool:
+            raise TypeError(f"incremental must be bool, not {type(incremental).__name__}")
+        response_headers = list(headers) if headers is not None else []
+        if any(name.lower() == b"incremental" for name, _ in response_headers):
+            raise ValueError(
+                "headers must not contain Incremental; pass incremental=True or "
+                "incremental=False instead"
+            )
+        response_headers.append((b"incremental", b"?1" if incremental else b"?0"))
         self.body = body
         self.status = status
-        self.headers = list(headers) if headers is not None else []
+        self.headers = response_headers
         self.background = background
         self._cleanup: Background | None = None
 
@@ -656,6 +728,14 @@ class StreamingResponse:
             (name, value) for name, value in self.headers if name.lower() != b"cache-control"
         ]
         self.headers.append((b"cache-control", policy.to_header()))
+
+    def set_cdn_cache_control(self, policy: CacheControl) -> None:
+        """Replace `CDN-Cache-Control` with an RFC 9213 targeted policy."""
+        _set_cdn_cache_control(self.headers, policy)
+
+    def set_link_templates(self, *templates: LinkTemplate) -> None:
+        """Replace `Link-Template` with validated RFC 9652 templated links."""
+        _set_link_templates(self.headers, templates)
 
     async def __call__(self, send: Send) -> None:
         """Emit the start message, then one body message per chunk.
@@ -784,8 +864,9 @@ class SSEResponse(StreamingResponse):
     the headers that keep a stream from being buffered or cached --
     `content-type: text/event-stream`, `cache-control: no-cache`,
     `x-accel-buffering: no`, `connection: keep-alive` -- with any `headers`
-    given appended after them. There is no `content-length`; the body ends when
-    the iterable does.
+    given appended after them. Like every `StreamingResponse`, it also emits
+    `incremental: ?1` by default. There is no `content-length`; the body ends
+    when the iterable does.
 
     **Nothing is emitted on a timer.** No keep-alive is sent unless the
     application yields one (`ServerSentEvent(comment="ping")`), and no `retry:`
@@ -801,6 +882,7 @@ class SSEResponse(StreamingResponse):
         events: Async iterable of events to frame, one message each.
         headers: Extra headers appended after the four preset above.
         background: Awaited by the application after the stream has finished.
+        incremental: Whether intermediaries should forward events as they arrive.
     """
 
     __slots__ = ()
@@ -813,6 +895,7 @@ class SSEResponse(StreamingResponse):
         status: int = 200,
         headers: Iterable[tuple[bytes, bytes]] | None = None,
         background: Background | None = None,
+        incremental: bool = True,
     ) -> None:
         combined: list[tuple[bytes, bytes]] = [
             (_CONTENT_TYPE, self.media_type),
@@ -823,7 +906,11 @@ class SSEResponse(StreamingResponse):
         if headers is not None:
             combined.extend(headers)
         super().__init__(
-            self._framed(events), status=status, headers=combined, background=background
+            self._framed(events),
+            status=status,
+            headers=combined,
+            background=background,
+            incremental=incremental,
         )
 
     @staticmethod
@@ -832,6 +919,52 @@ class SSEResponse(StreamingResponse):
     ) -> AsyncIterable[bytes]:
         async for event in events:
             yield _encode_sse(event)
+
+
+class _HeaderResponse:
+    __slots__ = ("_headers", "_response", "background", "status")
+
+    def __init__(self, response: Any, headers: Iterable[tuple[bytes, bytes]]) -> None:
+        self._response = response
+        self._headers = tuple(headers)
+        self.status = response.status
+        self.background = response.background
+
+    @property
+    def headers(self) -> list[tuple[bytes, bytes]]:
+        return [*self._response.headers, *self._headers]
+
+    @property
+    def body(self) -> Any:
+        return getattr(self._response, "body", None)
+
+    async def __call__(self, send: Send) -> None:
+        await self._response(self._decorated_send(send))
+
+    async def _head(self, send: Send) -> None:
+        decorated_send = self._decorated_send(send)
+        response_head = getattr(self._response, "_head", None)
+        if response_head is not None:
+            await response_head(decorated_send)
+            return
+
+        async def send_without_body(message: dict[str, Any]) -> None:
+            if message["type"] == "http.response.body":
+                message = {**message, "body": b""}
+            await decorated_send(message)
+
+        await self._response(send_without_body)
+
+    def _decorated_send(self, send: Send) -> Send:
+        async def send_with_headers(message: dict[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                message = {
+                    **message,
+                    "headers": [*message.get("headers", ()), *self._headers],
+                }
+            await send(message)
+
+        return send_with_headers
 
 
 class _Unsatisfiable:
@@ -1145,6 +1278,14 @@ class FileResponse:
             (name, value) for name, value in self.headers if name.lower() != b"cache-control"
         ]
         self.headers.append((b"cache-control", policy.to_header()))
+
+    def set_cdn_cache_control(self, policy: CacheControl) -> None:
+        """Replace `CDN-Cache-Control` with an RFC 9213 targeted policy."""
+        _set_cdn_cache_control(self.headers, policy)
+
+    def set_link_templates(self, *templates: LinkTemplate) -> None:
+        """Replace `Link-Template` with validated RFC 9652 templated links."""
+        _set_link_templates(self.headers, templates)
 
     def _window(self, size: int) -> tuple[int, int]:
         """The (offset, length) to send: the whole file, or the asked-for slice."""

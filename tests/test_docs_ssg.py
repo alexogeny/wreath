@@ -243,6 +243,16 @@ def test_admonition_and_table(tmp_path) -> None:
     assert 'class="admonition warning"' in adm.html and "admonition-title" in adm.html
 
 
+def test_heading_and_table_parsers_keep_ambiguous_whitespace_out_of_backtracking() -> None:
+    heading = render("# title" + " " * 2_000 + "x\n")
+    invalid_id = render("# title" + " " * 2_000 + "{#bad!}\n")
+    malformed_table = render("A | B\n---|---" + " " * 2_000 + "x\n")
+
+    assert heading.title == "title" + " " * 2_000 + "x"
+    assert invalid_id.title == "title" + " " * 2_000 + "{#bad!}"
+    assert "<table>" not in malformed_table.html
+
+
 def test_search_index_is_written(tmp_path) -> None:
     import json
 

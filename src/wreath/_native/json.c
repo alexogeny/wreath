@@ -984,15 +984,16 @@ parse_dataclass_document(const char *data, Py_ssize_t len, PyObject *plan,
                          PyObject *loc_seq)
 {
     enum { OP_DATACLASS = 9 };
-    if (!PyTuple_Check(plan) || PyTuple_GET_SIZE(plan) != 6) {
+    PyObject *source = wreath_validation_plan_source(plan);
+    if (!PyTuple_Check(source) || PyTuple_GET_SIZE(source) != 6) {
         return Py_NewRef(Py_NotImplemented);
     }
-    long opcode = PyLong_AsLong(PyTuple_GET_ITEM(plan, 0));
+    long opcode = PyLong_AsLong(PyTuple_GET_ITEM(source, 0));
     if (opcode == -1 && PyErr_Occurred()) return NULL;
     if (opcode != OP_DATACLASS) return Py_NewRef(Py_NotImplemented);
 
-    PyObject *fields = PyTuple_GET_ITEM(plan, 2);
-    PyObject *field_indices = PyTuple_GET_ITEM(plan, 5);
+    PyObject *fields = PyTuple_GET_ITEM(source, 2);
+    PyObject *field_indices = PyTuple_GET_ITEM(source, 5);
     if (!PyTuple_Check(fields) || !PyDict_Check(field_indices)) {
         return Py_NewRef(Py_NotImplemented);
     }
@@ -1116,8 +1117,11 @@ parsed:
         PyObject *field = PyTuple_GET_ITEM(fields, index);
         PyObject *wire_name = PyTuple_GET_ITEM(field, 1);
         if (PyList_Append(loc, wire_name) < 0) goto done;
-        PyObject *validated = wreath_validate_node(
-            PyTuple_GET_ITEM(field, 2), values[index], loc, errors, &steps);
+        PyObject *validated = PyCapsule_CheckExact(plan)
+            ? wreath_validate_plan_field(
+                plan, index, values[index], loc, errors, &steps)
+            : wreath_validate_node(
+                PyTuple_GET_ITEM(field, 2), values[index], loc, errors, &steps);
         if (PyList_SetSlice(
                 loc, PyList_GET_SIZE(loc) - 1, PyList_GET_SIZE(loc), NULL) < 0) {
             Py_XDECREF(validated);
@@ -1131,8 +1135,8 @@ parsed:
         }
     }
 
-    PyObject *cls = PyTuple_GET_ITEM(plan, 1);
-    int positional = PyObject_IsTrue(PyTuple_GET_ITEM(plan, 4));
+    PyObject *cls = PyTuple_GET_ITEM(source, 1);
+    int positional = PyObject_IsTrue(PyTuple_GET_ITEM(source, 4));
     if (positional < 0) goto done;
     if (positional && present_count == field_count) {
         instance = PyObject_Vectorcall(cls, values, (size_t)field_count, NULL);

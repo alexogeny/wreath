@@ -912,24 +912,22 @@ class Session:
         if not rows:
             # Empty results do not validate a projection's primary-key offsets.
             return []
-        row_plan, cursors = self._record_plan(compiled, spec, plan)
+        native_plan = self._record_plan(compiled, spec, plan)
         models = _model_storage()
         return _native_core.orm_hydrate_records(
-            self, spec, row_plan, cursors, rows, models._MODEL_API
+            self, native_plan, rows, models._MODEL_API
         )
-
-    def _assemble_joins(self, cursors: tuple[_JoinCursor, ...], parent: Any, row: Any) -> None:
-        models = _model_storage()
-        _native_core.orm_assemble_joins(self, cursors, parent, row, models._MODEL_API)
 
     def _record_plan(
         self, compiled: CompiledQuery, spec: ModelSpec, plan: LoadPlan
-    ) -> tuple[_RowPlan, tuple[_JoinCursor, ...]]:
+    ) -> Any:
         """Resolve and cache Record hydration constants by query shape."""
         cached = self._registry.cached_plan(compiled.shape_key)
         if cached is not None and cached.record_plan is not None:
             return cached.record_plan
-        built = (_row_plan(spec, plan.columns), _join_cursors(plan.joined))
+        built = _native_core.orm_compile_hydrate_plan(
+            spec, _row_plan(spec, plan.columns), _join_cursors(plan.joined)
+        )
         if cached is not None:
             cached.record_plan = built
         return built

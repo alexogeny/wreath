@@ -54,7 +54,6 @@ def _read_all(fd: int) -> bytes:
 # `_template_tape`'s -- so what it is handed here is what a caller wraps a value
 # in and what a caller catches.
 _core.template_configure(Markup, TemplateRenderError)
-_native_render = _core.template_render
 _native_compile = _core.template_compile
 _native_render_compiled = _core.template_render_compiled
 _native_render_compiled_tail = _core.template_render_compiled_tail
@@ -63,11 +62,10 @@ _native_render_compiled_tail = _core.template_render_compiled_tail
 class Template:
     """A compiled template. Immutable and safe to render concurrently."""
 
-    __slots__ = ("_program", "_tape", "name")
+    __slots__ = ("_program", "name")
 
     def __init__(self, tape: tuple[tuple[Any, ...], ...], name: str = "<string>") -> None:
-        self._tape = tape
-        self._program = _native_compile(tape) if _native_compile is not None else None
+        self._program = _native_compile(tape)
         self.name = name
 
     @classmethod
@@ -81,9 +79,7 @@ class Template:
 
     def render_bytes(self, context: dict[str, Any], max_output: int = MAX_OUTPUT_BYTES) -> bytes:
         """Render to UTF-8 bytes from an explicit context mapping."""
-        if self._program is not None:
-            return _native_render_compiled(self._program, context, max_output)
-        return _native_render(self._tape, context, max_output)
+        return _native_render_compiled(self._program, context, max_output)
 
     def _render_bytes_tail(
         self,
@@ -91,11 +87,6 @@ class Template:
         tail: bytes,
         max_output: int = MAX_OUTPUT_BYTES,
     ) -> bytes:
-        if self._program is None:
-            prefix = _native_render(self._tape, context, max_output)
-            if len(prefix) + len(tail) > max_output:
-                raise TemplateRenderError("template output too large")
-            return b"".join((prefix, tail))
         return _native_render_compiled_tail(self._program, context, tail, max_output)
 
 

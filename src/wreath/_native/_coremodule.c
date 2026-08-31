@@ -195,6 +195,8 @@ static PyMethodDef core_methods[] = {
      "Return the number of rows in request-owned native sync state."},
     {"run_validation", wreath_run_validation, METH_VARARGS,
      "run_validation(plan, value, loc) -> (result, errors)"},
+    {"compile_validation_plan", wreath_compile_validation_plan, METH_O,
+     "Compile a Python declaration tape into an operation-owned native plan."},
     {"run_validation_json", wreath_run_validation_json, METH_VARARGS,
      "run_validation_json(plan, value, loc) -> (body | None, errors)\n"
      "Validate a response value and serialize its successful JSON form."},
@@ -208,10 +210,10 @@ static PyMethodDef core_methods[] = {
      "Group parents by loaded relationship key and initialize relation slots."},
     {"orm_attach_relationships", wreath_orm_attach_relationships, METH_VARARGS,
      "Attach a hydrated child batch to grouped parents."},
+    {"orm_compile_hydrate_plan", wreath_orm_compile_hydrate_plan, METH_VARARGS,
+     "Compile cached row and join constants into a reusable native plan."},
     {"orm_hydrate_records", wreath_orm_hydrate_records, METH_VARARGS,
      "Hydrate a record batch and assemble its joined relationships."},
-    {"orm_assemble_joins", wreath_orm_assemble_joins, METH_VARARGS,
-     "Assemble joined relationships for one hydrated root."},
     {"orm_collect_values", wreath_orm_collect_values, METH_VARARGS,
      "orm_collect_values(select) -> list[ValueExpr]\nBind nodes in order."},
     {"csrf_sign", wreath_csrf_sign, METH_VARARGS,
@@ -292,6 +294,12 @@ static PyMethodDef core_methods[] = {
      "Parse the RFC 8941 dictionaries used by HTTP Message Signatures."},
     {"signature_parse_string", wreath_signature_parse_string, METH_VARARGS,
      "Parse one RFC 8941 quoted string."},
+    {"signature_compile_pair", wreath_signature_compile_pair, METH_VARARGS,
+     "Compile paired Signature-Input and Signature fields into a native plan."},
+    {"signature_plan_facts", wreath_signature_plan_facts, METH_O,
+     "Materialize verification facts from a native signature plan."},
+    {"signature_plan_base", wreath_signature_plan_base, METH_VARARGS,
+     "Construct an RFC 9421 signature base from a native plan."},
     {"signature_base", wreath_signature_base, METH_VARARGS,
      "Construct an RFC 9421 signature base."},
     {"curve_ed_add", wreath_curve_ed_add, METH_VARARGS,
@@ -462,6 +470,8 @@ static PyMethodDef core_methods[] = {
      "Select one request's log records without decoding every cell."},
     {"scim_parse", wreath_scim_parse, METH_VARARGS,
      "scim_parse(source, attributes, types) -> filter"},
+    {"scim_compile", wreath_scim_compile, METH_VARARGS,
+     "scim_compile(filter, types) -> operation-owned native plan"},
     {"scim_values_at", wreath_scim_values_at, METH_VARARGS,
      "scim_values_at(resource, path, types) -> list"},
     {"scim_matches", wreath_scim_matches, METH_VARARGS,
@@ -548,7 +558,7 @@ static PyMethodDef core_methods[] = {
     {"xml_configure", wreath_xml_configure, METH_O,
      "xml_configure(refusal_type) -> None"},
     {"xml_parse", wreath_xml_parse, METH_VARARGS,
-     "xml_parse(data, max_bytes, max_depth, max_elements, max_attributes, "
+     "xml_parse(data, element_type, max_bytes, max_depth, max_elements, max_attributes, "
      "max_attribute_bytes) -> node\nStrict XML, with a byte span per element."},
     {"xml_c14n", wreath_xml_c14n, METH_VARARGS,
      "xml_c14n(data, start, end, inherited, inclusive, *limits) -> bytes\n"
@@ -560,9 +570,6 @@ static PyMethodDef core_methods[] = {
     {"json_loads", wreath_json_loads, METH_O,
      "json_loads(data) -> object\n"
      "Parse JSON from str/bytes/bytearray with stdlib json.loads semantics."},
-    {"template_render", wreath_template_render, METH_VARARGS,
-     "template_render(tape, context, max_output) -> bytes\n"
-     "Execute a compiled template tape to escaped UTF-8."},
     {"template_compile", wreath_template_compile, METH_O,
      "template_compile(tape) -> program\n"
      "Decode a template tape once for repeated rendering."},

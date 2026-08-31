@@ -452,7 +452,11 @@ def generate_openapi(
             if behaviours:
                 operation[BEHAVIOUR_EXTENSION] = behaviours
             operation["responses"] = operation_responses
-            operations[method.lower()] = operation
+            if method == "QUERY":
+                operation["x-wreath-http-method"] = "QUERY"
+                operations["x-wreath-query"] = operation
+            else:
+                operations[method.lower()] = operation
 
     components = {model.name: _component_schema(model) for model in builder.registry.models()}
     document: dict[str, Any] = {
@@ -602,7 +606,7 @@ function wreathCsrf(){var m=document.cookie.match(/(?:^|; )wreath_csrf=([^;]+)/)
 return m?decodeURIComponent(m[1]):''}
 document.querySelectorAll('button.try').forEach(function(b){b.addEventListener('click',function(){
 var out=b.nextElementSibling;out.textContent='…';var h={};var c=wreathCsrf();
-if(c&&b.dataset.method!=='GET'){h['x-csrf-token']=c}
+if(c&&!['GET','HEAD','OPTIONS','QUERY'].includes(b.dataset.method)){h['x-csrf-token']=c}
 fetch(b.dataset.path,{method:b.dataset.method,credentials:'same-origin',headers:h})
 .then(function(r){return r.text().then(function(t){out.textContent=r.status+'\\n'+t})})
 .catch(function(e){out.textContent='error: '+e})})});

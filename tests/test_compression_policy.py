@@ -645,6 +645,37 @@ async def test_no_transform_and_incompressible_types_refuse_zstd_too() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_precomputed_integrity_field_prevents_a_later_content_coding() -> None:
+    app = Wreath()
+    app.configure_http_policy(HttpPolicy(compression=CompressionPolicy(minimum_size=16)))
+
+    @app.get("/content")
+    async def content(request: Any) -> Response:
+        response = Response(b"content integrity" * 100, media_type=b"text/plain")
+        response.set_content_digest("sha-256")
+        return response
+
+    @app.get("/representation")
+    async def representation(request: Any) -> Response:
+        response = Response(b"representation integrity" * 100, media_type=b"text/plain")
+        response.set_repr_digest("sha-256")
+        return response
+
+    async with TestClient(app) as client:
+        content_response = await client.get(
+            "/content", headers={"accept-encoding": "gzip"}
+        )
+        representation_response = await client.get(
+            "/representation", headers={"accept-encoding": "gzip"}
+        )
+
+    assert content_response.header("content-digest") is not None
+    assert content_response.header("content-encoding") is None
+    assert representation_response.header("repr-digest") is not None
+    assert representation_response.header("content-encoding") is None
+
+
+@pytest.mark.asyncio
 async def test_the_etag_suffix_lands_on_the_etag_and_not_a_neighbour() -> None:
     app = Wreath()
     app.configure_http_policy(HttpPolicy(compression=CompressionPolicy(minimum_size=16)))

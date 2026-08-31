@@ -509,8 +509,8 @@ class TestClient:
     ) -> TestResponse:
         """Send one request through the application and collect the response.
 
-        The verb helpers — `get()`, `post()`, `put()`, `patch()`, `delete()`,
-        `options()`, `head()` — forward here, so every keyword documented below
+        The verb helpers — `get()`, `query()`, `post()`, `put()`, `patch()`,
+        `delete()`, `options()`, `head()` — forward here, so every keyword documented below
         works on all of them.
 
         A query string already present in `path` is kept and `params` is
@@ -623,6 +623,10 @@ class TestClient:
     async def post(self, path: str, **kwargs: Any) -> TestResponse:
         """Send a POST request; keywords are those of `request()`."""
         return await self.request("POST", path, **kwargs)
+
+    async def query(self, path: str, **kwargs: Any) -> TestResponse:
+        """Send a QUERY request; keywords are those of `request()`."""
+        return await self.request("QUERY", path, **kwargs)
 
     async def put(self, path: str, **kwargs: Any) -> TestResponse:
         """Send a PUT request; keywords are those of `request()`."""

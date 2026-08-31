@@ -1198,7 +1198,8 @@ run_csrf(WreathPolicyState *state, PyObject *csrf, PyObject *method,
     state->csrf_config = csrf;
     int safe = PyUnicode_CompareWithASCIIString(method, "GET") == 0 ||
         PyUnicode_CompareWithASCIIString(method, "HEAD") == 0 ||
-        PyUnicode_CompareWithASCIIString(method, "OPTIONS") == 0;
+        PyUnicode_CompareWithASCIIString(method, "OPTIONS") == 0 ||
+        PyUnicode_CompareWithASCIIString(method, "QUERY") == 0;
     PyObject *site = find_header(headers, "sec-fetch-site", 14, NULL);
     if (site != NULL) {
         if (safe || bytes_equal_literal(site, "same-origin", 11) ||
@@ -1611,6 +1612,8 @@ wreath_policy_response(WreathPolicyProgram *program, WreathPolicyState *state,
     PyObject *content_type = response_value(headers, "content-type", 12);
     if (response_index_literal(headers, "content-encoding", 16) >= 0 ||
         response_index_literal(headers, "content-range", 13) >= 0 ||
+        response_index_literal(headers, "content-digest", 14) >= 0 ||
+        response_index_literal(headers, "repr-digest", 11) >= 0 ||
         !compressible_type(content_type) ||
         has_cache_token(response_value(headers, "cache-control", 13),
                         "no-transform", 12)) return 0;

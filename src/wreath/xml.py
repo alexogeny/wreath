@@ -71,7 +71,7 @@ belong to the layer above.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from ._native import _core
 
@@ -119,37 +119,6 @@ def _limit_tuple(limits: Limits) -> tuple[int, int, int, int, int]:
     )
 
 
-def _build(node: tuple[Any, ...], inherited: tuple[tuple[str, str], ...]) -> Element:
-    """Turn one C-built node tuple into an `Element`.
-
-    The C side returns plain tuples rather than constructing Python objects,
-    so the dataclass definition -- and therefore the shape a caller reads --
-    lives in exactly one place.
-    """
-    tag, attrib, text, tail, span, nsdecl, qualified, prefix, local, children = node
-    scope = dict(inherited)
-    for declared_prefix, uri in nsdecl:
-        if uri:
-            scope[declared_prefix] = uri
-        else:
-            scope.pop(declared_prefix, None)
-    nsscope = inherited if not nsdecl else tuple(sorted(scope.items()))
-    return Element(
-        tag=tag,
-        attrib=attrib,
-        text=text,
-        tail=tail,
-        children=tuple(_build(child, nsscope) for child in children),
-        span=span,
-        nsdeclarations=nsdecl,
-        nsscope=nsscope,
-        nsinherited=inherited,
-        qualified=qualified,
-        prefix=prefix,
-        local=local,
-    )
-
-
 def _parse_native(data: bytes, limits: Limits | None = None) -> Document:
     """Parse `data` under `limits`, or raise `XMLRefusal`.
 
@@ -158,8 +127,8 @@ def _parse_native(data: bytes, limits: Limits | None = None) -> Document:
     if not isinstance(data, bytes | bytearray | memoryview):
         raise TypeError("XML input must be bytes")
     payload = bytes(data)
-    root = _core.xml_parse(payload, *_limit_tuple(limits or Limits()))
-    return Document(root=_build(root, ()), source=payload, canonicalizer=_canonicalize_native)
+    root = _core.xml_parse(payload, Element, *_limit_tuple(limits or Limits()))
+    return Document(root=root, source=payload, canonicalizer=_canonicalize_native)
 
 
 def _canonicalize_native(

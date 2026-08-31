@@ -7,175 +7,141 @@ def codes(source: str) -> list[str]:
     return [finding.code for finding in scan_text("example.c", source)]
 
 
-def test_flags_python_object_work_inside_a_native_loop() -> None:
+def test_flags_a_recursive_boxed_opcode_interpreter() -> None:
     source = """
-static PyObject *decode_many(PyObject *items) {
-    for (Py_ssize_t i = 0; i < count; i++) {
-        PyObject *value = PyDict_GetItemWithError(items, keys[i]);
-        PyObject *number = PyLong_FromLong(i);
+static PyObject *evaluate(PyObject *node) {
+    long opcode = PyLong_AsLong(PyTuple_GET_ITEM(node, 0));
+    switch (opcode) {
+    case 0: return Py_NewRef(PyTuple_GET_ITEM(node, 1));
+    default: return evaluate(PyTuple_GET_ITEM(node, 1));
     }
 }
 """
-    assert "NB001" in codes(source)
+    assert codes(source) == ["NB001"]
 
 
-def test_flags_container_building_for_a_generic_call() -> None:
+def test_flags_execution_time_plan_reconstruction() -> None:
     source = """
-static PyObject *make_uuid(PyObject *type, PyObject *value) {
-    PyObject *args = PyTuple_Pack(1, value);
-    PyObject *kwargs = Py_BuildValue("{s:O}", "value", value);
-    return PyObject_Call(type, args, kwargs);
+static int row_plan_init(RowPlan *out, PyObject *plan) {
+    out->cells = PyObject_GetAttrString(plan, "cells");
+    return out->cells == NULL ? -1 : 0;
+}
+
+static PyObject *hydrate_records(PyObject *rows, PyObject *plan) {
+    RowPlan native = {0};
+    if (row_plan_init(&native, plan) < 0) return NULL;
+    return hydrate_all(rows, &native);
 }
 """
-    assert "NB002" in codes(source)
+    assert codes(source) == ["NB002"]
 
 
-def test_flags_repeated_dynamic_lookups_in_one_function() -> None:
+def test_compile_time_plan_construction_is_not_a_finding() -> None:
     source = """
-static PyObject *extract(PyObject *value) {
-    PyObject *a = PyObject_GetAttrString(value, "a");
-    PyObject *b = PyObject_GetAttrString(value, "b");
-    PyObject *c = PyDict_GetItemString(a, "c");
-    return PyObject_CallMethodNoArgs(b, name);
-}
-"""
-    assert "NB003" in codes(source)
-
-
-def test_flags_high_aggregate_boundary_pressure() -> None:
-    source = """
-static PyObject *convert(PyObject *value) {
-    PyObject *a = PyLong_FromLong(1);
-    PyObject *b = PyLong_FromLong(2);
-    PyObject *c = PyUnicode_FromString("c");
-    PyObject *d = PyTuple_Pack(3, a, b, c);
-    PyObject *e = PyObject_GetAttrString(value, "factory");
-    PyObject *f = PyLong_FromLong(3);
-    PyObject *g = PyUnicode_FromString("g");
-    PyObject *h = PyObject_CallOneArg(e, f);
-    return PyObject_CallOneArg(e, d);
-}
-"""
-    assert "NB004" in codes(source)
-
-
-def test_does_not_flag_a_single_boundary_conversion() -> None:
-    source = """
-static PyObject *size(PyObject *self, PyObject *value) {
-    long size = PyLong_AsLong(value);
-    return PyLong_FromLong(size + 1);
+static PyObject *compile_validation_plan(PyObject *plan) {
+    NativePlan native = {0};
+    if (row_plan_init(&native, plan) < 0) return NULL;
+    return plan_capsule(&native);
 }
 """
     assert codes(source) == []
 
 
-def test_rule_can_be_waived_with_a_reason() -> None:
+def test_tuple_opcode_decoder_used_only_by_a_compiler_is_not_a_finding() -> None:
     source = """
-static PyObject *decode_many(PyObject *items) {
-    for (Py_ssize_t i = 0; i < count; i++) {
-        /* native-boundary-lint: allow NB001 -- values must become owned Python objects */
-        PyObject *number = PyLong_FromLong(i);
-        PyObject *text = PyUnicode_FromFormat("%zd", i);
+static int decode_tape(PyObject *tape, NativePlan *out) {
+    long opcode = PyLong_AsLong(PyTuple_GET_ITEM(tape, 0));
+    switch (opcode) {
+    case 0: out->value = PyTuple_GET_ITEM(tape, 1); return 0;
+    default: return decode_tape(PyTuple_GET_ITEM(tape, 1), out);
     }
 }
+
+static PyObject *compile_template(PyObject *tape) {
+    NativePlan *plan = plan_new();
+    if (decode_tape(tape, plan) < 0) return NULL;
+    return plan_capsule(plan);
+}
 """
-    assert "NB001" not in codes(source)
+    assert codes(source) == []
 
 
-def test_object_work_inside_a_loop_still_counts_when_it_is_not_an_error_path() -> None:
+def test_tuple_opcode_decoder_shared_with_an_executor_remains_a_finding() -> None:
     source = """
-static PyObject *drive(PyObject *items) {
-    for (Py_ssize_t i = 0; i < count; i++) {
-        PyObject *name = PyUnicode_FromString("row");
-        PyObject *number = PyLong_FromLong(i);
+static int decode_tape(PyObject *tape, NativePlan *out) {
+    long opcode = PyLong_AsLong(PyTuple_GET_ITEM(tape, 0));
+    switch (opcode) {
+    case 0: out->value = PyTuple_GET_ITEM(tape, 1); return 0;
+    default: return decode_tape(PyTuple_GET_ITEM(tape, 1), out);
     }
 }
+
+static PyObject *compile_template(PyObject *tape) {
+    NativePlan *plan = plan_new();
+    if (decode_tape(tape, plan) < 0) return NULL;
+    return plan_capsule(plan);
+}
+
+static PyObject *render_template(PyObject *tape) {
+    NativePlan plan = {0};
+    if (decode_tape(tape, &plan) < 0) return NULL;
+    return execute_plan(&plan);
+}
 """
-    assert "NB001" in codes(source)
+    assert codes(source) == ["NB001"]
 
 
-def test_objects_built_as_arguments_to_a_raiser_are_not_loop_traffic() -> None:
+def test_public_result_materialization_is_a_legitimate_boundary() -> None:
     source = """
-static PyObject *drive(PyObject *items) {
-    for (Py_ssize_t i = 0; i < count; i++) {
-        if (bad) {
-            raise_render(0, PyUnicode_FromString("template output too large"));
-            raise_render(0, PyUnicode_FromFormat("invalid opcode %ld", op));
-        }
+static PyObject *materialize_rows(NativeRows *rows) {
+    PyObject *result = PyList_New(rows->count);
+    for (Py_ssize_t index = 0; index < rows->count; index++) {
+        PyObject *item = PyTuple_New(2);
+        PyTuple_SET_ITEM(item, 0, PyLong_FromLong(rows->items[index].id));
+        PyTuple_SET_ITEM(item, 1, PyUnicode_FromString(rows->items[index].name));
+        PyList_SET_ITEM(result, index, item);
     }
+    return result;
 }
 """
-    assert "NB001" not in codes(source)
+    assert codes(source) == []
 
 
-def test_a_raiser_wrapped_across_lines_is_covered_in_full() -> None:
+def test_python_callback_dispatch_is_a_legitimate_seam() -> None:
     source = """
-static PyObject *drive(PyObject *items) {
-    for (Py_ssize_t i = 0; i < count; i++) {
-        raise_render(line, joined ? PyUnicode_FromFormat(
-                                        "%R is not iterable", joined)
-                                  : NULL);
-        raise_render(line, other ? PyUnicode_FromFormat(
-                                        "%R is not callable", other)
-                                 : NULL);
+static PyObject *dispatch_callbacks(PyObject *callbacks, PyObject *value) {
+    PyObject *result = PyList_New(0);
+    for (Py_ssize_t index = 0; index < PyTuple_GET_SIZE(callbacks); index++) {
+        PyObject *item = PyObject_CallOneArg(PyTuple_GET_ITEM(callbacks, index), value);
+        if (item == NULL || PyList_Append(result, item) < 0) return NULL;
     }
+    return result;
 }
 """
-    assert "NB001" not in codes(source)
+    assert codes(source) == []
 
 
-def test_getattr_string_is_still_a_dynamic_lookup() -> None:
+def test_graphql_ast_construction_at_the_parse_boundary_is_not_a_finding() -> None:
     source = """
-static PyObject *read_three(PyObject *op) {
-    PyObject *a = PyObject_GetAttrString(op, "field_tape");
-    PyObject *b = PyObject_GetAttrString(op, "decoder_plan");
-    PyObject *c = PyObject_GetAttrString(op, "rows");
-}
-"""
-    assert "NB003" in codes(source)
-
-
-def test_getattr_with_an_interned_name_is_not_a_dynamic_lookup() -> None:
-    source = """
-static PyObject *read_three(PyObject *op) {
-    PyObject *a = PyObject_GetAttr(op, str_field_tape);
-    PyObject *b = PyObject_GetAttr(op, str_decoder_plan);
-    PyObject *c = PyObject_GetAttr(op, str_rows);
-}
-"""
-    assert "NB003" not in codes(source)
-
-
-def test_a_dynamic_lookup_beside_a_cached_one_still_counts() -> None:
-    source = """
-static PyObject *read_three(PyObject *op) {
-    PyObject *a = PyObject_GetAttr(op, str_tape); PyObject *d = PyObject_GetAttrString(op, "x");
-    PyObject *b = PyObject_GetAttrString(op, "decoder_plan");
-    PyObject *c = PyObject_GetAttrString(op, "rows");
-}
-"""
-    assert "NB003" in codes(source)
-
-
-def test_nb001_excuses_a_one_time_static_table_build() -> None:
-    source = """
-static int build_static_table(void) {
-    for (size_t i = 0; i < 61; i++) {
-        table[i].name = PyBytes_FromString(STATIC_NAMES[i]);
-        table[i].value = PyBytes_FromString(STATIC_VALUES[i]);
+static PyObject *graphql_parse(PyObject *source) {
+    PyObject *fields = PyList_New(0);
+    for (Py_ssize_t index = 0; index < token_count; index++) {
+        PyObject *field = PyObject_CallOneArg(Field, tokens[index]);
+        if (field == NULL || PyList_Append(fields, field) < 0) return NULL;
     }
+    return PyObject_CallOneArg(Document, fields);
 }
 """
-    assert "NB001" not in codes(source)
+    assert codes(source) == []
 
 
-def test_nb001_still_fires_on_a_similarly_named_hot_function() -> None:
+def test_plan_reconstruction_rule_can_be_waived_with_a_reason() -> None:
     source = """
-static int wreath_build_header_map(PyObject *headers) {
-    for (size_t i = 0; i < count; i++) {
-        PyObject *name = PyBytes_FromString(raw[i].name);
-        PyObject *value = PyBytes_FromString(raw[i].value);
-    }
+static PyObject *execute_bounded_plan(PyObject *plan) {
+    NativePlan native = {0};
+    /* native-boundary-lint: allow NB002 -- one bounded compatibility operation */
+    if (row_plan_init(&native, plan) < 0) return NULL;
+    return execute(&native);
 }
 """
-    assert "NB001" in codes(source)
+    assert codes(source) == []

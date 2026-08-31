@@ -436,6 +436,8 @@ def test_junk_is_refused_at_declaration_time() -> None:
         OneOf()
     with pytest.raises(DeclarationError, match="not a regex"):
         Pattern("(unclosed")
+    with pytest.raises(DeclarationError, match="linear-safe"):
+        Pattern(r"^(a+)+$")
     with pytest.raises(DeclarationError, match="declares no checks"):
         narrow("salary")
     with pytest.raises(DeclarationError, match="must name one of"):

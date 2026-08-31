@@ -13,6 +13,35 @@ typedef struct {
     Py_ssize_t max_components;
 } SignatureParser;
 
+typedef struct {
+    PyObject *name;
+    PyObject *params;
+    PyObject *identifier;
+} SignaturePlanComponent;
+
+typedef struct {
+    SignaturePlanComponent *components;
+    Py_ssize_t component_count;
+    PyObject *params;
+    PyObject *raw_signature;
+    PyObject *covered_order;
+    PyObject *serialized_params;
+} SignaturePlan;
+
+typedef struct {
+    PyObject *key;
+    SignaturePlanComponent *components;
+    Py_ssize_t component_count;
+    PyObject *params;
+} SignatureInputEntry;
+
+typedef struct {
+    PyObject *key;
+    PyObject *value;
+} SignatureValueEntry;
+
+#define SIGNATURE_PLAN_CAPSULE "wreath.signature.plan"
+
 static PyObject *
 signature_error(SignatureParser *parser, const char *message)
 {
@@ -603,6 +632,526 @@ error:
     Py_XDECREF(req_key);
     Py_XDECREF(name_key);
     return -1;
+}
+
+static void
+signature_components_clear(SignaturePlanComponent *components, Py_ssize_t count)
+{
+    if (components == NULL) return;
+    for (Py_ssize_t index = 0; index < count; index++) {
+        Py_XDECREF(components[index].identifier);
+        Py_XDECREF(components[index].params);
+        Py_XDECREF(components[index].name);
+    }
+    PyMem_Free(components);
+}
+
+static void
+signature_plan_clear(SignaturePlan *plan)
+{
+    if (plan == NULL) return;
+    signature_components_clear(plan->components, plan->component_count);
+    Py_XDECREF(plan->serialized_params);
+    Py_XDECREF(plan->covered_order);
+    Py_XDECREF(plan->raw_signature);
+    Py_XDECREF(plan->params);
+    PyMem_Free(plan);
+}
+
+static void
+signature_plan_capsule_destructor(PyObject *capsule)
+{
+    SignaturePlan *plan = PyCapsule_GetPointer(capsule, SIGNATURE_PLAN_CAPSULE);
+    if (plan != NULL) signature_plan_clear(plan);
+    else PyErr_Clear();
+}
+
+static SignaturePlan *
+signature_plan_get(PyObject *capsule)
+{
+    return PyCapsule_GetPointer(capsule, SIGNATURE_PLAN_CAPSULE);
+}
+
+static int
+signature_parse_plan_inner(SignatureParser *parser,
+                           SignaturePlanComponent **components_out,
+                           Py_ssize_t *count_out)
+{
+    SignaturePlanComponent *components = NULL;
+    Py_ssize_t count = 0;
+    if (parser->index >= parser->length || parser->text[parser->index] != '(') {
+        signature_error(parser, "structured field: expected an inner list");
+        return -1;
+    }
+    parser->index++;
+    signature_skip_ws(parser);
+    if (parser->max_components > 0) {
+        components = PyMem_Calloc((size_t)parser->max_components,
+                                  sizeof(*components));
+        if (components == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+    }
+    while (parser->index < parser->length && parser->text[parser->index] != ')') {
+        PyObject *name, *params;
+        if (count >= parser->max_components) {
+            signature_components_clear(components, count);
+            signature_error(parser, "signature covers too many components");
+            return -1;
+        }
+        name = signature_parse_string_value(parser);
+        if (name == NULL) {
+            signature_components_clear(components, count);
+            return -1;
+        }
+        params = signature_parse_params(parser);
+        if (params == NULL) {
+            Py_DECREF(name);
+            signature_components_clear(components, count);
+            return -1;
+        }
+        components[count].name = name;
+        components[count].params = params;
+        count++;
+        signature_skip_ws(parser);
+    }
+    if (parser->index >= parser->length) {
+        signature_components_clear(components, count);
+        signature_error(parser, "structured field: unterminated inner list");
+        return -1;
+    }
+    parser->index++;
+    *components_out = components;
+    *count_out = count;
+    return 0;
+}
+
+static int
+signature_input_entry_index(SignatureInputEntry *entries, Py_ssize_t count,
+                            PyObject *key)
+{
+    for (Py_ssize_t index = 0; index < count; index++) {
+        int equal = PyObject_RichCompareBool(entries[index].key, key, Py_EQ);
+        if (equal != 0) return equal < 0 ? -2 : (int)index;
+    }
+    return -1;
+}
+
+static int
+signature_value_entry_index(SignatureValueEntry *entries, Py_ssize_t count,
+                            PyObject *key)
+{
+    for (Py_ssize_t index = 0; index < count; index++) {
+        int equal = PyObject_RichCompareBool(entries[index].key, key, Py_EQ);
+        if (equal != 0) return equal < 0 ? -2 : (int)index;
+    }
+    return -1;
+}
+
+static void
+signature_input_entries_clear(SignatureInputEntry *entries, Py_ssize_t count)
+{
+    if (entries == NULL) return;
+    for (Py_ssize_t index = 0; index < count; index++) {
+        signature_components_clear(entries[index].components,
+                                   entries[index].component_count);
+        Py_XDECREF(entries[index].params);
+        Py_XDECREF(entries[index].key);
+    }
+    PyMem_Free(entries);
+}
+
+static void
+signature_value_entries_clear(SignatureValueEntry *entries, Py_ssize_t count)
+{
+    if (entries == NULL) return;
+    for (Py_ssize_t index = 0; index < count; index++) {
+        Py_XDECREF(entries[index].value);
+        Py_XDECREF(entries[index].key);
+    }
+    PyMem_Free(entries);
+}
+
+static int
+signature_parse_input_entries(SignatureParser *parser,
+                              SignatureInputEntry **entries_out,
+                              Py_ssize_t *count_out)
+{
+    SignatureInputEntry *entries = NULL;
+    Py_ssize_t count = 0, capacity = 0;
+    signature_skip_ws(parser);
+    while (parser->index < parser->length) {
+        SignaturePlanComponent *components = NULL;
+        Py_ssize_t component_count = 0;
+        PyObject *key = signature_parse_token(parser);
+        PyObject *params = NULL;
+        int existing;
+        if (key == NULL) goto error;
+        if (parser->index < parser->length && parser->text[parser->index] == '=') {
+            parser->index++;
+            if (signature_parse_plan_inner(parser, &components,
+                                           &component_count) < 0) {
+                Py_DECREF(key);
+                goto error;
+            }
+            params = signature_parse_params(parser);
+        }
+        else params = signature_parse_params(parser);
+        if (params == NULL) {
+            Py_DECREF(key);
+            signature_components_clear(components, component_count);
+            goto error;
+        }
+        existing = signature_input_entry_index(entries, count, key);
+        if (existing == -2) {
+            Py_DECREF(params);
+            Py_DECREF(key);
+            signature_components_clear(components, component_count);
+            goto error;
+        }
+        if (existing >= 0) {
+            signature_components_clear(entries[existing].components,
+                                       entries[existing].component_count);
+            Py_DECREF(entries[existing].params);
+            Py_DECREF(key);
+            entries[existing].components = components;
+            entries[existing].component_count = component_count;
+            entries[existing].params = params;
+        }
+        else {
+            if (count == capacity) {
+                Py_ssize_t next = capacity == 0 ? 4 : capacity * 2;
+                SignatureInputEntry *grown = PyMem_Realloc(
+                    entries, (size_t)next * sizeof(*entries));
+                if (grown == NULL) {
+                    Py_DECREF(params);
+                    Py_DECREF(key);
+                    signature_components_clear(components, component_count);
+                    PyErr_NoMemory();
+                    goto error;
+                }
+                entries = grown;
+                capacity = next;
+            }
+            entries[count++] = (SignatureInputEntry){
+                .key = key,
+                .components = components,
+                .component_count = component_count,
+                .params = params,
+            };
+        }
+        signature_skip_ws(parser);
+        if (parser->index < parser->length) {
+            if (parser->text[parser->index] != ',') {
+                signature_error(parser, "structured field: expected a comma");
+                goto error;
+            }
+            parser->index++;
+            signature_skip_ws(parser);
+            if (parser->index >= parser->length) {
+                signature_error(parser, "structured field: trailing comma");
+                goto error;
+            }
+        }
+    }
+    *entries_out = entries;
+    *count_out = count;
+    return 0;
+error:
+    signature_input_entries_clear(entries, count);
+    return -1;
+}
+
+static int
+signature_parse_value_entries(SignatureParser *parser,
+                              SignatureValueEntry **entries_out,
+                              Py_ssize_t *count_out)
+{
+    SignatureValueEntry *entries = NULL;
+    Py_ssize_t count = 0, capacity = 0;
+    signature_skip_ws(parser);
+    while (parser->index < parser->length) {
+        PyObject *key = signature_parse_token(parser);
+        PyObject *value = NULL, *params = NULL;
+        int existing;
+        if (key == NULL) goto error;
+        if (parser->index < parser->length && parser->text[parser->index] == '=') {
+            parser->index++;
+            value = signature_parse_item(parser);
+            if (value != NULL) params = signature_parse_params(parser);
+        }
+        else {
+            params = signature_parse_params(parser);
+            value = Py_NewRef(Py_True);
+        }
+        if (params == NULL) {
+            Py_XDECREF(value);
+            Py_DECREF(key);
+            goto error;
+        }
+        Py_XDECREF(params);
+        if (value == NULL) {
+            Py_DECREF(key);
+            goto error;
+        }
+        existing = signature_value_entry_index(entries, count, key);
+        if (existing == -2) {
+            Py_DECREF(value);
+            Py_DECREF(key);
+            goto error;
+        }
+        if (existing >= 0) {
+            Py_DECREF(entries[existing].value);
+            Py_DECREF(key);
+            entries[existing].value = value;
+        }
+        else {
+            if (count == capacity) {
+                Py_ssize_t next = capacity == 0 ? 4 : capacity * 2;
+                SignatureValueEntry *grown = PyMem_Realloc(
+                    entries, (size_t)next * sizeof(*entries));
+                if (grown == NULL) {
+                    Py_DECREF(value);
+                    Py_DECREF(key);
+                    PyErr_NoMemory();
+                    goto error;
+                }
+                entries = grown;
+                capacity = next;
+            }
+            entries[count++] = (SignatureValueEntry){.key = key, .value = value};
+        }
+        signature_skip_ws(parser);
+        if (parser->index < parser->length) {
+            if (parser->text[parser->index] != ',') {
+                signature_error(parser, "structured field: expected a comma");
+                goto error;
+            }
+            parser->index++;
+            signature_skip_ws(parser);
+            if (parser->index >= parser->length) {
+                signature_error(parser, "structured field: trailing comma");
+                goto error;
+            }
+        }
+    }
+    *entries_out = entries;
+    *count_out = count;
+    return 0;
+error:
+    signature_value_entries_clear(entries, count);
+    return -1;
+}
+
+static int
+signature_component_is_lowercase(PyObject *name)
+{
+    Py_ssize_t length;
+    const char *text = PyUnicode_AsUTF8AndSize(name, &length);
+    if (text == NULL) return -1;
+    for (Py_ssize_t index = 0; index < length; index++)
+        if (text[index] >= 'A' && text[index] <= 'Z') return 0;
+    return 1;
+}
+
+PyObject *
+wreath_signature_compile_pair(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *input_text, *signature_text, *error_type;
+    Py_ssize_t max_header, max_components;
+    SignatureParser input_parser, value_parser;
+    SignatureInputEntry *inputs = NULL;
+    SignatureValueEntry *values = NULL;
+    Py_ssize_t input_count = 0, value_count = 0;
+    SignaturePlan *plan = NULL;
+    PyObject *seen = NULL, *capsule = NULL;
+    Py_ssize_t chosen = -1, signature_index = -1;
+    if (!PyArg_ParseTuple(args, "OOOnn:signature_compile_pair", &input_text,
+                          &signature_text, &error_type, &max_header,
+                          &max_components)) return NULL;
+    input_parser.text = PyUnicode_AsUTF8AndSize(input_text, &input_parser.length);
+    if (input_parser.text == NULL) return NULL;
+    value_parser.text = PyUnicode_AsUTF8AndSize(signature_text,
+                                               &value_parser.length);
+    if (value_parser.text == NULL) return NULL;
+    input_parser.index = value_parser.index = 0;
+    input_parser.error_type = value_parser.error_type = error_type;
+    input_parser.max_components = value_parser.max_components = max_components;
+    if (input_parser.length > max_header || value_parser.length > max_header)
+        return signature_error(&input_parser, "signature header is too large");
+    if (signature_parse_input_entries(&input_parser, &inputs, &input_count) < 0 ||
+        signature_parse_value_entries(&value_parser, &values, &value_count) < 0)
+        goto error;
+    for (Py_ssize_t index = 0; index < input_count && chosen < 0; index++) {
+        int match = signature_value_entry_index(values, value_count,
+                                                inputs[index].key);
+        if (match == -2) goto error;
+        if (match >= 0) {
+            chosen = index;
+            signature_index = match;
+        }
+    }
+    if (chosen < 0) {
+        signature_raise(error_type,
+                        "no label appears in both signature headers");
+        goto error;
+    }
+    if (inputs[chosen].component_count == 0) {
+        signature_raise(error_type, "signature covers no components");
+        goto error;
+    }
+    plan = PyMem_Calloc(1, sizeof(*plan));
+    if (plan == NULL) {
+        PyErr_NoMemory();
+        goto error;
+    }
+    plan->components = inputs[chosen].components;
+    plan->component_count = inputs[chosen].component_count;
+    plan->params = inputs[chosen].params;
+    inputs[chosen].components = NULL;
+    inputs[chosen].component_count = 0;
+    inputs[chosen].params = NULL;
+    plan->raw_signature = Py_NewRef(values[signature_index].value);
+    plan->covered_order = PyTuple_New(plan->component_count);
+    seen = PySet_New(NULL);
+    if (plan->covered_order == NULL || seen == NULL) goto error;
+    for (Py_ssize_t index = 0; index < plan->component_count; index++) {
+        SignaturePlanComponent *component = &plan->components[index];
+        PyObject *serialized;
+        int lower = signature_component_is_lowercase(component->name);
+        if (lower < 0) goto error;
+        if (!lower) {
+            signature_raise(error_type,
+                            "component identifiers must be lowercase");
+            goto error;
+        }
+        if (signature_component_params(component->params, error_type) < 0)
+            goto error;
+        serialized = signature_serialize_params(component->params, error_type);
+        if (serialized == NULL) goto error;
+        component->identifier = signature_identifier(component->name, serialized);
+        Py_DECREF(serialized);
+        if (component->identifier == NULL) goto error;
+        int duplicate = PySet_Contains(seen, component->identifier);
+        if (duplicate < 0) goto error;
+        if (duplicate) {
+            PyObject *representation = PyObject_Repr(component->name);
+            PyObject *message = representation == NULL ? NULL :
+                PyUnicode_FromFormat("component %U is covered twice",
+                                     representation);
+            Py_XDECREF(representation);
+            if (message == NULL) goto error;
+            PyErr_SetObject(error_type, message);
+            Py_DECREF(message);
+            goto error;
+        }
+        if (PySet_Add(seen, component->identifier) < 0) goto error;
+        PyTuple_SET_ITEM(plan->covered_order, index,
+                         Py_NewRef(component->name));
+    }
+    plan->serialized_params = signature_serialize_params(plan->params, error_type);
+    if (plan->serialized_params == NULL) goto error;
+    capsule = PyCapsule_New(plan, SIGNATURE_PLAN_CAPSULE,
+                            signature_plan_capsule_destructor);
+    if (capsule == NULL) goto error;
+    plan = NULL;
+error:
+    Py_XDECREF(seen);
+    signature_plan_clear(plan);
+    signature_input_entries_clear(inputs, input_count);
+    signature_value_entries_clear(values, value_count);
+    return capsule;
+}
+
+PyObject *
+wreath_signature_plan_facts(PyObject *Py_UNUSED(self), PyObject *capsule)
+{
+    SignaturePlan *plan = signature_plan_get(capsule);
+    if (plan == NULL) return NULL;
+    return PyTuple_Pack(3, plan->params, plan->raw_signature,
+                        plan->covered_order);
+}
+
+PyObject *
+wreath_signature_plan_base(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *message, *capsule, *error_type, *derived;
+    SignaturePlan *plan;
+    PyObject *space = NULL, *split_name = NULL, *header = NULL, *result = NULL;
+    WreathBytesWriter writer = {0};
+    if (!PyArg_ParseTuple(args, "OOOO:signature_plan_base", &message, &capsule,
+                          &error_type, &derived)) return NULL;
+    plan = signature_plan_get(capsule);
+    if (plan == NULL) return NULL;
+    space = PyUnicode_FromString(" ");
+    split_name = PyUnicode_FromString("split");
+    header = PyObject_GetAttrString(message, "header");
+    if (space == NULL || split_name == NULL || header == NULL ||
+        wreath_writer_init(&writer, 512) < 0) goto error;
+    for (Py_ssize_t index = 0; index < plan->component_count; index++) {
+        SignaturePlanComponent *component = &plan->components[index];
+        PyObject *value = NULL;
+        Py_ssize_t name_length;
+        const char *name = PyUnicode_AsUTF8AndSize(component->name, &name_length);
+        if (name == NULL) goto error;
+        if (name_length > 0 && name[0] == '@')
+            value = PyObject_CallFunctionObjArgs(derived, component->name,
+                                                 component->params, message, NULL);
+        else {
+            PyObject *raw = PyObject_CallOneArg(header, component->name);
+            PyObject *parts;
+            if (raw == NULL) goto error;
+            if (raw == Py_None) {
+                PyObject *representation = PyObject_Repr(component->name);
+                PyObject *error_message;
+                Py_DECREF(raw);
+                if (representation == NULL) goto error;
+                error_message = PyUnicode_FromFormat(
+                    "covered header %U is not present", representation);
+                Py_DECREF(representation);
+                if (error_message == NULL) goto error;
+                PyErr_SetObject(error_type, error_message);
+                Py_DECREF(error_message);
+                goto error;
+            }
+            parts = PyObject_CallMethodNoArgs(raw, split_name);
+            Py_DECREF(raw);
+            if (parts == NULL) goto error;
+            value = PyUnicode_Join(space, parts);
+            Py_DECREF(parts);
+        }
+        if (value == NULL ||
+            wreath_writer_write(&writer, PyBytes_AS_STRING(component->identifier),
+                                PyBytes_GET_SIZE(component->identifier)) < 0 ||
+            wreath_writer_write(&writer, ": ", 2) < 0 ||
+            signature_write_unicode(&writer, value) < 0 ||
+            wreath_writer_byte(&writer, '\n') < 0) {
+            Py_XDECREF(value);
+            goto error;
+        }
+        Py_DECREF(value);
+    }
+    if (wreath_writer_write(&writer, "\"@signature-params\": (", 22) < 0)
+        goto error;
+    for (Py_ssize_t index = 0; index < plan->component_count; index++) {
+        PyObject *identifier = plan->components[index].identifier;
+        if ((index != 0 && wreath_writer_byte(&writer, ' ') < 0) ||
+            wreath_writer_write(&writer, PyBytes_AS_STRING(identifier),
+                                PyBytes_GET_SIZE(identifier)) < 0)
+            goto error;
+    }
+    if (wreath_writer_byte(&writer, ')') < 0 ||
+        wreath_writer_write(&writer, PyBytes_AS_STRING(plan->serialized_params),
+                            PyBytes_GET_SIZE(plan->serialized_params)) < 0)
+        goto error;
+    result = wreath_writer_finish(&writer);
+error:
+    Py_XDECREF(writer.bytes);
+    Py_XDECREF(header);
+    Py_XDECREF(split_name);
+    Py_XDECREF(space);
+    return result;
 }
 
 PyObject *

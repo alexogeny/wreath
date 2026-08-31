@@ -1,6 +1,6 @@
 ---
-description: Public MCP, GraphQL, gRPC, Protobuf, outbound HTTP and delivery APIs.
-keywords: API reference MCP GraphQL gRPC Protobuf HTTP client webhooks signatures XML email
+description: Public MCP, GraphQL, gRPC, Protobuf, OAuth BFF, HTTP integrity and delivery APIs.
+keywords: API reference MCP GraphQL gRPC Protobuf OAuth BFF digest HTTP client webhooks signatures XML email
 ---
 
 # Protocols and delivery
@@ -18,11 +18,15 @@ application to other services without inventing another identity or schema layer
 
 ::: wreath.http_client
 
+::: wreath.bff
+
 ::: wreath.service_client
 
 ::: wreath.webhooks
 
 ::: wreath.signatures
+
+::: wreath.digest
 
 ::: wreath.xml
 

@@ -4,7 +4,8 @@
 tape happens once, when a `Template` is built at startup, so there is nothing
 there for C to win and no C tokenizer exists -- `_core.template_compile` takes an
 *already compiled* tape and lowers it to a native program. Rendering is the
-request-time hot path, and `_native/templates.c` is what executes the tape.
+request-time hot path, and `_native/templates.c` executes only that program;
+there is no execution surface that accepts the boxed tape directly.
 
 That split is also why the compile-time refusals below need no native
 counterpart. A lookup path may not contain a segment starting with `_`, and the

@@ -2507,7 +2507,7 @@ begin_request(WreathHttpProtocol *self, PyObject *method, long minor, PyObject *
 
     self->http11 = (minor == 1);
     self->method_is_head = PyUnicode_CompareWithASCIIString(method, "HEAD") == 0;
-    /* RFC 9110's safe methods have no intended effect on the server, so losing
+    /* Safe methods have no intended effect on the server, so losing
      * the client can cost nothing but the work in flight; everything else is
      * left to finish, because unwinding a POST rolls its transaction back and
      * not the job it already enqueued. GET first: it is the common case, and a
@@ -2515,7 +2515,8 @@ begin_request(WreathHttpProtocol *self, PyObject *method, long minor, PyObject *
     self->cancel_on_disconnect =
         PyUnicode_CompareWithASCIIString(method, "GET") == 0 ||
         self->method_is_head ||
-        PyUnicode_CompareWithASCIIString(method, "OPTIONS") == 0;
+        PyUnicode_CompareWithASCIIString(method, "OPTIONS") == 0 ||
+        PyUnicode_CompareWithASCIIString(method, "QUERY") == 0;
 
     /* Splits the request target at the query separator by hand, where
      * `wreath_memmem(td, ts, "?", 1)` would dispatch the one-byte needle to

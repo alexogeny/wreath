@@ -1320,9 +1320,6 @@ wreath_pg_uuid_from_bytes(const unsigned char *data)
         Py_XDECREF(keywords);
         return NULL;
     }
-    /* native-boundary-lint: allow NB002 -- measured: replacing these containers
-       with a cached-kwnames vectorcall changed nothing; uuid.UUID.__init__ is
-       77% of this call's cost. See the note above the function. */
     result = PyObject_Call(uuid_type, empty_args, keywords);
     Py_DECREF(uuid_bytes);
     Py_DECREF(empty_args);

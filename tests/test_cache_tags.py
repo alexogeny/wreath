@@ -116,6 +116,34 @@ async def test_a_cached_response_carries_every_tag_header():
     present = tag_values(response)
     assert set(present) == set(TAG_HEADERS)
     assert set(present.values()) == {tags.header_value([Report])}
+    groups = [value for name, value in response.headers if name == b"cache-groups"]
+    expected = b'"' + tags.key(Report).encode("ascii") + b'"'
+    assert groups == [expected]
+
+
+async def test_an_unsafe_response_invalidates_only_its_declared_cache_groups():
+    tags = Tags(secret=SECRET)
+
+    @cached(invalidate_on=[Report, Invoice], tags=tags)
+    async def handler(request):
+        return Response(b"updated")
+
+    response = await handler(FakeRequest(method="POST"))
+
+    values = [value for name, value in response.headers if name == b"cache-group-invalidation"]
+    expected = b", ".join(b'"' + key.encode("ascii") + b'"' for key in tags.keys([Report, Invoice]))
+    assert values == [expected]
+    assert not [value for name, value in response.headers if name == b"cache-groups"]
+
+
+async def test_a_safe_uncached_method_does_not_emit_group_invalidation():
+    @cached(invalidate_on=[Report], tags=Tags(secret=SECRET))
+    async def handler(request):
+        return Response(b"metadata")
+
+    response = await handler(FakeRequest(method="HEAD"))
+
+    assert not [value for name, value in response.headers if name == b"cache-group-invalidation"]
 
 
 async def test_a_cache_hit_is_tagged_the_same_as_the_miss_that_filled_it():

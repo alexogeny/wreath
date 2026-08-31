@@ -48,9 +48,6 @@ _CSS_PATH = "assets/docs.css"
 _JS_PATH = "assets/docs.js"
 _INTERNAL_MD = re.compile(r'href="([^"#:]+)\.md(#[^"]*)?"')
 _ANCHOR = re.compile(r'href="#([^"]+)"')
-_FM_DESC = re.compile(r"^description:\s*(.+?)\s*$", re.MULTILINE)
-_FM_KEYWORDS = re.compile(r"^keywords:\s*(.+?)\s*$", re.MULTILINE)
-_FM_BOOST = re.compile(r"^boost:\s*([0-9.]+)\s*$", re.MULTILINE)
 #: Where one indexable section of a page starts. Only h2/h3 — an h4 is a label
 #: inside a section, not a destination somebody searches for.
 _SECTION_SPLIT = re.compile(r'<h([23]) id="([^"]+)"')
@@ -316,9 +313,10 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
             continue
         text = src.read_text(encoding="utf-8")
         front = _frontmatter(text)
-        description = _field(front, _FM_DESC) or site.description
-        keywords = _field(front, _FM_KEYWORDS)
-        boost = float(_field(front, _FM_BOOST) or 1.0)
+        description = front.get("description", "").strip("\"'") or site.description
+        keywords = front.get("keywords", "").strip("\"'")
+        boost_text = front.get("boost", "")
+        boost = float(boost_text) if boost_text and not boost_text.strip("0123456789.") else 1.0
         aliases = ""
         # The Python in the page, checked against the real objects before the
         # markdown is touched. Structural checks pass a page whose first line
@@ -633,17 +631,19 @@ def _footer(
     return f'<nav class="page-nav">{left}{right}</nav>{meta}'
 
 
-def _frontmatter(text: str) -> str:
-    """The YAML-ish front-matter block, or `""` when the page has none."""
+def _frontmatter(text: str) -> dict[str, str]:
+    """The search fields in a page's YAML-ish front matter."""
     if not text.startswith("---"):
-        return ""
+        return {}
     end = text.find("\n---", 3)
-    return text[:end] if end >= 0 else ""
-
-
-def _field(front: str, pattern: re.Pattern[str]) -> str:
-    match = pattern.search(front)
-    return match.group(1).strip("\"'") if match else ""
+    if end < 0:
+        return {}
+    fields: dict[str, str] = {}
+    for line in text[3:end].splitlines():
+        name, separator, value = line.partition(":")
+        if separator and name in {"description", "keywords", "boost"} and name not in fields:
+            fields[name] = value.strip()
+    return fields
 
 
 def _write_llms_txt(output_dir: Path, site: Site, pages: list[_RenderedPage]) -> None:

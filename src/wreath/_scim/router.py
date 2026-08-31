@@ -23,6 +23,7 @@ from ..response import JSONResponse, Response
 from ..router import Router
 from . import resources
 from .filters import FilterError, select
+from .filters import _compile as compile_filter
 from .filters import parse as parse_filter
 from .patch import PatchError
 from .patch import apply as apply_patch
@@ -126,7 +127,7 @@ def _parsed_filter(
     """Reuse one successful parse within the router that owns ``cache``."""
     node = cache.get(expression)
     if node is None:
-        node = parse_filter(expression, attributes=attributes)
+        node = compile_filter(parse_filter(expression, attributes=attributes))
         cache.set(expression, node)
     return node
 

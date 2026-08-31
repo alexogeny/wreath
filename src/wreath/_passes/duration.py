@@ -7,9 +7,9 @@ other's: `wreath.passes` holds `Rows` and imports `Buckets` from
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
+from .._duration import decimal_unit
 from .keyset import PassDeclarationError
 
 #: `d` is here so this and `wreath.series`'s compact spelling really are
@@ -22,7 +22,6 @@ from .keyset import PassDeclarationError
 #: `wreath.temporal.parse_duration` refuses months and years precisely
 #: because they are not a fixed number of seconds --
 #: `Series.compare(previous=Bucket)` depends on that refusal.
-_DURATION = re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*(ms|s|m|h|d)?\s*$")
 _SCALE = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
 
 
@@ -31,13 +30,14 @@ def seconds(value: Any, *, what: str, allow_zero: bool = False) -> float:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         total = float(value)
     elif isinstance(value, str):
-        match = _DURATION.fullmatch(value)
-        if match is None:
+        parsed = decimal_unit(value)
+        if parsed is None or (parsed[1] and parsed[1] not in _SCALE):
             raise PassDeclarationError(
                 f"{what} must be a number of seconds or a duration like '2s', "
                 f"'250ms', '5m', '1d'; got {value!r}"
             )
-        total = float(match.group(1)) * _SCALE[match.group(2) or "s"]
+        number, unit = parsed
+        total = float(number) * _SCALE[unit or "s"]
     else:
         raise PassDeclarationError(f"{what} must be a duration; got {value!r}")
     if total < 0 or (total == 0 and not allow_zero):

@@ -52,7 +52,7 @@ _csrf_sign: Any = _core.csrf_sign
 _csrf_new_token: Any = _core.csrf_new_token
 _csrf_validate: Any = _core.csrf_validate
 
-_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "QUERY"})
 _STATE_TOKEN = "_wreath_csrf_token"
 _STATE_ISSUE = "_wreath_csrf_issue"
 #: Recorded when Fetch Metadata answered a safe request and no token was minted,
@@ -147,7 +147,7 @@ def csrf_token(request: Request) -> str:
 class CsrfPolicy:
     """Protect unsafe browser requests with a signed double-submit token.
 
-    Global policy. `GET`, `HEAD`, and `OPTIONS` are treated as safe; every
+    Global policy. `GET`, `HEAD`, `OPTIONS`, and `QUERY` are treated as safe; every
     other method is checked, including ones a route does not implement.
 
     **`Sec-Fetch-Site` is consulted first, and settles the request when present.**

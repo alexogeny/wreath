@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wreath-http3"
-version = "0.3.4"
+version = "0.4.0"
 description = "Wreath's native HTTP/3 and QUIC server extension"
 requires-python = "==3.14.*"
 license = "MPL-2.0"
@@ -26,7 +26,7 @@ Source = "https://github.com/alexogeny/wreath"
 build = "cp314-*"
 skip = ["*-musllinux_*", "*_i686"]
 before-build = "python -c \"import shutil; shutil.rmtree('build', ignore_errors=True)\""
-before-test = "pip install --no-index --find-links {package}/wheel-deps wreath==0.3.4"
+before-test = "pip install --no-index --find-links {package}/wheel-deps wreath==0.4.0"
 test-command = "python {package}/wheel_smoke.py --http3"
 manylinux-x86_64-image = "manylinux_2_34"
 manylinux-aarch64-image = "manylinux_2_34"

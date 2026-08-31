@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from enum import StrEnum
 from typing import Any
 
 from .requirements import (
     Mode,
+    OAuthStepUpRequirement,
     add_authenticated,
     add_identify,
+    add_oauth_step_up,
     add_permissions,
     add_policy,
     add_public,
@@ -132,6 +134,46 @@ def second_factor(*, max_age: float = 300.0) -> Callable[[Any], Any]:
 
     def decorate(endpoint: Any) -> Any:
         return add_second_factor(endpoint, float(max_age))
+
+    return decorate
+
+
+def oauth_step_up(
+    *,
+    max_age: int | None = None,
+    acr_values: Iterable[str] = (),
+) -> Callable[[Any], Any]:
+    """Require OAuth authentication recency or class and emit an RFC 9470 challenge.
+
+    The identity must expose the access token's `auth_time` and `acr` claims in
+    `Identity.claims`. A valid token that misses either declared requirement is
+    answered with a 401 Bearer `insufficient_user_authentication` challenge,
+    including the `max_age` and `acr_values` a client can carry into a new
+    authorization request.
+
+    This is deliberately separate from `second_factor()`. That decorator owns
+    Wreath's browser-session verification flow and answers 403; this one owns an
+    OAuth resource-server challenge and answers 401. Combining them is refused
+    when the route is declared because their remediation paths conflict.
+
+    Args:
+        max_age: Non-negative whole seconds since the token's active
+            authentication event.
+        acr_values: Acceptable authentication context class references, in
+            preference order. The token's `acr` must equal one of them.
+
+    Returns:
+        A decorator that records the OAuth step-up requirement on the endpoint.
+
+    Raises:
+        TypeError: `max_age` is not an integer.
+        ValueError: neither requirement is present, a value is invalid, or the
+            same authentication class appears twice.
+    """
+    requirement = OAuthStepUpRequirement(max_age=max_age, acr_values=tuple(acr_values))
+
+    def decorate(endpoint: Any) -> Any:
+        return add_oauth_step_up(endpoint, requirement)
 
     return decorate
 

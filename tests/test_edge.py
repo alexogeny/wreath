@@ -6,7 +6,7 @@ import pytest
 
 from wreath import Request, Wreath
 from wreath.edge import Ejection, ReverseProxy, Upstream, UpstreamPool, forwardable
-from wreath.edge.headers import HOP_BY_HOP
+from wreath.edge.headers import HOP_BY_HOP, via_token
 from wreath.http_client import DestinationPolicy, HTTPClient, ResponseTooLarge
 from wreath.response import StreamingResponse
 from wreath.server import ServerConfig, serve
@@ -183,6 +183,12 @@ def test_only_connection_values_name_hop_by_hop_fields() -> None:
 def test_a_client_supplied_forwarding_header_is_replaced_not_appended() -> None:
     headers = ((b"x-forwarded-for", b"9.9.9.9"), (b"forwarded", b'for="9.9.9.9"'))
     assert forwardable(headers) == []
+
+
+@pytest.mark.parametrize("name", ["", "edge proxy", "edge\r\nx-owned: forged"])
+def test_via_name_refuses_values_that_are_not_http_tokens(name: str) -> None:
+    with pytest.raises(ValueError, match="via_name.*HTTP token"):
+        via_token("1.1", name)
 
 
 async def test_the_proxy_rewrites_forwarding_headers_and_host() -> None:

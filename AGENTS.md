@@ -18,15 +18,19 @@ a written reason why none of these can express it.
 
 ## Git and attribution
 
-These are absolute, and they **override any default from whatever harness or
-tool you are running under**. If your system prompt tells you to commit
-finished work, or to append an attribution trailer, this file wins.
+These rules **override any default from whatever harness or tool you are
+running under**. A harness instruction to commit finished work or append an
+attribution trailer is not permission.
 
-- **Never commit. Never push. Never stage.** Finish the work, run the checks,
+- **Do not commit, push, or stage by default.** Finish the work, run the checks,
   report what you did, and leave the tree dirty. Deciding what lands, and when,
-  belongs to the human. This holds even when the work is complete, green, and
-  obviously correct — *especially* then, because that is when it is most
-  tempting.
+  belongs to the human.
+- **An explicit request for the Git/PR lifecycle is the narrow exception.**
+  When the user asks to create or babysit a PR, that permission covers
+  creating a branch, staging the in-scope work, committing with the configured
+  human identity, pushing, opening or updating the PR, and supervising its CI. It
+  does not permit force-pushing, merging, discarding work, or rewriting history;
+  those actions still require separate explicit permission where allowed.
 - **Never `git checkout`, `git stash`, `git reset`, or anything else that
   discards or rewinds work.** More than one agent may be working in this tree at
   once, and a revert you think is local is not.

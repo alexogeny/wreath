@@ -1140,7 +1140,7 @@ class CedarPolicies:
         else:
             store = self._store
         allowed, reason, diagnostics = _core.cedar_is_authorized(
-            self._policies,
+            self._plan,
             _as_uid_tuple(principal, "principal"),
             _as_uid_tuple(action, "action"),
             _as_uid_tuple(resource, "resource"),
@@ -1226,7 +1226,7 @@ class CedarPolicies:
         action_uid = _as_uid_tuple(action, "action")
         compiled_context = _to_cedar_value(dict(context or {}), where="context")
         results = _core.cedar_is_authorized_many(
-            self._policies,
+            self._plan,
             principal_uid,
             action_uid,
             tuple(_as_uid_tuple(resource, "resource") for resource in resources),
@@ -1253,7 +1253,7 @@ class CedarPolicies:
         else:
             store = self._store
         return _core.cedar_is_authorized_many_native(
-            self._policies,
+            self._plan,
             _as_uid_tuple(principal, "principal"),
             _as_uid_tuple(action, "action"),
             tuple(_as_uid_tuple(resource, "resource") for resource in resources),

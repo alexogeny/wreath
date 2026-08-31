@@ -79,6 +79,7 @@ from ._flight_markers import phase_marker as _phase_marker
 from ._json import loads as _json_loads
 from ._model_fields import dataclass_field_image
 from ._native import _core
+from ._safe_pattern import compile_safe_pattern
 from .exceptions import BadRequest
 from .geospatial import Coordinate
 from .negotiation import PROTOBUF_MEDIA_TYPES as _PROTOBUF_MEDIA_TYPES
@@ -131,7 +132,7 @@ class Field:
         ):
             raise ValueError("Field min_length exceeds max_length")
         if self.pattern is not None:
-            re.compile(self.pattern)
+            compile_safe_pattern(self.pattern)
 
 
 def _field_annotation(annotation: Any) -> tuple[Any, Field | None]:
@@ -1075,6 +1076,7 @@ def _compile_response_check(annotation: Any) -> Callable[[Any], Any]:
     except _PlanUnsupported:
         plan = None
     if plan is not None:
+        plan = _core.compile_validation_plan(plan)
         run_validation = _core.run_validation
 
         def planned_check(value: Any, _plan: Any = plan, _run: Any = run_validation) -> Any:
@@ -1140,6 +1142,7 @@ def compile_response_validator(handler: Handler, annotation: Any) -> Handler:
         if response_plan[0] in (_OP_LIST, _OP_DICT) and _response_plan_is_wire_preserving(
             response_plan
         ):
+            response_plan = _core.compile_validation_plan(response_plan)
             run_validation_json = _core.run_validation_json
 
             def planned_json(  # type: ignore[no-redef]
@@ -2195,6 +2198,7 @@ def _body_validator(annotation: Any) -> _BodyValidator:
     except _PlanUnsupported:
         plan = None
     if plan is not None:
+        plan = _core.compile_validation_plan(plan)
         run_validation = _core.run_validation
         decode_json = _core.decode_json_validation_tape
 

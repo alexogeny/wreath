@@ -203,8 +203,8 @@ class _CachedPlan:
     #: `False` records that this shape cannot use the direct path, which is
     #: distinct from "not compiled yet".
     hydrate_plan: Any = None
-    #: `(root row plan, joined cursors)` for the *Record* hydration path, built
-    #: on first use. Both derive only from `load_plan`, so they are a property
+    #: Native root-and-join plan for the *Record* hydration path, built on first
+    #: use. Its constants derive only from `load_plan`, so it is a property
     #: of the shape and not of a query. Cached here rather than rebuilt per
     #: query because the alternative regressed the commonest read there is: a
     #: `fetch_one` amortises the build over one row, and paying it per query

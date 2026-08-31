@@ -40,6 +40,209 @@ enum {
     OP_FIELD = 11,
 };
 
+typedef struct ValidationNode ValidationNode;
+
+typedef struct {
+    PyObject *source;
+    ValidationNode *plan;
+} ValidationField;
+
+struct ValidationNode {
+    int opcode;
+    int passthrough;
+    PyObject *source;
+    ValidationNode *child;
+    ValidationNode **options;
+    Py_ssize_t option_count;
+    ValidationField *fields;
+    Py_ssize_t field_count;
+};
+
+typedef struct {
+    PyObject *source;
+    ValidationNode *root;
+} ValidationPlan;
+
+#define VALIDATION_PLAN_CAPSULE "wreath.validation.plan"
+#define WREATH_VALIDATE_MAX_PLAN_NODES 100000
+
+static void
+validation_node_clear(ValidationNode *node)
+{
+    if (node == NULL) return;
+    validation_node_clear(node->child);
+    for (Py_ssize_t index = 0; index < node->option_count; index++)
+        validation_node_clear(node->options[index]);
+    for (Py_ssize_t index = 0; index < node->field_count; index++)
+        validation_node_clear(node->fields[index].plan);
+    PyMem_Free(node->fields);
+    PyMem_Free(node->options);
+    PyMem_Free(node);
+}
+
+static void
+validation_plan_clear(ValidationPlan *plan)
+{
+    if (plan == NULL) return;
+    validation_node_clear(plan->root);
+    Py_XDECREF(plan->source);
+    PyMem_Free(plan);
+}
+
+static void
+validation_plan_destructor(PyObject *capsule)
+{
+    ValidationPlan *plan = PyCapsule_GetPointer(capsule,
+                                                VALIDATION_PLAN_CAPSULE);
+    if (plan != NULL) validation_plan_clear(plan);
+    else PyErr_Clear();
+}
+
+static ValidationNode *
+validation_node_compile(PyObject *source, int depth, Py_ssize_t *remaining)
+{
+    ValidationNode *node;
+    long opcode;
+    if (depth > 256) {
+        PyErr_SetString(PyExc_ValueError, "validation plan is nested too deeply");
+        return NULL;
+    }
+    if (*remaining == 0) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "validation plan expands to more than 100000 nodes; simplify the annotation");
+        return NULL;
+    }
+    --*remaining;
+    if (!PyTuple_Check(source) || PyTuple_GET_SIZE(source) == 0) {
+        PyErr_SetString(PyExc_TypeError, "validation plan nodes must be tuples");
+        return NULL;
+    }
+    opcode = PyLong_AsLong(PyTuple_GET_ITEM(source, 0));
+    if (opcode < OP_ANY || opcode > OP_FIELD) {
+        if (!PyErr_Occurred())
+            PyErr_Format(PyExc_ValueError, "unknown validation opcode %ld", opcode);
+        return NULL;
+    }
+    node = PyMem_Calloc(1, sizeof(*node));
+    if (node == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    node->opcode = (int)opcode;
+    node->source = source;
+    switch (node->opcode) {
+    case OP_ANY:
+    case OP_INT:
+    case OP_BOOL:
+    case OP_STR:
+    case OP_UNSUPPORTED:
+        node->passthrough = 1;
+        break;
+    case OP_NULL:
+    case OP_FLOAT:
+        break;
+    case OP_LIST:
+    case OP_DICT:
+        node->child = validation_node_compile(PyTuple_GET_ITEM(source, 1),
+                                              depth + 1, remaining);
+        if (node->child == NULL) goto error;
+        node->passthrough = node->child->passthrough;
+        break;
+    case OP_UNION: {
+        PyObject *options = PyTuple_GET_ITEM(source, 2);
+        node->option_count = PyTuple_GET_SIZE(options);
+        if (node->option_count != 0) {
+            node->options = PyMem_Calloc((size_t)node->option_count,
+                                         sizeof(*node->options));
+            if (node->options == NULL) { PyErr_NoMemory(); goto error; }
+        }
+        node->passthrough = 1;
+        for (Py_ssize_t index = 0; index < node->option_count; index++) {
+            node->options[index] = validation_node_compile(
+                PyTuple_GET_ITEM(options, index), depth + 1, remaining);
+            if (node->options[index] == NULL) goto error;
+            if (!node->options[index]->passthrough) node->passthrough = 0;
+        }
+        break;
+    }
+    case OP_DATACLASS: {
+        PyObject *fields = PyTuple_GET_ITEM(source, 2);
+        node->field_count = PyTuple_GET_SIZE(fields);
+        if (node->field_count != 0) {
+            node->fields = PyMem_Calloc((size_t)node->field_count,
+                                        sizeof(*node->fields));
+            if (node->fields == NULL) { PyErr_NoMemory(); goto error; }
+        }
+        for (Py_ssize_t index = 0; index < node->field_count; index++) {
+            PyObject *field = PyTuple_GET_ITEM(fields, index);
+            node->fields[index].source = field;
+            node->fields[index].plan = validation_node_compile(
+                PyTuple_GET_ITEM(field, 2), depth + 1, remaining);
+            if (node->fields[index].plan == NULL) goto error;
+        }
+        break;
+    }
+    case OP_FIELD:
+        node->child = validation_node_compile(PyTuple_GET_ITEM(source, 1),
+                                              depth + 1, remaining);
+        if (node->child == NULL) goto error;
+        node->passthrough = node->child->passthrough;
+        break;
+    }
+    return node;
+error:
+    validation_node_clear(node);
+    return NULL;
+}
+
+static ValidationPlan *
+validation_plan_compile(PyObject *source)
+{
+    Py_ssize_t remaining = WREATH_VALIDATE_MAX_PLAN_NODES;
+    ValidationPlan *plan = PyMem_Calloc(1, sizeof(*plan));
+    if (plan == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    plan->source = Py_NewRef(source);
+    plan->root = validation_node_compile(source, 0, &remaining);
+    if (plan->root == NULL) {
+        validation_plan_clear(plan);
+        return NULL;
+    }
+    return plan;
+}
+
+static ValidationPlan *
+validation_plan_get(PyObject *object)
+{
+    if (!PyCapsule_IsValid(object, VALIDATION_PLAN_CAPSULE)) return NULL;
+    return PyCapsule_GetPointer(object, VALIDATION_PLAN_CAPSULE);
+}
+
+PyObject *
+wreath_compile_validation_plan(PyObject *Py_UNUSED(self), PyObject *source)
+{
+    ValidationPlan *existing = validation_plan_get(source);
+    ValidationPlan *plan;
+    PyObject *capsule;
+    if (existing != NULL) return Py_NewRef(source);
+    plan = validation_plan_compile(source);
+    if (plan == NULL) return NULL;
+    capsule = PyCapsule_New(plan, VALIDATION_PLAN_CAPSULE,
+                            validation_plan_destructor);
+    if (capsule == NULL) validation_plan_clear(plan);
+    return capsule;
+}
+
+PyObject *
+wreath_validation_plan_source(PyObject *object)
+{
+    ValidationPlan *plan = validation_plan_get(object);
+    return plan == NULL ? object : plan->source;
+}
+
 /* Total node visits allowed per validation. A OP_UNION tries every option
  * against the whole value, so nested unions that fail deep re-explore each
  * branch at every level -- O(2^depth) work from a small body (a validation
@@ -101,38 +304,9 @@ loc_pop(PyObject *loc)
  * from the value, so container validators can walk once and return the decoded
  * graph they were handed instead of allocating an identical second graph. */
 static int
-plan_is_passthrough(PyObject *plan)
+plan_is_passthrough(ValidationNode *plan)
 {
-    long opcode = PyLong_AsLong(PyTuple_GET_ITEM(plan, 0));
-    if (opcode == -1 && PyErr_Occurred()) return -1;
-    switch (opcode) {
-    case OP_ANY:
-    case OP_INT:
-    case OP_BOOL:
-    case OP_STR:
-    case OP_UNSUPPORTED:
-        return 1;
-    case OP_NULL:
-    case OP_FLOAT:
-    case OP_DATACLASS:
-        return 0;
-    case OP_LIST:
-    case OP_DICT:
-        return plan_is_passthrough(PyTuple_GET_ITEM(plan, 1));
-    case OP_UNION: {
-        PyObject *options = PyTuple_GET_ITEM(plan, 2);
-        for (Py_ssize_t index = 0; index < PyTuple_GET_SIZE(options); index++) {
-            int child = plan_is_passthrough(PyTuple_GET_ITEM(options, index));
-            if (child <= 0) return child;
-        }
-        return 1;
-    }
-    case OP_FIELD:
-        return plan_is_passthrough(PyTuple_GET_ITEM(plan, 1));
-    default:
-        PyErr_Format(PyExc_ValueError, "unknown validation opcode %ld", opcode);
-        return -1;
-    }
+    return plan->passthrough;
 }
 
 /* Validate one homogeneous scalar without recursion or location objects.
@@ -145,12 +319,10 @@ plan_is_passthrough(PyObject *plan)
  * their indices never need to become Python integers merely to be discarded
  * after every accepted item. */
 static int
-flat_scalar_accepts(PyObject *plan, PyObject *value)
+flat_scalar_accepts(ValidationNode *plan, PyObject *value)
 {
-    if (!PyTuple_Check(plan) || PyTuple_GET_SIZE(plan) != 1) return -1;
-    long opcode = PyLong_AsLong(PyTuple_GET_ITEM(plan, 0));
-    if (opcode == -1 && PyErr_Occurred()) return -2;
-    switch (opcode) {
+    if (PyTuple_GET_SIZE(plan->source) != 1) return -1;
+    switch (plan->opcode) {
     case OP_ANY:
         return 1;
     case OP_NULL:
@@ -169,10 +341,11 @@ flat_scalar_accepts(PyObject *plan, PyObject *value)
 /* Returns a new reference to the validated value, or NULL only on a hard
  * C-API failure (exception set). Validation failures are accumulated into
  * errors and still return a (new-reference) value, mirroring the Python code. */
-PyObject *
-wreath_validate_node(PyObject *plan, PyObject *value, PyObject *loc,
-                     PyObject *errors, long *steps)
+static PyObject *
+validate_node(ValidationNode *compiled, PyObject *value, PyObject *loc,
+              PyObject *errors, long *steps)
 {
+    PyObject *plan = compiled->source;
     if (*steps <= 0) {
         /* Budget exhausted: mark it (negative sentinel) and stop descending.
          * The single "too_complex" error is added by wreath_run_validation, so
@@ -181,10 +354,7 @@ wreath_validate_node(PyObject *plan, PyObject *value, PyObject *loc,
         *steps = -1;
         return Py_NewRef(value);
     }
-    long opcode = PyLong_AsLong(PyTuple_GET_ITEM(plan, 0));
-    if (opcode == -1 && PyErr_Occurred()) {
-        return NULL;
-    }
+    int opcode = compiled->opcode;
     /* Field metadata wraps a child without visiting another value. The Python
      * definition strips the annotation before decrementing its node budget,
      * so the native tape must not charge this wrapper as a second node. */
@@ -250,7 +420,7 @@ wreath_validate_node(PyObject *plan, PyObject *value, PyObject *loc,
             }
             return Py_NewRef(value);
         }
-        PyObject *item_plan = PyTuple_GET_ITEM(plan, 1);
+        ValidationNode *item_plan = compiled->child;
         Py_ssize_t count = PyList_GET_SIZE(value);
         int flat = flat_scalar_accepts(
             item_plan, count == 0 ? Py_None : PyList_GET_ITEM(value, 0));
@@ -281,7 +451,7 @@ wreath_validate_node(PyObject *plan, PyObject *value, PyObject *loc,
                 return NULL;
             }
             Py_DECREF(key);
-            PyObject *item = wreath_validate_node(
+            PyObject *item = validate_node(
                 item_plan, PyList_GET_ITEM(value, index), loc, errors, steps);
             loc_pop(loc);
             if (item == NULL) {
@@ -301,7 +471,7 @@ wreath_validate_node(PyObject *plan, PyObject *value, PyObject *loc,
             }
             return Py_NewRef(value);
         }
-        PyObject *value_plan = PyTuple_GET_ITEM(plan, 1);
+        ValidationNode *value_plan = compiled->child;
         /* ``dict[str, Any]`` has already proved the only property its plan can
          * enforce once the outer value is a dict.  Rebuilding every key/value
          * pair into an identical dict was work whose answer cannot differ;
@@ -342,7 +512,7 @@ wreath_validate_node(PyObject *plan, PyObject *value, PyObject *loc,
                 Py_DECREF(result);
                 return NULL;
             }
-            PyObject *validated = wreath_validate_node(
+            PyObject *validated = validate_node(
                 value_plan, item, loc, errors, steps);
             loc_pop(loc);
             if (validated == NULL) {
@@ -367,15 +537,14 @@ wreath_validate_node(PyObject *plan, PyObject *value, PyObject *loc,
         if (value == Py_None && has_none) {
             Py_RETURN_NONE;
         }
-        PyObject *options = PyTuple_GET_ITEM(plan, 2);
-        Py_ssize_t count = PyTuple_GET_SIZE(options);
+        Py_ssize_t count = compiled->option_count;
         for (Py_ssize_t index = 0; index < count; index++) {
             PyObject *attempt = PyList_New(0);
             if (attempt == NULL) {
                 return NULL;
             }
-            PyObject *result = wreath_validate_node(
-                PyTuple_GET_ITEM(options, index), value, loc, attempt, steps);
+            PyObject *result = validate_node(
+                compiled->options[index], value, loc, attempt, steps);
             if (result == NULL) {
                 Py_DECREF(attempt);
                 return NULL;
@@ -429,7 +598,7 @@ wreath_validate_node(PyObject *plan, PyObject *value, PyObject *loc,
         }
         PyObject *fields = PyTuple_GET_ITEM(plan, 2);
         PyObject *known = PyTuple_GET_ITEM(plan, 3);
-        Py_ssize_t field_count = PyTuple_GET_SIZE(fields);
+        Py_ssize_t field_count = compiled->field_count;
         int positional = PyObject_IsTrue(PyTuple_GET_ITEM(plan, 4));
         if (positional < 0) return NULL;
         PyObject **values = NULL;
@@ -445,10 +614,9 @@ wreath_validate_node(PyObject *plan, PyObject *value, PyObject *loc,
         }
         Py_ssize_t present_count = 0;
         for (Py_ssize_t index = 0; index < field_count; index++) {
-            PyObject *field = PyTuple_GET_ITEM(fields, index);
+            PyObject *field = compiled->fields[index].source;
             PyObject *name = PyTuple_GET_ITEM(field, 0);
             PyObject *wire_name = PyTuple_GET_ITEM(field, 1);
-            PyObject *field_plan = PyTuple_GET_ITEM(field, 2);
             long required = PyLong_AsLong(PyTuple_GET_ITEM(field, 3));
             if (required == -1 && PyErr_Occurred()) {
                 goto dataclass_error;
@@ -462,8 +630,8 @@ wreath_validate_node(PyObject *plan, PyObject *value, PyObject *loc,
                 if (loc_push(loc, wire_name) < 0) {
                     goto dataclass_error;
                 }
-                PyObject *validated = wreath_validate_node(
-                    field_plan, present, loc, errors, steps);
+                PyObject *validated = validate_node(
+                    compiled->fields[index].plan, present, loc, errors, steps);
                 loc_pop(loc);
                 if (validated == NULL) goto dataclass_error;
                 if (positional) {
@@ -574,8 +742,8 @@ dataclass_error:
 
     case OP_FIELD: {
         Py_ssize_t before = PyList_GET_SIZE(errors);
-        PyObject *validated = wreath_validate_node(
-            PyTuple_GET_ITEM(plan, 1), value, loc, errors, steps);
+        PyObject *validated = validate_node(
+            compiled->child, value, loc, errors, steps);
         if (validated == NULL || PyList_GET_SIZE(errors) != before || *steps < 0) {
             return validated;
         }
@@ -660,9 +828,38 @@ field_error:
     }
 
     default:
-        PyErr_Format(PyExc_ValueError, "unknown validation opcode %ld", opcode);
+        PyErr_Format(PyExc_ValueError, "unknown validation opcode %d", opcode);
         return NULL;
     }
+}
+
+PyObject *
+wreath_validate_node(PyObject *plan_object, PyObject *value, PyObject *loc,
+                     PyObject *errors, long *steps)
+{
+    ValidationPlan *plan = validation_plan_get(plan_object);
+    if (plan == NULL) {
+        PyErr_SetString(PyExc_TypeError,
+                        "validation execution requires a compiled native plan");
+        return NULL;
+    }
+    return validate_node(plan->root, value, loc, errors, steps);
+}
+
+PyObject *
+wreath_validate_plan_field(PyObject *plan_object, Py_ssize_t field_index,
+                           PyObject *value, PyObject *loc, PyObject *errors,
+                           long *steps)
+{
+    ValidationPlan *plan = validation_plan_get(plan_object);
+    if (plan == NULL || plan->root->opcode != OP_DATACLASS || field_index < 0 ||
+        field_index >= plan->root->field_count) {
+        PyErr_SetString(PyExc_ValueError,
+                        "compiled dataclass validation field is invalid");
+        return NULL;
+    }
+    return validate_node(plan->root->fields[field_index].plan, value, loc,
+                         errors, steps);
 }
 
 /* run_validation(plan, value, loc) -> (result, errors)
@@ -731,12 +928,13 @@ wreath_run_validation_json(PyObject *self, PyObject *args)
         return NULL;
     }
 
-    long opcode = PyLong_AsLong(PyTuple_GET_ITEM(plan, 0));
+    PyObject *source = wreath_validation_plan_source(plan);
+    long opcode = PyLong_AsLong(PyTuple_GET_ITEM(source, 0));
     if (opcode == -1 && PyErr_Occurred()) {
         return NULL;
     }
     if (opcode == OP_DICT && PyDict_Check(value)) {
-        PyObject *value_plan = PyTuple_GET_ITEM(plan, 1);
+        PyObject *value_plan = PyTuple_GET_ITEM(source, 1);
         long value_opcode = PyLong_AsLong(PyTuple_GET_ITEM(value_plan, 0));
         if (value_opcode == -1 && PyErr_Occurred()) {
             return NULL;

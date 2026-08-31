@@ -18,22 +18,19 @@ _core.template_configure(Markup, TemplateRenderError)
 _LIMIT = 16 * 1024 * 1024
 
 
+def test_raw_tape_execution_is_not_exposed() -> None:
+    assert not hasattr(_core, "template_render")
+
+
 def render(tape: tuple, context: dict, max_output: int = _LIMIT) -> bytes:
-    """Render `tape` both ways, assert the two agree, and return the bytes."""
-    walked = _core.template_render(tape, context, max_output)
-    compiled = _core.template_render_compiled(_core.template_compile(tape), context, max_output)
-    assert compiled == walked, "the compiled program disagreed with the walked tape"
-    return walked
+    """Compile `tape` to its native program and return the rendered bytes."""
+    return _core.template_render_compiled(_core.template_compile(tape), context, max_output)
 
 
 def render_error(tape: tuple, context: dict, max_output: int = _LIMIT) -> BaseException:
-    """The error both paths raise, asserted identical, and returned."""
-    walked = _capture(lambda: _core.template_render(tape, context, max_output))
+    """Return the error raised by the compiled native program."""
     program = _core.template_compile(tape)
-    compiled = _capture(lambda: _core.template_render_compiled(program, context, max_output))
-    assert type(compiled) is type(walked)
-    assert str(compiled) == str(walked)
-    return walked
+    return _capture(lambda: _core.template_render_compiled(program, context, max_output))
 
 
 class Obj:
@@ -76,7 +73,7 @@ PARITY_CASES = [
 
 
 @pytest.mark.parametrize("source, context", PARITY_CASES)
-def test_both_execution_paths_render_one_answer(source: str, context: dict) -> None:
+def test_compiled_program_renders_each_supported_shape(source: str, context: dict) -> None:
     assert isinstance(render(compile_tape(source), context), bytes)
 
 
@@ -109,8 +106,6 @@ NUMERIC_CASES = [
 
 @pytest.mark.parametrize("context", NUMERIC_CASES, ids=lambda case: repr(case["v"]))
 def test_non_string_values_render_as_str(context: dict) -> None:
-    # Against `str()`, which is the contract, rather than against the other
-    # execution path -- the two agreeing is a separate and weaker claim.
     assert render(compile_tape("{{ v }}"), context) == str(context["v"]).encode()
 
 
@@ -129,11 +124,11 @@ def test_a_number_inside_a_loop_renders_once_per_row() -> None:
         ("{% for x in v %}{% endfor %}", {"v": 5}),
     ],
 )
-def test_a_bad_lookup_is_a_render_error_on_both_paths(source: str, context: dict) -> None:
+def test_a_bad_lookup_is_a_render_error(source: str, context: dict) -> None:
     assert isinstance(render_error(compile_tape(source), context), TemplateRenderError)
 
 
-def test_output_past_the_size_bound_is_refused_on_both_paths() -> None:
+def test_output_past_the_size_bound_is_refused() -> None:
     tape = compile_tape("{{ x }}")
     assert isinstance(render_error(tape, {"x": "a" * 100}, 10), TemplateRenderError)
 

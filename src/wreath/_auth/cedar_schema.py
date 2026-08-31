@@ -38,10 +38,51 @@ _MISSING = object()
 # baseline for that reason; they are startup-only and never enter evaluation.
 _MAX_SCHEMA_BYTES = 1 << 20
 _MAX_TYPE_DEPTH = 64
+_COMMENT_OR_QUOTE = re.compile(r'["/]')
 
 
 def _without_comments(source: str) -> str:
-    return re.sub(r"//[^\n]*|/\*.*?\*/", "", source, flags=re.S)
+    output: list[str] = []
+    index = 0
+    while index < len(source):
+        marker = _COMMENT_OR_QUOTE.search(source, index)
+        if marker is None:
+            # complexity: allow SL-SLICE-LOOP -- tail copied once before break
+            output.append(source[index:])
+            break
+        start = marker.start()
+        output.append(source[index:start])
+        if source[start] == '"':
+            end = start + 1
+            while end < len(source):
+                if source[end] == "\\":
+                    end += 2
+                elif source[end] == '"':
+                    end += 1
+                    break
+                else:
+                    end += 1
+            output.append(source[start:end])
+            index = end
+            continue
+        if source.startswith("//", start):
+            end = source.find("\n", start + 2)
+            if end < 0:
+                output.append(" ")
+                break
+            output.extend((" ", "\n"))
+            index = end + 1
+            continue
+        if source.startswith("/*", start):
+            end = source.find("*/", start + 2)
+            if end < 0:
+                raise ValueError("Cedar schema block comment is missing '*/'")
+            output.append(" ")
+            index = end + 2
+            continue
+        output.append("/")
+        index = start + 1
+    return "".join(output)
 
 
 def _statements(source: str) -> tuple[str, ...]:
@@ -81,9 +122,17 @@ def _parts(source: str) -> tuple[str, ...]:
     start = 0
     depth = 0
     quoted = False
+    escaped = False
     for index, character in enumerate(source):
-        if character == '"':
-            quoted = not quoted
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+        elif character == '"':
+            quoted = True
         elif not quoted and character in "{[<":
             depth = depth + 1
         elif not quoted and character in "}]>":
@@ -105,7 +154,7 @@ def _type(source: str, aliases: dict[str, Any], depth: int = 0) -> Any:
         fields: dict[str, Any] = {}
         for declaration in _parts(source[1:-1]):
             match = re.fullmatch(
-                r'(?P<name>"(?:\\.|[^"])+"|[A-Za-z_][\w]*)\s*(?P<optional>\?)?\s*:\s*(?P<type>.+)',
+                r'(?P<name>"(?:\\.|[^"\\])+"|[A-Za-z_][\w]*)\s*(?P<optional>\?)?\s*:\s*(?P<type>.+)',
                 declaration,
                 re.S,
             )
@@ -186,7 +235,7 @@ class CedarSchema:
                     raise ValueError(f"entity {match.group(1)!r} must declare a record")
                 entities[match.group(1)] = value
                 continue
-            match = re.fullmatch(r'action\s+"((?:\\.|[^"])*)"(?P<body>.*)', statement, re.S)
+            match = re.fullmatch(r'action\s+"((?:\\.|[^"\\])*)"(?P<body>.*)', statement, re.S)
             if match is not None:
                 pending_actions.append((match.group(1), match.group("body")))
                 continue
@@ -199,7 +248,9 @@ class CedarSchema:
             parent_match = re.match(r"\s*in\s*\[(?P<parents>[^]]*)\]", body, re.S)
             parents = ()
             if parent_match is not None:
-                parents = tuple(re.findall(r'"((?:\\.|[^"])*)"', parent_match.group("parents")))
+                parents = tuple(
+                    re.findall(r'"((?:\\.|[^"\\])*)"', parent_match.group("parents"))
+                )
             context: Any | None = None
             applies = re.search(r"appliesTo\s*\{(?P<body>.*)\}\s*$", body, re.S)
             if applies is not None:

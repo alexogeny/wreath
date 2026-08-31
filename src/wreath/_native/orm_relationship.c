@@ -187,6 +187,14 @@ struct JoinPlan {
 };
 
 typedef struct {
+    HydratePlan root;
+    JoinPlan *joins;
+    Py_ssize_t join_count;
+} CompiledHydratePlan;
+
+#define ORM_HYDRATE_PLAN_CAPSULE "wreath.orm.hydrate-plan"
+
+typedef struct {
     PyObject *session;
     PyObject *identity;
     const WreathModelAPI *models;
@@ -357,6 +365,49 @@ error:
     return -1;
 }
 
+static void
+compiled_hydrate_plan_clear(CompiledHydratePlan *plan)
+{
+    if (plan == NULL) return;
+    join_plans_clear(plan->joins, plan->join_count);
+    PyMem_Free(plan->joins);
+    hydrate_plan_clear(&plan->root);
+    PyMem_Free(plan);
+}
+
+static void
+compiled_hydrate_plan_destructor(PyObject *capsule)
+{
+    CompiledHydratePlan *plan = PyCapsule_GetPointer(
+        capsule, ORM_HYDRATE_PLAN_CAPSULE);
+    if (plan != NULL) compiled_hydrate_plan_clear(plan);
+    else PyErr_Clear();
+}
+
+PyObject *
+wreath_orm_compile_hydrate_plan(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *spec, *row_plan, *cursors;
+    CompiledHydratePlan *plan;
+    PyObject *capsule;
+    if (!PyArg_ParseTuple(args, "OOO:orm_compile_hydrate_plan", &spec,
+                          &row_plan, &cursors)) return NULL;
+    plan = PyMem_Calloc(1, sizeof(*plan));
+    if (plan == NULL) return PyErr_NoMemory();
+    if (hydrate_plan_init(&plan->root, spec, row_plan) < 0 ||
+        join_plans_init(cursors, &plan->joins, &plan->join_count) < 0) {
+        compiled_hydrate_plan_clear(plan);
+        return NULL;
+    }
+    capsule = PyCapsule_New(plan, ORM_HYDRATE_PLAN_CAPSULE,
+                            compiled_hydrate_plan_destructor);
+    if (capsule == NULL) {
+        compiled_hydrate_plan_clear(plan);
+        return NULL;
+    }
+    return capsule;
+}
+
 static PyObject *
 hydrate_one(HydrateContext *context, HydratePlan *plan, PyObject *row,
             Py_ssize_t offset)
@@ -471,15 +522,16 @@ hydrate_context_clear(HydrateContext *context)
 PyObject *
 wreath_orm_hydrate_records(PyObject *Py_UNUSED(self), PyObject *args)
 {
-    PyObject *session, *spec, *row_plan, *cursors_object, *rows_object, *models;
+    PyObject *session, *plan_object, *rows_object, *models;
     PyObject *rows = NULL, *objects = NULL;
     PyObject **unique = NULL, **seen = NULL;
-    HydratePlan root_plan = {0};
-    JoinPlan *joins = NULL;
-    Py_ssize_t join_count = 0, unique_count = 0, seen_capacity = 8;
+    CompiledHydratePlan *plan;
+    Py_ssize_t unique_count = 0, seen_capacity = 8;
     HydrateContext context = {0};
-    if (!PyArg_ParseTuple(args, "OOOOOO:orm_hydrate_records", &session, &spec,
-                          &row_plan, &cursors_object, &rows_object, &models)) return NULL;
+    if (!PyArg_ParseTuple(args, "OOOO:orm_hydrate_records", &session,
+                          &plan_object, &rows_object, &models)) return NULL;
+    plan = PyCapsule_GetPointer(plan_object, ORM_HYDRATE_PLAN_CAPSULE);
+    if (plan == NULL) return NULL;
     rows = PySequence_Fast(rows_object, "rows must be a sequence");
     if (rows == NULL) goto error;
     {
@@ -500,9 +552,7 @@ wreath_orm_hydrate_records(PyObject *Py_UNUSED(self), PyObject *args)
         seen = PyMem_Calloc((size_t)seen_capacity, sizeof(*seen));
     }
     if ((PySequence_Fast_GET_SIZE(rows) != 0 && unique == NULL) || seen == NULL ||
-        hydrate_context_init(&context, session, models) < 0 ||
-        hydrate_plan_init(&root_plan, spec, row_plan) < 0 ||
-        join_plans_init(cursors_object, &joins, &join_count) < 0) goto error;
+        hydrate_context_init(&context, session, models) < 0) goto error;
     for (Py_ssize_t index = 0; index < PySequence_Fast_GET_SIZE(rows); index++) {
         PyObject *row = PySequence_Fast(
             PySequence_Fast_GET_ITEM(rows, index), "database row must be a sequence");
@@ -511,7 +561,7 @@ wreath_orm_hydrate_records(PyObject *Py_UNUSED(self), PyObject *args)
         Py_ssize_t slot;
         int is_new = 0;
         if (row == NULL) goto error;
-        root = hydrate_one(&context, &root_plan, row, 0);
+        root = hydrate_one(&context, &plan->root, row, 0);
         if (root == NULL) { Py_DECREF(row); goto error; }
         if (root == Py_None) { Py_DECREF(root); Py_DECREF(row); continue; }
         hash = (uintptr_t)root >> 4;
@@ -526,7 +576,7 @@ wreath_orm_hydrate_records(PyObject *Py_UNUSED(self), PyObject *args)
             unique[unique_count++] = root;
             is_new = 1;
         }
-        if (assemble_plans(&context, joins, join_count, root, row) < 0) {
+        if (assemble_plans(&context, plan->joins, plan->join_count, root, row) < 0) {
             if (!is_new) Py_DECREF(root);
             Py_DECREF(row);
             goto error;
@@ -541,39 +591,14 @@ wreath_orm_hydrate_records(PyObject *Py_UNUSED(self), PyObject *args)
         unique[index] = NULL;
     }
     PyMem_Free(seen); PyMem_Free(unique);
-    join_plans_clear(joins, join_count); PyMem_Free(joins);
-    hydrate_plan_clear(&root_plan); hydrate_context_clear(&context);
+    hydrate_context_clear(&context);
     Py_DECREF(rows);
     return objects;
 error:
     for (Py_ssize_t index = 0; index < unique_count; index++)
         Py_XDECREF(unique == NULL ? NULL : unique[index]);
     PyMem_Free(seen); PyMem_Free(unique);
-    join_plans_clear(joins, join_count); PyMem_Free(joins);
-    hydrate_plan_clear(&root_plan); hydrate_context_clear(&context);
+    hydrate_context_clear(&context);
     Py_XDECREF(objects); Py_XDECREF(rows);
-    return NULL;
-}
-
-PyObject *
-wreath_orm_assemble_joins(PyObject *Py_UNUSED(self), PyObject *args)
-{
-    PyObject *session, *cursors, *parent, *row, *models;
-    PyObject *fast_row = NULL;
-    JoinPlan *plans = NULL;
-    Py_ssize_t count = 0;
-    HydrateContext context = {0};
-    if (!PyArg_ParseTuple(args, "OOOOO:orm_assemble_joins", &session, &cursors,
-                          &parent, &row, &models)) return NULL;
-    fast_row = PySequence_Fast(row, "database row must be a sequence");
-    if (fast_row == NULL || hydrate_context_init(&context, session, models) < 0 ||
-        join_plans_init(cursors, &plans, &count) < 0 ||
-        assemble_plans(&context, plans, count, parent, fast_row) < 0) goto error;
-    join_plans_clear(plans, count); PyMem_Free(plans);
-    hydrate_context_clear(&context); Py_DECREF(fast_row);
-    Py_RETURN_NONE;
-error:
-    join_plans_clear(plans, count); PyMem_Free(plans);
-    hydrate_context_clear(&context); Py_XDECREF(fast_row);
     return NULL;
 }

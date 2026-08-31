@@ -20,6 +20,7 @@ from asyncio import gather as _gather
 from asyncio import timeout as _asyncio_timeout
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import replace as _dc_replace
+from datetime import datetime
 from inspect import iscoroutinefunction as _iscoroutinefunction
 from time import monotonic_ns as _monotonic_ns
 from time import time as _wall_clock
@@ -28,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import quote
 
 from . import telemetry as _telemetry
+from ._api_catalog import CATALOG_PATH, catalog_path, catalog_response
 from ._auth.backends import AuthenticationBackend, AuthorizationProvider, BearerTokenBackend
 from ._auth.models import Identity
 from ._auth.requirements import (
@@ -90,6 +92,7 @@ from .response import (
     TextResponse,
     _coerce_encoded_json,
     _EncodedJSON,
+    _HeaderResponse,
     coerce_bytes,
     coerce_json,
     coerce_text,
@@ -1773,6 +1776,9 @@ class Wreath:
         response_media_type: str = "application/json",
         responses: Mapping[int, Any] | None = None,
         deprecated: bool = False,
+        deprecated_at: datetime | None = None,
+        sunset_at: datetime | None = None,
+        deprecation_link: str | None = None,
         include_in_schema: bool = True,
         security: Mapping[str, Iterable[str]] | None = None,
         name: str | None = None,
@@ -1805,7 +1811,7 @@ class Wreath:
 
         `cancel_on_disconnect` decides what a lost client does to a handler that
         is still working. Left alone, the request method decides: RFC 9110's
-        safe methods (`GET`, `HEAD`, `OPTIONS`) are cancelled, because nobody is
+        safe methods (`GET`, `HEAD`, `OPTIONS`, `QUERY`) are cancelled, because nobody is
         waiting for the answer and a cancelled query stops scanning; every other
         method is left to finish, because unwinding it rolls the transaction
         back but not the mail it already sent. Set it to opt a `POST` in or a
@@ -1825,6 +1831,10 @@ class Wreath:
             permissions: Permission names the caller must hold, all of them.
             operation_id: OpenAPI operationId, and the generated clients' method name.
             response_only: Handler promises to return a response object directly.
+            deprecated: Mark the operation deprecated in OpenAPI.
+            deprecated_at: RFC 9745 effective date, emitted as `Deprecation`.
+            sunset_at: Expected shutdown date, emitted as `Sunset`.
+            deprecation_link: URI-reference for `rel="deprecation"` documentation.
             cancel_on_disconnect: Cancel this handler when the client goes away;
                 omitted, the request method decides.
 
@@ -1851,6 +1861,9 @@ class Wreath:
                 response_media_type=response_media_type,
                 responses=responses,
                 deprecated=deprecated,
+                deprecated_at=deprecated_at,
+                sunset_at=sunset_at,
+                deprecation_link=deprecation_link,
                 include_in_schema=include_in_schema,
                 security=security,
                 name=name,
@@ -1889,6 +1902,26 @@ class Wreath:
         contract, parameter binding and return-value coercion are the same.
         """
         return self.route(path, methods=("GET",), **metadata)
+
+    def query(
+        self,
+        path: str,
+        *,
+        accept_query: Iterable[str] = ("application/json",),
+        **metadata: Any,
+    ) -> Callable[[Handler], Handler]:
+        """Register a safe, idempotent QUERY route.
+
+        `accept_query` names the request media types this resource understands.
+        A QUERY without exactly one `Content-Type` is refused with 400; an
+        unsupported type is refused with 415. Both responses advertise the
+        supported formats in `Accept-Query`.
+        """
+        from .router import _QueryContentPolicy
+
+        policy = _QueryContentPolicy(accept_query).middleware()
+        middleware = tuple(metadata.pop("middleware", ()))
+        return self.route(path, methods=("QUERY",), middleware=(policy, *middleware), **metadata)
 
     def frozen(
         self,
@@ -2571,6 +2604,7 @@ class Wreath:
                     and all(
                         not _iscoroutinefunction(handler)
                         and requirement.second_factor is None
+                        and requirement.oauth_step_up is None
                         and not requirement.policies
                         for handler, requirement in self._handler_requirements.items()
                     )
@@ -3304,7 +3338,11 @@ class Wreath:
                     response = await self._handle_exception(request, error)
                 await self._finish_http(request, response, send, method, scope, native_response, 0)
                 return
-            if requirement.second_factor is not None or requirement.policies:
+            if (
+                requirement.second_factor is not None
+                or requirement.oauth_step_up is not None
+                or requirement.policies
+            ):
                 try:
                     stage_response = await self._authorize_request(
                         request,
@@ -4051,7 +4089,7 @@ class Wreath:
     async def _finish_http(
         self,
         request: Request,
-        response: Response | StreamingResponse | FileResponse | PreparedResponse,
+        response: Response | StreamingResponse | FileResponse | PreparedResponse | _HeaderResponse,
         send: Send,
         method: str,
         scope: Any,
@@ -4059,6 +4097,10 @@ class Wreath:
         active_global: int,
         after_hooks: tuple[tuple[Any, int], ...] | None = None,
     ) -> None:
+        lifecycle_headers: tuple[tuple[bytes, bytes], ...] = ()
+        if response.__class__ is _HeaderResponse:
+            lifecycle_headers = response._headers
+            response = response._response
         # `active_global` indexes `after_hooks`, and the two must come from the
         # same compiled program -- see `_hook_program`. Only the compartment
         # dispatcher passes one; every other caller unwinds the global program.
@@ -4094,6 +4136,9 @@ class Wreath:
                         request, response, native_one_shot=native_one_shot
                     )
                 )
+
+        if lifecycle_headers:
+            response = _HeaderResponse(response, lifecycle_headers)
 
         # Close this request's log scope before the response goes out, so its
         # records are published while the recorder still holds the context they
@@ -4185,7 +4230,7 @@ class Wreath:
 
     def _finish_http_plain(
         self,
-        response: Response | StreamingResponse | FileResponse | PreparedResponse,
+        response: Response | StreamingResponse | FileResponse | PreparedResponse | _HeaderResponse,
         send: Send,
         method: str,
         scope: Any,
@@ -4239,7 +4284,7 @@ class Wreath:
 
     async def _finish_http_plain_background(
         self,
-        response: Response | StreamingResponse | FileResponse | PreparedResponse,
+        response: Response | StreamingResponse | FileResponse | PreparedResponse | _HeaderResponse,
         send: Send,
         method: str,
         scope: Any,
@@ -4704,6 +4749,8 @@ class Wreath:
                         ),
                     )
                 )
+                if definition.lifecycle_headers:
+                    compiled = _with_response_headers(compiled, definition.lifecycle_headers)
                 dynamic = definition.host is not None or ":path}" in definition.path
                 router.add(
                     definition.path,
@@ -4716,7 +4763,12 @@ class Wreath:
                 handler_requirements[compiled] = requirement
                 if requestless and not definition.dependencies:
                     requestless_handlers.add(compiled)
-                if frozen_response is not None and not chain and not definition.dependencies:
+                if (
+                    frozen_response is not None
+                    and not chain
+                    and not definition.dependencies
+                    and not definition.lifecycle_headers
+                ):
                     frozen_responses[compiled] = frozen_response
                 flight_route_keys[compiled] = (method, definition.path)
                 if definition.cancel_on_disconnect is not None:
@@ -5081,6 +5133,14 @@ class Wreath:
             age = second_factor_age(identity, _wall_clock())
             if age is None or age > requirement.second_factor:
                 raise Forbidden("second_factor_required")
+        oauth_step_up = requirement.oauth_step_up
+        if oauth_step_up is not None:
+            now = _wall_clock() if oauth_step_up.max_age is not None else None
+            if not oauth_step_up.satisfied_by(identity, now):
+                raise Unauthorized(
+                    "insufficient_user_authentication",
+                    challenge=oauth_step_up.challenge,
+                )
         if not access_resolved:
             for check in requirement.role_checks:
                 if not _check_set(identity.roles, check):
@@ -5104,6 +5164,36 @@ class Wreath:
                     if denial is not None:
                         raise Forbidden(denial)
         return None
+
+    def enable_api_catalog(
+        self,
+        *,
+        api_path: str = "/",
+        spec_path: str | None = "/openapi.json",
+        docs_path: str | None = "/docs",
+    ) -> None:
+        """Publish the RFC 9727 API catalog at its well-known location.
+
+        Registration is explicit because catalog entries disclose an API's
+        specification and documentation locations. Each configured path must
+        be origin-relative; emitted links become absolute when the request has
+        a Host header.
+        """
+        validated_api_path = catalog_path("api_path", api_path)
+        validated_spec_path = catalog_path("spec_path", spec_path)
+        validated_docs_path = catalog_path("docs_path", docs_path)
+        if validated_api_path is None:
+            raise TypeError("api_path must be a path string, not None")
+
+        async def api_catalog(request: Request) -> Response:
+            return catalog_response(
+                request,
+                api_path=validated_api_path,
+                spec_path=validated_spec_path,
+                docs_path=validated_docs_path,
+            )
+
+        self.get(CATALOG_PATH, include_in_schema=False)(api_catalog)
 
     def enable_api_docs(
         self,
@@ -5507,6 +5597,27 @@ def _check_set(actual: frozenset[str], requirement: SetRequirement) -> bool:
 _NOT_FOUND = ProblemResponse(status=404, detail="Not Found")
 
 
+def _with_response_headers(
+    endpoint: Handler,
+    headers: tuple[tuple[bytes, bytes], ...],
+) -> Handler:
+    if _iscoroutinefunction(endpoint):
+
+        async def async_decorated(request: Request) -> _HeaderResponse:
+            return _HeaderResponse(_coerce_response(await endpoint(request)), headers)
+
+        async_decorated.__name__ = getattr(endpoint, "__name__", "decorated")
+        async_decorated.__qualname__ = getattr(endpoint, "__qualname__", "decorated")
+        return async_decorated
+
+    def sync_decorated(request: Request) -> _HeaderResponse:
+        return _HeaderResponse(_coerce_response(endpoint(request)), headers)
+
+    sync_decorated.__name__ = getattr(endpoint, "__name__", "decorated")
+    sync_decorated.__qualname__ = getattr(endpoint, "__qualname__", "decorated")
+    return sync_decorated
+
+
 def _ensure_response(endpoint: Handler, status: int = 200) -> Handler:
     coerced: Handler
     if _iscoroutinefunction(endpoint):
@@ -5552,7 +5663,10 @@ def _coerce_response(
         return coerce_json(value) if status == 200 else JSONResponse(value, status=status)
     if kind is bytes:
         return coerce_bytes(value) if status == 200 else Response(value, status=status)
-    if isinstance(value, (Response, StreamingResponse, FileResponse, PreparedResponse)):
+    if isinstance(
+        value,
+        (Response, StreamingResponse, FileResponse, PreparedResponse, _HeaderResponse),
+    ):
         return value
     if isinstance(value, bytes):
         return Response(value, status=status)
@@ -5578,11 +5692,12 @@ def _head_send(send: Send) -> Send:
 
 
 def _send_head(
-    response: Response | StreamingResponse | FileResponse | PreparedResponse,
+    response: Response | StreamingResponse | FileResponse | PreparedResponse | _HeaderResponse,
     send: Send,
 ) -> Awaitable[None]:
-    if isinstance(response, FileResponse):
-        return response._head(send)
+    response_head = getattr(response, "_head", None)
+    if response_head is not None:
+        return response_head(send)
     return response(_head_send(send))
 
 

@@ -13,6 +13,7 @@ from wreath.response import (
     Response,
     StreamingResponse,
     TextResponse,
+    _HeaderResponse,
 )
 
 
@@ -163,7 +164,7 @@ def test_default_header_lists_are_not_shared_between_instances() -> None:
 
 
 @pytest.mark.asyncio
-async def test_streaming_response_unchanged() -> None:
+async def test_streaming_response_signals_incremental_forwarding() -> None:
     async def chunks():
         yield b"a"
         yield b"b"
@@ -174,8 +175,102 @@ async def test_streaming_response_unchanged() -> None:
         sent.append(message)
 
     await StreamingResponse(chunks(), headers=[(b"content-type", b"text/plain")])(send)
-    assert sent[0]["headers"] == [(b"content-type", b"text/plain")]
+    assert sent[0]["headers"] == [
+        (b"content-type", b"text/plain"),
+        (b"incremental", b"?1"),
+    ]
     assert [m.get("body") for m in sent[1:]] == [b"a", b"b", b""]
+
+
+def test_streaming_response_can_explicitly_allow_buffering() -> None:
+    async def chunks():
+        yield b"a"
+
+    response = StreamingResponse(chunks(), incremental=False)
+    assert response.headers == [(b"incremental", b"?0")]
+
+
+def test_streaming_response_refuses_ambiguous_incremental_declarations() -> None:
+    async def chunks():
+        yield b"a"
+
+    with pytest.raises(ValueError, match=r"incremental=False"):
+        StreamingResponse(chunks(), headers=[(b"Incremental", b"?0")])
+    with pytest.raises(TypeError, match=r"incremental must be bool"):
+        StreamingResponse(chunks(), incremental=1)
+
+
+@pytest.mark.asyncio
+async def test_header_response_decorates_without_mutating_a_reusable_response() -> None:
+    response = PreparedResponse.text("ok", headers=[(b"x-base", b"1")])
+    additions = [(b"deprecation", b"@1688169599")]
+    decorated = _HeaderResponse(response, additions)
+    additions.append((b"sunset", b"Sat, 30 Jun 2023 23:59:59 GMT"))
+    first: list[dict[str, Any]] = []
+    second: list[dict[str, Any]] = []
+
+    async def send_first(message: dict[str, Any]) -> None:
+        first.append(message)
+
+    async def send_second(message: dict[str, Any]) -> None:
+        second.append(message)
+
+    await decorated(send_first)
+    await decorated(send_second)
+
+    assert decorated.status == response.status
+    assert decorated.background is response.background
+    assert decorated.body == response.body
+    assert decorated.headers == [*response.headers, (b"deprecation", b"@1688169599")]
+    assert (b"deprecation", b"@1688169599") not in response.headers
+    assert first[0]["headers"] == [
+        *response.headers,
+        (b"deprecation", b"@1688169599"),
+    ]
+    assert second[0]["headers"] == first[0]["headers"]
+    assert second[0]["headers"] is not first[0]["headers"]
+
+
+@pytest.mark.asyncio
+async def test_header_response_decorates_every_response_shape(tmp_path) -> None:
+    path = tmp_path / "asset.bin"
+    path.write_bytes(b"file")
+
+    async def chunks():
+        yield b"stream"
+
+    def recorder(messages: list[dict[str, Any]]):
+        async def send(message: dict[str, Any]) -> None:
+            messages.append(message)
+
+        return send
+
+    responses = [
+        Response(b"plain"),
+        PreparedResponse(b"prepared"),
+        StreamingResponse(chunks()),
+        FileResponse(path),
+    ]
+    for response in responses:
+        sent: list[dict[str, Any]] = []
+        await _HeaderResponse(response, ((b"sunset", b"date"),))(recorder(sent))
+        assert sent[0]["headers"][-1] == (b"sunset", b"date")
+
+
+@pytest.mark.asyncio
+async def test_header_response_preserves_file_head_without_reading_a_body(tmp_path) -> None:
+    path = tmp_path / "asset.bin"
+    path.write_bytes(b"file")
+    sent: list[dict[str, Any]] = []
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    await _HeaderResponse(FileResponse(path), ((b"sunset", b"date"),))._head(send)
+
+    assert (b"content-length", b"4") in sent[0]["headers"]
+    assert (b"sunset", b"date") in sent[0]["headers"]
+    assert sent[1] == {"type": "http.response.body", "body": b""}
 
 
 def test_prepared_text_headers_and_body() -> None:

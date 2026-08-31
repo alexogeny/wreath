@@ -76,6 +76,17 @@ async def test_safe_request_issues_token_and_valid_unsafe_request_passes() -> No
 
 
 @pytest.mark.asyncio
+async def test_query_is_safe_and_needs_no_cross_site_csrf_token() -> None:
+    middleware = CsrfPolicy("s" * 32)
+    request = _request(
+        "QUERY",
+        [(b"host", b"example.test"), (b"sec-fetch-site", b"cross-site")],
+    )
+
+    assert await middleware._ingress(request) is None
+
+
+@pytest.mark.asyncio
 async def test_configured_urlencoded_form_field_can_resubmit_token() -> None:
     middleware = CsrfPolicy("s" * 32, form_field="csrf_token")
     safe = _request("GET")

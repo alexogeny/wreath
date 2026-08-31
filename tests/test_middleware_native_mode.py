@@ -10,6 +10,7 @@ from wreath import Response, Wreath
 from wreath.policy import (
     AIScrapingPolicy,
     CorsPolicy,
+    CsrfPolicy,
     HttpPolicy,
     RequestIdPolicy,
     SecurityHeadersPolicy,
@@ -107,6 +108,31 @@ async def test_ingress_refusal_is_native_and_never_calls_the_handler() -> None:
     response = await serve(app, b"GET /x HTTP/1.1\r\nhost: evil.test\r\n\r\n")
     assert response.startswith(b"HTTP/1.1 400 Bad Request\r\n")
     assert materialized == []
+
+
+@pytest.mark.asyncio
+async def test_native_csrf_treats_query_as_safe() -> None:
+    reached = False
+    app = Wreath(http_policy=HttpPolicy(csrf=CsrfPolicy("s" * 32)))
+
+    @app.query("/search")
+    async def search(request: Any) -> Response:
+        nonlocal reached
+        reached = True
+        return Response(b"ok")
+
+    app._compile_routes()
+    response = await serve(
+        app,
+        b"QUERY /search HTTP/1.1\r\n"
+        b"host: allowed.test\r\n"
+        b"content-type: application/json\r\n"
+        b"content-length: 2\r\n"
+        b"sec-fetch-site: cross-site\r\n\r\n{}",
+    )
+
+    assert response.startswith(b"HTTP/1.1 200 OK\r\n")
+    assert reached is True
 
 
 @pytest.mark.asyncio

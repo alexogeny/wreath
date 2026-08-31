@@ -1138,6 +1138,118 @@
         ]
       }
     },
+    "duration-invalid-tail": {
+      "contract": {
+        "group": "extended",
+        "stage": "declaration",
+        "axis": "digits scanned before an invalid compact-duration unit",
+        "assumption": "invalid compact durations are refused in one forward pass",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "duration-invalid-tail",
+        "group": "extended",
+        "stage": "declaration",
+        "axis": "digits scanned before an invalid compact-duration unit",
+        "assumption": "invalid compact durations are refused in one forward pass",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.005,
+        "tail_exponent": 1.002,
+        "local_exponents": [
+          1.015,
+          0.996,
+          1.008
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          0.002564658992923796,
+          0.005184594949241728,
+          0.010338144027628005,
+          0.02079316700110212
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "duration-valid-tail-control": {
+      "contract": {
+        "group": "extended",
+        "stage": "declaration",
+        "axis": "digits scanned before a valid compact-duration unit",
+        "assumption": "the same-size valid duration control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "duration-valid-tail-control",
+        "group": "extended",
+        "stage": "declaration",
+        "axis": "digits scanned before a valid compact-duration unit",
+        "assumption": "the same-size valid duration control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.003,
+        "tail_exponent": 0.992,
+        "local_exponents": [
+          1.03,
+          0.994,
+          0.989
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          0.0025775230024009943,
+          0.0052621689974330366,
+          0.010480129974894226,
+          0.020803874998819083
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
     "fifo-queue-offer-drain-control": {
       "contract": {
         "group": "web",
@@ -2495,6 +2607,342 @@
           {
             "retained_timers": 0
           }
+        ]
+      }
+    },
+    "markdown-heading-ambiguous-whitespace": {
+      "contract": {
+        "group": "extended",
+        "stage": "documentation",
+        "axis": "trailing spaces retained inside one Markdown heading",
+        "assumption": "ambiguous heading whitespace is parsed in one forward pass",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "markdown-heading-ambiguous-whitespace",
+        "group": "extended",
+        "stage": "documentation",
+        "axis": "trailing spaces retained inside one Markdown heading",
+        "assumption": "ambiguous heading whitespace is parsed in one forward pass",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.246,
+        "tail_exponent": 0.309,
+        "local_exponents": [
+          0.127,
+          0.225,
+          0.393
+        ],
+        "class": "O(1)",
+        "degree_name": "constant",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          2.4455017410218716e-05,
+          2.6708003133535385e-05,
+          3.122095949947834e-05,
+          4.0988961700350046e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "markdown-heading-id-invalid": {
+      "contract": {
+        "group": "extended",
+        "stage": "documentation",
+        "axis": "spaces before an invalid explicit Markdown heading ID",
+        "assumption": "an invalid explicit heading ID is refused in one forward pass",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "markdown-heading-id-invalid",
+        "group": "extended",
+        "stage": "documentation",
+        "axis": "spaces before an invalid explicit Markdown heading ID",
+        "assumption": "an invalid explicit heading ID is refused in one forward pass",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": -0.002,
+        "tail_exponent": -0.009,
+        "local_exponents": [
+          0.009,
+          0.013,
+          -0.032
+        ],
+        "class": "O(1)",
+        "degree_name": "constant",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          1.7740007024258375e-05,
+          1.7851998563855886e-05,
+          1.801102189347148e-05,
+          1.7619982827454805e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "markdown-heading-id-valid-control": {
+      "contract": {
+        "group": "extended",
+        "stage": "documentation",
+        "axis": "same-size text before a valid explicit Markdown heading ID",
+        "assumption": "the same-size valid explicit heading ID control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "markdown-heading-id-valid-control",
+        "group": "extended",
+        "stage": "documentation",
+        "axis": "same-size text before a valid explicit Markdown heading ID",
+        "assumption": "the same-size valid explicit heading ID control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.024,
+        "tail_exponent": 0.038,
+        "local_exponents": [
+          -0.013,
+          0.053,
+          0.023
+        ],
+        "class": "O(1)",
+        "degree_name": "constant",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          2.374197356402874e-05,
+          2.3522996343672276e-05,
+          2.439599484205246e-05,
+          2.4781038518995047e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "markdown-heading-text-control": {
+      "contract": {
+        "group": "extended",
+        "stage": "documentation",
+        "axis": "ordinary text retained inside one same-size Markdown heading",
+        "assumption": "the same-size ordinary heading control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "markdown-heading-text-control",
+        "group": "extended",
+        "stage": "documentation",
+        "axis": "ordinary text retained inside one same-size Markdown heading",
+        "assumption": "the same-size ordinary heading control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.273,
+        "tail_exponent": 0.347,
+        "local_exponents": [
+          0.109,
+          0.322,
+          0.372
+        ],
+        "class": "O(1)",
+        "degree_name": "constant",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          2.3925036657601595e-05,
+          2.5803979951888323e-05,
+          3.2257987186312675e-05,
+          4.175194771960378e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "markdown-table-invalid-tail": {
+      "contract": {
+        "group": "extended",
+        "stage": "documentation",
+        "axis": "spaces scanned before an invalid Markdown table-delimiter tail",
+        "assumption": "an invalid delimiter row is refused in one forward pass",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "markdown-table-invalid-tail",
+        "group": "extended",
+        "stage": "documentation",
+        "axis": "spaces scanned before an invalid Markdown table-delimiter tail",
+        "assumption": "an invalid delimiter row is refused in one forward pass",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.637,
+        "tail_exponent": 0.733,
+        "local_exponents": [
+          0.425,
+          0.698,
+          0.768
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          4.9877038691192865e-05,
+          6.696599302813411e-05,
+          0.00010863196803256869,
+          0.0001849670079536736
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "markdown-table-valid-control": {
+      "contract": {
+        "group": "extended",
+        "stage": "documentation",
+        "axis": "hyphens scanned in a same-size valid Markdown delimiter row",
+        "assumption": "the same-size valid delimiter control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "markdown-table-valid-control",
+        "group": "extended",
+        "stage": "documentation",
+        "axis": "hyphens scanned in a same-size valid Markdown delimiter row",
+        "assumption": "the same-size valid delimiter control is linear",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.942,
+        "tail_exponent": 0.962,
+        "local_exponents": [
+          0.898,
+          0.952,
+          0.972
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          0.0002226869692094624,
+          0.00041496800258755684,
+          0.0008029139717109501,
+          0.0015753799816593528
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
         ]
       }
     },
@@ -7606,16 +8054,16 @@
       "contract": {
         "group": "extended",
         "stage": "component",
-        "axis": "input size",
-        "assumption": "A nested-union validation bomb stays bounded regardless of depth: O(1).",
+        "axis": "native nodes implied by one shared union declaration",
+        "assumption": "startup compilation stops at the fixed 100,000-node ceiling",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
         "metric": null,
         "sizes": [
-          22,
-          24,
-          26,
-          28
+          131072,
+          262144,
+          524288,
+          1048576
         ],
         "todo": null
       },
@@ -7623,32 +8071,32 @@
         "probe": "validate-union-bomb",
         "group": "extended",
         "stage": "component",
-        "axis": "input size",
-        "assumption": "A nested-union validation bomb stays bounded regardless of depth: O(1).",
+        "axis": "native nodes implied by one shared union declaration",
+        "assumption": "startup compilation stops at the fixed 100,000-node ceiling",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": -0.673,
-        "tail_exponent": -0.892,
+        "fitted_exponent": 0.009,
+        "tail_exponent": 0.063,
         "local_exponents": [
-          -0.143,
-          -1.204,
-          -0.546
+          -0.09,
+          -0.022,
+          0.148
         ],
         "class": "O(1)",
         "degree_name": "constant",
         "todo": null,
         "status": "PASS",
         "sizes": [
-          22,
-          24,
-          26,
-          28
+          131072,
+          262144,
+          524288,
+          1048576
         ],
         "seconds": [
-          0.5981374430120923,
-          0.5907411720254458,
-          0.5364644090295769,
-          0.5151958900387399
+          0.0027218260220251977,
+          0.0025579360080882907,
+          0.0025189410080201924,
+          0.00279191299341619
         ],
         "counters": [
           {},
