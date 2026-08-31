@@ -47,6 +47,21 @@ def test_token_bound_single_use():
     assert verify_token("s", "reset", t, bound="fp2", now=1) is None  # fingerprint changed
 
 
+def test_memory_store_batch_lookup_preserves_order_duplicates_and_misses():
+    async def scenario():
+        store = InMemoryUserStore()
+        first = await store.create("first@example.com", "hash-1")
+        second = await store.create("second@example.com", "hash-2")
+
+        found = await store.get_many_by_id(
+            (second.id, "missing", first.id, second.id)
+        )
+
+        assert found == [second, None, first, second]
+
+    run(scenario())
+
+
 def _links(purpose, token):
     return f"https://app/{purpose}/{token}"
 

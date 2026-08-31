@@ -184,36 +184,32 @@ async def test_execute_command_tag_preserves_utf8_replacement_behavior() -> None
 
 @requires_native
 @pytest.mark.asyncio
-async def test_direct_data_row_spanning_two_slabs_decodes_through_tape() -> None:
+async def test_direct_data_row_spanning_two_slabs_decodes_into_a_record() -> None:
     protocol = native.BufferedProtocol()
     operation = _register(protocol, "fetch", (17,), ("blob",))
     value = b"s" * (64 * 1024 + 51)
     _feed(protocol, _message(b"D", _data_row((value,))), (9, 4096, 33))
 
-    assert operation.field_tape.row_count == 1
+    assert operation.field_tape.row_count == 0
     assert protocol._receive_stats()["chained_messages"] == 1
     assert protocol._receive_stats()["direct_data_rows"] == 1
-    rows = native._decode_field_tape(operation.decoder_plan, operation.field_tape, "fetch", 256)
-    assert rows[0]["blob"] == value
-    assert operation.field_tape.row_count == 0
+    assert operation.rows[0]["blob"] == value
     assert operation.field_tape.owner_count == 0
 
 
 @requires_native
 @pytest.mark.asyncio
-async def test_direct_rows_share_one_retained_slab_owner() -> None:
+async def test_direct_rows_do_not_retain_a_slab_owner() -> None:
     protocol = native.BufferedProtocol()
     operation = _register(protocol, "fetch", (23,), ("number",))
     batch = b"".join(_message(b"D", _data_row((struct.pack("!i", value),))) for value in range(200))
     _feed(protocol, batch)
 
     tape = operation.field_tape
-    assert tape.row_count == 200
-    # 200 packed rows fit in one 64 KiB slab; deduplication keeps one owner.
-    assert tape.owner_count == 1
-    rows = native._decode_field_tape(operation.decoder_plan, tape, "fetch", 256)
-    assert [row["number"] for row in rows] == list(range(200))
+    assert tape.row_count == 0
     assert tape.owner_count == 0
+    assert [row["number"] for row in operation.rows] == list(range(200))
+    assert protocol._receive_stats()["direct_record_rows"] == 200
 
 
 @requires_native
@@ -229,17 +225,13 @@ async def test_slabs_recycle_across_256_row_batch_boundaries() -> None:
     _feed(protocol, _message(b"Z", b"I"))
     assert await protocol.read_message() == (b"Z", b"I")
 
-    decoded_inline = total // 256 * 256
-    assert operation.rows is not None and len(operation.rows) == decoded_inline
+    assert operation.rows is not None and len(operation.rows) == total
     assert [row["label"] for row in operation.rows[:2]] == [
         "value-" + "0" * 22 + "000000",
         "value-" + "0" * 22 + "000001",
     ]
-    remainder = native._decode_field_tape(
-        operation.decoder_plan, operation.field_tape, "fetch", 256
-    )
-    assert len(remainder) == total - decoded_inline
-    assert remainder[-1]["label"] == f"value-{total - 1:028d}"
+    assert operation.rows[-1]["label"] == f"value-{total - 1:028d}"
+    assert operation.field_tape.row_count == 0
     stats = protocol._receive_stats()
     assert stats["direct_data_rows"] == total
     # The ~130 KiB of row data must flow through recycled fixed slabs, not
@@ -277,11 +269,9 @@ async def test_cancellation_while_direct_rows_arrive_keeps_parser_consistent() -
     _feed(protocol, _message(b"Z", b"I"))
     assert await protocol.read_message() == (b"Z", b"I")
 
-    tape = operation.field_tape
-    assert tape.row_count >= 10
-    tape.clear()
-    assert tape.row_count == 0
-    assert tape.owner_count == 0
+    assert operation.rows is not None and len(operation.rows) == 20
+    assert operation.field_tape.row_count == 0
+    assert operation.field_tape.owner_count == 0
     stats = protocol._receive_stats()
     assert stats["active_slabs"] == 0
     assert stats["idle_slabs"] <= 4

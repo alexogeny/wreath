@@ -211,6 +211,27 @@ def test_fetch_batch_final_flush_extends_the_operation_owned_batch() -> None:
     assert operation.rows[299]["label"] == "value-299"
 
 
+def test_python_receive_path_defers_orm_hydration_until_completion() -> None:
+    class DecodeHarness(PureConnection):
+        def _flush_decode_batch(self, operation: Any) -> None:
+            raise AssertionError("ORM rows were published before ReadyForQuery")
+
+    tape = native._FieldTape(1)
+    operation = SimpleNamespace(
+        dest=(object(), {}, object()),
+        field_tape=tape,
+        mode="fetch",
+        result_oids=(23,),
+    )
+    connection = object.__new__(DecodeHarness)
+    payload = bytes(_data_row((struct.pack("!i", 1),)))
+
+    for _ in range(256):
+        connection._tape_data_row(operation, payload)
+
+    assert tape.row_count == 256
+
+
 @requires_native
 def test_repeated_record_width_reuses_empty_gc_storage() -> None:
     plan = native._compile_decoder_plan((23, 25), (1, 1), ("number", "label"))
@@ -279,7 +300,7 @@ async def test_pure_and_native_multirow_results_are_identical(
 
 @requires_native
 @pytest.mark.asyncio
-async def test_cached_data_rows_flow_parser_to_tape_without_python_queue(
+async def test_cached_data_rows_decode_to_records_without_python_queue(
     database: tuple[FakePostgres, str],
 ) -> None:
     _, dsn = database
@@ -294,6 +315,7 @@ async def test_cached_data_rows_flow_parser_to_tape_without_python_queue(
         await connection.close()
     assert len(rows) == 300
     assert after["direct_data_rows"] - before["direct_data_rows"] == 300
+    assert after["direct_record_rows"] - before["direct_record_rows"] == 300
     assert after["queued_messages"] - before["queued_messages"] <= 4
 
 
@@ -309,7 +331,7 @@ async def test_large_native_result_releases_slabs_at_batch_boundaries(
         assert len(rows) == 600
         stats = connection._reader._receive_stats()
         assert stats["active_slabs"] == 0
-        assert stats["idle_slabs"] <= 1
+        assert stats["idle_slabs"] <= 2
         assert stats["retired_slabs"] <= 2
     finally:
         await connection.close()

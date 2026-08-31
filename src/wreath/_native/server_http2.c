@@ -148,6 +148,7 @@ typedef struct {
     PyObject *loop;
     PyObject *registry;
     PyObject *config;
+    PyObject *default_response_headers;
     PyObject *transport;
     PyObject *transport_write_fn;
 
@@ -588,9 +589,44 @@ stream_receive(PyObject *op, PyObject *Py_UNUSED(ignored))
 }
 
 
+static int
+response_header_parts(PyObject *pair, PyObject **name, PyObject **value)
+{
+    if (PyTuple_Check(pair) && PyTuple_GET_SIZE(pair) == 2) {
+        *name = PyTuple_GET_ITEM(pair, 0);
+        *value = PyTuple_GET_ITEM(pair, 1);
+    }
+    else if (PyList_Check(pair) && PyList_GET_SIZE(pair) == 2) {
+        *name = PyList_GET_ITEM(pair, 0);
+        *value = PyList_GET_ITEM(pair, 1);
+    }
+    else {
+        PyErr_SetString(PyExc_RuntimeError, "response header must be a pair");
+        return -1;
+    }
+    if (!PyBytes_Check(*name) || !PyBytes_Check(*value)) {
+        PyErr_SetString(PyExc_RuntimeError, "response header must be bytes");
+        return -1;
+    }
+    const char *name_data = PyBytes_AS_STRING(*name);
+    Py_ssize_t name_size = PyBytes_GET_SIZE(*name);
+    if (!(name_size > 0 && name_data[0] == ':') &&
+        !wreath_field_name_valid(name_data, name_size)) {
+        PyErr_SetString(PyExc_RuntimeError, "invalid response header");
+        return -1;
+    }
+    if (!wreath_field_value_valid(
+            PyBytes_AS_STRING(*value), PyBytes_GET_SIZE(*value))) {
+        PyErr_SetString(PyExc_RuntimeError, "invalid response header");
+        return -1;
+    }
+    return 0;
+}
+
 /* Encode a header list into HPACK literals appended to `block`. */
 static int
-encode_header_block(PyObject *block, int status, PyObject *headers, PyObject *config)
+encode_header_block(PyObject *block, int status, PyObject *headers,
+                    PyObject *default_headers)
 {
     /* :status first */
     char status_buf[4];
@@ -604,31 +640,28 @@ encode_header_block(PyObject *block, int status, PyObject *headers, PyObject *co
     }
     int has_date = 0;
     int has_server = 0;
-    Py_ssize_t count = headers == NULL ? 0 : PySequence_Size(headers);
-    if (count < 0) {
-        return -1;
-    }
-    for (Py_ssize_t i = 0; i < count; i++) {
-        PyObject *pair = PySequence_GetItem(headers, i);
-        if (pair == NULL) {
+    PyObject *items = NULL;
+    if (headers != NULL) {
+        items = PySequence_Fast(headers, "response headers must be a sequence");
+        if (items == NULL) {
             return -1;
         }
-        PyObject *name = PySequence_GetItem(pair, 0);
-        PyObject *value = PySequence_GetItem(pair, 1);
-        Py_DECREF(pair);
-        if (name == NULL || value == NULL) {
-            Py_XDECREF(name);
-            Py_XDECREF(value);
+    }
+    Py_ssize_t count = items == NULL ? 0 : PySequence_Fast_GET_SIZE(items);
+    for (Py_ssize_t i = 0; i < count; i++) {
+        PyObject *pair = PySequence_Fast_GET_ITEM(items, i);
+        PyObject *name;
+        PyObject *value;
+        if (response_header_parts(pair, &name, &value) < 0) {
+            Py_DECREF(items);
             return -1;
         }
         char *nptr, *vptr;
         Py_ssize_t nlen, vlen;
-        if (PyBytes_AsStringAndSize(name, &nptr, &nlen) < 0 ||
-            PyBytes_AsStringAndSize(value, &vptr, &vlen) < 0) {
-            Py_DECREF(name);
-            Py_DECREF(value);
-            return -1;
-        }
+        nptr = PyBytes_AS_STRING(name);
+        nlen = PyBytes_GET_SIZE(name);
+        vptr = PyBytes_AS_STRING(value);
+        vlen = PyBytes_GET_SIZE(value);
         /* Skip connection-specific and pseudo headers in responses. */
         int skip = (nlen > 0 && nptr[0] == ':');
         if (wreath_ascii_equal_ci(nptr, nlen, "date", 4)) has_date = 1;
@@ -637,43 +670,32 @@ encode_header_block(PyObject *block, int status, PyObject *headers, PyObject *co
         if (!skip) {
             if (wreath_hpack_encode_literal(block, (const uint8_t *)nptr, nlen,
                                          (const uint8_t *)vptr, vlen) < 0) {
-                Py_DECREF(name);
-                Py_DECREF(value);
+                Py_DECREF(items);
                 return -1;
             }
         }
-        Py_DECREF(name);
-        Py_DECREF(value);
     }
-    PyObject *defaults = PyObject_GetAttrString(config, "_default_response_headers");
-    PyObject *default_headers;
-    if (defaults == NULL) return -1;
-    default_headers = PyObject_GetAttrString(defaults, "headers");
-    Py_DECREF(defaults);
-    if (default_headers == NULL) return -1;
-    PyObject *items = PySequence_Fast(default_headers, "default response headers must be a sequence");
-    Py_DECREF(default_headers);
-    if (items == NULL) return -1;
-    for (Py_ssize_t i = 0; i < PySequence_Fast_GET_SIZE(items); i++) {
-        PyObject *pair = PySequence_Fast_GET_ITEM(items, i);
-        PyObject *name = PyTuple_GET_ITEM(pair, 0);
-        PyObject *value = PyTuple_GET_ITEM(pair, 1);
-        char *nptr, *vptr;
-        Py_ssize_t nlen, vlen;
-        if (PyBytes_AsStringAndSize(name, &nptr, &nlen) < 0 ||
-            PyBytes_AsStringAndSize(value, &vptr, &vlen) < 0) {
-            Py_DECREF(items);
+    Py_XDECREF(items);
+    for (Py_ssize_t i = 0; i < PySequence_Fast_GET_SIZE(default_headers); i++) {
+        PyObject *pair = PySequence_Fast_GET_ITEM(default_headers, i);
+        PyObject *name;
+        PyObject *value;
+        if (response_header_parts(pair, &name, &value) < 0) {
             return -1;
         }
+        char *nptr, *vptr;
+        Py_ssize_t nlen, vlen;
+        nptr = PyBytes_AS_STRING(name);
+        nlen = PyBytes_GET_SIZE(name);
+        vptr = PyBytes_AS_STRING(value);
+        vlen = PyBytes_GET_SIZE(value);
         if ((has_date && wreath_ascii_equal_ci(nptr, nlen, "date", 4)) ||
             (has_server && wreath_ascii_equal_ci(nptr, nlen, "server", 6))) continue;
         if (wreath_hpack_encode_literal(block, (const uint8_t *)nptr, nlen,
                                      (const uint8_t *)vptr, vlen) < 0) {
-            Py_DECREF(items);
             return -1;
         }
     }
-    Py_DECREF(items);
     return 0;
 }
 
@@ -1075,7 +1097,8 @@ h2_response_start(Http2Stream *self, PyObject *status_obj, PyObject *headers,
     self->trailers_expected = trailers_expected;
     PyObject *block = PyByteArray_FromStringAndSize("", 0);
     if (block == NULL) return NULL;
-    if (encode_header_block(block, (int)status, headers, proto->config) < 0 ||
+    if (encode_header_block(block, (int)status, headers,
+                            proto->default_response_headers) < 0 ||
         h2_write_frame((PyObject *)proto, FRAME_HEADERS, FLAG_END_HEADERS,
                        self->id,
                        (const uint8_t *)PyByteArray_AS_STRING(block),
@@ -1341,7 +1364,8 @@ stream_finish(Http2Stream *self, PyObject *exc, PyObject *owner,
             /* minimal 500 */
             PyObject *block = PyByteArray_FromStringAndSize("", 0);
             if (block != NULL) {
-                encode_header_block(block, 500, NULL, proto->config);
+                encode_header_block(block, 500, NULL,
+                                    proto->default_response_headers);
                 h2_write_frame((PyObject *)proto, FRAME_HEADERS,
                                FLAG_END_HEADERS | FLAG_END_STREAM, self->id,
                                (const uint8_t *)PyByteArray_AS_STRING(block),
@@ -3287,6 +3311,7 @@ h2_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(self->loop);
     Py_VISIT(self->registry);
     Py_VISIT(self->config);
+    Py_VISIT(self->default_response_headers);
     Py_VISIT(self->transport);
     Py_VISIT(self->transport_write_fn);
     Py_VISIT(self->loop_create_future);
@@ -3317,6 +3342,7 @@ h2_clear(PyObject *op)
     Py_CLEAR(self->loop);
     Py_CLEAR(self->registry);
     Py_CLEAR(self->config);
+    Py_CLEAR(self->default_response_headers);
     Py_CLEAR(self->transport);
     Py_CLEAR(self->transport_write_fn);
     Py_CLEAR(self->loop_create_future);
@@ -3381,6 +3407,34 @@ h2_init(PyObject *op, PyObject *args, PyObject *kwargs)
         return -1;
     }
     self->config = Py_NewRef(config);
+    {
+        PyObject *defaults = PyObject_GetAttrString(config, "_default_response_headers");
+        PyObject *headers;
+        if (defaults == NULL) {
+            return -1;
+        }
+        headers = PyObject_GetAttrString(defaults, "headers");
+        Py_DECREF(defaults);
+        if (headers == NULL) {
+            return -1;
+        }
+        self->default_response_headers = PySequence_Fast(
+            headers, "default response headers must be a sequence");
+        Py_DECREF(headers);
+        if (self->default_response_headers == NULL) {
+            return -1;
+        }
+        for (Py_ssize_t i = 0;
+             i < PySequence_Fast_GET_SIZE(self->default_response_headers); i++) {
+            PyObject *name;
+            PyObject *value;
+            if (response_header_parts(
+                    PySequence_Fast_GET_ITEM(self->default_response_headers, i),
+                    &name, &value) < 0) {
+                return -1;
+            }
+        }
+    }
     self->loop = Py_NewRef(loop);
     self->registry = Py_NewRef(registry);
     self->transport = NULL;

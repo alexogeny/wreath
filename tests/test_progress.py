@@ -86,7 +86,8 @@ async def test_push_progress_sends_json_frames() -> None:
 
 
 async def _events(registry, task_id, **kw):
-    return [p async for p in registry.stream(task_id, interval=0.01, **kw)]
+    async with asyncio.timeout(1):
+        return [p async for p in registry.stream(task_id, interval=0.01, **kw)]
 
 
 async def test_an_expired_entry_closes_the_stream_with_a_reason():

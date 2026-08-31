@@ -17,6 +17,7 @@ from wreath.audit_log import (
 )
 from wreath.log import PostgresLog
 from wreath.orm import Model, Registry, Session, column
+from wreath.orm.errors import StaleDataError
 from wreath.orm.types import Int64, Text
 from wreath.postgres import Database
 
@@ -292,6 +293,123 @@ async def test_a_flush_of_many_audited_rows_records_every_one(registry, trail, s
         records = await _records(trail, str(identifier))
         assert [record["op"] for record in records] == ["insert"], identifier
         assert records[0]["fields"]["caption"] == f"herd {identifier}"
+
+
+async def test_batched_updates_and_deletes_create_one_audit_record_per_row(
+    registry, trail, sessions
+):
+    session = sessions(registry, trail)
+    photos = [
+        Photo(id=identifier, caption="before", exif_gps=None)
+        for identifier in range(120, 124)
+    ]
+    with actor("user:41"):
+        for photo in photos:
+            session.add(photo)
+        await session.flush()
+        for photo in photos:
+            photo.caption = "after"
+        await session.flush()
+        for photo in photos:
+            session.delete(photo)
+        await session.flush()
+
+    for photo in photos:
+        records = await _records(trail, str(photo.id))
+        assert [record["op"] for record in records] == ["insert", "update", "delete"]
+        assert records[1]["fields"] == {"caption": "after"}
+
+
+async def test_a_stale_update_batch_creates_no_partial_audit_records(
+    registry, trail, database, sessions
+):
+    session = sessions(registry, trail)
+    photos = [
+        Photo(id=identifier, caption="before", exif_gps=None)
+        for identifier in (140, 141)
+    ]
+    with actor("user:41"):
+        for photo in photos:
+            session.add(photo)
+        await session.flush()
+        await _apply(database, f'DELETE FROM "{_SCHEMA}".photos WHERE id = 141')
+        for photo in photos:
+            photo.caption = "after"
+        with pytest.raises(StaleDataError, match=r"Photo.*\(141,\)"):
+            await session.flush()
+
+    assert all(photo._orm_has_changes() for photo in photos)
+    for photo in photos:
+        assert [record["op"] for record in await _records(trail, str(photo.id))] == [
+            "insert"
+        ]
+
+
+async def test_a_caught_stale_update_batch_cannot_commit_matching_rows(
+    registry, trail, database, sessions
+):
+    session = sessions(registry, trail)
+    photos = [
+        Photo(id=identifier, caption="before", exif_gps=None)
+        for identifier in (150, 151)
+    ]
+    with actor("user:41"):
+        for photo in photos:
+            session.add(photo)
+        await session.flush()
+        await _apply(database, f'DELETE FROM "{_SCHEMA}".photos WHERE id = 151')
+        photos[0].caption = "after"
+        photos[1].exif_gps = "changed"
+        async with session.begin():
+            with pytest.raises(StaleDataError, match=r"Photo.*\(151,\)"):
+                await session.flush()
+
+    connection = await database.acquire("write")
+    try:
+        caption = await connection.fetchval(
+            f'SELECT caption FROM "{_SCHEMA}".photos WHERE id = 150'
+        )
+    finally:
+        await database.release("write", connection)
+    assert caption == "before"
+    assert all(photo._orm_has_changes() for photo in photos)
+    for photo in photos:
+        assert [record["op"] for record in await _records(trail, str(photo.id))] == [
+            "insert"
+        ]
+
+
+async def test_a_caught_stale_delete_batch_cannot_commit_matching_rows(
+    registry, trail, database, sessions
+):
+    session = sessions(registry, trail)
+    photos = [
+        Photo(id=identifier, caption="before", exif_gps=None)
+        for identifier in (160, 161)
+    ]
+    with actor("user:41"):
+        for photo in photos:
+            session.add(photo)
+        await session.flush()
+        await _apply(database, f'DELETE FROM "{_SCHEMA}".photos WHERE id = 161')
+        for photo in photos:
+            session.delete(photo)
+        async with session.begin():
+            with pytest.raises(StaleDataError, match=r"Photo.*\(161,\)"):
+                await session.flush()
+
+    connection = await database.acquire("write")
+    try:
+        caption = await connection.fetchval(
+            f'SELECT caption FROM "{_SCHEMA}".photos WHERE id = 160'
+        )
+    finally:
+        await database.release("write", connection)
+    assert caption == "before"
+    for photo in photos:
+        assert [record["op"] for record in await _records(trail, str(photo.id))] == [
+            "insert"
+        ]
 
 
 async def test_a_rolled_back_flush_of_many_leaves_none_of_their_records(registry, trail, sessions):

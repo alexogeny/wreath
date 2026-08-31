@@ -33,6 +33,8 @@ typedef struct {
     WreathPgColumnDecoder *columns;
     PyObject *names;
     PyObject *name_index;
+    PyObject *record_descriptor;
+    int record_gc_safe;
 } WreathPgDecoderPlan;
 
 extern PyTypeObject *WreathPgDecoderPlanType;
@@ -42,6 +44,9 @@ int wreath_pg_decode_fetch_extend(PyObject *plan_object, PyObject *tape_object,
 int wreath_pg_decode_datarow_batch(PyObject *plan_object, PyObject *batch,
                                   const unsigned char *data,
                                   Py_ssize_t length);
+int wreath_pg_decode_datarow_record(PyObject *plan_object, PyObject *rows,
+                                   const unsigned char *data,
+                                   Py_ssize_t length);
 PyObject *wreath_pg_decode_fetchval(PyObject *plan_object,
                                    PyObject *tape_object);
 int wreath_pg_decode_init(PyObject *module);

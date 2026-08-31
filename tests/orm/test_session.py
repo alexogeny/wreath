@@ -15,9 +15,10 @@ from wreath.orm.errors import (
     ORMError,
     SessionClosedError,
     SessionError,
+    StaleDataError,
     UnloadedRelationshipError,
 )
-from wreath.orm.model import DETACHED, PERSISTENT
+from wreath.orm.model import DELETED, DETACHED, PERSISTENT
 from wreath.orm.registry import Registry
 from wreath.orm.session import Session
 from wreath.orm.types import Int64, Text, Timestamp, TsVector
@@ -429,6 +430,7 @@ async def test_an_inner_failure_rolls_back_to_its_savepoint(
         "BEGIN",
         "SAVEPOINT wreath_sp_1",
         "ROLLBACK TO SAVEPOINT wreath_sp_1",
+        "RELEASE SAVEPOINT wreath_sp_1",
         "COMMIT",
     ]
 
@@ -677,25 +679,24 @@ async def test_insert_does_not_batch_across_a_different_shape(
     assert [args[0] for _sql, args in inserts] == [1, 2, 3]
 
 
-async def test_insert_keeps_server_generated_keys_on_the_ordered_single_row_path(
-    monkeypatch: pytest.MonkeyPatch, database: FakeDatabase, session: Session
+async def test_insert_batches_rows_that_return_server_generated_keys(
+    database: FakeDatabase, session: Session
 ) -> None:
-    returned = iter(((7, None), (8, None)))
-
-    async def fetchrow(sql: str, *args: object) -> tuple[object, ...]:
-        database.connection._record(sql, args)
-        return next(returned)
-
-    monkeypatch.setattr(database.connection, "fetchrow", fetchrow)
+    database.connection.script("INSERT", [[7, None], [8, None]])
     users = [User(email="a@b.c", name="A"), User(email="b@b.c", name="B")]
     for user in users:
         session.add(user)
 
     await session.flush()
 
-    inserts = [sql for sql in database.connection.statements if sql.startswith("INSERT")]
-    assert len(inserts) == 2
-    assert all("RETURNING" in sql for sql in inserts)
+    inserts = [call for call in database.connection.calls if call[0].startswith("INSERT")]
+    assert inserts == [
+        (
+            'INSERT INTO "public"."users" ("email", "name") '
+            'VALUES ($1, $2), ($3, $4) RETURNING "id", "created_at"',
+            ("a@b.c", "A", "b@b.c", "B"),
+        )
+    ]
     assert [user.id for user in users] == [7, 8]
 
 
@@ -714,6 +715,33 @@ async def test_insert_batch_stays_within_the_parameter_limit(
 
     inserts = [(sql, args) for sql, args in database.connection.calls if sql.startswith("INSERT")]
     assert [len(args) for _sql, args in inserts] == [8, 4]
+
+
+async def test_returning_insert_batch_stays_within_the_parameter_limit(
+    monkeypatch: pytest.MonkeyPatch, database: FakeDatabase, session: Session
+) -> None:
+    monkeypatch.setattr("wreath.orm.session.MAX_BIND_PARAMETERS", 4)
+    users = [
+        User(email=f"{index}@b.c", name=f"U{index}")
+        for index in range(1, 4)
+    ]
+
+    async def fetch(sql: str, *args: object) -> list[tuple[object, ...]]:
+        database.connection._record(sql, args)
+        return [
+            (int(str(args[offset]).split("@", 1)[0]), None)
+            for offset in range(0, len(args), 2)
+        ]
+
+    monkeypatch.setattr(database.connection, "fetch", fetch)
+    for user in users:
+        session.add(user)
+
+    await session.flush()
+
+    inserts = [(sql, args) for sql, args in database.connection.calls if sql.startswith("INSERT")]
+    assert [len(args) for _sql, args in inserts] == [4, 2]
+    assert [user.id for user in users] == [1, 2, 3]
 
 
 async def test_insert_batch_splits_when_the_encoded_packet_is_too_large(
@@ -760,6 +788,36 @@ async def test_a_failed_insert_batch_preserves_every_pending_instance(
     assert "ROLLBACK" in database.connection.statements
 
 
+async def test_a_late_returning_insert_chunk_failure_preserves_the_whole_batch(
+    monkeypatch: pytest.MonkeyPatch, database: FakeDatabase, session: Session
+) -> None:
+    monkeypatch.setattr("wreath.orm.session.MAX_BIND_PARAMETERS", 4)
+    users = [
+        User(email=f"{index}@b.c", name=f"U{index}")
+        for index in range(1, 4)
+    ]
+    calls = 0
+
+    async def fetch(sql: str, *args: object) -> list[tuple[object, ...]]:
+        nonlocal calls
+        database.connection._record(sql, args)
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("constraint")
+        return [(7, None), (8, None)]
+
+    monkeypatch.setattr(database.connection, "fetch", fetch)
+    for user in users:
+        session.add(user)
+
+    with pytest.raises(RuntimeError, match="constraint"):
+        await session.flush()
+
+    assert session._new == users
+    assert all(user._orm_state != PERSISTENT for user in users)
+    assert all(user._orm_primary_key() is None for user in users)
+
+
 async def test_an_inserted_object_enters_the_identity_map(
     database: FakeDatabase, session: Session
 ) -> None:
@@ -771,15 +829,261 @@ async def test_an_inserted_object_enters_the_identity_map(
     assert (await session.get(User, 7)) is user
 
 
+async def test_a_staged_generated_key_is_present_in_the_insert_audit(
+    monkeypatch: pytest.MonkeyPatch, registry: Registry, database: FakeDatabase
+) -> None:
+    class Facet:
+        redact = frozenset()
+
+    class Audit:
+        def __init__(self) -> None:
+            self.changes: list[Any] = []
+
+        def attribute(self) -> str:
+            return "test:actor"
+
+        async def record_many(self, changes: list[Any], *, connection: Any) -> None:
+            self.changes += changes
+
+    monkeypatch.setattr(User, "__wreath_facets__", {"audit": Facet()})
+    audit = Audit()
+    audited = Session(registry, "write", audit=audit)
+    database.connection.script("INSERT", [[7, None]])
+    user = User(email="a@b.c", name="A")
+    audited.add(user)
+
+    await audited.flush()
+
+    assert audit.changes[0].key == "7"
+    assert audit.changes[0].fields["id"] == 7
+
+
 async def test_update_writes_only_dirty_columns(database: FakeDatabase, session: Session) -> None:
     database.connection.script("SELECT", [user_row(1, "a@b.c", "A")])
     user = (await session.fetch(User.select()))[0]
     user.name = "B"
+    database.connection.script("UPDATE", [[1]])
     database.connection.calls.clear()
     await session.flush()
     sql, args = database.connection.calls[1]
-    assert sql == 'UPDATE "public"."users" SET "name" = $1 WHERE "id" = $2'
-    assert args == ("B", 1)
+    assert sql == (
+        'UPDATE "public"."users" AS "wreath_target" '
+        'SET "name" = "wreath_batch"."name" '
+        'FROM UNNEST($1::text[], $2::bigint[]) AS "wreath_batch" ("name", "id") '
+        'WHERE "wreath_target"."id" = "wreath_batch"."id" '
+        'RETURNING "wreath_target"."id"'
+    )
+    assert args == (["B"], [1])
+
+
+async def test_updates_group_by_model_and_dirty_shape(
+    database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script(
+        "SELECT", [user_row(1, "1@b.c", "A"), user_row(2, "2@b.c", "B")]
+    )
+    users = await session.fetch(User.select())
+    users[0].name = "A2"
+    users[1].name = "B2"
+    database.connection.script("UPDATE", [[1], [2]])
+    database.connection.calls.clear()
+
+    await session.flush()
+
+    updates = [call for call in database.connection.calls if call[0].startswith("UPDATE")]
+    assert len(updates) == 1
+    assert "UNNEST($1::text[], $2::bigint[])" in updates[0][0]
+    assert updates[0][1] == (["A2", "B2"], [1, 2])
+    assert not users[0]._orm_has_changes()
+    assert not users[1]._orm_has_changes()
+
+
+async def test_updates_consolidate_nonadjacent_equal_dirty_shapes(
+    monkeypatch: pytest.MonkeyPatch, database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script(
+        "SELECT",
+        [
+            user_row(1, "1@b.c", "A"),
+            user_row(2, "2@b.c", "B"),
+            user_row(3, "3@b.c", "C"),
+        ],
+    )
+    users = await session.fetch(User.select())
+    users[0].name = "A2"
+    users[1].email = "two@b.c"
+    users[2].name = "C2"
+
+    async def fetch(sql: str, *args: object) -> list[tuple[object, ...]]:
+        database.connection._record(sql, args)
+        return [(key,) for key in cast(list[object], args[-1])]
+
+    monkeypatch.setattr(database.connection, "fetch", fetch)
+    database.connection.calls.clear()
+
+    await session.flush()
+
+    updates = [call for call in database.connection.calls if call[0].startswith("UPDATE")]
+    assert len(updates) == 2
+    assert updates[0][1] == (["A2", "C2"], [1, 3])
+    assert updates[1][1] == (["two@b.c"], [2])
+
+
+async def test_update_batch_chunks_at_the_array_row_limit(
+    monkeypatch: pytest.MonkeyPatch, database: FakeDatabase, session: Session
+) -> None:
+    monkeypatch.setattr("wreath.orm.session.MAX_BIND_PARAMETERS", 2)
+    database.connection.script(
+        "SELECT",
+        [
+            user_row(1, "1@b.c", "A"),
+            user_row(2, "2@b.c", "B"),
+            user_row(3, "3@b.c", "C"),
+        ],
+    )
+    users = await session.fetch(User.select())
+    for user in users:
+        user.name += "2"
+
+    async def fetch(sql: str, *args: object) -> list[tuple[object, ...]]:
+        database.connection._record(sql, args)
+        return [(key,) for key in cast(list[object], args[-1])]
+
+    monkeypatch.setattr(database.connection, "fetch", fetch)
+    database.connection.calls.clear()
+
+    await session.flush()
+
+    updates = [call for call in database.connection.calls if call[0].startswith("UPDATE")]
+    assert [args for _sql, args in updates] == [
+        (["A2", "B2"], [1, 2]),
+        (["C2"], [3]),
+    ]
+
+
+async def test_update_unnest_batch_splits_when_the_packet_is_too_large(
+    monkeypatch: pytest.MonkeyPatch, database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script(
+        "SELECT", [user_row(1, name="A"), user_row(2, name="B")]
+    )
+    users = await session.fetch(User.select())
+    for user in users:
+        user.name += "2"
+
+    async def fetch(sql: str, *args: object) -> list[tuple[object, ...]]:
+        keys = cast(list[object], args[-1])
+        if len(keys) > 1:
+            raise PipelineFullError("operation exceeds maximum outbound batch")
+        database.connection._record(sql, args)
+        return [(keys[0],)]
+
+    monkeypatch.setattr(database.connection, "fetch", fetch)
+    database.connection.calls.clear()
+
+    await session.flush()
+
+    updates = [call for call in database.connection.calls if call[0].startswith("UPDATE")]
+    assert [args for _sql, args in updates] == [(["A2"], [1]), (["B2"], [2])]
+    assert all(not user._orm_has_changes() for user in users)
+
+
+async def test_a_stale_update_batch_keeps_every_dirty_state(
+    database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script(
+        "SELECT", [user_row(1, "1@b.c", "A"), user_row(2, "2@b.c", "B")]
+    )
+    users = await session.fetch(User.select())
+    for user in users:
+        user.name += "2"
+    database.connection.script("UPDATE", [[1]])
+
+    with pytest.raises(StaleDataError, match=r"User.*\(2,\)"):
+        await session.flush()
+
+    assert all(user._orm_has_changes() for user in users)
+
+
+async def test_a_stale_update_batch_rolls_back_its_explicit_transaction_savepoint(
+    database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script(
+        "SELECT", [user_row(1, "1@b.c", "A"), user_row(2, "2@b.c", "B")]
+    )
+    users = await session.fetch(User.select())
+    for user in users:
+        user.name += "2"
+    database.connection.script("UPDATE", [[1]])
+    database.connection.calls.clear()
+
+    async with session.begin():
+        with pytest.raises(StaleDataError, match=r"User.*\(2,\)"):
+            await session.flush()
+
+    statements = database.connection.statements
+    assert statements[:2] == ["BEGIN", "SAVEPOINT wreath_sp_1"]
+    assert statements[2].startswith("UPDATE")
+    assert statements[3:] == [
+        "ROLLBACK TO SAVEPOINT wreath_sp_1",
+        "RELEASE SAVEPOINT wreath_sp_1",
+        "COMMIT",
+    ]
+
+
+async def test_a_later_stale_update_group_keeps_an_earlier_group_dirty(
+    monkeypatch: pytest.MonkeyPatch, database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script(
+        "SELECT", [user_row(1, "1@b.c", "A"), user_row(2, "2@b.c", "B")]
+    )
+    users = await session.fetch(User.select())
+    users[0].name = "changed"
+    users[1].email = "changed@b.c"
+
+    async def fetch(sql: str, *args: object) -> list[tuple[object, ...]]:
+        database.connection._record(sql, args)
+        return [(1,)] if 'SET "name"' in sql else []
+
+    monkeypatch.setattr(database.connection, "fetch", fetch)
+    database.connection.calls.clear()
+
+    async with session.begin():
+        with pytest.raises(StaleDataError, match=r"User.*\(2,\)"):
+            await session.flush()
+
+    assert all(user._orm_has_changes() for user in users)
+    assert database.connection.statements[-3:] == [
+        "ROLLBACK TO SAVEPOINT wreath_sp_1",
+        "RELEASE SAVEPOINT wreath_sp_1",
+        "COMMIT",
+    ]
+
+
+async def test_a_stale_update_after_an_insert_restores_the_new_instance(
+    monkeypatch: pytest.MonkeyPatch, database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script("SELECT", [user_row(1, "1@b.c", "A")])
+    existing = (await session.fetch(User.select()))[0]
+    existing.name = "changed"
+    inserted = User(email="new@b.c", name="new")
+    session.add(inserted)
+
+    async def fetch(sql: str, *args: object) -> list[tuple[object, ...]]:
+        database.connection._record(sql, args)
+        return [(7, None)] if sql.startswith("INSERT") else []
+
+    monkeypatch.setattr(database.connection, "fetch", fetch)
+    database.connection.calls.clear()
+
+    async with session.begin():
+        with pytest.raises(StaleDataError, match=r"User.*\(1,\)"):
+            await session.flush()
+
+    assert inserted._orm_state != PERSISTENT
+    assert inserted._orm_primary_key() is None
+    assert inserted in session._new
+    assert existing._orm_has_changes()
 
 
 async def test_an_object_with_no_changes_emits_no_sql(
@@ -798,11 +1102,131 @@ async def test_delete_uses_the_complete_primary_key(
     database.connection.script("SELECT", [[1, 1, "admin"]])
     membership = (await session.fetch(Membership.select()))[0]
     session.delete(membership)
+    database.connection.script("DELETE", [[1, 1]])
     database.connection.calls.clear()
     await session.flush()
     sql, args = database.connection.calls[1]
-    assert sql == ('DELETE FROM "public"."memberships" WHERE "org_id" = $1 AND "user_id" = $2')
-    assert args == (1, 1)
+    assert sql == (
+        'DELETE FROM "public"."memberships" AS "wreath_target" '
+        'USING UNNEST($1::bigint[], $2::bigint[]) '
+        'AS "wreath_batch" ("org_id", "user_id") '
+        'WHERE "wreath_target"."org_id" = "wreath_batch"."org_id" AND '
+        '"wreath_target"."user_id" = "wreath_batch"."user_id" '
+        'RETURNING "wreath_target"."org_id", "wreath_target"."user_id"'
+    )
+    assert args == ([1], [1])
+
+
+async def test_deletes_batch_by_model_with_composite_stale_detection(
+    database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script("SELECT", [[1, 1, "admin"], [1, 2, "member"]])
+    memberships = await session.fetch(Membership.select())
+    for membership in memberships:
+        session.delete(membership)
+    database.connection.script("DELETE", [[1, 1], [1, 2]])
+    database.connection.calls.clear()
+
+    await session.flush()
+
+    deletes = [call for call in database.connection.calls if call[0].startswith("DELETE")]
+    assert len(deletes) == 1
+    assert deletes[0][1] == ([1, 1], [1, 2])
+    assert all(item._orm_state == DETACHED for item in memberships)
+
+
+async def test_delete_batch_chunks_at_the_array_row_limit(
+    monkeypatch: pytest.MonkeyPatch, database: FakeDatabase, session: Session
+) -> None:
+    monkeypatch.setattr("wreath.orm.session.MAX_BIND_PARAMETERS", 2)
+    database.connection.script(
+        "SELECT", [[1, 1, "admin"], [1, 2, "member"], [1, 3, "member"]]
+    )
+    memberships = await session.fetch(Membership.select())
+    for membership in memberships:
+        session.delete(membership)
+
+    async def fetch(sql: str, *args: object) -> list[tuple[object, ...]]:
+        database.connection._record(sql, args)
+        return list(zip(*args, strict=True))
+
+    monkeypatch.setattr(database.connection, "fetch", fetch)
+    database.connection.calls.clear()
+
+    await session.flush()
+
+    deletes = [call for call in database.connection.calls if call[0].startswith("DELETE")]
+    assert [args for _sql, args in deletes] == [
+        ([1, 1], [1, 2]),
+        ([1], [3]),
+    ]
+
+
+async def test_a_stale_delete_batch_keeps_every_identity_mapped(
+    database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script("SELECT", [[1, 1, "admin"], [1, 2, "member"]])
+    memberships = await session.fetch(Membership.select())
+    for membership in memberships:
+        session.delete(membership)
+    database.connection.script("DELETE", [[1, 1]])
+
+    with pytest.raises(StaleDataError, match=r"Membership.*\(1, 2\)"):
+        await session.flush()
+
+    spec = session._registry.spec_for(Membership)
+    assert all(item._orm_state == DELETED for item in memberships)
+    assert [session._identity[(spec, (1, key))] for key in (1, 2)] == memberships
+
+
+async def test_a_stale_delete_batch_rolls_back_its_explicit_transaction_savepoint(
+    database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script("SELECT", [[1, 1, "admin"], [1, 2, "member"]])
+    memberships = await session.fetch(Membership.select())
+    for membership in memberships:
+        session.delete(membership)
+    database.connection.script("DELETE", [[1, 1]])
+    database.connection.calls.clear()
+
+    async with session.begin():
+        with pytest.raises(StaleDataError, match=r"Membership.*\(1, 2\)"):
+            await session.flush()
+
+    statements = database.connection.statements
+    assert statements[:2] == ["BEGIN", "SAVEPOINT wreath_sp_1"]
+    assert statements[2].startswith("DELETE")
+    assert statements[3:] == [
+        "ROLLBACK TO SAVEPOINT wreath_sp_1",
+        "RELEASE SAVEPOINT wreath_sp_1",
+        "COMMIT",
+    ]
+
+
+async def test_a_later_stale_delete_group_keeps_an_earlier_group_attached(
+    monkeypatch: pytest.MonkeyPatch, database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script("SELECT", [user_row(1, "1@b.c", "A")])
+    user = (await session.fetch(User.select()))[0]
+    post = _persistent_post(session)
+    session.delete(user)
+    session.delete(post)
+
+    async def fetch(sql: str, *args: object) -> list[tuple[object, ...]]:
+        database.connection._record(sql, args)
+        return [(5,)] if '"posts"' in sql else []
+
+    monkeypatch.setattr(database.connection, "fetch", fetch)
+    database.connection.calls.clear()
+
+    async with session.begin():
+        with pytest.raises(StaleDataError, match=r"User.*\(1,\)"):
+            await session.flush()
+
+    spec = session._registry.spec_for(Post)
+    assert post._orm_state == DELETED
+    assert post._orm_owner is session
+    assert session._identity[(spec, (5,))] is post
 
 
 async def test_flush_opens_and_commits_its_own_transaction(
@@ -815,7 +1239,7 @@ async def test_flush_opens_and_commits_its_own_transaction(
     assert database.connection.statements[-1] == "COMMIT"
 
 
-async def test_flush_inside_a_transaction_does_not_nest_one(
+async def test_insert_flush_inside_a_transaction_uses_a_savepoint(
     database: FakeDatabase, session: Session
 ) -> None:
     database.connection.script("INSERT", [[7, None]])
@@ -823,7 +1247,143 @@ async def test_flush_inside_a_transaction_does_not_nest_one(
         session.add(User(email="a@b.c", name="A"))
         await session.flush()
     assert database.connection.statements.count("BEGIN") == 1
-    assert "SAVEPOINT wreath_sp_1" not in database.connection.statements
+    assert "SAVEPOINT wreath_sp_1" in database.connection.statements
+
+
+async def test_a_single_update_inside_a_transaction_uses_a_savepoint(
+    database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script("SELECT", [user_row(1, "a@b.c", "A")])
+    user = (await session.fetch(User.select()))[0]
+    user.name = "changed"
+    database.connection.script("UPDATE", [[1]])
+    database.connection.calls.clear()
+
+    async with session.begin():
+        await session.flush()
+
+    assert "SAVEPOINT wreath_sp_1" in database.connection.statements
+
+
+async def test_a_successful_update_batch_releases_its_flush_savepoint(
+    database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script(
+        "SELECT", [user_row(1, "1@b.c", "A"), user_row(2, "2@b.c", "B")]
+    )
+    users = await session.fetch(User.select())
+    for user in users:
+        user.name = "changed"
+    database.connection.script("UPDATE", [[1], [2]])
+    database.connection.calls.clear()
+
+    async with session.begin():
+        await session.flush()
+
+    statements = database.connection.statements
+    assert statements[:2] == ["BEGIN", "SAVEPOINT wreath_sp_1"]
+    assert statements[2].startswith("UPDATE")
+    assert statements[3:] == ["RELEASE SAVEPOINT wreath_sp_1", "COMMIT"]
+
+
+async def test_outer_rollback_invalidates_an_insert_for_retry(
+    database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script("INSERT", [[7, None]])
+    user = User(email="a@b.c", name="A")
+
+    with pytest.raises(RuntimeError, match="rollback"):
+        async with session.begin():
+            session.add(user)
+            await session.flush()
+            assert user._orm_state == PERSISTENT
+            assert user.id == 7
+            raise RuntimeError("rollback")
+
+    assert user._orm_state == DETACHED
+    assert user._orm_owner is None
+    retry = User(email="a@b.c", name="A")
+    database.connection.responses.clear()
+    database.connection.script("INSERT", [[8, None]])
+    session.add(retry)
+    await session.flush()
+    assert retry._orm_state == PERSISTENT
+    assert retry.id == 8
+
+
+async def test_outer_rollback_restores_an_update_for_retry(
+    database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script("SELECT", [user_row(1, "a@b.c", "A")])
+    user = (await session.fetch(User.select()))[0]
+    user.name = "changed"
+    database.connection.script("UPDATE", [[1]])
+
+    with pytest.raises(RuntimeError, match="rollback"):
+        async with session.begin():
+            await session.flush()
+            assert not user._orm_has_changes()
+            raise RuntimeError("rollback")
+
+    assert user._orm_state == DETACHED
+    assert user._orm_owner is None
+    database.connection.script("SELECT", [user_row(1, "a@b.c", "A")])
+    user = (await session.fetch(User.select()))[0]
+    user.name = "changed"
+    await session.flush()
+    assert not user._orm_has_changes()
+
+
+async def test_outer_rollback_restores_a_delete_for_retry(
+    database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script("SELECT", [[1, 1, "admin"]])
+    membership = (await session.fetch(Membership.select()))[0]
+    session.delete(membership)
+    database.connection.script("DELETE", [[1, 1]])
+
+    with pytest.raises(RuntimeError, match="rollback"):
+        async with session.begin():
+            await session.flush()
+            assert membership._orm_state == DETACHED
+            raise RuntimeError("rollback")
+
+    assert membership._orm_state == DETACHED
+    assert membership._orm_owner is None
+    database.connection.script("SELECT", [[1, 1, "admin"]])
+    membership = (await session.fetch(Membership.select()))[0]
+    session.delete(membership)
+    await session.flush()
+    assert membership._orm_state == DETACHED
+
+
+async def test_outer_rollback_invalidates_every_successful_flush(
+    database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script("SELECT", [user_row(1, "a@b.c", "A")])
+    existing = (await session.fetch(User.select()))[0]
+    database.connection.script("UPDATE", [[1]])
+    inserted = User(email="new@b.c", name="New")
+
+    with pytest.raises(RuntimeError, match="rollback"):
+        async with session.begin():
+            existing.name = "changed"
+            await session.flush()
+            database.connection.responses.clear()
+            database.connection.script("INSERT", [[7, None]])
+            session.add(inserted)
+            await session.flush()
+            database.connection.responses.clear()
+            database.connection.script("UPDATE", [[7]])
+            inserted.name = "Newer"
+            await session.flush()
+            raise RuntimeError("rollback")
+
+    assert existing._orm_state == DETACHED
+    assert existing._orm_owner is None
+    assert inserted._orm_state == DETACHED
+    assert inserted._orm_owner is None
+    assert inserted.name == "Newer"
 
 
 async def test_flush_orders_inserts_then_updates_then_deletes(
@@ -834,7 +1394,8 @@ async def test_flush_orders_inserts_then_updates_then_deletes(
     existing.name = "changed"
     database.connection.responses.clear()
     database.connection.script("INSERT", [[7, None]])
-    database.connection.script("SELECT", [[2, 1, "x"]])
+    database.connection.script("UPDATE", [[1]])
+    database.connection.script("DELETE", [[5]])
     session.add(User(email="new@x.y", name="N"))
     doomed = Post._orm_new()
     doomed._orm_set_loaded(0, 5)

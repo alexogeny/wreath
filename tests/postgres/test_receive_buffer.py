@@ -159,6 +159,26 @@ async def test_native_connection_uses_buffered_protocol_without_stream_reader() 
 
 @requires_native
 @pytest.mark.asyncio
+async def test_cached_queries_reuse_receive_slabs_without_steady_allocations() -> None:
+    server = FakePostgres(fragment=True)
+    dsn = await server.start_tcp()
+    connection = await native.connect(dsn)
+    try:
+        await connection.fetchval("select 42::int4")
+        await connection.fetchval("select 42::int4")
+        before = connection._reader._receive_stats()
+        for _ in range(32):
+            assert await connection.fetchval("select 42::int4") == 42
+        after = connection._reader._receive_stats()
+        assert after["slab_allocations"] == before["slab_allocations"]
+        assert after["idle_slabs"] <= 2
+    finally:
+        await connection.close()
+        await server.close()
+
+
+@requires_native
+@pytest.mark.asyncio
 async def test_retired_slab_reclamation_is_budgeted_per_receive() -> None:
     protocol = native.BufferedProtocol()
     pinned = 128

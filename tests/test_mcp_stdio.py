@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import json
 import os
+from collections.abc import AsyncIterator
+from types import SimpleNamespace
+from unittest import mock
 
 from wreath import Wreath
-from wreath._mcp.stdio import _pump, serve
+from wreath._mcp import stdio
+from wreath._mcp.stdio import _pump
 from wreath.mcp import MCP, PROTOCOL_VERSION
 
 
@@ -27,7 +33,8 @@ class Pipe:
         self.writer.flush()
 
     def close(self) -> None:
-        self.writer.close()
+        if not self.writer.closed:
+            self.writer.close()
 
 
 class Sink:
@@ -48,8 +55,30 @@ class Sink:
     def flush(self) -> None:
         return None
 
-    async def next(self, seconds: float = 5.0) -> dict:
+    async def next(self, seconds: float = 0.5) -> dict:
         return await asyncio.wait_for(self._pending.get(), timeout=seconds)
+
+
+@contextlib.asynccontextmanager
+async def relay_session() -> AsyncIterator[tuple[Pipe, Sink]]:
+    pipe = Pipe()
+    sink = Sink()
+    process_streams = SimpleNamespace(
+        stdin=SimpleNamespace(buffer=io.BytesIO()),
+        stdout=SimpleNamespace(buffer=Sink()),
+    )
+    with mock.patch.object(stdio, "sys", process_streams):
+        relay = asyncio.create_task(stdio.serve(build(), stdin=pipe.reader, stdout=sink))
+        try:
+            yield pipe, sink
+        finally:
+            pipe.close()
+            try:
+                await asyncio.wait_for(relay, timeout=0.25)
+            except TimeoutError:
+                relay.cancel()
+                await asyncio.gather(relay, return_exceptions=True)
+            pipe.reader.close()
 
 
 def build() -> Wreath:
@@ -86,118 +115,113 @@ async def test_stream_pump_reassembles_one_data_line_from_many_fragments() -> No
     assert written == [payload]
 
 
-async def test_a_tool_can_be_called_over_the_pipe() -> None:
+async def test_end_of_input_stops_the_relay() -> None:
     pipe = Pipe()
-    sink = Sink()
-    relay = asyncio.ensure_future(serve(build(), stdin=pipe.reader, stdout=sink))
-
-    pipe.send(
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {"protocolVersion": PROTOCOL_VERSION, "capabilities": {}},
-        }
-    )
-    opened = await sink.next()
-    assert opened["result"]["serverInfo"]["name"] == "camera-trap"
-
-    pipe.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-    listed = await sink.next()
-    assert [tool["name"] for tool in listed["result"]["tools"]] == [
-        "count_sightings",
-        "summarise",
-    ]
-
-    pipe.send(
-        {
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tools/call",
-            "params": {"name": "count_sightings", "arguments": {"species": "fox"}},
-        }
-    )
-    called = await sink.next()
-    assert called["result"]["structuredContent"] == {"species": "fox", "count": 3}
-
     pipe.close()
-    assert await asyncio.wait_for(relay, timeout=5) == 0
+    sink = Sink()
+    try:
+        assert await asyncio.wait_for(
+            stdio.serve(build(), stdin=pipe.reader, stdout=sink),
+            timeout=0.5,
+        ) == 0
+    finally:
+        pipe.reader.close()
+
+
+async def test_a_tool_can_be_called_over_the_pipe() -> None:
+    async with relay_session() as (pipe, sink):
+        pipe.send(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": PROTOCOL_VERSION, "capabilities": {}},
+            }
+        )
+        opened = await sink.next()
+        assert opened["result"]["serverInfo"]["name"] == "camera-trap"
+
+        pipe.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        listed = await sink.next()
+        assert [tool["name"] for tool in listed["result"]["tools"]] == [
+            "count_sightings",
+            "summarise",
+        ]
+
+        pipe.send(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "count_sightings", "arguments": {"species": "fox"}},
+            }
+        )
+        called = await sink.next()
+        assert called["result"]["structuredContent"] == {"species": "fox", "count": 3}
 
 
 async def test_a_schema_rejection_is_the_same_one_the_http_endpoint_gives() -> None:
-    pipe = Pipe()
-    sink = Sink()
-    relay = asyncio.ensure_future(serve(build(), stdin=pipe.reader, stdout=sink))
-
-    pipe.send(
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {"protocolVersion": PROTOCOL_VERSION, "capabilities": {}},
-        }
-    )
-    await sink.next()
-    pipe.send(
-        {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {"name": "count_sightings", "arguments": {"invented": 1}},
-        }
-    )
-    refused = await sink.next()
-    assert refused["error"]["code"] == -32602
-    assert refused["error"]["data"]["errors"][0]["loc"] == ["arguments", "species"]
-
-    pipe.close()
-    await asyncio.wait_for(relay, timeout=5)
+    async with relay_session() as (pipe, sink):
+        pipe.send(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": PROTOCOL_VERSION, "capabilities": {}},
+            }
+        )
+        await sink.next()
+        pipe.send(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "count_sightings", "arguments": {"invented": 1}},
+            }
+        )
+        refused = await sink.next()
+        assert refused["error"]["code"] == -32602
+        assert refused["error"]["data"]["errors"][0]["loc"] == ["arguments", "species"]
 
 
 async def test_a_server_to_client_request_travels_out_and_its_answer_comes_back() -> None:
-    pipe = Pipe()
-    sink = Sink()
-    relay = asyncio.ensure_future(serve(build(), stdin=pipe.reader, stdout=sink))
+    async with relay_session() as (pipe, sink):
+        pipe.send(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {"sampling": {}},
+                },
+            }
+        )
+        await sink.next()
+        pipe.send(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "summarise", "arguments": {"note": "a fox"}},
+            }
+        )
 
-    pipe.send(
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {"sampling": {}},
-            },
-        }
-    )
-    await sink.next()
-    pipe.send(
-        {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {"name": "summarise", "arguments": {"note": "a fox"}},
-        }
-    )
-
-    asked = await sink.next()
-    assert asked["method"] == "sampling/createMessage"
-    pipe.send(
-        {
-            "jsonrpc": "2.0",
-            "id": asked["id"],
-            "result": {
-                "role": "assistant",
-                "content": {"type": "text", "text": "one fox"},
-                "model": "a-model",
-            },
-        }
-    )
-    answered = await sink.next()
-    assert answered["result"]["structuredContent"] == {"summary": "one fox"}
-
-    pipe.close()
-    await asyncio.wait_for(relay, timeout=5)
+        asked = await sink.next()
+        assert asked["method"] == "sampling/createMessage"
+        pipe.send(
+            {
+                "jsonrpc": "2.0",
+                "id": asked["id"],
+                "result": {
+                    "role": "assistant",
+                    "content": {"type": "text", "text": "one fox"},
+                    "model": "a-model",
+                },
+            }
+        )
+        answered = await sink.next()
+        assert answered["result"]["structuredContent"] == {"summary": "one fox"}
 
 
 async def test_the_subcommand_is_wired_to_the_relay() -> None:

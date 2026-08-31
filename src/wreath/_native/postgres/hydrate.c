@@ -53,6 +53,121 @@ static PyObject *mapping_error = NULL;
 #define BITMAP_LOADED 0
 #define BITMAP_NULL 1
 
+typedef struct {
+    PyObject *instance;
+    WreathPgModelLayout *layout;
+    unsigned char *state;
+    int restored;
+} WreathPgHydrateSnapshot;
+
+typedef struct {
+    PyObject *created;
+    WreathPgHydrateSnapshot *snapshots;
+    Py_ssize_t snapshot_count;
+    Py_ssize_t snapshot_capacity;
+} WreathPgHydrateJournal;
+
+static int
+hydrate_journal_init(WreathPgHydrateJournal *journal)
+{
+    memset(journal, 0, sizeof(*journal));
+    journal->created = PyList_New(0);
+    return journal->created == NULL ? -1 : 0;
+}
+
+static void
+hydrate_snapshot_release(WreathPgHydrateSnapshot *snapshot)
+{
+    if (!snapshot->restored) {
+        for (Py_ssize_t i = 0; i < snapshot->layout->pointer_count; i++) {
+            Py_ssize_t relative = snapshot->layout->pointer_offsets[i] -
+                snapshot->layout->bitmap_offset;
+            PyObject *value;
+            memcpy(&value, snapshot->state + relative, sizeof(value));
+            Py_XDECREF(value);
+        }
+    }
+    Py_DECREF(snapshot->instance);
+    PyMem_Free(snapshot->state);
+}
+
+static void
+hydrate_journal_clear(WreathPgHydrateJournal *journal)
+{
+    for (Py_ssize_t i = 0; i < journal->snapshot_count; i++)
+        hydrate_snapshot_release(&journal->snapshots[i]);
+    PyMem_Free(journal->snapshots);
+    Py_CLEAR(journal->created);
+}
+
+static int
+hydrate_journal_snapshot(WreathPgHydrateJournal *journal, PyObject *instance)
+{
+    WreathPgModelLayout *layout = wreath_pg_model_layout_of(instance);
+    WreathPgHydrateSnapshot *snapshot;
+    Py_ssize_t state_size;
+    if (layout == NULL) {
+        PyErr_SetString(PyExc_TypeError, "model hydration target has no native layout");
+        return -1;
+    }
+    if (journal->snapshot_count == journal->snapshot_capacity) {
+        Py_ssize_t capacity = journal->snapshot_capacity == 0
+            ? 8 : journal->snapshot_capacity * 2;
+        WreathPgHydrateSnapshot *resized = PyMem_Realloc(
+            journal->snapshots, (size_t)capacity * sizeof(*resized));
+        if (resized == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        journal->snapshots = resized;
+        journal->snapshot_capacity = capacity;
+    }
+    state_size = layout->basicsize - layout->bitmap_offset;
+    snapshot = &journal->snapshots[journal->snapshot_count];
+    snapshot->state = PyMem_Malloc((size_t)state_size);
+    if (snapshot->state == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    memcpy(snapshot->state, (char *)instance + layout->bitmap_offset,
+           (size_t)state_size);
+    for (Py_ssize_t i = 0; i < layout->pointer_count; i++) {
+        Py_ssize_t relative = layout->pointer_offsets[i] - layout->bitmap_offset;
+        PyObject *value;
+        memcpy(&value, snapshot->state + relative, sizeof(value));
+        Py_XINCREF(value);
+    }
+    snapshot->instance = Py_NewRef(instance);
+    snapshot->layout = layout;
+    snapshot->restored = 0;
+    journal->snapshot_count++;
+    return 0;
+}
+
+static void
+hydrate_journal_rollback(WreathPgHydrateJournal *journal, PyObject *identity_map)
+{
+    PyObject *raised = PyErr_GetRaisedException();
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(journal->created); i++) {
+        if (PyDict_DelItem(identity_map, PyList_GET_ITEM(journal->created, i)) < 0)
+            PyErr_Clear();
+    }
+    for (Py_ssize_t i = 0; i < journal->snapshot_count; i++) {
+        WreathPgHydrateSnapshot *snapshot = &journal->snapshots[i];
+        WreathPgModelLayout *layout = snapshot->layout;
+        for (Py_ssize_t pointer = 0; pointer < layout->pointer_count; pointer++) {
+            PyObject **slot = (PyObject **)(
+                (char *)snapshot->instance + layout->pointer_offsets[pointer]);
+            Py_CLEAR(*slot);
+        }
+        memcpy((char *)snapshot->instance + layout->bitmap_offset,
+               snapshot->state,
+               (size_t)(layout->basicsize - layout->bitmap_offset));
+        snapshot->restored = 1;
+    }
+    PyErr_SetRaisedException(raised);
+}
+
 static uint64_t *
 bitmap_words_at(PyObject *instance, const WreathPgHydratePlan *plan, int which)
 {
@@ -431,6 +546,19 @@ validate_result(const WreathPgDecoderPlan *decoder, const WreathPgHydratePlan *p
     return 0;
 }
 
+int
+wreath_pg_hydrate_validate(PyObject *decoder_plan, PyObject *hydrate_plan)
+{
+    if (!PyObject_TypeCheck(decoder_plan, WreathPgDecoderPlanType) ||
+        !PyObject_TypeCheck(hydrate_plan, WreathPgHydratePlanType)) {
+        PyErr_SetString(PyExc_ValueError, "invalid model hydration plan");
+        return -1;
+    }
+    return validate_result(
+        (WreathPgDecoderPlan *)decoder_plan,
+        (WreathPgHydratePlan *)hydrate_plan);
+}
+
 static const unsigned char *
 field_data(WreathPgFieldTape *tape, Py_buffer *buffers, Py_ssize_t row,
            Py_ssize_t column, Py_ssize_t *length)
@@ -491,7 +619,7 @@ row_identity(WreathPgHydratePlan *plan, WreathPgDecoderPlan *decoder, WreathPgFi
 static int
 hydrate_row(WreathPgHydratePlan *plan, WreathPgDecoderPlan *decoder, WreathPgFieldTape *tape,
             Py_buffer *buffers, Py_ssize_t row, PyObject *dest, PyObject *identity_map,
-            PyObject *owner, PyObject *seen)
+            PyObject *owner, PyObject *seen, WreathPgHydrateJournal *journal)
 {
     PyObject *key = NULL;
     PyObject *identity = NULL;
@@ -522,6 +650,8 @@ hydrate_row(WreathPgHydratePlan *plan, WreathPgDecoderPlan *decoder, WreathPgFie
         plan->allocated++;
     } else {
         plan->reused++;
+        if (!seen_before && hydrate_journal_snapshot(journal, instance) < 0)
+            goto done;
     }
 
     for (Py_ssize_t i = 0; i < plan->column_count; i++) {
@@ -575,6 +705,7 @@ hydrate_row(WreathPgHydratePlan *plan, WreathPgDecoderPlan *decoder, WreathPgFie
         if (PySet_Add(seen, identity) < 0) goto done;
         seen_added = 1;
         if (PyList_Append(dest, instance) < 0) goto done;
+        if (fresh && PyList_Append(journal->created, identity) < 0) goto done;
     }
     failed = 0;
 
@@ -597,6 +728,209 @@ done:
     return failed;
 }
 
+typedef struct {
+    const unsigned char *data;
+    Py_ssize_t length;
+} WreathPgRawField;
+
+static uint16_t
+raw_u16(const unsigned char *data)
+{
+    return (uint16_t)((uint16_t)data[0] << 8 | data[1]);
+}
+
+static uint32_t
+raw_u32(const unsigned char *data)
+{
+    return ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) |
+           ((uint32_t)data[2] << 8) | data[3];
+}
+
+static PyObject *
+raw_row_identity(WreathPgHydratePlan *plan, WreathPgDecoderPlan *decoder,
+                 WreathPgRawField *fields, int *has_null)
+{
+    PyObject *key = PyTuple_New(plan->key_count);
+    if (key == NULL) return NULL;
+    *has_null = 0;
+    for (Py_ssize_t i = 0; i < plan->key_count; i++) {
+        Py_ssize_t position = plan->key_positions[i];
+        WreathPgColumnDecoder *column = &decoder->columns[position];
+        WreathPgRawField *field = &fields[position];
+        PyObject *value;
+        if (field->length == -1) {
+            *has_null = 1;
+            Py_DECREF(key);
+            return NULL;
+        }
+        value = column->decoder(
+            field->data, field->length, column->format, column->oid);
+        if (value == NULL) {
+            Py_DECREF(key);
+            return NULL;
+        }
+        PyTuple_SET_ITEM(key, i, value);
+    }
+    return key;
+}
+
+static int
+hydrate_raw_row(WreathPgHydratePlan *plan, WreathPgDecoderPlan *decoder,
+                WreathPgRawField *fields, PyObject *dest,
+                PyObject *identity_map, PyObject *owner, PyObject *seen)
+{
+    PyObject *key = NULL;
+    PyObject *identity = NULL;
+    PyObject *instance = NULL;
+    PyObject *raised = NULL;
+    int has_null = 0;
+    int fresh = 0;
+    int identity_added = 0;
+    int seen_before;
+    int seen_added = 0;
+    int failed = -1;
+
+    key = raw_row_identity(plan, decoder, fields, &has_null);
+    if (key == NULL) return has_null ? 0 : -1;
+    identity = PyTuple_Pack(2, plan->identity_spec, key);
+    if (identity == NULL) goto done;
+    seen_before = PySet_Contains(seen, identity);
+    if (seen_before < 0) goto done;
+    if (PyDict_GetItemRef(identity_map, identity, &instance) < 0) goto done;
+    if (instance == NULL) {
+        instance = wreath_pg_model_alloc(plan->model_type);
+        if (instance == NULL) goto done;
+        fresh = 1;
+        plan->allocated++;
+    } else {
+        plan->reused++;
+    }
+
+    for (Py_ssize_t i = 0; i < plan->column_count; i++) {
+        WreathPgHydrateColumn *column = &plan->columns[i];
+        WreathPgRawField *field = &fields[i];
+        char *cell = (char *)instance + column->offset;
+        int stored;
+        if (!fresh && bit_get(instance, plan, 2, column->bit)) continue;
+        if (field->length == -1) {
+            if (column->kind == WREATH_CELL_OBJECT) {
+                PyObject **slot = (PyObject **)cell;
+                Py_CLEAR(*slot);
+            }
+            bit_set(instance, plan, BITMAP_NULL, column->bit, 1);
+            bit_set(instance, plan, BITMAP_LOADED, column->bit, 1);
+            continue;
+        }
+        stored = store_binary_inline(
+            cell, column, decoder->columns[i].format,
+            field->data, field->length);
+        if (stored < 0) goto done;
+        if (stored == 0) {
+            WreathPgColumnDecoder *source = &decoder->columns[i];
+            PyObject *value = source->decoder(
+                field->data, field->length, source->format, source->oid);
+            if (value == NULL) goto done;
+            if (store_boxed(cell, column, value) < 0) {
+                Py_DECREF(value);
+                goto done;
+            }
+            Py_DECREF(value);
+        }
+        bit_set(instance, plan, BITMAP_NULL, column->bit, 0);
+        bit_set(instance, plan, BITMAP_LOADED, column->bit, 1);
+    }
+
+    if (fresh) {
+        WreathPgModel *model = (WreathPgModel *)instance;
+        model->state_flags = 1;
+        Py_XSETREF(model->identity_owner, Py_NewRef(owner));
+        if (PyDict_SetItem(identity_map, identity, instance) < 0) goto done;
+        identity_added = 1;
+    }
+    if (!seen_before) {
+        if (PySet_Add(seen, identity) < 0) goto done;
+        seen_added = 1;
+        if (PyList_Append(dest, instance) < 0) goto done;
+    }
+    failed = 0;
+
+done:
+    if (failed) raised = PyErr_GetRaisedException();
+    if (failed && identity_added && PyDict_DelItem(identity_map, identity) < 0)
+        PyErr_Clear();
+    if (failed && fresh && instance != NULL) Py_CLEAR(instance);
+    if (failed && seen_added && PySet_Discard(seen, identity) < 0)
+        PyErr_Clear();
+    if (failed) PyErr_SetRaisedException(raised);
+    Py_XDECREF(instance);
+    Py_XDECREF(identity);
+    Py_XDECREF(key);
+    return failed;
+}
+
+int
+wreath_pg_hydrate_datarow(PyObject *decoder_plan, PyObject *hydrate_plan,
+                          PyObject *dest, PyObject *identity_map,
+                          PyObject *owner, PyObject *seen,
+                          const unsigned char *data, Py_ssize_t length)
+{
+    WreathPgDecoderPlan *decoder = (WreathPgDecoderPlan *)decoder_plan;
+    WreathPgHydratePlan *plan = (WreathPgHydratePlan *)hydrate_plan;
+    WreathPgRawField stack_fields[32];
+    WreathPgRawField *fields = stack_fields;
+    Py_ssize_t offset = 2;
+    int result;
+
+    if (!PyObject_TypeCheck(decoder_plan, WreathPgDecoderPlanType) ||
+        !PyObject_TypeCheck(hydrate_plan, WreathPgHydratePlanType) ||
+        !PyList_Check(dest) || !PyDict_Check(identity_map) ||
+        !PySet_Check(seen) || data == NULL || length < 2) {
+        PyErr_SetString(PyExc_ValueError, "invalid direct model hydration request");
+        return -1;
+    }
+    if ((Py_ssize_t)raw_u16(data) != decoder->column_count) {
+        PyErr_SetString(PyExc_ValueError, "DataRow column count does not match plan");
+        return -1;
+    }
+    if (decoder->column_count > 32) {
+        fields = PyMem_Malloc(
+            (size_t)decoder->column_count * sizeof(WreathPgRawField));
+        if (fields == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+    }
+    for (Py_ssize_t column = 0; column < decoder->column_count; column++) {
+        int32_t field_length;
+        if (offset > length - 4) {
+            PyErr_SetString(PyExc_ValueError, "truncated DataRow field length");
+            goto error;
+        }
+        field_length = (int32_t)raw_u32(data + offset);
+        offset += 4;
+        if (field_length < -1 ||
+            (field_length >= 0 && offset > length - field_length)) {
+            PyErr_SetString(PyExc_ValueError, "invalid DataRow field length");
+            goto error;
+        }
+        fields[column].length = field_length;
+        fields[column].data = field_length < 0 ? NULL : data + offset;
+        if (field_length >= 0) offset += field_length;
+    }
+    if (offset != length) {
+        PyErr_SetString(PyExc_ValueError, "invalid DataRow length");
+        goto error;
+    }
+    result = hydrate_raw_row(
+        plan, decoder, fields, dest, identity_map, owner, seen);
+    if (fields != stack_fields) PyMem_Free(fields);
+    return result;
+
+error:
+    if (fields != stack_fields) PyMem_Free(fields);
+    return -1;
+}
+
 int
 wreath_pg_hydrate_models(PyObject *decoder_plan, PyObject *tape_object,
                       PyObject *hydrate_plan, Py_ssize_t limit, PyObject *dest,
@@ -610,6 +944,7 @@ wreath_pg_hydrate_models(PyObject *decoder_plan, PyObject *tape_object,
     Py_buffer *buffers;
     Py_ssize_t start;
     PyObject *seen = NULL;
+    WreathPgHydrateJournal journal;
     int result = 0;
 
     if (!PyObject_TypeCheck(decoder_plan, WreathPgDecoderPlanType) ||
@@ -625,8 +960,13 @@ wreath_pg_hydrate_models(PyObject *decoder_plan, PyObject *tape_object,
     if (rows == 0) return 0;
     seen = PySet_New(NULL);
     if (seen == NULL) return -1;
+    if (hydrate_journal_init(&journal) < 0) {
+        Py_DECREF(seen);
+        return -1;
+    }
     buffers = wreath_pg_acquire_owner_buffers(tape, rows, &owner_limit);
     if (buffers == NULL) {
+        hydrate_journal_clear(&journal);
         Py_DECREF(seen);
         return -1;
     }
@@ -638,7 +978,7 @@ wreath_pg_hydrate_models(PyObject *decoder_plan, PyObject *tape_object,
             break;
         }
         if (hydrate_row(plan, decoder, tape, buffers, row, dest, identity_map, owner,
-                        seen) < 0) {
+                        seen, &journal) < 0) {
             result = -1;
             break;
         }
@@ -646,8 +986,10 @@ wreath_pg_hydrate_models(PyObject *decoder_plan, PyObject *tape_object,
     if (result == 0 && wreath_pg_tape_consume(tape, rows) < 0) result = -1;
     if (result < 0) {
         PyList_SetSlice(dest, start, PyList_GET_SIZE(dest), NULL);
+        hydrate_journal_rollback(&journal, identity_map);
     }
     wreath_pg_release_owner_buffers(buffers, owner_limit);
+    hydrate_journal_clear(&journal);
     Py_DECREF(seen);
     return result;
 }

@@ -1852,12 +1852,8 @@ class HTTPClient:
                     except (OSError, ssl.SSLError, TimeoutError) as error:
                         errors.append(error)
                     else:
-                        if winner is None:
-                            winner = connection
-                        else:
-                            connection.writer.close()
-                if winner is not None:
-                    return winner
+                        winner = connection
+                        return connection
         finally:
             for task in pending:
                 task.cancel()

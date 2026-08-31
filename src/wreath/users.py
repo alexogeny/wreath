@@ -25,7 +25,7 @@ implicit TLS on port 465) is the shipped production transport.
 from __future__ import annotations
 
 import weakref
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from time import monotonic, time
 from typing import Annotated, Any, cast
@@ -2128,6 +2128,21 @@ class OrmUserStore:
         with a store that converts, or give the model a text primary key.
         """
         return self._found(await self._session.get(self._model, user_id))
+
+    async def get_many_by_id(self, user_ids: Iterable[str]) -> list[UserRecord | None]:
+        """Return ordered users and misses after one query for all supplied ids.
+
+        Repeated ids repeat their result without repeating the database query.
+        An empty input returns without crossing into the session. Primary-key
+        values follow the same typing rule as `get_by_id`.
+        """
+        ordered = tuple(user_ids)
+        if not ordered:
+            return []
+        query = self._model.select().where(self._model.id.in_(ordered))
+        rows = await self._session.fetch(query)
+        by_id = {str(row.id): self._to_record(row) for row in rows}
+        return [by_id.get(user_id) for user_id in ordered]
 
     async def create(self, email: str, hashed_password: str) -> UserRecord:
         """Insert a user from an already-hashed password and return the record.

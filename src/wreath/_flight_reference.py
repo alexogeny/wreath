@@ -300,7 +300,7 @@ class ReferenceRecorder:
         slab_bytes: int = 65536,
         capture_hash_key: tuple[int, int] | None = None,
     ) -> None:
-        if ring_records and (ring_records & (ring_records - 1)):
+        if ring_records & (ring_records - 1):
             raise ValueError("ring_records must be a power of two")
         if not 0.0 <= detailed_sample_rate <= 1.0:
             raise ValueError("detailed_sample_rate must be in [0, 1]")

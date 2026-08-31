@@ -913,9 +913,11 @@ def _refuses_authorization(node: ast.AST) -> bool:
     the rule off every `get_or_none`.
     """
     for inner in ast.walk(node):
-        if not isinstance(inner, ast.Raise) or inner.exc is None:
-            continue
-        raised = inner.exc
+        match inner:
+            case ast.Raise(exc=ast.expr() as raised):
+                pass
+            case _:
+                continue
         name = _name_of(raised).lower().replace("_", "")
         if any(word in name for word in _AUTHZ_EXCEPTIONS):
             return True
@@ -1227,7 +1229,7 @@ class _Scanner(ast.NodeVisitor):
 
     def prepare(self) -> None:
         for statement in self.tree.body:
-            if isinstance(statement, (ast.Assign, ast.AnnAssign)) and statement.value is not None:
+            if isinstance(statement, (ast.Assign, ast.AnnAssign)):
                 targets = (
                     statement.targets if isinstance(statement, ast.Assign) else [statement.target]
                 )
@@ -1325,8 +1327,6 @@ class _Scanner(ast.NodeVisitor):
                 names = [name for target in targets for name in _bound_names(target)]
                 if self._tainted(value):
                     self.caller_controlled.update(names)
-                    if _is_dynamic_string(value.value if isinstance(value, ast.Await) else value):
-                        self.dynamic_strings.update(names)
             if len(self.caller_controlled) + len(self.dynamic_strings) == before:
                 return
 
@@ -1336,8 +1336,6 @@ class _Scanner(ast.NodeVisitor):
             return
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         names = [name for target in targets for name in _bound_names(target)]
-        if not names:
-            return
         source = value.value if isinstance(value, ast.Await) else value
 
         if self._is_request_data(source):
@@ -1377,8 +1375,8 @@ class _Scanner(ast.NodeVisitor):
             # walks every call in the expression and sees `random.randbytes`
             # one level in. An arm was written here, and a mutant removing it
             # changed nothing, which is how the redundancy was found.
-            root = dotted.split(".")[0] if dotted else ""
-            return bool(root) and root in self.random_bound
+            root = dotted.partition(".")[0]
+            return root in self.random_bound
         return False
 
     def _is_origin_read(self, node: ast.AST) -> bool:
@@ -1449,10 +1447,7 @@ class _Scanner(ast.NodeVisitor):
             rendered = _interpolated(argument)
             if rendered:
                 candidates.extend(rendered)
-            elif not isinstance(argument, ast.Constant):
-                # Everything that is not the message itself is a value that
-                # reaches the record: `logger.info("...%s", token)` defers the
-                # formatting, and `logger.info(token)` skips it entirely.
+            else:
                 candidates.append(argument)
         # Every keyword too. `extra=` is how structured logging carries fields,
         # and the rest -- `exc_info`, `stacklevel` -- hold nothing a credential
@@ -1792,8 +1787,8 @@ class _Scanner(ast.NodeVisitor):
                 dotted = _dotted(inner.func)
                 if dotted.startswith("random."):
                     return True
-                root = dotted.split(".")[0] if dotted else ""
-                if root and root in self.random_bound:
+                root = dotted.partition(".")[0]
+                if root in self.random_bound:
                     return True
         return False
 

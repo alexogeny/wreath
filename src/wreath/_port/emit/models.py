@@ -4,13 +4,13 @@ its validators and its config."""
 from __future__ import annotations
 
 import ast
+from typing import cast
 
 from ..analyzer import (
     _config_extra,
     dataclass_needs_kw_only,
     pydantic_field_rule,
     redundant_literal_validator,
-    settings_class_rule,
 )
 from .state import _EmitterState
 
@@ -56,11 +56,6 @@ class _ModelRewrite(_EmitterState):
                 self.buf.replace_span(node.bases[0], node.bases[-1], ", ".join(kept))
             else:
                 self._strip_all_bases(node)
-            for base, origin in zip(node.bases, origins, strict=True):
-                if origin in settings_origins:
-                    self._rewritten.add(id(base))
-        rule_id = settings_class_rule(self.imports, node)
-        self._resolve(node.lineno, rule_id)
         self._rewrite_settings_custom_init(node)
         for statement in node.body:
             if isinstance(statement, ast.ClassDef) and statement.name == "Config":
@@ -109,10 +104,12 @@ class _ModelRewrite(_EmitterState):
                 self.needs_field = True
                 self._replace_all_of(value, f"field(default_factory={value.func.id})")
             else:
-                factory = _mutable_factory(value) if value is not None else None
-                if factory and value is not None:
+                factory = _mutable_factory(value)
+                if factory:
                     self.needs_field = True
-                    self._replace_all_of(value, f"field(default_factory={factory})")
+                    self._replace_all_of(
+                        cast(ast.expr, value), f"field(default_factory={factory})"
+                    )
             self._resolve(statement.lineno, "settings.field_complex")
             self._resolve(statement.lineno, "settings.nested")
 
@@ -233,22 +230,11 @@ class _ModelRewrite(_EmitterState):
             if origin in {"pydantic.BaseModel", "pydantic_partial.PartialModelMixin"}:
                 self._rewritten.update(id(item) for item in ast.walk(base))
                 continue
-            if (
-                isinstance(base, ast.Call)
-                and isinstance(base.func, ast.Attribute)
-                and base.func.attr == "model_as_partial"
-                and not base.args
-                and not base.keywords
-            ):
-                kept.append(self._seg(base))
-                continue
             kept.append(self._seg(base))
-        if node.bases:
-            if kept:
-                self.buf.replace_span(node.bases[0], node.bases[-1], ", ".join(kept))
-            else:
-                self._strip_all_bases(node)
-        self._resolve(node.lineno, "pydantic.model")
+        if kept:
+            self.buf.replace_span(node.bases[0], node.bases[-1], ", ".join(kept))
+        else:
+            self._strip_all_bases(node)
         for stmt in node.body:
             self._rewrite_pydantic_field(stmt)
         self._rewrite_pydantic_validators(node)
@@ -330,7 +316,11 @@ class _ModelRewrite(_EmitterState):
     def _rewrite_pydantic_field(self, stmt: ast.stmt) -> None:
         if isinstance(stmt, ast.ClassDef) and stmt.name == "Config":
             declarative = all(
-                isinstance(child, ast.Assign)
+                (
+                    isinstance(child, ast.Assign)
+                    and len(child.targets) == 1
+                    and isinstance(child.targets[0], ast.Name)
+                )
                 or (
                     isinstance(child, ast.Expr)
                     and isinstance(child.value, ast.Constant)
@@ -338,16 +328,16 @@ class _ModelRewrite(_EmitterState):
                 )
                 for child in stmt.body
             )
+            if not declarative:
+                self._annotate(stmt.lineno, "pydantic.config_class")
+                return
             settings = {
-                child.targets[0].id
+                cast(ast.Name, child.targets[0]).id
                 for child in stmt.body
                 if isinstance(child, ast.Assign)
-                and len(child.targets) == 1
-                and isinstance(child.targets[0], ast.Name)
             }
             if (
-                declarative
-                and settings
+                settings
                 and settings
                 <= {
                     "arbitrary_types_allowed",
@@ -380,14 +370,12 @@ class _ModelRewrite(_EmitterState):
                         "# wreath-port: extra='ignore' dropped -- wreath rejects unknown "
                         "fields with a 422. Clients sending extras will start failing.",
                     )
-                elif extra == "ignore":
-                    self._annotate(stmt.lineno, "pydantic.config_ignore")
                 elif self._drop_redundant_model_config(stmt, stmt.value):
                     pass
                 return
             rule_id = pydantic_field_rule(self.imports, stmt)
-            if rule_id == "pydantic.field_metadata_exact" and isinstance(stmt.value, ast.Call):
-                self._rewrite_field_metadata(stmt, stmt.value)
+            if rule_id == "pydantic.field_metadata_exact":
+                self._rewrite_field_metadata(stmt, cast(ast.Call, stmt.value))
                 return
             if rule_id != "pydantic.field":
                 # Metadata without an exact Wreath equivalent stays written so
@@ -402,10 +390,12 @@ class _ModelRewrite(_EmitterState):
                 self._rewrite_field_marker(stmt, default)
                 return
             # mutable literal defaults -> field(default_factory=...)
-            factory = _mutable_factory(default) if default is not None else None
-            if factory and default is not None:
+            factory = _mutable_factory(default)
+            if factory:
                 self.needs_field = True
-                self.buf.replace(default, f"field(default_factory={factory})")
+                self.buf.replace(
+                    cast(ast.expr, default), f"field(default_factory={factory})"
+                )
         elif isinstance(stmt, ast.Assign) and any(
             isinstance(t, ast.Name) and t.id == "model_config" for t in stmt.targets
         ):
@@ -421,8 +411,6 @@ class _ModelRewrite(_EmitterState):
                     "# wreath-port: extra='ignore' dropped -- wreath rejects unknown "
                     "fields with a 422. Clients sending extras will start failing.",
                 )
-            elif extra == "ignore":
-                self._annotate(stmt.lineno, "pydantic.config_ignore")
             else:
                 self._drop_redundant_model_config(stmt, stmt.value)
 
@@ -439,7 +427,7 @@ class _ModelRewrite(_EmitterState):
             "validate_default",
         }
         names = {keyword.arg for keyword in value.keywords}
-        if None in names or not names or not names <= safe:
+        if not names or not names <= safe:
             return False
         self._removed_pydantic_imports.add("ConfigDict")
         self._replace_all_of(stmt, "# wreath-port: redundant model config removed")

@@ -27,6 +27,12 @@ async def _serve_h3(app, **config):
     return server, server.datagram_addresses[0][1]
 
 
+async def _serve_h3_config(app, config):
+    cert, key = make_self_signed_cert()
+    server = await serve(app, config, tls=TLSConfig(cert, key))
+    return server, server.datagram_addresses[0][1]
+
+
 @requires_curl_h3
 @pytest.mark.network
 async def test_scope_reports_http3_over_https() -> None:
@@ -40,6 +46,84 @@ async def test_scope_reports_http3_over_https() -> None:
         rc, output = await curl_http3(port, "/scope")
         assert rc == 0
         assert output == b"3|https"
+    finally:
+        await server.close()
+
+
+@requires_curl_h3
+@pytest.mark.network
+async def test_existing_endpoint_keeps_the_default_header_sequence() -> None:
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    config = ServerConfig(
+        host="127.0.0.1",
+        port=0,
+        lifespan="off",
+        protocols=("h3",),
+        server_header="before",
+        date_header=False,
+    )
+    server, port = await _serve_h3_config(app, config)
+    defaults = config._default_response_headers
+    defaults.server = b"after"
+    defaults.refresh(False)
+    object.__setattr__(config, "_default_response_headers", object())
+    try:
+        rc, output = await curl_http3(port, "/", "-D", "-")
+        assert rc == 0
+        assert b"server: after\r\n" in output.lower()
+    finally:
+        await server.close()
+
+
+@requires_curl_h3
+@pytest.mark.network
+async def test_application_response_headers_override_defaults() -> None:
+    async def app(scope, receive, send):
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"server", b"application"), (b"date", b"custom")],
+            }
+        )
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    server, port = await _serve_h3(app)
+    try:
+        rc, output = await curl_http3(port, "/", "-D", "-")
+        head = output.lower().partition(b"\r\n\r\n")[0]
+        assert rc == 0
+        assert head.count(b"server:") == 1
+        assert b"server: application" in head
+        assert head.count(b"date:") == 1
+        assert b"date: custom" in head
+    finally:
+        await server.close()
+
+
+@requires_curl_h3
+@pytest.mark.network
+async def test_invalid_response_header_is_refused_before_start() -> None:
+    observed = []
+
+    async def app(scope, receive, send):
+        with pytest.raises(RuntimeError, match="response header must be a pair") as caught:
+            await send(
+                {"type": "http.response.start", "status": 200, "headers": [(b"x",)]}
+            )
+        observed.append(str(caught.value))
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    server, port = await _serve_h3(app)
+    try:
+        rc, output = await curl_http3(port, "/")
+        assert rc == 0
+        assert output == b"ok"
+        assert observed == ["response header must be a pair"]
     finally:
         await server.close()
 

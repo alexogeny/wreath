@@ -36,11 +36,12 @@ import os
 import re
 import select
 import signal
+import subprocess
 import sys
 import time
 from collections import deque
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -114,12 +115,12 @@ class Plan:
 
 def module_name_for(path: Path) -> str | None:
     """Dotted name of a file, by walking up while `__init__.py` exists."""
-    parts = [path.stem]
+    parts = [] if path.name == "__init__.py" else [path.stem]
     parent = path.parent
     while (parent / "__init__.py").exists():
         parts.append(parent.name)
         parent = parent.parent
-    if len(parts) == 1 and path.stem != path.name.removesuffix(".py"):
+    if not parts or (len(parts) == 1 and path.suffix != ".py"):
         return None
     return ".".join(reversed(parts))
 
@@ -537,6 +538,7 @@ def run_native_baseline(
     from wreath._native_test_runner import (
         _facade_import,
         _run,
+        _test_import_paths,
     )
 
     watched = {path: frozenset(lines) for path, lines in plan.watched.items()}
@@ -565,12 +567,27 @@ def run_native_baseline(
                 else:
                     tracer.end()
 
-            tracer.start()
+            if watched:
+                tracer.start()
             try:
-                with _facade_import():
+                with _facade_import(), _test_import_paths(collection.files):
                     results = _run(collection, 0, observe)
             finally:
-                tracer.stop()
+                if watched:
+                    tracer.stop()
+            traced_failures = tuple(
+                result.node_id
+                for result in results
+                if result.outcome in {"failed", "interrupted"}
+            )
+            if watched and traced_failures:
+                retried = _retry_native_results(tuple(result.node_id for result in results))
+                results = tuple(
+                    replace(result, outcome=retried[result.node_id])
+                    if result.node_id in retried
+                    else result
+                    for result in results
+                )
             index = tracer.index()
             per_file: dict[str, set[str]] = {path: set() for path in plan.whole_file}
             for (path, _line), nodes in index.items():
@@ -616,6 +633,37 @@ def run_native_baseline(
         per_file={path: tuple(nodes) for path, nodes in payload["files"].items()},
         seconds=time.perf_counter() - started,
     )
+
+
+def _retry_native_results(node_ids: Sequence[str]) -> dict[str, str]:
+    files = sorted({node_id.split("::", 1)[0] for node_id in node_ids})
+    script = """
+import contextlib
+import io
+import json
+import sys
+from wreath._mutant.runner import prepare_native_collection
+from wreath._native_test_runner import _test_import_paths, run_selected
+
+files = json.loads(sys.argv[1])
+node_ids = json.loads(sys.argv[2])
+collection = prepare_native_collection(files)
+with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+    with _test_import_paths(collection.files):
+        results = run_selected(collection, node_ids, max_failures=0)
+print(json.dumps([[result.node_id, result.outcome] for result in results]))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script, json.dumps(files), json.dumps(node_ids)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or "no output"
+        raise RuntimeError(f"fresh native baseline retry failed: {detail}")
+    return dict(json.loads(completed.stdout))
 
 
 def prepare_native_collection(tests: Sequence[str]) -> Any:
@@ -708,7 +756,7 @@ def candidates_for(
     # the first objection, so put the direct contract first without excluding
     # a single candidate. This is ordering only -- the verdict set is unchanged.
     source_stem = site.stem.removeprefix("_")
-    return tuple(
+    ordered = tuple(
         sorted(
             (n for n in found if n in baseline.passed),
             key=lambda nodeid: (
@@ -718,6 +766,10 @@ def candidates_for(
             ),
         )
     )
+    probe = _focused_probe(mutation, ordered)
+    if not probe:
+        return ordered
+    return (*probe, *(nodeid for nodeid in ordered if nodeid != probe[0]))
 
 
 @dataclass(slots=True)

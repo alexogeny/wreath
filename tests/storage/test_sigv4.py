@@ -198,6 +198,31 @@ def test_an_empty_path_signs_as_the_root():
     assert cr.split("\n")[1] == "/"
 
 
+def test_canonical_request_normalizes_ascii_whitespace_and_unicode_encoding():
+    canonical, signed = sigv4.canonical_request(
+        "get",
+        "/café/雪",
+        [("q", "a b"), ("é", "/")],
+        {
+            " X-Amz-Meta-Name ": "  alpha\t beta\n gamma  ",
+            "X-Ünicode": "  naïve\u2003value  ",
+        },
+        sigv4.EMPTY_SHA256,
+    )
+
+    assert canonical.split("\n") == [
+        "GET",
+        "/caf%C3%A9/%E9%9B%AA",
+        "%C3%A9=%2F&q=a%20b",
+        "x-amz-meta-name:alpha beta gamma",
+        "x-ünicode:naïve value",
+        "",
+        "x-amz-meta-name;x-ünicode",
+        sigv4.EMPTY_SHA256,
+    ]
+    assert signed == "x-amz-meta-name;x-ünicode"
+
+
 def test_presign_carries_the_token_the_extra_params_and_the_signed_headers():
     url = sigv4.presign(
         method="GET",

@@ -310,6 +310,96 @@ class TestSsoSession:
             assert started.status == 302
             assert started.header("location").startswith("https://idp.example/authorize?")
 
+    @pytest.mark.parametrize(
+        ("query", "session", "expected"),
+        [
+            (
+                "state=issued",
+                {"_oidc_state_idp": "issued", "_oidc_verifier_idp": "v"},
+                (400, {"error": "invalid_state"}, 0),
+            ),
+            (
+                "code=c",
+                {"_oidc_verifier_idp": "v"},
+                (400, {"error": "invalid_state"}, 0),
+            ),
+            (
+                "code=c&state=issued",
+                {"_oidc_state_idp": "issued"},
+                (400, {"error": "invalid_state"}, 0),
+            ),
+            (
+                "code=c&state=wrong",
+                {"_oidc_state_idp": "issued", "_oidc_verifier_idp": "v"},
+                (400, {"error": "invalid_state"}, 0),
+            ),
+            (
+                "code=c&state=issued",
+                {"_oidc_state_idp": "issued", "_oidc_verifier_idp": "v"},
+                (502, {"error": "token_exchange_failed"}, 1),
+            ),
+        ],
+        ids=("missing-code", "missing-state", "missing-verifier", "wrong-state", "valid"),
+    )
+    async def test_the_callback_requires_each_state_binding(
+        self,
+        query: str,
+        session: dict[str, str],
+        expected: tuple[int, dict[str, str], int],
+    ):
+        from wreath import JSONResponse, Wreath
+        from wreath._auth.oauth2 import register_oauth2_login
+        from wreath._auth.oidc import OidcProvider
+        from wreath.policy import HttpPolicy, SessionPolicy
+        from wreath.testing import TestClient
+
+        class _Response:
+            status = 500
+            body = b""
+
+        class _TokenClient:
+            calls = 0
+
+            async def post(self, *args, **kwargs):
+                self.calls += 1
+                return _Response()
+
+        token_client = _TokenClient()
+        provider = OidcProvider(
+            "idp",
+            issuer="https://idp.example",
+            audience="client",
+            http_client=token_client,
+        )
+        provider.authorization_endpoint = "https://idp.example/authorize"
+        provider.token_endpoint = "https://idp.example/token"
+
+        app = Wreath()
+        app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
+
+        @app.get("/seed")
+        async def seed(request):
+            request.state.session.update(session)
+            return JSONResponse({})
+
+        register_oauth2_login(
+            app,
+            "idp",
+            provider=provider,
+            client_id="client",
+            client_secret="secret",
+            redirect_uri="https://app.example/auth/callback",
+        )
+        async with TestClient(app) as client:
+            seeded = await client.get("/seed")
+            cookie = seeded.header("set-cookie")
+            assert seeded.status == 200 and cookie is not None
+            response = await client.get(
+                f"/auth/callback?{query}", headers={"cookie": cookie.split(";", 1)[0]}
+            )
+
+        assert (response.status, response.json(), token_client.calls) == expected
+
     async def test_the_session_backend_carries_permissions(self):
         from wreath._auth.session_backend import SessionIdentityBackend
 

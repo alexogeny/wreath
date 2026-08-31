@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import importlib
 import math
+import os
 import struct
 import uuid
 from typing import Any
@@ -10,6 +11,8 @@ from typing import Any
 import pytest
 
 from wreath import _pgdriver as pure
+from wreath.orm.types import WireList
+from wreath.postgres import Database, PoolConfig
 
 native: Any = None
 try:
@@ -88,6 +91,56 @@ def test_null_is_encoded_without_payload_and_decodes_to_none(backend: Any) -> No
     assert backend._encode_binary(None, 23) is None
     assert backend._decode_value(23, 0, None) is None
     assert backend._decode_value(23, 1, None) is None
+
+
+@pytest.mark.skipif(native is None, reason="native PostgreSQL extension not built")
+@pytest.mark.parametrize(
+    ("oid", "value", "encoded"),
+    (
+        (1016, [1, None, -2], b'{"1",NULL,"-2"}'),
+        (
+            1009,
+            ["comma,value", 'quote"slash\\', "NULL", "", None],
+            b'{"comma,value","quote\\"slash\\\\","NULL","",NULL}',
+        ),
+        (3807, ['{"key":"x,y"}'], b'{"{\\"key\\":\\"x,y\\"}"}'),
+    ),
+)
+def test_native_text_array_codec_quotes_elements_and_preserves_nulls(
+    oid: int, value: object, encoded: bytes
+) -> None:
+    assert native._encode_text(value, oid) == encoded
+
+
+@pytest.mark.skipif(native is None, reason="native PostgreSQL extension not built")
+def test_native_text_array_codec_requires_a_list_or_tuple() -> None:
+    with pytest.raises(TypeError, match="array codec requires a list or tuple"):
+        native._encode_text("not-an-array", 1009)
+
+
+@pytest.mark.database
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not os.environ.get("WREATH_TEST_POSTGRES_DSN"),
+    reason="set WREATH_TEST_POSTGRES_DSN for live array codec tests",
+)
+async def test_text_array_cold_bind_and_binary_cached_bind_match_postgresql() -> None:
+    database = Database(
+        "array-codec-live",
+        os.environ["WREATH_TEST_POSTGRES_DSN"],
+        pools={"write": PoolConfig(min_size=1, max_size=1)},
+    )
+    await database.start()
+    connection = await database.acquire("write")
+    sql = "SELECT value FROM unnest($1::text[]) AS value"
+    try:
+        first = WireList(["comma,value", 'quote"slash\\', "NULL", "", None], 1009)
+        second = WireList(["cached", "bind"], 1009)
+        assert [row[0] for row in await connection.fetch(sql, first)] == list(first)
+        assert [row[0] for row in await connection.fetch(sql, second)] == list(second)
+    finally:
+        await database.release("write", connection)
+        await database.stop()
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

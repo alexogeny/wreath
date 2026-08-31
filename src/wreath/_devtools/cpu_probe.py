@@ -81,6 +81,34 @@ def available() -> bool:
     return perf_counters([sys.executable, "-c", "pass"]) is not None
 
 
+def _parse_perf_counters(stderr: str) -> dict[str, float] | None:
+    """Aggregate logical counters split across hybrid CPU PMUs."""
+    counts: dict[str, float] = {}
+    for line in stderr.splitlines():
+        parts = line.split(",")
+        if len(parts) < 3:
+            continue
+        value, event = parts[0], parts[2]
+        bare_event = event.split(":", 1)[0]
+        if bare_event in COUNTERS:
+            counter = bare_event
+        else:
+            split_event = bare_event.split("/")
+            if (
+                len(split_event) < 2
+                or split_event[0] not in ("cpu_core", "cpu_atom")
+                or split_event[1] not in COUNTERS
+            ):
+                continue
+            counter = split_event[1]
+        try:
+            counted = float(value)
+        except ValueError:
+            continue
+        counts[counter] = counts.get(counter, 0.0) + counted
+    return counts if all(counter in counts for counter in COUNTERS) else None
+
+
 def perf_counters(command: list[str]) -> dict[str, float] | None:
     """Run `command` under `perf stat`, or None if the counters are unavailable."""
     try:
@@ -93,20 +121,7 @@ def perf_counters(command: list[str]) -> dict[str, float] | None:
         return None
     if proc.returncode != 0:
         return None
-    counts: dict[str, float] = {}
-    for line in proc.stderr.splitlines():
-        parts = line.split(",")
-        if len(parts) < 3:
-            continue
-        value, _unit, event = parts[0], parts[1], parts[2]
-        # perf appends the privilege modifier it managed to use --
-        # `instructions:u` when paranoia allows userspace counting only.
-        event = event.split(":", 1)[0]
-        if event in COUNTERS:
-            if not value or not value.replace(".", "").isdigit():
-                return None  # <not supported> / <not counted>
-            counts[event] = float(value)
-    return counts if len(counts) == len(COUNTERS) else None
+    return _parse_perf_counters(proc.stderr)
 
 
 def per_operation(

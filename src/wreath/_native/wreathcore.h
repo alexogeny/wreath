@@ -353,6 +353,9 @@ PyObject *wreath_find_header(PyObject *self, PyObject *args);
 PyObject *wreath_build_header_map(PyObject *self, PyObject *args);
 
 /* validate.c */
+#define WREATH_VALIDATE_MAX_STEPS 2000000
+PyObject *wreath_validate_node(PyObject *plan, PyObject *value, PyObject *loc,
+                               PyObject *errors, long *steps);
 PyObject *wreath_run_validation(PyObject *self, PyObject *args);
 PyObject *wreath_run_validation_json(PyObject *self, PyObject *args);
 
@@ -458,6 +461,8 @@ int wreath_register_multipart(PyObject *module);
 /* json.c */
 PyObject *wreath_json_dumps(PyObject *self, PyObject *arg);
 PyObject *wreath_json_loads(PyObject *self, PyObject *arg);
+PyObject *wreath_json_loads_validation(PyObject *arg, PyObject *plan,
+                                       PyObject *loc_seq);
 PyObject *wreath_json_configure(PyObject *self, PyObject *args);
 int wreath_json_write_string(WreathBytesWriter *writer, PyObject *value);
 int wreath_json_write_value(WreathBytesWriter *writer, PyObject *value, int depth);

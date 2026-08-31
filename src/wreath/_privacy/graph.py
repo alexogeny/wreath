@@ -200,48 +200,34 @@ def order_children_first(
 
 
 def _cycles(graph: Graph, members: set[type]) -> list[tuple[type, ...]]:
-    """The strongly connected components of what the ordering could not place.
-
-    Tarjan would be tidier; this is an iterative colour-marking walk because
-    the input is the *residue* of a topological sort, which in a real schema is
-    a handful of tables rather than the whole graph. Priced before written: the
-    loop's length is the number of tables in a cycle, and its body is a set
-    lookup, so there is nothing here worth making faster.
-    """
     components: list[tuple[type, ...]] = []
     seen: set[type] = set()
+    traversal_limit = 1 + sum(
+        len(graph.inbound.get(model, ())) + len(graph.outbound.get(model, ()))
+        for model in members
+    )
     for start in sorted(members, key=lambda model: graph.nodes[model].qualified):
         if start in seen:
             continue
         component: list[type] = []
         stack = [start]
         local: set[type] = set()
-        while stack:
+        for _ in range(traversal_limit):
+            if not stack:
+                break
             model = stack.pop()
             if model in local:
                 continue
             local.add(model)
             component.append(model)
-            # Membership is the only test on the way in. "Have we been here?"
-            # is answered once, at the top of the loop, where a duplicate is
-            # skipped anyway -- a second copy of that question here would only
-            # keep the stack shorter, and two spellings of one condition is how
-            # they drift apart later.
-            # Both directions are walked, and only one of them is ever taken by
-            # a test. A residue member is stuck because of a *child* it depends
-            # on, so following outbound edges from the alphabetically-first
-            # member reaches every loop this planner can build -- the inbound
-            # arm is completeness for a component whose first member has no
-            # outbound edge inside it, which the ordering does not produce.
-            # Left in rather than deleted, because "the walk visits the whole
-            # component" is the property the finding rests on, and a component
-            # split in two would name the wrong tables to break.
             for _edge, child in graph.inbound.get(model, ()):
                 if child in members:
                     stack.append(child)
             for _edge, parent in graph.outbound.get(model, ()):
                 if parent in members:
                     stack.append(parent)
+        if stack:
+            raise RuntimeError("privacy graph traversal exceeded its edge bound")
         seen |= local
         # No size test, and no self-reference test beside it. This is called
         # with the *residue* of the topological sort, and a model reaches the

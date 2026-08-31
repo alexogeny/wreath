@@ -258,12 +258,21 @@ def session_functions(
             callers_by_target.setdefault(target, set()).add(caller)
     needs = {name for name in runs if usable(name)}
     pending = deque(needs)
-    while pending:  # climb each reverse edge once
+    expanded: set[str] = set()
+    traversal_limit = len(definitions) + sum(map(len, callers_by_target.values()))
+    for _ in range(traversal_limit):
+        if not pending:
+            break
         target = pending.popleft()
+        if target in expanded:
+            continue
+        expanded.add(target)
         for caller in callers_by_target.get(target, ()):
             if caller not in needs and usable(caller):
                 needs.add(caller)
                 pending.append(caller)
+    if pending:
+        raise RuntimeError("session function traversal exceeded its edge bound")
     return frozenset(needs)
 
 
@@ -551,12 +560,25 @@ def session_sites(
 
     needs = set(direct)
     pending = deque(needs)
-    while pending:
+    expanded: set[FunctionKey] = set()
+    traversal_limit = (
+        len(definitions)
+        + sum(map(len, callers_by_target.values()))
+        + sum(map(len, overrides.values()))
+    )
+    for _ in range(traversal_limit):
+        if not pending:
+            break
         key = pending.popleft()
+        if key in expanded:
+            continue
+        expanded.add(key)
         for candidate in (*overrides.get(key, ()), *callers_by_target.get(key, ())):
             if candidate not in needs:
                 needs.add(candidate)
                 pending.append(candidate)
+    if pending:
+        raise RuntimeError("session site traversal exceeded its edge bound")
 
     # A signature change is only complete when the requirement reaches a place
     # Wreath already supplies a session: a route (or a function that already
@@ -592,8 +614,14 @@ def session_sites(
         if key not in inbound and not is_test_path(key[0]) and key not in blocked_by_test
     )
     pending = deque(supported)
-    while pending:
+    expanded.clear()
+    for _ in range(traversal_limit):
+        if not pending:
+            break
         caller = pending.popleft()
+        if caller in expanded:
+            continue
+        expanded.add(caller)
         candidates = set(overrides.get(caller, ()))
         for _call, called in edges.get(caller, ()):
             candidates.update(called)
@@ -605,6 +633,8 @@ def session_sites(
             ):
                 supported.add(candidate)
                 pending.append(candidate)
+    if pending:
+        raise RuntimeError("supported session traversal exceeded its edge bound")
     needs = supported
 
     definition_sites = frozenset((key[0], definitions[key].lineno) for key in needs)

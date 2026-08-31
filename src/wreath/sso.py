@@ -480,8 +480,8 @@ class AttributeMapping:
             )
         return {
             "email": attributes[self.email],
-            "display_name": (attributes.get(self.display_name) if self.display_name else None),
-            "external_id": (attributes.get(self.external_id) if self.external_id else None),
+            "display_name": attributes.get(self.display_name),
+            "external_id": attributes.get(self.external_id),
         }
 
 
@@ -617,7 +617,6 @@ class OidcRelyingParty:
             parsed_issuer.scheme != "https"
             or parsed_issuer.hostname is None
             or parsed_issuer.username is not None
-            or parsed_issuer.password is not None
             or parsed_issuer.query
             or parsed_issuer.fragment
         ):

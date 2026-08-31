@@ -333,8 +333,8 @@ class LogRuntime:
             key[1],
         )
         mismatches = outcome >> 1
-        if mismatches:
-            self.counters.type_mismatch += mismatches
+        self.counters.type_mismatch += mismatches
+
         return True
 
 
@@ -512,8 +512,7 @@ class RequestScope:
         line needs no separate channel, no new cell kind, and no second
         assembly path.
         """
-        if not self._fields:
-            return
+
         runtime = _RUNTIME
         items = list(self._fields.items())
         self._fields = {}
@@ -523,7 +522,7 @@ class RequestScope:
             flags = LOG_FLAG_EVENT_FIELDS
             for name, (value, raw) in chunk:
                 spec = infer_field(name, value)
-                if raw and spec.disposition is not RAW:
+                if raw:
                     spec = LogField(name, spec.type, RAW)
                 specs.append(spec)
             template = " ".join(f"{name}={{{name}}}" for name, _ in chunk)
@@ -541,9 +540,8 @@ class RequestScope:
                 continue
             packed: list[LogArg] = []
             for spec, value in zip(specs, values, strict=True):
-                arg, mismatched = pack_value(runtime.registry, value, spec)
-                if mismatched:
-                    runtime.counters.type_mismatch += 1
+                arg, _ = pack_value(runtime.registry, value, spec)
+
                 if arg.redacted:
                     flags |= LOG_FLAG_REDACTED
                 packed.append(arg)
@@ -884,8 +882,6 @@ class LogEvent:
         # all, so suppressing it would save nothing and would thin out exactly
         # the history a failure is about to need.
         buffered = severity < runtime.level
-        if buffered and buffer is None:
-            return
         if not buffered and not runtime.limiter.allow(site_id, severity):
             return
         specs = self._fields

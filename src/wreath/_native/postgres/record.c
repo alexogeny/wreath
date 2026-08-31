@@ -14,8 +14,7 @@ static Py_ssize_t record_storage_allocations = 0;
    row costs a single allocation instead of a Record plus a values tuple. */
 typedef struct {
     PyObject_VAR_HEAD
-    PyObject *names;
-    PyObject *index;
+    PyObject *descriptor;
     PyObject *values[1];
 } WreathPgRecord;
 
@@ -44,6 +43,7 @@ typedef struct {
     WreathPgBatchCell *cells; /* batch-owned decoded values, row-major */
     PyObject *names;
     PyObject *index;
+    PyObject *descriptor;
     char *arena;         /* compact ownership for validated wire text */
     Py_ssize_t arena_size;
     Py_ssize_t arena_capacity;
@@ -53,6 +53,18 @@ typedef struct {
 } WreathPgRecordBatch;
 
 #define RECORD_BASICSIZE ((Py_ssize_t)offsetof(WreathPgRecord, values))
+
+static inline PyObject *
+record_names(WreathPgRecord *self)
+{
+    return PyTuple_GET_ITEM(self->descriptor, 0);
+}
+
+static inline PyObject *
+record_index(WreathPgRecord *self)
+{
+    return PyTuple_GET_ITEM(self->descriptor, 1);
+}
 
 /* A Fortunes response creates and destroys twelve same-width Records. Their
  * values are request-owned, but the variable-sized GC shells are not. Keep a
@@ -96,8 +108,7 @@ record_allocate(PyTypeObject *type, Py_ssize_t count)
 static int
 record_traverse(WreathPgRecord *self, visitproc visit, void *arg)
 {
-    Py_VISIT(self->names);
-    Py_VISIT(self->index);
+    Py_VISIT(self->descriptor);
     for (Py_ssize_t i = 0; i < Py_SIZE(self); i++) Py_VISIT(self->values[i]);
     return 0;
 }
@@ -105,10 +116,28 @@ record_traverse(WreathPgRecord *self, visitproc visit, void *arg)
 static int
 record_clear(WreathPgRecord *self)
 {
-    Py_CLEAR(self->names);
-    Py_CLEAR(self->index);
+    Py_CLEAR(self->descriptor);
     for (Py_ssize_t i = 0; i < Py_SIZE(self); i++) Py_CLEAR(self->values[i]);
     return 0;
+}
+
+static int
+record_is_atomic(WreathPgRecord *self)
+{
+    PyObject *names = record_names(self);
+    if (!PyTuple_CheckExact(names)) return 0;
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(names); i++) {
+        if (!PyUnicode_CheckExact(PyTuple_GET_ITEM(names, i))) return 0;
+    }
+    for (Py_ssize_t i = 0; i < Py_SIZE(self); i++) {
+        PyObject *value = self->values[i];
+        if (value != Py_None && !PyBool_Check(value) &&
+            !PyLong_CheckExact(value) && !PyFloat_CheckExact(value) &&
+            !PyUnicode_CheckExact(value) && !PyBytes_CheckExact(value)) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static void
@@ -156,6 +185,7 @@ record_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     PyObject *values;
     WreathPgRecord *self;
     PyObject *index;
+    PyObject *descriptor;
     Py_ssize_t count;
     static char *keywords[] = {"names", "values", NULL};
 
@@ -181,28 +211,36 @@ record_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         }
         Py_DECREF(position);
     }
+    descriptor = PyTuple_Pack(2, names, index);
+    Py_DECREF(index);
+    if (descriptor == NULL) return NULL;
     self = record_allocate(type, count);
     if (self == NULL) {
-        Py_DECREF(index);
+        Py_DECREF(descriptor);
         return NULL;
     }
-    self->names = Py_NewRef(names);
-    self->index = index;
+    self->descriptor = descriptor;
     for (Py_ssize_t i = 0; i < count; i++) {
         self->values[i] = Py_NewRef(PyTuple_GET_ITEM(values, i));
     }
+    if (record_is_atomic(self)) PyObject_GC_UnTrack(self);
     record_allocations++;
     return (PyObject *)self;
 }
 
 PyObject *
-wreath_pg_record_alloc(PyObject *names, PyObject *index, Py_ssize_t count)
+wreath_pg_record_descriptor(PyObject *names, PyObject *index)
+{
+    return PyTuple_Pack(2, names, index);
+}
+
+PyObject *
+wreath_pg_record_alloc(PyObject *descriptor, Py_ssize_t count)
 {
     WreathPgRecord *self;
     self = record_allocate(WreathPgRecordType, count);
     if (self == NULL) return NULL;
-    self->names = Py_NewRef(names);
-    self->index = Py_NewRef(index);
+    self->descriptor = Py_NewRef(descriptor);
     record_allocations++;
     return (PyObject *)self;
 }
@@ -213,21 +251,39 @@ wreath_pg_record_set_value(PyObject *record, Py_ssize_t position, PyObject *valu
     ((WreathPgRecord *)record)->values[position] = value;
 }
 
+void
+wreath_pg_record_untrack(PyObject *record)
+{
+    PyObject_GC_UnTrack(record);
+}
+
+void
+wreath_pg_record_maybe_untrack(PyObject *record)
+{
+    WreathPgRecord *self = (WreathPgRecord *)record;
+    if (record_is_atomic(self)) PyObject_GC_UnTrack(self);
+}
+
 PyObject *
 wreath_pg_record_create(PyObject *names, PyObject *index, PyObject *values)
 {
     WreathPgRecord *self;
+    PyObject *descriptor;
     Py_ssize_t count;
     if (!PyTuple_Check(names) || !PyDict_Check(index) || !PyTuple_Check(values)) {
         PyErr_SetString(PyExc_TypeError, "invalid native Record storage");
         return NULL;
     }
     count = PyTuple_GET_SIZE(values);
-    self = (WreathPgRecord *)wreath_pg_record_alloc(names, index, count);
+    descriptor = wreath_pg_record_descriptor(names, index);
+    if (descriptor == NULL) return NULL;
+    self = (WreathPgRecord *)wreath_pg_record_alloc(descriptor, count);
+    Py_DECREF(descriptor);
     if (self == NULL) return NULL;
     for (Py_ssize_t i = 0; i < count; i++) {
         self->values[i] = Py_NewRef(PyTuple_GET_ITEM(values, i));
     }
+    wreath_pg_record_maybe_untrack((PyObject *)self);
     return (PyObject *)self;
 }
 
@@ -251,7 +307,7 @@ static PyObject *
 record_subscript(WreathPgRecord *self, PyObject *key)
 {
     if (PyUnicode_Check(key)) {
-        PyObject *position = PyDict_GetItemWithError(self->index, key);
+        PyObject *position = PyDict_GetItemWithError(record_index(self), key);
         Py_ssize_t index;
         if (position == NULL) {
             if (!PyErr_Occurred()) PyErr_SetObject(PyExc_KeyError, key);
@@ -290,10 +346,11 @@ record_get_borrowed(PyObject *object, PyObject *key,
         return 0;
     }
     WreathPgRecord *self = (WreathPgRecord *)object;
+    PyObject *names = record_names(self);
     Py_ssize_t position = *cached_position;
-    if (*cached_names != self->names || position < 0 ||
+    if (*cached_names != names || position < 0 ||
         position >= Py_SIZE(self)) {
-        PyObject *position_object = PyDict_GetItemWithError(self->index, key);
+        PyObject *position_object = PyDict_GetItemWithError(record_index(self), key);
         if (position_object == NULL) {
             return PyErr_Occurred() ? -1 : 2;
         }
@@ -305,7 +362,7 @@ record_get_borrowed(PyObject *object, PyObject *key,
             PyErr_SetObject(PyExc_KeyError, key);
             return -1;
         }
-        Py_XSETREF(*cached_names, Py_NewRef(self->names));
+        Py_XSETREF(*cached_names, Py_NewRef(names));
         *cached_position = position;
     }
     *value = self->values[position];
@@ -475,6 +532,9 @@ wreath_pg_record_batch_prepare(PyObject *batch, PyObject *names,
     if (self->columns == 0 && self->size == 0) {
         Py_XSETREF(self->names, Py_NewRef(names));
         Py_XSETREF(self->index, Py_NewRef(index));
+        PyObject *descriptor = wreath_pg_record_descriptor(names, index);
+        if (descriptor == NULL) return -1;
+        Py_XSETREF(self->descriptor, descriptor);
         self->columns = columns;
     } else if (self->names != names || self->index != index ||
                self->columns != columns) {
@@ -535,6 +595,7 @@ batch_traverse(WreathPgRecordBatch *self, visitproc visit, void *arg)
 {
     Py_VISIT(self->names);
     Py_VISIT(self->index);
+    Py_VISIT(self->descriptor);
     for (Py_ssize_t i = 0; i < self->size; i++) {
         Py_VISIT(self->objects[i]);
         for (Py_ssize_t column = 0; column < self->columns; column++) {
@@ -552,6 +613,7 @@ batch_clear(WreathPgRecordBatch *self)
     wreath_pg_record_batch_truncate((PyObject *)self, 0);
     Py_CLEAR(self->names);
     Py_CLEAR(self->index);
+    Py_CLEAR(self->descriptor);
     PyMem_Free(self->objects);
     PyMem_Free(self->cells);
     PyMem_Free(self->arena);
@@ -587,6 +649,7 @@ batch_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     self->cells = NULL;
     self->names = NULL;
     self->index = NULL;
+    self->descriptor = NULL;
     self->arena = NULL;
     self->arena_size = 0;
     self->arena_capacity = 0;
@@ -629,6 +692,7 @@ wreath_pg_record_batch_new(void)
     self->cells = NULL;
     self->names = NULL;
     self->index = NULL;
+    self->descriptor = NULL;
     self->arena = NULL;
     self->arena_size = 0;
     self->arena_capacity = 0;
@@ -654,12 +718,11 @@ batch_item(WreathPgRecordBatch *self, Py_ssize_t position)
     if (self->objects[position] != NULL) {
         return Py_NewRef(self->objects[position]);
     }
-    if (self->columns <= 0 || self->names == NULL || self->index == NULL) {
+    if (self->columns <= 0 || self->descriptor == NULL) {
         PyErr_SetString(PyExc_SystemError, "RecordBatch row is unset");
         return NULL;
     }
-    PyObject *record = wreath_pg_record_alloc(
-        self->names, self->index, self->columns);
+    PyObject *record = wreath_pg_record_alloc(self->descriptor, self->columns);
     if (record == NULL) return NULL;
     for (Py_ssize_t column = 0; column < self->columns; column++) {
         WreathPgBatchCell *cell =
@@ -671,6 +734,7 @@ batch_item(WreathPgRecordBatch *self, Py_ssize_t position)
         }
         wreath_pg_record_set_value(record, column, Py_NewRef(value));
     }
+    wreath_pg_record_maybe_untrack(record);
     self->objects[position] = record;
     return Py_NewRef(record);
 }
@@ -712,7 +776,8 @@ batch_sort_key(WreathPgRecordBatch *self, Py_ssize_t row, PyObject *column,
         entry->key = Py_XNewRef(batch_cell_materialize(self, cell));
     } else if (Py_TYPE(item) == WreathPgRecordType) {
         WreathPgRecord *record = (WreathPgRecord *)item;
-        PyObject *position_object = PyDict_GetItemWithError(record->index, column);
+        PyObject *position_object = PyDict_GetItemWithError(
+            record_index(record), column);
         if (position_object == NULL) {
             if (!PyErr_Occurred()) PyErr_SetObject(PyExc_KeyError, column);
             return -1;

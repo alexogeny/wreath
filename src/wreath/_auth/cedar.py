@@ -740,14 +740,14 @@ class CedarAuthorizer:
         """Map the resource-independent half of one or more engine queries."""
         principal = (
             (identity.type, identity.id)
-            if compiled is not None and self._principal is _default_principal
+            if compiled is not None
             else _default_principal(identity)
             if self._principal is _default_principal
             else await _resolve(self._principal(identity))
         )
         action = (
             compiled.action_uid
-            if compiled is not None and self._action is _default_action
+            if compiled is not None
             else _default_action(action_name, request)
             if self._action is _default_action
             else await _resolve(self._action(action_name, request))

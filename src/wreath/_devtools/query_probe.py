@@ -65,12 +65,14 @@ GRAFTED = (
     "fetch",
     "fetchrow",
     "fetchval",
+    "map",
     "_fetch_into",
 )
 
 #: Each arm is one query shape. They differ in the axis named, and nothing
 #: else, so the difference between two of them is that axis.
 ARMS: dict[str, str] = {
+    "fetchval": "one scalar -- the native direct-completion path",
     "fetchrow": "one row, one column pair -- the smallest complete round trip",
     "fetch12": "twelve rows -- the Fortunes shape; adds per-row decode",
     "execute": "no result set -- submission and completion with no decode",
@@ -298,18 +300,24 @@ async def _run_arm(
                 # driver in the path. Everything above this line is the cost of
                 # awaiting at all; subtracting it from an arm leaves the driver.
                 await _resolved()
+            elif arm == "fetchval":
+                await connection.fetchval(one, 1)
             elif arm == "fetchrow":
                 await connection.fetchrow(one, 1)
             elif arm == "fetch12":
                 await connection.fetch(twelve)
             elif arm == "execute":
                 await connection.execute("SELECT 1")
-            else:
+            elif arm == "map20":
                 await connection.map(
                     "fetchrow",
                     one,
                     [(i % 12 + 1,) for i in range(20)],
                     max_in_flight=20,
+                )
+            else:
+                raise SystemExit(
+                    f"unknown arm {arm!r}. Known: {', '.join(ARMS)}"
                 )
 
         for connection in connections:  # warm plans, codec, statement cache
@@ -606,6 +614,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", type=Path, default=None)
     args = parser.parse_args(argv)
 
+    requested_arms = [args.run_child] if args.run_child else (args.arm or [])
+    unknown = [name for name in requested_arms if name not in ARMS]
+    if unknown:
+        parser.error(f"unknown arm(s): {', '.join(unknown)}. Known: {', '.join(ARMS)}")
+
     target = args.dsn or dsn()
     if target is None:
         print(
@@ -629,9 +642,6 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     arms = args.arm or list(ARMS)
-    unknown = [name for name in arms if name not in ARMS]
-    if unknown:
-        parser.error(f"unknown arm(s): {', '.join(unknown)}. Known: {', '.join(ARMS)}")
 
     modes = [False, True] if args.compare else [args.ungraft]
     results: dict[str, dict[str, Any]] = {}

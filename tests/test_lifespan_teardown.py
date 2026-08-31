@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 from typing import Any
 
 import pytest
@@ -162,3 +163,111 @@ async def test_a_clean_lifespan_counts_no_teardown_errors() -> None:
     ]
     assert app.lifespan_teardown_errors == 0
     assert database.stopped
+
+
+@pytest.mark.asyncio
+async def test_an_app_without_orm_registries_does_not_load_orm_introspection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    imported = False
+    original_import = builtins.__import__
+
+    def track_import(
+        name: str,
+        globals: dict[str, Any] | None = None,
+        locals: dict[str, Any] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> Any:
+        nonlocal imported
+        if name == "orm.introspection" and level == 1:
+            imported = True
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", track_import)
+
+    await _drive(Wreath(), "lifespan.startup", "lifespan.shutdown")
+
+    assert imported is False
+
+
+@pytest.mark.asyncio
+async def test_lifespan_resolves_and_validates_each_orm_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wreath.orm import introspection
+
+    registry = object()
+    calls: list[tuple[str, object]] = []
+
+    async def resolve(candidate: object) -> None:
+        calls.append(("resolve", candidate))
+
+    async def validate(candidate: object) -> None:
+        calls.append(("validate", candidate))
+
+    monkeypatch.setattr(introspection, "resolve_extension_types", resolve)
+    monkeypatch.setattr(introspection, "validate_registry", validate)
+    app = Wreath()
+    app._orm_registries = {"main": registry}
+
+    await _drive(app, "lifespan.startup", "lifespan.shutdown")
+
+    assert calls == [("resolve", registry), ("validate", registry)]
+
+
+@pytest.mark.asyncio
+async def test_an_app_without_services_does_not_start_a_supervisor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import wreath.services as services
+
+    constructed = 0
+
+    class Supervisor:
+        def __init__(self) -> None:
+            nonlocal constructed
+            constructed += 1
+
+        def add(self, service: object) -> None:
+            raise AssertionError("an empty app added a service")
+
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
+    monkeypatch.setattr(services, "Supervisor", Supervisor)
+
+    await _drive(Wreath(), "lifespan.startup", "lifespan.shutdown")
+
+    assert constructed == 0
+
+
+@pytest.mark.asyncio
+async def test_lifespan_starts_registered_services_under_the_supervisor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import wreath.services as services
+
+    service = object()
+    calls: list[tuple[str, object | None]] = []
+
+    class Supervisor:
+        def add(self, candidate: object) -> None:
+            calls.append(("add", candidate))
+
+        async def start(self) -> None:
+            calls.append(("start", None))
+
+        async def stop(self) -> None:
+            calls.append(("stop", None))
+
+    monkeypatch.setattr(services, "Supervisor", Supervisor)
+    app = Wreath()
+    app._services = {"test": service}
+
+    await _drive(app, "lifespan.startup", "lifespan.shutdown")
+
+    assert calls == [("add", service), ("start", None), ("stop", None)]

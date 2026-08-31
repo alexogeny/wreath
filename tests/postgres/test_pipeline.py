@@ -68,6 +68,32 @@ async def test_a_multi_operation_flush_writes_the_complete_batch() -> None:
     assert list(connection._emitted) == operations
 
 
+def test_fail_connection_without_a_scheduled_flush_closes_immediately() -> None:
+    class Writer:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    connection = pure_postgres.Connection.__new__(pure_postgres.Connection)
+    connection._closed = False
+    connection._flush_handle = None
+    connection._current = None
+    connection._waiting = deque()
+    connection._waiting_live = 0
+    connection._emitted = deque()
+    connection._completed = deque()
+    connection._idle_event = asyncio.Event()
+    connection._writer = Writer()
+    error = pure_postgres.OperationalError("connection failed")
+
+    connection._fail_connection(error)
+
+    assert connection._closed
+    assert connection._failure is error
+    assert connection._writer.closed
+
+
 @pytest.fixture(params=POSTGRES_BACKENDS, ids=lambda backend: backend._implementation)
 def postgres(request: pytest.FixtureRequest) -> Any:
     return request.param
@@ -179,7 +205,12 @@ async def test_queue_limit_raises_pipeline_full(
             asyncio.create_task(conn.fetchval("select 2::int4")),
             asyncio.create_task(conn.fetchval("select 3::int4")),
         ]
-        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        done, _pending = await asyncio.wait(
+            tasks,
+            timeout=1,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        assert done, "one operation must be refused before the server answers"
         server.query_gate.set()
         results = await asyncio.gather(*tasks, return_exceptions=True)
         assert sum(isinstance(result, postgres.PipelineFullError) for result in results) == 1

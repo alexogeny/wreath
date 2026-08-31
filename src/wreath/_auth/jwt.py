@@ -293,8 +293,6 @@ def peek_header(token: str) -> dict[str, Any] | None:
     """
     try:
         first = token.split(".", 1)[0]
-        if not first:
-            return None
         header = json.loads(_b64url_decode(first))
     except ValueError, KeyError, json.JSONDecodeError:
         return None
@@ -329,9 +327,6 @@ def _verify_signature(
     signature: bytes,
 ) -> bool:
     family = _FAMILY[alg]
-    # Structural anti-confusion: the key's family must match the alg's family.
-    if key.family != family:
-        return False
     if family == "HS":
         if not isinstance(key, SymmetricKey):
             return False
@@ -576,7 +571,7 @@ def _freeze_audiences(audience: str | Sequence[str] | None) -> tuple[str, ...]:
     return tuple(audience)
 
 
-def _coerce_key(key: JwtKey | bytes | str) -> JwtKey:
+def _coerce_key(key: JwtKey | bytes | bytearray | str) -> JwtKey:
     if isinstance(key, (SymmetricKey, RsaPublicKey, EcPublicKey, OkpPublicKey)):
         return key
     if isinstance(key, (bytes, bytearray)):

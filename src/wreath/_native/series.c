@@ -2800,9 +2800,9 @@ series_chart_plan_build_joined_path(SeriesChartPlan *plan)
     SeriesData *data = plan->data;
     size_t path_size = plan->joined_path_size;
     if (path_size > (size_t)PY_SSIZE_T_MAX) return PyErr_NoMemory();
-    PyObject *path = PyBytes_FromStringAndSize(NULL, (Py_ssize_t)path_size);
+    PyObject *path = PyUnicode_New((Py_ssize_t)path_size, 127);
     if (path == NULL) return NULL;
-    char *path_buffer = PyBytes_AS_STRING(path);
+    char *path_buffer = (char *)PyUnicode_1BYTE_DATA(path);
     size_t path_written = 0;
     for (Py_ssize_t output = 0; output < plan->downsample_count; output++) {
         Py_ssize_t row = plan->rows[output];
@@ -2848,10 +2848,7 @@ series_chart_plan_render_text_joined(SeriesChartPlan *plan)
 {
     SeriesData *data = plan->data;
     Py_ssize_t output_count = plan->downsample_count + plan->full_count;
-    PyObject *path_bytes = series_chart_plan_build_joined_path(plan);
-    if (path_bytes == NULL) return NULL;
-    PyObject *path = series_chart_trusted_ascii(path_bytes);
-    Py_DECREF(path_bytes);
+    PyObject *path = series_chart_plan_build_joined_path(plan);
     if (path == NULL) return NULL;
     WreathBytesWriter tick_writer = {0};
     if (wreath_writer_init(&tick_writer, 256) < 0) goto joined_error;

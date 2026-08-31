@@ -105,8 +105,8 @@ class SignedRoutePolicy:
         normalized_method = method.upper()
         if normalized_method not in self._methods:
             raise ValueError("signed method is not protected by this policy")
-        query = query_text.encode("latin-1") if separator else b""
-        if any(part.startswith(self._parameter_bytes) for part in query.split(b"&") if part):
+        query = query_text.encode("latin-1")
+        if any(part.startswith(self._parameter_bytes) for part in query.split(b"&")):
             raise ValueError("signed path already contains the signature parameter")
         target = self._target(path_only, query)
         bound = self._method(normalized_method) + "\x00" + target

@@ -27,7 +27,7 @@ import sys
 from collections import defaultdict
 from typing import Any
 
-_TOOL_ID = 4
+_TOOL_IDS = (4, 3, 2, 1, 0)
 _TOOL_NAME = "wreath-mutant"
 
 
@@ -39,6 +39,7 @@ class LineTracer:
         self.hits: dict[str, set[tuple[str, int]]] = {}
         self._current: set[tuple[str, int]] | None = None
         self._armed = False
+        self._tool_id: int | None = None
 
     def begin(self, node_id: str) -> None:
         """Begin one engine-independent test attribution window."""
@@ -67,18 +68,26 @@ class LineTracer:
         if self._armed:
             return
         monitoring = sys.monitoring
-        monitoring.use_tool_id(_TOOL_ID, _TOOL_NAME)
-        monitoring.register_callback(_TOOL_ID, monitoring.events.LINE, self._line)
-        monitoring.set_events(_TOOL_ID, monitoring.events.LINE)
+        tool_id = next((item for item in _TOOL_IDS if monitoring.get_tool(item) is None), None)
+        if tool_id is None:
+            raise RuntimeError("no PEP 669 monitoring tool slot is available for mutation tracing")
+        monitoring.use_tool_id(tool_id, _TOOL_NAME)
+        monitoring.register_callback(tool_id, monitoring.events.LINE, self._line)
+        monitoring.set_events(tool_id, monitoring.events.LINE)
+        self._tool_id = tool_id
         self._armed = True
 
     def stop(self) -> None:
         if not self._armed:
             return
         monitoring = sys.monitoring
-        monitoring.set_events(_TOOL_ID, 0)
-        monitoring.register_callback(_TOOL_ID, monitoring.events.LINE, None)
-        monitoring.free_tool_id(_TOOL_ID)
+        tool_id = self._tool_id
+        if tool_id is None:
+            raise RuntimeError("mutation tracer is armed without a monitoring tool slot")
+        monitoring.set_events(tool_id, 0)
+        monitoring.register_callback(tool_id, monitoring.events.LINE, None)
+        monitoring.free_tool_id(tool_id)
+        self._tool_id = None
         self._armed = False
 
     def index(self) -> dict[tuple[str, int], tuple[str, ...]]:

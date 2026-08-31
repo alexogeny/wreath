@@ -54,7 +54,7 @@ class Peer:
         self.mcp = mcp
         self.asked: list[dict] = []
 
-    async def next_request(self, seconds: float = 5.0) -> dict:
+    async def next_request(self, seconds: float = 0.5) -> dict:
         """Wait for the server to ask something, reading the session's queue.
 
         The queue is the transport here rather than the SSE stream: a stream
@@ -105,6 +105,7 @@ def _session_of(mcp: MCP, session: str):
 
 def build(**kwargs) -> tuple[Wreath, MCP]:
     app = Wreath()
+    kwargs.setdefault("limits", MCPLimits(client_request_seconds=0.25))
     mcp = MCP(app, name="camera-trap", version="1.0.0", **kwargs)
     return app, mcp
 
@@ -910,7 +911,7 @@ async def test_a_reader_parked_on_a_question_is_failed_when_the_session_ends() -
 
 
 async def test_the_pending_table_is_bounded() -> None:
-    app, mcp = build(limits=MCPLimits(max_pending_requests=1, client_request_seconds=5.0))
+    app, mcp = build(limits=MCPLimits(max_pending_requests=1, client_request_seconds=0.25))
     refusals: list[str] = []
     first = asyncio.Event()
 
@@ -930,7 +931,7 @@ async def test_the_pending_table_is_bounded() -> None:
             outer = asyncio.ensure_future(context.elicit("Well?", Confirm))
             await asyncio.sleep(0)
             first.set()
-            await asyncio.wait_for(helper, timeout=5)
+            await asyncio.wait_for(helper, timeout=0.5)
             outer.cancel()
             await asyncio.gather(outer, return_exceptions=True)
         finally:
@@ -939,7 +940,7 @@ async def test_the_pending_table_is_bounded() -> None:
 
     async with TestClient(app) as client:
         session = await initialize(client)
-        await asyncio.wait_for(call(client, session, tool_call(2, "ask")), timeout=10)
+        await asyncio.wait_for(call(client, session, tool_call(2, "ask")), timeout=1)
 
     assert refusals and "max_pending_requests" in refusals[0]
 

@@ -160,26 +160,33 @@ def test_native_worker_yields_between_cases_until_the_controller_assigns_cpu() -
         control_descriptor=read_control,
         case_count=2,
     )
-    observer("tests/test_policy.py::test_one", None)
-    yielded = threading.Thread(
-        target=observer,
-        args=("tests/test_policy.py::test_one", "passed"),
-    )
+    threads: list[threading.Thread] = []
 
-    yielded.start()
-    yielded.join(timeout=0.05)
-    assert yielded.is_alive(), "the worker started its next case without a CPU permit"
-    os.write(write_control, b"1")
-    yielded.join(timeout=1)
-    assert not yielded.is_alive()
+    def call(node_id: str, outcome: str | None, *, should_yield: bool) -> None:
+        thread = threading.Thread(target=observer, args=(node_id, outcome))
+        threads.append(thread)
+        thread.start()
+        thread.join(timeout=0.05)
+        yielded = thread.is_alive()
+        if yielded:
+            os.write(write_control, b"1")
+            thread.join(timeout=1)
+        assert yielded is should_yield
+        assert not thread.is_alive()
 
-    observer("tests/test_policy.py::test_two", None)
-    observer("tests/test_policy.py::test_two", "passed")
-    observer.finish()
-    os.close(write_control)
-    while os.read(read_progress, 65536):
-        pass
-    os.close(read_progress)
+    try:
+        call("tests/test_policy.py::test_one", None, should_yield=False)
+        call("tests/test_policy.py::test_one", "passed", should_yield=True)
+        call("tests/test_policy.py::test_two", None, should_yield=False)
+        call("tests/test_policy.py::test_two", "passed", should_yield=False)
+    finally:
+        os.close(write_control)
+        for thread in threads:
+            thread.join(timeout=1)
+        observer.finish()
+        while os.read(read_progress, 65536):
+            pass
+        os.close(read_progress)
 
 
 def test_finished_worker_keeps_ownership_until_buffered_progress_is_drained(
@@ -240,6 +247,18 @@ def test_worker_reaper_never_waits_for_an_unowned_mutation_or_fuzz_child(
 
     assert native_runner._reap_owned_worker((11, 22, 33)) == (22, 0)
     assert waited == [11, 22]
+
+
+def test_worker_cleanup_refuses_a_process_group_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    killed: list[int] = []
+    monkeypatch.setattr(native_runner.os, "kill", lambda pid, _signal: killed.append(pid))
+
+    with pytest.raises(ValueError, match="positive worker PID"):
+        native_runner._terminate_owned_worker(0)
+
+    assert killed == []
 
 
 def test_native_core_honours_maxfail_without_calling_later_cases() -> None:

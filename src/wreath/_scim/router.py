@@ -231,8 +231,8 @@ def scim_router(
     Args:
         app: the application these routes will be mounted on. Read for its
             authorizer and its authentication backend; the routes are its own.
-        users: a `wreath.users` `UserStore` -- `get_by_id`, `get_by_email`,
-            `create`, `update`.
+        users: a `wreath.users` `UserStore` -- `get_by_id`, `get_many_by_id`,
+            `get_by_email`, `create`, `update`.
         organizations: an `OrganizationStore` that also offers
             `members(org_id)`, which the authorization path never needs and a
             directory listing always does.
@@ -248,8 +248,8 @@ def scim_router(
         max_page_size: the largest `count` honoured.
         max_filter_scan: how many members a *filtered* list may examine before
             refusing with `tooMany`. A filter is evaluated per member and
-            building one member's representation reads their account, so this
-            bounds the fan-out one request can ask for.
+            building the representations reads their accounts in one batch, so
+            this bounds the work one request can ask for.
 
     Returns:
         A `Router` to pass to `app.include_router`.
@@ -259,7 +259,11 @@ def scim_router(
             an empty action name, an inconsistent page size, or an organisation
             id that cannot be spelled inside a Cedar entity reference.
     """
-    _require(users, ("get_by_id", "get_by_email", "create", "update"), "user store")
+    _require(
+        users,
+        ("get_by_id", "get_many_by_id", "get_by_email", "create", "update"),
+        "user store",
+    )
     _require(
         organizations,
         ("members", "memberships", "roles", "add_member", "remove_member"),
@@ -622,12 +626,20 @@ def scim_router(
                 f"evaluates a filter over at most {limit}; narrow the request or "
                 "raise scim_router(max_filter_scan=...)",
             )
-        found: list[dict[str, Any]] = []
-        for user_id in sorted(held):
-            record = await users.get_by_id(user_id)
-            if record is not None:
-                found.append(resources.user_document(record, roles=held[user_id], base=base))
-        return found
+        ordered = sorted(held)
+        if not ordered:
+            return []
+        records = await users.get_many_by_id(ordered)
+        if len(records) != len(ordered):
+            raise RuntimeError(
+                f"{type(users).__name__}.get_many_by_id must return one result per id "
+                f"({len(ordered)} ids, {len(records)} results)"
+            )
+        return [
+            resources.user_document(record, roles=held[user_id], base=base)
+            for user_id, record in zip(ordered, records, strict=True)
+            if record is not None
+        ]
 
     @router.get("/Users")
     @authorize(action=read_action, resource=cedar_resource)
@@ -648,11 +660,18 @@ def scim_router(
             held = await membership_map(org)
             start, count = paging(query)
             ordered = sorted(held)
-            found = []
-            for user_id in ordered[start - 1 : start - 1 + count]:
-                record = await users.get_by_id(user_id)
-                if record is not None:
-                    found.append(resources.user_document(record, roles=held[user_id], base=base))
+            page = ordered[start - 1 : start - 1 + count]
+            records = await users.get_many_by_id(page) if page else []
+            if len(records) != len(page):
+                raise RuntimeError(
+                    f"{type(users).__name__}.get_many_by_id must return one result per id "
+                    f"({len(page)} ids, {len(records)} results)"
+                )
+            found = [
+                resources.user_document(record, roles=held[user_id], base=base)
+                for user_id, record in zip(page, records, strict=True)
+                if record is not None
+            ]
             return ScimResponse(
                 resources.list_response(
                     found, total=len(ordered), start_index=start, per_page=len(found)

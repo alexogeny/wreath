@@ -254,7 +254,8 @@ def _compile_plan(annotation: Any, seen: frozenset[type]) -> tuple[Any, ...]:
             positional = all(
                 field.init and not field.kw_only for field in dataclasses.fields(annotation)
             )
-            return (_OP_DATACLASS, annotation, fields, known, positional)
+            field_indices = {field[1]: index for index, field in enumerate(fields)}
+            return (_OP_DATACLASS, annotation, fields, known, positional, field_indices)
         if (
             annotation
             in (
@@ -1745,8 +1746,7 @@ class AppScope:
             raise
         self._values[fn] = value
         self._pending.pop(fn, None)
-        if not future.done():
-            future.set_result(value)
+        future.set_result(value)
         return value
 
     def track_cleanup(self, generator: Any) -> None:

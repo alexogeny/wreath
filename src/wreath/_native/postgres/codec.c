@@ -102,9 +102,7 @@ wreath_pg_decode_hex_bytea(const unsigned char *data, Py_ssize_t length)
 #define PG_UUID_ARRAY 2951
 #define PG_JSONB_ARRAY 3807
 
-/* The element OID for an array OID, or 0 when the OID is not a supported array.
- * TODO: `wreath._pgdriver` has no array codec, so `Array(...)` columns need a
- * build with `_postgres`. */
+/* The element OID for an array OID, or 0 when the OID is not supported. */
 static uint32_t
 array_element_oid(uint32_t oid)
 {
@@ -1196,6 +1194,7 @@ write_be32(unsigned char *out, uint32_t value)
 /* Mutually recursive with the scalar encoder/decoder (an array frames its
    elements through them), so both are forward-declared here. */
 static PyObject *encode_binary_array(PyObject *value, uint32_t element_oid);
+static PyObject *encode_text_array(PyObject *value, uint32_t element_oid);
 static PyObject *decode_binary_array(const unsigned char *raw, Py_ssize_t length);
 
 /* PostgreSQL counts date/timestamp binary values from 2000-01-01 and reserves
@@ -1862,6 +1861,12 @@ wreath_pg_encode_text_value(PyObject *value, uint32_t oid)
     }
     default:
         {
+            uint32_t element_oid = array_element_oid(oid);
+            if (element_oid != 0) {
+                return encode_text_array(value, element_oid);
+            }
+        }
+        {
             /* `vector` and `halfvec` both print "[1,2,3]", so one text encoder
              * serves them; `sparsevec` prints "{1:1.5}/5" and needs its own. */
             int kind = wreath_pg_extension_kind(oid);
@@ -1874,6 +1879,116 @@ wreath_pg_encode_text_value(PyObject *value, uint32_t oid)
         }
         return ascii_string(value);
     }
+}
+
+static PyObject *
+encode_text_array(PyObject *value, uint32_t element_oid)
+{
+    PyObject *seq;
+    PyObject **payloads = NULL;
+    PyObject *array = NULL;
+    Py_ssize_t count;
+    Py_ssize_t total = 2;
+    Py_ssize_t offset = 0;
+    char *output;
+
+    if (!PyList_Check(value) && !PyTuple_Check(value)) {
+        PyErr_SetString(PyExc_TypeError, "array codec requires a list or tuple");
+        return NULL;
+    }
+    seq = PySequence_Fast(value, "array codec requires a list or tuple");
+    if (seq == NULL) return NULL;
+    count = PySequence_Fast_GET_SIZE(seq);
+    if (count > 0) {
+        if (count > PY_SSIZE_T_MAX - 1) {
+            Py_DECREF(seq);
+            PyErr_SetString(PyExc_OverflowError, "array parameter too large");
+            return NULL;
+        }
+        payloads = PyMem_Calloc((size_t)count, sizeof(PyObject *));
+        if (payloads == NULL) {
+            Py_DECREF(seq);
+            return PyErr_NoMemory();
+        }
+        total += count - 1;
+    }
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyObject *item = PySequence_Fast_GET_ITEM(seq, index);
+        PyObject *encoded;
+        Py_ssize_t size;
+        Py_ssize_t escaped = 0;
+        Py_ssize_t element_size;
+        const char *raw;
+        if (item == Py_None) {
+            payloads[index] = Py_NewRef(Py_None);
+            if (total > PY_SSIZE_T_MAX - 4) {
+                PyErr_SetString(PyExc_OverflowError, "array parameter too large");
+                goto done;
+            }
+            total += 4;
+            continue;
+        }
+        encoded = wreath_pg_encode_text_value(item, element_oid);
+        if (encoded == NULL) goto done;
+        if (!PyBytes_Check(encoded)) {
+            Py_DECREF(encoded);
+            PyErr_SetString(
+                PyExc_TypeError, "array element encoder did not return bytes"
+            );
+            goto done;
+        }
+        payloads[index] = encoded;
+        size = PyBytes_GET_SIZE(encoded);
+        raw = PyBytes_AS_STRING(encoded);
+        for (Py_ssize_t byte = 0; byte < size; byte++) {
+            escaped += raw[byte] == '"' || raw[byte] == '\\';
+        }
+        if (size > PY_SSIZE_T_MAX - 2 ||
+            escaped > PY_SSIZE_T_MAX - size - 2) {
+            PyErr_SetString(PyExc_OverflowError, "array parameter too large");
+            goto done;
+        }
+        element_size = size + escaped + 2;
+        if (total > PY_SSIZE_T_MAX - element_size) {
+            PyErr_SetString(PyExc_OverflowError, "array parameter too large");
+            goto done;
+        }
+        total += element_size;
+    }
+    array = PyBytes_FromStringAndSize(NULL, total);
+    if (array == NULL) goto done;
+    output = PyBytes_AS_STRING(array);
+    output[offset++] = '{';
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyObject *payload = payloads[index];
+        const unsigned char *input;
+        Py_ssize_t length;
+        if (index > 0) output[offset++] = ',';
+        if (payload == Py_None) {
+            memcpy(output + offset, "NULL", 4);
+            offset += 4;
+            continue;
+        }
+        output[offset++] = '"';
+        input = (const unsigned char *)PyBytes_AS_STRING(payload);
+        length = PyBytes_GET_SIZE(payload);
+        for (Py_ssize_t byte = 0; byte < length; byte++) {
+            if (input[byte] == '"' || input[byte] == '\\') {
+                output[offset++] = '\\';
+            }
+            output[offset++] = (char)input[byte];
+        }
+        output[offset++] = '"';
+    }
+    output[offset] = '}';
+
+done:
+    for (Py_ssize_t index = 0; index < count; index++) {
+        Py_XDECREF(payloads[index]);
+    }
+    PyMem_Free(payloads);
+    Py_DECREF(seq);
+    return array;
 }
 
 static PyObject *

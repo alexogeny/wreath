@@ -367,16 +367,16 @@ def row_from_record(record: Any) -> LedgerRow:
         cursor=_json(field("cursor", 3)),
         ceiling=_json(field("ceiling", 4)),
         keyspace_from=_json(field("keyspace_from", 5)),
-        pending=_json(field("pending", 6)) or [],
-        units_done=int(field("units_done", 7) or 0),
-        rows_done=int(field("rows_done", 8) or 0),
+        pending=_json(field("pending", 6)),
+        units_done=int(field("units_done", 7)),
+        rows_done=int(field("rows_done", 8)),
         denominator=field("denominator", 9),
         denominator_kind=field("denominator_kind", 10),
-        chunk_limit=int(field("chunk_limit", 11) or 0),
+        chunk_limit=int(field("chunk_limit", 11)),
         paced_reason=field("paced_reason", 12),
         window_started=field("window_started", 13),
-        window_rows=int(field("window_rows", 14) or 0),
-        window_units=int(field("window_units", 15) or 0),
+        window_rows=int(field("window_rows", 14)),
+        window_units=int(field("window_units", 15)),
         started_at=field("started_at", 16),
         last_advance=field("last_advance", 17),
         cycle_started=field("cycle_started", 18),
@@ -388,7 +388,7 @@ def row_from_record(record: Any) -> LedgerRow:
         verified_fact=field("verified_fact", 24),
         last_error=field("last_error", 25),
         now=field("now", 26),
-        holes_open=int(field("holes_open", 27) or 0),
+        holes_open=int(field("holes_open", 27)),
         # Absent from the record when the column is not there, so a build newer
         # than its schema reads `None` rather than raising a KeyError from a
         # stack frame that says nothing useful.
@@ -403,9 +403,9 @@ def hole_from_record(record: Any) -> Hole:
         tenant=str(field("tenant", 1)),
         cursor_from=_json(field("cursor_from", 2)),
         cursor_to=_json(field("cursor_to", 3)),
-        attempts=int(field("attempts", 4) or 0),
-        error=str(field("error", 5) or ""),
-        predicate=str(field("predicate", 6) or ""),
+        attempts=int(field("attempts", 4)),
+        error=str(field("error", 5)),
+        predicate=str(field("predicate", 6)),
         failed_at=field("failed_at", 7),
     )
 
@@ -857,10 +857,7 @@ class Ledger:
             self._name,
             self._tenant,
         )
-        if record is None:
-            return None
-        field = _reader(record)
-        return _json(field("unit", 0))
+        return _json(_reader(record)("unit", 0))
 
     async def drop_pending(self, executor: Any, *, cursor_from: Any, cursor_to: Any) -> None:
         """Remove one unit by value, for a unit that has been given up on."""
@@ -923,7 +920,7 @@ class Ledger:
             self._name,
             self._tenant,
         )
-        return [hole_from_record(record) for record in records or ()]
+        return [hole_from_record(record) for record in records]
 
     async def open_holes(self, executor: Any) -> int:
         total = await executor.fetchval(
@@ -931,7 +928,7 @@ class Ledger:
             self._name,
             self._tenant,
         )
-        return int(total or 0)
+        return int(total)
 
 
 @dataclass(frozen=True, slots=True)
@@ -967,7 +964,7 @@ async def published_facts(
         *args,
     )
     out: list[PublishedFact] = []
-    for record in records or ():
+    for record in records:
         field = _reader(record)
         out.append(
             PublishedFact(
@@ -1008,7 +1005,7 @@ async def all_pending_facts(executor: Any, *, schema: str) -> list[PendingFact]:
         f"FROM {table} p WHERE verified_at IS NULL AND guards IS NOT NULL "
         "ORDER BY name, tenant"
     )
-    return [_pending_from_record(record) for record in records or ()]
+    return [_pending_from_record(record) for record in records]
 
 
 def _pending_from_record(record: Any) -> PendingFact:
@@ -1018,7 +1015,7 @@ def _pending_from_record(record: Any) -> PendingFact:
         tenant=field("tenant", 1, ""),
         fact=field("guards", 2, ""),
         phase=field("phase", 3, ""),
-        holes_open=int(field("holes_open", 4) or 0),
+        holes_open=int(field("holes_open", 4)),
     )
 
 
@@ -1045,7 +1042,7 @@ async def pending_facts(
         "ORDER BY name, tenant",
         *facts,
     )
-    return [_pending_from_record(record) for record in records or ()]
+    return [_pending_from_record(record) for record in records]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1117,9 +1114,9 @@ async def rewritten_columns(
     # a row the ledger still has beats one it does not, because the phase is
     # only knowable from the ledger.
     found: dict[tuple[str, str, str], RewrittenColumn] = {}
-    for record in records or ():
+    for record in records:
         field = _reader(record)
-        phase = str(field("phase", 3, "") or "")
+        phase = str(field("phase", 3, ""))
         entry = RewrittenColumn(
             name=field("name", 0),
             tenant=field("tenant", 1, ""),
@@ -1155,7 +1152,7 @@ async def read_all(executor: Any, *, schema: str, name: str | None = None) -> li
             f"SELECT {_COLUMNS}, {extra} FROM {table} p WHERE name = $1 ORDER BY tenant",
             name,
         )
-    return [row_from_record(record) for record in records or ()]
+    return [row_from_record(record) for record in records]
 
 
 async def read_holes(executor: Any, *, schema: str, name: str | None = None) -> list[Hole]:
@@ -1170,7 +1167,7 @@ async def read_holes(executor: Any, *, schema: str, name: str | None = None) -> 
             f"SELECT {_HOLE_COLUMNS} FROM {table} WHERE name = $1 ORDER BY tenant, failed_at",
             name,
         )
-    return [hole_from_record(record) for record in records or ()]
+    return [hole_from_record(record) for record in records]
 
 
 def _affected(tag: Any) -> int:

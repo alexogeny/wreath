@@ -945,7 +945,7 @@ def _form_fields(
         if submitted is not None and name in submitted:
             raw = _form_value(submitted[name])
         else:
-            raw = _form_value(getattr(instance, name, None)) if instance is not None else ""
+            raw = _form_value(getattr(instance, name, None))
         boolean = type_name in _BOOLEAN_TYPES
         multiline = type_name in _MULTILINE_TYPES
         fields.append(

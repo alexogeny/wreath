@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 import wreath.app as app_module
-from wreath import JSONResponse, Response, Wreath
+from wreath import JSONResponse, Response, Router, Wreath
 from wreath.app import _StaticMatcher
 from wreath.binding import Depends
 from wreath.policy import HttpPolicy, RequestIdPolicy
@@ -723,6 +723,109 @@ def test_named_route_registration_does_not_rescan_prior_definitions() -> None:
         @app.get("/third", name="first")
         async def duplicate(request):
             return "duplicate"
+
+
+def test_route_refuses_a_duplicate_dynamic_route() -> None:
+    app = Wreath()
+
+    @app.get("/assets/{asset_path:path}")
+    async def first(request):
+        return "first"
+
+    with pytest.raises(ValueError, match="already registered"):
+
+        @app.get("/assets/{asset_path:path}")
+        async def second(request):
+            return "second"
+
+    @app.get("/plain")
+    async def first_static(request):
+        return "first"
+
+    with pytest.raises(ValueError, match="duplicate route"):
+
+        @app.get("/plain")
+        async def second_static(request):
+            return "second"
+
+    assert app._dynamic_route_keys == {("GET", "/assets/{asset_path:path}", None)}
+
+
+def test_include_router_tracks_each_kind_of_dynamic_route() -> None:
+    cases = (
+        ("/hosted", "{tenant}.example.test"),
+        ("/assets/{asset_path:path}", None),
+    )
+
+    for path, host in cases:
+        router = Router()
+
+        @router.get(path, host=host)
+        async def endpoint(request):
+            return "ok"
+
+        app = Wreath()
+        app.include_router(router)
+
+        assert ("GET", path, host) in app._dynamic_route_keys
+
+
+def test_include_router_refuses_duplicate_names() -> None:
+    first = Router()
+
+    @first.get("/first", name="shared")
+    async def first_endpoint(request):
+        return "first"
+
+    second = Router()
+
+    @second.get("/second", name="shared")
+    async def second_endpoint(request):
+        return "second"
+
+    app = Wreath()
+    app.include_router(first)
+
+    with pytest.raises(ValueError, match="route name 'shared' is already registered"):
+        app.include_router(second)
+
+
+def test_include_router_refuses_a_duplicate_dynamic_route() -> None:
+    first = Router()
+
+    @first.get("/assets/{asset_path:path}")
+    async def first_endpoint(request):
+        return "first"
+
+    second = Router()
+
+    @second.get("/assets/{asset_path:path}")
+    async def second_endpoint(request):
+        return "second"
+
+    app = Wreath()
+    app.include_router(first)
+
+    with pytest.raises(ValueError, match="already registered"):
+        app.include_router(second)
+
+
+def test_include_router_indexes_only_named_and_dynamic_routes() -> None:
+    router = Router()
+
+    @router.get("/plain")
+    async def plain(request):
+        return "plain"
+
+    @router.get("/named", name="named")
+    async def named(request):
+        return "named"
+
+    app = Wreath()
+    app.include_router(router)
+
+    assert app._route_names == {"named"}
+    assert app._dynamic_route_keys == set()
 
 
 @pytest.mark.asyncio

@@ -12,16 +12,15 @@ class Widget(Model, table="rgb_widgets"):
 
 
 class TestStaleWriteDetection:
-    """G-32: `_update`/`_delete` ignore the affected row count, so a write
-    against a row another session already deleted silently no-ops."""
+    """G-32: a write against a row another session deleted must not silently no-op."""
 
-    def _session(self, status):
+    def _session(self, rows):
         from wreath.orm.registry import Registry
         from wreath.orm.session import Session
 
         class _Connection:
-            async def execute(self, sql, *args):
-                return status
+            async def fetch(self, sql, *args):
+                return rows
 
         class _Database:
             name = "app"
@@ -37,30 +36,43 @@ class TestStaleWriteDetection:
 
     async def test_an_update_that_matched_nothing_is_reported(self):
         from wreath.orm.errors import StaleDataError
+        from wreath.orm.session import _update_mask
 
-        session = self._session("UPDATE 0")
+        session = self._session([])
         widget = Widget(id=1, name="a")
         widget._orm_state = 2  # PERSISTENT
         widget._orm_owner = session
         widget.name = "b"
         with pytest.raises(StaleDataError):
-            await session._update(widget)
+            await session._update_batch(
+                [widget], _update_mask(session._registry.spec_for(Widget), widget)
+            )
 
     async def test_an_update_that_matched_is_silent(self):
-        session = self._session("UPDATE 1")
-        widget = Widget(id=1, name="a")
-        widget._orm_state = 2
-        widget._orm_owner = session
-        widget.name = "b"
-        await session._update(widget)
+        from wreath.orm.session import _update_mask
 
-    async def test_an_unparseable_status_is_not_treated_as_stale(self):
-        session = self._session("OK")
+        session = self._session([(1,)])
         widget = Widget(id=1, name="a")
         widget._orm_state = 2
         widget._orm_owner = session
         widget.name = "b"
-        await session._update(widget)
+        await session._update_batch(
+            [widget], _update_mask(session._registry.spec_for(Widget), widget)
+        )
+
+    async def test_an_unexpected_returned_key_is_not_treated_as_success(self):
+        from wreath.orm.errors import ORMError
+        from wreath.orm.session import _update_mask
+
+        session = self._session([(2,)])
+        widget = Widget(id=1, name="a")
+        widget._orm_state = 2
+        widget._orm_owner = session
+        widget.name = "b"
+        with pytest.raises(ORMError, match="unexpected primary key"):
+            await session._update_batch(
+                [widget], _update_mask(session._registry.spec_for(Widget), widget)
+            )
 
 
 class TestRollbackCancellation:
@@ -188,6 +200,8 @@ class TestSessionSlidingExpiry:
 
     async def test_reading_an_active_session_extends_it(self):
         from wreath.policy.sessions import SessionPolicy
+        from wreath.request import Request
+        from wreath.response import Response
 
         saved: list = []
 
@@ -207,26 +221,21 @@ class TestSessionSlidingExpiry:
         middleware = SessionPolicy(secret="s" * 32, store=_Store())
         signed = middleware._sign(b"sid-1", __import__("time").time().__trunc__())
 
-        class _State:
-            def get(self, name, default=None):
-                return getattr(self, name, default)
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
 
-        class _Request:
-            cookies = {"wreath_session": signed}
-            state = _State()
-
-        class _Response:
-            headers: list = []
-
-            def set_cookie(self, *args, **kwargs):
-                pass
-
-            def delete_cookie(self, *args, **kwargs):  # pragma: no cover
-                pass
-
-        request = _Request()
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/",
+                "query_string": b"",
+                "headers": [(b"cookie", f"wreath_session={signed}".encode())],
+            },
+            receive,
+        )
         await middleware.before(request)
-        await middleware.after(request, _Response())
+        await middleware.after(request, Response())
         assert any(entry[0] == "touch" for entry in saved), (
             "an unchanged but live session was never extended"
         )

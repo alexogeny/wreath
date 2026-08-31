@@ -21,7 +21,7 @@ import os
 import smtplib
 import ssl
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
@@ -245,6 +245,15 @@ class UserStore(Protocol):
         """
         ...
 
+    async def get_many_by_id(self, user_ids: Iterable[str]) -> list[UserRecord | None]:
+        """Return one result per supplied id, in the same order.
+
+        Missing ids produce `None`, and repeated ids repeat their result. This
+        exact shape lets a caller retain its own ordering while a database store
+        serves the whole request with one query.
+        """
+        ...
+
     async def create(self, email: str, hashed_password: str) -> UserRecord:
         """Create a user and return the stored record, with its id assigned.
 
@@ -290,6 +299,10 @@ class InMemoryUserStore:
     async def get_by_id(self, user_id: str) -> UserRecord | None:
         """The user with this id, or `None`."""
         return self._by_id.get(user_id)
+
+    async def get_many_by_id(self, user_ids: Iterable[str]) -> list[UserRecord | None]:
+        """One ordered dictionary lookup per id, retaining repeats and misses."""
+        return [self._by_id.get(user_id) for user_id in user_ids]
 
     async def create(self, email: str, hashed_password: str) -> UserRecord:
         """Store a new user under the next id in a per-instance counter.

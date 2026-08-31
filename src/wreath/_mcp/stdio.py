@@ -81,8 +81,8 @@ async def serve(
 
     async with TestClient(app) as client:
         session = ""
-        stream: asyncio.Task[None] | None = None
         inflight: set[asyncio.Task[None]] = set()
+        streams: list[asyncio.Task[None]] = []
 
         async def relay(message: bytes) -> None:
             response = await client.post(path, content=message, headers=_headers(session))
@@ -110,19 +110,18 @@ async def serve(
                         # The stream carries everything the server sends unasked,
                         # including the requests it will park a tool on, so it is
                         # opened the moment there is a session to open it for.
-                        stream = asyncio.ensure_future(_pump(client, path, session, write, lock))
+                        streams.append(
+                            asyncio.create_task(_pump(client, path, session, write, lock))
+                        )
                     continue
                 task = asyncio.ensure_future(relay(message))
                 inflight.add(task)
                 task.add_done_callback(inflight.discard)
         finally:
-            for task in list(inflight):
+            tasks = (*inflight, *streams)
+            for task in tasks:
                 task.cancel()
-            if stream is not None:
-                stream.cancel()
-            await asyncio.gather(*inflight, return_exceptions=True)
-            if stream is not None:
-                await asyncio.gather(stream, return_exceptions=True)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _pump(
@@ -159,11 +158,8 @@ async def _pump(
             return
         pending.extend(body)
         consumed = 0
-        while True:
+        for _ in range(pending.count(b"\n", searched)):
             newline = pending.find(b"\n", searched)
-            if newline < 0:
-                searched = len(pending)
-                break
             text = _sse_line_text(pending, consumed, newline)
             consumed = newline + 1
             searched = consumed
@@ -172,7 +168,7 @@ async def _pump(
                     write(text[len(_DATA) :].encode("utf-8"))
         if consumed:
             del pending[:consumed]
-            searched -= consumed
+        searched = len(pending)
 
     await client.app(scope, receive, send)
 

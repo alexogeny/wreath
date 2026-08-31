@@ -260,6 +260,72 @@ async def test_server_default_response_headers(make_driver):
     assert b"date" not in headers
 
 
+async def test_existing_connection_keeps_the_default_header_sequence(make_driver):
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    config = ServerConfig(protocols=("h2",), server_header="before", date_header=False)
+    d = make_driver(app, config)
+    defaults = config._default_response_headers
+    defaults.server = b"after"
+    defaults.refresh(False)
+    object.__setattr__(config, "_default_response_headers", object())
+
+    await d.preface()
+    await d.feed_and_settle(support.build_headers_frame(1, support.request_headers()))
+
+    headers = dict(_decode_response(d)[1]["headers"])
+    assert headers[b"server"] == b"after"
+
+
+async def test_application_response_headers_override_defaults(make_driver):
+    async def app(scope, receive, send):
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"server", b"application"), (b"date", b"custom")],
+            }
+        )
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    d = make_driver(app)
+    await d.preface()
+    await d.feed_and_settle(support.build_headers_frame(1, support.request_headers()))
+
+    headers = _decode_response(d)[1]["headers"]
+    assert [value for name, value in headers if name == b"server"] == [b"application"]
+    assert [value for name, value in headers if name == b"date"] == [b"custom"]
+
+
+@pytest.mark.parametrize(
+    ("header", "error"),
+    [
+        ((b"x",), "response header must be a pair"),
+        ((b"x", "value"), "response header must be bytes"),
+        ((b"bad name", b"value"), "invalid response header"),
+        ((b"x", b"bad\r\nvalue"), "invalid response header"),
+    ],
+)
+async def test_invalid_response_headers_are_refused_before_start(make_driver, header, error):
+    observed = []
+
+    async def app(scope, receive, send):
+        with pytest.raises(RuntimeError, match=error) as caught:
+            await send({"type": "http.response.start", "status": 200, "headers": [header]})
+        observed.append(str(caught.value))
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    d = make_driver(app)
+    await d.preface()
+    await d.feed_and_settle(support.build_headers_frame(1, support.request_headers()))
+
+    assert observed == [error]
+    assert _decode_response(d)[1]["body"] == b"ok"
+
+
 async def test_response_trailers(make_driver):
     async def app(scope, receive, send):
         await send({"type": "http.response.start", "status": 200, "headers": [], "trailers": True})

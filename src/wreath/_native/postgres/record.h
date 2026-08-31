@@ -7,8 +7,11 @@
 extern PyTypeObject *WreathPgRecordType;
 extern PyTypeObject *WreathPgRecordBatchType;
 PyObject *wreath_pg_record_create(PyObject *names, PyObject *index, PyObject *values);
-PyObject *wreath_pg_record_alloc(PyObject *names, PyObject *index, Py_ssize_t count);
+PyObject *wreath_pg_record_descriptor(PyObject *names, PyObject *index);
+PyObject *wreath_pg_record_alloc(PyObject *descriptor, Py_ssize_t count);
 void wreath_pg_record_set_value(PyObject *record, Py_ssize_t position, PyObject *value);
+void wreath_pg_record_untrack(PyObject *record);
+void wreath_pg_record_maybe_untrack(PyObject *record);
 PyObject *wreath_pg_record_batch_new(void);
 int wreath_pg_record_batch_append(PyObject *batch, PyObject *value);
 int wreath_pg_record_batch_check(PyObject *batch);

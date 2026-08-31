@@ -336,8 +336,7 @@ class HttpPolicy:
             )
             mask |= _CSRF
             request._policy_mask = mask
-            if candidate is not None:
-                return candidate
+            return candidate
         return None
 
     def _reference_ingress_scope(self, scope: Any, method: str, path: str) -> Any | None:

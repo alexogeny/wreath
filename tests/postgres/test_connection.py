@@ -304,7 +304,8 @@ async def test_cached_execute_without_result_columns(
 
     assert first == second == "UPDATE 1"
     if before is not None and after is not None:
-        assert after["queued_messages"] - before["queued_messages"] == 1
+        expected_queued = 0 if postgres._implementation == "native" else 1
+        assert after["queued_messages"] - before["queued_messages"] == expected_queued
     assert server.flights == [
         [b"P", b"D", b"B", b"E", b"S"],
         [b"B", b"E", b"S"],

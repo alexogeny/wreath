@@ -1087,6 +1087,27 @@ endpoint_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwargs))
         return -1;
     }
     ep->config = Py_NewRef(config);
+    {
+        PyObject *defaults = PyObject_GetAttrString(config, "_default_response_headers");
+        PyObject *headers;
+        if (defaults == NULL) {
+            return -1;
+        }
+        headers = PyObject_GetAttrString(defaults, "headers");
+        Py_DECREF(defaults);
+        if (headers == NULL) {
+            return -1;
+        }
+        ep->default_response_headers = PySequence_Fast(
+            headers, "default response headers must be a sequence");
+        Py_DECREF(headers);
+        if (ep->default_response_headers == NULL) {
+            return -1;
+        }
+        if (wreath_h3_validate_response_headers(ep->default_response_headers) < 0) {
+            return -1;
+        }
+    }
     ep->loop = Py_NewRef(loop);
     ep->registry = Py_NewRef(registry);
     ep->loop_create_future = PyObject_GetAttrString(loop, "create_future");
@@ -1159,6 +1180,7 @@ endpoint_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(ep->native_app);
     Py_VISIT(ep->policy.descriptor);
     Py_VISIT(ep->config);
+    Py_VISIT(ep->default_response_headers);
     Py_VISIT(ep->loop);
     Py_VISIT(ep->registry);
     Py_VISIT(ep->transport);
@@ -1188,6 +1210,7 @@ endpoint_clear(PyObject *op)
     Py_CLEAR(ep->native_app);
     wreath_policy_program_clear(&ep->policy);
     Py_CLEAR(ep->config);
+    Py_CLEAR(ep->default_response_headers);
     Py_CLEAR(ep->loop);
     Py_CLEAR(ep->registry);
     Py_CLEAR(ep->transport);
