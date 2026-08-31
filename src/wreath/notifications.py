@@ -464,6 +464,12 @@ class InMemoryPushSubscriptions:
     """A dict-backed subscription store for development and tests."""
 
     _by_recipient: dict[str, list[PushSubscription]] = field(default_factory=dict)
+    _by_endpoint: dict[str, set[str]] = field(default_factory=dict, init=False)
+
+    def __post_init__(self) -> None:
+        for key, entries in self._by_recipient.items():
+            for entry in entries:
+                self._by_endpoint.setdefault(entry.endpoint, set()).add(key)
 
     async def for_recipient(self, key: str) -> Sequence[PushSubscription]:
         """Every subscription registered for `key`."""
@@ -474,10 +480,15 @@ class InMemoryPushSubscriptions:
         entries = self._by_recipient.setdefault(key, [])
         entries[:] = [entry for entry in entries if entry.endpoint != subscription.endpoint]
         entries.append(subscription)
+        self._by_endpoint.setdefault(subscription.endpoint, set()).add(key)
 
     async def remove(self, endpoint: str) -> None:
         """Forget every subscription with this endpoint."""
-        for entries in self._by_recipient.values():
+        keys = self._by_endpoint.pop(endpoint, None)
+        if keys is None:
+            return
+        for key in keys:
+            entries = self._by_recipient[key]
             entries[:] = [entry for entry in entries if entry.endpoint != endpoint]
 
 

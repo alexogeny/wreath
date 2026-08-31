@@ -210,6 +210,19 @@ async def test_an_unknown_token_is_refused_with_invitations_outstanding() -> Non
 
 
 @pytest.mark.asyncio
+async def test_invitation_acceptance_does_not_walk_outstanding_invitations() -> None:
+    class NoValueWalk(dict):
+        def values(self):
+            raise AssertionError("outstanding invitations were walked")
+
+    store = _store()
+    invitation = await store.invite("acme", "a@example.com")
+    store._invitations = NoValueWalk(store._invitations)
+
+    assert (await store.accept(invitation.token, "alice")).user_id == "alice"
+
+
+@pytest.mark.asyncio
 async def test_invite_and_accept_default_their_clock_to_the_wall_clock() -> None:
     store = _store()
     invitation = await store.invite("acme", "a@example.com", roles={"member"}, ttl=3600)

@@ -4,7 +4,7 @@ from typing import Any
 
 from wreath import Wreath
 from wreath._audit.dom import parse_html
-from wreath._audit.model import Severity
+from wreath._audit.model import Finding, Severity
 from wreath._audit.rules import A11Y_RULES, app_perf
 from wreath._audit.sources import run_audit
 from wreath.policy import HttpPolicy, SecurityHeadersPolicy
@@ -19,6 +19,12 @@ def _app() -> Wreath:
         return "ok"
 
     return app
+
+
+def test_finding_does_not_allocate_an_instance_dictionary() -> None:
+    finding = Finding("rule", Severity.WARN, "app", "message")
+
+    assert not hasattr(finding, "__dict__")
 
 
 def test_self_audit_api_docs_has_no_errors() -> None:

@@ -33,6 +33,12 @@ def _namespace(*arguments: str) -> Namespace:
     )
 
 
+def test_fixture_request_does_not_allocate_an_instance_dictionary() -> None:
+    request = native_runner._FixtureRequest(object(), str, object())
+
+    assert not hasattr(request, "__dict__")
+
+
 def test_fuzz_schedule_is_seeded_reproducible_and_not_collection_order() -> None:
     def contract() -> None:
         return None

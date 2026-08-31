@@ -602,10 +602,16 @@ class InMemorySecondFactorStore:
     """
 
     _rows: dict[str, SecondFactor] = field(default_factory=dict)
+    _by_user: dict[str, dict[str, SecondFactor]] = field(default_factory=dict, init=False)
+
+    def __post_init__(self) -> None:
+        for credential in self._rows.values():
+            self._by_user.setdefault(credential.user_id, {})[credential.id] = credential
 
     async def credentials(self, user_id: str) -> list[SecondFactor]:
         """Every credential belonging to `user_id`, in insertion order."""
-        return [row for row in self._rows.values() if row.user_id == user_id]
+        rows = self._by_user.get(user_id)
+        return [] if rows is None else list(rows.values())
 
     async def add(self, credential: SecondFactor) -> SecondFactor:
         """Store `credential`.
@@ -616,7 +622,15 @@ class InMemorySecondFactorStore:
         """
         if credential.id in self._rows:
             raise ValueError(f"duplicate second-factor id: {credential.id!r}")
-        self._rows[credential.id] = credential
+        rows = self._by_user.setdefault(credential.user_id, {})
+        rows[credential.id] = credential
+        try:
+            self._rows[credential.id] = credential
+        except MemoryError:
+            del rows[credential.id]
+            if not rows:
+                del self._by_user[credential.user_id]
+            raise
         return credential
 
     async def credential(self, credential_id: str) -> SecondFactor | None:
@@ -633,6 +647,10 @@ class InMemorySecondFactorStore:
         row = self._rows.get(credential_id)
         if row is not None and row.user_id == user_id:
             del self._rows[credential_id]
+            rows = self._by_user[user_id]
+            del rows[credential_id]
+            if not rows:
+                del self._by_user[user_id]
 
     def _advance(self, credential_id: str, counter: int, at: datetime) -> bool:
         """Compare and set, in a **synchronous** function. Returns whether it won.
@@ -650,7 +668,9 @@ class InMemorySecondFactorStore:
         row = self._rows.get(credential_id)
         if row is None or counter <= row.counter:
             return False
-        self._rows[credential_id] = replace(row, counter=counter, last_used_at=at)
+        updated = replace(row, counter=counter, last_used_at=at)
+        self._rows[credential_id] = updated
+        self._by_user[row.user_id][credential_id] = updated
         return True
 
     async def touch(self, credential_id: str, *, counter: int, at: datetime) -> bool:

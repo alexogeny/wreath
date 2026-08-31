@@ -414,8 +414,8 @@ async def test_a_durable_wakeup_still_wakes_consumers_after_a_reconnect() -> Non
     bus = _bus(database)
     bus.subscribe("order_placed", group="billing", durable=True)(handler)
     # Registered as one more waiter: the doorbell wakes every parked consumer,
-    # so a recording waiter in the list observes each edge.
-    bus._waiters.append(RecordingEvent())
+    # so a recording waiter in the set observes each edge.
+    bus._waiters.add(RecordingEvent())
     supervisor = RunningSupervisor()
     await bus.start(supervisor)
     try:

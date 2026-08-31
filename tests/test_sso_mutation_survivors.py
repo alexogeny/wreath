@@ -16,11 +16,6 @@ from wreath.sso import (
 )
 
 
-class _ItemsMustNotBeRead(dict[str, Any]):
-    def items(self) -> Any:
-        pytest.fail("expiry entries were scanned before their deadline")
-
-
 def _pending(
     request_id: str,
     *,
@@ -122,12 +117,12 @@ def test_pending_login_organization_refuses_an_unknown_request() -> None:
 
 def test_pending_login_sweep_returns_before_the_next_deadline() -> None:
     store = PendingLoginStore(ttl=10)
-    store.put(_pending("request"))
-    store._by_id = _ItemsMustNotBeRead(store._by_id)
+    pending = _pending("request")
+    store.put(pending)
 
     store._sweep(109)
 
-    assert "request" in store._by_id
+    assert store._by_id.held("request") is pending
     assert store._next_sweep == 110
 
 
@@ -225,9 +220,8 @@ def test_oidc_consume_requires_a_non_empty_session_binding() -> None:
 def test_oidc_sweep_returns_at_the_exact_next_deadline() -> None:
     party = _party(ttl=10)
     flow = party.begin_login(organization="acme", session_id="session", now=100)
-    party._flows = _ItemsMustNotBeRead(party._flows)
 
     party._sweep_flows(110)
 
-    assert flow.state in party._flows
+    assert party._flows.held(flow.state) is flow
     assert party._next_sweep == 110

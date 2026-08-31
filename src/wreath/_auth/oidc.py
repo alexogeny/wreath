@@ -8,17 +8,17 @@ async `Verifier` for `wreath.auth.BearerTokenBackend`; the resulting
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable, Sequence
 from typing import Any
 from urllib.parse import urlsplit
 
+from .. import _json
 from .jwks import JwksCache
 from .jwt import (
     IdentityMapper,
+    compile_audiences,
     default_identity,
     freeze_algorithms,
-    freeze_audiences,
     peek_header,
     verify_jwt,
 )
@@ -123,7 +123,7 @@ class OidcProvider:
                 ) from error
         self._client = http_client
         self._algorithms = freeze_algorithms(algorithms)
-        self._audiences = freeze_audiences(audience)
+        self._audiences = compile_audiences(audience)
         self._leeway = int(leeway)
         self._required = tuple(required)
         self._identity = identity
@@ -142,7 +142,7 @@ class OidcProvider:
             raise RuntimeError(f"OIDC discovery for {self.name!r} failed: HTTP {response.status}")
         if len(response.body) > _MAX_DISCOVERY_BYTES:
             raise ValueError("OIDC discovery document exceeds size cap")
-        document = json.loads(response.body)
+        document = _json.loads(response.body)
         if document.get("issuer") != self.issuer:
             raise ValueError("OIDC discovery 'issuer' does not match the configured issuer")
         self.jwks_uri = document["jwks_uri"]
@@ -166,7 +166,7 @@ class OidcProvider:
         """Return an async `Verifier` closing over this provider's JWKS cache."""
 
         audiences = (
-            self._audiences if audience is _USE_PROVIDER_AUDIENCES else freeze_audiences(audience)
+            self._audiences if audience is _USE_PROVIDER_AUDIENCES else compile_audiences(audience)
         )
 
         async def verify(token: str) -> Identity | None:

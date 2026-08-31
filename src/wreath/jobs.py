@@ -247,7 +247,7 @@ class JobRunner:
         # another worker -- already waiting -- slept the full poll interval with
         # work sitting there. Each worker clears its own waiter immediately
         # before claiming, so a wake that lands mid-claim is still remembered.
-        self._waiters: list[asyncio.Event] = []
+        self._waiters: set[asyncio.Event] = set()
         self._doorbell = Doorbell(
             database=database,
             workload=workload,
@@ -1762,12 +1762,12 @@ class JobRunner:
     def _new_waiter(self) -> asyncio.Event:
         """Register a waiter for one worker. See `_waiters`."""
         wake = asyncio.Event()
-        self._waiters.append(wake)
+        self._waiters.add(wake)
         return wake
 
     def _wake_workers(self) -> None:
         """Wake every parked worker. One doorbell, every waiter."""
-        for wake in tuple(self._waiters):
+        for wake in self._waiters:
             wake.set()
 
     async def _park(self, wake: asyncio.Event) -> None:

@@ -56,6 +56,8 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 from xml.sax.saxutils import quoteattr
 
+from ._capability_map import CapabilityMap
+
 __all__ = [
     "AttributeMapping",
     "IdentityProviderConfig",
@@ -187,7 +189,12 @@ class PendingLoginStore:
             raise ValueError("pending-login ttl must be positive")
         if max_entries < 1:
             raise ValueError("pending-login max_entries must be at least one")
-        self._by_id: dict[str, PendingLogin] = {}
+        self._by_id = CapabilityMap(
+            max_entries=max_entries,
+            ttl=ttl,
+            clock=time.time,
+            overflow="refuse",
+        )
         self._ttl = ttl
         self._max_entries = max_entries
         self._next_sweep = float("inf")
@@ -199,8 +206,14 @@ class PendingLoginStore:
                 "pending-capacity",
                 f"the pending-login store is at its ceiling of {self._max_entries}",
             )
-        self._by_id[pending.request_id] = pending
-        self._next_sweep = min(self._next_sweep, pending.issued_at + self._ttl)
+        if not self._by_id.put(
+            pending.request_id, pending, now=pending.issued_at
+        ):
+            raise SsoRefusal(
+                "pending-capacity",
+                f"the pending-login store is at its ceiling of {self._max_entries}",
+            )
+        self._next_sweep = self._by_id.next_deadline
 
     def spend(
         self,
@@ -212,7 +225,7 @@ class PendingLoginStore:
     ) -> PendingLogin:
         """Take the pending login, or refuse. Never returns the same one twice."""
         moment = time.time() if now is None else now
-        pending = self._by_id.get(request_id)
+        pending = self._by_id.held(request_id)
         if pending is None:
             raise SsoRefusal(
                 "unsolicited",
@@ -221,7 +234,7 @@ class PendingLoginStore:
                 "answers no request is unsolicited and is not a login here.",
             )
         if moment - pending.issued_at >= self._ttl:
-            del self._by_id[request_id]
+            self._by_id.discard(request_id)
             raise SsoRefusal(
                 "expired-request",
                 f"the login for InResponseTo={request_id!r} was issued "
@@ -237,12 +250,12 @@ class PendingLoginStore:
                 "state-session-mismatch",
                 "this SAML response belongs to a different browser session",
             )
-        del self._by_id[request_id]
+        self._by_id.discard(request_id)
         return pending
 
     def organization_for(self, request_id: str) -> str:
         """Read the organisation without spending the request. For diagnostics."""
-        pending = self._by_id.get(request_id)
+        pending = self._by_id.held(request_id)
         if pending is None:
             raise SsoRefusal("unsolicited", f"no login is pending for {request_id!r}")
         return pending.organization
@@ -255,20 +268,8 @@ class PendingLoginStore:
         """
         if now < self._next_sweep:
             return
-        cutoff = now - self._ttl
-        next_sweep = float("inf")
-        expired_ids: list[str] = []
-        ttl = self._ttl
-        for request_id, pending in self._by_id.items():
-            if pending.issued_at <= cutoff:
-                expired_ids.append(request_id)
-            else:
-                deadline = pending.issued_at + ttl
-                if deadline < next_sweep:
-                    next_sweep = deadline
-        for request_id in expired_ids:
-            del self._by_id[request_id]
-        self._next_sweep = next_sweep
+        self._by_id.sweep(now=now)
+        self._next_sweep = self._by_id.next_deadline
 
 
 def _request_id() -> str:
@@ -634,7 +635,13 @@ class OidcRelyingParty:
         self._pkce = pkce
         self._ttl = ttl
         self._max_pending = max_pending
-        self._flows: dict[str, _OidcFlow] = {}
+        self._flows = CapabilityMap(
+            max_entries=max_pending,
+            ttl=ttl,
+            clock=time.time,
+            overflow="refuse",
+            expire_at_deadline=False,
+        )
         self._next_sweep = float("inf")
         #: `kid -> key`, filled by `refresh()` at startup. Never on the request
         #: path: a fetch driven by a request lets an unauthenticated caller aim
@@ -702,13 +709,17 @@ class OidcRelyingParty:
             session_id=session_id,
             issued_at=moment,
         )
-        self._flows[flow.state] = flow
-        self._next_sweep = min(self._next_sweep, moment + self._ttl)
+        if not self._flows.put(flow.state, flow, now=moment):
+            raise SsoRefusal(
+                "pending-capacity",
+                f"the OIDC pending-login store is at its ceiling of {self._max_pending}",
+            )
+        self._next_sweep = self._flows.next_deadline
         return flow
 
     def consume_state(self, state: str, *, session_id: str, now: float | None = None) -> _OidcFlow:
         """Spend the state, refusing a replay or another browser's callback."""
-        flow = self._flows.pop(state, None)
+        flow = self._flows.held(state)
         if flow is None:
             raise SsoRefusal(
                 "unknown-state",
@@ -716,6 +727,7 @@ class OidcRelyingParty:
                 "already spent. A state that is not single-use is CSRF on the login "
                 "endpoint.",
             )
+        self._flows.discard(state)
         moment = time.time() if now is None else now
         if moment - flow.issued_at > self._ttl:
             raise SsoRefusal(
@@ -739,20 +751,8 @@ class OidcRelyingParty:
     def _sweep_flows(self, now: float) -> None:
         if now <= self._next_sweep:
             return
-        cutoff = now - self._ttl
-        next_sweep = float("inf")
-        expired_states: list[str] = []
-        ttl = self._ttl
-        for state, flow in self._flows.items():
-            if flow.issued_at < cutoff:
-                expired_states.append(state)
-            else:
-                deadline = flow.issued_at + ttl
-                if deadline < next_sweep:
-                    next_sweep = deadline
-        for state in expired_states:
-            del self._flows[state]
-        self._next_sweep = next_sweep
+        self._flows.sweep(now=now)
+        self._next_sweep = self._flows.next_deadline
 
     def check_nonce(self, claims: Mapping[str, Any], *, expected_nonce: str) -> None:
         """The claim that binds an id token to one authorization request."""

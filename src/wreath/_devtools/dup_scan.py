@@ -411,7 +411,7 @@ def _c_shape(
     return shape, lines
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Site:
     """One function body, and where to find it."""
 
@@ -862,7 +862,7 @@ class Pair:
         }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Body:
     """A scanned body: where it is, what shape it has, and that shape's bytes."""
 

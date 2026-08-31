@@ -303,7 +303,7 @@ class MessageBus:
         self._ephemeral_subs: dict[str, list[_Subscription]] = {}
         # One waiter per consumer; see wreath.jobs for why a single shared
         # Event loses wakes when several consumers park on it.
-        self._waiters: list[asyncio.Event] = []
+        self._waiters: set[asyncio.Event] = set()
         self._inflight: set[asyncio.Future[Any]] = set()
         # Channel -> the groups other processes registered for it. Refreshed on
         # a timer by `_group_refresher`, never read on the publish path: a
@@ -1231,13 +1231,13 @@ class MessageBus:
 
     def _new_waiter(self) -> asyncio.Event:
         wake = asyncio.Event()
-        self._waiters.append(wake)
+        self._waiters.add(wake)
         return wake
 
     def _wake_consumers(self) -> None:
         """Wake every parked consumer. One doorbell, every waiter."""
         # Event.set() schedules a parked task; it cannot resume that task and
-        # mutate this event-loop-owned list until this synchronous loop returns.
+        # mutate this event-loop-owned set until this synchronous loop returns.
         for wake in self._waiters:
             wake.set()
 

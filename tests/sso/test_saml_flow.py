@@ -157,9 +157,9 @@ def test_pending_login_sweep_tracks_the_next_live_deadline() -> None:
 
     store._sweep(111.0)
 
-    assert "_first" not in store._by_id
-    assert "_second" in store._by_id
-    assert "_third" in store._by_id
+    assert store._by_id.held("_first") is None
+    assert store._by_id.held("_second") is not None
+    assert store._by_id.held("_third") is not None
     assert store._next_sweep == 118.0
 
 

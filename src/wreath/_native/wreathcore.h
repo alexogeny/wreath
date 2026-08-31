@@ -120,6 +120,8 @@ PyObject *wreath_read_osenv(PyObject *self, PyObject *ignored);
 
 /* codecs.c */
 PyObject *wreath_cache_key_selected(PyObject *self, PyObject *args);
+PyObject *wreath_validate_bit_string(
+    PyObject *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *wreath_float_sequence(PyObject *self, PyObject *args);
 PyObject *wreath_array_coerce(PyObject *self, PyObject *args);
 PyObject *wreath_map_nullable(PyObject *self, PyObject *args);

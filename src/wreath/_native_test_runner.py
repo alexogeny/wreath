@@ -126,6 +126,8 @@ class _FixtureNode:
 
 
 class _FixtureRequest:
+    __slots__ = ("_has_param", "_param", "_resolve", "_stack", "node")
+
     def __init__(
         self,
         node: _FixtureNode,

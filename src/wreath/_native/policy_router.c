@@ -105,6 +105,12 @@ typedef struct {
     int greedy;
 } BDynamicRoute;
 
+typedef struct {
+    Py_ssize_t *indices;
+    Py_ssize_t count;
+    Py_ssize_t capacity;
+} BDynamicGroup;
+
 /* Open-addressed map: literal bytes -> mask word offset. Avoids building a
  * PyUnicode per segment on the match path, which the dict-keyed tree must do.
  *
@@ -191,6 +197,7 @@ typedef struct {
     uint64_t disc_lookups; /* lookups served by the discriminating-byte keying */
     uint64_t verify_routes;/* routes the scan fully verified */
     uint64_t verify_cmps;  /* literal segment compares inside verify */
+    uint64_t dynamic_candidates;
 } ProbeStats;
 
 typedef struct {
@@ -212,6 +219,7 @@ typedef struct {
     BDynamicRoute *dynamic_routes;
     Py_ssize_t ndynamic;
     Py_ssize_t dynamic_cap;
+    PyObject *dynamic_groups[2];
     int dirty;
     int sealed;
     ProbeStats probe_stats; /* zeroed by tp_alloc; reset via probe_stats() */
@@ -992,6 +1000,82 @@ dynamic_route_clear(BDynamicRoute *route)
     memset(route, 0, sizeof(*route));
 }
 
+static void
+dynamic_group_capsule_free(PyObject *capsule)
+{
+    BDynamicGroup *group = PyCapsule_GetPointer(capsule, "brt.dynamicgroup");
+    if (group == NULL) {
+        PyErr_Clear();
+        return;
+    }
+    PyMem_Free(group->indices);
+    PyMem_Free(group);
+}
+
+static BDynamicGroup *
+dynamic_group_lookup(PolicyRouteTable *self, int host_route, PyObject *method)
+{
+    PyObject *capsule = PyDict_GetItemWithError(
+        self->dynamic_groups[host_route], method);
+    if (capsule == NULL) return NULL;
+    return PyCapsule_GetPointer(capsule, "brt.dynamicgroup");
+}
+
+static int
+dynamic_groups_build(PolicyRouteTable *self)
+{
+    PyDict_Clear(self->dynamic_groups[0]);
+    PyDict_Clear(self->dynamic_groups[1]);
+    for (Py_ssize_t index = 0; index < self->ndynamic; index++) {
+        BDynamicRoute *route = &self->dynamic_routes[index];
+        PyObject *groups = self->dynamic_groups[route->host_route];
+        PyObject *capsule = PyDict_GetItemWithError(groups, route->method);
+        BDynamicGroup *group;
+        if (capsule != NULL) {
+            group = PyCapsule_GetPointer(capsule, "brt.dynamicgroup");
+            if (group == NULL) return -1;
+        } else {
+            if (PyErr_Occurred()) return -1;
+            group = PyMem_Calloc(1, sizeof(*group));
+            if (group == NULL) {
+                PyErr_NoMemory();
+                return -1;
+            }
+            capsule = PyCapsule_New(
+                group, "brt.dynamicgroup", dynamic_group_capsule_free);
+            if (capsule == NULL || PyDict_SetItem(groups, route->method, capsule) < 0) {
+                Py_XDECREF(capsule);
+                if (capsule == NULL) {
+                    PyMem_Free(group);
+                }
+                return -1;
+            }
+            Py_DECREF(capsule);
+        }
+        if (group->count == group->capacity) {
+            if (group->capacity > PY_SSIZE_T_MAX / 2) {
+                PyErr_NoMemory();
+                return -1;
+            }
+            Py_ssize_t capacity = group->capacity == 0 ? 8 : group->capacity * 2;
+            if ((size_t)capacity > SIZE_MAX / sizeof(*group->indices)) {
+                PyErr_NoMemory();
+                return -1;
+            }
+            Py_ssize_t *indices = PyMem_Realloc(
+                group->indices, (size_t)capacity * sizeof(*indices));
+            if (indices == NULL) {
+                PyErr_NoMemory();
+                return -1;
+            }
+            group->indices = indices;
+            group->capacity = capacity;
+        }
+        group->indices[group->count++] = index;
+    }
+    return 0;
+}
+
 static int
 dynamic_segment_compile(BDynamicSegment *target, const char *text,
                         Py_ssize_t len, int host)
@@ -1114,8 +1198,12 @@ brt_new(PyTypeObject *type, PyObject *Py_UNUSED(a), PyObject *Py_UNUSED(k))
     memset(self->no_groups.built, 1, sizeof(self->no_groups.built));
     self->groups = PyDict_New();
     self->statics = PyDict_New();
+    self->dynamic_groups[0] = PyDict_New();
+    self->dynamic_groups[1] = PyDict_New();
     self->get_method = PyUnicode_InternFromString("GET");
-    if (self->groups == NULL || self->statics == NULL || self->get_method == NULL) {
+    if (self->groups == NULL || self->statics == NULL ||
+        self->dynamic_groups[0] == NULL || self->dynamic_groups[1] == NULL ||
+        self->get_method == NULL) {
         Py_DECREF(self);
         return NULL;
     }
@@ -1135,6 +1223,8 @@ brt_dealloc(PolicyRouteTable *self)
         dynamic_route_clear(&self->dynamic_routes[i]);
     }
     PyMem_Free(self->dynamic_routes);
+    Py_XDECREF(self->dynamic_groups[0]);
+    Py_XDECREF(self->dynamic_groups[1]);
     Py_XDECREF(self->cached_method);
     Py_XDECREF(self->get_method);
     Py_XDECREF(self->groups);
@@ -1517,6 +1607,7 @@ static int
 brt_compile_groups(PolicyRouteTable *self)
 {
     if (!self->dirty) return 0;
+    if (dynamic_groups_build(self) < 0) return -1;
     PyDict_Clear(self->groups);
     Py_CLEAR(self->cached_method);
     self->cached_mg = NULL;
@@ -1733,16 +1824,32 @@ dynamic_dispatch(PolicyRouteTable *self, PyObject *method_obj,
         if (nhost < 0) Py_RETURN_NONE;
     }
 
-    for (Py_ssize_t index = 0; index < self->ndynamic; index++) {
-        BDynamicRoute *route = &self->dynamic_routes[index];
-        if (route->host_route != host_routes) continue;
-        int same_method = PyObject_RichCompareBool(route->method, method_obj, Py_EQ);
-        if (same_method < 0) return NULL;
-        if (!same_method && PyUnicode_CompareWithASCIIString(method_obj, "HEAD") == 0) {
-            same_method = PyObject_RichCompareBool(route->method, self->get_method, Py_EQ);
-            if (same_method < 0) return NULL;
+    BDynamicGroup *method_group = dynamic_group_lookup(
+        self, host_routes, method_obj);
+    if (method_group == NULL && PyErr_Occurred()) return NULL;
+    BDynamicGroup *get_group = NULL;
+    if (PyUnicode_CompareWithASCIIString(method_obj, "HEAD") == 0) {
+        get_group = dynamic_group_lookup(self, host_routes, self->get_method);
+        if (get_group == NULL && PyErr_Occurred()) return NULL;
+    }
+    Py_ssize_t method_pos = 0;
+    Py_ssize_t get_pos = 0;
+    while ((method_group != NULL && method_pos < method_group->count) ||
+           (get_group != NULL && get_pos < get_group->count)) {
+        Py_ssize_t method_index = method_group != NULL && method_pos < method_group->count
+            ? method_group->indices[method_pos] : PY_SSIZE_T_MAX;
+        Py_ssize_t get_index = get_group != NULL && get_pos < get_group->count
+            ? get_group->indices[get_pos] : PY_SSIZE_T_MAX;
+        Py_ssize_t index;
+        if (method_index < get_index) {
+            index = method_index;
+            method_pos++;
+        } else {
+            index = get_index;
+            get_pos++;
         }
-        if (!same_method) continue;
+        BRT_PROBE(self->probe_stats.dynamic_candidates++);
+        BDynamicRoute *route = &self->dynamic_routes[index];
         if (route->greedy ? npath < route->npath : npath != route->npath) continue;
         Py_ssize_t fixed_path = route->greedy ? route->npath - 1 : route->npath;
         if (!dynamic_segments_match(route->path, fixed_path, path_segments)) continue;
@@ -2280,12 +2387,13 @@ brt_probe_stats_get(PolicyRouteTable *self, PyObject *Py_UNUSED(a))
 {
     ProbeStats *s = &self->probe_stats;
     PyObject *d = Py_BuildValue(
-        "{s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K}",
+        "{s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K}",
         "lookups", s->lookups, "buckets_examined", s->buckets,
         "key_compares", s->key_compares, "hits", s->hits,
         "misses", s->misses, "max_probe", s->max_probe,
         "disc_lookups", s->disc_lookups, "verify_routes", s->verify_routes,
-        "verify_cmps", s->verify_cmps);
+        "verify_cmps", s->verify_cmps,
+        "dynamic_candidates", s->dynamic_candidates);
     memset(s, 0, sizeof(*s));
     return d;
 }

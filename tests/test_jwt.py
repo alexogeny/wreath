@@ -79,8 +79,14 @@ def _reason_for(value: object, claim: str = "exp") -> int:
         now=int(time.time()),
         leeway=0,
         issuer=None,
-        audiences=(),
+        audiences=frozenset(),
         required=(),
+    )
+
+
+def test_configured_audiences_are_compiled_for_membership() -> None:
+    assert jwt_module._compile_audiences(("api", "admin", "api")) == frozenset(
+        {"api", "admin"}
     )
 
 

@@ -7,6 +7,14 @@ import pytest
 from wreath._devtools import dup_scan
 from wreath._devtools.native_lint import repo_root
 
+
+def test_scanned_body_records_do_not_allocate_instance_dictionaries() -> None:
+    site = dup_scan.Site("module.py", "function", 1, 12)
+    body = dup_scan.Body(site, "digest", b"shape")
+
+    assert not hasattr(site, "__dict__")
+    assert not hasattr(body, "__dict__")
+
 RENAMED_TWINS = '''
 def insert_settled(connection, table, values):
     """One docstring."""

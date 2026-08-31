@@ -622,7 +622,11 @@ def decode_response(data: bytes) -> dict[int, H2StreamResponse]:
                     del pending[frame.stream_id]
         elif frame.type == DATA:
             stream = _stream(frame.stream_id)
-            bodies.setdefault(frame.stream_id, bytearray()).extend(frame.payload)
+            body = bodies.get(frame.stream_id)
+            if body is None:
+                body = bytearray()
+                bodies[frame.stream_id] = body
+            body.extend(frame.payload)
             if frame.flags & FLAG_END_STREAM:
                 stream.ended = True
         elif frame.type == RST_STREAM:

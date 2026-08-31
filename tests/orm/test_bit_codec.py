@@ -146,6 +146,27 @@ def test_a_character_that_is_not_a_bit_is_refused_at_assignment() -> None:
         Bit(4).coerce("10a1")
 
 
+def test_a_str_subclass_cannot_override_bit_validation() -> None:
+    class LyingBits(str):
+        def count(self, _substring: str, *_bounds: int) -> int:
+            return 2
+
+    with pytest.raises(ValueError, match="only '0' and '1'"):
+        Bit(4).coerce(LyingBits("10a1"))
+
+
+def test_a_str_subclass_cannot_override_bit_length() -> None:
+    class LyingBits(str):
+        def __len__(self) -> int:
+            return 3
+
+        def count(self, substring: str, *_bounds: int) -> int:
+            return 2 if substring == "0" else 1
+
+    with pytest.raises(ValueError, match="exactly 3 bits, got 2"):
+        Bit(3).coerce(LyingBits("01"))
+
+
 def test_packed_bytes_are_accepted_and_unpacked_to_the_declared_length() -> None:
     assert Bit(8).coerce(b"\x81") == "10000001"
     assert Bit(3).coerce(b"\xa0") == "101"

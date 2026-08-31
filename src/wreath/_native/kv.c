@@ -722,6 +722,33 @@ kv_peek(WreathKV *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnam
     return Py_NewRef(self->slots[index].value);
 }
 
+PyDoc_STRVAR(kv_held_doc,
+"held(key, default=None)\n"
+"--\n\n"
+"The value physically held under `key`, including one past its deadline.");
+
+static PyObject *
+kv_held(WreathKV *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    if (nargs < 1 || nargs > 2) {
+        PyErr_Format(PyExc_TypeError,
+                     "held() takes from 1 to 2 positional arguments but %zd were given",
+                     nargs);
+        return NULL;
+    }
+    PyObject *key = args[0];
+    PyObject *fallback = nargs == 2 ? args[1] : Py_None;
+    Py_hash_t hash;
+    size_t index;
+    size_t insert_at;
+    int found;
+    hash = PyObject_Hash(key);
+    if (hash == -1 && PyErr_Occurred() != NULL) return NULL;
+    found = kv_probe(self, key, kv_mix(hash), hash, &index, &insert_at);
+    if (found < 0) return NULL;
+    return Py_NewRef(found ? self->slots[index].value : fallback);
+}
+
 PyDoc_STRVAR(kv_set_doc,
 "set(key, value, ttl=None, now=None, keep_deadline=False, cost=0)\n"
 "--\n\n"
@@ -1568,6 +1595,7 @@ static PyMethodDef kv_methods[] = {
      kv_get_doc},
     {"peek", (PyCFunction)(void (*)(void))kv_peek, METH_FASTCALL | METH_KEYWORDS,
      kv_peek_doc},
+    {"held", (PyCFunction)(void (*)(void))kv_held, METH_FASTCALL, kv_held_doc},
     {"set", (PyCFunction)(void (*)(void))kv_set, METH_FASTCALL | METH_KEYWORDS,
      kv_set_doc},
     {"claim", (PyCFunction)(void (*)(void))kv_claim, METH_FASTCALL | METH_KEYWORDS,

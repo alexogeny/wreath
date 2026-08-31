@@ -80,6 +80,31 @@ async def test_accept_query_uses_structured_fields_for_media_parameters() -> Non
 
 
 @pytest.mark.parametrize(
+    ("accepted", "content_type"),
+    [
+        (("application/json",), "application/json"),
+        (("application/*",), "application/json"),
+        (("*/*",), "text/plain"),
+    ],
+)
+async def test_accept_query_matches_exact_type_ranges_and_the_any_range(
+    accepted: tuple[str, ...], content_type: str
+) -> None:
+    app = Wreath()
+
+    @app.query("/search", accept_query=accepted)
+    async def search(request: Request) -> str:
+        return "ok"
+
+    async with TestClient(app) as client:
+        response = await client.query(
+            "/search", content=b"query", headers={"content-type": content_type}
+        )
+
+    assert response.status == 200
+
+
+@pytest.mark.parametrize(
     "media_range",
     ["json", "application/foo:bar", "application/json;format=foo/bar"],
 )

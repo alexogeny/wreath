@@ -158,8 +158,7 @@ async def _pump(
             return
         pending.extend(body)
         consumed = 0
-        for _ in range(pending.count(b"\n", searched)):
-            newline = pending.find(b"\n", searched)
+        while (newline := pending.find(b"\n", searched)) >= 0:
             text = _sse_line_text(pending, consumed, newline)
             consumed = newline + 1
             searched = consumed

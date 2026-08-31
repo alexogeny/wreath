@@ -59,7 +59,7 @@ def build() -> tuple[Wreath, MCP]:
     return app, mcp
 
 
-def test_session_creation_does_not_scan_before_expiry_is_possible() -> None:
+def test_session_creation_collects_only_due_deadlines() -> None:
     class CountingStore(SessionStore):
         visits = 0
 
@@ -77,7 +77,7 @@ def test_session_creation_does_not_scan_before_expiry_is_possible() -> None:
     assert store.visits == 0
 
     store.create(protocol_version=PROTOCOL_VERSION, client_info={}, now=110)
-    assert store.visits == 5
+    assert store.visits == 0
     assert len(store) == 5
     assert store._next_sweep == 111
 

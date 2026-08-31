@@ -28,6 +28,13 @@ class TestDoorbellWakesEveryParkedWorker:
     `clear()` racing another's `set()` loses the wake -- the parked worker then
     sleeps the whole poll interval with work waiting."""
 
+    def test_waiter_registries_use_constant_time_identity_sets(self):
+        runner = JobRunner(_FakeDatabase(), name="work")
+        bus = MessageBus(_FakeDatabase(), name="events")
+
+        assert isinstance(runner._waiters, set)
+        assert isinstance(bus._waiters, set)
+
     async def test_a_doorbell_wakes_all_parked_job_workers(self):
         runner = JobRunner(_FakeDatabase(), name="work", poll_interval=30.0, concurrency=3)
         waiters = [runner._new_waiter() for _ in range(3)]

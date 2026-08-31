@@ -1001,6 +1001,7 @@ class Database:
         "_pools",
         "_register_lock",
         "_statements",
+        "_statements_by_workload",
         "_workload_dsns",
         "shutdown_timeout",
         "started",
@@ -1028,6 +1029,7 @@ class Database:
         self._connector = connector
         self._pools: dict[Workload, Pool] = {}
         self._statements: dict[str, Statement] = {}
+        self._statements_by_workload: dict[Workload, list[Statement]] = {}
         # Guards the duplicate check in `statement`, which is check-then-act and
         # therefore not a guard at all across threads -- see the comment there.
         self._register_lock = threading.Lock()
@@ -1075,11 +1077,18 @@ class Database:
                 self._configs[workload] = PoolConfig()
             statement = Statement(self, name, sql, workload)
             statement._pool = self._pools.get(workload)
-            self._statements[name] = statement
+            statements = self._statements_by_workload.setdefault(workload, [])
+            statements.append(statement)
+            try:
+                self._statements[name] = statement
+            except MemoryError:
+                statements.pop()
+                raise
         return statement
 
     def _for_workload(self, workload: Workload) -> tuple[Statement, ...]:
-        return tuple(item for item in self._statements.values() if item.workload == workload)
+        statements = self._statements_by_workload.get(workload)
+        return () if statements is None else tuple(statements)
 
     async def start(self) -> None:
         """Build a `Pool` per configured workload and start them all.

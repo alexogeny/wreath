@@ -188,6 +188,18 @@ def test_policy_table_orders_host_static_and_greedy_routes() -> None:
     )
 
 
+def test_dynamic_dispatch_only_walks_routes_for_the_requested_method() -> None:
+    router = CompiledRouter("policy")
+    for index in range(64):
+        router.add(f"/method-{index}/{{rest:path}}", f"METHOD-{index}", handler)
+    router.add("/assets/{rest:path}", "GET", handler)
+    router.compile()
+
+    assert router.classify_request("GET", "/assets/site.css", "example.test")[0] == 1
+    stats = router._table.probe_stats()
+    assert stats["dynamic_candidates"] == 1
+
+
 @pytest.mark.parametrize(
     ("path", "host", "request_path", "request_host", "params"),
     [

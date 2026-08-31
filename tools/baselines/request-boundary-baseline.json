@@ -4,20 +4,20 @@
     "realistic": {
       "status": 200,
       "totals": {
-        "c": 103,
+        "c": 100,
         "python": 2
       },
       "pre_activation": {
-        "c": 42,
+        "c": 39,
         "python": 1
       },
       "phases": {
         "ingress": {
-          "c": 37,
+          "c": 35,
           "python": 1
         },
         "routing": {
-          "c": 5,
+          "c": 4,
           "python": 0
         },
         "handler": {
@@ -30,7 +30,7 @@
         }
       },
       "c_calls": {
-        "dict.get": 22,
+        "dict.get": 19,
         "builtins.isinstance": 10,
         "str.encode": 6,
         "builtins.getattr": 6,
@@ -43,7 +43,7 @@
         "lock.__exit__": 2,
         "str.rpartition": 2,
         "list.append": 2,
-        "dict.clear": 2,
+        "set.clear": 2,
         "wreath._native._core.replace_response_header": 2,
         "wreath._native._core.request_new": 1,
         "TrustedNetworks.contains": 1,
@@ -65,8 +65,8 @@
         "wreath._native._core.orm_shape": 1,
         "wreath._native._core.orm_hydrate_records": 1,
         "dict.values": 1,
+        "dict.clear": 1,
         "list.clear": 1,
-        "set.clear": 1,
         "wreath._native._core.json_dumps": 1,
         "object.__new__": 1,
         "wreath._native._core.append_missing_headers": 1,

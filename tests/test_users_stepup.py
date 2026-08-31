@@ -557,6 +557,27 @@ async def test_the_memory_store_scopes_removal_to_the_owning_user() -> None:
     assert await factors.credential(factor.id) is None
 
 
+async def test_memory_credentials_do_not_walk_other_users_rows() -> None:
+    class NoValueWalk(dict):
+        def values(self):
+            raise AssertionError("every credential was walked")
+
+    factors = InMemorySecondFactorStore()
+    factor = SecondFactor(
+        id="cred-1",
+        user_id="user-1",
+        kind="totp",
+        label="Phone",
+        created_at=datetime.now(UTC),
+        last_used_at=None,
+        material=b"a-twenty-byte-secret",
+    )
+    await factors.add(factor)
+    factors._rows = NoValueWalk(factors._rows)
+
+    assert await factors.credentials("user-1") == [factor]
+
+
 async def test_removing_one_of_two_factors_keeps_the_recovery_codes() -> None:
     factors = InMemorySecondFactorStore()
     now = datetime.now(UTC)
