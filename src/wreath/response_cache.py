@@ -13,7 +13,7 @@ inspect (`.cache_store.stats`), and clear (`.invalidate()`) with certainty.
 
 Safe by default — a response is **not** cached when it would leak or mislead:
 
-* only the methods you allow (`GET` by default),
+* only the methods you allow (`GET` and `QUERY` by default),
 * only success statuses (< 400),
 * never a response that sets a cookie (that would replay one user's cookie to
   everyone),
@@ -51,6 +51,7 @@ from typing import Any, Final
 
 from ._native import _core
 from ._orm_events import subscribe_writes
+from ._structured_fields import Item, Token, serialize_list
 from .cache import BoundedCache
 from .response import Response
 from .temporal import Duration
@@ -67,6 +68,11 @@ __all__ = [
 
 #: Compatible purge-tag headers for Fastly, Cloudflare, and Akamai.
 TAG_HEADERS: Final = (b"cache-tag", b"surrogate-key", b"edge-cache-tag")
+
+_CACHE_GROUPS: Final = b"cache-groups"
+_CACHE_GROUP_INVALIDATION: Final = b"cache-group-invalidation"
+_CACHE_STATUS: Final = b"cache-status"
+_SAFE_METHODS: Final = frozenset({"GET", "HEAD", "OPTIONS", "QUERY", "TRACE"})
 
 #: Digest bytes carried in each surrogate key.
 _TAG_BYTES: Final = 8
@@ -337,7 +343,12 @@ class CDNPurge:
 _PENDING: set[asyncio.Task[None]] = set()
 
 
-def _apply_tags(result: Any, value: bytes) -> None:
+def _apply_header(result: Any, name: bytes, value: bytes) -> None:
+    if isinstance(result, Response) and (name, value) not in result.headers:
+        result.headers.append((name, value))
+
+
+def _apply_tags(result: Any, value: bytes, groups: bytes) -> None:
     """Write surrogate-key headers when the handler returned a `Response`."""
     if not isinstance(result, Response):
         return
@@ -346,6 +357,55 @@ def _apply_tags(result: Any, value: bytes) -> None:
         # Preserve handler tags and keep reused response objects idempotent.
         if (name, value) not in headers:
             headers.append((name, value))
+    if (_CACHE_GROUPS, groups) not in headers:
+        headers.append((_CACHE_GROUPS, groups))
+
+
+def _cache_status_values(identifier: str) -> dict[str, bytes]:
+    states = {
+        "hit": {"hit": True},
+        "miss": {"fwd": Token("uri-miss")},
+        "stored": {"fwd": Token("uri-miss"), "stored": True},
+        "method": {"fwd": Token("method")},
+        "bypass": {"fwd": Token("bypass")},
+    }
+    return {
+        state: serialize_list([Item(identifier, parameters)])
+        for state, parameters in states.items()
+    }
+
+
+def _normalized_content_type(value: bytes) -> bytes:
+    media_type, separator, parameters = value.partition(b";")
+    normalized = media_type.strip().lower()
+    if not separator:
+        return normalized
+    return normalized + b";" + parameters.strip()
+
+
+def _normalized_comma_tokens(value: bytes) -> bytes:
+    return b",".join(part.strip().lower() for part in value.split(b","))
+
+
+def _digest_part(digest: Any, kind: bytes, value: bytes) -> None:
+    digest.update(kind)
+    digest.update(len(value).to_bytes(8, "big"))
+    digest.update(value)
+
+
+async def _query_cache_key(request: Any, base: str) -> str:
+    digest = blake2b(digest_size=32)
+    for name, value in request.headers:
+        if name == b"content-type":
+            _digest_part(digest, b"t", _normalized_content_type(value))
+        elif name == b"content-encoding":
+            _digest_part(digest, b"e", _normalized_comma_tokens(value))
+        elif name == b"content-language":
+            _digest_part(digest, b"l", _normalized_comma_tokens(value))
+        elif name == b"content-location":
+            _digest_part(digest, b"u", value.strip())
+    _digest_part(digest, b"b", await request.body())
+    return f"{base}#query={digest.hexdigest()}"
 
 
 def _copy_if_mutable(value: Any) -> Any:
@@ -368,11 +428,12 @@ def cached(
     ttl: Any = None,
     max_entries: int = 1024,
     key: Callable[[Any], str] = default_cache_key,
-    methods: tuple[str, ...] = ("GET",),
+    methods: tuple[str, ...] = ("GET", "QUERY"),
     store: BoundedCache | None = None,
     invalidate_on: Iterable[Any] = (),
     query_params: Iterable[str] | None = None,
     tags: Tags | None = None,
+    cache_status: str | None = None,
 ) -> Any:
     """Cache a route handler's response in a bounded in-process store.
 
@@ -395,6 +456,8 @@ def cached(
             derived from nothing names nothing, and a response tagged with
             nothing is one no purge will ever reach — which is worse than an
             untagged response, because it looks tagged.
+        cache_status: cache identifier to emit in an RFC 9211 `Cache-Status`
+            field. Omit it to expose no cache diagnostics.
 
     The wrapped handler gains `.cache_store` (the store, for `.stats`) and
     `.invalidate(request=None)` — drop one key, or clear all when omitted.
@@ -409,6 +472,7 @@ def cached(
             invalidate_on=invalidate_on,
             query_params=query_params,
             tags=tags,
+            cache_status=cache_status,
         )(fn)
 
     if query_params is not None:
@@ -422,7 +486,16 @@ def cached(
             "derived from the models the response reads, so with none declared "
             "there is no tag to emit and no purge could ever reach this response"
         )
-    tag_value = tags.header_value(watched) if tags is not None else None
+    if tags is None:
+        tag_value = None
+        group_value = None
+    else:
+        tag_keys = tags.keys(watched)
+        tag_value = " ".join(tag_keys).encode("ascii")
+        group_value = serialize_list(Item(tag) for tag in tag_keys)
+    if cache_status is not None and not isinstance(cache_status, str):
+        raise TypeError(f"cached(cache_status=...) must be str, got {type(cache_status).__name__}")
+    status_values = _cache_status_values(cache_status) if cache_status is not None else None
     public_key = key is default_cache_key or getattr(key, "_wreath_public", False)
 
     window = None if ttl is None else Duration.of(ttl).total_seconds()
@@ -437,14 +510,28 @@ def cached(
         @wraps(handler)
         async def wrapper(request: Any, *args: Any, **kwargs: Any) -> Any:
             if request.method not in methods:
-                return await handler(request, *args, **kwargs)
+                result = await handler(request, *args, **kwargs)
+                if group_value is not None and request.method not in _SAFE_METHODS:
+                    _apply_header(result, _CACHE_GROUP_INVALIDATION, group_value)
+                if status_values is not None:
+                    reason = "method" if request.method not in _SAFE_METHODS else "bypass"
+                    _apply_header(result, _CACHE_STATUS, status_values[reason])
+                return result
             if public_key and getattr(request, "identity", None) is not None:
                 # A principal must never read or populate a shared key.
-                return await handler(request, *args, **kwargs)
+                result = await handler(request, *args, **kwargs)
+                if status_values is not None:
+                    _apply_header(result, _CACHE_STATUS, status_values["bypass"])
+                return result
             cache_key = key(request)
+            if request.method == "QUERY":
+                cache_key = await _query_cache_key(request, cache_key)
             hit = the_store.get(cache_key)
             if hit is not None:
-                return _revive(hit)
+                result = _revive(hit)
+                if status_values is not None:
+                    _apply_header(result, _CACHE_STATUS, status_values["hit"])
+                return result
             pending = inflight.get(cache_key)
             if pending is not None:
                 return _copy_if_mutable(await asyncio.shield(pending))
@@ -462,12 +549,15 @@ def cached(
                 del inflight[cache_key]
                 if not future.done():
                     future.set_result(result)
-            if tag_value is not None:
+            if tag_value is not None and group_value is not None:
                 # Snapshot the same purge tags served on the cold response.
-                _apply_tags(result, tag_value)
+                _apply_tags(result, tag_value, group_value)
             entry = _snapshot(result)
             if entry is not None:
                 the_store.set(cache_key, entry)
+            if status_values is not None:
+                state = "stored" if entry is not None else "miss"
+                _apply_header(result, _CACHE_STATUS, status_values[state])
             return result
 
         def invalidate(request: Any = None) -> None:

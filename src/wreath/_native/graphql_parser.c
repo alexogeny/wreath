@@ -1,4 +1,5 @@
-/* Bounded GraphQL recursive descent. AST classes remain Python declarations. */
+/* Bounded GraphQL recursive descent. The token stream stays in native arrays;
+ * public AST objects are created only as parse() returns its Document. */
 #include "wreathcore.h"
 
 enum { G_PUNCT, G_NAME, G_NUMBER, G_STRING, G_SPREAD, G_EOF };

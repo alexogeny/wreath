@@ -41,7 +41,16 @@ def test_sse_response_headers() -> None:
     assert headers[b"content-type"] == b"text/event-stream"
     assert headers[b"cache-control"] == b"no-cache"
     assert headers[b"x-accel-buffering"] == b"no"
+    assert headers[b"incremental"] == b"?1"
     assert response.status == 200
+
+
+def test_sse_response_can_explicitly_allow_buffering() -> None:
+    async def events():
+        yield "x"
+
+    response = SSEResponse(events(), incremental=False)
+    assert dict(response.headers)[b"incremental"] == b"?0"
 
 
 async def test_sse_response_frames_iterator() -> None:

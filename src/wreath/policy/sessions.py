@@ -271,8 +271,10 @@ class SessionPolicy:
             # -- looks changed and is reissued with the same content and a fresh
             # signature. `tests/test_client_sessions_forms.py` pins that.
             session, baseline = loaded
-        request.state.session = session
-        request.state._session_loaded = baseline
+        state = request.state
+        state.session = session
+        state._session_loaded = baseline
+        state._session_server_side = False
         return None
 
     async def _before_stored(self, request: Request) -> None:
@@ -295,6 +297,7 @@ class SessionPolicy:
         state._session_sid = sid
         state._session_loaded = baseline
         state._session_rotate = False
+        state._session_server_side = True
 
     async def _after_stored(self, request: Request, response: Any) -> Any:
         state = request.state

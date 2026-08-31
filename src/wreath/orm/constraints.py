@@ -36,6 +36,7 @@ from collections.abc import Callable, Iterable
 from itertools import count
 from typing import Any
 
+from .._safe_pattern import UnsafePatternError, compile_safe_pattern
 from .errors import DeclarationError
 from .types import PgType
 
@@ -212,9 +213,11 @@ class Pattern(Check):
 
     def __init__(self, pattern: str | re.Pattern[str]) -> None:
         try:
-            self.regex = re.compile(pattern)
+            self.regex = compile_safe_pattern(pattern)
         except re.error as error:
             raise DeclarationError(f"Pattern({pattern!r}) is not a regex: {error}") from None
+        except UnsafePatternError as error:
+            raise DeclarationError(f"Pattern({pattern!r}) is unsafe: {error}") from None
         self.kind = "pattern"
         self.message = f"value must match {self.regex.pattern!r}"
 

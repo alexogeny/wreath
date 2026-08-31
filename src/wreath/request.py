@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 from ._headers import build_header_map, find_header
 from ._json import loads as _json_loads
 from ._native import _core
+from .digest import Digest, DigestError, DigestPreferences
 from .exceptions import (
     BadRequest,
     ClientDisconnect,
@@ -1123,6 +1124,67 @@ class Request:
         if not header:
             return "en"
         return _core.locale_preference(header)
+
+    def preferred_content_digest(self, *supported: str) -> str | None:
+        """Best supported Want-Content-Digest algorithm, or None for no usable hint."""
+        return self._preferred_digest(b"want-content-digest", supported)
+
+    def preferred_repr_digest(self, *supported: str) -> str | None:
+        """Best supported Want-Repr-Digest algorithm, or None for no usable hint."""
+        return self._preferred_digest(b"want-repr-digest", supported)
+
+    def _preferred_digest(self, header: bytes, supported: tuple[str, ...]) -> str | None:
+        raw = self._header_bytes(header)
+        if raw is None:
+            return None
+        try:
+            preferences = DigestPreferences.parse(raw)
+        except DigestError:
+            return None
+        return preferences.preferred(*supported)
+
+    async def verify_content_digest(self, *, required: bool = False) -> str | None:
+        """Verify RFC 9530 Content-Digest against this request's message content.
+
+        Returns the active algorithm used, None when the field is absent and
+        optional, and raises 400 for a required, malformed, unsupported, or
+        mismatching field. This reads and caches the body; call it after binding
+        for ordinary buffered APIs rather than before a one-shot `stream()`.
+        """
+        raw = self._header_bytes(b"content-digest")
+        if raw is None:
+            if required:
+                raise BadRequest("Content-Digest is required")
+            return None
+        try:
+            digest = Digest.parse(raw)
+            return digest.verify(await self.body())
+        except DigestError as error:
+            raise BadRequest(str(error)) from error
+
+    async def verify_repr_digest(
+        self,
+        representation: bytes | None = None,
+        *,
+        required: bool = False,
+    ) -> str | None:
+        """Verify Repr-Digest against complete selected representation data.
+
+        `representation` defaults to this message's content, which is correct
+        when the request encloses the complete selected representation. Supply
+        the reconstructed representation for partial or otherwise transformed
+        messages.
+        """
+        raw = self._header_bytes(b"repr-digest")
+        if raw is None:
+            if required:
+                raise BadRequest("Repr-Digest is required")
+            return None
+        content = await self.body() if representation is None else representation
+        try:
+            return Digest.parse(raw).verify(content)
+        except DigestError as error:
+            raise BadRequest(str(error)) from error
 
     async def body(self) -> bytes:
         """The whole request body as bytes, read once and cached.

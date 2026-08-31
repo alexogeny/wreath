@@ -19,7 +19,6 @@ __all__ = [
 MANIFEST = "agents/manifest.json"
 
 _DIRECTIVE = re.compile(r"^:::\s+capability-map\s*$")
-_H1 = re.compile(r"^#\s+(.*?)\s*#*\s*$", re.MULTILINE)
 
 _HEADER = (
     "| Capability | Elsewhere you'd install | In Wreath | Guide |",
@@ -202,9 +201,9 @@ def _links(
 
 
 def _title(path: Path, relative: str) -> str:
-    match = _H1.search(path.read_text(encoding="utf-8"))
-    if match is None:
-        return relative
-    # The heading as words: a guide titled "`wreath.orm`" would otherwise put
-    # backticks inside a link label, where they render as backticks.
-    return match.group(1).replace("`", "").replace("*", "")
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if len(line) < 2 or line[0] != "#" or not line[1].isspace():
+            continue
+        title = line[1:].lstrip().rstrip().rstrip("#").rstrip()
+        return title.replace("`", "").replace("*", "")
+    return relative

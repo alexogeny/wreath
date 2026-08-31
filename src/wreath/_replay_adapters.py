@@ -207,7 +207,86 @@ _CAST_REQUIRES: dict[str, tuple[type, ...]] = {
 
 _PLACEHOLDER_CAST = re.compile(r"\$(\d+)::(\w+)")
 _PLACEHOLDER = re.compile(r"\$(\d+)")
-_STRING_OR_DOLLAR = re.compile(r"'(?:[^']|'')*'|\$\$.*?\$\$", re.DOTALL)
+_SQL_REGION_START = re.compile(r'''--|/\*|'|"|\$''')
+
+
+def _dollar_delimiter(sql: str, start: int) -> str | None:
+    if start and (sql[start - 1] in "_$" or sql[start - 1].isalnum()):
+        return None
+    index = start + 1
+    if index < len(sql) and sql[index] == "$":
+        return "$$"
+    if index >= len(sql) or not (sql[index] == "_" or sql[index].isalpha()):
+        return None
+    index += 1
+    while index < len(sql) and (sql[index] == "_" or sql[index].isalnum()):
+        index += 1
+    return sql[start : index + 1] if index < len(sql) and sql[index] == "$" else None
+
+
+def _quoted_end(sql: str, start: int, quote: str, *, backslash: bool = False) -> int:
+    index = start + 1
+    while index < len(sql):
+        if backslash and sql[index] == "\\":
+            index += 2
+            continue
+        if sql[index] != quote:
+            index += 1
+            continue
+        if index + 1 < len(sql) and sql[index + 1] == quote:
+            index += 2
+            continue
+        return index + 1
+    return len(sql)
+
+
+def _sql_code(sql: str) -> str:
+    output: list[str] = []
+    code_start = 0
+    index = 0
+    while index < len(sql):
+        marker = _SQL_REGION_START.search(sql, index)
+        if marker is None:
+            break
+        start = marker.start()
+        end = start
+        if sql.startswith("--", start):
+            end = sql.find("\n", start + 2)
+            end = len(sql) if end < 0 else end
+        elif sql.startswith("/*", start):
+            end = start + 2
+            depth = 1
+            while end < len(sql) and depth:
+                if sql.startswith("/*", end):
+                    depth += 1
+                    end += 2
+                elif sql.startswith("*/", end):
+                    depth -= 1
+                    end += 2
+                else:
+                    end += 1
+        elif sql[start] == "'":
+            escaped = start > 0 and sql[start - 1] in "eE" and (
+                start == 1 or not (sql[start - 2] == "_" or sql[start - 2].isalnum())
+            )
+            end = _quoted_end(sql, start, "'", backslash=escaped)
+        elif sql[start] == '"':
+            end = _quoted_end(sql, start, '"')
+        elif sql[start] == "$" and (delimiter := _dollar_delimiter(sql, start)) is not None:
+            found = sql.find(delimiter, start + len(delimiter))
+            if found < 0:
+                end = len(sql)
+            else:
+                end = found + len(delimiter)
+        if end == start:
+            index = start + 1
+            continue
+        output.append(sql[code_start:start])
+        output.append(" ")
+        index = end
+        code_start = index
+    output.append(sql[code_start:])
+    return "".join(output)
 
 
 def refuse_unbindable(args: tuple[Any, ...]) -> None:
@@ -234,7 +313,7 @@ def refuse_unbindable(args: tuple[Any, ...]) -> None:
 
 def refuse_multiple_commands(sql: str) -> None:
     """The extended query protocol takes one command per statement."""
-    stripped = _STRING_OR_DOLLAR.sub("", sql).strip().rstrip(";")
+    stripped = _sql_code(sql).strip().rstrip(";")
     if ";" in stripped:
         raise PostgresError("cannot insert multiple commands into a prepared statement")
 
@@ -268,7 +347,7 @@ def refuse_parameter_arity(sql: str, args: tuple[Any, ...]) -> None:
     String literals and `$$`-quoted bodies are stripped first, so `SELECT '$1'`
     is not read as carrying a placeholder.
     """
-    referenced = {int(index) for index in _PLACEHOLDER.findall(_STRING_OR_DOLLAR.sub("", sql))}
+    referenced = {int(index) for index in _PLACEHOLDER.findall(_sql_code(sql))}
     if 0 in referenced:
         raise PostgresError("there is no parameter $0")
     declared = len(args)
@@ -289,7 +368,7 @@ def refuse_uninferable_cast(sql: str, args: tuple[Any, ...], seen: set[str]) -> 
     seen.add(text)
     if first_time:
         return
-    for index, cast in _PLACEHOLDER_CAST.findall(text):
+    for index, cast in _PLACEHOLDER_CAST.findall(_sql_code(text)):
         position = int(index) - 1
         if position >= len(args):
             continue

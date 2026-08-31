@@ -96,6 +96,10 @@ def parse(source: str, *, attributes: frozenset[str] | None = None) -> Filter:
     return _core.scim_parse(source, attributes, _TYPES)
 
 
+def _compile(node: Filter) -> Any:
+    return _core.scim_compile(node, _TYPES)
+
+
 def values_at(resource: Any, path: str) -> list[Any]:
     """Resolve a case-insensitive path, flattening list-valued steps."""
     return _core.scim_values_at(resource, path, _TYPES)
@@ -103,9 +107,9 @@ def values_at(resource: Any, path: str) -> list[Any]:
 
 def matches(node: Filter, resource: Any) -> bool:
     """Whether ``resource`` satisfies ``node``."""
-    return _core.scim_matches(node, resource, _TYPES)
+    return _core.scim_matches(_compile(node), resource, _TYPES)
 
 
 def select(node: Filter, resources: Sequence[Any], *, invert: bool = False) -> list[Any]:
     """Resources matching ``node``, or non-matches when ``invert`` is true."""
-    return _core.scim_filter(node, resources, _TYPES, invert)
+    return _core.scim_filter(_compile(node), resources, _TYPES, invert)

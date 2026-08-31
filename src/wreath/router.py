@@ -25,14 +25,172 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Any
 
 from ._auth.requirements import AuthRequirement, SetRequirement, merge_requirements
+from ._http import _is_http_token
+from ._route_lifecycle import lifecycle_headers
 from ._routing import Handler, check_placeholders
+from ._structured_fields import Item, Token, serialize_list
 from .binding import Depends
-from .middleware.base import Middleware
+from .middleware.base import Middleware, MiddlewareHooks
 
 _EMPTY_REQUIREMENT = AuthRequirement()
+
+
+def _query_media_range(value: str) -> tuple[str, Item]:
+    if not isinstance(value, str):
+        raise TypeError(f"Accept-Query media ranges must be str, not {type(value).__name__}")
+    media_type, separator, parameters = value.partition(";")
+    media_type = media_type.strip().lower()
+    major, slash, minor = media_type.partition("/")
+    if (
+        not slash
+        or not major
+        or not minor
+        or "/" in minor
+        or not _is_http_token(major)
+        or not _is_http_token(minor)
+        or major == "*"
+        and minor != "*"
+    ):
+        raise ValueError(
+            f"invalid Accept-Query media range {value!r}; use type/subtype, type/*, or */*"
+        )
+    structured_parameters: dict[str, str | Token] = {}
+    if separator:
+        for raw_parameter in parameters.split(";"):
+            name, equals, raw_value = raw_parameter.strip().partition("=")
+            if not equals or not name or not raw_value:
+                raise ValueError(
+                    f"invalid Accept-Query media range {value!r}; parameters must be name=value"
+                )
+            if not _is_http_token(name):
+                raise ValueError(f"invalid Accept-Query parameter name {name!r}; use an HTTP token")
+            if raw_value.startswith('"'):
+                if len(raw_value) < 2 or not raw_value.endswith('"'):
+                    raise ValueError(
+                        f"invalid Accept-Query parameter {raw_parameter!r}; close the quoted value"
+                    )
+                parameter_value: str | Token = (
+                    raw_value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+                )
+            elif _is_http_token(raw_value):
+                try:
+                    parameter_value = Token(raw_value)
+                except ValueError:
+                    parameter_value = raw_value
+            else:
+                raise ValueError(
+                    f"invalid Accept-Query parameter value {raw_value!r}; "
+                    "use an HTTP token or quoted string"
+                )
+            structured_parameters[name.lower()] = parameter_value
+    item_value: str | Token
+    if structured_parameters:
+        try:
+            item_value = Token(media_type)
+        except ValueError:
+            item_value = media_type
+    else:
+        item_value = media_type
+    return media_type, Item(item_value, structured_parameters)
+
+
+class _QueryContentPolicy:
+    __slots__ = ("_accept_query", "_media_types")
+
+    def __init__(self, media_ranges: Iterable[str]) -> None:
+        parsed = tuple(_query_media_range(value) for value in media_ranges)
+        if not parsed:
+            raise ValueError(
+                "accept_query must name at least one media range; use ('*/*',) for any"
+            )
+        self._media_types = tuple(media_type for media_type, _item in parsed)
+        self._accept_query = serialize_list(item for _media_type, item in parsed)
+
+    def describe(self) -> Any:
+        from .middleware.base import HeaderSpec, MiddlewareContract
+        from .openapi import ResponseSpec
+
+        header = HeaderSpec(
+            "Accept-Query",
+            description="Structured list of request media types this QUERY resource accepts.",
+            const=self._accept_query.decode("ascii"),
+        )
+        return MiddlewareContract(
+            response_headers=((None, header), (400, header), (415, header)),
+            responses=(
+                (
+                    400,
+                    ResponseSpec(
+                        description="The QUERY Content-Type is missing, duplicated, or malformed.",
+                        media_type="application/problem+json",
+                    ),
+                ),
+                (
+                    415,
+                    ResponseSpec(
+                        description="The QUERY Content-Type is not supported by this resource.",
+                        media_type="application/problem+json",
+                    ),
+                ),
+            ),
+            methods=frozenset({"QUERY"}),
+        )
+
+    def before_sync(self, request: Any) -> Any:
+        from .response import ProblemResponse
+
+        values = [value for name, value in request.headers if name == b"content-type"]
+        if len(values) != 1:
+            return ProblemResponse(
+                status=400,
+                detail="QUERY requires exactly one Content-Type request header",
+            )
+        try:
+            received = values[0].decode("ascii").partition(";")[0].strip().lower()
+        except UnicodeDecodeError:
+            return ProblemResponse(
+                status=400,
+                detail="QUERY Content-Type must be ASCII",
+            )
+        if not any(
+            offered == "*/*"
+            or offered.endswith("/*")
+            and received.startswith(offered[:-1])
+            or offered == received
+            for offered in self._media_types
+        ):
+            return ProblemResponse(
+                status=415,
+                detail=f"Content-Type {received!r} is not supported for this QUERY resource",
+            )
+        return None
+
+    def after_sync(self, request: Any, response: Any) -> Any:
+        from ._prepared import PreparedResponse
+        from ._webpolicy import replace_response_header
+
+        if isinstance(response, PreparedResponse):
+            headers = list(response.headers)
+            replace_response_header(headers, b"accept-query", self._accept_query)
+            return PreparedResponse(
+                response.body,
+                status=response.status,
+                media_type=None,
+                headers=headers,
+            )
+        replace_response_header(response.headers, b"accept-query", self._accept_query)
+        return response
+
+    def middleware(self) -> MiddlewareHooks:
+        return MiddlewareHooks(
+            before_sync=self.before_sync,
+            after_sync=self.after_sync,
+            contract=self.describe(),
+        )
 
 
 def _prefix(value: str) -> str:
@@ -93,6 +251,9 @@ def _route_definition(
     response_media_type: str = "application/json",
     responses: Mapping[int, Any] | None = None,
     deprecated: bool = False,
+    deprecated_at: datetime | None = None,
+    sunset_at: datetime | None = None,
+    deprecation_link: str | None = None,
     include_in_schema: bool = True,
     security: Mapping[str, Iterable[str]] | None = None,
     name: str | None = None,
@@ -106,6 +267,11 @@ def _route_definition(
     surfaces, router inclusion, and startup compiler from growing independent
     interpretations of methods, permissions, responses, or security metadata.
     """
+    wire_lifecycle = lifecycle_headers(
+        deprecated_at=deprecated_at,
+        sunset_at=sunset_at,
+        deprecation_link=deprecation_link,
+    )
     return RouteDefinition(
         path=path,
         methods=tuple(method.upper() for method in methods),
@@ -121,7 +287,8 @@ def _route_definition(
         response_description=response_description,
         response_media_type=response_media_type,
         responses=tuple((int(code), spec) for code, spec in (responses or {}).items()),
-        deprecated=deprecated,
+        deprecated=deprecated or deprecated_at is not None,
+        lifecycle_headers=wire_lifecycle,
         include_in_schema=include_in_schema,
         security=tuple((key, tuple(scopes)) for key, scopes in (security or {}).items()),
         name=name,
@@ -176,13 +343,14 @@ class RouteDefinition:
     response_media_type: str = "application/json"
     responses: tuple[tuple[int, Any], ...] = ()
     deprecated: bool = False
+    lifecycle_headers: tuple[tuple[bytes, bytes], ...] = ()
     include_in_schema: bool = True
     security: tuple[tuple[str, tuple[str, ...]], ...] = ()
     name: str | None = None
     host: str | None = None
     #: Whether losing the client cancels this route's handler. `None` -- the
-    #: default -- defers to the request method: RFC 9110's safe methods (`GET`,
-    #: `HEAD`, `OPTIONS`) are cancelled, everything else is left to finish.
+    #: default -- defers to the request method: safe methods (`GET`, `HEAD`,
+    #: `OPTIONS`, `QUERY`) are cancelled, everything else is left to finish.
     #: Setting it here overrides that either way, for every method the route
     #: answers.
     cancel_on_disconnect: bool | None = None
@@ -349,6 +517,9 @@ class Router:
         response_media_type: str = "application/json",
         responses: Mapping[int, Any] | None = None,
         deprecated: bool = False,
+        deprecated_at: datetime | None = None,
+        sunset_at: datetime | None = None,
+        deprecation_link: str | None = None,
         include_in_schema: bool = True,
         security: Mapping[str, Iterable[str]] | None = None,
         name: str | None = None,
@@ -396,6 +567,10 @@ class Router:
             permissions: Additional permissions required, all of them.
             operation_id: Explicit operation id; when omitted one is derived from method and path.
             response_only: Promise that the handler returns a response object directly.
+            deprecated: Mark the operation deprecated in OpenAPI.
+            deprecated_at: RFC 9745 effective date, emitted as `Deprecation`.
+            sunset_at: Expected shutdown date, emitted as `Sunset`.
+            deprecation_link: URI-reference for `rel="deprecation"` documentation.
             cancel_on_disconnect: Cancel this handler when the client goes away.
                 Omitted, the request method decides: safe methods are cancelled,
                 unsafe ones are not.
@@ -428,6 +603,9 @@ class Router:
                     response_media_type=response_media_type,
                     responses=responses,
                     deprecated=deprecated,
+                    deprecated_at=deprecated_at,
+                    sunset_at=sunset_at,
+                    deprecation_link=deprecation_link,
                     include_in_schema=include_in_schema,
                     security=security,
                     name=name,
@@ -442,6 +620,18 @@ class Router:
     def get(self, path: str, **metadata: Any) -> Callable[[Handler], Handler]:
         """Register a handler for `path` on GET; keywords are those of `route()`."""
         return self.route(path, methods=("GET",), **metadata)
+
+    def query(
+        self,
+        path: str,
+        *,
+        accept_query: Iterable[str] = ("application/json",),
+        **metadata: Any,
+    ) -> Callable[[Handler], Handler]:
+        """Register a safe, idempotent QUERY route with accepted content types."""
+        policy = _QueryContentPolicy(accept_query).middleware()
+        middleware = tuple(metadata.pop("middleware", ()))
+        return self.route(path, methods=("QUERY",), middleware=(policy, *middleware), **metadata)
 
     def post(self, path: str, **metadata: Any) -> Callable[[Handler], Handler]:
         """Register a handler for `path` on POST; keywords are those of `route()`."""

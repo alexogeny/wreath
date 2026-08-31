@@ -2,9 +2,8 @@
  *
  * Executes the flat opcode tape compiled by wreath._template_tape.compile_tape.
  * Parsing and jump resolution stay in Python -- they run once, at startup; only
- * request-time rendering is here. `template_render` walks the tape and
- * `template_render_compiled` runs a lowered program, and the two must produce
- * identical bytes.
+ * request-time rendering is here. `template_compile` lowers the tape once and
+ * `template_render_compiled` executes only the owned native program.
  */
 #include "wreathcore.h"
 
@@ -1068,53 +1067,6 @@ wreath_template_render_compiled_tail(PyObject *Py_UNUSED(self), PyObject *args)
     return render_program(
         compiled->program, compiled->length, context, max_output,
         &compiled->output_hint, tail_data, tail_size);
-}
-
-/* template_render(tape, context, max_output) -> bytes */
-PyObject *
-wreath_template_render(PyObject *self, PyObject *args)
-{
-    (void)self;
-    PyObject *tape;
-    PyObject *context;
-    Py_ssize_t max_output;
-    if (!PyArg_ParseTuple(args, "OOn", &tape, &context, &max_output)) {
-        return NULL;
-    }
-    if (RenderError == NULL) {
-        PyErr_SetString(PyExc_RuntimeError, "templates not configured");
-        return NULL;
-    }
-    if (!PyTuple_Check(tape)) {
-        PyErr_SetString(PyExc_TypeError, "tape must be a tuple");
-        return NULL;
-    }
-    if (!PyDict_Check(context)) {
-        PyErr_SetString(PyExc_TypeError, "context must be a dict");
-        return NULL;
-    }
-
-    Py_ssize_t n = PyTuple_GET_SIZE(tape);
-    decoded stack_program[TAPE_STACK_SLOTS];
-    decoded *program = stack_program;
-    if (n > TAPE_STACK_SLOTS) {
-        program = PyMem_Malloc((size_t)n * sizeof(decoded));
-        if (program == NULL) {
-            return PyErr_NoMemory();
-        }
-    }
-    if (decode_tape(tape, n, program) < 0) {
-        if (program != stack_program) {
-            PyMem_Free(program);
-        }
-        return NULL;
-    }
-    PyObject *result = render_program(
-        program, n, context, max_output, NULL, NULL, 0);
-    if (program != stack_program) {
-        PyMem_Free(program);
-    }
-    return result;
 }
 
 /* template_configure(markup_type, render_error_type) -> None */

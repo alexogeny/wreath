@@ -75,6 +75,11 @@ class TestLadder:
         with pytest.raises(SeriesError, match="is not a duration"):
             build({"raw": "soonish"}, refuse=SeriesError)
 
+    @pytest.mark.parametrize("value", ["3.", "+3 days", "３ days", "3 days extra"])
+    def test_duration_near_misses_are_refused(self, value):
+        with pytest.raises(SeriesError, match="is not a duration"):
+            build({"raw": value}, refuse=SeriesError)
+
 
 class TestDeclaration:
     def test_a_coarser_tier_needs_a_seal(self):

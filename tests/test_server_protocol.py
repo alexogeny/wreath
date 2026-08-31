@@ -299,6 +299,32 @@ async def test_native_first_class_cache_and_compression_transform_before_egress(
 
 
 @pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.parametrize("integrity", [b"content-digest", b"repr-digest"])
+@pytest.mark.asyncio
+async def test_native_compression_preserves_precomputed_integrity_fields(
+    integrity: bytes,
+) -> None:
+    app = Wreath(http_policy=HttpPolicy(compression=CompressionPolicy(minimum_size=0)))
+    body = b"already hashed" * 100
+
+    @app.get("/")
+    async def payload(request: Any) -> Response:
+        return Response(
+            body,
+            headers=[(integrity, b"sha-256=:YWxyZWFkeSBoYXNoZWQ=:")],
+            media_type=b"text/plain",
+        )
+
+    request = GET[:-2] + b"Accept-Encoding: gzip\r\n\r\n"
+    transport = await drive(_NativeHttpProtocol, app, [request])
+    head, received = bytes(transport.buffer).split(b"\r\n\r\n", 1)
+
+    assert integrity + b":" in head
+    assert b"content-encoding:" not in head
+    assert received == body
+
+
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
 @pytest.mark.parametrize(("initial", "expected"), [(b"*", b"*"), (b"", b"accept-encoding")])
 @pytest.mark.asyncio
 async def test_native_compression_preserves_vary_wildcard_and_drops_empty_members(

@@ -556,7 +556,7 @@ edge_failed(EdgeTable *table, Py_ssize_t index, double now)
  * and keeping the connection would only invite the next message to be read
  * against a boundary this end no longer trusts. */
 static int
-edge_refuse(EdgeClient *self, int status)
+edge_refuse_error(EdgeClient *self, int status, const char *error)
 {
     const char *line;
     switch (status) {
@@ -569,17 +569,48 @@ edge_refuse(EdgeClient *self, int status)
     }
     static const char tail[] =
         "content-length: 0\r\nconnection: close\r\n\r\n";
-    char reply[128];
-    size_t line_len = strlen(line);
-    memcpy(reply, line, line_len);
-    memcpy(reply + line_len, tail, sizeof(tail) - 1);
+    EdgeBuf *reply = &self->out;
+    ebuf_reset(reply);
+    if (ebuf_add(reply, line, (Py_ssize_t)strlen(line)) < 0) {
+        return -1;
+    }
+    if (error != NULL) {
+        const char *via = PyBytes_AS_STRING(self->table->via);
+        Py_ssize_t via_len = PyBytes_GET_SIZE(self->table->via);
+        const char *proxy = memchr(via, ' ', (size_t)via_len);
+        Py_ssize_t proxy_len;
+        if (proxy == NULL) {
+            proxy = via;
+            proxy_len = via_len;
+        }
+        else {
+            proxy++;
+            proxy_len = via_len - (Py_ssize_t)(proxy - via);
+        }
+        if (EBUF_LIT(reply, "proxy-status: ") < 0
+            || ebuf_add(reply, proxy, proxy_len) < 0
+            || EBUF_LIT(reply, ";error=") < 0
+            || ebuf_add(reply, error, (Py_ssize_t)strlen(error)) < 0
+            || EBUF_LIT(reply, "\r\n") < 0) {
+            return -1;
+        }
+    }
+    if (ebuf_add(reply, tail, (Py_ssize_t)(sizeof(tail) - 1)) < 0) {
+        return -1;
+    }
     self->state = EC_CLOSED;
-    if (sink_write(&self->sink, reply,
-                   (Py_ssize_t)(line_len + sizeof(tail) - 1)) < 0) {
+    if (sink_write(&self->sink, reply->data, reply->len) < 0) {
         return -1;
     }
     sink_close(&self->sink);
     return 0;
+}
+
+
+static int
+edge_refuse(EdgeClient *self, int status)
+{
+    return edge_refuse_error(self, status, NULL);
 }
 
 
@@ -676,6 +707,292 @@ edge_parse_decimal(const char *p, Py_ssize_t n, Py_ssize_t *out)
     }
     *out = value;
     return 0;
+}
+
+
+static int
+edge_sf_key_start(char c)
+{
+    return (c >= 'a' && c <= 'z') || c == '*';
+}
+
+
+static int
+edge_sf_key_char(char c)
+{
+    return edge_sf_key_start(c) || (c >= '0' && c <= '9')
+        || c == '_' || c == '-' || c == '.';
+}
+
+
+static int
+edge_sf_token_char(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+        || (c >= '0' && c <= '9') || c == '!' || c == '#'
+        || c == '$' || c == '%' || c == '&' || c == '\'' || c == '*'
+        || c == '+' || c == '-' || c == '.' || c == '^' || c == '_'
+        || c == '`' || c == '|' || c == '~' || c == ':' || c == '/';
+}
+
+
+static int
+edge_sf_base64(const char *value, Py_ssize_t len)
+{
+    Py_ssize_t data_len = len;
+    int padding = 0;
+    while (data_len > 0 && value[data_len - 1] == '=') {
+        data_len--;
+        padding++;
+    }
+    if (padding > 2) {
+        return 0;
+    }
+    for (Py_ssize_t i = 0; i < data_len; i++) {
+        char c = value[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+              || (c >= '0' && c <= '9') || c == '+' || c == '/')) {
+            return 0;
+        }
+    }
+    if (data_len + padding != len || data_len % 4 == 1) {
+        return 0;
+    }
+    if (padding == 0) {
+        return 1;
+    }
+    return len % 4 == 0 && data_len % 4 == 4 - padding;
+}
+
+
+static int
+edge_sf_lower_hex(char c)
+{
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    return -1;
+}
+
+
+static int
+edge_sf_display_string(const char *value, Py_ssize_t len)
+{
+    if (len < 3 || value[0] != '%' || value[1] != '"'
+        || value[len - 1] != '"') {
+        return 0;
+    }
+    int continuation = 0;
+    unsigned char continuation_min = 0x80;
+    unsigned char continuation_max = 0xbf;
+    for (Py_ssize_t i = 2; i < len - 1; i++) {
+        unsigned char c = (unsigned char)value[i];
+        if (c == '%') {
+            if (i + 2 >= len - 1) {
+                return 0;
+            }
+            int high = edge_sf_lower_hex(value[i + 1]);
+            int low = edge_sf_lower_hex(value[i + 2]);
+            if (high < 0 || low < 0) {
+                return 0;
+            }
+            c = (unsigned char)((high << 4) | low);
+            i += 2;
+        }
+        else if (!(c == 0x20 || c == 0x21 || c == 0x23 || c == 0x24
+                   || (c >= 0x26 && c <= 0x7e))) {
+            return 0;
+        }
+
+        if (continuation > 0) {
+            if (c < continuation_min || c > continuation_max) {
+                return 0;
+            }
+            continuation--;
+            continuation_min = 0x80;
+            continuation_max = 0xbf;
+        }
+        else if (c <= 0x7f) {
+            continue;
+        }
+        else if (c >= 0xc2 && c <= 0xdf) {
+            continuation = 1;
+        }
+        else if (c == 0xe0) {
+            continuation = 2;
+            continuation_min = 0xa0;
+        }
+        else if ((c >= 0xe1 && c <= 0xec) || (c >= 0xee && c <= 0xef)) {
+            continuation = 2;
+        }
+        else if (c == 0xed) {
+            continuation = 2;
+            continuation_max = 0x9f;
+        }
+        else if (c == 0xf0) {
+            continuation = 3;
+            continuation_min = 0x90;
+        }
+        else if (c >= 0xf1 && c <= 0xf3) {
+            continuation = 3;
+        }
+        else if (c == 0xf4) {
+            continuation = 3;
+            continuation_max = 0x8f;
+        }
+        else {
+            return 0;
+        }
+    }
+    return continuation == 0;
+}
+
+
+static int
+edge_sf_parameter_bare(const char *value, Py_ssize_t len)
+{
+    if (len <= 0) {
+        return 0;
+    }
+    if (value[0] == '?') {
+        return len == 2 && (value[1] == '0' || value[1] == '1');
+    }
+    if (edge_sf_key_start(value[0]) || (value[0] >= 'A' && value[0] <= 'Z')) {
+        for (Py_ssize_t i = 1; i < len; i++) {
+            if (!edge_sf_token_char(value[i])) {
+                return 0;
+            }
+        }
+        return 1;
+    }
+    if (value[0] == ':') {
+        if (len < 2 || value[len - 1] != ':') {
+            return 0;
+        }
+        return edge_sf_base64(value + 1, len - 2);
+    }
+    Py_ssize_t i = 0;
+    int is_date = 0;
+    if (value[i] == '@') {
+        is_date = 1;
+        i++;
+        if (i >= len) {
+            return 0;
+        }
+    }
+    if (value[i] == '-') {
+        i++;
+    }
+    if (i >= len) {
+        return 0;
+    }
+    Py_ssize_t integer_digits = 0;
+    while (i < len && value[i] >= '0' && value[i] <= '9') {
+        integer_digits++;
+        i++;
+    }
+    if (integer_digits == 0) {
+        return 0;
+    }
+    if (is_date) {
+        return i == len && integer_digits <= 15;
+    }
+    if (i == len) {
+        return integer_digits <= 15;
+    }
+    if (value[i++] != '.' || integer_digits > 12) {
+        return 0;
+    }
+    Py_ssize_t fraction_digits = 0;
+    while (i < len && value[i] >= '0' && value[i] <= '9') {
+        fraction_digits++;
+        i++;
+    }
+    return i == len && fraction_digits >= 1 && fraction_digits <= 3;
+}
+
+
+static int
+edge_incremental_true(const char *value, Py_ssize_t len)
+{
+    /* The generic Structured Fields owner is Python and cannot be entered from
+     * this request path. Parse only the Boolean Item shape RFC 10036 needs. */
+    if (len < 2 || value[0] != '?' || value[1] != '1') {
+        return 0;
+    }
+    Py_ssize_t i = 2;
+    while (i < len) {
+        if (value[i++] != ';' || i >= len) {
+            return 0;
+        }
+        while (i < len && value[i] == ' ') {
+            i++;
+        }
+        if (i >= len || !edge_sf_key_start(value[i])) {
+            return 0;
+        }
+        i++;
+        while (i < len && edge_sf_key_char(value[i])) {
+            i++;
+        }
+        if (i >= len || value[i] == ';') {
+            continue;
+        }
+        if (value[i++] != '=' || i >= len) {
+            return 0;
+        }
+        if (value[i] == '"') {
+            i++;
+            int closed = 0;
+            while (i < len) {
+                unsigned char c = (unsigned char)value[i++];
+                if (c == '"') {
+                    closed = 1;
+                    break;
+                }
+                if (c == '\\') {
+                    if (i >= len || (value[i] != '"' && value[i] != '\\')) {
+                        return 0;
+                    }
+                    i++;
+                }
+                else if (c < 0x20 || c > 0x7e) {
+                    return 0;
+                }
+            }
+            if (!closed) {
+                return 0;
+            }
+        }
+        else if (value[i] == '%') {
+            Py_ssize_t start = i;
+            i += 2;
+            while (i < len && value[i] != '"') {
+                i++;
+            }
+            if (i >= len
+                || !edge_sf_display_string(value + start, i - start + 1)) {
+                return 0;
+            }
+            i++;
+        }
+        else {
+            Py_ssize_t start = i;
+            while (i < len && value[i] != ';') {
+                i++;
+            }
+            if (!edge_sf_parameter_bare(value + start, i - start)) {
+                return 0;
+            }
+        }
+        if (i < len && value[i] != ';') {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 
@@ -916,6 +1233,7 @@ edge_parse_request(EdgeClient *self)
     Py_ssize_t declared = -1;
     int content_lengths = 0;
     int chunked = 0, transfer_encodings = 0;
+    int incrementals = 0, incremental_true = 0;
 
     p = line_end + 2;
     while (p < end) {
@@ -988,6 +1306,10 @@ edge_parse_request(EdgeClient *self)
                 return edge_refuse(self, 501);
             }
         }
+        else if (edge_token_eq(base + name, name_len, "incremental", 11)) {
+            incrementals++;
+            incremental_true = edge_incremental_true(base + value, value_len);
+        }
 
         if (nfields >= EDGE_MAX_HEADERS) {
             return edge_refuse(self, 431);
@@ -1015,6 +1337,9 @@ edge_parse_request(EdgeClient *self)
     }
     if (transfer_encodings > 0 && content_lengths > 0) {
         return edge_refuse(self, 400);
+    }
+    if (incrementals == 1 && incremental_true) {
+        return edge_refuse_error(self, 501, "incremental_refused");
     }
 
     self->no_body_expected = edge_token_eq(base + method, method_len, "HEAD", 4);
@@ -1058,7 +1383,7 @@ edge_parse_request(EdgeClient *self)
         index = edge_choose(self->table, edge_now(), 0);
     }
     if (index < 0) {
-        return edge_refuse(self, 502);
+        return edge_refuse_error(self, 502, "destination_unavailable");
     }
     up = &self->table->ups[index];
     self->queued_on = index;
@@ -1140,7 +1465,7 @@ edge_finish_chunked(EdgeClient *self)
         index = edge_choose(self->table, edge_now(), 0);
     }
     if (index < 0) {
-        return edge_refuse(self, 502);
+        return edge_refuse_error(self, 502, "destination_unavailable");
     }
     self->queued_on = index;
     if (edge_build_request(self, &self->table->ups[index], fields, nfields,
@@ -1962,7 +2287,7 @@ edge_conn_drive(EdgeConn *self)
                 /* An unparseable head is the origin's fault, and the client is
                  * owed an answer rather than a hang. */
                 if (client != NULL) {
-                    edge_refuse(client, 502);
+                    edge_refuse_error(client, 502, "http_protocol_error");
                 }
                 edge_failed(self->table, self->index, edge_now());
                 edge_release_conn(self, 0);
@@ -2184,7 +2509,7 @@ edge_conn_connection_lost(EdgeConn *self, PyObject *Py_UNUSED(exc))
         else if (self->state != EU_IDLE) {
             EdgeClient *client = self->client;
             if (client != NULL && self->state == EU_HEAD) {
-                if (edge_refuse(client, 502) < 0) {
+                if (edge_refuse_error(client, 502, "connection_terminated") < 0) {
                     PyErr_WriteUnraisable((PyObject *)self);
                 }
             }

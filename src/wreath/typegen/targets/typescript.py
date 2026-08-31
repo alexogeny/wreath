@@ -406,10 +406,13 @@ def _react_hook(operation: Operation, ts_type: Any) -> str:
     param_type = _pascal(operation.id) + "Parameters"
     response = ts_type(_tuplize(operation.response_body))
     body_ref = operation.request_body
-    is_query = operation.method in ("GET", "HEAD")
+    body_type = ts_type(_tuplize(body_ref)) if body_ref is not None else "void"
+    is_query = operation.method in ("GET", "HEAD", "QUERY")
     key = f'["{operation.id}"'
     if has_params:
         key += ", parameters"
+    if is_query and body_ref is not None:
+        key += ", body"
     key += "] as const"
 
     args: list[str] = []
@@ -417,6 +420,9 @@ def _react_hook(operation: Operation, ts_type: Any) -> str:
         args.append(f"parameters: {param_type}")
     call_args = "parameters" if has_params else ""
     if is_query:
+        if body_ref is not None:
+            args.append(f"body: {body_type}")
+            call_args = (call_args + ", body") if call_args else "body"
         args.append(
             f'options?: Omit<UseQueryOptions<{response}, WreathApiError>, "queryKey" | "queryFn">'
         )
@@ -432,7 +438,6 @@ def _react_hook(operation: Operation, ts_type: Any) -> str:
             f"}}\n"
         )
     # Mutation: variables carry the body (and parameters when present).
-    body_type = ts_type(_tuplize(body_ref)) if body_ref is not None else "void"
     var_type = body_type
     call = call_args
     if body_ref is not None:

@@ -20,6 +20,8 @@ edge paths, operational signals and bounded evidence for reproducing failures.
 
 ::: wreath.edge.headers
 
+::: wreath.proxy_status
+
 ::: wreath.health
 
 ::: wreath.hardening

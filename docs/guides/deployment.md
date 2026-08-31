@@ -16,12 +16,12 @@ Pin one Wreath version in the lockfile or hashed requirements. The extras instal
 version-matched companion wheels; they are capabilities, not alternate frameworks.
 
 ```bash
-uv add 'wreath==0.3.4'          # portable framework and server
-uv add 'wreath[linux]==0.3.4'   # Linux io_uring metal loop + native TLS transport
-uv add 'wreath[h3]==0.3.4'      # Linux HTTP/3; http3 is an alias
+uv add 'wreath==0.4.0'          # portable framework and server
+uv add 'wreath[linux]==0.4.0'   # Linux io_uring metal loop + native TLS transport
+uv add 'wreath[h3]==0.4.0'      # Linux HTTP/3; http3 is an alias
 ```
 
-`wreath[linux,h3]==0.3.4` selects both Linux capabilities. Confirm the resolved
+`wreath[linux,h3]==0.4.0` selects both Linux capabilities. Confirm the resolved
 environment during the image build:
 
 ```bash

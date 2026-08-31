@@ -107,7 +107,6 @@ change with its own measurement.
 from __future__ import annotations
 
 import base64
-import hashlib
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -118,6 +117,7 @@ from ._auth.jwt import JwtError, OkpPublicKey, key_from_jwk
 from ._capability_map import CapabilityMap
 from ._native import _core
 from ._reqcache import resolve_once
+from .digest import SUPPORTED_DIGEST_ALGORITHMS, Digest, DigestError, _checksum
 from .exceptions import HTTPException
 from .state import BODY_CHECK_SLOT
 from .temporal import Duration
@@ -176,7 +176,7 @@ _DIGEST_COMPONENT: Final = "content-digest"
 #: allow-list rather than a lookup into `hashlib`: `sha-1` and `md5` are
 #: registered spellings, and accepting one would let a caller choose a digest
 #: nobody should be relying on for integrity.
-_DIGEST_ALGORITHMS: Final = ("sha-256", "sha-512")
+_DIGEST_ALGORITHMS: Final = SUPPORTED_DIGEST_ALGORITHMS
 
 #: Where the deferred body check waits between ingress and the first read of the
 #: body. See `Signatures._verify_headers` and `Request._check_body`.
@@ -226,6 +226,16 @@ def _parse_dictionary(text: str, *, inner_list: bool) -> dict[str, Any]:
     """
     return _core.signature_parse_dictionary(
         text, inner_list, SignatureError, _MAX_HEADER_BYTES, _MAX_COMPONENTS
+    )
+
+
+def _verification_plan(raw_input: bytes, raw_signature: bytes) -> Any:
+    return _core.signature_compile_pair(
+        raw_input.decode("latin-1"),
+        raw_signature.decode("latin-1"),
+        SignatureError,
+        _MAX_HEADER_BYTES,
+        _MAX_COMPONENTS,
     )
 
 
@@ -386,20 +396,14 @@ def _digest_expectation(raw: bytes | None) -> tuple[str, bytes]:
     """
     if raw is None:
         raise SignatureError("covered header 'content-digest' is not present")
-    parsed = _parse_dictionary(raw.decode("latin-1"), inner_list=False)
-    for algorithm in reversed(_DIGEST_ALGORITHMS):
-        entry = parsed.get(algorithm)
-        if entry is None:
-            continue
-        value = entry[0]
-        if not isinstance(value, bytes):
-            raise SignatureError("content-digest value must be a byte sequence")
-        return algorithm, value
-    raise SignatureError("content-digest names no supported algorithm")
+    try:
+        return Digest.parse(raw).expectation()
+    except DigestError as error:
+        raise SignatureError(str(error)) from error
 
 
 def _digest(algorithm: str, body: bytes) -> bytes:
-    return hashlib.new(algorithm.replace("-", ""), body).digest()
+    return _checksum(algorithm, body)
 
 
 # Replay
@@ -800,20 +804,11 @@ class Signatures:
         agent: str | None,
         headers: Mapping[bytes, bytes],
     ) -> SignatureFacts:
-        inputs = _parse_dictionary(raw_input.decode("latin-1"), inner_list=True)
-        signatures = _parse_dictionary(raw_signature.decode("latin-1"), inner_list=False)
-        label = next(
-            (name for name in inputs if name in signatures),
-            None,
-        )
-        if label is None:
-            raise SignatureError("no label appears in both signature headers")
-        components, params = inputs[label]
-        raw_bytes, _ = signatures[label]
+        plan = _verification_plan(raw_input, raw_signature)
+        params, raw_bytes, covered_order = _core.signature_plan_facts(plan)
         if not isinstance(raw_bytes, bytes):
             raise SignatureError("signature value must be a byte sequence")
 
-        covered_order = tuple(name.lower() for name, _ in components)
         covered = set(covered_order)
         missing = [name for name in self._required if name not in covered]
         if missing:
@@ -866,7 +861,9 @@ class Signatures:
                 raise SignatureError("signature nonce was already used")
 
         # Curve verification follows every cheap refusal available to an untrusted caller.
-        base = signature_base(_message(request, headers), components, params)
+        base = _core.signature_plan_base(
+            _message(request, headers), plan, SignatureError, _derived
+        )
         from ._auth._ecverify import verify_ed25519
 
         if not verify_ed25519(key.public, base, raw_bytes):

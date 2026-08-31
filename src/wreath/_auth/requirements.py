@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -53,6 +53,75 @@ class SetRequirement:
 class PolicyRequirement:
     action: str
     resource: object | Callable[[Any], object]
+
+
+@dataclass(frozen=True, slots=True)
+class OAuthStepUpRequirement:
+    """RFC 9470 authentication recency and class required by a resource."""
+
+    max_age: int | None = None
+    acr_values: tuple[str, ...] = ()
+    challenge: str = field(init=False, compare=False)
+
+    def __post_init__(self) -> None:
+        max_age = self.max_age
+        if max_age is not None:
+            if isinstance(max_age, bool) or not isinstance(max_age, int):
+                raise TypeError("OAuth step-up max_age must be a non-negative integer")
+            if max_age < 0:
+                raise ValueError("OAuth step-up max_age must be a non-negative integer")
+        acr_values = tuple(self.acr_values)
+        if len(set(acr_values)) != len(acr_values):
+            raise ValueError("OAuth step-up acr_values must be unique")
+        for value in acr_values:
+            if (
+                not isinstance(value, str)
+                or not value
+                or not value.isascii()
+                or not value.isprintable()
+                or any(character.isspace() for character in value)
+                or '"' in value
+                or "\\" in value
+            ):
+                raise ValueError(
+                    "OAuth step-up acr_values entries must be non-empty ASCII "
+                    "strings without whitespace"
+                )
+        if max_age is None and not acr_values:
+            raise ValueError("OAuth step-up requires max_age or acr_values")
+        object.__setattr__(self, "acr_values", acr_values)
+        if max_age is not None and acr_values:
+            description = (
+                "More recent authentication and a different authentication level are required"
+            )
+        elif max_age is not None:
+            description = "More recent authentication is required"
+        else:
+            description = "A different authentication level is required"
+        parameters = [
+            'Bearer error="insufficient_user_authentication"',
+            f'error_description="{description}"',
+        ]
+        if max_age is not None:
+            parameters.append(f'max_age="{max_age}"')
+        if acr_values:
+            parameters.append(f'acr_values="{" ".join(acr_values)}"')
+        object.__setattr__(self, "challenge", ", ".join(parameters))
+
+    def satisfied_by(self, identity: Any, now: float | None = None) -> bool:
+        """Whether the token claims meet every declared RFC 9470 requirement."""
+        claims = getattr(identity, "claims", None)
+        if not isinstance(claims, Mapping):
+            return False
+        max_age = self.max_age
+        if max_age is not None:
+            stamp = claims.get("auth_time")
+            if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+                return False
+            if now is None or max(0, int(now - stamp)) > max_age:
+                return False
+        acr_values = self.acr_values
+        return not acr_values or claims.get("acr") in acr_values
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -114,6 +183,8 @@ class AuthRequirement:
     policies: tuple[PolicyRequirement, ...] = ()
     #: Maximum age in seconds of the identity's second-factor proof.
     second_factor: float | None = None
+    #: OAuth token authentication recency/class required under RFC 9470.
+    oauth_step_up: OAuthStepUpRequirement | None = None
     #: Whether the endpoint explicitly admits anonymous callers.
     public: bool = False
 
@@ -152,6 +223,7 @@ class AuthRequirement:
             or self.permission_checks
             or self.policies
             or self.second_factor is not None
+            or self.oauth_step_up is not None
         ):
             # The public-route answer first, and without building a generator
             # for the admin scan: `Wreath._auth_handlers` decides this once per
@@ -178,6 +250,7 @@ def merge_requirements(*requirements: AuthRequirement) -> AuthRequirement:
     authenticated = False
     identify = False
     second_factor: float | None = None
+    oauth_step_up: OAuthStepUpRequirement | None = None
     role_checks: list[SetRequirement] = []
     permission_checks: list[SetRequirement] = []
     policies: list[PolicyRequirement] = []
@@ -189,6 +262,7 @@ def merge_requirements(*requirements: AuthRequirement) -> AuthRequirement:
         window = requirement.second_factor
         if window is not None and (second_factor is None or window < second_factor):
             second_factor = window
+        oauth_step_up = _merge_oauth_step_up(oauth_step_up, requirement.oauth_step_up)
         role_checks.extend(requirement.role_checks)
         permission_checks.extend(requirement.permission_checks)
         policies.extend(requirement.policies)
@@ -196,15 +270,44 @@ def merge_requirements(*requirements: AuthRequirement) -> AuthRequirement:
         raise ValueError(
             "public() cannot be combined with authentication or authorization requirements"
         )
+    if second_factor is not None and oauth_step_up is not None:
+        raise ValueError(
+            "session second_factor and OAuth oauth_step_up requirements cannot be combined"
+        )
     return AuthRequirement(
         public=public,
         second_factor=second_factor,
+        oauth_step_up=oauth_step_up,
         authenticated=authenticated,
         identify=identify,
         role_checks=tuple(role_checks),
         permission_checks=tuple(permission_checks),
         policies=tuple(policies),
     )
+
+
+def _merge_oauth_step_up(
+    left: OAuthStepUpRequirement | None,
+    right: OAuthStepUpRequirement | None,
+) -> OAuthStepUpRequirement | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    if left.max_age is None:
+        max_age = right.max_age
+    elif right.max_age is None:
+        max_age = left.max_age
+    else:
+        max_age = min(left.max_age, right.max_age)
+    if left.acr_values and right.acr_values:
+        accepted = frozenset(right.acr_values)
+        acr_values = tuple(value for value in left.acr_values if value in accepted)
+        if not acr_values:
+            raise ValueError("OAuth step-up requirements have no authentication class in common")
+    else:
+        acr_values = left.acr_values or right.acr_values
+    return OAuthStepUpRequirement(max_age=max_age, acr_values=acr_values)
 
 
 def set_requirement(endpoint: Any, requirement: AuthRequirement) -> Any:
@@ -245,8 +348,25 @@ def add_second_factor(endpoint: Any, max_age: float) -> Any:
     `merge_requirements` does: stacking requirements adds, never subtracts.
     """
     current = _protected_requirement(endpoint)
+    if current.oauth_step_up is not None:
+        raise ValueError(
+            "second_factor() cannot be combined with oauth_step_up(); choose the "
+            "session or OAuth remediation flow"
+        )
     window = max_age if current.second_factor is None else min(current.second_factor, max_age)
     return set_requirement(endpoint, replace(current, authenticated=True, second_factor=window))
+
+
+def add_oauth_step_up(endpoint: Any, step_up: OAuthStepUpRequirement) -> Any:
+    """Demand RFC 9470 token authentication claims. Implies authentication."""
+    current = _protected_requirement(endpoint)
+    if current.second_factor is not None:
+        raise ValueError(
+            "oauth_step_up() cannot be combined with second_factor(); choose the "
+            "OAuth or session remediation flow"
+        )
+    merged = _merge_oauth_step_up(current.oauth_step_up, step_up)
+    return set_requirement(endpoint, replace(current, authenticated=True, oauth_step_up=merged))
 
 
 def add_roles(endpoint: Any, values: frozenset[str], mode: Mode) -> Any:

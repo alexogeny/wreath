@@ -59,11 +59,11 @@ Reference: `/reference/series`.
 
 from __future__ import annotations
 
-import re as _re
 from calendar import monthrange
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from ._duration import decimal_unit
 from ._native import _core
 from ._series.compile import (
     CURRENT,
@@ -2686,7 +2686,6 @@ def _instant(value: Any) -> Any:
 #: `Rows(within="3d")` refused. The scales are the same set now, and
 #: `tests/series/test_duration_syntax.py` asserts it rather than trusting this
 #: comment -- a claim two modules apart is one edit from being false again.
-_COMPACT_DURATION = _re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*(ms|s|m|h|d)?\s*$")
 _COMPACT_SCALE = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
 
 
@@ -2703,9 +2702,10 @@ def _lateness(value: Any) -> float:
             f"seal(after=) takes a duration like '2h' or a number of seconds, got {value!r}"
         )
     if isinstance(value, str):
-        match = _COMPACT_DURATION.fullmatch(value)
-        if match is not None:
-            seconds = float(match.group(1)) * _COMPACT_SCALE[match.group(2) or "s"]
+        parsed = decimal_unit(value)
+        if parsed is not None and (not parsed[1] or parsed[1] in _COMPACT_SCALE):
+            number, unit = parsed
+            seconds = float(number) * _COMPACT_SCALE[unit or "s"]
         else:
             try:
                 seconds = parse_duration(value).total_seconds()

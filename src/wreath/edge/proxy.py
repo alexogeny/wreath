@@ -16,7 +16,21 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from ..http_client import ClientError, HTTPClient
+from .._structured_fields import parse_boolean_item
+from ..http_client import (
+    ClientClosed,
+    ClientError,
+    ConnectError,
+    DestinationRejected,
+    DNSFailure,
+    HTTPClient,
+    PoolTimeout,
+    ProtocolError,
+    RequestTimeout,
+    ResponseTimeout,
+    TLSFailure,
+)
+from ..proxy_status import ProxyStatus
 from ..response import Response, StreamingResponse
 from .headers import forwardable, request_headers, via_token
 from .upstream import Upstream, UpstreamPool
@@ -35,7 +49,9 @@ DEFAULT_VIA_NAME = "wreath"
 #: `POST` is absent and stays absent. A client that knows its POST is safe to
 #: repeat says so with `Idempotency-Key`, which `wreath.policy.idempotency`
 #: already speaks -- and that is a claim only the client can make.
-IDEMPOTENT: frozenset[str] = frozenset({"GET", "HEAD", "PUT", "DELETE", "OPTIONS", "TRACE"})
+IDEMPOTENT: frozenset[str] = frozenset(
+    {"GET", "HEAD", "PUT", "DELETE", "OPTIONS", "QUERY", "TRACE"}
+)
 
 #: Methods with no request body to read. `GET` with a body is legal and
 #: meaningless -- RFC 9110 §9.3.1 says content on one has no defined semantics --
@@ -85,8 +101,10 @@ class ReverseProxy:
         "_attempts",
         "_buffer_below",
         "_clients",
+        "_incremental_refused",
         "_max_body",
         "_pool",
+        "_proxy_name",
         "_via",
     )
 
@@ -111,12 +129,23 @@ class ReverseProxy:
         # Encoded once: it is `"1.1 <name>"` for the life of the proxy, and
         # building it per request was an f-string plus an encode on the hot path.
         self._via = via_token("1.1", via_name)
+        self._proxy_name = via_name
+        self._incremental_refused = ProxyStatus(
+            via_name,
+            error="incremental_refused",
+        ).to_header()
         self._max_body = max_body
         self._attempts = max(1, attempts)
         self._buffer_below = buffer_below
 
     async def __call__(self, request: Any) -> Response | StreamingResponse:
         """Proxy one request. Returns the upstream's response, streamed."""
+        if _request_incremental(request.headers) is True:
+            return Response(
+                b"",
+                status=501,
+                headers=[(b"proxy-status", self._incremental_refused)],
+            )
         method = request.method.upper()
         # A method that cannot carry a body does not pay to ask for one. `body()`
         # is not free even when there is nothing to read: it is a coroutine, and
@@ -141,6 +170,7 @@ class ReverseProxy:
 
         tried: frozenset[str] = frozenset()
         last = "no upstream available"
+        proxy_error = "destination_unavailable"
         for _ in range(self._attempts):
             upstream = self._pool.choose(exclude=tried)
             if upstream is None:
@@ -159,22 +189,33 @@ class ReverseProxy:
                 upstream.inflight -= 1
                 self._pool.failed(upstream)
                 last = str(error)
+                proxy_error = _proxy_error(error)
                 if not retryable:
                     break
                 continue
-            headers = forwardable(response.headers)
-            small = self._buffered_length(response)
+            incremental, headers = _response_incremental_headers(forwardable(response.headers))
+            small = None if incremental is True else self._buffered_length(response)
             if small is not None:
                 return await self._buffered(stream, response, upstream, started, headers)
             return StreamingResponse(
                 self._relay(stream, response, upstream, started),
                 status=response.status,
                 headers=headers,
+                incremental=incremental is not False,
             )
         # 502, because the request was fine and the upstreams were not. The
         # distinction matters to whoever reads the log: a 4xx here would blame
         # the client for the proxy's own dependency.
-        return Response(last.encode("utf-8"), status=502)
+        return Response(
+            last.encode("utf-8"),
+            status=502,
+            headers=[
+                (
+                    b"proxy-status",
+                    ProxyStatus(self._proxy_name, error=proxy_error).to_header(),
+                )
+            ],
+        )
 
     def _buffered_length(self, response: Any) -> int | None:
         """The declared body size when it is small enough to read in one go."""
@@ -248,3 +289,52 @@ class ReverseProxy:
             scheme=_SCHEMES.get(request.scheme) or request.scheme.encode("latin-1"),
             via=self._via,
         )
+
+
+def _proxy_error(error: ClientError | OSError) -> str:
+    if isinstance(error, DNSFailure):
+        return "dns_error"
+    if isinstance(error, TLSFailure):
+        return "tls_protocol_error"
+    if isinstance(error, DestinationRejected):
+        return "destination_ip_prohibited"
+    if isinstance(error, PoolTimeout):
+        return "connection_limit_reached"
+    if isinstance(error, RequestTimeout):
+        return "connection_timeout"
+    if isinstance(error, ResponseTimeout):
+        return "connection_read_timeout"
+    if isinstance(error, ProtocolError):
+        return "http_protocol_error"
+    if isinstance(error, ConnectError):
+        return "destination_unavailable"
+    if isinstance(error, ClientClosed):
+        return "proxy_internal_error"
+    if isinstance(error, OSError):
+        return "connection_terminated"
+    return "proxy_internal_error"
+
+
+def _request_incremental(headers: list[tuple[bytes, bytes]]) -> bool | None:
+    value = None
+    for name, candidate in headers:
+        if name != b"incremental":
+            continue
+        if value is not None:
+            return None
+        value = candidate
+    return parse_boolean_item(value) if value is not None else None
+
+
+def _response_incremental_headers(
+    headers: list[tuple[bytes, bytes]],
+) -> tuple[bool | None, list[tuple[bytes, bytes]]]:
+    values: list[bytes] = []
+    forwarded: list[tuple[bytes, bytes]] = []
+    for name, value in headers:
+        if name.lower() == b"incremental":
+            values.append(value)
+        else:
+            forwarded.append((name, value))
+    preference = parse_boolean_item(values[0]) if len(values) == 1 else None
+    return preference, forwarded

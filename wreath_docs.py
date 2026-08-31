@@ -24,6 +24,7 @@ nav = Nav(
         Page("Your first Wreath application", "start/index.md"),
         Page("Choose a path", "start/paths.md"),
         Page("Versions and upgrades", "start/releases.md"),
+        Page("Wreath 0.4.0", "release_notes/0.4.0.md"),
         Page("Wreath 0.3.4", "release_notes/0.3.4.md"),
     ),
     Section(

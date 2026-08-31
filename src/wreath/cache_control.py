@@ -6,6 +6,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from ._structured_fields import Item, serialize_dictionary
+
 if TYPE_CHECKING:
     from .request import Request
 
@@ -13,6 +15,7 @@ if TYPE_CHECKING:
 @dataclass(frozen=True, slots=True)
 class CacheControl:
     _header: bytes = field(init=False, repr=False, compare=False)
+    _targeted_header: bytes = field(init=False, repr=False, compare=False)
     public: bool = False
     private: bool = False
     no_store: bool = False
@@ -43,6 +46,7 @@ class CacheControl:
         if self.immutable and (self.max_age is None or self.max_age <= 0):
             raise ValueError("immutable cache policy requires a positive max_age")
         object.__setattr__(self, "_header", self._render_header())
+        object.__setattr__(self, "_targeted_header", self._render_targeted_header())
 
     def _render_header(self) -> bytes:
         directives: list[str] = []
@@ -70,6 +74,46 @@ class CacheControl:
 
     def to_header(self) -> bytes:
         return self._header
+
+    def _render_targeted_header(self) -> bytes:
+        directives: dict[str, Item] = {}
+        for enabled, name in (
+            (self.public, "public"),
+            (self.private, "private"),
+            (self.no_store, "no-store"),
+            (self.no_cache, "no-cache"),
+            (self.no_transform, "no-transform"),
+            (self.must_revalidate, "must-revalidate"),
+            (self.proxy_revalidate, "proxy-revalidate"),
+            (self.immutable, "immutable"),
+        ):
+            if enabled:
+                directives[name] = Item(True)
+        for value, name in (
+            (self.max_age, "max-age"),
+            (self.shared_max_age, "s-maxage"),
+            (self.stale_while_revalidate, "stale-while-revalidate"),
+            (self.stale_if_error, "stale-if-error"),
+        ):
+            if value is not None:
+                directives[name] = Item(value)
+        return serialize_dictionary(directives) if directives else b""
+
+    def to_targeted_header(self) -> bytes:
+        """Return this policy as an RFC 9213 Structured Dictionary."""
+        return self._targeted_header
+
+
+def _set_cdn_cache_control(headers: list[tuple[bytes, bytes]], policy: CacheControl) -> None:
+    value = policy.to_targeted_header()
+    if not value:
+        raise ValueError("CDN-Cache-Control needs at least one directive")
+    headers[:] = [
+        (name, existing)
+        for name, existing in headers
+        if name.lower() != b"cdn-cache-control"
+    ]
+    headers.append((b"cdn-cache-control", value))
 
 
 type CachePolicy = Callable[["Request", Any], CacheControl | None]

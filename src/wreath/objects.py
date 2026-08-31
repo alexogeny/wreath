@@ -810,13 +810,6 @@ def _etag(data: bytes) -> str:
     return hashlib.md5(data).hexdigest()
 
 
-#: The exact shape `LocalObjectStore.write_stream` gives its temporary file, and
-#: the shape `_walk` skips so a killed write never shows up as an object. Both
-#: sides come from here on purpose: when the writer and the filter were allowed
-#: to spell it separately, only one of them was right.
-_TMP_NAME = re.compile(r"\..+\.[0-9a-f]{12}\.tmp")
-
-
 def _tmp_name(name: str) -> str:
     return f".{name}.{os.urandom(6).hex()}.tmp"
 

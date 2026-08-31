@@ -25,21 +25,18 @@ from .highlight import highlight
 __all__ = ["Rendered", "TocEntry", "plain", "render", "slugify"]
 
 _SAFE_SCHEME = re.compile(r"^(?:https?:|mailto:|#|/|\.{0,2}/|[^:]*$)", re.IGNORECASE)
-_HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 #: `key="value"` attributes trailing a fence's language, e.g.
 #: ``` ``python title="app.py" hl_lines="3 4" ````.
 _FENCE_ATTR = re.compile(r'(\w+)\s*=\s*"([^"]*)"')
 #: Optional trailing `{#custom-id}` on a heading (attr_list style) — lets a page
 #: pin an explicit anchor, e.g. mkdocstrings' dotted `wreath.mod.Class` ids so
 #: cross-references written against them keep resolving.
-_HEADING_ID = re.compile(r"^(.*?)\s*\{#([\w.:-]+)\}$")
 _FENCE = re.compile(r"^(```+|~~~+)\s*([^\s`]*)\s*(.*)$")
 _THEMATIC = re.compile(r"^ {0,3}([-*_])(?:\s*\1){2,}\s*$")
 _UL_ITEM = re.compile(r"^(\s*)[-*+]\s+(.*)$")
 _OL_ITEM = re.compile(r"^(\s*)(\d+)[.)]\s+(.*)$")
 _SLUG_STRIP = re.compile(r"[^\w\- ]+")
 _ADMONITION = re.compile(r'^(!!!|\?\?\?\+?|\?\?\?)\s+([\w-]+)(?:\s+"([^"]*)")?\s*$')
-_TABLE_DELIM = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$")
 _CONTENT_TAB = re.compile(r'^=== +"([^"]*)"\s*$')
 _TASK = re.compile(r"\[([ xX])\]\s+(.*)$")
 
@@ -200,8 +197,8 @@ class _Renderer:
             fence = _FENCE.match(line) if line_kind & _WDT_FENCE else None
             if fence:
                 i = self._code_block(lines, i, fence)
-            elif line_kind & _WDT_HEADING and (heading := _HEADING.match(line)) is not None:
-                self._heading(heading)
+            elif line_kind & _WDT_HEADING and (heading := _parse_heading(line)) is not None:
+                self._heading(*heading)
                 i += 1
             elif line_kind & _WDT_THEMATIC and _THEMATIC.match(line):
                 self.out.append("<hr />")
@@ -222,13 +219,11 @@ class _Renderer:
                 i = self._paragraph(lines, kinds, i)
         return Rendered("\n".join(self.out), tuple(self.toc), self.title)
 
-    def _heading(self, match: re.Match[str]) -> None:
-        level = len(match.group(1))
-        text = match.group(2)
-        explicit = _HEADING_ID.match(text)
+    def _heading(self, level: int, text: str) -> None:
+        explicit = _parse_heading_id(text)
         if explicit is not None:
-            text = explicit.group(1)
-            slug = self._claim_slug(explicit.group(2))
+            text, identifier = explicit
+            slug = self._claim_slug(identifier)
         else:
             slug = self._unique_slug(text)
         if level == 1 and self.title is None:
@@ -494,7 +489,7 @@ def _is_block_start(line: str, kind: int) -> bool:
     if not kind:
         return False
     return bool(
-        (kind & _WDT_HEADING and _HEADING.match(line))
+        (kind & _WDT_HEADING and _parse_heading(line))
         or (kind & _WDT_FENCE and _FENCE.match(line))
         or (kind & _WDT_THEMATIC and _THEMATIC.match(line))
         or (kind & _WDT_ADMONITION and _ADMONITION.match(line))
@@ -518,7 +513,11 @@ def _strip_frontmatter(lines: list[str]) -> list[str]:
 
 
 def _is_table(lines: list[str], i: int) -> bool:
-    return i + 1 < len(lines) and "|" in lines[i] and bool(_TABLE_DELIM.match(lines[i + 1]))
+    return (
+        i + 1 < len(lines)
+        and "|" in lines[i]
+        and _parse_table_aligns(lines[i + 1]) is not None
+    )
 
 
 def _table_row(line: str) -> list[str]:
@@ -527,12 +526,54 @@ def _table_row(line: str) -> list[str]:
 
 
 def _table_aligns(delim: str) -> list[str]:
-    out: list[str] = []
-    for raw_spec in delim.strip().strip("|").split("|"):
+    return _parse_table_aligns(delim) or []
+
+
+def _parse_heading(line: str) -> tuple[int, str] | None:
+    level = 0
+    while level < min(6, len(line)) and line[level] == "#":
+        level += 1
+    if level == 0 or level == len(line) or not line[level].isspace():
+        return None
+    text = line[level:].lstrip().rstrip()
+    return level, text.rstrip("#").rstrip()
+
+
+def _parse_heading_id(text: str) -> tuple[str, str] | None:
+    if not text.endswith("}"):
+        return None
+    start = text.rfind("{#")
+    if start < 0:
+        return None
+    identifier = text[start + 2 : -1]
+    if not identifier or any(
+        not (character == "_" or character.isalnum() or character in ".:-")
+        for character in identifier
+    ):
+        return None
+    return text[:start].rstrip(), identifier
+
+
+def _parse_table_aligns(line: str) -> list[str] | None:
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    cells = stripped.split("|")
+    if len(cells) < 2:
+        return None
+    aligns: list[str] = []
+    for raw_spec in cells:
         spec = raw_spec.strip()
         left, right = spec.startswith(":"), spec.endswith(":")
-        out.append("center" if left and right else "right" if right else "left" if left else "")
-    return out
+        hyphens = spec.removeprefix(":").removesuffix(":")
+        if not hyphens or hyphens.strip("-"):
+            return None
+        aligns.append(
+            "center" if left and right else "right" if right else "left" if left else ""
+        )
+    return aligns
 
 
 def _align(aligns: list[str], column: int) -> str:

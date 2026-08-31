@@ -213,7 +213,8 @@ class RedirectError(ClientError):
     """A redirect could not be followed under `RedirectPolicy`.
 
     Raised when the hop limit is exhausted, when the `Location` is not ASCII,
-    when it leaves the origin, and when a 301/302 on a non-GET/HEAD method would
+    when it leaves the origin, and when a 301/302 on a method other than
+    GET, HEAD, or QUERY would
     require rewriting the method -- refused rather than silently turned into a
     GET, because that would drop the body the caller asked to send.
     """
@@ -342,7 +343,7 @@ class RetryPolicy:
     **Retries are off by default** (`attempts=1` means one attempt, not one
     retry). Turning them on requires deciding that repeating the request is safe,
     which is what `idempotent_only` encodes: with it set, only DELETE, GET,
-    HEAD, OPTIONS, PUT and TRACE are repeated -- plus any request carrying an
+    HEAD, OPTIONS, PUT, QUERY and TRACE are repeated -- plus any request carrying an
     `idempotency_key`, because that key is the caller's promise that the origin
     will collapse a duplicate.
 
@@ -882,7 +883,7 @@ class _Connection:
     writer: _TransportStreamWriter
 
 
-_IDEMPOTENT = frozenset({"DELETE", "GET", "HEAD", "OPTIONS", "PUT", "TRACE"})
+_IDEMPOTENT = frozenset({"DELETE", "GET", "HEAD", "OPTIONS", "PUT", "QUERY", "TRACE"})
 _DEFAULT_LIMITS = ClientLimits()
 _DEFAULT_TIMEOUT = ClientTimeout()
 _DEFAULT_RETRY = RetryPolicy()
@@ -1186,6 +1187,36 @@ class HTTPClient:
         """
         return self.request(
             "POST", target, headers=headers, body=body, idempotency_key=idempotency_key
+        )
+
+    def query(
+        self,
+        target: str,
+        *,
+        headers: tuple[tuple[bytes, bytes], ...] = (),
+        body: bytes | bytearray | memoryview = b"",
+        content_type: str = "application/json",
+    ) -> Coroutine[Any, Any, ClientResponse]:
+        """Send a safe, idempotent QUERY with its mandatory Content-Type."""
+        if any(name.lower() == b"content-type" for name, _value in headers):
+            raise ValueError(
+                "HTTPClient.query received Content-Type in headers; pass content_type= instead"
+            )
+        try:
+            encoded_type = content_type.encode("ascii")
+        except UnicodeEncodeError as error:
+            raise ValueError("QUERY content_type must be an ASCII media type") from error
+        if not encoded_type:
+            raise ValueError("QUERY content_type must not be empty; use a type/subtype media type")
+        from .router import _query_media_range
+
+        media_type, _item = _query_media_range(content_type)
+        if "*" in media_type:
+            raise ValueError(
+                f"QUERY content_type must name one type/subtype, not media range {content_type!r}"
+            )
+        return self.request(
+            "QUERY", target, headers=((b"content-type", encoded_type), *headers), body=body
         )
 
     def stream(
@@ -1509,7 +1540,7 @@ class HTTPClient:
             if response.status == 303:
                 method_upper = "GET"
                 payload = b""
-            elif response.status in (301, 302) and method_upper not in ("GET", "HEAD"):
+            elif response.status in (301, 302) and method_upper not in ("GET", "HEAD", "QUERY"):
                 raise RedirectError("redirect would require rewriting a non-idempotent method")
 
     async def _throttle(self) -> None:

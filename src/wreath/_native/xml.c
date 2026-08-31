@@ -7,10 +7,11 @@
  * of one parser is the shape that produces a signature-wrapping bug -- a
  * verifier running one and a consumer running the other.
  *
- * The tree is built directly as Python objects rather than into a private C
- * representation and converted after: the shapes are small (a SAML assertion
- * is kilobytes), and a second representation would be a third thing to keep in
- * step with the other two.
+ * Parsing owns a compact native node tree for the duration of one operation.
+ * Public Element objects are materialized once at the parse boundary, while
+ * canonicalization renders the same native tree directly.  Keeping the
+ * authoritative parse native avoids a complete tuple/list/dict shadow tree
+ * beside the public dataclasses without introducing a second parser.
  */
 #include "wreathcore.h"
 
@@ -36,6 +37,107 @@ typedef struct {
     Py_ssize_t elements;
     XmlLimits limits;
 } XmlParser;
+
+typedef struct XmlNode XmlNode;
+
+typedef struct {
+    PyObject *prefix;
+    PyObject *uri;
+} XmlNamespace;
+
+typedef struct {
+    PyObject *prefix;
+    PyObject *local;
+    PyObject *uri;
+    PyObject *value;
+    PyObject *key;
+} XmlAttribute;
+
+typedef struct {
+    XmlNode **items;
+    Py_ssize_t count;
+    Py_ssize_t capacity;
+} XmlChildren;
+
+struct XmlNode {
+    PyObject *tag;
+    PyObject *text;
+    PyObject *tail;
+    PyObject *prefix;
+    PyObject *local;
+    Py_ssize_t start;
+    Py_ssize_t end;
+    XmlNamespace *declarations;
+    Py_ssize_t declaration_count;
+    XmlAttribute *attributes;
+    Py_ssize_t attribute_count;
+    XmlNode **children;
+    Py_ssize_t child_count;
+};
+
+static void xml_node_free(XmlNode *node);
+
+static void
+xml_children_clear(XmlChildren *children)
+{
+    for (Py_ssize_t index = 0; index < children->count; index++)
+        xml_node_free(children->items[index]);
+    PyMem_Free(children->items);
+    children->items = NULL;
+    children->count = 0;
+    children->capacity = 0;
+}
+
+static int
+xml_children_append(XmlChildren *children, XmlNode *node)
+{
+    if (children->count == children->capacity) {
+        Py_ssize_t capacity = children->capacity == 0 ? 4 : children->capacity * 2;
+        if (capacity < children->capacity ||
+            (size_t)capacity > SIZE_MAX / sizeof(*children->items)) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        XmlNode **items = PyMem_Realloc(
+            children->items, (size_t)capacity * sizeof(*children->items));
+        if (items == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        children->items = items;
+        children->capacity = capacity;
+    }
+    children->items[children->count++] = node;
+    return 0;
+}
+
+static void
+xml_node_free(XmlNode *node)
+{
+    if (node == NULL) return;
+    for (Py_ssize_t index = 0; index < node->child_count; index++)
+        xml_node_free(node->children[index]);
+    for (Py_ssize_t index = 0; index < node->declaration_count; index++) {
+        Py_XDECREF(node->declarations[index].prefix);
+        Py_XDECREF(node->declarations[index].uri);
+    }
+    for (Py_ssize_t index = 0; index < node->attribute_count; index++) {
+        Py_XDECREF(node->attributes[index].prefix);
+        Py_XDECREF(node->attributes[index].local);
+        Py_XDECREF(node->attributes[index].uri);
+        Py_XDECREF(node->attributes[index].value);
+        Py_XDECREF(node->attributes[index].key);
+    }
+    PyMem_Free(node->children);
+    PyMem_Free(node->declarations);
+    PyMem_Free(node->attributes);
+    Py_XDECREF(node->tag);
+    Py_XDECREF(node->text);
+    Py_XDECREF(node->tail);
+    Py_XDECREF(node->prefix);
+    Py_XDECREF(node->local);
+    PyMem_Free(node);
+}
 
 /* The wreath.xml.XMLRefusal class, handed over by xml_configure so this module
  * raises the type `wreath._xml_model` declares rather than inventing one. */
@@ -759,17 +861,17 @@ xml_resolve(XmlParser *parser, PyObject *prefix, PyObject *scope,
 }
 
 
-static PyObject *xml_read_element(XmlParser *parser, PyObject *inherited,
-                                  Py_ssize_t depth);
+static XmlNode *xml_read_element(XmlParser *parser, PyObject *inherited,
+                                 Py_ssize_t depth);
 
 
 /* Read element content up to the matching end tag.
  *
- * `text_out` receives this element's leading character data; each child tuple
+ * `text_out` receives this element's leading character data; each native child
  * is appended to `children` with its tail already folded in. */
 static int
 xml_read_content(XmlParser *parser, PyObject *name, PyObject *scope,
-                 Py_ssize_t depth, PyObject **text_out, PyObject *children)
+                 Py_ssize_t depth, PyObject **text_out, XmlChildren *children)
 {
     const uint8_t *data = parser->data;
     PyObject *text_parts = PyList_New(0);
@@ -861,36 +963,22 @@ xml_read_content(XmlParser *parser, PyObject *name, PyObject *scope,
             goto done;
         }
         {
-            PyObject *child = xml_read_element(parser, scope, depth + 1);
+            XmlNode *child = xml_read_element(parser, scope, depth + 1);
             PyObject *tail_parts;
             if (child == NULL) {
                 goto done;
             }
-            if (PyList_Append(children, child) < 0) {
-                Py_DECREF(child);
+            if (xml_children_append(children, child) < 0) {
+                xml_node_free(child);
                 goto done;
             }
-            Py_DECREF(child);
             tail_parts = PyList_New(0);
             if (tail_parts == NULL) {
                 goto done;
             }
-            /* The child's tail is character data that follows it, so it is not
-             * known until the next sibling or this element's end tag. Park the
-             * accumulating list in the child tuple's tail slot and join it in
-             * place once the content ends.
-             *
-             * Mutating a tuple is only legal because this one was built here
-             * and has not been handed to anything else yet -- it is reachable
-             * only through `children`, which this function owns. */
-            pending_index = PyList_GET_SIZE(children) - 1;
-            {
-                PyObject *slot = PyList_GET_ITEM(children, pending_index);
-                PyObject *previous = PyTuple_GET_ITEM(slot, 3);
-                PyTuple_SET_ITEM(slot, 3, tail_parts);   /* steals tail_parts */
-                Py_DECREF(previous);
-            }
-            target = tail_parts;   /* borrowed from the tuple slot */
+            pending_index = children->count - 1;
+            Py_SETREF(children->items[pending_index]->tail, tail_parts);
+            target = tail_parts;
             run = parser->pos;
         }
     }
@@ -901,9 +989,9 @@ xml_read_content(XmlParser *parser, PyObject *name, PyObject *scope,
      * itself trailing it. */
 
     /* Fold every parked tail list into the str it stands for. */
-    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(children); i++) {
-        PyObject *child = PyList_GET_ITEM(children, i);
-        PyObject *parked = PyTuple_GET_ITEM(child, 3);
+    for (Py_ssize_t i = 0; i < children->count; i++) {
+        XmlNode *child = children->items[i];
+        PyObject *parked = child->tail;
         PyObject *joined;
         if (!PyList_Check(parked)) {
             continue;
@@ -912,8 +1000,7 @@ xml_read_content(XmlParser *parser, PyObject *name, PyObject *scope,
         if (joined == NULL) {
             goto done;
         }
-        PyTuple_SET_ITEM(child, 3, joined);
-        Py_DECREF(parked);
+        Py_SETREF(child->tail, joined);
     }
     *text_out = xml_join(text_parts);
     status = *text_out == NULL ? -1 : 0;
@@ -924,9 +1011,8 @@ done:
 }
 
 
-/* Parse one element, returning the node tuple
- * (tag, attrib, text, tail, span, nsdecl, qualified, prefix, local, children). */
-static PyObject *
+/* Parse one element into the operation-owned native tree. */
+static XmlNode *
 xml_read_element(XmlParser *parser, PyObject *inherited, Py_ssize_t depth)
 {
     const uint8_t *data = parser->data;
@@ -939,14 +1025,13 @@ xml_read_element(XmlParser *parser, PyObject *inherited, Py_ssize_t depth)
     PyObject *scope = NULL;
     PyObject *attrib = NULL;
     PyObject *qualified = NULL;
-    PyObject *children = NULL;
+    XmlChildren children = {0};
     PyObject *text = NULL;
     PyObject *prefix = NULL;
     PyObject *local = NULL;
     PyObject *uri = NULL;
     PyObject *tag = NULL;
-    PyObject *node = NULL;
-    PyObject *span = NULL;
+    XmlNode *node = NULL;
     int empty = 0;
 
     if (depth > parser->limits.max_depth) {
@@ -1224,8 +1309,8 @@ xml_read_element(XmlParser *parser, PyObject *inherited, Py_ssize_t depth)
         if (PyDict_SetItem(attrib, key, value) < 0) {
             goto attribute_error;
         }
-        entry = PyTuple_Pack(4, attribute_prefix, attribute_local, attribute_uri,
-                             value);
+        entry = PyTuple_Pack(5, attribute_prefix, attribute_local, attribute_uri,
+                             value, key);
         if (entry == NULL || PyList_Append(qualified, entry) < 0) {
             Py_XDECREF(entry);
             goto attribute_error;
@@ -1245,58 +1330,66 @@ xml_read_element(XmlParser *parser, PyObject *inherited, Py_ssize_t depth)
         goto error;
     }
 
-    children = PyList_New(0);
-    if (children == NULL) {
-        goto error;
-    }
     if (empty) {
         text = PyUnicode_FromString("");
         if (text == NULL) {
             goto error;
         }
     }
-    else if (xml_read_content(parser, name, scope, depth, &text, children) < 0) {
+    else if (xml_read_content(parser, name, scope, depth, &text, &children) < 0) {
         goto error;
     }
 
-    span = Py_BuildValue("(nn)", start, parser->pos);
-    if (span == NULL) {
+    node = PyMem_Calloc(1, sizeof(*node));
+    if (node == NULL) {
+        PyErr_NoMemory();
         goto error;
     }
-    {
-        PyObject *declaration_tuple = PyList_AsTuple(declarations);
-        PyObject *qualified_tuple = PyList_AsTuple(qualified);
-        PyObject *children_tuple = PyList_AsTuple(children);
-        PyObject *empty_tail = PyUnicode_FromString("");
-        if (declaration_tuple == NULL || qualified_tuple == NULL ||
-            children_tuple == NULL || empty_tail == NULL) {
-            Py_XDECREF(declaration_tuple);
-            Py_XDECREF(qualified_tuple);
-            Py_XDECREF(children_tuple);
-            Py_XDECREF(empty_tail);
+    node->tag = Py_NewRef(tag);
+    node->text = Py_NewRef(text);
+    node->tail = PyUnicode_FromString("");
+    node->prefix = Py_NewRef(prefix);
+    node->local = Py_NewRef(local);
+    node->start = start;
+    node->end = parser->pos;
+    node->declaration_count = PyList_GET_SIZE(declarations);
+    node->attribute_count = PyList_GET_SIZE(qualified);
+    if (node->tail == NULL) goto error;
+    if (node->declaration_count != 0) {
+        node->declarations = PyMem_Calloc(
+            (size_t)node->declaration_count, sizeof(*node->declarations));
+        if (node->declarations == NULL) {
+            PyErr_NoMemory();
             goto error;
         }
-        /* A list, not a tuple, so xml_read_content can park a tail list in
-         * slot 3 and replace it in place once the tail is known. */
-        node = PyTuple_New(10);
-        if (node == NULL) {
-            Py_DECREF(declaration_tuple);
-            Py_DECREF(qualified_tuple);
-            Py_DECREF(children_tuple);
-            Py_DECREF(empty_tail);
-            goto error;
+        for (Py_ssize_t index = 0; index < node->declaration_count; index++) {
+            PyObject *entry = PyList_GET_ITEM(declarations, index);
+            node->declarations[index].prefix = Py_NewRef(PyTuple_GET_ITEM(entry, 0));
+            node->declarations[index].uri = Py_NewRef(PyTuple_GET_ITEM(entry, 1));
         }
-        PyTuple_SET_ITEM(node, 0, Py_NewRef(tag));
-        PyTuple_SET_ITEM(node, 1, Py_NewRef(attrib));
-        PyTuple_SET_ITEM(node, 2, Py_NewRef(text));
-        PyTuple_SET_ITEM(node, 3, empty_tail);
-        PyTuple_SET_ITEM(node, 4, Py_NewRef(span));
-        PyTuple_SET_ITEM(node, 5, declaration_tuple);
-        PyTuple_SET_ITEM(node, 6, qualified_tuple);
-        PyTuple_SET_ITEM(node, 7, Py_NewRef(prefix));
-        PyTuple_SET_ITEM(node, 8, Py_NewRef(local));
-        PyTuple_SET_ITEM(node, 9, children_tuple);
     }
+    if (node->attribute_count != 0) {
+        node->attributes = PyMem_Calloc(
+            (size_t)node->attribute_count, sizeof(*node->attributes));
+        if (node->attributes == NULL) {
+            PyErr_NoMemory();
+            goto error;
+        }
+        for (Py_ssize_t index = 0; index < node->attribute_count; index++) {
+            PyObject *entry = PyList_GET_ITEM(qualified, index);
+            XmlAttribute *attribute = &node->attributes[index];
+            attribute->prefix = Py_NewRef(PyTuple_GET_ITEM(entry, 0));
+            attribute->local = Py_NewRef(PyTuple_GET_ITEM(entry, 1));
+            attribute->uri = Py_NewRef(PyTuple_GET_ITEM(entry, 2));
+            attribute->value = Py_NewRef(PyTuple_GET_ITEM(entry, 3));
+            attribute->key = Py_NewRef(PyTuple_GET_ITEM(entry, 4));
+        }
+    }
+    node->children = children.items;
+    node->child_count = children.count;
+    children.items = NULL;
+    children.count = 0;
+    children.capacity = 0;
 
 error:
     Py_XDECREF(name);
@@ -1307,13 +1400,16 @@ error:
     Py_XDECREF(scope);
     Py_XDECREF(attrib);
     Py_XDECREF(qualified);
-    Py_XDECREF(children);
+    xml_children_clear(&children);
     Py_XDECREF(text);
     Py_XDECREF(prefix);
     Py_XDECREF(local);
     Py_XDECREF(uri);
     Py_XDECREF(tag);
-    Py_XDECREF(span);
+    if (PyErr_Occurred() && node != NULL) {
+        xml_node_free(node);
+        node = NULL;
+    }
     return node;
 }
 
@@ -1339,13 +1435,13 @@ xml_read_limits(PyObject *args, Py_ssize_t offset, XmlLimits *limits)
 
 
 /* Parse a whole document: prolog, one root element, trailing whitespace. */
-static PyObject *
+static XmlNode *
 xml_parse_document(const uint8_t *data, Py_ssize_t len, XmlLimits limits,
                    PyObject *initial_scope)
 {
     XmlParser parser;
     PyObject *scope = NULL;
-    PyObject *root = NULL;
+    XmlNode *root = NULL;
 
     parser.data = data;
     parser.len = len;
@@ -1408,7 +1504,7 @@ xml_parse_document(const uint8_t *data, Py_ssize_t len, XmlLimits limits,
 
 error:
     Py_DECREF(scope);
-    Py_XDECREF(root);
+    xml_node_free(root);
     return NULL;
 }
 
@@ -1420,27 +1516,136 @@ wreath_xml_configure(PyObject *Py_UNUSED(self), PyObject *arg)
     Py_RETURN_NONE;
 }
 
+static PyObject *
+xml_materialize_scope(const XmlNode *node, PyObject *inherited)
+{
+    if (node->declaration_count == 0) return Py_NewRef(inherited);
+    PyObject *scope = PyDict_New();
+    if (scope == NULL) return NULL;
+    for (Py_ssize_t index = 0; index < PyTuple_GET_SIZE(inherited); index++) {
+        PyObject *entry = PyTuple_GET_ITEM(inherited, index);
+        if (PyDict_SetItem(
+                scope, PyTuple_GET_ITEM(entry, 0), PyTuple_GET_ITEM(entry, 1)) < 0)
+            goto error;
+    }
+    for (Py_ssize_t index = 0; index < node->declaration_count; index++) {
+        XmlNamespace *declaration = &node->declarations[index];
+        if (PyUnicode_GET_LENGTH(declaration->uri) != 0) {
+            if (PyDict_SetItem(scope, declaration->prefix, declaration->uri) < 0)
+                goto error;
+        }
+        else if (PyDict_DelItem(scope, declaration->prefix) < 0) {
+            PyErr_Clear();
+        }
+    }
+    PyObject *items = PyDict_Items(scope);
+    Py_DECREF(scope);
+    if (items == NULL) return NULL;
+    if (PyList_Sort(items) < 0) {
+        Py_DECREF(items);
+        return NULL;
+    }
+    PyObject *result = PyList_AsTuple(items);
+    Py_DECREF(items);
+    return result;
+
+error:
+    Py_DECREF(scope);
+    return NULL;
+}
+
+static PyObject *
+xml_materialize_element(const XmlNode *node, PyObject *element_type,
+                        PyObject *inherited)
+{
+    PyObject *attrib = _PyDict_NewPresized(node->attribute_count);
+    PyObject *children = NULL;
+    PyObject *span = NULL;
+    PyObject *declarations = NULL;
+    PyObject *qualified = NULL;
+    PyObject *nsscope = NULL;
+    PyObject *result = NULL;
+    if (attrib == NULL) goto done;
+    for (Py_ssize_t index = 0; index < node->attribute_count; index++) {
+        XmlAttribute *attribute = &node->attributes[index];
+        if (PyDict_SetItem(attrib, attribute->key, attribute->value) < 0) goto done;
+    }
+
+    nsscope = xml_materialize_scope(node, inherited);
+    children = PyTuple_New(node->child_count);
+    declarations = PyTuple_New(node->declaration_count);
+    qualified = PyTuple_New(node->attribute_count);
+    span = Py_BuildValue("(nn)", node->start, node->end);
+    if (nsscope == NULL || children == NULL || declarations == NULL ||
+        qualified == NULL || span == NULL) goto done;
+
+    for (Py_ssize_t index = 0; index < node->declaration_count; index++) {
+        XmlNamespace *declaration = &node->declarations[index];
+        PyObject *entry = PyTuple_Pack(2, declaration->prefix, declaration->uri);
+        if (entry == NULL) goto done;
+        PyTuple_SET_ITEM(declarations, index, entry);
+    }
+    for (Py_ssize_t index = 0; index < node->attribute_count; index++) {
+        XmlAttribute *attribute = &node->attributes[index];
+        PyObject *entry = PyTuple_Pack(
+            4, attribute->prefix, attribute->local, attribute->uri, attribute->value);
+        if (entry == NULL) goto done;
+        PyTuple_SET_ITEM(qualified, index, entry);
+    }
+    for (Py_ssize_t index = 0; index < node->child_count; index++) {
+        PyObject *child = xml_materialize_element(
+            node->children[index], element_type, nsscope);
+        if (child == NULL) goto done;
+        PyTuple_SET_ITEM(children, index, child);
+    }
+
+    PyObject *arguments[] = {
+        node->tag, attrib, node->text, node->tail, children, span,
+        declarations, nsscope, inherited, qualified, node->prefix, node->local,
+    };
+    result = PyObject_Vectorcall(element_type, arguments, 12, NULL);
+
+done:
+    Py_XDECREF(attrib);
+    Py_XDECREF(children);
+    Py_XDECREF(span);
+    Py_XDECREF(declarations);
+    Py_XDECREF(qualified);
+    Py_XDECREF(nsscope);
+    return result;
+}
+
 
 PyObject *
 wreath_xml_parse(PyObject *Py_UNUSED(self), PyObject *args)
 {
     Py_buffer buffer;
     XmlLimits limits;
-    PyObject *root;
+    XmlNode *root;
+    PyObject *result = NULL;
 
-    if (PyTuple_GET_SIZE(args) != 6) {
-        PyErr_SetString(PyExc_TypeError, "xml_parse expects 6 arguments");
+    if (PyTuple_GET_SIZE(args) != 7) {
+        PyErr_SetString(PyExc_TypeError, "xml_parse expects 7 arguments");
         return NULL;
     }
-    if (xml_read_limits(args, 1, &limits) < 0) {
+    if (xml_read_limits(args, 2, &limits) < 0) {
         return NULL;
     }
     if (PyObject_GetBuffer(PyTuple_GET_ITEM(args, 0), &buffer, PyBUF_SIMPLE) < 0) {
         return NULL;
     }
     root = xml_parse_document((const uint8_t *)buffer.buf, buffer.len, limits, NULL);
+    if (root != NULL) {
+        PyObject *empty_scope = PyTuple_New(0);
+        if (empty_scope != NULL) {
+            result = xml_materialize_element(
+                root, PyTuple_GET_ITEM(args, 1), empty_scope);
+            Py_DECREF(empty_scope);
+        }
+    }
+    xml_node_free(root);
     PyBuffer_Release(&buffer);
-    return root;
+    return result;
 }
 
 
@@ -1504,37 +1709,27 @@ xml_write_escaped(WreathBytesWriter *out, PyObject *value, int attribute)
 }
 
 
-/* Sort key for attributes: (namespace uri, local name). */
-static PyObject *
-xml_attribute_key(PyObject *entry)
-{
-    return PyTuple_Pack(2, PyTuple_GET_ITEM(entry, 2), PyTuple_GET_ITEM(entry, 1));
-}
-
-
 static int
-xml_render(PyObject *node, PyObject *scope, PyObject *rendered,
+xml_render(XmlNode *node, PyObject *scope, PyObject *rendered,
            PyObject *inclusive, WreathBytesWriter *out);
 
 
 /* Compute the scope in force at `node` given its parent's `inherited`. */
 static PyObject *
-xml_child_scope(PyObject *node, PyObject *inherited)
+xml_child_scope(XmlNode *native, PyObject *inherited)
 {
-    PyObject *declarations = PyTuple_GET_ITEM(node, 5);
     PyObject *scope;
 
-    if (PyTuple_GET_SIZE(declarations) == 0) {
+    if (native->declaration_count == 0) {
         return Py_NewRef(inherited);
     }
     scope = PyDict_Copy(inherited);
     if (scope == NULL) {
         return NULL;
     }
-    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(declarations); i++) {
-        PyObject *entry = PyTuple_GET_ITEM(declarations, i);
-        PyObject *prefix = PyTuple_GET_ITEM(entry, 0);
-        PyObject *uri = PyTuple_GET_ITEM(entry, 1);
+    for (Py_ssize_t i = 0; i < native->declaration_count; i++) {
+        PyObject *prefix = native->declarations[i].prefix;
+        PyObject *uri = native->declarations[i].uri;
         if (PyUnicode_GET_LENGTH(uri) > 0) {
             if (PyDict_SetItem(scope, prefix, uri) < 0) {
                 Py_DECREF(scope);
@@ -1548,20 +1743,70 @@ xml_child_scope(PyObject *node, PyObject *inherited)
     return scope;
 }
 
+static int
+xml_attribute_compare(const XmlAttribute *left, const XmlAttribute *right)
+{
+    int compared = PyUnicode_Compare(left->uri, right->uri);
+    if (compared == 0) compared = PyUnicode_Compare(left->local, right->local);
+    return compared;
+}
 
 static int
-xml_render(PyObject *node, PyObject *inherited, PyObject *rendered,
+xml_attribute_order(const XmlNode *node, XmlAttribute ***result)
+{
+    Py_ssize_t count = node->attribute_count;
+    XmlAttribute **order = PyMem_Malloc((size_t)count * sizeof(*order));
+    XmlAttribute **scratch = PyMem_Malloc((size_t)count * sizeof(*scratch));
+    if ((count != 0 && order == NULL) || (count != 0 && scratch == NULL)) {
+        PyMem_Free(order);
+        PyMem_Free(scratch);
+        PyErr_NoMemory();
+        return -1;
+    }
+    for (Py_ssize_t index = 0; index < count; index++)
+        order[index] = &node->attributes[index];
+    for (Py_ssize_t width = 1; width < count; width *= 2) {
+        /* complexity: allow CL-NEST-SAME -- required mergesort is O(n log n); XML profile caps n at 256 */
+        for (Py_ssize_t start = 0; start < count; start += width * 2) {
+            Py_ssize_t middle = start + width < count ? start + width : count;
+            Py_ssize_t end = start + width * 2 < count ? start + width * 2 : count;
+            Py_ssize_t left = start;
+            Py_ssize_t right = middle;
+            Py_ssize_t target = start;
+            while (left < middle && right < end) {
+                int compared = xml_attribute_compare(order[left], order[right]);
+                if (PyErr_Occurred()) {
+                    PyMem_Free(order);
+                    PyMem_Free(scratch);
+                    return -1;
+                }
+                scratch[target++] = compared <= 0 ? order[left++] : order[right++];
+            }
+            while (left < middle) scratch[target++] = order[left++];
+            while (right < end) scratch[target++] = order[right++];
+        }
+        XmlAttribute **swap = order;
+        order = scratch;
+        scratch = swap;
+        if (width > count / 2) break;
+    }
+    PyMem_Free(scratch);
+    *result = order;
+    return 0;
+}
+
+
+static int
+xml_render(XmlNode *node, PyObject *inherited, PyObject *rendered,
            PyObject *inclusive, WreathBytesWriter *out)
 {
     PyObject *scope = xml_child_scope(node, inherited);
-    PyObject *qualified = PyTuple_GET_ITEM(node, 6);
-    PyObject *prefix = PyTuple_GET_ITEM(node, 7);
-    PyObject *local = PyTuple_GET_ITEM(node, 8);
-    PyObject *children = PyTuple_GET_ITEM(node, 9);
+    PyObject *prefix = node->prefix;
+    PyObject *local = node->local;
     PyObject *utilized = NULL;
     PyObject *emitted = NULL;
     PyObject *ordered = NULL;
-    PyObject *sorted_attributes = NULL;
+    XmlAttribute **sorted_attributes = NULL;
     PyObject *child_rendered = NULL;
     PyObject *qualified_name = NULL;
     int status = -1;
@@ -1577,8 +1822,8 @@ xml_render(PyObject *node, PyObject *inherited, PyObject *rendered,
     if (PySet_Add(utilized, prefix) < 0) {
         goto done;
     }
-    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(qualified); i++) {
-        PyObject *attribute_prefix = PyTuple_GET_ITEM(PyTuple_GET_ITEM(qualified, i), 0);
+    for (Py_ssize_t i = 0; i < node->attribute_count; i++) {
+        PyObject *attribute_prefix = node->attributes[i].prefix;
         if (PyUnicode_GET_LENGTH(attribute_prefix) > 0 &&
             PySet_Add(utilized, attribute_prefix) < 0) {
             goto done;
@@ -1694,44 +1939,13 @@ xml_render(PyObject *node, PyObject *inherited, PyObject *rendered,
         }
     }
 
-    sorted_attributes = PySequence_List(qualified);
-    if (sorted_attributes == NULL) {
-        goto done;
-    }
+    if (xml_attribute_order(node, &sorted_attributes) < 0) goto done;
     {
-        /* Decorate-sort-undecorate: the key is (uri, local), and building it
-         * once per attribute beats a comparison function that rebuilds it per
-         * comparison. */
-        Py_ssize_t count = PyList_GET_SIZE(sorted_attributes);
-        PyObject *decorated = PyList_New(count);
-        if (decorated == NULL) {
-            goto done;
-        }
-        for (Py_ssize_t i = 0; i < count; i++) {
-            PyObject *entry = PyList_GET_ITEM(sorted_attributes, i);
-            PyObject *key = xml_attribute_key(entry);
-            PyObject *pair;
-            if (key == NULL) {
-                Py_DECREF(decorated);
-                goto done;
-            }
-            pair = PyTuple_Pack(2, key, entry);
-            Py_DECREF(key);
-            if (pair == NULL) {
-                Py_DECREF(decorated);
-                goto done;
-            }
-            PyList_SET_ITEM(decorated, i, pair);
-        }
-        if (PyList_Sort(decorated) < 0) {
-            Py_DECREF(decorated);
-            goto done;
-        }
-        for (Py_ssize_t i = 0; i < count; i++) {
-            PyObject *entry = PyTuple_GET_ITEM(PyList_GET_ITEM(decorated, i), 1);
-            PyObject *attribute_prefix = PyTuple_GET_ITEM(entry, 0);
-            PyObject *attribute_local = PyTuple_GET_ITEM(entry, 1);
-            PyObject *value = PyTuple_GET_ITEM(entry, 3);
+        for (Py_ssize_t i = 0; i < node->attribute_count; i++) {
+            XmlAttribute *attribute = sorted_attributes[i];
+            PyObject *attribute_prefix = attribute->prefix;
+            PyObject *attribute_local = attribute->local;
+            PyObject *value = attribute->value;
             int failed = xml_write(out, " ") < 0;
             if (!failed && PyUnicode_GET_LENGTH(attribute_prefix) > 0) {
                 failed = xml_write_object(out, attribute_prefix) < 0 ||
@@ -1742,11 +1956,9 @@ xml_render(PyObject *node, PyObject *inherited, PyObject *rendered,
                      xml_write_escaped(out, value, 1) < 0 ||
                      xml_write(out, "\"") < 0;
             if (failed) {
-                Py_DECREF(decorated);
                 goto done;
             }
         }
-        Py_DECREF(decorated);
     }
     if (xml_write(out, ">") < 0) {
         goto done;
@@ -1771,13 +1983,13 @@ xml_render(PyObject *node, PyObject *inherited, PyObject *rendered,
         }
     }
 
-    if (xml_write_escaped(out, PyTuple_GET_ITEM(node, 2), 0) < 0) {
+    if (xml_write_escaped(out, node->text, 0) < 0) {
         goto done;
     }
-    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(children); i++) {
-        PyObject *child = PyTuple_GET_ITEM(children, i);
+    for (Py_ssize_t i = 0; i < node->child_count; i++) {
+        XmlNode *child = node->children[i];
         if (xml_render(child, scope, child_rendered, inclusive, out) < 0 ||
-            xml_write_escaped(out, PyTuple_GET_ITEM(child, 3), 0) < 0) {
+            xml_write_escaped(out, child->tail, 0) < 0) {
             goto done;
         }
     }
@@ -1792,7 +2004,7 @@ done:
     Py_XDECREF(utilized);
     Py_XDECREF(emitted);
     Py_XDECREF(ordered);
-    Py_XDECREF(sorted_attributes);
+    PyMem_Free(sorted_attributes);
     Py_XDECREF(child_rendered);
     Py_XDECREF(qualified_name);
     return status;
@@ -1810,7 +2022,7 @@ wreath_xml_c14n(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject *inclusive_input;
     PyObject *scope = NULL;
     PyObject *inclusive = NULL;
-    PyObject *root = NULL;
+    XmlNode *root = NULL;
     WreathBytesWriter out = {0};
     PyObject *rendered = NULL;
     PyObject *result = NULL;
@@ -1886,7 +2098,7 @@ done:
     PyBuffer_Release(&buffer);
     Py_XDECREF(scope);
     Py_XDECREF(inclusive);
-    Py_XDECREF(root);
+    xml_node_free(root);
     Py_XDECREF(out.bytes);
     Py_XDECREF(rendered);
     return result;

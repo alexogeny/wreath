@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
 from wreath.response import Response
@@ -11,6 +13,32 @@ class _Req:
         self.method = method
         self.path = path
         self.query_string = query
+
+
+class _QueryReq(_Req):
+    def __init__(
+        self,
+        body: bytes,
+        *,
+        content_type: bytes = b"application/json",
+        content_encoding: bytes | None = None,
+        content_language: bytes | None = None,
+        content_location: bytes | None = None,
+    ) -> None:
+        super().__init__(method="QUERY", path="/search")
+        self._body = body
+        self.body_reads = 0
+        self.headers = [(b"content-type", content_type)]
+        if content_encoding is not None:
+            self.headers.append((b"content-encoding", content_encoding))
+        if content_language is not None:
+            self.headers.append((b"content-language", content_language))
+        if content_location is not None:
+            self.headers.append((b"content-location", content_location))
+
+    async def body(self) -> bytes:
+        self.body_reads += 1
+        return self._body
 
 
 pytestmark = pytest.mark.asyncio
@@ -39,6 +67,49 @@ async def test_second_call_is_served_from_cache() -> None:
     assert handler.cache_store.stats.hits == 1
 
 
+async def test_cache_status_distinguishes_a_stored_miss_from_a_hit() -> None:
+    @cached(ttl=100, cache_status="Wreath")
+    async def handler(request):
+        return Response(b"body")
+
+    miss = await handler(_Req())
+    hit = await handler(_Req())
+
+    assert (b"cache-status", b'"Wreath";fwd=uri-miss;stored') in miss.headers
+    assert (b"cache-status", b'"Wreath";hit') in hit.headers
+    assert all(b"GET /" not in value for name, value in hit.headers if name == b"cache-status")
+
+
+async def test_cache_status_reports_method_and_policy_bypasses() -> None:
+    @cached(ttl=100, cache_status="Wreath")
+    async def handler(request):
+        return Response(b"body")
+
+    method = await handler(_Req(method="POST"))
+    policy = await handler(_Identified("ada"))
+
+    assert (b"cache-status", b'"Wreath";fwd=method') in method.headers
+    assert (b"cache-status", b'"Wreath";fwd=bypass') in policy.headers
+
+
+async def test_cache_status_is_opt_in() -> None:
+    @cached(ttl=100)
+    async def handler(request):
+        return Response(b"body")
+
+    response = await handler(_Req())
+
+    assert not [value for name, value in response.headers if name == b"cache-status"]
+
+
+async def test_invalid_cache_status_identifier_is_refused_when_declared() -> None:
+    with pytest.raises(ValueError, match="structured string"):
+        cached(ttl=100, cache_status="caf\N{LATIN SMALL LETTER E WITH ACUTE}")
+
+    with pytest.raises(TypeError, match="cache_status.*must be str, got int"):
+        cached(ttl=100, cache_status=cast(str, 7))
+
+
 async def test_query_string_is_part_of_the_key() -> None:
     calls = 0
 
@@ -51,6 +122,58 @@ async def test_query_string_is_part_of_the_key() -> None:
     await handler(_Req(query=b"a=1"))
     await handler(_Req(query=b"a=2"))
     assert calls == 2  # different query -> different key
+
+
+async def test_query_cache_keys_include_content_and_representation_metadata() -> None:
+    calls = 0
+
+    @cached(ttl=100, key=lambda request: "same-base-key")
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        return Response(f"response-{calls}".encode())
+
+    first = _QueryReq(b'{"term":"one"}')
+    repeated = _QueryReq(b'{"term":"one"}')
+    other_body = _QueryReq(b'{"term":"two"}')
+    other_type = _QueryReq(b'{"term":"one"}', content_type=b"application/cbor")
+    other_encoding = _QueryReq(b'{"term":"one"}', content_encoding=b"gzip")
+    other_language = _QueryReq(b'{"term":"one"}', content_language=b"mi")
+    other_location = _QueryReq(b'{"term":"one"}', content_location=b"/queries/one")
+    normalized_metadata = _QueryReq(
+        b'{"term":"one"}',
+        content_type=b" Application/JSON ",
+    )
+
+    assert (await handler(first)).body == b"response-1"
+    assert (await handler(repeated)).body == b"response-1"
+    assert (await handler(other_body)).body == b"response-2"
+    assert (await handler(other_type)).body == b"response-3"
+    assert (await handler(other_encoding)).body == b"response-4"
+    assert (await handler(other_language)).body == b"response-5"
+    assert (await handler(other_location)).body == b"response-6"
+    assert (await handler(normalized_metadata)).body == b"response-1"
+    assert calls == 6
+    requests = (
+        first,
+        repeated,
+        other_body,
+        other_type,
+        other_encoding,
+        other_language,
+        other_location,
+        normalized_metadata,
+    )
+    assert [request.body_reads for request in requests] == [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+    ]
 
 
 async def test_non_get_is_not_cached() -> None:

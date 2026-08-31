@@ -9,7 +9,8 @@ the next hop then strips from someone else's request.
 
 from __future__ import annotations
 
-from wreath._native import _edge
+from .._http import _is_http_token
+from .._native import _edge
 
 #: RFC 9110 §7.6.1. Never forwarded in either direction.
 HOP_BY_HOP: frozenset[bytes] = frozenset(
@@ -89,6 +90,10 @@ def forwardable(
 
 def via_token(version: str, name: str) -> bytes:
     """This proxy's `Via` element: the protocol it received, then who it is."""
+    if not isinstance(name, str):
+        raise TypeError(f"via_name must be str, not {type(name).__name__}")
+    if not _is_http_token(name):
+        raise ValueError(f"via_name must be one non-empty HTTP token, got {name!r}")
     return f"{version} {name}".encode("latin-1")
 
 

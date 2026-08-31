@@ -55,6 +55,52 @@ typedef struct {
     PyObject *types;
 } ScimParser;
 
+#define SCIM_PLAN_CAPSULE "wreath.scim.plan"
+
+typedef enum {
+    SCIM_NODE_COMPARE,
+    SCIM_NODE_VALUE_PATH,
+    SCIM_NODE_AND,
+    SCIM_NODE_OR,
+    SCIM_NODE_NOT,
+    SCIM_NODE_GROUP,
+} ScimNodeKind;
+
+typedef enum {
+    SCIM_OP_PR,
+    SCIM_OP_EQ,
+    SCIM_OP_NE,
+    SCIM_OP_CO,
+    SCIM_OP_SW,
+    SCIM_OP_EW,
+    SCIM_OP_GT,
+    SCIM_OP_GE,
+    SCIM_OP_LT,
+    SCIM_OP_LE,
+} ScimOperator;
+
+typedef struct {
+    PyObject **steps;
+    Py_ssize_t count;
+} ScimPath;
+
+typedef struct ScimPlanNode ScimPlanNode;
+
+struct ScimPlanNode {
+    ScimNodeKind kind;
+    ScimOperator operation;
+    ScimPath path;
+    PyObject *value;
+    PyObject *folded;
+    ScimPlanNode *left;
+    ScimPlanNode *right;
+};
+
+typedef struct {
+    ScimPlanNode *root;
+    PyObject *types;
+} ScimPlan;
+
 #define SCIM_COMPARE(p) PyTuple_GET_ITEM((p)->types, 0)
 #define SCIM_LOGICAL(p) PyTuple_GET_ITEM((p)->types, 1)
 #define SCIM_NEGATE(p) PyTuple_GET_ITEM((p)->types, 2)
@@ -616,6 +662,200 @@ done:
     return node;
 }
 
+static void
+scim_plan_node_free(ScimPlanNode *node)
+{
+    if (node == NULL) return;
+    scim_plan_node_free(node->left);
+    scim_plan_node_free(node->right);
+    for (Py_ssize_t index = 0; index < node->path.count; index++)
+        Py_DECREF(node->path.steps[index]);
+    PyMem_Free(node->path.steps);
+    Py_XDECREF(node->value);
+    Py_XDECREF(node->folded);
+    PyMem_Free(node);
+}
+
+static void
+scim_plan_destroy(PyObject *capsule)
+{
+    ScimPlan *plan = PyCapsule_GetPointer(capsule, SCIM_PLAN_CAPSULE);
+    if (plan == NULL) {
+        PyErr_Clear();
+        return;
+    }
+    scim_plan_node_free(plan->root);
+    Py_DECREF(plan->types);
+    PyMem_Free(plan);
+}
+
+static int
+scim_compile_path(ScimPath *path, PyObject *value)
+{
+    PyObject *separator = PyUnicode_FromString(".");
+    PyObject *steps = separator != NULL ? PyUnicode_Split(value, separator, -1) : NULL;
+    Py_XDECREF(separator);
+    if (steps == NULL) return -1;
+    path->count = PyList_GET_SIZE(steps);
+    path->steps = PyMem_Calloc((size_t)path->count, sizeof(*path->steps));
+    if (path->count != 0 && path->steps == NULL) {
+        Py_DECREF(steps);
+        PyErr_NoMemory();
+        return -1;
+    }
+    for (Py_ssize_t index = 0; index < path->count; index++)
+        path->steps[index] = Py_NewRef(PyList_GET_ITEM(steps, index));
+    Py_DECREF(steps);
+    return 0;
+}
+
+static int
+scim_compile_operator(PyObject *value, ScimOperator *operation)
+{
+    static const char *names[] = {"pr", "eq", "ne", "co", "sw", "ew",
+                                  "gt", "ge", "lt", "le"};
+    for (int index = 0; index < 10; index++) {
+        int equal = PyUnicode_CompareWithASCIIString(value, names[index]);
+        if (equal == 0) {
+            *operation = (ScimOperator)index;
+            return 0;
+        }
+        if (equal == -1 && PyErr_Occurred()) return -1;
+    }
+    PyErr_Format(PyExc_ValueError, "unknown compiled SCIM operator %R", value);
+    return -1;
+}
+
+static ScimPlanNode *
+scim_compile_node(PyObject *node, PyObject *types, int depth)
+{
+    if (depth > SCIM_MAX_DEPTH) {
+        scim_raise(PyTuple_GET_ITEM(types, 5),
+                   "filter nesting exceeds the 16-level limit");
+        return NULL;
+    }
+    ScimPlanNode *compiled = PyMem_Calloc(1, sizeof(*compiled));
+    if (compiled == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    int instance = PyObject_IsInstance(node, PyTuple_GET_ITEM(types, 0));
+    if (instance < 0) goto error;
+    if (instance) {
+        PyObject *path = scim_getattr(node, SCIM_ATTR_PATH);
+        PyObject *operation_object = scim_getattr(node, SCIM_ATTR_OP);
+        compiled->kind = SCIM_NODE_COMPARE;
+        if (path == NULL || operation_object == NULL ||
+            scim_compile_path(&compiled->path, path) < 0 ||
+            scim_compile_operator(operation_object, &compiled->operation) < 0) {
+            Py_XDECREF(path);
+            Py_XDECREF(operation_object);
+            goto error;
+        }
+        Py_DECREF(path);
+        Py_DECREF(operation_object);
+        if (compiled->operation != SCIM_OP_PR) {
+            compiled->value = scim_getattr(node, SCIM_ATTR_VALUE);
+            if (compiled->value == NULL) goto error;
+            if (PyUnicode_Check(compiled->value)) {
+                compiled->folded = PyObject_CallMethod(compiled->value, "lower", NULL);
+                if (compiled->folded == NULL) goto error;
+            }
+        }
+        return compiled;
+    }
+    instance = PyObject_IsInstance(node, PyTuple_GET_ITEM(types, 4));
+    if (instance < 0) goto error;
+    if (instance) {
+        PyObject *path = scim_getattr(node, SCIM_ATTR_PATH);
+        PyObject *predicate = scim_getattr(node, SCIM_ATTR_PREDICATE);
+        compiled->kind = SCIM_NODE_VALUE_PATH;
+        if (path == NULL || predicate == NULL ||
+            scim_compile_path(&compiled->path, path) < 0) {
+            Py_XDECREF(path);
+            Py_XDECREF(predicate);
+            goto error;
+        }
+        Py_DECREF(path);
+        compiled->left = scim_compile_node(predicate, types, depth + 1);
+        Py_DECREF(predicate);
+        if (compiled->left == NULL) goto error;
+        return compiled;
+    }
+    instance = PyObject_IsInstance(node, PyTuple_GET_ITEM(types, 1));
+    if (instance < 0) goto error;
+    if (instance) {
+        PyObject *operation_object = scim_getattr(node, SCIM_ATTR_OP);
+        PyObject *left_object = scim_getattr(node, SCIM_ATTR_LEFT);
+        PyObject *right_object = scim_getattr(node, SCIM_ATTR_RIGHT);
+        if (operation_object == NULL || left_object == NULL || right_object == NULL) {
+            Py_XDECREF(operation_object);
+            Py_XDECREF(left_object);
+            Py_XDECREF(right_object);
+            goto error;
+        }
+        int compared = PyUnicode_CompareWithASCIIString(operation_object, "and");
+        Py_DECREF(operation_object);
+        if (compared == -1 && PyErr_Occurred()) {
+            Py_DECREF(left_object);
+            Py_DECREF(right_object);
+            goto error;
+        }
+        compiled->kind = compared == 0 ? SCIM_NODE_AND : SCIM_NODE_OR;
+        compiled->left = scim_compile_node(left_object, types, depth + 1);
+        compiled->right = compiled->left != NULL
+            ? scim_compile_node(right_object, types, depth + 1) : NULL;
+        Py_DECREF(left_object);
+        Py_DECREF(right_object);
+        if (compiled->left == NULL || compiled->right == NULL) goto error;
+        return compiled;
+    }
+    for (int type_index = 2; type_index <= 3; type_index++) {
+        instance = PyObject_IsInstance(node, PyTuple_GET_ITEM(types, type_index));
+        if (instance < 0) goto error;
+        if (instance) {
+            PyObject *operand = scim_getattr(node, SCIM_ATTR_OPERAND);
+            if (operand == NULL) goto error;
+            compiled->kind = type_index == 2 ? SCIM_NODE_NOT : SCIM_NODE_GROUP;
+            compiled->left = scim_compile_node(operand, types, depth + 1);
+            Py_DECREF(operand);
+            if (compiled->left == NULL) goto error;
+            return compiled;
+        }
+    }
+    scim_raise(PyTuple_GET_ITEM(types, 5),
+               "filter contains a node this evaluator does not know");
+
+error:
+    scim_plan_node_free(compiled);
+    return NULL;
+}
+
+PyObject *
+wreath_scim_compile(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *node;
+    PyObject *types;
+    if (!PyArg_ParseTuple(args, "OO:scim_compile", &node, &types)) return NULL;
+    if (PyCapsule_IsValid(node, SCIM_PLAN_CAPSULE)) return Py_NewRef(node);
+    ScimPlan *plan = PyMem_Calloc(1, sizeof(*plan));
+    if (plan == NULL) return PyErr_NoMemory();
+    plan->types = Py_NewRef(types);
+    plan->root = scim_compile_node(node, types, 0);
+    if (plan->root == NULL) {
+        Py_DECREF(plan->types);
+        PyMem_Free(plan);
+        return NULL;
+    }
+    PyObject *capsule = PyCapsule_New(plan, SCIM_PLAN_CAPSULE, scim_plan_destroy);
+    if (capsule == NULL) {
+        scim_plan_node_free(plan->root);
+        Py_DECREF(plan->types);
+        PyMem_Free(plan);
+    }
+    return capsule;
+}
+
 static int
 scim_key_equal_ci(PyObject *key, PyObject *wanted)
 {
@@ -813,6 +1053,213 @@ scim_compare(PyObject *value, PyObject *op, PyObject *wanted)
     return result;
 }
 
+typedef int (*ScimValueVisitor)(PyObject *value, void *context);
+
+static int
+scim_visit_path(PyObject *resource, const ScimPath *path, Py_ssize_t step,
+                PyObject *types, ScimValueVisitor visit, void *context);
+
+static int
+scim_visit_path_value(PyObject *value, const ScimPath *path, Py_ssize_t step,
+                      PyObject *types, ScimValueVisitor visit, void *context)
+{
+    if (step == path->count) {
+        if (PyList_Check(value)) {
+            for (Py_ssize_t index = 0; index < PyList_GET_SIZE(value); index++) {
+                int result = visit(PyList_GET_ITEM(value, index), context);
+                if (result != 0) return result;
+            }
+            return 0;
+        }
+        return visit(value, context);
+    }
+    if (PyList_Check(value)) {
+        for (Py_ssize_t index = 0; index < PyList_GET_SIZE(value); index++) {
+            int result = scim_visit_path(
+                PyList_GET_ITEM(value, index), path, step, types, visit, context);
+            if (result != 0) return result;
+        }
+        return 0;
+    }
+    return scim_visit_path(value, path, step, types, visit, context);
+}
+
+static int
+scim_visit_path(PyObject *resource, const ScimPath *path, Py_ssize_t step,
+                PyObject *types, ScimValueVisitor visit, void *context)
+{
+    int mapping = PyObject_IsInstance(resource, SCIM_MAPPING(types));
+    if (mapping <= 0) return mapping;
+    PyObject *wanted = path->steps[step];
+    if (PyDict_Check(resource)) {
+        Py_ssize_t position = 0;
+        PyObject *key;
+        PyObject *value;
+        while (PyDict_Next(resource, &position, &key, &value)) {
+            if (!scim_key_equal_ci(key, wanted)) continue;
+            int result = scim_visit_path_value(
+                value, path, step + 1, types, visit, context);
+            if (result != 0) return result;
+        }
+        return 0;
+    }
+    PyObject *pairs = PyMapping_Items(resource);
+    if (pairs == NULL) return -1;
+    PyObject *fast = PySequence_Fast(pairs, "mapping items must be a sequence");
+    Py_DECREF(pairs);
+    if (fast == NULL) return -1;
+    int result = 0;
+    for (Py_ssize_t index = 0;
+         index < PySequence_Fast_GET_SIZE(fast) && result == 0; index++) {
+        PyObject *pair = PySequence_Fast_GET_ITEM(fast, index);
+        PyObject *key = PySequence_GetItem(pair, 0);
+        PyObject *value = PySequence_GetItem(pair, 1);
+        if (key == NULL || value == NULL) {
+            Py_XDECREF(key);
+            Py_XDECREF(value);
+            result = -1;
+            break;
+        }
+        if (scim_key_equal_ci(key, wanted))
+            result = scim_visit_path_value(
+                value, path, step + 1, types, visit, context);
+        Py_DECREF(key);
+        Py_DECREF(value);
+    }
+    Py_DECREF(fast);
+    return result;
+}
+
+static int
+scim_compiled_compare(const ScimPlanNode *node, PyObject *value)
+{
+    if (node->operation == SCIM_OP_PR) {
+        int present = value != Py_None;
+        if (present && (PyUnicode_Check(value) || PyList_Check(value) ||
+                        PyDict_Check(value) || PyTuple_Check(value))) {
+            Py_ssize_t size = PyObject_Length(value);
+            return size < 0 ? -1 : size > 0;
+        }
+        return present;
+    }
+    PyObject *wanted = node->value;
+    if (PyUnicode_Check(value) && PyUnicode_Check(wanted)) {
+        PyObject *left = PyObject_CallMethod(value, "lower", NULL);
+        if (left == NULL) return -1;
+        PyObject *right = node->folded;
+        int result;
+        switch (node->operation) {
+        case SCIM_OP_EQ:
+        case SCIM_OP_NE:
+            result = PyObject_RichCompareBool(left, right, Py_EQ);
+            if (result >= 0 && node->operation == SCIM_OP_NE) result = !result;
+            break;
+        case SCIM_OP_CO:
+        {
+            Py_ssize_t found = PyUnicode_Find(
+                left, right, 0, PyUnicode_GET_LENGTH(left), 1);
+            result = found == -2 ? -1 : found >= 0;
+            break;
+        }
+        case SCIM_OP_SW:
+        case SCIM_OP_EW:
+            result = PyUnicode_Tailmatch(
+                left, right, 0, PyUnicode_GET_LENGTH(left),
+                node->operation == SCIM_OP_SW ? -1 : 1);
+            break;
+        case SCIM_OP_GT:
+        case SCIM_OP_GE:
+        case SCIM_OP_LT:
+        case SCIM_OP_LE: {
+            int relation = node->operation == SCIM_OP_GT ? Py_GT :
+                           node->operation == SCIM_OP_GE ? Py_GE :
+                           node->operation == SCIM_OP_LT ? Py_LT : Py_LE;
+            result = PyObject_RichCompareBool(left, right, relation);
+            break;
+        }
+        default:
+            result = 0;
+            break;
+        }
+        Py_DECREF(left);
+        return result;
+    }
+    if (node->operation == SCIM_OP_EQ || node->operation == SCIM_OP_NE) {
+        int equal = PyBool_Check(value) || PyBool_Check(wanted)
+            ? value == wanted : PyObject_RichCompareBool(value, wanted, Py_EQ);
+        return equal < 0 || node->operation == SCIM_OP_EQ ? equal : !equal;
+    }
+    if (node->operation == SCIM_OP_CO || node->operation == SCIM_OP_SW ||
+        node->operation == SCIM_OP_EW) return 0;
+    int numeric = ((PyLong_Check(value) || PyFloat_Check(value)) && !PyBool_Check(value)) &&
+                  ((PyLong_Check(wanted) || PyFloat_Check(wanted)) && !PyBool_Check(wanted));
+    if (!numeric) return 0;
+    int relation = node->operation == SCIM_OP_GT ? Py_GT :
+                   node->operation == SCIM_OP_GE ? Py_GE :
+                   node->operation == SCIM_OP_LT ? Py_LT : Py_LE;
+    return PyObject_RichCompareBool(value, wanted, relation);
+}
+
+typedef struct {
+    const ScimPlanNode *node;
+} ScimCompareContext;
+
+static int
+scim_compare_visit(PyObject *value, void *context)
+{
+    ScimCompareContext *comparison = context;
+    return scim_compiled_compare(comparison->node, value);
+}
+
+static int scim_matches_compiled(
+    const ScimPlanNode *node, PyObject *resource, PyObject *types);
+
+typedef struct {
+    const ScimPlanNode *predicate;
+    PyObject *types;
+} ScimPredicateContext;
+
+static int
+scim_predicate_visit(PyObject *value, void *context)
+{
+    ScimPredicateContext *predicate = context;
+    return scim_matches_compiled(predicate->predicate, value, predicate->types);
+}
+
+static int
+scim_matches_compiled(const ScimPlanNode *node, PyObject *resource, PyObject *types)
+{
+    switch (node->kind) {
+    case SCIM_NODE_COMPARE: {
+        ScimCompareContext context = {node};
+        return scim_visit_path(
+            resource, &node->path, 0, types, scim_compare_visit, &context);
+    }
+    case SCIM_NODE_VALUE_PATH: {
+        ScimPredicateContext context = {node->left, types};
+        return scim_visit_path(
+            resource, &node->path, 0, types, scim_predicate_visit, &context);
+    }
+    case SCIM_NODE_AND: {
+        int result = scim_matches_compiled(node->left, resource, types);
+        return result > 0
+            ? scim_matches_compiled(node->right, resource, types) : result;
+    }
+    case SCIM_NODE_OR: {
+        int result = scim_matches_compiled(node->left, resource, types);
+        return result == 0
+            ? scim_matches_compiled(node->right, resource, types) : result;
+    }
+    case SCIM_NODE_NOT: {
+        int result = scim_matches_compiled(node->left, resource, types);
+        return result < 0 ? result : !result;
+    }
+    case SCIM_NODE_GROUP:
+        return scim_matches_compiled(node->left, resource, types);
+    }
+    return -1;
+}
+
 static int scim_matches_node(PyObject *node, PyObject *resource, PyObject *types);
 
 static int
@@ -939,7 +1386,12 @@ wreath_scim_matches(PyObject *Py_UNUSED(self), PyObject *args)
     int result;
     if (!PyArg_ParseTuple(args, "OOO:scim_matches", &node, &resource, &types))
         return NULL;
-    result = scim_matches_node(node, resource, types);
+    if (PyCapsule_IsValid(node, SCIM_PLAN_CAPSULE)) {
+        ScimPlan *plan = PyCapsule_GetPointer(node, SCIM_PLAN_CAPSULE);
+        if (plan == NULL) return NULL;
+        result = scim_matches_compiled(plan->root, resource, plan->types);
+    }
+    else result = scim_matches_node(node, resource, types);
     if (result < 0) return NULL;
     return PyBool_FromLong(result);
 }
@@ -949,6 +1401,7 @@ wreath_scim_filter(PyObject *Py_UNUSED(self), PyObject *args)
 {
     PyObject *node, *resources_object, *types;
     PyObject *resources = NULL, *selected = NULL;
+    ScimPlan *plan = NULL;
     int invert = 0;
     if (!PyArg_ParseTuple(args, "OOOp:scim_filter", &node, &resources_object,
                           &types, &invert)) return NULL;
@@ -956,9 +1409,15 @@ wreath_scim_filter(PyObject *Py_UNUSED(self), PyObject *args)
                                 "SCIM resources must be a sequence");
     selected = PyList_New(0);
     if (resources == NULL || selected == NULL) goto error;
+    if (PyCapsule_IsValid(node, SCIM_PLAN_CAPSULE)) {
+        plan = PyCapsule_GetPointer(node, SCIM_PLAN_CAPSULE);
+        if (plan == NULL) goto error;
+    }
     for (Py_ssize_t index = 0; index < PySequence_Fast_GET_SIZE(resources); index++) {
         PyObject *resource = PySequence_Fast_GET_ITEM(resources, index);
-        int matched = scim_matches_node(node, resource, types);
+        int matched = plan != NULL
+            ? scim_matches_compiled(plan->root, resource, plan->types)
+            : scim_matches_node(node, resource, types);
         if (matched < 0) goto error;
         if ((matched != 0) != (invert != 0) && PyList_Append(selected, resource) < 0)
             goto error;

@@ -1607,7 +1607,7 @@ def test_the_evaluator_decides_what_cedar_specifies(
         ),
     )
     decision = _core.cedar_is_authorized(
-        engine._policies,
+        engine._plan,
         ("User", "alice"),
         ("Action", "read"),
         ("Document", "42"),

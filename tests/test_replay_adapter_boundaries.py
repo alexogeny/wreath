@@ -11,9 +11,12 @@ from wreath._replay_adapters import (
     ObjectStoreDouble,
     ReplayAdapters,
     _db_error,
+    _dollar_delimiter,
+    _sql_code,
     installed_boundaries,
     observed_boundaries,
     refuse_mapping_rows,
+    refuse_multiple_commands,
     refuse_parameter_arity,
     refuse_uninferable_cast,
     refuse_what_postgres_refuses,
@@ -109,6 +112,73 @@ def test_parameter_arity_refuses_each_postgres_shape(
         refuse_parameter_arity(sql, args)
 
     assert str(caught.value) == message
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT 1 -- ; comment",
+        "SELECT 1 /* ; */",
+        "SELECT 1 /* outer /* ; */ still outer */",
+        r"SELECT E'escaped\'; semicolon'",
+        'SELECT "identifier;part"',
+        "SELECT $$;$$",
+        "$body$;$body$",
+        "SELECT $__tag$;$__tag$",
+        "SELECT $a_b$;$a_b$",
+        "SELECT $body$;$body$",
+        "SELECT $body$BEGIN; COMMIT$body$",
+        "SELECT $body$unterminated ; content",
+    ],
+)
+def test_statement_separators_inside_postgres_lexical_regions_are_ignored(sql: str) -> None:
+    refuse_multiple_commands(sql)
+
+
+def test_placeholders_inside_tagged_dollar_strings_are_ignored() -> None:
+    refuse_parameter_arity("SELECT $body$$1$body$", ())
+
+
+@pytest.mark.parametrize(
+    "sql",
+    ["SELECT 1 -- $1\n", "SELECT /* $1 */ 1", 'SELECT "column$1"'],
+)
+def test_placeholders_inside_other_postgres_lexical_regions_are_ignored(sql: str) -> None:
+    refuse_parameter_arity(sql, ())
+
+
+def test_dollar_text_inside_an_unquoted_identifier_does_not_start_a_string() -> None:
+    with pytest.raises(PostgresError, match="multiple commands"):
+        refuse_multiple_commands("SELECT name$tag$value; SELECT 2")
+
+
+@pytest.mark.parametrize(
+    ("sql", "start", "expected"),
+    [
+        ("$tag$", 0, "$tag$"),
+        ("_$tag$", 1, None),
+        ("$$tag$", 1, None),
+        ("$", 0, None),
+        ("$1$", 0, None),
+        ("$__tag$", 0, "$__tag$"),
+        ("$a_b$", 0, "$a_b$"),
+        ("$tag", 0, None),
+    ],
+)
+def test_postgres_dollar_delimiters_follow_identifier_boundaries(
+    sql: str, start: int, expected: str | None
+) -> None:
+    assert _dollar_delimiter(sql, start) == expected
+
+
+def test_sql_masker_stops_at_a_closed_or_unclosed_dollar_region() -> None:
+    assert _sql_code("$tag$x$tag$ + 1") == "  + 1"
+    assert _sql_code("$tag$unterminated ; content") == " "
+
+
+def test_a_line_comment_ends_at_newline_before_the_next_command() -> None:
+    with pytest.raises(PostgresError, match="multiple commands"):
+        refuse_multiple_commands("SELECT 1 -- hidden ;\n; SELECT 2")
 
 
 def test_missing_cast_argument_is_left_to_parameter_arity() -> None:

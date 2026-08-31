@@ -38,10 +38,15 @@ from ..response import Response, StreamingResponse
 _BODYLESS = {204, 304}
 
 _ETAG_SUFFIX = {"dcz": b"--dcz", "gzip": b"--gzip", "zstd": b"--zstd"}
+_INTEGRITY_FIELDS = frozenset({b"content-digest", b"repr-digest"})
 _FORMAT_COUNT = 7
 
 
 _format_index = _core.gzip_format
+
+
+def _has_integrity_field(headers: list[tuple[bytes, bytes]]) -> bool:
+    return any(name.lower() in _INTEGRITY_FIELDS for name, _value in headers)
 
 
 def _encoded_etag(value: bytes, coding: str) -> bytes | None:
@@ -383,6 +388,7 @@ class CompressionPolicy:
         if (
             find_response_header(headers, b"content-encoding") is not None
             or find_response_header(headers, b"content-range") is not None
+            or _has_integrity_field(headers)
         ):
             return response
         cache_control = find_response_header(headers, b"cache-control")

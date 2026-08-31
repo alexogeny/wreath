@@ -121,7 +121,9 @@ def _slow_app(shape: str = "plain") -> tuple[wreath.Wreath, dict[str, _Watch]]:
     elif shape == "compartment":
         app.add_global_middleware(_Everywhere())
         app.add_global_middleware(_Scoped(only="/get"))
-    watches = {name: _Watch() for name in ("get", "post", "post-optin", "get-optout", "streaming")}
+    watches = {
+        name: _Watch() for name in ("get", "query", "post", "post-optin", "get-optout", "streaming")
+    }
 
     async def park(watch: _Watch) -> None:
         watch.started.set()
@@ -142,6 +144,11 @@ def _slow_app(shape: str = "plain") -> tuple[wreath.Wreath, dict[str, _Watch]]:
     @app.post("/post")
     async def slow_post(request: wreath.Request) -> wreath.Response:
         await park(watches["post"])
+        return wreath.Response(b"late")
+
+    @app.query("/query")
+    async def slow_query(request: wreath.Request) -> wreath.Response:
+        await park(watches["query"])
         return wreath.Response(b"late")
 
     @app.post("/post-optin", cancel_on_disconnect=True)
@@ -174,6 +181,13 @@ def _get(path: str) -> bytes:
 
 def _post(path: str) -> bytes:
     return (f"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n").encode()
+
+
+def _query(path: str) -> bytes:
+    return (
+        f"QUERY {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+        "Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}"
+    ).encode()
 
 
 def test_the_route_default_is_undeclared() -> None:
@@ -259,6 +273,16 @@ async def test_a_reset_get_cancels_the_handler(protocol: type) -> None:
     try:
         await _send_and_drop(_port(server), _get("/get"), watches["get"], abort=True)
         await asyncio.wait_for(watches["get"].cancelled.wait(), timeout=_PATIENCE)
+    finally:
+        await server.close()
+
+
+async def test_a_disconnected_query_cancels_the_handler(protocol: type) -> None:
+    app, watches = _slow_app()
+    server = await _serve(app)
+    try:
+        await _send_and_drop(_port(server), _query("/query"), watches["query"])
+        await asyncio.wait_for(watches["query"].cancelled.wait(), timeout=_PATIENCE)
     finally:
         await server.close()
 

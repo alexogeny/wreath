@@ -18,6 +18,8 @@ The signatures below are imported from the installed code during the docs build.
 
 ::: wreath.response
 
+::: wreath.link_template
+
 ::: wreath.exceptions
 
 ::: wreath.background

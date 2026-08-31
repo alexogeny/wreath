@@ -971,9 +971,10 @@ def _dataclass_plan(field_count: int):
     import dataclasses
 
     from wreath import binding
+    from wreath._native import _core
 
     cls = dataclasses.make_dataclass("Probe", [(f"field{i}", int) for i in range(field_count)])
-    return binding._compile_plan(cls, frozenset())
+    return _core.compile_validation_plan(binding._compile_plan(cls, frozenset()))
 
 
 @probe("validate-unexpected-fields", expect=1.0, sizes=(400, 800, 1600, 3200))
@@ -996,8 +997,7 @@ def _validate_unexpected_fields(n: int):
 
 
 def _union_bomb_plan(depth: int):
-    """A native plan nesting binary unions `depth` deep, both options recursing
-    into the same subtree, so a value failing the leaf forces 2**depth work."""
+    """A plan nesting binary unions `depth` deep with 2**depth expansion."""
     from wreath import binding
 
     node = (binding._OP_INT,)
@@ -1006,19 +1006,35 @@ def _union_bomb_plan(depth: int):
     return node
 
 
-@probe("validate-union-bomb", expect=0.0, sizes=(22, 24, 26, 28), repeats=1, noise_floor=0.0)
-def _validate_union_bomb(depth: int):
-    """A nested-union validation bomb stays bounded regardless of depth: O(1).
+@probe(
+    "validate-union-bomb",
+    expect=0.0,
+    sizes=(131_072, 262_144, 524_288, 1_048_576),
+    repeats=1,
+    noise_floor=0.0,
+    axis="native nodes implied by one shared union declaration",
+    assumption="startup compilation stops at the fixed 100,000-node ceiling",
+)
+def _validate_union_bomb(expanded_nodes: int):
+    """A nested-union plan bomb is refused in bounded startup work: O(1).
 
-    A union tries every option against the whole value, so without a work
-    budget nested unions are O(2**depth). The step ceiling caps total node
-    visits, so past the budget knee (~depth 20 at 2M steps) validation time
-    plateaus -- a regression that removes the budget makes this explode."""
+    Native plan materialization expands both union arms, so a shared declaration
+    can otherwise cost O(2**depth) before validation starts. Compilation caps
+    native nodes at 100,000 and refuses every measured size at startup."""
     from wreath._native import _core
 
+    depth = expanded_nodes.bit_length() - 1
     plan = _union_bomb_plan(depth)
     start = time.perf_counter()
-    _core.run_validation(plan, "x", ["body"])  # a str fails every int leaf
+    try:
+        compiled = _core.compile_validation_plan(plan)
+    except ValueError as error:
+        if "more than 100000 nodes" not in str(error):
+            raise
+    else:
+        if depth >= 17:
+            raise RuntimeError("exponential validation declaration was accepted")
+        del compiled
     return time.perf_counter() - start
 
 
@@ -2341,7 +2357,9 @@ def _validation_list_harness(n: int, *, typed: bool, response: bool) -> float:
     from wreath import binding
     from wreath._native import _core
 
-    plan = binding._compile_plan(list[int] if typed else list[Any], frozenset())
+    plan = _core.compile_validation_plan(
+        binding._compile_plan(list[int] if typed else list[Any], frozenset())
+    )
     value = list(range(n))
     wire = json.dumps(value).encode()
     loops = 20
@@ -4303,6 +4321,163 @@ def _port_session_propagation_chain(n: int):
 def _port_session_propagation_star_control(n: int):
     """Same-size control: every caller is one edge from the query leaf."""
     return _port_session_propagation_harness(n, chain=False)
+
+
+def _duration_parse_harness(n: int, *, valid: bool) -> float:
+    from wreath._duration import decimal_unit
+
+    value = "9" * n + ("s" if valid else "x")
+    loops = 50
+    before = time.perf_counter()
+    for _ in range(loops):
+        parsed = decimal_unit(value)
+        accepted = parsed is not None and parsed[1] in {"", "ms", "s", "m", "h", "d"}
+        if accepted is not valid:
+            raise RuntimeError("compact duration acceptance changed")
+    return time.perf_counter() - before
+
+
+@probe(
+    "duration-invalid-tail",
+    expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="digits scanned before an invalid compact-duration unit",
+    assumption="invalid compact durations are refused in one forward pass",
+    stage="declaration",
+    group="extended",
+)
+def _duration_invalid_tail(n: int):
+    return _duration_parse_harness(n, valid=False)
+
+
+@probe(
+    "duration-valid-tail-control",
+    expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="digits scanned before a valid compact-duration unit",
+    assumption="the same-size valid duration control is linear",
+    stage="declaration",
+    group="extended",
+)
+def _duration_valid_tail_control(n: int):
+    return _duration_parse_harness(n, valid=True)
+
+
+def _markdown_heading_harness(n: int, *, ambiguous: bool) -> float:
+    from wreath._docs.markdown import _parse_heading
+
+    value = "# title" + " " * n + "x" if ambiguous else "# " + "x" * (n + 6)
+    loops = 50
+    before = time.perf_counter()
+    for _ in range(loops):
+        parsed = _parse_heading(value)
+        if parsed is None or len(parsed[1]) != n + 6:
+            raise RuntimeError("Markdown heading parse changed")
+    return time.perf_counter() - before
+
+
+@probe(
+    "markdown-heading-ambiguous-whitespace",
+    expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="trailing spaces retained inside one Markdown heading",
+    assumption="ambiguous heading whitespace is parsed in one forward pass",
+    stage="documentation",
+    group="extended",
+)
+def _markdown_heading_ambiguous_whitespace(n: int):
+    return _markdown_heading_harness(n, ambiguous=True)
+
+
+@probe(
+    "markdown-heading-text-control",
+    expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="ordinary text retained inside one same-size Markdown heading",
+    assumption="the same-size ordinary heading control is linear",
+    stage="documentation",
+    group="extended",
+)
+def _markdown_heading_text_control(n: int):
+    return _markdown_heading_harness(n, ambiguous=False)
+
+
+def _markdown_heading_id_harness(n: int, *, valid: bool) -> float:
+    from wreath._docs.markdown import _parse_heading_id
+
+    value = "title" + (" " * n + "{#bad!}" if not valid else "x" * n + "{#valid}")
+    loops = 50
+    before = time.perf_counter()
+    for _ in range(loops):
+        accepted = _parse_heading_id(value) is not None
+        if accepted is not valid:
+            raise RuntimeError("Markdown explicit heading ID acceptance changed")
+    return time.perf_counter() - before
+
+
+@probe(
+    "markdown-heading-id-invalid",
+    expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="spaces before an invalid explicit Markdown heading ID",
+    assumption="an invalid explicit heading ID is refused in one forward pass",
+    stage="documentation",
+    group="extended",
+)
+def _markdown_heading_id_invalid(n: int):
+    return _markdown_heading_id_harness(n, valid=False)
+
+
+@probe(
+    "markdown-heading-id-valid-control",
+    expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="same-size text before a valid explicit Markdown heading ID",
+    assumption="the same-size valid explicit heading ID control is linear",
+    stage="documentation",
+    group="extended",
+)
+def _markdown_heading_id_valid_control(n: int):
+    return _markdown_heading_id_harness(n, valid=True)
+
+
+def _markdown_table_harness(n: int, *, valid: bool) -> float:
+    from wreath._docs.markdown import _parse_table_aligns
+
+    value = "---|" + ("-" * (n + 4) if valid else "---" + " " * n + "x")
+    loops = 50
+    before = time.perf_counter()
+    for _ in range(loops):
+        accepted = _parse_table_aligns(value) is not None
+        if accepted is not valid:
+            raise RuntimeError("Markdown table delimiter acceptance changed")
+    return time.perf_counter() - before
+
+
+@probe(
+    "markdown-table-invalid-tail",
+    expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="spaces scanned before an invalid Markdown table-delimiter tail",
+    assumption="an invalid delimiter row is refused in one forward pass",
+    stage="documentation",
+    group="extended",
+)
+def _markdown_table_invalid_tail(n: int):
+    return _markdown_table_harness(n, valid=False)
+
+
+@probe(
+    "markdown-table-valid-control",
+    expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="hyphens scanned in a same-size valid Markdown delimiter row",
+    assumption="the same-size valid delimiter control is linear",
+    stage="documentation",
+    group="extended",
+)
+def _markdown_table_valid_control(n: int):
+    return _markdown_table_harness(n, valid=True)
 
 
 def _todo_document(todo: Todo | None) -> dict[str, Any] | None:

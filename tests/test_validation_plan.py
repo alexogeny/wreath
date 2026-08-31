@@ -7,6 +7,8 @@ import pytest
 
 from wreath._native import _core
 from wreath.binding import (
+    _OP_INT,
+    _OP_UNION,
     Field,
     ValidationError,
     _body_validator,
@@ -42,9 +44,22 @@ class KeywordPayload:
     label: str = "default"
 
 
+def _native_plan(annotation: Any) -> object:
+    return _core.compile_validation_plan(_compile_plan(annotation, frozenset()))
+
+
+def test_native_plan_compilation_refuses_exponential_declaration_expansion() -> None:
+    node: tuple[Any, ...] = (_OP_INT,)
+    for _ in range(17):
+        node = (_OP_UNION, 0, (node, node), "union")
+
+    with pytest.raises(ValueError, match="more than 100000 nodes"):
+        _core.compile_validation_plan(node)
+
+
 def test_any_mapping_validation_preserves_an_unchanged_value() -> None:
     payload = {"id": 7, "nested": [1, "two"]}
-    plan = _compile_plan(dict[str, Any], frozenset())
+    plan = _native_plan(dict[str, Any])
 
     result, errors = _core.run_validation(plan, payload, ("response",))
 
@@ -54,7 +69,7 @@ def test_any_mapping_validation_preserves_an_unchanged_value() -> None:
 
 def test_any_mapping_contract_encodes_in_the_validation_entry() -> None:
     payload = {"id": 7, "nested": [1, "two"]}
-    plan = _compile_plan(dict[str, Any], frozenset())
+    plan = _native_plan(dict[str, Any])
 
     body, errors = _core.run_validation_json(plan, payload, ("response",))
 
@@ -77,7 +92,7 @@ def test_recursive_dataclass_is_evaluated_without_a_flat_plan() -> None:
 
 
 def test_keyword_only_dataclass_keeps_its_defaulted_constructor_path() -> None:
-    plan = _compile_plan(KeywordPayload, frozenset())
+    plan = _native_plan(KeywordPayload)
 
     result, errors = _core.run_validation(plan, {"value": 7}, ("body",))
 
@@ -96,7 +111,7 @@ def test_keyword_only_dataclass_keeps_its_defaulted_constructor_path() -> None:
     ],
 )
 def test_fused_json_dataclass_matches_decode_then_validate(data: bytes) -> None:
-    plan = _compile_plan(ConstrainedPayload, frozenset())
+    plan = _native_plan(ConstrainedPayload)
 
     expected = _core.run_validation(plan, _core.json_loads(data), ("body",))
     actual = _core.decode_json_validation_tape(data, plan, ("body",))
@@ -111,7 +126,7 @@ def test_fused_json_dataclass_matches_decode_then_validate(data: bytes) -> None:
 def test_fused_json_dataclass_preserves_keyword_only_defaults(
     data: bytes | bytearray,
 ) -> None:
-    plan = _compile_plan(KeywordPayload, frozenset())
+    plan = _native_plan(KeywordPayload)
 
     result, errors = _core.decode_json_validation_tape(data, plan, ("body",))
 
@@ -143,7 +158,7 @@ def test_fused_json_dataclass_preserves_keyword_only_defaults(
     ],
 )
 def test_field_plan_matches_the_reference_validator(annotation: Any, value: Any) -> None:
-    plan = _compile_plan(annotation, frozenset())
+    plan = _native_plan(annotation)
     actual, actual_errors = _core.run_validation(plan, value, ("body",))
     try:
         expected = validate(annotation, value, ("body",))

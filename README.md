@@ -78,6 +78,67 @@ The framework stays ordinary ASGI, so `uvicorn app:app` remains valid. The nativ
 server is available when you want Wreath's complete HTTP, telemetry and recording
 path.
 
+## Put the rest of HTTP to work
+
+Most frameworks stop at familiar methods and response headers. Wreath turns newer
+HTTP standards into application-level tools that can simplify an API well beyond
+its transport layer:
+
+- **[QUERY](https://www.rfc-editor.org/rfc/rfc10008.html) — rich searches that
+  stay safe and idempotent.** Declare
+  `@app.query("/search")` when filters are too large or structured for a URL. The
+  request can carry a typed body without pretending to create a resource, while
+  clients, caches and retry machinery retain the semantics of a read.
+- **[API Catalog](https://www.rfc-editor.org/rfc/rfc9727.html) — an API that can
+  introduce itself.**
+  `app.enable_api_catalog()` publishes the API, its OpenAPI document and its docs
+  at `/.well-known/api-catalog`, giving tools a standard discovery point instead
+  of another URL they have to be told about.
+- **[Link-Template](https://www.rfc-editor.org/rfc/rfc9652.html) — relationships
+  without expanding one link per object.** Responses can publish validated RFC
+  6570 templates for collections and related resources; Unicode attributes use
+  RFC 9651 Display Strings, and the wire value is compiled once at declaration.
+- **[OAuth browser BFF](https://www.rfc-editor.org/rfc/rfc10017.html) — use OAuth
+  without giving JavaScript a token.** `bff_router()` keeps access and refresh
+  tokens in a revocable server-side session, then exposes fixed-origin API routes
+  guarded by a preflight-forcing CSRF header. Browser cookies and credentials are
+  stripped before forwarding; resource-server cookies are stripped on the way
+  back.
+- **[OAuth step-up](https://www.rfc-editor.org/rfc/rfc9470.html) — ask for a
+  fresher or stronger login in a form clients understand.** `oauth_step_up()`
+  evaluates `auth_time` and `acr`, then returns the standard Bearer challenge a
+  client can carry into reauthorization.
+- **[Content-Digest and Repr-Digest](https://www.rfc-editor.org/rfc/rfc9530.html)
+  — integrity that crosses HTTP hops.** Requests can verify the strongest
+  supported digest before using a body, while responses can publish content or
+  complete-representation digests and negotiate the peer's preferred algorithm.
+- **[Deprecation](https://www.rfc-editor.org/rfc/rfc9745.html) and
+  [Sunset](https://www.rfc-editor.org/rfc/rfc8594.html) — migrations clients can
+  automate.** Put
+  `deprecated_at`, `sunset_at` and `deprecation_link` on a route. Wreath emits the
+  protocol headers and marks the OpenAPI operation from the same declaration, so
+  a retirement date cannot quietly drift away from the contract.
+- **[Incremental responses](https://www.rfc-editor.org/rfc/rfc10036.html) —
+  streams that proxies know are live.**
+  `StreamingResponse` and server-sent events emit the `Incremental` signal, so a
+  conforming intermediary can forward each part instead of buffering the whole
+  response and turning a live feed into a delayed download.
+- **Cache coordination — one declaration from database write to CDN purge.**
+  Targeted RFC 9213 `CDN-Cache-Control` can differ from browser freshness;
+  `@cached(...)` can expose
+  [Cache-Status](https://www.rfc-editor.org/rfc/rfc9211.html), invalidate on
+  committed model writes and emit signed cache tags plus
+  [Cache-Groups](https://www.rfc-editor.org/rfc/rfc9875.html). Local freshness,
+  diagnostics and shared-cache invalidation describe the same dependency graph.
+- **[Proxy-Status](https://www.rfc-editor.org/rfc/rfc9209.html) — failure context
+  that survives the proxy hop.** Wreath's proxy surfaces a structured account of
+  connection, DNS, TLS and upstream failures, so an application operator gets
+  more than an anonymous 502.
+
+These are ordinary interoperable HTTP fields and methods, not private client
+conventions. Use them with Wreath's native server or any ASGI deployment whose
+intermediaries support the corresponding standard.
+
 ## Start where your system gets hard
 
 The documentation builds nine complete systems around the pressure that usually
