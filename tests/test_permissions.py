@@ -537,10 +537,6 @@ async def test_the_manifest_is_private_and_anonymous_callers_are_refused() -> No
         assert b"private" in response.header("cache-control", "").encode()
 
 
-# The manifest is only worth fetching once if its `ETag` is trustworthy, and the
-# half of the tag that identifies the *policy set* used to be `id(engine)`.
-
-
 class _OpaqueEngine:
     """A third-party `CedarEngine`: satisfies the protocol, exposes nothing else.
 

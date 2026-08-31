@@ -15,9 +15,7 @@ def test_hidden_child_refuses_unknown_arm_before_running(
     monkeypatch.setattr(query_probe, "_child_main", child)
 
     with pytest.raises(SystemExit) as raised:
-        query_probe.main(
-            ["--dsn", "postgresql://unused", "--run-child", "not-an-arm"]
-        )
+        query_probe.main(["--dsn", "postgresql://unused", "--run-child", "not-an-arm"])
     assert raised.value.code == 2
     assert "unknown arm" in capsys.readouterr().err
 

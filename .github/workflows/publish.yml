@@ -1,13 +1,11 @@
 name: publish
 
 # Cut a versioned release from the exact main commit that passed `ci`.
-#
 #   1. detect  - Is the pyproject version a valid PEP 440 version and newer than
 #                the last version tag?
 #                Emits `bumped`, `version`, and the validated commit SHA. The
 #                last PEP 440 tag is the baseline, so a follow-up fix can resume
 #                an unpublished version without touching pyproject.toml again.
-#
 #                When no release is cut, the reason is written to the run
 #                summary. A skipped `release` job otherwise looks identical to
 #                a broken one.
@@ -27,15 +25,12 @@ name: publish
 #   4. pypi-*  - Publish one distribution per Trusted Publishing identity. The
 #                companion projects go first; the base project becomes visible
 #                only after both extras are installable.
-#
 # Configure all three GitHub environments with the same reviewer/branch policy,
 # then register these exact PyPI Trusted Publishers (owner `alexogeny`, repository
 # `wreath`, workflow `publish.yml`):
-#
 #   wreath        -> environment `publish`
 #   wreath-linux  -> environment `publish-linux`
 #   wreath-http3  -> environment `publish-http3`
-#
 # The distinct environments are required while the companion projects are
 # pending. PyPI refuses a second pending project with the same owner/repository/
 # workflow/environment identity because an incoming OIDC token would not name
@@ -86,12 +81,6 @@ jobs:
         with:
           python-version: "3.14"
       - name: Install the version parser
-        # `packaging` is the reference PEP 440 implementation. This check used a
-        # semver regex and `sort -V`, and the index this guards speaks neither:
-        # `0.1.0a1` is a legal Python version the regex rejected outright, and
-        # `sort -V` orders `0.1.0 < 0.1.0-alpha` where PEP 440 -- and PyPI --
-        # order it the other way. Both errors point at publishing the wrong
-        # thing, so the guard now uses the same rules as the index.
         run: python -m pip install --quiet packaging
       - id: check
         env:

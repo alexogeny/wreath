@@ -1258,13 +1258,7 @@ class FileResponse:
             os.close(fd)
 
     def __del__(self) -> None:
-        """Close a descriptor this response still owns when it is collected.
-
-        `from_descriptor()` takes ownership of an open file, and only the reader
-        used to close it -- which never runs if the response is not sent. The
-        `getattr` guards a `cls.__new__` instance whose attributes were never
-        assigned, where `__del__` would otherwise raise during collection.
-        """
+        """Close a descriptor this response still owns when it is collected."""
         if getattr(self, "_fd", None) is not None:
             self.close()
 

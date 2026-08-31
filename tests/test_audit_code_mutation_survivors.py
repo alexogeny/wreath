@@ -17,15 +17,19 @@ def findings(source: str, rule_id: str) -> list[str]:
 
 
 def test_identifier_suffix_does_not_turn_a_token_id_into_a_secret() -> None:
-    assert findings(
-        "def matches(token_id, expected):\n    return token_id == expected\n",
-        "timing-unsafe-compare",
-    ) == []
+    assert (
+        findings(
+            "def matches(token_id, expected):\n    return token_id == expected\n",
+            "timing-unsafe-compare",
+        )
+        == []
+    )
 
 
 def test_bare_reraise_does_not_make_a_fail_open_check_an_authorizer() -> None:
-    assert findings(
-        """
+    assert (
+        findings(
+            """
         def resolve_access(subject):
             if subject is None:
                 return
@@ -34,8 +38,10 @@ def test_bare_reraise_does_not_make_a_fail_open_check_an_authorizer() -> None:
             except LookupError:
                 raise
         """,
-        "authz-fail-open",
-    ) == []
+            "authz-fail-open",
+        )
+        == []
+    )
 
 
 def test_named_refusal_makes_an_undecided_return_fail_open() -> None:
@@ -85,10 +91,13 @@ def test_annotation_without_a_value_is_a_valid_module_declaration() -> None:
 
 
 def test_module_constant_seed_keeps_random_reproducibility_out_of_security_findings() -> None:
-    assert findings(
-        "SEED = load_seed()\nrng = random.Random(SEED)\n",
-        "weak-randomness",
-    ) == []
+    assert (
+        findings(
+            "SEED = load_seed()\nrng = random.Random(SEED)\n",
+            "weak-randomness",
+        )
+        == []
+    )
 
 
 @pytest.mark.parametrize("member_source", ["archive.infolist()", "archive.namelist()"])
@@ -115,14 +124,17 @@ def test_getmembers_call_receiver_is_retained_as_member_provenance() -> None:
 
 
 def test_unrelated_calls_do_not_create_archive_member_provenance() -> None:
-    assert findings(
-        """
+    assert (
+        findings(
+            """
         archive.read()
         for ignored in unrelated:
             destination = root / archive.name
         """,
-        "unsafe-archive-extract",
-    ) == []
+            "unsafe-archive-extract",
+        )
+        == []
+    )
 
 
 @pytest.mark.parametrize("enumerator", ["infolist", "namelist", "getmembers"])
@@ -139,27 +151,33 @@ def test_archive_loop_binding_is_retained_beyond_the_enumerator_loop(enumerator:
 
 
 def test_non_call_archive_loop_does_not_invent_global_member_provenance() -> None:
-    assert findings(
-        """
+    assert (
+        findings(
+            """
         for member in members:
             inspect(member)
         for ignored in unrelated:
             destination = root / member.name
         """,
-        "unsafe-archive-extract",
-    ) == []
+            "unsafe-archive-extract",
+        )
+        == []
+    )
 
 
 def test_unrelated_loop_call_does_not_invent_global_member_provenance() -> None:
-    assert findings(
-        """
+    assert (
+        findings(
+            """
         for member in archive.read():
             inspect(member)
         for ignored in unrelated:
             destination = root / member.name
         """,
-        "unsafe-archive-extract",
-    ) == []
+            "unsafe-archive-extract",
+        )
+        == []
+    )
 
 
 def test_awaited_dynamic_string_propagates_to_the_sql_sink() -> None:
@@ -253,16 +271,19 @@ def test_dynamic_string_binding_requires_a_dynamic_expression() -> None:
 
 
 def test_ordinary_bound_values_do_not_acquire_security_provenance() -> None:
-    assert scan_source(
-        """
+    assert (
+        scan_source(
+            """
         value = build_value()
         label = f"constant"
         header = request.header("accept")
         logger.info("ready")
         response.headers.append(("access-control-allow-origin", configured_value))
         """,
-        surface="mutation-survivor.py",
-    ) == []
+            surface="mutation-survivor.py",
+        )
+        == []
+    )
 
 
 @pytest.mark.parametrize(
@@ -289,10 +310,13 @@ def test_each_supported_random_binding_spelling_is_detected(
 
 
 def test_non_random_calls_do_not_taint_a_secret_assignment() -> None:
-    assert findings(
-        "generator = factory().build()\napi_secret = generator.choice('abc')\n",
-        "weak-randomness",
-    ) == []
+    assert (
+        findings(
+            "generator = factory().build()\napi_secret = generator.choice('abc')\n",
+            "weak-randomness",
+        )
+        == []
+    )
 
 
 @pytest.mark.parametrize(
@@ -331,9 +355,7 @@ def test_request_body_logging_reports_bound_and_inline_sources_exactly() -> None
         "secret-in-log",
     )
     inline = findings("logger.info(request.body())\n", "secret-in-log")
-    assert bound == [
-        "body is the caller's own body, which is not known to be free of credentials"
-    ]
+    assert bound == ["body is the caller's own body, which is not known to be free of credentials"]
     assert inline == [
         "a value read off the request is the caller's own body, which is not known "
         "to be free of credentials"
@@ -395,15 +417,14 @@ def test_only_literal_true_destination_policy_widenings_are_flagged(source: str)
 
 
 def test_destination_policy_literal_true_widening_is_flagged() -> None:
-    assert findings(
-        "DestinationPolicy(allow_private=True)\n", "ssrf-policy-widened"
-    ) == ["DestinationPolicy permits allow_private"]
+    assert findings("DestinationPolicy(allow_private=True)\n", "ssrf-policy-widened") == [
+        "DestinationPolicy permits allow_private"
+    ]
 
 
 def test_cors_reflection_accepts_bound_and_origin_named_values_but_not_others() -> None:
     bound = (
-        "value = request.header('origin')\n"
-        "response.header('access-control-allow-origin', value)\n"
+        "value = request.header('origin')\nresponse.header('access-control-allow-origin', value)\n"
     )
     named = "response.header('access-control-allow-origin', supplied_origin)\n"
     unrelated = "response.header('access-control-allow-origin', value)\n"
@@ -413,9 +434,7 @@ def test_cors_reflection_accepts_bound_and_origin_named_values_but_not_others() 
 
 
 def test_non_header_lookup_cannot_trigger_forwarded_header_rule() -> None:
-    assert findings(
-        "request.lookup('x-forwarded-for')\n", "untrusted-forwarded-header"
-    ) == []
+    assert findings("request.lookup('x-forwarded-for')\n", "untrusted-forwarded-header") == []
 
 
 def test_nested_random_draws_are_detected_without_tainting_other_chains() -> None:
@@ -423,10 +442,13 @@ def test_nested_random_draws_are_detected_without_tainting_other_chains() -> Non
         "rng = random.Random()\napi_secret = rng.choice('abc').strip()\n",
         "weak-randomness",
     ) == ["api_secret is drawn from random rather than secrets"]
-    assert findings(
-        "generator = factory().build()\napi_secret = generator.choice('abc').strip()\n",
-        "weak-randomness",
-    ) == []
+    assert (
+        findings(
+            "generator = factory().build()\napi_secret = generator.choice('abc').strip()\n",
+            "weak-randomness",
+        )
+        == []
+    )
 
 
 def test_random_provenance_propagates_through_multiple_bound_generators() -> None:
@@ -441,38 +463,54 @@ def test_random_provenance_propagates_through_multiple_bound_generators() -> Non
 
 
 def test_non_random_provenance_does_not_propagate_through_bound_generators() -> None:
-    assert findings(
-        """
+    assert (
+        findings(
+            """
         generator = factory()
         derived = generator.choice("abc")
         api_secret = derived.transform()
         """,
-        "weak-randomness",
-    ) == []
+            "weak-randomness",
+        )
+        == []
+    )
 
 
 def test_timing_rule_requires_equality_and_refuses_literal_dispatch() -> None:
-    assert findings(
-        "def compare(expected_signature, supplied):\n    return expected_signature < supplied\n",
-        "timing-unsafe-compare",
-    ) == []
-    assert findings(
-        "def compare(expected_signature):\n    return expected_signature == 'fixed'\n",
-        "timing-unsafe-compare",
-    ) == []
+    assert (
+        findings(
+            "def compare(expected_signature, supplied):\n"
+            "    return expected_signature < supplied\n",
+            "timing-unsafe-compare",
+        )
+        == []
+    )
+    assert (
+        findings(
+            "def compare(expected_signature):\n    return expected_signature == 'fixed'\n",
+            "timing-unsafe-compare",
+        )
+        == []
+    )
 
 
 def test_case_mapping_requires_a_mapping_method_and_authorization_comparator() -> None:
-    assert findings(
-        "def compare(user_identity, allowed_role):\n"
-        "    return user_identity.strip() == allowed_role\n",
-        "case-mapped-authz",
-    ) == []
-    assert findings(
-        "def compare(user_identity, display_name):\n"
-        "    return user_identity.casefold() == display_name\n",
-        "case-mapped-authz",
-    ) == []
+    assert (
+        findings(
+            "def compare(user_identity, allowed_role):\n"
+            "    return user_identity.strip() == allowed_role\n",
+            "case-mapped-authz",
+        )
+        == []
+    )
+    assert (
+        findings(
+            "def compare(user_identity, display_name):\n"
+            "    return user_identity.casefold() == display_name\n",
+            "case-mapped-authz",
+        )
+        == []
+    )
     assert findings(
         "def compare(user_identity, allowed_role):\n"
         "    return user_identity.casefold() == allowed_role\n",

@@ -223,9 +223,7 @@ async def test_batch_requires_ids_to_be_a_list() -> None:
     app = SimpleNamespace(_routes=(), _ws_routes=(), _authorizer=object())
     batch = _endpoint(permissions_router(app), "batch")
 
-    response = await batch(
-        _Request(SimpleNamespace(id="ada"), {"type": "Llama", "ids": ()})
-    )
+    response = await batch(_Request(SimpleNamespace(id="ada"), {"type": "Llama", "ids": ()}))
 
     assert response.status == 400
     assert "`type` (string) and `ids` (list) are required" == json.loads(response.body)["detail"]

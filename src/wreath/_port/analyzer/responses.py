@@ -8,16 +8,6 @@ import ast
 from ..._conditional import STATUS_WITHOUT_BODY as _STATUS_WITHOUT_BODY
 from .imports import _Imports
 
-#: HTTP status literal -> the `wreath.exceptions` class a `HTTPException(...)`
-#: with that status becomes. Shared with the emitter so the report cannot call a
-#: status translated that the emitter then annotates: 502/503/501 and the rest
-#: have no class, and earn `exc.http_unmapped` instead.
-#:
-#: 500 maps to the *base* class deliberately — `wreath.exceptions.HTTPException`
-#: declares `status = 500`, so `HTTPException(status_code=500, detail=x)` is
-#: `HTTPException(x)` and nothing is left to decide. It is the single most common
-#: spelling of a 500 by some distance, and it used to fall through to a
-#: needs-review annotation over a name whose import the emitter had dropped.
 STATUS_EXCEPTION: dict[int, str] = {
     400: "BadRequest",
     401: "Unauthorized",

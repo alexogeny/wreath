@@ -170,7 +170,5 @@ def test_robots_file_includes_sitemap_only_for_absolute_site(tmp_path: Path) -> 
 
     assert without_url.joinpath("robots.txt").read_text() == "User-agent: *\nAllow: /\n"
     assert with_url.joinpath("robots.txt").read_text() == (
-        "User-agent: *\n"
-        "Allow: /\n"
-        "Sitemap: https://docs.example.test/base/sitemap.xml\n"
+        "User-agent: *\nAllow: /\nSitemap: https://docs.example.test/base/sitemap.xml\n"
     )

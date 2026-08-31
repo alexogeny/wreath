@@ -1,11 +1,5 @@
 """Insert, cancel and fire on the timing wheel, by *arrangement* rather than size.
 
-The wheel's cost used to depend on how deadlines were arranged, not on how many
-there were. Slots are a hash of the deadline, so deadlines congruent modulo
-`slots` share one; with the unordered chain that preceded the per-slot pairing
-heap, both "which nodes are due" and "what is this slot's new minimum" needed a
-full walk, and each was quadratic in the chain length.
-
 That is why this benchmark measures the three operations *separately* in *two*
 arrangements. Timing schedule-and-cancel as one region hides which of the two
 moved, and a fix that flattens cancel by making insert quadratic is a relocation
@@ -51,8 +45,8 @@ def _delays(count: int, *, colliding: bool) -> list[float]:
     """Deadlines that share one slot, or spread one per slot.
 
     Colliding steps by `SLOTS` so every deadline lands in the same bucket at a
-    *distinct* deadline -- distinct is the point, because a same-deadline cohort
-    is the case the old chain already handled in O(1).
+    *distinct* deadline so the benchmark does not collapse into a same-deadline
+    cohort.
     """
     step = SLOTS if colliding else 1
     return [step * index * RESOLUTION for index in range(1, count + 1)]

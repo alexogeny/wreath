@@ -51,10 +51,6 @@ async def _drive(app: Wreath, *types: str) -> list[dict[str, Any]]:
 
 @pytest.mark.asyncio
 async def test_a_refusing_database_does_not_strand_the_startup_failure_reply() -> None:
-    # Teardown runs in reverse, so `second` is stopped first and raises. Before
-    # the fix that exception escaped `_lifespan` entirely: `first` was never
-    # stopped and the server never received `lifespan.startup.failed`, so it sat
-    # waiting on a lifespan message that would never arrive.
     app = Wreath()
     first = _Recorder("first")
     second = _Recorder("second", fail=True)
@@ -94,8 +90,6 @@ async def test_a_refusing_client_does_not_strand_the_databases_behind_it() -> No
 
 @pytest.mark.asyncio
 async def test_a_failing_shutdown_handler_still_releases_every_resource() -> None:
-    # A shutdown handler that raises used to skip the whole teardown block, so a
-    # single bad handler leaked every pool the app owned.
     app = Wreath()
     database = _Recorder("db")
     client = _Recorder("client")

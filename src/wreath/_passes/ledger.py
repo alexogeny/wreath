@@ -78,11 +78,8 @@ def rewrites_table_name(schema: str) -> str:
 def _placeholders(values: tuple[str, ...]) -> str:
     """`$1, $2, ...` for an `IN` list, one placeholder per value.
 
-    Not `= ANY($1)`, which is the obvious spelling and does not work: the
-    driver infers a parameter's type from the Python value, and it has no case
-    for `list` -- passing one raises `unsupported PostgreSQL value type`.
-    Both readers here were written that way and neither had ever run against a
-    real server, because their tests use fakes and fakes do not infer types.
+    Not `= ANY($1)`: the driver cannot infer a PostgreSQL parameter type from a
+    Python `list`.
 
     The list is bounded by the columns one migration touches, so an `IN` list
     is the right size of hammer; a reader proportional to the *ledger* would
@@ -92,17 +89,7 @@ def _placeholders(values: tuple[str, ...]) -> str:
 
 
 def statements(schema: str) -> tuple[str, ...]:
-    """DDL for the ledger, its dead-letter table, and the rewrite record.
-
-    One statement per element, which is what the driver wants: it speaks the
-    extended query protocol exclusively, so it prepares each statement and
-    PostgreSQL refuses `cannot insert multiple commands into a prepared
-    statement`. This used to be one `;\\n`-joined blob that five call sites each
-    split back apart, and the trigger function below was written on a single
-    line for no reason other than to survive that split. It no longer has to be,
-    though it is left as it was: reflowing SQL that guards against silent data
-    loss, in the same change that moves it, would make the diff unreviewable.
-    """
+    """DDL statements for the ledger, dead-letter table, and rewrite record."""
     table = table_name(schema)
     holes = holes_table_name(schema)
     rewrites = rewrites_table_name(schema)

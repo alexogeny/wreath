@@ -55,10 +55,6 @@ JobHandler = Callable[..., Awaitable[None]]
 # messaging share one definition; kept as a module-local alias for readability.
 _validate_identifier = validate_identifier
 
-#: Reconnect backoff for the NOTIFY doorbell, re-exported from
-#: `wreath._doorbell`, which the bus shares. Matching `messaging.MessageBus`
-#: is no longer a thing to keep true by hand: both hold the same supervisor.
-
 
 class JobVanished(RuntimeError):
     """A deduplicated `JobRunner.launch` found no row to hand back.
@@ -259,11 +255,6 @@ class JobRunner:
             channels=(self._channel,),
         )
         self._inflight: set[asyncio.Future[Any]] = set()
-        #: Jobs this process claimed and has not started running. A batch claim
-        #: leases several at once, and a shutdown between the claim and the run
-        #: used to leave them leased until the lease expired -- so a rolling
-        #: deploy parked `batch - 1` jobs for `lease` seconds per restart, which
-        #: reads as a queue that stalls whenever you deploy.
         self._claimed_not_started: list[_Claimed] = []
         #: This process's identity on a claimed row. It was the *queue* name,
         #: so every worker on a queue shared one and `owner` answered "which
@@ -279,10 +270,6 @@ class JobRunner:
         #: repeat across containers and restarts. Prefixed with the queue so a
         #: human reading a row still sees which queue it belongs to.
         self._worker_id = f"{self._name}:{uuid.uuid4().hex[:12]}"
-        #: Sweeps that raised. The sweeper suppresses everything so a transient
-        #: error cannot end the loop, which also meant a sweeper that had never
-        #: once succeeded -- a missing table, a revoked grant -- was
-        #: indistinguishable from one with nothing to reclaim.
         self.sweep_errors = 0
         #: Scheduler ticks that raised, for the same reason.
         self.schedule_errors = 0
@@ -301,9 +288,6 @@ class JobRunner:
         #: reports: a dead-lettered job is silent in the logs and invisible in
         #: the queue depth, because it has left the queue.
         self.dead_lettered = 0
-        #: Failures *after* a job was claimed -- recording the outcome, not
-        #: running the handler. Non-zero means jobs are being re-run on lease
-        #: expiry rather than completing, which used to end a worker silently.
         self.run_errors = 0
         #: Handlers cancelled for outrunning their deadline. Distinct from
         #: `run_errors`: the handler did not fail, it was stopped, and the number
@@ -1244,13 +1228,7 @@ class JobRunner:
         if handler is None:
             await self._fail(job, f"no handler registered for task {job.task!r}")
             return
-        # Bound before the call, because a row enqueued by an older release can
-        # carry an arity this handler no longer accepts. Left to the call itself
-        # the `TypeError` was raised while building the coroutine -- outside the
-        # try below -- so it escaped `_run` entirely: no `_fail`, no `last_error`,
-        # no backoff. The job stayed leased until the sweeper reclaimed it and
-        # eventually dead-lettered it as "lease expired before completion", which
-        # points at a hung handler rather than at a signature change.
+        # Bind before constructing the coroutine so arity failures are recorded.
         try:
             handler.signature.bind(ctx, *job.args)
         except TypeError as error:

@@ -18,13 +18,14 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from .._b64 import B64URL_ALPHABET
+from .._b64 import B64URL_ALPHABET, b64url_encode
 from .._b64 import b64url_decode as _b64url_decode
+from .._json import dumps as _json_dumps
+from .._json import loads as _json_loads
 from .._native import _core
 from ._ecverify import on_p256_curve, verify_ed25519, verify_es256
 from .models import Identity
@@ -47,6 +48,8 @@ __all__ = [
     "default_identity",
     "key_from_jwk",
     "key_from_pem",
+    "jwk_thumbprint",
+    "jwk_thumbprint_uri",
 ]
 
 #: Minimum length for an HMAC secret given as a bare string. RFC 8725 §3.5 and
@@ -169,6 +172,44 @@ class OkpPublicKey:
 #: Any key an algorithm family can be verified with.
 JwtKey = SymmetricKey | RsaPublicKey | EcPublicKey | OkpPublicKey
 
+_THUMBPRINT_MEMBERS = {
+    "EC": ("crv", "kty", "x", "y"),
+    "OKP": ("crv", "kty", "x"),
+    "RSA": ("e", "kty", "n"),
+    "oct": ("k", "kty"),
+}
+
+
+def jwk_thumbprint(jwk: Mapping[str, Any], *, hash_name: str = "sha-256") -> str:
+    """Return the RFC 7638 thumbprint of one JWK.
+
+    SHA-256 is the mandatory-to-implement algorithm for both RFC 7638 and
+    RFC 9278. The JSON input is reduced to the required members for its key
+    type, lexicographically ordered, encoded without whitespace, and hashed.
+    """
+    if hash_name != "sha-256":
+        raise ValueError("JWK thumbprint hash_name must be 'sha-256'")
+    kty = jwk.get("kty")
+    members = _THUMBPRINT_MEMBERS.get(kty)
+    if members is None:
+        raise ValueError(f"JWK thumbprint does not support key type {kty!r}")
+    required: dict[str, str] = {}
+    for name in members:
+        value = jwk.get(name)
+        if not isinstance(value, str):
+            raise ValueError(
+                f"JWK thumbprint requires string member {name!r} for key type {kty!r}"
+            )
+        required[name] = value
+    canonical = _json_dumps(required)
+    return b64url_encode(hashlib.sha256(canonical).digest())
+
+
+def jwk_thumbprint_uri(jwk: Mapping[str, Any], *, hash_name: str = "sha-256") -> str:
+    """Return the RFC 9278 URI form of a JWK thumbprint."""
+    thumbprint = jwk_thumbprint(jwk, hash_name=hash_name)
+    return f"urn:ietf:params:oauth:jwk-thumbprint:{hash_name}:{thumbprint}"
+
 
 def key_from_jwk(jwk: Mapping[str, Any]) -> JwtKey:
     """Build a key from a single JWK. Supports `oct`/`RSA`/`EC`/`OKP`."""
@@ -278,8 +319,8 @@ def _rsa_public_from_der(der: bytes, kind: str) -> tuple[int, int]:
 def _parse_compact(token: str) -> tuple[dict[str, Any], dict[str, Any], bytes, bytes]:
     """Split + decode + JSON-parse a compact JWS. Raises ValueError if malformed."""
     header_bytes, payload_bytes, signing_input, signature = _native_parse(token, _MAX_SEGMENT_BYTES)
-    header = json.loads(header_bytes)
-    claims = json.loads(payload_bytes)
+    header = _json_loads(header_bytes)
+    claims = _json_loads(payload_bytes)
     if not isinstance(header, dict) or not isinstance(claims, dict):
         raise ValueError("JWT header and payload must be JSON objects")
     return header, claims, signing_input, signature
@@ -293,8 +334,8 @@ def peek_header(token: str) -> dict[str, Any] | None:
     """
     try:
         first = token.split(".", 1)[0]
-        header = json.loads(_b64url_decode(first))
-    except ValueError, KeyError, json.JSONDecodeError:
+        header = _json_loads(_b64url_decode(first))
+    except (ValueError, KeyError):
         return None
     return header if isinstance(header, dict) else None
 
@@ -495,7 +536,7 @@ def verify_jwt(
 
     try:
         header, claims, signing_input, signature = _parse_compact(token)
-    except ValueError, KeyError, json.JSONDecodeError:
+    except (ValueError, KeyError):
         return None
 
     alg = header.get("alg")

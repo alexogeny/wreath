@@ -107,12 +107,7 @@ def _hex_span(span_id: int) -> str:
 
 
 def _trace_ids(trace: ProjectedTrace) -> tuple[int, int]:
-    """The (trace_id, span_id) to export.
-
-    Delegates to `ProjectedTrace.effective_ids` so spans and log records for one
-    request cannot disagree about its identity -- they used to be able to,
-    because the synthesis for an unpropagated request lived only here.
-    """
+    """The (trace_id, span_id) to export."""
     return trace.effective_ids
 
 

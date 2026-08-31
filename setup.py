@@ -128,21 +128,17 @@ else:
         hot_compile_args += ["-g", "-fno-omit-frame-pointer"]
 
 # Profile-guided optimization, in two passes and off by default.
-#
 #   WREATH_PGO=generate python setup.py build_ext --inplace
-#   ... run a representative workload, which writes .gcda counters ...
+#   Run a representative workload to write .gcda counters.
 #   WREATH_PGO=use      python setup.py build_ext --inplace
-#
 # Worth having because the hot C here is exactly the shape PGO helps: an HTTP
 # parser and a dispatcher, dense in branches whose direction is stable in
 # production and invisible to the compiler. `-O3 -flto` already lays out code
 # well; what it cannot know is which way each branch actually goes.
-#
 # `-fprofile-dir` is absolute so both passes agree on where counters live --
 # setuptools builds objects under a platform-specific `build/temp.*` path, and
 # a relative profile directory silently produced "no profile data" on the second
 # pass while still linking a valid, unoptimized extension.
-#
 # `-fprofile-partial-training` tells GCC to optimize un-exercised functions
 # normally rather than for size; without it, any path the training run missed
 # gets pessimized, which is the classic way a PGO build is faster on the
@@ -512,7 +508,6 @@ ext_modules = [
 # Everything above compiles anywhere: no platform headers, no POSIX-only calls.
 # These two do not, and gating them is what lets macOS and Windows have the rest
 # of the accelerators instead of failing the install at the first `#include`.
-#
 # The Python side declares their absence: `wreath.reactor` raises a named error
 # only when `timers="wheel"` is explicitly asked for, and
 # `wreath.server._create_recorder` returns None on a missing `_flight`, leaving

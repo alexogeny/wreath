@@ -657,8 +657,7 @@ async def test_insert_batches_adjacent_rows_with_the_same_complete_shape(
     ]
     assert all(user._orm_state == PERSISTENT for user in users)
     assert [
-        session._identity[(session._registry.spec_for(User), (index,))]
-        for index in range(1, 4)
+        session._identity[(session._registry.spec_for(User), (index,))] for index in range(1, 4)
     ] == users
 
 
@@ -721,16 +720,12 @@ async def test_returning_insert_batch_stays_within_the_parameter_limit(
     monkeypatch: pytest.MonkeyPatch, database: FakeDatabase, session: Session
 ) -> None:
     monkeypatch.setattr("wreath.orm.session.MAX_BIND_PARAMETERS", 4)
-    users = [
-        User(email=f"{index}@b.c", name=f"U{index}")
-        for index in range(1, 4)
-    ]
+    users = [User(email=f"{index}@b.c", name=f"U{index}") for index in range(1, 4)]
 
     async def fetch(sql: str, *args: object) -> list[tuple[object, ...]]:
         database.connection._record(sql, args)
         return [
-            (int(str(args[offset]).split("@", 1)[0]), None)
-            for offset in range(0, len(args), 2)
+            (int(str(args[offset]).split("@", 1)[0]), None) for offset in range(0, len(args), 2)
         ]
 
     monkeypatch.setattr(database.connection, "fetch", fetch)
@@ -792,10 +787,7 @@ async def test_a_late_returning_insert_chunk_failure_preserves_the_whole_batch(
     monkeypatch: pytest.MonkeyPatch, database: FakeDatabase, session: Session
 ) -> None:
     monkeypatch.setattr("wreath.orm.session.MAX_BIND_PARAMETERS", 4)
-    users = [
-        User(email=f"{index}@b.c", name=f"U{index}")
-        for index in range(1, 4)
-    ]
+    users = [User(email=f"{index}@b.c", name=f"U{index}") for index in range(1, 4)]
     calls = 0
 
     async def fetch(sql: str, *args: object) -> list[tuple[object, ...]]:
@@ -879,9 +871,7 @@ async def test_update_writes_only_dirty_columns(database: FakeDatabase, session:
 async def test_updates_group_by_model_and_dirty_shape(
     database: FakeDatabase, session: Session
 ) -> None:
-    database.connection.script(
-        "SELECT", [user_row(1, "1@b.c", "A"), user_row(2, "2@b.c", "B")]
-    )
+    database.connection.script("SELECT", [user_row(1, "1@b.c", "A"), user_row(2, "2@b.c", "B")])
     users = await session.fetch(User.select())
     users[0].name = "A2"
     users[1].name = "B2"
@@ -964,9 +954,7 @@ async def test_update_batch_chunks_at_the_array_row_limit(
 async def test_update_unnest_batch_splits_when_the_packet_is_too_large(
     monkeypatch: pytest.MonkeyPatch, database: FakeDatabase, session: Session
 ) -> None:
-    database.connection.script(
-        "SELECT", [user_row(1, name="A"), user_row(2, name="B")]
-    )
+    database.connection.script("SELECT", [user_row(1, name="A"), user_row(2, name="B")])
     users = await session.fetch(User.select())
     for user in users:
         user.name += "2"
@@ -991,9 +979,7 @@ async def test_update_unnest_batch_splits_when_the_packet_is_too_large(
 async def test_a_stale_update_batch_keeps_every_dirty_state(
     database: FakeDatabase, session: Session
 ) -> None:
-    database.connection.script(
-        "SELECT", [user_row(1, "1@b.c", "A"), user_row(2, "2@b.c", "B")]
-    )
+    database.connection.script("SELECT", [user_row(1, "1@b.c", "A"), user_row(2, "2@b.c", "B")])
     users = await session.fetch(User.select())
     for user in users:
         user.name += "2"
@@ -1008,9 +994,7 @@ async def test_a_stale_update_batch_keeps_every_dirty_state(
 async def test_a_stale_update_batch_rolls_back_its_explicit_transaction_savepoint(
     database: FakeDatabase, session: Session
 ) -> None:
-    database.connection.script(
-        "SELECT", [user_row(1, "1@b.c", "A"), user_row(2, "2@b.c", "B")]
-    )
+    database.connection.script("SELECT", [user_row(1, "1@b.c", "A"), user_row(2, "2@b.c", "B")])
     users = await session.fetch(User.select())
     for user in users:
         user.name += "2"
@@ -1034,9 +1018,7 @@ async def test_a_stale_update_batch_rolls_back_its_explicit_transaction_savepoin
 async def test_a_later_stale_update_group_keeps_an_earlier_group_dirty(
     monkeypatch: pytest.MonkeyPatch, database: FakeDatabase, session: Session
 ) -> None:
-    database.connection.script(
-        "SELECT", [user_row(1, "1@b.c", "A"), user_row(2, "2@b.c", "B")]
-    )
+    database.connection.script("SELECT", [user_row(1, "1@b.c", "A"), user_row(2, "2@b.c", "B")])
     users = await session.fetch(User.select())
     users[0].name = "changed"
     users[1].email = "changed@b.c"
@@ -1108,7 +1090,7 @@ async def test_delete_uses_the_complete_primary_key(
     sql, args = database.connection.calls[1]
     assert sql == (
         'DELETE FROM "public"."memberships" AS "wreath_target" '
-        'USING UNNEST($1::bigint[], $2::bigint[]) '
+        "USING UNNEST($1::bigint[], $2::bigint[]) "
         'AS "wreath_batch" ("org_id", "user_id") '
         'WHERE "wreath_target"."org_id" = "wreath_batch"."org_id" AND '
         '"wreath_target"."user_id" = "wreath_batch"."user_id" '
@@ -1139,9 +1121,7 @@ async def test_delete_batch_chunks_at_the_array_row_limit(
     monkeypatch: pytest.MonkeyPatch, database: FakeDatabase, session: Session
 ) -> None:
     monkeypatch.setattr("wreath.orm.session.MAX_BIND_PARAMETERS", 2)
-    database.connection.script(
-        "SELECT", [[1, 1, "admin"], [1, 2, "member"], [1, 3, "member"]]
-    )
+    database.connection.script("SELECT", [[1, 1, "admin"], [1, 2, "member"], [1, 3, "member"]])
     memberships = await session.fetch(Membership.select())
     for membership in memberships:
         session.delete(membership)
@@ -1268,9 +1248,7 @@ async def test_a_single_update_inside_a_transaction_uses_a_savepoint(
 async def test_a_successful_update_batch_releases_its_flush_savepoint(
     database: FakeDatabase, session: Session
 ) -> None:
-    database.connection.script(
-        "SELECT", [user_row(1, "1@b.c", "A"), user_row(2, "2@b.c", "B")]
-    )
+    database.connection.script("SELECT", [user_row(1, "1@b.c", "A"), user_row(2, "2@b.c", "B")])
     users = await session.fetch(User.select())
     for user in users:
         user.name = "changed"

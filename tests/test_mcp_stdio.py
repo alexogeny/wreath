@@ -120,10 +120,13 @@ async def test_end_of_input_stops_the_relay() -> None:
     pipe.close()
     sink = Sink()
     try:
-        assert await asyncio.wait_for(
-            stdio.serve(build(), stdin=pipe.reader, stdout=sink),
-            timeout=0.5,
-        ) == 0
+        assert (
+            await asyncio.wait_for(
+                stdio.serve(build(), stdin=pipe.reader, stdout=sink),
+                timeout=0.5,
+            )
+            == 0
+        )
     finally:
         pipe.reader.close()
 

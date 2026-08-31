@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
 # Run the framework matrix on a quieted machine, without retyping the sudo dance.
-#
 # Tier-1 quieting writes to sysfs and stops named services, so it needs root; the
 # benchmark must *stay* root afterwards to undo those writes. That means the whole
 # run goes under sudo, and sudo resets PATH, which loses the load generator. This
 # script is that invocation, once, correctly.
-#
 #   tools/bench-quiet.sh                        # the standard matrix
 #   tools/bench-quiet.sh --requests 32000       # ... with an override
 #   tools/bench-quiet.sh --framework wreath-metal blacksheep
-#
 # Arguments are appended after the defaults, and argparse takes the last value
 # for a repeated option, so anything below can be overridden by passing it again.
 set -euo pipefail
@@ -34,7 +31,6 @@ fi
 # Sanic is not here on purpose: it is the slowest arm in the suite to boot, and
 # every trial boots its own server. It is still in the matrix -- pass
 # `--framework sanic ...` to get it back.
-#
 # The last three arms are reference points rather than peers: `blacksheep-granian`
 # is the same BlackSheep app on Granian instead of Uvicorn and only means anything
 # read against `blacksheep`; `granian-rsgi` is no framework at all, the floor; and

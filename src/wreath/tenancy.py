@@ -80,9 +80,6 @@ __all__ = [
     "verify_isolation",
 ]
 
-#: `SchemaMode.isolated(isolation="role")` used to be a word this codebase
-#: accepted and never read. Importing this module is what makes it mean
-#: something; `tests/tenancy/` is what says it did.
 ROLE_ISOLATION_IMPLEMENTED = True
 
 #: The `source` name `wreath doctor preflight` files tenancy findings under.

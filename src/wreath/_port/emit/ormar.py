@@ -161,11 +161,6 @@ class _OrmarModels(_EmitterState):
             and isinstance(stmt, ast.AnnAssign)
             and isinstance(stmt.value, ast.Call)
         ]
-        # The nullability reminder used to go on every model, whether or not the
-        # model left anything unsaid. It now goes only on models with a column
-        # that states neither `nullable=` nor `primary_key=` — the ones where the
-        # answer really did change, because ormar defaults a column to nullable
-        # and wreath defaults it to NOT NULL.
         unstated = [
             stmt.target.id
             for stmt, call in columns
@@ -198,13 +193,7 @@ class _OrmarModels(_EmitterState):
             self._rewrite_unannotated_ormar_column(stmt, call)
 
     def _rewrite_ormar_config(self, node: ast.ClassDef, config_stmt: ast.Assign) -> None:
-        """Delete `ormar_config = …`, but not the constraints hanging off it.
-
-        `constraints=[ormar.UniqueColumns("name", "ranch")]` is a real UNIQUE
-        index in the database, and the whole statement used to be deleted with
-        no note at all — the port came out looking complete and quietly dropped
-        31 constraints. Each one becomes a wreath declaration of the same shape.
-        """
+        """Delete `ormar_config = …`, but not the constraints hanging off it."""
         indent = self.buf.line_indent(config_stmt.lineno)
         lines: list[str] = []
         unread: list[str] = []
@@ -340,15 +329,7 @@ class _OrmarModels(_EmitterState):
         return name
 
     def _ormar_kwargs(self, stmt: ast.AnnAssign | ast.Assign, call: ast.Call) -> list[str]:
-        """The `column(...)` arguments one ormar column's keywords become.
-
-        Anything with a wreath home is carried; anything that only described the
-        column for a schema is dropped without a word; and whatever is left over
-        earns one note that names it. That last list used to include
-        `max_length=` and `description=`, which between them accounted for 366
-        of the 632 notes this emitter wrote — one on nearly every column in the
-        tree, for two keywords that need no decision at all.
-        """
+        """The `column(...)` arguments one ormar column's keywords become."""
         out: list[str] = []
         dropped: list[str] = []
         checks: list[str] = []

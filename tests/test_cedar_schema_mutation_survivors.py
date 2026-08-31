@@ -13,22 +13,22 @@ from wreath._auth.cedar_schema import (
 
 
 def test_statement_parser_keeps_nested_and_escaped_semicolons_together() -> None:
-    source = 'type R = {"quoted\\\";name": String, nested: Set<{x: Long}>}; action "a";'
+    source = 'type R = {"quoted\\";name": String, nested: Set<{x: Long}>}; action "a";'
     assert _statements(source) == (
-        'type R = {"quoted\\\";name": String, nested: Set<{x: Long}>}',
+        'type R = {"quoted\\";name": String, nested: Set<{x: Long}>}',
         'action "a"',
     )
 
 
 def test_statement_parser_ignores_empty_statements() -> None:
-    assert _statements(" ; action \"read\"; ;") == ('action "read"',)
+    assert _statements(' ; action "read"; ;') == ('action "read"',)
 
 
 @pytest.mark.parametrize(
     ("source", "message"),
     [
         ('action "read"', "missing ';'"),
-        ('type R = {x: String;', "missing ';'"),
+        ("type R = {x: String;", "missing ';'"),
         ('action "read;', "missing ';'"),
     ],
 )
@@ -81,7 +81,7 @@ def test_schema_refuses_namespaces_and_unsupported_declarations() -> None:
 
 
 def test_schema_parses_empty_and_explicit_entity_records() -> None:
-    schema = CedarSchema("entity Empty; entity User = {name: String}; action \"read\";")
+    schema = CedarSchema('entity Empty; entity User = {name: String}; action "read";')
     assert schema._entities == {
         "Empty": _Record({}),
         "User": _Record({"name": "String"}),
@@ -95,7 +95,7 @@ def test_schema_refuses_an_entity_body_that_is_not_a_record() -> None:
 
 def test_schema_action_parser_ignores_non_context_entries_and_reads_context() -> None:
     schema = CedarSchema(
-        'type Context = {tenant: String}; '
+        "type Context = {tenant: String}; "
         'action "read" appliesTo {principal: User, resource: Doc, context: Context};'
     )
     assert schema.contexts({"read"}) == (_Record({"tenant": "String"}),)
@@ -103,8 +103,7 @@ def test_schema_action_parser_ignores_non_context_entries_and_reads_context() ->
 
 def test_schema_context_requires_a_separator_and_exact_context_key() -> None:
     schema = CedarSchema(
-        'action "read" appliesTo {'
-        'contextual: {wrong: String}, context {bad: String}, context};'
+        'action "read" appliesTo {contextual: {wrong: String}, context {bad: String}, context};'
     )
     assert schema.contexts({"read"}) == (None,)
 

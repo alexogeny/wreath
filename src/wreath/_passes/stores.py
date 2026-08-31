@@ -1,11 +1,7 @@
 """The purge pass a :mod:`wreath.store` declaration implies.
 
-Three of Wreath's own tables -- idempotency replays, rate-limit buckets, server
-side sessions -- are keyed stores that need expired rows dropped forever. That is
-a recurring pass with no gate, over exactly the tables that get large in the
-deployments where getting it wrong matters, and writing it once here is the same
-argument :mod:`wreath.store` itself makes about the six disciplines its three
-callers used to re-derive.
+Idempotency replays, rate-limit buckets, and server-side sessions share this
+bounded keyset purge declaration.
 
 The key is ``(stamp, key)``: the stamp because that is the ordered domain the
 frontier is measured in, and the primary key appended as a tiebreaker because a

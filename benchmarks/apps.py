@@ -49,17 +49,6 @@ if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
 
     app = Wreath()
 
-    # The literal tokens the `auth-*` scenarios have always sent, and a real
-    # HS256 verifier behind them. The two string compares run first and
-    # short-circuit, so every previously recorded `auth-*` number is measuring
-    # exactly the work it measured before; only a token that is neither falls
-    # through to the JWT path.
-    # That path is here because it is the one native accelerator the whole
-    # scenario suite otherwise never reaches. `ws-echo` exercises the masking
-    # arm, `template` the HTML-escape arm, `json`/`json-body` the JSON scanner
-    # -- but every `auth-*` scenario compared a literal string, so `jose_parse`,
-    # `jose_verify_hs`, `jose_validate_claims` and the vectorised
-    # `jose_b64url_decode` under them were shipped unmeasured.
     _JWT_SECRET = b"wreath-benchmark-hs256-secret-0123456789"
 
     _jwt_verifier = JwtVerifier(

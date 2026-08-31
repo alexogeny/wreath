@@ -106,9 +106,7 @@ def test_strict_build_parses_fenced_wreath_commands_with_the_live_cli(tmp_path) 
     site = _site(tmp_path)
     guide = tmp_path / "docs" / "guides" / "routing.md"
     guide.write_text(
-        "# Routing\n\n```bash\n"
-        "WREATH_HOST=0.0.0.0 uv run wreath serve app:app --workers 4\n"
-        "```\n"
+        "# Routing\n\n```bash\nWREATH_HOST=0.0.0.0 uv run wreath serve app:app --workers 4\n```\n"
     )
 
     report = build(site, root=tmp_path)
@@ -128,9 +126,7 @@ def test_strict_build_parses_fenced_wreath_commands_with_the_live_cli(tmp_path) 
 def test_strict_build_checks_nested_cli_arguments(tmp_path) -> None:
     site = _site(tmp_path)
     (tmp_path / "docs" / "guides" / "routing.md").write_text(
-        "# Routing\n\n```bash\n"
-        "wreath capture /run/wreath/app.sock disarm 17\n"
-        "```\n"
+        "# Routing\n\n```bash\nwreath capture /run/wreath/app.sock disarm 17\n```\n"
     )
 
     report = build(site, root=tmp_path)
@@ -265,8 +261,6 @@ def test_search_index_is_written(tmp_path) -> None:
     # section the reader asked for, and its own text is the result snippet.
     section = next(s for s in index["s"] if s["p"] == page_id and s["a"] == "basics")
     assert section["h"] == "Basics"
-    # The body is prose only: the heading lives in its own field, and the `#`
-    # permalink is chrome. Both used to lead every snippet ("Basics # text").
     assert section["x"] == "text"
     routing = (tmp_path / "site" / "guides" / "routing.html").read_text()
     assert 'id="docs-search"' in routing and 'data-root="../"' in routing
@@ -561,10 +555,6 @@ def test_chart_colors_wreath_arms_distinctly() -> None:
         "t",
         "",
     )
-    # The arms differ by how much of the stack is native, which is an ordered
-    # quantity, so they are one hue at three strengths rather than three hues.
-    # Two of the four used to be hard-coded hexes and went off-palette in every
-    # theme but the default.
     bars = re.findall(r"<rect x=\"168\"[^>]*fill=\"([^\"]+)\"", svg)
     arms = [fill for fill in bars if "primary" in fill]
     assert len(arms) == 3 and len(set(arms)) == 3, arms
@@ -1005,10 +995,14 @@ def test_a_hero_can_name_the_signals_it_demonstrates() -> None:
 def test_story_cards_are_link_checked_and_bounded(tmp_path) -> None:
     from wreath._docs import cards
 
-    source = "```cards\n" + "\n".join(
-        f"card: Story {index} | A system under pressure. | story-{index}.md | realtime"
-        for index in range(14)
-    ) + "\n```\n"
+    source = (
+        "```cards\n"
+        + "\n".join(
+            f"card: Story {index} | A system under pressure. | story-{index}.md | realtime"
+            for index in range(14)
+        )
+        + "\n```\n"
+    )
     _, tokens = cards.extract(source)
     rendered = next(iter(tokens.values()))
     assert rendered.count('class="story-card"') == 12

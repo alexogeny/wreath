@@ -576,9 +576,7 @@ def run_native_baseline(
                 if watched:
                     tracer.stop()
             traced_failures = tuple(
-                result.node_id
-                for result in results
-                if result.outcome in {"failed", "interrupted"}
+                result.node_id for result in results if result.outcome in {"failed", "interrupted"}
             )
             if watched and traced_failures:
                 retried = _retry_native_results(tuple(result.node_id for result in results))

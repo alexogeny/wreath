@@ -19,9 +19,7 @@ def _walk(source: str, *, settings: frozenset[str] = frozenset()) -> _Emitter:
 
 def _body(source: str, *, opinionated: bool = True) -> str:
     emitted = port.emit_module(source, opinionated=opinionated)
-    return "\n".join(
-        line for line in emitted.splitlines() if not line.startswith("# wreath-port:")
-    )
+    return "\n".join(line for line in emitted.splitlines() if not line.startswith("# wreath-port:"))
 
 
 def test_partial_model_family_closes_over_ancestors_and_descendants() -> None:
@@ -646,18 +644,13 @@ def test_removed_custom_middleware_import_keeps_unrelated_aliases() -> None:
 
     body = _body(source)
 
-    assert (
-        "from middleware.ratelimiter import RateLimitingMiddleware, Other as Kept" in body
-    )
+    assert "from middleware.ratelimiter import RateLimitingMiddleware, Other as Kept" in body
     assert "InMemoryLimitProvider" not in body
     assert "callback = RateLimitingMiddleware" in body
 
 
 def test_test_client_import_is_swapped_to_wreath() -> None:
-    source = (
-        "from starlette.testclient import TestClient\n"
-        "client = TestClient(app)\n"
-    )
+    source = "from starlette.testclient import TestClient\nclient = TestClient(app)\n"
 
     body = _body(source)
 

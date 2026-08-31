@@ -72,8 +72,6 @@ def test_large_clock_jump_fires_overdue_in_order_and_preserves_future_timer():
     for deadline in (30.0, 5.0, 90_000.0, 17.0):
         w.schedule(deadline, lambda value=deadline: fired.append(value))
 
-    # Simulate resuming after a one-day machine suspend. This used to walk all
-    # 86.4 million elapsed ticks before returning to the event loop.
     for callback in w.advance(86_400.0):
         callback()
 

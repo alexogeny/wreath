@@ -513,11 +513,7 @@ def _strip_frontmatter(lines: list[str]) -> list[str]:
 
 
 def _is_table(lines: list[str], i: int) -> bool:
-    return (
-        i + 1 < len(lines)
-        and "|" in lines[i]
-        and _parse_table_aligns(lines[i + 1]) is not None
-    )
+    return i + 1 < len(lines) and "|" in lines[i] and _parse_table_aligns(lines[i + 1]) is not None
 
 
 def _table_row(line: str) -> list[str]:
@@ -570,9 +566,7 @@ def _parse_table_aligns(line: str) -> list[str] | None:
         hyphens = spec.removeprefix(":").removesuffix(":")
         if not hyphens or hyphens.strip("-"):
             return None
-        aligns.append(
-            "center" if left and right else "right" if right else "left" if left else ""
-        )
+        aligns.append("center" if left and right else "right" if right else "left" if left else "")
     return aligns
 
 

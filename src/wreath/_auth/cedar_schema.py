@@ -248,9 +248,7 @@ class CedarSchema:
             parent_match = re.match(r"\s*in\s*\[(?P<parents>[^]]*)\]", body, re.S)
             parents = ()
             if parent_match is not None:
-                parents = tuple(
-                    re.findall(r'"((?:\\.|[^"\\])*)"', parent_match.group("parents"))
-                )
+                parents = tuple(re.findall(r'"((?:\\.|[^"\\])*)"', parent_match.group("parents")))
             context: Any | None = None
             applies = re.search(r"appliesTo\s*\{(?P<body>.*)\}\s*$", body, re.S)
             if applies is not None:

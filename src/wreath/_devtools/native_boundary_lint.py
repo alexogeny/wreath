@@ -101,9 +101,7 @@ def scan_text(path: str, text: str) -> list[Finding]:
             and (recursive_calls >= 2 or EXECUTOR_NAME.search(function))
             and not _only_called_by_builders(function, by_function, code_lines)
         ):
-            anchor = next(
-                index for index in indexes if BOXED_OPCODE.search(code_lines[index])
-            )
+            anchor = next(index for index in indexes if BOXED_OPCODE.search(code_lines[index]))
             if "NB001" not in waived.get(anchor + 1, ()):
                 rule = RULES["NB001"]
                 findings.append(Finding(path, anchor + 1, rule.code, rule.summary, rule.hint))
@@ -120,9 +118,7 @@ def scan_text(path: str, text: str) -> list[Finding]:
                 anchor = calls[0][0]
                 if "NB002" not in waived.get(anchor + 1, ()):
                     rule = RULES["NB002"]
-                    findings.append(
-                        Finding(path, anchor + 1, rule.code, rule.summary, rule.hint)
-                    )
+                    findings.append(Finding(path, anchor + 1, rule.code, rule.summary, rule.hint))
 
     return sorted(findings, key=lambda finding: (finding.path, finding.line, finding.code))
 

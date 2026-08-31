@@ -165,8 +165,7 @@ def serialize_dictionary(members: Mapping[str, Item]) -> bytes:
             raise ValueError(f"invalid structured dictionary member name {name!r}")
         if not isinstance(item, Item):
             raise TypeError(
-                f"structured dictionary member {name!r} must be Item, not "
-                f"{type(item).__name__}"
+                f"structured dictionary member {name!r} must be Item, not {type(item).__name__}"
             )
         member = bytearray(name.encode("ascii"))
         if item.value is not True:

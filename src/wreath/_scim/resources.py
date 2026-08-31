@@ -255,6 +255,24 @@ def list_response(
     }
 
 
+def cursor_list_response(
+    resources: list[dict[str, Any]],
+    *,
+    total: int,
+    next_cursor: str = "",
+) -> dict[str, Any]:
+    """The RFC 9865 cursor form of a SCIM `ListResponse`."""
+    response: dict[str, Any] = {
+        "schemas": [LIST_RESPONSE_URN],
+        "totalResults": total,
+        "itemsPerPage": len(resources),
+        "Resources": resources,
+    }
+    if next_cursor:
+        response["nextCursor"] = next_cursor
+    return response
+
+
 def error_document(status: int, detail: str, scim_type: str | None = None) -> dict[str, Any]:
     """The error document of section 3.12. `status` is a string on the wire."""
     body: dict[str, Any] = {"schemas": [ERROR_URN], "status": str(status)}
@@ -265,7 +283,13 @@ def error_document(status: int, detail: str, scim_type: str | None = None) -> di
 
 
 def service_provider_config(
-    *, base: str, max_results: int, scheme: dict[str, Any]
+    *,
+    base: str,
+    max_results: int,
+    scheme: dict[str, Any],
+    default_page_size: int,
+    max_page_size: int,
+    cursor_timeout: int,
 ) -> dict[str, Any]:
     """What this provider supports, per section 5 of RFC 7643.
 
@@ -283,6 +307,14 @@ def service_provider_config(
         "sort": {"supported": True},
         "etag": {"supported": False},
         "authenticationSchemes": [scheme],
+        "pagination": {
+            "cursor": True,
+            "index": True,
+            "defaultPaginationMethod": "index",
+            "defaultPageSize": default_page_size,
+            "maxPageSize": max_page_size,
+            "cursorTimeout": cursor_timeout,
+        },
         "meta": {
             "resourceType": "ServiceProviderConfig",
             "location": f"{base}/ServiceProviderConfig",

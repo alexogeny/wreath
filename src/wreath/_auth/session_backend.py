@@ -74,11 +74,6 @@ class SessionIdentityBackend:
         # who never proved the second factor.
         if principal.get("pending"):
             return None
-        # An SSO session used to last the *cookie's* max_age -- 14 days by
-        # default -- whatever the identity provider said about the token it was
-        # minted from. When the login flow recorded an `exp`, honour it: the
-        # provider's answer to "how long is this person signed in" should not be
-        # overridden by a cookie setting nobody connected to it.
         expires = principal.get("exp")
         if isinstance(expires, (int, float)) and not isinstance(expires, bool):
             import time

@@ -105,9 +105,7 @@ redirect("/next", 303)
             (8, "port.http.redirect"): 1,
         }
     )
-    assert _findings("Bottle()\n", {"bottle", "gevent"}) == Counter(
-        {(1, "foreign.bottle.app"): 1}
-    )
+    assert _findings("Bottle()\n", {"bottle", "gevent"}) == Counter({(1, "foreign.bottle.app"): 1})
 
 
 def test_aiohttp_rules_require_their_full_shapes() -> None:
@@ -372,9 +370,7 @@ socket.create_connection(address)
 
 
 def test_same_rule_and_line_is_emitted_once() -> None:
-    assert _findings("g.first; g.second\n", {"flask"}) == Counter(
-        {(1, "foreign.flask.proxy"): 1}
-    )
+    assert _findings("g.first; g.second\n", {"flask"}) == Counter({(1, "foreign.flask.proxy"): 1})
 
 
 def test_no_framework_or_monkeypatch_has_no_findings() -> None:
@@ -539,12 +535,8 @@ abort(404)
 redirect("/x")
 """
 
-    assert _findings(source, {"aiohttp", "gevent"}) == Counter(
-        {(1, "foreign.aiohttp.route"): 1}
-    )
-    assert _findings(source, {"flask", "gevent"}) == Counter(
-        {(1, "foreign.flask.route"): 1}
-    )
+    assert _findings(source, {"aiohttp", "gevent"}) == Counter({(1, "foreign.aiohttp.route"): 1})
+    assert _findings(source, {"flask", "gevent"}) == Counter({(1, "foreign.flask.route"): 1})
 
 
 def test_django_atomic_rejects_non_default_and_unresolved_calls() -> None:
@@ -557,9 +549,7 @@ with transaction.atomic(using="replica"):
     assert _findings(source, {"django"}, with_imports=True) == Counter(
         {(2, "foreign.django.api"): 1}
     )
-    assert _findings(
-        "with transaction.atomic():\n    write()\n", {"django"}
-    ) == Counter()
+    assert _findings("with transaction.atomic():\n    write()\n", {"django"}) == Counter()
 
 
 def test_blocking_origins_require_a_monkeypatch() -> None:
@@ -590,11 +580,14 @@ class Socket(WebSocketHandler):
     def open(self): pass
 """
 
-    assert _findings(
-        source,
-        {"flask"},
-        class_bases={"Socket": ["WebSocketHandler"]},
-    ) == Counter()
+    assert (
+        _findings(
+            source,
+            {"flask"},
+            class_bases={"Socket": ["WebSocketHandler"]},
+        )
+        == Counter()
+    )
 
 
 def test_django_inherited_api_requires_family_membership() -> None:
@@ -603,12 +596,15 @@ class Plain(object):
     def method(self): return self.unknown
 """
 
-    assert _findings(
-        source,
-        {"django"},
-        class_bases={"Plain": ["object"]},
-        class_members={"Plain": {"method"}},
-    ) == Counter()
+    assert (
+        _findings(
+            source,
+            {"django"},
+            class_bases={"Plain": ["object"]},
+            class_members={"Plain": {"method"}},
+        )
+        == Counter()
+    )
 
 
 def test_pyramid_acl_targets_must_be_names() -> None:

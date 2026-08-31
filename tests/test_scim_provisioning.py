@@ -35,6 +35,7 @@ when { context.org_roles.contains("acme:admin") };
 """
 
 PATCH_BODY = "urn:ietf:params:scim:api:messages:2.0:PatchOp"
+SEARCH_BODY = "urn:ietf:params:scim:api:messages:2.0:SearchRequest"
 
 
 def _identity_for(token: str, directory_identity: Identity) -> Identity | None:
@@ -126,6 +127,14 @@ async def test_the_service_provider_config_describes_this_implementation() -> No
     assert body["etag"]["supported"] is False
     assert body["authenticationSchemes"][0]["type"] == "oauthbearertoken"
     assert body["meta"]["location"].endswith("/scim/v2/ServiceProviderConfig")
+    assert body["pagination"] == {
+        "cursor": True,
+        "index": True,
+        "defaultPaginationMethod": "index",
+        "defaultPageSize": 100,
+        "maxPageSize": 200,
+        "cursorTimeout": 3600,
+    }
 
 
 @pytest.mark.asyncio
@@ -477,6 +486,167 @@ async def test_a_list_is_a_list_response_with_one_based_paging() -> None:
         "user1@example.com",
         "user2@example.com",
     ]
+
+
+@pytest.mark.asyncio
+async def test_cursor_pagination_walks_users_without_exposing_an_index() -> None:
+    async with directory().client() as client:
+        for index in range(5):
+            await provision(client, f"user{index}@example.com")
+        first = (await client.get("/scim/v2/Users?cursor&count=2", headers=AUTH)).json()
+        second = (
+            await client.get(
+                f"/scim/v2/Users?cursor={first['nextCursor']}&count=2",
+                headers=AUTH,
+            )
+        ).json()
+        third = (
+            await client.get(
+                f"/scim/v2/Users?cursor={second['nextCursor']}&count=2",
+                headers=AUTH,
+            )
+        ).json()
+    assert [row["userName"] for row in first["Resources"]] == [
+        "user0@example.com",
+        "user1@example.com",
+    ]
+    assert [row["userName"] for row in second["Resources"]] == [
+        "user2@example.com",
+        "user3@example.com",
+    ]
+    assert [row["userName"] for row in third["Resources"]] == ["user4@example.com"]
+    assert "startIndex" not in first
+    assert "startIndex" not in second
+    assert "nextCursor" not in third
+
+
+@pytest.mark.asyncio
+async def test_cursor_pagination_is_available_to_post_search_requests() -> None:
+    async with directory().client() as client:
+        for index in range(3):
+            await provision(client, f"user{index}@example.com")
+        first = (
+            await client.post(
+                "/scim/v2/Users/.search",
+                json={"schemas": [SEARCH_BODY], "cursor": "", "count": 2},
+                headers=AUTH,
+            )
+        ).json()
+        second = (
+            await client.post(
+                "/scim/v2/Users/.search",
+                json={
+                    "schemas": [SEARCH_BODY],
+                    "cursor": first["nextCursor"],
+                    "count": 2,
+                },
+                headers=AUTH,
+            )
+        ).json()
+    assert [row["userName"] for row in first["Resources"]] == [
+        "user0@example.com",
+        "user1@example.com",
+    ]
+    assert [row["userName"] for row in second["Resources"]] == ["user2@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_post_search_refuses_an_invalid_message_shape() -> None:
+    async with directory().client() as client:
+        wrong_schema = await client.post(
+            "/scim/v2/Users/.search",
+            json={"schemas": ["wrong"], "cursor": ""},
+            headers=AUTH,
+        )
+        wrong_cursor = await client.post(
+            "/scim/v2/Users/.search",
+            json={"schemas": [SEARCH_BODY], "cursor": 7},
+            headers=AUTH,
+        )
+    assert wrong_schema.status == 400
+    assert wrong_schema.json()["scimType"] == "invalidSyntax"
+    assert wrong_cursor.status == 400
+    assert wrong_cursor.json()["scimType"] == "invalidValue"
+
+
+@pytest.mark.asyncio
+async def test_post_search_supports_group_cursors() -> None:
+    async with directory().client() as client:
+        first = (
+            await client.post(
+                "/scim/v2/Groups/.search",
+                json={"schemas": [SEARCH_BODY], "cursor": "", "count": 2},
+                headers=AUTH,
+            )
+        ).json()
+        second = (
+            await client.post(
+                "/scim/v2/Groups/.search",
+                json={
+                    "schemas": [SEARCH_BODY],
+                    "cursor": first["nextCursor"],
+                    "count": 2,
+                },
+                headers=AUTH,
+            )
+        ).json()
+    assert len(first["Resources"]) == 2
+    assert len(second["Resources"]) == 1
+    assert "nextCursor" not in second
+
+
+@pytest.mark.asyncio
+async def test_cursor_errors_distinguish_count_syntax_and_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import wreath._scim.router as router_module
+
+    now = 1_000_000
+    monkeypatch.setattr(router_module.time, "time", lambda: now)
+    fixture = Provisioned(Identity("directory"), cursor_timeout=1)
+    async with fixture.client() as client:
+        for index in range(2):
+            await provision(client, f"user{index}@example.com")
+        invalid_count = await client.get(
+            "/scim/v2/Users?cursor&count=not-an-integer", headers=AUTH
+        )
+        first = (await client.get("/scim/v2/Users?cursor&count=1", headers=AUTH)).json()
+        now += 2
+        expired = await client.get(
+            f"/scim/v2/Users?cursor={first['nextCursor']}&count=1", headers=AUTH
+        )
+    assert invalid_count.status == 400
+    assert invalid_count.json()["scimType"] == "invalidCount"
+    assert expired.status == 400
+    assert expired.json()["scimType"] == "expiredCursor"
+
+
+@pytest.mark.asyncio
+async def test_cursor_is_bound_to_the_initial_count_and_query() -> None:
+    async with directory().client() as client:
+        for index in range(3):
+            await provision(client, f"user{index}@example.com")
+        first = (await client.get("/scim/v2/Users?cursor&count=1", headers=AUTH)).json()
+        cursor = first["nextCursor"]
+        changed_count = await client.get(
+            f"/scim/v2/Users?cursor={cursor}&count=2", headers=AUTH
+        )
+        changed_filter = await client.get(
+            f'/scim/v2/Users?cursor={cursor}&count=1&filter=userName%20sw%20"u"',
+            headers=AUTH,
+        )
+    assert changed_count.status == 400
+    assert changed_count.json()["scimType"] == "invalidCount"
+    assert changed_filter.status == 400
+    assert changed_filter.json()["scimType"] == "invalidCursor"
+
+
+@pytest.mark.asyncio
+async def test_a_forged_cursor_is_refused() -> None:
+    async with directory().client() as client:
+        response = await client.get("/scim/v2/Users?cursor=forged.value&count=2", headers=AUTH)
+    assert response.status == 400
+    assert response.json()["scimType"] == "invalidCursor"
 
 
 @pytest.mark.asyncio

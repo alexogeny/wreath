@@ -159,15 +159,6 @@ def _declared_by(app: Any, holder: Any) -> str:
 def _component_owners(app: Any) -> list[tuple[Any, Any, str]]:
     """`(database, component, declared_by)` for every subsystem that owns tables.
 
-    The holder walk is `wreath.app.walk_claims`, shared with
-    `Wreath.schema_components`, and the attribution is `Wreath._schema_database`.
-    Inference used to own a third copy of the walk plus a `_held_database` that
-    guessed among `_db`, `_database` and `database`, because the subsystems had
-    never been made to agree on a name. Both are gone: an owner now *says* which
-    database it belongs to, either because the application recorded the
-    declaration that built it or because it answers `schema_database`, so there
-    is nothing left to guess at and no fourth name to miss when one is added.
-
     The single-database fallback is kept only for owners that genuinely hold no
     database -- a webhook hub is handed a session per call and never sees one.
     A claim that still cannot be attributed comes back with `None` rather than

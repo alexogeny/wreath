@@ -4,16 +4,13 @@ name: ci
 # build. Benchmarks are not run here — they live in benchmarks/, are
 # never collected by pytest (testpaths = ["tests"]), and are regenerated on the
 # maintainer's host, not in CI.
-#
 # **One sync, not three.** Measured on run 31304072652 (9 Aug), when this was
 # three parallel jobs: lint 38s (27s of it sync), docs-build 44s (30s sync),
 # test 113s (26s sync, 78s tests) — 113s wall, 195s compute, with the same
 # extension built three times from an identical tree.
-#
 # Ruff and ty together cost 2s. They are free when they are not each paying a
 # 27s sync for the privilege, so they moved in behind the sync the tests were
 # already doing.
-#
 # **This buys compute, not wall clock.** Each job carries ~7s of fixed overhead
 # (set up, checkout, setup-uv, teardown), so folding lint into the test job puts
 # the critical path at roughly 7 + 27 + 2 + 78 = ~115s against today's 113s —
@@ -21,13 +18,11 @@ name: ci
 # of three: ~115s of compute rather than 195s, a 41% cut, and ~159s on a push to
 # main where the docs job also runs. Those two figures are projections from the
 # per-step timings above; the first run on this workflow is what confirms them.
-#
 # The rejected alternative was a `setup` job publishing the build as an
 # artifact. It loses on both axes: a venv carrying ruff, ty, grpcio and
 # cryptography is too big to upload and download cheaply, and shipping only the
 # wheel still puts `test` behind an upstream job — so wall clock goes *up* to
 # ~116s to save less compute than simply merging the jobs does.
-#
 # The 27s itself is already the fixed version: `setup.py` defaults `build_ext`
 # to one worker per core, which took the extension build from 44s to 27s here.
 # The remainder is dominated by the `-flto` link of `_core`, which parallelism
@@ -125,7 +120,6 @@ jobs:
         # Default marks exclude fuzz/performance/network. The suite is ~14,500
         # tests, so it runs parallel: `wreath test` picks min(8, cpu_count)
         # workers, which is 4 on a public-repo ubuntu-latest.
-        #
         # `--mutant off` is load-bearing. The default is a 192-control mutation
         # sample with a 50-second post-suite ceiling plus live mutant children
         # competing for cores; that belongs on a maintainer's machine, not in

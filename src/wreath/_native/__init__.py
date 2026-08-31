@@ -75,21 +75,11 @@ def extension(name: str) -> Any | None:
             raise
         if name in _REQUIRED_EXTENSIONS:
             raise ImportError(
-                f"{module_name} is missing from this installation; "
-                "install a compiled Wreath wheel"
+                f"{module_name} is missing from this installation; install a compiled Wreath wheel"
             ) from error
         return None
 
 
-# Any-typed: the compiled module is invisible to static analysis.
-# `_core` is the one eager load. Nearly every facade
-# wants it, so the dlopen is paid once here rather than discovered as an
-# `AttributeError` deep in a request. Everything else waits for a caller that
-# means it -- `_client`'s module init alone imports `asyncio`, which brings
-# `ssl`, `subprocess`, `logging`, `inspect` and `dataclasses` with it and
-# measured at 74 ms of the 118 ms `import wreath._native._core` used to cost,
-# charged to every subprocess and every xdist worker for a client most of them
-# never open.
 _core: Any = extension("_core")
 
 

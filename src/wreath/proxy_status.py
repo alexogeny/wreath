@@ -9,9 +9,7 @@ from ._structured_fields import BareItem, Item, Token, serialize_item
 
 __all__ = ["ProxyStatus"]
 
-_URI_UNRESERVED = frozenset(
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
-)
+_URI_UNRESERVED = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 
 
 def _text(value: str, name: str, *, non_empty: bool = False) -> str:

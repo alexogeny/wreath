@@ -313,8 +313,6 @@ class MessageBus:
         #: Durable publishes that found no group anywhere. Was silent; now the
         #: one remaining way to lose a message is at least countable.
         self.unrouted_publishes = 0
-        #: Failed reads of / writes to the group registry. Non-zero almost
-        #: always means `schema_sql()` was never applied.
         self.group_registry_errors = 0
         #: Exceptions raised by *ephemeral* subscriber callbacks. Fire-and-forget
         #: delivery has nowhere else to put them -- a durable handler's failure
@@ -453,9 +451,8 @@ class MessageBus:
         Union, not replace, because the failures are not symmetric: a duplicate
         copy goes to a group that demonstrably has a consumer (this process
         registered it) and durable delivery is at-least-once regardless, so
-        handlers already tolerate one. A missing copy is silent. The union is
-        also what makes this change safe to deploy before the DDL is applied --
-        with no registry table, the result is exactly what it was before.
+        handlers already tolerate one. A missing copy is silent. With no
+        registry table, the union contains only local groups.
         """
         local = {
             sub.group for sub in self._subs if sub.channel == channel and sub.durable and sub.group

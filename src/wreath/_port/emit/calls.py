@@ -139,14 +139,6 @@ class _CallRewrite(
             and not orm_query_call
             and not any(kw.arg == _SESSION_PARAM for kw in node.keywords)
         ):
-            # The callee gained a session parameter, so this call has to pass
-            # one. Doing the signature and leaving the call is the half-port
-            # that fails on its first request; `--opinionated` means both ends.
-            # A ``Model.objects.create(...)`` call is not a call to a local
-            # function named ``create``. The query rewriter below owns its
-            # complete span and turns it into ``session.create(Model, ...)``;
-            # inserting a keyword here overlaps that replacement and used to
-            # leave the old manager call behind in the emitted tree.
             self._pass_session(node)
         if (
             isinstance(func, ast.Attribute)

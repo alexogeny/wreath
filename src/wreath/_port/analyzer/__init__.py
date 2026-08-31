@@ -177,15 +177,7 @@ class TreeContext:
 def module_findings(
     path: Path, root: Path, tree: ast.Module, imports: _Imports, context: TreeContext
 ) -> list[Finding]:
-    """Every finding for one already-parsed module.
-
-    Shared with the emitter. The emitter used to carry its own copy of each
-    detector, and the two drifted apart exactly as you would expect: 23 rules
-    and 794 findings appeared in the report and nowhere in the ported files, so
-    a porter reading their own code saw no sign of 160 hand-written SQL
-    migrations or 87 pandas modules. Deriving both from this makes that class of
-    gap impossible rather than merely fixed.
-    """
+    """Every finding for one already-parsed module."""
     analyzer = _Analyzer(
         path,
         root,
@@ -284,12 +276,7 @@ def analyze_all(roots) -> Report:
 
 
 def detect_roots(roots) -> Detection | None:
-    """Name the stack without running any rule — emit mode's pre-flight.
-
-    Emit does not otherwise analyze, so it used to write a full ported tree for
-    an application in a framework this tool does not translate without ever
-    saying so. Reading imports is the cheapest question that catches it.
-    """
+    """Name the stack without running any rule — emit mode's pre-flight."""
     parts = []
     for raw_root in roots:
         root = Path(raw_root)

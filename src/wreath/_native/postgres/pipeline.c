@@ -1223,300 +1223,326 @@ schedule_flush(PyObject *self)
     return 0;
 }
 
-static int
-do_flush(PyObject *self)
-{
+typedef struct {
     PyObject *waiting;
     PyObject *emitted;
-    PyObject *packets = NULL;
-    PyObject *operations = NULL;
-    PyObject *single_packet = NULL;
-    PyObject *single_operation = NULL;
-    Py_ssize_t available;
-    Py_ssize_t batch_size = 0;
-    Py_ssize_t emitted_now = 0;
+    PyObject *packets;
+    PyObject *operations;
+    PyObject *single_packet;
+    PyObject *single_operation;
+    Py_ssize_t batch_size;
+    Py_ssize_t emitted_now;
     Py_ssize_t waiting_live;
-    Py_ssize_t max_emitted;
-    Py_ssize_t max_batch;
-    int failed = 0;
+} FlushBatch;
 
-    slot_set(self, conn_off.flush_handle, Py_None);
+static void
+flush_batch_clear(FlushBatch *batch)
+{
+    Py_XDECREF(batch->packets);
+    Py_XDECREF(batch->operations);
+    Py_XDECREF(batch->single_packet);
+    Py_XDECREF(batch->single_operation);
+}
 
-    if (slot_is_true(self, conn_off.closed) ||
-        slot_is_true(self, conn_off.write_blocked)) return 0;
-    waiting_live = slot_as_ssize(self, conn_off.waiting_live, "_waiting_live");
-    if (waiting_live < 0) return PyErr_Occurred() ? -1 : 0;
-    if (waiting_live == 0) return 0;
-
-    max_emitted = class_bound(self, str_max_emitted);
-    max_batch = class_bound(self, str_max_outbound);
-    if (max_emitted < 0 || max_batch < 0) return -1;
-
-    waiting = SLOT_BORROW(self, conn_off.waiting, "_waiting");
-    emitted = SLOT_BORROW(self, conn_off.emitted, "_emitted");
-    if (waiting == NULL || emitted == NULL) return -1;
-
-    available = max_emitted - operation_queue_size(emitted);
-    if (available <= 0) return PyErr_Occurred() ? -1 : 0;
-
-    while (operation_queue_size(waiting) > 0 && emitted_now < available) {
-        PyObject *operation = operation_queue_getitem(waiting, 0);
-        PyObject *state;
-        PyObject *packet;
-        Py_ssize_t packet_size;
-        int cancelled;
-
-        if (operation == NULL) goto error;
-        state = SLOT(operation, op_off.state);
-        /* Tombstones left by `_cancel_operation`. Drained here rather than
-           removed there, and skipped before the batch-size test so a cancelled
-           operation's packet cannot end a batch it will never join. */
-        if (state == str_cancelled) {
-            PyObject *dropped = operation_queue_popleft(waiting);
+static int
+flush_collect(PyObject *self, FlushBatch *batch, Py_ssize_t available,
+              Py_ssize_t max_batch)
+{
+    while (operation_queue_size(batch->waiting) > 0 &&
+           batch->emitted_now < available) {
+        PyObject *operation = operation_queue_getitem(batch->waiting, 0);
+        if (operation == NULL) return -1;
+        if (SLOT(operation, op_off.state) == str_cancelled) {
+            PyObject *dropped = operation_queue_popleft(batch->waiting);
             Py_DECREF(operation);
-            if (dropped == NULL) goto error;
+            if (dropped == NULL) return -1;
             Py_DECREF(dropped);
             continue;
         }
-        packet = SLOT(operation, op_off.packet);
-        packet_size = packet == NULL ? 0 : PyBytes_Size(packet);
-        if (packet_size < 0) { Py_DECREF(operation); goto error; }
-        if (emitted_now > 0 && batch_size + packet_size > max_batch) {
+        PyObject *packet = SLOT(operation, op_off.packet);
+        Py_ssize_t packet_size = packet == NULL ? 0 : PyBytes_Size(packet);
+        if (packet_size < 0) {
+            Py_DECREF(operation);
+            return -1;
+        }
+        if (batch->emitted_now > 0 &&
+            batch->batch_size + packet_size > max_batch) {
             Py_DECREF(operation);
             break;
         }
-        {
-            PyObject *dropped = operation_queue_popleft(waiting);
-            if (dropped == NULL) { Py_DECREF(operation); goto error; }
-            Py_DECREF(dropped);
-        }
-        waiting_live -= 1;
-        if (slot_set_ssize(self, conn_off.waiting_live, waiting_live) < 0) {
+        PyObject *dropped = operation_queue_popleft(batch->waiting);
+        if (dropped == NULL) {
             Py_DECREF(operation);
-            goto error;
+            return -1;
         }
-        cancelled = future_is_cancelled(SLOT(operation, op_off.future));
-        if (cancelled < 0) { Py_DECREF(operation); goto error; }
+        Py_DECREF(dropped);
+        batch->waiting_live -= 1;
+        if (slot_set_ssize(
+                self, conn_off.waiting_live, batch->waiting_live) < 0) {
+            Py_DECREF(operation);
+            return -1;
+        }
+        int cancelled = future_is_cancelled(SLOT(operation, op_off.future));
+        if (cancelled < 0) {
+            Py_DECREF(operation);
+            return -1;
+        }
         if (cancelled) {
             slot_set(operation, op_off.state, str_cancelled);
             Py_DECREF(operation);
             continue;
         }
-        if (emitted_now == 0) {
-            single_packet = Py_NewRef(packet);
-            single_operation = Py_NewRef(operation);
-        } else {
-            if (packets == NULL) {
-                packets = PyList_New(0);
-                operations = PyList_New(0);
-                if (packets == NULL || operations == NULL ||
-                    PyList_Append(packets, single_packet) < 0 ||
-                    PyList_Append(operations, single_operation) < 0) {
+        if (batch->emitted_now == 0) {
+            batch->single_packet = Py_NewRef(packet);
+            batch->single_operation = Py_NewRef(operation);
+        }
+        else {
+            if (batch->packets == NULL) {
+                batch->packets = PyList_New(0);
+                batch->operations = PyList_New(0);
+                if (batch->packets == NULL || batch->operations == NULL ||
+                    PyList_Append(
+                        batch->packets, batch->single_packet) < 0 ||
+                    PyList_Append(
+                        batch->operations, batch->single_operation) < 0) {
                     Py_DECREF(operation);
-                    goto error;
+                    return -1;
                 }
             }
-            if (PyList_Append(packets, packet) < 0 ||
-                PyList_Append(operations, operation) < 0) {
+            if (PyList_Append(batch->packets, packet) < 0 ||
+                PyList_Append(batch->operations, operation) < 0) {
                 Py_DECREF(operation);
-                goto error;
+                return -1;
             }
         }
-        batch_size += packet_size;
+        batch->batch_size += packet_size;
         slot_set(operation, op_off.state, str_emitted);
-        if (operation_queue_append(emitted, operation) < 0) {
+        if (operation_queue_append(batch->emitted, operation) < 0) {
             Py_DECREF(operation);
-            goto error;
+            return -1;
         }
         Py_DECREF(operation);
-        emitted_now += 1;
+        batch->emitted_now += 1;
     }
+    return 0;
+}
 
-    if (emitted_now > 0) {
-        /* Once per flight, not once per operation. `_idle_event` is edge state
-           -- "is the pipeline empty" -- so clearing it k times to emit a batch
-           of k did the same work k times, and only two tests ever wait on it. */
-        PyObject *idle = SLOT(self, conn_off.idle_event);
-        PyObject *payload = NULL;
-        PyObject *pending = NULL;
-        PyObject *hook = SLOT(self, conn_off.register_operations);
-        PyObject *backpressure = SLOT(self, conn_off.write_with_backpressure);
+static int
+flush_register_operations(PyObject *self, FlushBatch *batch)
+{
+    PyObject *hook = SLOT(self, conn_off.register_operations);
+    if (hook == NULL || hook == Py_None) return 0;
+    int registered;
+    if (batch->emitted_now == 1) {
+        long mode_code = operation_mode_code(batch->single_operation);
+        if (mode_code < 0) return -1;
+        registered = wreath_pg_protocol_register_operation_parts(
+            SLOT(self, conn_off.reader), batch->single_operation,
+            SLOT(batch->single_operation, op_off.field_tape),
+            SLOT(batch->single_operation, op_off.decoder_plan),
+            SLOT(batch->single_operation, op_off.rows),
+            SLOT(batch->single_operation, op_off.dest), mode_code);
+    }
+    else {
+        registered = wreath_pg_protocol_register_operations(
+            SLOT(self, conn_off.reader), batch->operations);
+    }
+    if (registered < 0) return -1;
+    if (registered) return 0;
+    PyObject *tuple = batch->emitted_now == 1
+        ? PyTuple_Pack(1, batch->single_operation)
+        : PyList_AsTuple(batch->operations);
+    PyObject *result = tuple == NULL ? NULL : PyObject_CallOneArg(hook, tuple);
+    Py_XDECREF(tuple);
+    if (result == NULL) return -1;
+    Py_DECREF(result);
+    return 0;
+}
 
-        if (idle != NULL) {
-            PyObject *cleared = call_method0(idle, str_clear);
-            if (cleared == NULL) goto error;
-            Py_DECREF(cleared);
+static PyObject *
+flush_payload(PyObject *self, FlushBatch *batch)
+{
+    if (batch->emitted_now == 1) return Py_NewRef(batch->single_packet);
+    int borrowed;
+    PyObject *joiner = hook_get(
+        self, hook_join_packets, str_join_packets, &borrowed);
+    PyObject *tuple = PyList_AsTuple(batch->packets);
+    PyObject *payload = joiner == NULL || tuple == NULL
+        ? NULL : PyObject_CallOneArg(joiner, tuple);
+    hook_release(joiner, borrowed);
+    Py_XDECREF(tuple);
+    return payload;
+}
+
+static PyObject *
+flush_write(PyObject *self, FlushBatch *batch)
+{
+    PyObject *idle = SLOT(self, conn_off.idle_event);
+    if (idle != NULL) {
+        PyObject *cleared = call_method0(idle, str_clear);
+        if (cleared == NULL) return NULL;
+        Py_DECREF(cleared);
+    }
+    if (flush_register_operations(self, batch) < 0) return NULL;
+    PyObject *payload = flush_payload(self, batch);
+    if (payload == NULL) return NULL;
+    PyObject *backpressure = SLOT(self, conn_off.write_with_backpressure);
+    PyObject *pending;
+    if (backpressure == NULL || backpressure == Py_None) {
+        PyObject *writer = SLOT(self, conn_off.writer);
+        PyObject *written = writer == NULL
+            ? NULL : PyObject_CallMethodOneArg(writer, str_write, payload);
+        if (written == NULL) {
+            Py_DECREF(payload);
+            return NULL;
         }
-        if (hook != NULL && hook != Py_None) {
-            int registered;
-            if (emitted_now == 1) {
-                long mode_code = operation_mode_code(single_operation);
-                if (mode_code < 0) goto write_error;
-                registered = wreath_pg_protocol_register_operation_parts(
-                    SLOT(self, conn_off.reader), single_operation,
-                    SLOT(single_operation, op_off.field_tape),
-                    SLOT(single_operation, op_off.decoder_plan),
-                    SLOT(single_operation, op_off.rows),
-                    SLOT(single_operation, op_off.dest),
-                    mode_code);
-            } else {
-                registered = wreath_pg_protocol_register_operations(
-                    SLOT(self, conn_off.reader), operations);
+        Py_DECREF(written);
+        pending = call_method0(writer, str_drain);
+    }
+    else {
+        pending = PyObject_CallOneArg(backpressure, payload);
+    }
+    Py_DECREF(payload);
+    return pending;
+}
+
+static int
+flush_pending(PyObject *self, PyObject *pending)
+{
+    if (pending == Py_None) return 0;
+    int settled = 0;
+    if (PyObject_IsInstance(pending, (PyObject *)&PyBaseObject_Type) >= 0) {
+        PyObject *done_attr = PyObject_GetAttr(pending, str_done);
+        if (done_attr != NULL) {
+            PyObject *outcome = PyObject_CallNoArgs(done_attr);
+            Py_DECREF(done_attr);
+            if (outcome != NULL) {
+                settled = PyObject_IsTrue(outcome);
+                Py_DECREF(outcome);
             }
-            if (registered < 0) goto write_error;
-            if (!registered) {
-                PyObject *tuple = emitted_now == 1
-                    ? PyTuple_Pack(1, single_operation)
-                    : PyList_AsTuple(operations);
-                PyObject *result = tuple == NULL
-                    ? NULL : PyObject_CallOneArg(hook, tuple);
-                Py_XDECREF(tuple);
-                if (result == NULL) goto write_error;
-                Py_DECREF(result);
-            }
+            else PyErr_Clear();
         }
-        if (emitted_now == 1) {
-            payload = Py_NewRef(single_packet);
-        } else {
-            int borrowed;
-            PyObject *joiner = hook_get(
-                self, hook_join_packets, str_join_packets, &borrowed);
-            PyObject *tuple = PyList_AsTuple(packets);
-            payload = (joiner == NULL || tuple == NULL)
-                ? NULL : PyObject_CallOneArg(joiner, tuple);
-            hook_release(joiner, borrowed);
-            Py_XDECREF(tuple);
-            if (payload == NULL) goto write_error;
-        }
-        if (backpressure == NULL || backpressure == Py_None) {
-            PyObject *writer = SLOT(self, conn_off.writer);
-            PyObject *written = writer == NULL
-                ? NULL : PyObject_CallMethodOneArg(writer, str_write, payload);
-            if (written == NULL) { Py_DECREF(payload); goto write_error; }
-            Py_DECREF(written);
-            pending = call_method0(writer, str_drain);
-        } else {
-            pending = PyObject_CallOneArg(backpressure, payload);
-        }
-        Py_DECREF(payload);
+        else PyErr_Clear();
+    }
+    if (settled) return 0;
+    PyObject *loop = SLOT(self, conn_off.loop);
+    PyObject *drain_method = PyObject_GetAttr(self, str_drain_method);
+    PyObject *coroutine = drain_method == NULL
+        ? NULL : PyObject_CallOneArg(drain_method, pending);
+    PyObject *task = NULL;
+    Py_XDECREF(drain_method);
+    if (coroutine != NULL) {
+        task = PyObject_CallMethodOneArg(loop, str_create_task, coroutine);
+        Py_DECREF(coroutine);
+    }
+    if (task == NULL) return -1;
+    slot_set(self, conn_off.write_blocked, Py_True);
+    PyObject *tracked = PyObject_CallMethodOneArg(
+        self, str_track_background, task);
+    Py_DECREF(task);
+    if (tracked == NULL) return -1;
+    Py_DECREF(tracked);
+    return 0;
+}
+
+static int
+flush_start_reader(PyObject *self)
+{
+    PyObject *reader = SLOT(self, conn_off.reader_task);
+    if (reader != NULL && reader != Py_None) return 0;
+    PyObject *loop = SLOT(self, conn_off.loop);
+    PyObject *method = PyObject_GetAttr(self, str_read_pipeline);
+    PyObject *coroutine = method == NULL ? NULL : PyObject_CallNoArgs(method);
+    PyObject *task = NULL;
+    Py_XDECREF(method);
+    if (coroutine != NULL) {
+        task = PyObject_CallMethodOneArg(loop, str_create_task, coroutine);
+        Py_DECREF(coroutine);
+    }
+    if (task == NULL) return -1;
+    slot_steal(self, conn_off.reader_task, task);
+    return 0;
+}
+
+static int
+flush_connection_lost(PyObject *self)
+{
+    PyObject *type, *value, *traceback;
+    PyObject *failure;
+    PyErr_Fetch(&type, &value, &traceback);
+    PyErr_NormalizeException(&type, &value, &traceback);
+    failure = PyObject_CallFunction(exc_operational, "s", "PostgreSQL connection lost");
+    if (failure != NULL) {
+        PyObject *handled = PyObject_CallMethodObjArgs(
+            self, str_fail_connection, failure,
+            value == NULL ? Py_None : value, NULL);
+        Py_DECREF(failure);
+        Py_XDECREF(handled);
+    }
+    Py_XDECREF(type);
+    Py_XDECREF(value);
+    Py_XDECREF(traceback);
+    return PyErr_Occurred() ? -1 : 0;
+}
+
+static int
+do_flush(PyObject *self)
+{
+    FlushBatch batch = {0};
+
+    slot_set(self, conn_off.flush_handle, Py_None);
+    if (slot_is_true(self, conn_off.closed) ||
+        slot_is_true(self, conn_off.write_blocked)) return 0;
+    batch.waiting_live = slot_as_ssize(
+        self, conn_off.waiting_live, "_waiting_live");
+    if (batch.waiting_live < 0) return PyErr_Occurred() ? -1 : 0;
+    if (batch.waiting_live == 0) return 0;
+
+    Py_ssize_t max_emitted = class_bound(self, str_max_emitted);
+    Py_ssize_t max_batch = class_bound(self, str_max_outbound);
+    if (max_emitted < 0 || max_batch < 0) return -1;
+    batch.waiting = SLOT_BORROW(self, conn_off.waiting, "_waiting");
+    batch.emitted = SLOT_BORROW(self, conn_off.emitted, "_emitted");
+    if (batch.waiting == NULL || batch.emitted == NULL) return -1;
+
+    Py_ssize_t available = max_emitted - operation_queue_size(batch.emitted);
+    if (available <= 0) return PyErr_Occurred() ? -1 : 0;
+    if (flush_collect(self, &batch, available, max_batch) < 0) goto error;
+
+    if (batch.emitted_now > 0) {
+        PyObject *pending = flush_write(self, &batch);
         if (pending == NULL) goto write_error;
-
-        {
-            Py_ssize_t count = slot_as_ssize(self, conn_off.write_count, "_write_count");
-            if (count < 0 && PyErr_Occurred()) { Py_DECREF(pending); goto error; }
-            if (slot_set_ssize(self, conn_off.write_count, count + 1) < 0) {
-                Py_DECREF(pending);
-                goto error;
-            }
+        Py_ssize_t count = slot_as_ssize(
+            self, conn_off.write_count, "_write_count");
+        if (count < 0 && PyErr_Occurred()) {
+            Py_DECREF(pending);
+            goto error;
         }
-
-        if (pending != Py_None) {
-            int settled = 0;
-            if (PyObject_IsInstance(pending, (PyObject *)&PyBaseObject_Type) >= 0) {
-                /* A Future that has already resolved needs no drain task. */
-                PyObject *done_attr = PyObject_GetAttr(pending, str_done);
-                if (done_attr != NULL) {
-                    PyObject *outcome = PyObject_CallNoArgs(done_attr);
-                    Py_DECREF(done_attr);
-                    if (outcome != NULL) {
-                        settled = PyObject_IsTrue(outcome);
-                        Py_DECREF(outcome);
-                    } else {
-                        PyErr_Clear();
-                    }
-                } else {
-                    PyErr_Clear();
-                }
-            }
-            if (!settled) {
-                PyObject *loop = SLOT(self, conn_off.loop);
-                PyObject *drain_method = PyObject_GetAttr(self, str_drain_method);
-                PyObject *coroutine = drain_method == NULL
-                    ? NULL : PyObject_CallOneArg(drain_method, pending);
-                PyObject *task = NULL;
-                Py_XDECREF(drain_method);
-                if (coroutine != NULL) {
-                    task = PyObject_CallMethodOneArg(loop, str_create_task, coroutine);
-                    Py_DECREF(coroutine);
-                }
-                if (task == NULL) { Py_DECREF(pending); goto error; }
-                slot_set(self, conn_off.write_blocked, Py_True);
-                {
-                    PyObject *tracked = PyObject_CallMethodOneArg(
-                        self, str_track_background, task);
-                    Py_DECREF(task);
-                    if (tracked == NULL) { Py_DECREF(pending); goto error; }
-                    Py_DECREF(tracked);
-                }
-            }
+        if (slot_set_ssize(self, conn_off.write_count, count + 1) < 0 ||
+            flush_pending(self, pending) < 0) {
+            Py_DECREF(pending);
+            goto error;
         }
         Py_DECREF(pending);
-
-        {
-            /* One question again. The reader waits on the socket now, so
-               there is nothing to wake: this flight's write is what makes the
-               server answer, and the answer is what wakes the read. See the
-               loop comment in `_read_pipeline`. */
-            PyObject *reader = SLOT(self, conn_off.reader_task);
-            if (reader == NULL || reader == Py_None) {
-                PyObject *loop = SLOT(self, conn_off.loop);
-                PyObject *method = PyObject_GetAttr(self, str_read_pipeline);
-                PyObject *coroutine = method == NULL
-                    ? NULL : PyObject_CallNoArgs(method);
-                PyObject *task = NULL;
-                Py_XDECREF(method);
-                if (coroutine != NULL) {
-                    task = PyObject_CallMethodOneArg(loop, str_create_task, coroutine);
-                    Py_DECREF(coroutine);
-                }
-                if (task == NULL) goto error;
-                slot_steal(self, conn_off.reader_task, task);
-            }
-        }
+        if (flush_start_reader(self) < 0) goto error;
     }
 
-    if (waiting_live > 0 && operation_queue_size(emitted) < max_emitted) {
+    if (batch.waiting_live > 0 &&
+        operation_queue_size(batch.emitted) < max_emitted) {
         if (schedule_flush(self) < 0) goto error;
     }
 
-    Py_XDECREF(packets);
-    Py_XDECREF(operations);
-    Py_XDECREF(single_packet);
-    Py_XDECREF(single_operation);
-    return failed;
+    flush_batch_clear(&batch);
+    return 0;
 
 write_error:
-    /* An OSError from the transport is a lost connection, and every caller has
-       to be failed rather than left waiting on a write that never happened. */
     if (PyErr_ExceptionMatches(PyExc_OSError)) {
-        PyObject *type, *value, *traceback;
-        PyObject *failure;
-        PyErr_Fetch(&type, &value, &traceback);
-        PyErr_NormalizeException(&type, &value, &traceback);
-        failure = PyObject_CallFunction(
-            exc_operational, "s", "PostgreSQL connection lost");
-        if (failure != NULL) {
-            PyObject *handled = PyObject_CallMethodObjArgs(
-                self, str_fail_connection, failure,
-                value == NULL ? Py_None : value, NULL);
-            Py_DECREF(failure);
-            Py_XDECREF(handled);
-        }
-        Py_XDECREF(type);
-        Py_XDECREF(value);
-        Py_XDECREF(traceback);
-        Py_XDECREF(packets);
-        Py_XDECREF(operations);
-        Py_XDECREF(single_packet);
-        Py_XDECREF(single_operation);
-        if (PyErr_Occurred()) return -1;
-        return 0;
+        int rc = flush_connection_lost(self);
+        flush_batch_clear(&batch);
+        return rc;
     }
 error:
-    Py_XDECREF(packets);
-    Py_XDECREF(operations);
-    Py_XDECREF(single_packet);
-    Py_XDECREF(single_operation);
+    flush_batch_clear(&batch);
     return -1;
 }
 
@@ -1772,232 +1798,277 @@ cancel_operation(PyObject *self, PyObject *operation)
  * The submit path
  * ------------------------------------------------------------------ */
 
-static PyObject *
-submit(PyObject *self, PyObject *mode, PyObject *sql, PyObject *args,
-       PyObject *dest, PyObject *completion)
+static int
+submit_preflight(PyObject *self, PyObject *sql, PyObject **emitted_out,
+                 Py_ssize_t *waiting_live_out, int *transaction_sql_out)
 {
-    PyObject *waiting;
-    PyObject *emitted;
-    PyObject *future = NULL;
-    PyObject *operation = NULL;
-    PyObject *plan = NULL;
-    PyObject *packet = NULL;
-    PyObject *closes = NULL;
-    Py_ssize_t outstanding;
-    Py_ssize_t waiting_live;
-    Py_ssize_t sequence;
-    Py_ssize_t max_queued;
-    Py_ssize_t max_batch;
-    int transaction_sql;
-    int batch_decode;
-
     if (slot_is_true(self, conn_off.closed)) {
         PyErr_SetString(exc_interface, "connection is closed");
-        return NULL;
+        return -1;
     }
     if (!PyUnicode_Check(sql) || PyUnicode_GET_LENGTH(sql) == 0) {
         PyErr_SetString(exc_interface, "SQL must be a non-empty string");
-        return NULL;
+        return -1;
     }
-
-    waiting_live = slot_as_ssize(self, conn_off.waiting_live, "_waiting_live");
-    if (waiting_live < 0 && PyErr_Occurred()) return NULL;
-    emitted = SLOT_BORROW(self, conn_off.emitted, "_emitted");
-    if (emitted == NULL) return NULL;
-    outstanding = waiting_live + operation_queue_size(emitted);
-    if (outstanding < 0 && PyErr_Occurred()) return NULL;
-
-    transaction_sql = is_transaction_sql(sql);
-    if (transaction_sql < 0) return NULL;
-    {
-        PyObject *status = SLOT(self, conn_off.transaction_status);
-        int in_transaction = status == NULL
-            ? 0 : PyObject_RichCompareBool(status, bytes_idle, Py_NE);
-        if (in_transaction < 0) return NULL;
-        if ((in_transaction || slot_is_true(self, conn_off.transaction_barrier)) &&
-            outstanding) {
-            PyErr_SetString(
-                exc_interface, "explicit transactions reject concurrent operations");
-            return NULL;
-        }
+    Py_ssize_t waiting_live = slot_as_ssize(
+        self, conn_off.waiting_live, "_waiting_live");
+    if (waiting_live < 0 && PyErr_Occurred()) return -1;
+    PyObject *emitted = SLOT_BORROW(self, conn_off.emitted, "_emitted");
+    if (emitted == NULL) return -1;
+    Py_ssize_t outstanding = waiting_live + operation_queue_size(emitted);
+    if (outstanding < 0 && PyErr_Occurred()) return -1;
+    int transaction_sql = is_transaction_sql(sql);
+    if (transaction_sql < 0) return -1;
+    PyObject *status = SLOT(self, conn_off.transaction_status);
+    int in_transaction = status == NULL
+        ? 0 : PyObject_RichCompareBool(status, bytes_idle, Py_NE);
+    if (in_transaction < 0) return -1;
+    if ((in_transaction || slot_is_true(self, conn_off.transaction_barrier)) &&
+        outstanding) {
+        PyErr_SetString(
+            exc_interface, "explicit transactions reject concurrent operations");
+        return -1;
     }
     if (transaction_sql && outstanding) {
         PyErr_SetString(
             exc_interface, "transaction control cannot enter an active pipeline");
-        return NULL;
+        return -1;
     }
-    max_queued = class_bound(self, str_max_queued);
-    if (max_queued < 0) return NULL;
+    Py_ssize_t max_queued = class_bound(self, str_max_queued);
+    if (max_queued < 0) return -1;
     if (outstanding >= max_queued) {
         PyErr_SetString(exc_pipeline_full, "PostgreSQL pipeline is full");
-        return NULL;
+        return -1;
     }
+    *emitted_out = emitted;
+    *waiting_live_out = waiting_live;
+    *transaction_sql_out = transaction_sql;
+    return 0;
+}
 
-    sequence = slot_as_ssize(self, conn_off.sequence, "_sequence");
+static PyObject *
+submit_new_operation(PyObject *self, PyObject *mode, PyObject *sql,
+                     PyObject *args, PyObject *completion)
+{
+    Py_ssize_t sequence = slot_as_ssize(self, conn_off.sequence, "_sequence");
     if (sequence < 0 && PyErr_Occurred()) return NULL;
     sequence += 1;
     if (slot_set_ssize(self, conn_off.sequence, sequence) < 0) return NULL;
-
-    if (completion != NULL) {
-        future = Py_NewRef(completion);
-    } else {
+    PyObject *future;
+    if (completion != NULL) future = Py_NewRef(completion);
+    else {
         PyObject *loop = SLOT_BORROW(self, conn_off.loop, "_loop");
         if (loop == NULL) return NULL;
         future = call_method0(loop, str_create_future);
         if (future == NULL) return NULL;
     }
-    {
-        int borrowed;
-        PyObject *operation_type = hook_get(
-            self, hook_operation_type, str_operation_type, &borrowed);
-        PyObject *sequence_object = PyLong_FromSsize_t(sequence);
-        if (operation_type == NULL || sequence_object == NULL) {
-            hook_release(operation_type, borrowed);
-            Py_XDECREF(sequence_object);
-            Py_DECREF(future);
+    int borrowed;
+    PyObject *operation_type = hook_get(
+        self, hook_operation_type, str_operation_type, &borrowed);
+    PyObject *sequence_object = PyLong_FromSsize_t(sequence);
+    if (operation_type == NULL || sequence_object == NULL) {
+        hook_release(operation_type, borrowed);
+        Py_XDECREF(sequence_object);
+        Py_DECREF(future);
+        return NULL;
+    }
+    PyObject *operation = PyObject_CallFunctionObjArgs(
+        operation_type, sequence_object, sql, args, mode, future, Py_None, NULL);
+    hook_release(operation_type, borrowed);
+    Py_DECREF(sequence_object);
+    Py_DECREF(future);
+    return operation;
+}
+
+static int
+submit_batch_decode(PyObject *self)
+{
+    if ((PyObject *)Py_TYPE(self) == connection_type_ref) return hook_batch_decode;
+    PyObject *flag = PyObject_GetAttr(self, str_batch_decode);
+    if (flag == NULL) return -1;
+    int enabled = PyObject_IsTrue(flag);
+    Py_DECREF(flag);
+    return enabled;
+}
+
+static PyObject *
+submit_plan(PyObject *self, PyObject *sql)
+{
+    PyObject *plans = SLOT(self, conn_off.plans);
+    PyObject *getter = plans == NULL ? NULL : PyObject_GetAttr(plans, str_get);
+    if (getter == NULL) return NULL;
+    PyObject *plan = PyObject_CallOneArg(getter, sql);
+    Py_DECREF(getter);
+    return plan;
+}
+
+static PyObject *
+submit_build_cold(PyObject *self, PyObject *operation, PyObject *sql,
+                  PyObject *args, PyObject *mode, PyObject *dest)
+{
+    Py_ssize_t statement_id = slot_as_ssize(
+        self, conn_off.statement_id, "_statement_id");
+    if (statement_id < 0 && PyErr_Occurred()) return NULL;
+    statement_id += 1;
+    if (slot_set_ssize(self, conn_off.statement_id, statement_id) < 0) return NULL;
+    PyObject *name = PyUnicode_FromFormat("wreath_%zd", statement_id);
+    if (name == NULL) return NULL;
+    PyObject *encoded = PyUnicode_AsASCIIString(name);
+    Py_DECREF(name);
+    if (encoded == NULL) return NULL;
+    slot_steal(operation, op_off.statement_name, encoded);
+
+    Py_ssize_t count = PyTuple_Check(args) ? PyTuple_GET_SIZE(args) : 0;
+    PyObject *oids = PyTuple_New(count);
+    if (oids == NULL) return NULL;
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyObject *oid = PyObject_CallOneArg(
+            fn_infer_oid, PyTuple_GET_ITEM(args, index));
+        if (oid == NULL) {
+            Py_DECREF(oids);
             return NULL;
         }
-        operation = PyObject_CallFunctionObjArgs(
-            operation_type, sequence_object, sql, args, mode, future, Py_None, NULL);
-        hook_release(operation_type, borrowed);
-        Py_DECREF(sequence_object);
-        Py_DECREF(future);
-        if (operation == NULL) return NULL;
+        PyTuple_SET_ITEM(oids, index, oid);
     }
+    slot_steal(operation, op_off.parameter_oids, oids);
+    if (dest == NULL || dest == Py_None) {
+        int borrowed;
+        PyObject *builder = hook_get(
+            self, hook_build_cold, str_build_cold, &borrowed);
+        if (builder == NULL) return NULL;
+        PyObject *packet = PyObject_CallFunctionObjArgs(
+            builder, SLOT(operation, op_off.statement_name), sql, args,
+            SLOT(operation, op_off.parameter_oids), mode, NULL);
+        hook_release(builder, borrowed);
+        return packet;
+    }
+    PyObject *kwargs = PyDict_New();
+    if (kwargs == NULL ||
+        PyDict_SetItem(kwargs, str_binary_results, Py_True) < 0) {
+        Py_XDECREF(kwargs);
+        return NULL;
+    }
+    PyObject *call_args[] = {
+        SLOT(operation, op_off.statement_name), sql, args,
+        SLOT(operation, op_off.parameter_oids), mode,
+    };
+    PyObject *packet = PyObject_VectorcallDict(
+        fn_build_cold_query_packet, call_args, 5, kwargs);
+    Py_DECREF(kwargs);
+    return packet;
+}
+
+static int
+submit_prepare_cached_decode(PyObject *self, PyObject *operation,
+                             WreathPgPlan *plan, int batch_decode)
+{
+    if (batch_decode) {
+        slot_set(operation, op_off.decoder_plan, plan->decoder_plan);
+        PyObject *result_oids = plan->result_oids;
+        Py_ssize_t width_value = result_oids == NULL ? 0 : PyObject_Size(result_oids);
+        if (width_value < 0) return -1;
+        if (width_value == 0) return 0;
+        int borrowed;
+        PyObject *tape_type = hook_get(
+            self, hook_field_tape_type, str_field_tape_type, &borrowed);
+        PyObject *width = PyLong_FromSsize_t(width_value);
+        PyObject *tape = tape_type != NULL && width != NULL
+            ? PyObject_CallOneArg(tape_type, width) : NULL;
+        hook_release(tape_type, borrowed);
+        Py_XDECREF(width);
+        if (tape == NULL) return -1;
+        slot_steal(operation, op_off.field_tape, tape);
+        return 0;
+    }
+    Py_ssize_t count = PyObject_Size(plan->result_oids);
+    if (count < 0) return -1;
+    PyObject *formats = PyTuple_New(count);
+    if (formats == NULL) return -1;
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyObject *binary = PyLong_FromLong(1);
+        if (binary == NULL) {
+            Py_DECREF(formats);
+            return -1;
+        }
+        PyTuple_SET_ITEM(formats, index, binary);
+    }
+    slot_steal(operation, op_off.result_formats, formats);
+    return 0;
+}
+
+static PyObject *
+submit_build_cached(PyObject *self, PyObject *operation, PyObject *plan_object,
+                    PyObject *args, PyObject *mode, int batch_decode)
+{
+    WreathPgPlan *plan = (WreathPgPlan *)plan_object;
+    slot_set(operation, op_off.statement_name, plan->statement_name);
+    slot_set(operation, op_off.parameter_oids, plan->parameter_oids);
+    slot_set(operation, op_off.result_names, plan->result_names);
+    slot_set(operation, op_off.result_oids, plan->result_oids);
+    if (submit_prepare_cached_decode(self, operation, plan, batch_decode) < 0) {
+        return NULL;
+    }
+    int borrowed;
+    PyObject *builder = hook_get(
+        self, hook_build_cached, str_build_cached, &borrowed);
+    if (builder == NULL) return NULL;
+    PyObject *packet = PyObject_CallFunctionObjArgs(
+        builder, plan_object, args, mode, NULL);
+    hook_release(builder, borrowed);
+    return packet;
+}
+
+static int
+submit_enqueue(PyObject *self, PyObject *operation, PyObject *emitted,
+               Py_ssize_t waiting_live)
+{
+    PyObject *waiting = SLOT_BORROW(self, conn_off.waiting, "_waiting");
+    if (waiting == NULL || operation_queue_append(waiting, operation) < 0 ||
+        slot_set_ssize(self, conn_off.waiting_live, waiting_live + 1) < 0) {
+        return -1;
+    }
+    PyObject *handle = SLOT(self, conn_off.flush_handle);
+    PyObject *flag = PyObject_GetAttr(self, str_eager_flush_idle);
+    if (flag == NULL) return -1;
+    int eager = PyObject_IsTrue(flag);
+    Py_DECREF(flag);
+    if (eager < 0) return -1;
+    eager = eager && waiting_live == 0 && operation_queue_size(emitted) == 0 &&
+            (handle == NULL || handle == Py_None);
+    if (eager) return do_flush(self);
+    if (handle == NULL || handle == Py_None) return schedule_flush(self);
+    return 0;
+}
+
+static PyObject *
+submit(PyObject *self, PyObject *mode, PyObject *sql, PyObject *args,
+       PyObject *dest, PyObject *completion)
+{
+    PyObject *emitted = NULL;
+    PyObject *operation = NULL;
+    PyObject *plan = NULL;
+    PyObject *packet = NULL;
+    PyObject *closes = NULL;
+    Py_ssize_t waiting_live;
+    int transaction_sql;
+    if (submit_preflight(
+            self, sql, &emitted, &waiting_live, &transaction_sql) < 0) {
+        return NULL;
+    }
+    operation = submit_new_operation(self, mode, sql, args, completion);
+    if (operation == NULL) return NULL;
     if (dest != NULL && dest != Py_None) slot_set(operation, op_off.dest, dest);
-
-    if ((PyObject *)Py_TYPE(self) == connection_type_ref) {
-        batch_decode = hook_batch_decode;
-    } else {
-        PyObject *flag = PyObject_GetAttr(self, str_batch_decode);
-        if (flag == NULL) goto error;
-        batch_decode = PyObject_IsTrue(flag);
-        Py_DECREF(flag);
-        if (batch_decode < 0) goto error;
-    }
-
-    /* Plan lookup; a hit is also the recency update. */
-    {
-        PyObject *plans = SLOT(self, conn_off.plans);
-        PyObject *getter = plans == NULL ? NULL : PyObject_GetAttr(plans, str_get);
-        if (getter == NULL) goto error;
-        plan = PyObject_CallOneArg(getter, sql);
-        Py_DECREF(getter);
-        if (plan == NULL) goto error;
-    }
+    int batch_decode = submit_batch_decode(self);
+    if (batch_decode < 0) goto error;
+    plan = submit_plan(self, sql);
+    if (plan == NULL) goto error;
     slot_set(operation, op_off.plan, plan);
     slot_set(operation, op_off.cold, plan == Py_None ? Py_True : Py_False);
-
-    if (plan == Py_None) {
-        Py_ssize_t statement_id = slot_as_ssize(
-            self, conn_off.statement_id, "_statement_id");
-        PyObject *name;
-        PyObject *oids;
-        PyObject *builder;
-        if (statement_id < 0 && PyErr_Occurred()) goto error;
-        statement_id += 1;
-        if (slot_set_ssize(self, conn_off.statement_id, statement_id) < 0) goto error;
-        name = PyUnicode_FromFormat("wreath_%zd", statement_id);
-        if (name == NULL) goto error;
-        {
-            PyObject *encoded = PyUnicode_AsASCIIString(name);
-            Py_DECREF(name);
-            if (encoded == NULL) goto error;
-            slot_steal(operation, op_off.statement_name, encoded);
-        }
-        {
-            Py_ssize_t count = PyTuple_Check(args) ? PyTuple_GET_SIZE(args) : 0;
-            oids = PyTuple_New(count);
-            if (oids == NULL) goto error;
-            for (Py_ssize_t i = 0; i < count; i++) {
-                PyObject *oid = PyObject_CallOneArg(
-                    fn_infer_oid, PyTuple_GET_ITEM(args, i));
-                if (oid == NULL) { Py_DECREF(oids); goto error; }
-                PyTuple_SET_ITEM(oids, i, oid);
-            }
-        }
-        slot_steal(operation, op_off.parameter_oids, oids);
-        if (dest == NULL || dest == Py_None) {
-            int borrowed;
-            builder = hook_get(self, hook_build_cold, str_build_cold, &borrowed);
-            if (builder == NULL) goto error;
-            packet = PyObject_CallFunctionObjArgs(
-                builder,
-                SLOT(operation, op_off.statement_name),
-                sql, args,
-                SLOT(operation, op_off.parameter_oids),
-                mode, NULL
-            );
-            hook_release(builder, borrowed);
-        } else {
-            /* A catalog destination decodes binary only, and a cold operation
-               otherwise binds text -- so the *first* catalog read on any
-               connection failed, and failed as a hang. Deliberately the Python
-               builder even when the C one is bound: the accelerated
-               `_build_cold` takes five positional arguments and adding a sixth
-               means changing both builders to serve a path that runs once per
-               connection, off the hot path, only for migration reads. */
-            PyObject *call_kwargs = PyDict_New();
-            if (call_kwargs == NULL ||
-                PyDict_SetItem(call_kwargs, str_binary_results, Py_True) < 0) {
-                Py_XDECREF(call_kwargs);
-                goto error;
-            }
-            PyObject *call_args[] = {
-                SLOT(operation, op_off.statement_name), sql, args,
-                SLOT(operation, op_off.parameter_oids), mode,
-            };
-            packet = PyObject_VectorcallDict(
-                fn_build_cold_query_packet, call_args, 5, call_kwargs);
-            Py_DECREF(call_kwargs);
-        }
-        if (packet == NULL) goto error;
-    } else {
-        PyObject *builder;
-        slot_set(operation, op_off.statement_name,
-                 ((WreathPgPlan *)plan)->statement_name);
-        slot_set(operation, op_off.parameter_oids,
-                 ((WreathPgPlan *)plan)->parameter_oids);
-        slot_set(operation, op_off.result_names,
-                 ((WreathPgPlan *)plan)->result_names);
-        slot_set(operation, op_off.result_oids,
-                 ((WreathPgPlan *)plan)->result_oids);
-        if (batch_decode) {
-            PyObject *result_oids = ((WreathPgPlan *)plan)->result_oids;
-            slot_set(operation, op_off.decoder_plan,
-                     ((WreathPgPlan *)plan)->decoder_plan);
-            if (result_oids != NULL && PyObject_Size(result_oids) > 0) {
-                int borrowed;
-                PyObject *tape_type = hook_get(
-                    self, hook_field_tape_type, str_field_tape_type, &borrowed);
-                PyObject *width = PyLong_FromSsize_t(PyObject_Size(result_oids));
-                PyObject *tape = NULL;
-                if (tape_type != NULL && width != NULL)
-                    tape = PyObject_CallOneArg(tape_type, width);
-                hook_release(tape_type, borrowed);
-                Py_XDECREF(width);
-                if (tape == NULL) goto error;
-                slot_steal(operation, op_off.field_tape, tape);
-            }
-        } else {
-            PyObject *formats;
-            Py_ssize_t count = PyObject_Size(((WreathPgPlan *)plan)->result_oids);
-            if (count < 0) goto error;
-            formats = PyTuple_New(count);
-            if (formats == NULL) goto error;
-            for (Py_ssize_t i = 0; i < count; i++)
-                PyTuple_SET_ITEM(formats, i, PyLong_FromLong(1));
-            slot_steal(operation, op_off.result_formats, formats);
-        }
-        {
-            int borrowed;
-            builder = hook_get(self, hook_build_cached, str_build_cached, &borrowed);
-            if (builder == NULL) goto error;
-            packet = PyObject_CallFunctionObjArgs(builder, plan, args, mode, NULL);
-            hook_release(builder, borrowed);
-        }
-        if (packet == NULL) goto error;
-    }
+    packet = plan == Py_None
+        ? submit_build_cold(self, operation, sql, args, mode, dest)
+        : submit_build_cached(self, operation, plan, args, mode, batch_decode);
+    if (packet == NULL) goto error;
+    Py_CLEAR(plan);
 
     closes = build_closes_prefix(self);
     if (closes == NULL) goto error;
@@ -2011,46 +2082,21 @@ submit(PyObject *self, PyObject *mode, PyObject *sql, PyObject *args,
     }
     Py_CLEAR(closes);
     slot_set(operation, op_off.packet, packet);
-
-    max_batch = class_bound(self, str_max_outbound);
+    Py_ssize_t max_batch = class_bound(self, str_max_outbound);
     if (max_batch < 0) goto error;
     if (PyBytes_GET_SIZE(packet) > max_batch) {
         PyErr_SetString(exc_pipeline_full, "operation exceeds maximum outbound batch");
         goto error;
     }
     Py_CLEAR(packet);
-
     if (transaction_sql) slot_set(self, conn_off.transaction_barrier, Py_True);
-
-    waiting = SLOT_BORROW(self, conn_off.waiting, "_waiting");
-    if (waiting == NULL) goto error;
-    if (operation_queue_append(waiting, operation) < 0) goto error;
-    if (slot_set_ssize(self, conn_off.waiting_live, waiting_live + 1) < 0) goto error;
-
-    /* The eager path: an otherwise idle connection writes now rather than after
-       a call_soon turn, which is the whole latency win on a single query. */
-    {
-        int eager;
-        PyObject *handle = SLOT(self, conn_off.flush_handle);
-        PyObject *flag = PyObject_GetAttr(self, str_eager_flush_idle);
-        if (flag == NULL) goto error;
-        eager = PyObject_IsTrue(flag);
-        Py_DECREF(flag);
-        if (eager < 0) goto error;
-        eager = eager && waiting_live == 0 && operation_queue_size(emitted) == 0 &&
-                (handle == NULL || handle == Py_None);
-        if (eager) {
-            if (do_flush(self) < 0) goto error;
-        } else if (handle == NULL || handle == Py_None) {
-            if (schedule_flush(self) < 0) goto error;
-        }
-    }
-
+    if (submit_enqueue(self, operation, emitted, waiting_live) < 0) goto error;
     return operation;
 
 error:
     Py_XDECREF(closes);
     Py_XDECREF(packet);
+    Py_XDECREF(plan);
     Py_XDECREF(operation);
     return NULL;
 }

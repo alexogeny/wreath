@@ -57,23 +57,6 @@ CARD_EXTRACTION_LIMITS = ZipExtractionLimits(
 #: up the first one's jobs.
 QUEUE = "ingest"
 
-#: The tables the runner owns, for anyone who needs to tell the application's
-#: own tables from its queue's.
-#:
-#: **The table is `jobs`, not `ingest_jobs`** — `JobRunner` names it from the
-#: schema and not from the queue name, so two runners sharing a schema share a
-#: table. Rows carry a `queue` column and the indexes are `(queue, run_at)` and
-#: `(queue, dedup_key)`, so sharing is by design rather than by accident. It is
-#: still the reason the queue gets the application's schema rather than the
-#: `wreath` default: a second copy of this example on the same database would
-#: otherwise pick up the first one's jobs.
-#:
-#: **Nobody applies this DDL by hand any more.** `app.jobs(...)` registers the
-#: runner as a schema component, and wreath creates its tables during lifespan
-#: startup before any handler runs — see `wreath.schema`. The example used to
-#: export a `queue_schema_sql` so the quickstart, the seeder and the test
-#: fixtures could apply the same statements; that join is the framework's job
-#: now, and `wreath schema sql` prints it for a DBA who needs it.
 QUEUE_TABLES = ("jobs",)
 
 

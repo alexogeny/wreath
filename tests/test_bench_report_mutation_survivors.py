@@ -56,10 +56,7 @@ def test_bars_refuse_absent_metrics_and_rank_both_directions() -> None:
     )
     assert lower.index("fast") < lower.index("slow")
     assert lower.count("bar-win") == 1
-    assert (
-        '<div class="who">fast</div><div class="track"><div class="bar bar-win"'
-        in lower
-    )
+    assert '<div class="who">fast</div><div class="track"><div class="bar bar-win"' in lower
     assert 'style="width:50.00%"' in lower
     assert "10.000 ms" in lower
     assert "within-noise" not in lower
@@ -73,10 +70,7 @@ def test_bars_refuse_absent_metrics_and_rank_both_directions() -> None:
     )
     assert higher.index("fast") < higher.index("slow")
     assert higher.count("bar-win") == 1
-    assert (
-        '<div class="who">fast</div><div class="track"><div class="bar bar-win"'
-        in higher
-    )
+    assert '<div class="who">fast</div><div class="track"><div class="bar bar-win"' in higher
     assert "20.000 req/s" in higher
     assert "within-noise" not in higher
 
@@ -449,9 +443,7 @@ def test_render_covers_empty_single_merged_mixed_and_noted_documents() -> None:
     assert "Medians across 2 merged runs." in mixed
     assert "Rows use different load generators" in mixed
 
-    comparable = render(
-        {"metadata": {}, "results": [_row("a", 20.0), _row("b", 10.0)]}
-    )
+    comparable = render({"metadata": {}, "results": [_row("a", 20.0), _row("b", 10.0)]})
     assert "Rows span multiple protocols" not in comparable
 
 

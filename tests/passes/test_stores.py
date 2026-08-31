@@ -161,8 +161,6 @@ def test_every_store_that_purges_offers_a_pass():
     from wreath.policy.ratelimit import PostgresRateLimitStore
     from wreath.session_store import PostgresSessionStore
 
-    # All three used to be one unbounded DELETE. The unbounded form is kept for
-    # a small table and for tests, but the supported route is the pass.
     for store in (PostgresIdempotencyStore, PostgresRateLimitStore, PostgresSessionStore):
         assert hasattr(store, "purge_pass")
         assert hasattr(store, "purge")

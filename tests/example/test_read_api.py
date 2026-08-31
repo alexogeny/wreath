@@ -170,14 +170,6 @@ def test_a_bad_number_in_the_environment_names_the_variable(
 
 @pytest.fixture
 async def client():
-    """The application, on a freshly built and seeded schema.
-
-    Built on the framework default, ``validate_schema="error"``, so these tests
-    exercise the configuration a real deployment gets. That was not always
-    possible: the catalog read used to hang at lifespan startup, and once that
-    was fixed it reported every foreign key missing on a correct schema. Both
-    are fixed, and running the default here is what would catch a third.
-    """
     from _camera_trap import build_schema, drop_schema
     from camera_trap.app import build
 

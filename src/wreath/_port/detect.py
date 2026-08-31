@@ -1,16 +1,11 @@
 """What framework is this tree written in, and can `wreath port` port it?
 
-`wreath port` translates FastAPI and Starlette. Everything else it can only walk
-past, and walking past used to happen two ways, both silent:
-
 * **Nothing recognized, exit 0.** An aiohttp, Tornado or Pyramid tree produced no
   findings, `coverage_overall: null`, and a successful exit. Nothing in that
   output distinguishes "I read this and it needs no work" from "I have no idea
   what this is".
-* **A perfect score off a coincidence.** A Bottle application scored 1.00,
-  because nineteen `@app.get(...)` decorators are spelled exactly the way
-  FastAPI spells them. Confidence, from a rule that had never seen the framework
-  it fired on.
+* **A familiar decorator in an unfamiliar framework.** Bottle and FastAPI both
+  spell routes as `@app.get(...)`, so framework identity gates confidence.
 
 So detection runs first and is reported next to the coverage number. It answers
 from imports alone -- no execution, no installed packages -- which is enough to

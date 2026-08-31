@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ._json import dumps as _json_dumps
+from .linkset import LinkContext, Linkset, LinksetResponse, LinkTarget
 from .response import Response
 
 CATALOG_PATH = "/.well-known/api-catalog"
@@ -37,15 +38,23 @@ def catalog_response(
     spec_path: str | None,
     docs_path: str | None,
 ) -> Response:
-    entry: dict[str, Any] = {"anchor": _absolute(request, api_path)}
+    links: dict[str, tuple[LinkTarget, ...]] = {}
     if spec_path is not None:
-        entry["service-desc"] = [
-            {"href": _absolute(request, spec_path), "type": "application/json"}
-        ]
+        links["service-desc"] = (
+            LinkTarget(_absolute(request, spec_path), type="application/json"),
+        )
     if docs_path is not None:
-        entry["service-doc"] = [{"href": _absolute(request, docs_path), "type": "text/html"}]
-    return Response(
-        _json_dumps({"linkset": [entry]}),
+        links["service-doc"] = (
+            LinkTarget(_absolute(request, docs_path), type="text/html"),
+        )
+    if not links:
+        return Response(
+            _json_dumps({"linkset": [{"anchor": _absolute(request, api_path)}]}),
+            headers=[CATALOG_LINK],
+            media_type=CATALOG_MEDIA_TYPE,
+        )
+    return LinksetResponse(
+        Linkset(LinkContext(anchor=_absolute(request, api_path), links=links)),
+        profile="https://www.rfc-editor.org/info/rfc9727",
         headers=[CATALOG_LINK],
-        media_type=CATALOG_MEDIA_TYPE,
     )

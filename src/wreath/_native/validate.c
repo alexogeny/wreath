@@ -338,6 +338,393 @@ flat_scalar_accepts(ValidationNode *plan, PyObject *value)
     }
 }
 
+static PyObject *
+validate_node(ValidationNode *compiled, PyObject *value, PyObject *loc,
+              PyObject *errors, long *steps);
+
+static PyObject *
+validate_list(ValidationNode *compiled, PyObject *value, PyObject *loc,
+              PyObject *errors, long *steps)
+{
+    if (!PyList_Check(value)) {
+        if (emit(errors, loc, "value is not an array", "list") < 0) return NULL;
+        return Py_NewRef(value);
+    }
+    ValidationNode *item_plan = compiled->child;
+    Py_ssize_t count = PyList_GET_SIZE(value);
+    int flat = flat_scalar_accepts(
+        item_plan, count == 0 ? Py_None : PyList_GET_ITEM(value, 0));
+    if (flat == -2) return NULL;
+    if (flat >= 0 && count <= *steps) {
+        Py_ssize_t index = flat ? 1 : 0;
+        for (; index < count; index++) {
+            flat = flat_scalar_accepts(item_plan, PyList_GET_ITEM(value, index));
+            if (flat == -2) return NULL;
+            if (flat != 1) break;
+        }
+        if (index == count) {
+            *steps -= (long)count;
+            return Py_NewRef(value);
+        }
+    }
+    int passthrough = plan_is_passthrough(item_plan);
+    if (passthrough < 0) return NULL;
+    PyObject *result = passthrough ? Py_NewRef(value) : PyList_New(count);
+    if (result == NULL) return NULL;
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyObject *key = PyLong_FromSsize_t(index);
+        if (key == NULL || loc_push(loc, key) < 0) {
+            Py_XDECREF(key);
+            Py_DECREF(result);
+            return NULL;
+        }
+        Py_DECREF(key);
+        PyObject *item = validate_node(
+            item_plan, PyList_GET_ITEM(value, index), loc, errors, steps);
+        loc_pop(loc);
+        if (item == NULL) {
+            Py_DECREF(result);
+            return NULL;
+        }
+        if (passthrough) Py_DECREF(item);
+        else PyList_SET_ITEM(result, index, item); /* steals reference */
+    }
+    return result;
+}
+
+static PyObject *
+validate_dict(ValidationNode *compiled, PyObject *value, PyObject *loc,
+              PyObject *errors, long *steps)
+{
+    if (!PyDict_Check(value)) {
+        if (emit(errors, loc, "value is not an object", "dict") < 0) return NULL;
+        return Py_NewRef(value);
+    }
+    ValidationNode *value_plan = compiled->child;
+    Py_ssize_t count = PyDict_GET_SIZE(value);
+    int flat_supported = -1;
+    int flat_clean = 1;
+    PyObject *key, *item;
+    Py_ssize_t pos = 0;
+    if (count <= *steps) {
+        while (PyDict_Next(value, &pos, &key, &item)) {
+            int accepted = flat_scalar_accepts(value_plan, item);
+            if (accepted == -2) return NULL;
+            if (accepted == -1) {
+                flat_supported = -1;
+                break;
+            }
+            flat_supported = 1;
+            if (!accepted) {
+                flat_clean = 0;
+                break;
+            }
+        }
+        if ((count == 0 || flat_supported == 1) && flat_clean) {
+            *steps -= (long)count;
+            return Py_NewRef(value);
+        }
+    }
+    int passthrough = plan_is_passthrough(value_plan);
+    if (passthrough < 0) return NULL;
+    PyObject *result = passthrough ? Py_NewRef(value) : PyDict_New();
+    if (result == NULL) return NULL;
+    pos = 0;
+    while (PyDict_Next(value, &pos, &key, &item)) {
+        if (loc_push(loc, key) < 0) {
+            Py_DECREF(result);
+            return NULL;
+        }
+        PyObject *validated = validate_node(value_plan, item, loc, errors, steps);
+        loc_pop(loc);
+        if (validated == NULL) {
+            Py_DECREF(result);
+            return NULL;
+        }
+        int rc = passthrough ? 0 : PyDict_SetItem(result, key, validated);
+        Py_DECREF(validated);
+        if (rc < 0) {
+            Py_DECREF(result);
+            return NULL;
+        }
+    }
+    return result;
+}
+
+static PyObject *
+validate_union(ValidationNode *compiled, PyObject *value, PyObject *loc,
+               PyObject *errors, long *steps)
+{
+    PyObject *plan = compiled->source;
+    long has_none = PyLong_AsLong(PyTuple_GET_ITEM(plan, 1));
+    if (has_none == -1 && PyErr_Occurred()) return NULL;
+    if (value == Py_None && has_none) Py_RETURN_NONE;
+    for (Py_ssize_t index = 0; index < compiled->option_count; index++) {
+        PyObject *attempt = PyList_New(0);
+        if (attempt == NULL) return NULL;
+        PyObject *result = validate_node(
+            compiled->options[index], value, loc, attempt, steps);
+        if (result == NULL) {
+            Py_DECREF(attempt);
+            return NULL;
+        }
+        if (PyList_GET_SIZE(attempt) == 0 && *steps >= 0) {
+            Py_DECREF(attempt);
+            return result;
+        }
+        Py_DECREF(result);
+        Py_DECREF(attempt);
+        if (*steps < 0) return Py_NewRef(value);
+    }
+    PyObject *msg = PyTuple_GET_ITEM(plan, 3);
+    PyObject *loc_copy = PyList_GetSlice(loc, 0, PyList_GET_SIZE(loc));
+    if (loc_copy == NULL) return NULL;
+    PyObject *err = Py_BuildValue(
+        "{s:N,s:O,s:s}", "loc", loc_copy, "msg", msg, "type", "union");
+    if (err == NULL) return NULL;
+    int rc = PyList_Append(errors, err);
+    Py_DECREF(err);
+    if (rc < 0) return NULL;
+    return Py_NewRef(value);
+}
+
+static void
+dataclass_values_clear(PyObject **values, Py_ssize_t count, PyObject *kwargs)
+{
+    if (values != NULL) {
+        for (Py_ssize_t index = 0; index < count; index++) {
+            Py_XDECREF(values[index]);
+        }
+        PyMem_Free(values);
+    }
+    Py_XDECREF(kwargs);
+}
+
+static PyObject *
+validate_dataclass(ValidationNode *compiled, PyObject *value, PyObject *loc,
+                   PyObject *errors, long *steps)
+{
+    PyObject *plan = compiled->source;
+    PyObject *cls = PyTuple_GET_ITEM(plan, 1);
+    int is_instance = PyObject_IsInstance(value, cls);
+    if (is_instance < 0) return NULL;
+    if (is_instance) return Py_NewRef(value);
+    if (!PyDict_Check(value)) {
+        if (emit(errors, loc, "value is not an object", "dict") < 0) return NULL;
+        return Py_NewRef(value);
+    }
+    PyObject *fields = PyTuple_GET_ITEM(plan, 2);
+    PyObject *known = PyTuple_GET_ITEM(plan, 3);
+    Py_ssize_t field_count = compiled->field_count;
+    int positional = PyObject_IsTrue(PyTuple_GET_ITEM(plan, 4));
+    if (positional < 0) return NULL;
+    PyObject **values = NULL;
+    PyObject *kwargs = NULL;
+    if (positional && field_count != 0) {
+        values = PyMem_Calloc((size_t)field_count, sizeof(*values));
+        if (values == NULL) return PyErr_NoMemory();
+    }
+    else if (!positional) {
+        kwargs = PyDict_New();
+        if (kwargs == NULL) return NULL;
+    }
+    Py_ssize_t present_count = 0;
+    for (Py_ssize_t index = 0; index < field_count; index++) {
+        PyObject *field = compiled->fields[index].source;
+        PyObject *name = PyTuple_GET_ITEM(field, 0);
+        PyObject *wire_name = PyTuple_GET_ITEM(field, 1);
+        long required = PyLong_AsLong(PyTuple_GET_ITEM(field, 3));
+        if (required == -1 && PyErr_Occurred()) goto error;
+        PyObject *present = PyDict_GetItemWithError(value, wire_name);
+        if (present == NULL && PyErr_Occurred()) goto error;
+        if (present != NULL) {
+            present_count++;
+            if (loc_push(loc, wire_name) < 0) goto error;
+            PyObject *validated = validate_node(
+                compiled->fields[index].plan, present, loc, errors, steps);
+            loc_pop(loc);
+            if (validated == NULL) goto error;
+            if (positional) values[index] = validated;
+            else {
+                int rc = PyDict_SetItem(kwargs, name, validated);
+                Py_DECREF(validated);
+                if (rc < 0) goto error;
+            }
+        }
+        else if (required) {
+            if (loc_push(loc, wire_name) < 0) goto error;
+            int rc = emit(errors, loc, "field is required", "missing");
+            loc_pop(loc);
+            if (rc < 0) goto error;
+        }
+    }
+    if (PyDict_GET_SIZE(value) > present_count) {
+        PyObject *key, *item;
+        Py_ssize_t pos = 0;
+        while (PyDict_Next(value, &pos, &key, &item)) {
+            int contains = PySet_Contains(known, key);
+            if (contains < 0) goto error;
+            if (!contains) {
+                if (loc_push(loc, key) < 0) goto error;
+                int rc = emit(errors, loc, "unexpected field", "extra");
+                loc_pop(loc);
+                if (rc < 0) goto error;
+            }
+        }
+    }
+    if (PyList_GET_SIZE(errors) > 0 || *steps < 0) {
+        dataclass_values_clear(values, field_count, kwargs);
+        return Py_NewRef(value);
+    }
+    PyObject *instance;
+    if (positional && present_count == field_count) {
+        instance = PyObject_Vectorcall(cls, values, (size_t)field_count, NULL);
+    }
+    else {
+        if (kwargs == NULL) {
+            kwargs = PyDict_New();
+            if (kwargs == NULL) goto error;
+            for (Py_ssize_t index = 0; index < field_count; index++) {
+                if (values[index] == NULL) continue;
+                PyObject *name = PyTuple_GET_ITEM(
+                    PyTuple_GET_ITEM(fields, index), 0);
+                if (PyDict_SetItem(kwargs, name, values[index]) < 0) goto error;
+            }
+        }
+        instance = PyObject_VectorcallDict(cls, NULL, 0, kwargs);
+    }
+    dataclass_values_clear(values, field_count, kwargs);
+    return instance;
+
+error:
+    dataclass_values_clear(values, field_count, kwargs);
+    return NULL;
+}
+
+static int
+validate_field_comparisons(PyObject *comparisons, PyObject *value,
+                           PyObject *loc, PyObject *errors)
+{
+    static const int rich_operations[] = {Py_GT, Py_GE, Py_LT, Py_LE};
+    for (Py_ssize_t index = 0; index < PyTuple_GET_SIZE(comparisons); index++) {
+        PyObject *entry = PyTuple_GET_ITEM(comparisons, index);
+        long operation = PyLong_AsLong(PyTuple_GET_ITEM(entry, 0));
+        if (operation == -1 && PyErr_Occurred()) return -1;
+        if (operation < 0 || operation >= 4) {
+            PyErr_SetString(PyExc_ValueError, "invalid field comparison opcode");
+            return -1;
+        }
+        int valid = PyObject_RichCompareBool(
+            value, PyTuple_GET_ITEM(entry, 1), rich_operations[operation]);
+        if (valid < 0) {
+            if (!PyErr_ExceptionMatches(PyExc_TypeError)) return -1;
+            PyErr_Clear();
+            return emit_objects(
+                errors, loc, PyTuple_GET_ITEM(entry, 3),
+                PyTuple_GET_ITEM(entry, 4)) < 0 ? -1 : 1;
+        }
+        if (!valid) {
+            return emit_objects(
+                errors, loc, PyTuple_GET_ITEM(entry, 2),
+                PyTuple_GET_ITEM(entry, 4)) < 0 ? -1 : 1;
+        }
+    }
+    return 0;
+}
+
+static int
+validate_field_lengths(PyObject *lengths, PyObject *value, PyObject *loc,
+                       PyObject *errors)
+{
+    for (Py_ssize_t index = 0; index < PyTuple_GET_SIZE(lengths); index++) {
+        PyObject *entry = PyTuple_GET_ITEM(lengths, index);
+        long operation = PyLong_AsLong(PyTuple_GET_ITEM(entry, 0));
+        Py_ssize_t bound = PyLong_AsSsize_t(PyTuple_GET_ITEM(entry, 1));
+        if ((operation == -1 || bound == -1) && PyErr_Occurred()) return -1;
+        if (operation < 0 || operation >= 2) {
+            PyErr_SetString(PyExc_ValueError, "invalid field length opcode");
+            return -1;
+        }
+        Py_ssize_t length = PyObject_Length(value);
+        if (length < 0) {
+            if (!PyErr_ExceptionMatches(PyExc_TypeError)) return -1;
+            PyErr_Clear();
+            return emit_objects(
+                errors, loc, PyTuple_GET_ITEM(entry, 3),
+                PyTuple_GET_ITEM(entry, 4)) < 0 ? -1 : 1;
+        }
+        int valid = operation == 0 ? length >= bound : length <= bound;
+        if (!valid) {
+            return emit_objects(
+                errors, loc, PyTuple_GET_ITEM(entry, 2),
+                PyTuple_GET_ITEM(entry, 4)) < 0 ? -1 : 1;
+        }
+    }
+    return 0;
+}
+
+static int
+validate_field_pattern(PyObject *pattern, PyObject *value, PyObject *loc,
+                       PyObject *errors)
+{
+    if (pattern == Py_None) return 0;
+    int valid = 0;
+    if (PyUnicode_Check(value)) {
+        PyObject *match = PyObject_CallOneArg(PyTuple_GET_ITEM(pattern, 0), value);
+        if (match == NULL) return -1;
+        valid = match != Py_None;
+        Py_DECREF(match);
+    }
+    if (valid) return 0;
+    return emit_objects(
+        errors, loc, PyTuple_GET_ITEM(pattern, 1),
+        PyTuple_GET_ITEM(pattern, 2)) < 0 ? -1 : 1;
+}
+
+static PyObject *
+validate_field(ValidationNode *compiled, PyObject *value, PyObject *loc,
+               PyObject *errors, long *steps)
+{
+    Py_ssize_t before = PyList_GET_SIZE(errors);
+    PyObject *validated = validate_node(
+        compiled->child, value, loc, errors, steps);
+    if (validated == NULL || PyList_GET_SIZE(errors) != before || *steps < 0) {
+        return validated;
+    }
+    PyObject *plan = compiled->source;
+    int rc = validate_field_comparisons(
+        PyTuple_GET_ITEM(plan, 2), validated, loc, errors);
+    if (rc == 0) {
+        rc = validate_field_lengths(
+            PyTuple_GET_ITEM(plan, 3), validated, loc, errors);
+    }
+    if (rc == 0) {
+        rc = validate_field_pattern(
+            PyTuple_GET_ITEM(plan, 4), validated, loc, errors);
+    }
+    if (rc < 0) {
+        Py_DECREF(validated);
+        return NULL;
+    }
+    return validated;
+}
+
+static PyObject *
+validate_unsupported(PyObject *plan, PyObject *value, PyObject *loc,
+                     PyObject *errors)
+{
+    PyObject *msg = PyTuple_GET_ITEM(plan, 1);
+    PyObject *loc_copy = PyList_GetSlice(loc, 0, PyList_GET_SIZE(loc));
+    if (loc_copy == NULL) return NULL;
+    PyObject *err = Py_BuildValue(
+        "{s:N,s:O,s:s}", "loc", loc_copy, "msg", msg, "type", "unsupported");
+    if (err == NULL) return NULL;
+    int rc = PyList_Append(errors, err);
+    Py_DECREF(err);
+    if (rc < 0) return NULL;
+    return Py_NewRef(value);
+}
+
 /* Returns a new reference to the validated value, or NULL only on a hard
  * C-API failure (exception set). Validation failures are accumulated into
  * errors and still return a (new-reference) value, mirroring the Python code. */
@@ -413,419 +800,23 @@ validate_node(ValidationNode *compiled, PyObject *value, PyObject *loc,
         }
         return Py_NewRef(value);
 
-    case OP_LIST: {
-        if (!PyList_Check(value)) {
-            if (emit(errors, loc, "value is not an array", "list") < 0) {
-                return NULL;
-            }
-            return Py_NewRef(value);
-        }
-        ValidationNode *item_plan = compiled->child;
-        Py_ssize_t count = PyList_GET_SIZE(value);
-        int flat = flat_scalar_accepts(
-            item_plan, count == 0 ? Py_None : PyList_GET_ITEM(value, 0));
-        if (flat == -2) return NULL;
-        if (flat >= 0 && count <= *steps) {
-            Py_ssize_t index = flat ? 1 : 0;
-            for (; index < count; index++) {
-                flat = flat_scalar_accepts(
-                    item_plan, PyList_GET_ITEM(value, index));
-                if (flat == -2) return NULL;
-                if (flat != 1) break;
-            }
-            if (index == count) {
-                *steps -= (long)count;
-                return Py_NewRef(value);
-            }
-        }
-        int passthrough = plan_is_passthrough(item_plan);
-        PyObject *result;
-        if (passthrough < 0) return NULL;
-        result = passthrough ? Py_NewRef(value) : PyList_New(count);
-        if (result == NULL) return NULL;
-        for (Py_ssize_t index = 0; index < count; index++) {
-            PyObject *key = PyLong_FromSsize_t(index);
-            if (key == NULL || loc_push(loc, key) < 0) {
-                Py_XDECREF(key);
-                Py_DECREF(result);
-                return NULL;
-            }
-            Py_DECREF(key);
-            PyObject *item = validate_node(
-                item_plan, PyList_GET_ITEM(value, index), loc, errors, steps);
-            loc_pop(loc);
-            if (item == NULL) {
-                Py_DECREF(result);
-                return NULL;
-            }
-            if (passthrough) Py_DECREF(item);
-            else PyList_SET_ITEM(result, index, item); /* steals reference */
-        }
-        return result;
-    }
+    case OP_LIST:
+        return validate_list(compiled, value, loc, errors, steps);
 
-    case OP_DICT: {
-        if (!PyDict_Check(value)) {
-            if (emit(errors, loc, "value is not an object", "dict") < 0) {
-                return NULL;
-            }
-            return Py_NewRef(value);
-        }
-        ValidationNode *value_plan = compiled->child;
-        /* ``dict[str, Any]`` has already proved the only property its plan can
-         * enforce once the outer value is a dict.  Rebuilding every key/value
-         * pair into an identical dict was work whose answer cannot differ;
-         * response projection and JSON conversion remain separate stages. */
-        Py_ssize_t count = PyDict_GET_SIZE(value);
-        int flat_supported = -1;
-        int flat_clean = 1;
-        PyObject *key, *item;
-        Py_ssize_t pos = 0;
-        if (count <= *steps) {
-            while (PyDict_Next(value, &pos, &key, &item)) {
-                int accepted = flat_scalar_accepts(value_plan, item);
-                if (accepted == -2) return NULL;
-                if (accepted == -1) {
-                    flat_supported = -1;
-                    break;
-                }
-                flat_supported = 1;
-                if (!accepted) {
-                    flat_clean = 0;
-                    break;
-                }
-            }
-            if ((count == 0 || flat_supported == 1) && flat_clean) {
-                *steps -= (long)count;
-                return Py_NewRef(value);
-            }
-        }
-        int passthrough = plan_is_passthrough(value_plan);
-        if (passthrough < 0) return NULL;
-        PyObject *result = passthrough ? Py_NewRef(value) : PyDict_New();
-        if (result == NULL) {
-            return NULL;
-        }
-        pos = 0;
-        while (PyDict_Next(value, &pos, &key, &item)) {
-            if (loc_push(loc, key) < 0) {
-                Py_DECREF(result);
-                return NULL;
-            }
-            PyObject *validated = validate_node(
-                value_plan, item, loc, errors, steps);
-            loc_pop(loc);
-            if (validated == NULL) {
-                Py_DECREF(result);
-                return NULL;
-            }
-            int rc = passthrough ? 0 : PyDict_SetItem(result, key, validated);
-            Py_DECREF(validated);
-            if (rc < 0) {
-                Py_DECREF(result);
-                return NULL;
-            }
-        }
-        return result;
-    }
+    case OP_DICT:
+        return validate_dict(compiled, value, loc, errors, steps);
 
-    case OP_UNION: {
-        long has_none = PyLong_AsLong(PyTuple_GET_ITEM(plan, 1));
-        if (has_none == -1 && PyErr_Occurred()) {
-            return NULL;
-        }
-        if (value == Py_None && has_none) {
-            Py_RETURN_NONE;
-        }
-        Py_ssize_t count = compiled->option_count;
-        for (Py_ssize_t index = 0; index < count; index++) {
-            PyObject *attempt = PyList_New(0);
-            if (attempt == NULL) {
-                return NULL;
-            }
-            PyObject *result = validate_node(
-                compiled->options[index], value, loc, attempt, steps);
-            if (result == NULL) {
-                Py_DECREF(attempt);
-                return NULL;
-            }
-            if (PyList_GET_SIZE(attempt) == 0 && *steps >= 0) {
-                Py_DECREF(attempt);
-                return result; /* first clean match wins */
-            }
-            Py_DECREF(result);
-            Py_DECREF(attempt);
-            if (*steps < 0) {
-                /* Budget ran out mid-union: stop trying options. An empty
-                 * attempt from here on is a silent bail, not a real match, so
-                 * declaring success would wrongly accept the value. Fall
-                 * through; run_validation reports too_complex. */
-                return Py_NewRef(value);
-            }
-        }
-        PyObject *msg = PyTuple_GET_ITEM(plan, 3);
-        PyObject *loc_copy = PyList_GetSlice(loc, 0, PyList_GET_SIZE(loc));
-        if (loc_copy == NULL) {
-            return NULL;
-        }
-        PyObject *err = Py_BuildValue("{s:N,s:O,s:s}", "loc", loc_copy, "msg", msg,
-                                      "type", "union");
-        if (err == NULL) {
-            return NULL;
-        }
-        int rc = PyList_Append(errors, err);
-        Py_DECREF(err);
-        if (rc < 0) {
-            return NULL;
-        }
-        return Py_NewRef(value);
-    }
+    case OP_UNION:
+        return validate_union(compiled, value, loc, errors, steps);
 
-    case OP_DATACLASS: {
-        PyObject *cls = PyTuple_GET_ITEM(plan, 1);
-        int is_instance = PyObject_IsInstance(value, cls);
-        if (is_instance < 0) {
-            return NULL;
-        }
-        if (is_instance) {
-            return Py_NewRef(value);
-        }
-        if (!PyDict_Check(value)) {
-            if (emit(errors, loc, "value is not an object", "dict") < 0) {
-                return NULL;
-            }
-            return Py_NewRef(value);
-        }
-        PyObject *fields = PyTuple_GET_ITEM(plan, 2);
-        PyObject *known = PyTuple_GET_ITEM(plan, 3);
-        Py_ssize_t field_count = compiled->field_count;
-        int positional = PyObject_IsTrue(PyTuple_GET_ITEM(plan, 4));
-        if (positional < 0) return NULL;
-        PyObject **values = NULL;
-        PyObject *kwargs = NULL;
-        if (positional && field_count != 0) {
-            values = PyMem_Malloc((size_t)field_count * sizeof(*values));
-            if (values == NULL) return PyErr_NoMemory();
-            for (Py_ssize_t index = 0; index < field_count; index++) values[index] = NULL;
-        }
-        else if (!positional) {
-            kwargs = PyDict_New();
-            if (kwargs == NULL) return NULL;
-        }
-        Py_ssize_t present_count = 0;
-        for (Py_ssize_t index = 0; index < field_count; index++) {
-            PyObject *field = compiled->fields[index].source;
-            PyObject *name = PyTuple_GET_ITEM(field, 0);
-            PyObject *wire_name = PyTuple_GET_ITEM(field, 1);
-            long required = PyLong_AsLong(PyTuple_GET_ITEM(field, 3));
-            if (required == -1 && PyErr_Occurred()) {
-                goto dataclass_error;
-            }
-            PyObject *present = PyDict_GetItemWithError(value, wire_name); /* borrowed */
-            if (present == NULL && PyErr_Occurred()) {
-                goto dataclass_error;
-            }
-            if (present != NULL) {
-                present_count++;
-                if (loc_push(loc, wire_name) < 0) {
-                    goto dataclass_error;
-                }
-                PyObject *validated = validate_node(
-                    compiled->fields[index].plan, present, loc, errors, steps);
-                loc_pop(loc);
-                if (validated == NULL) goto dataclass_error;
-                if (positional) {
-                    values[index] = validated;
-                }
-                else {
-                    int rc = PyDict_SetItem(kwargs, name, validated);
-                    Py_DECREF(validated);
-                    if (rc < 0) goto dataclass_error;
-                }
-            }
-            else if (required) {
-                if (loc_push(loc, wire_name) < 0) {
-                    goto dataclass_error;
-                }
-                int rc = emit(errors, loc, "field is required", "missing");
-                loc_pop(loc);
-                if (rc < 0) goto dataclass_error;
-            }
-        }
-        /* Unexpected fields: any value key not named by a field. Iterated in
-         * value's insertion order to match `wreath.binding._validate`. */
-        if (PyDict_GET_SIZE(value) > present_count) {
-            PyObject *key, *item;
-            Py_ssize_t pos = 0;
-            while (PyDict_Next(value, &pos, &key, &item)) {
-                int contains = PySet_Contains(known, key);
-                if (contains < 0) goto dataclass_error;
-                if (!contains) {
-                    if (loc_push(loc, key) < 0) goto dataclass_error;
-                    int rc = emit(errors, loc, "unexpected field", "extra");
-                    loc_pop(loc);
-                    if (rc < 0) goto dataclass_error;
-                }
-            }
-        }
-        /* Any error anywhere (shared list) means we cannot construct. A
-         * negative step budget means validation was cut short mid-tree, so the
-         * kwargs may be incomplete -- never construct from a truncated body. */
-        if (PyList_GET_SIZE(errors) > 0 || *steps < 0) {
-            if (values != NULL) {
-                for (Py_ssize_t index = 0; index < field_count; index++) {
-                    Py_XDECREF(values[index]);
-                }
-                PyMem_Free(values);
-            }
-            Py_XDECREF(kwargs);
-            return Py_NewRef(value);
-        }
-        PyObject *instance;
-        if (positional && present_count == field_count) {
-            instance = PyObject_Vectorcall(
-                cls, values, (size_t)field_count, NULL);
-        }
-        else {
-            if (kwargs == NULL) {
-                kwargs = PyDict_New();
-                if (kwargs == NULL) goto dataclass_error;
-                for (Py_ssize_t index = 0; index < field_count; index++) {
-                    if (values[index] == NULL) continue;
-                    PyObject *name = PyTuple_GET_ITEM(
-                        PyTuple_GET_ITEM(fields, index), 0);
-                    if (PyDict_SetItem(kwargs, name, values[index]) < 0) {
-                        goto dataclass_error;
-                    }
-                }
-            }
-            instance = PyObject_VectorcallDict(cls, NULL, 0, kwargs);
-        }
-        if (values != NULL) {
-            for (Py_ssize_t index = 0; index < field_count; index++) {
-                Py_XDECREF(values[index]);
-            }
-            PyMem_Free(values);
-        }
-        Py_XDECREF(kwargs);
-        return instance;
+    case OP_DATACLASS:
+        return validate_dataclass(compiled, value, loc, errors, steps);
 
-dataclass_error:
-        if (values != NULL) {
-            for (Py_ssize_t index = 0; index < field_count; index++) {
-                Py_XDECREF(values[index]);
-            }
-            PyMem_Free(values);
-        }
-        Py_XDECREF(kwargs);
-        return NULL;
-    }
+    case OP_UNSUPPORTED:
+        return validate_unsupported(plan, value, loc, errors);
 
-    case OP_UNSUPPORTED: {
-        PyObject *msg = PyTuple_GET_ITEM(plan, 1);
-        PyObject *loc_copy = PyList_GetSlice(loc, 0, PyList_GET_SIZE(loc));
-        if (loc_copy == NULL) {
-            return NULL;
-        }
-        PyObject *err = Py_BuildValue("{s:N,s:O,s:s}", "loc", loc_copy, "msg", msg,
-                                      "type", "unsupported");
-        if (err == NULL) {
-            return NULL;
-        }
-        int rc = PyList_Append(errors, err);
-        Py_DECREF(err);
-        if (rc < 0) {
-            return NULL;
-        }
-        return Py_NewRef(value);
-    }
-
-    case OP_FIELD: {
-        Py_ssize_t before = PyList_GET_SIZE(errors);
-        PyObject *validated = validate_node(
-            compiled->child, value, loc, errors, steps);
-        if (validated == NULL || PyList_GET_SIZE(errors) != before || *steps < 0) {
-            return validated;
-        }
-
-        PyObject *comparisons = PyTuple_GET_ITEM(plan, 2);
-        Py_ssize_t count = PyTuple_GET_SIZE(comparisons);
-        for (Py_ssize_t index = 0; index < count; index++) {
-            PyObject *entry = PyTuple_GET_ITEM(comparisons, index);
-            long operation = PyLong_AsLong(PyTuple_GET_ITEM(entry, 0));
-            if (operation == -1 && PyErr_Occurred()) goto field_error;
-            static const int rich_operations[] = {Py_GT, Py_GE, Py_LT, Py_LE};
-            if (operation < 0 || operation >= 4) {
-                PyErr_SetString(PyExc_ValueError, "invalid field comparison opcode");
-                goto field_error;
-            }
-            int valid = PyObject_RichCompareBool(
-                validated, PyTuple_GET_ITEM(entry, 1), rich_operations[operation]);
-            if (valid < 0) {
-                if (!PyErr_ExceptionMatches(PyExc_TypeError)) goto field_error;
-                PyErr_Clear();
-                if (emit_objects(
-                        errors, loc, PyTuple_GET_ITEM(entry, 3),
-                        PyTuple_GET_ITEM(entry, 4)) < 0) goto field_error;
-                return validated;
-            }
-            if (!valid) {
-                if (emit_objects(
-                        errors, loc, PyTuple_GET_ITEM(entry, 2),
-                        PyTuple_GET_ITEM(entry, 4)) < 0) goto field_error;
-                return validated;
-            }
-        }
-
-        PyObject *lengths = PyTuple_GET_ITEM(plan, 3);
-        count = PyTuple_GET_SIZE(lengths);
-        for (Py_ssize_t index = 0; index < count; index++) {
-            PyObject *entry = PyTuple_GET_ITEM(lengths, index);
-            long operation = PyLong_AsLong(PyTuple_GET_ITEM(entry, 0));
-            Py_ssize_t bound = PyLong_AsSsize_t(PyTuple_GET_ITEM(entry, 1));
-            if ((operation == -1 || bound == -1) && PyErr_Occurred()) goto field_error;
-            if (operation < 0 || operation >= 2) {
-                PyErr_SetString(PyExc_ValueError, "invalid field length opcode");
-                goto field_error;
-            }
-            Py_ssize_t length = PyObject_Length(validated);
-            if (length < 0) {
-                if (!PyErr_ExceptionMatches(PyExc_TypeError)) goto field_error;
-                PyErr_Clear();
-                if (emit_objects(
-                        errors, loc, PyTuple_GET_ITEM(entry, 3),
-                        PyTuple_GET_ITEM(entry, 4)) < 0) goto field_error;
-                return validated;
-            }
-            int valid = operation == 0 ? length >= bound : length <= bound;
-            if (!valid) {
-                if (emit_objects(
-                        errors, loc, PyTuple_GET_ITEM(entry, 2),
-                        PyTuple_GET_ITEM(entry, 4)) < 0) goto field_error;
-                return validated;
-            }
-        }
-
-        PyObject *pattern = PyTuple_GET_ITEM(plan, 4);
-        if (pattern != Py_None) {
-            int valid = 0;
-            if (PyUnicode_Check(validated)) {
-                PyObject *match = PyObject_CallOneArg(
-                    PyTuple_GET_ITEM(pattern, 0), validated);
-                if (match == NULL) goto field_error;
-                valid = match != Py_None;
-                Py_DECREF(match);
-            }
-            if (!valid && emit_objects(
-                    errors, loc, PyTuple_GET_ITEM(pattern, 1),
-                    PyTuple_GET_ITEM(pattern, 2)) < 0) goto field_error;
-        }
-        return validated;
-
-field_error:
-        Py_DECREF(validated);
-        return NULL;
-    }
+    case OP_FIELD:
+        return validate_field(compiled, value, loc, errors, steps);
 
     default:
         PyErr_Format(PyExc_ValueError, "unknown validation opcode %d", opcode);

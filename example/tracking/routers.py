@@ -214,14 +214,6 @@ def routers(live: LiveMap) -> tuple[Router, ...]:
     async def read_daily(
         request: Request,
         animal_id: int,
-        # An ordinary read session, on an ordinary `GET`. Reading a sealed
-        # `Series` computes any day past the horizon that nobody has settled
-        # yet and does *not* store it: settling is `Series.settle()`, which a
-        # job runs. This used to be a `WriteSession`, because the read
-        # materialised as a side effect and a read-workload session answered
-        # `cannot execute INSERT in a read-only transaction` from inside the
-        # series machinery, on a route that wrote nothing the application can
-        # see.
         session: ReadSession,
         since: datetime.date,
         days: Annotated[int, Query(minimum=1, maximum=MAX_TRACK_DAYS)] = 14,

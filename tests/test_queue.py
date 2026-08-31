@@ -681,10 +681,6 @@ class TestOneFamilyOneSurface:
         assert len(container.drain()) == 2
 
     def test_a_subclass_chains_init_like_any_python_class(self, kind) -> None:
-        # Both rings used to configure themselves in `__new__`, which meant a
-        # subclass had to override `__new__` and must never call
-        # `super().__init__` -- a rule that lived only in a comment, and one
-        # `wreath.kv.KV` next door did not share.
         seen: list[int] = []
 
         class Subclass(kind):  # type: ignore[misc,valid-type]

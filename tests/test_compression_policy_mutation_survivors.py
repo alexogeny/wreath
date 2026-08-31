@@ -125,9 +125,7 @@ def test_anonymous_fragment_render_prepares_dcz() -> None:
 async def test_head_response_is_not_compressed() -> None:
     response = Response(b"compressible" * 20, media_type=b"text/plain")
 
-    result = await CompressionPolicy(minimum_size=0).after(
-        _request(method="HEAD"), response
-    )
+    result = await CompressionPolicy(minimum_size=0).after(_request(method="HEAD"), response)
 
     assert result is response
     assert b"content-encoding" not in dict(response.headers)
@@ -206,9 +204,7 @@ async def test_dcz_is_not_available_over_plain_http() -> None:
     token = policy._configure_dcz_dictionary("application/json", body)
     response = Response(body, media_type=b"application/json")
 
-    await policy.after(
-        _request(accepted=b"dcz, gzip", available=token, scheme="http"), response
-    )
+    await policy.after(_request(accepted=b"dcz, gzip", available=token, scheme="http"), response)
 
     assert dict(response.headers)[b"content-encoding"] == b"gzip"
     assert b"available-dictionary" not in dict(response.headers)[b"vary"]
@@ -264,8 +260,9 @@ async def test_gzip_uses_its_configured_level(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(
         compression_module,
         "_gzip_fragment_compress_with",
-        lambda workspace, body, level, content_type, fragments: observed.append(level)
-        or b"encoded",
+        lambda workspace, body, level, content_type, fragments: (
+            observed.append(level) or b"encoded"
+        ),
     )
     policy = CompressionPolicy(minimum_size=0, gzip_level=1, zstd_level=9)
     response = Response(b"compressible", media_type=b"text/plain")
@@ -295,8 +292,9 @@ async def test_exact_prepared_body_uses_fragment_parts(
     monkeypatch.setattr(
         compression_module,
         "_gzip_fragment_compress_with",
-        lambda workspace, parts, level, content_type, fragments: observed.append(parts)
-        or b"encoded",
+        lambda workspace, parts, level, content_type, fragments: (
+            observed.append(parts) or b"encoded"
+        ),
     )
     response = Response(body, media_type=b"text/html")
 

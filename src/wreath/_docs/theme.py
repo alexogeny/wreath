@@ -545,9 +545,7 @@ blockquote{margin-inline:0;padding-left:var(--space-4);
 blockquote>*+*{margin-top:var(--space-3);}
 
 /* --- admonitions ----------------------------------------------------------- */
-/* A rule, a mono label, and the faintest wash — not a saturated card. Six of
-   these on a page used to read as six competing boxes; the weight now lives in
-   the label, which is the part that says what kind of aside this is. */
+/* A rule, a mono label, and the faintest wash rather than a saturated card. */
 .admonition{--adm:var(--accent);position:relative;padding:var(--space-3)
  var(--space-4) var(--space-4);border-left:2px solid var(--adm);
  border-radius:0 var(--radius) var(--radius) 0;}
@@ -1337,15 +1335,7 @@ def repo_link(info: RepoInfo | None) -> str:
     The counts are two spans of text, not badge images: an `<img>` from
     shields.io would be the one remote request in an otherwise self-contained
     page, and it would be the request that renders *last*, on a service the docs
-    do not control.
-
-    **A zero count is not shown.** The test used to be `stars >= 0`, where -1
-    means "the build could not resolve them" -- so a resolved zero rendered as a
-    literal `0 stars, 0 forks` in the header of every page. That is strictly
-    worse than the unresolved case, which renders nothing: an empty slot reads
-    as a design decision, and a zero reads as a claim nobody wanted to make.
-    A young repository is the one most likely to be building its own docs.
-    """
+    do not control."""
     if info is None:
         return ""
     mark = ICON_MARKS.get(info.host or "link", ICON_MARKS["link"])
@@ -1382,19 +1372,7 @@ def link_row(links) -> str:
 
 
 def _more(repo_html: str, links_html: str) -> str:
-    """The right-hand controls, behind one disclosure.
-
-    They used to sit in the bar as bare glyphs, and they read as strange
-    because they were: a wireframe cube for PyPI, a *filled* mark for GitHub
-    (stroked, it is unrecognisable at 18px), and a half-filled circle for the
-    theme. Three icons drawn three different ways, none of them labelled, each
-    asking the reader to guess.
-
-    In a menu they get their names, which is the actual fix -- an icon that
-    needs a tooltip was never carrying its meaning. Only the theme control
-    stays outside, because it changes what is on screen and is reached often
-    enough that burying it would be the worse trade.
-    """
+    """The right-hand controls, behind one disclosure."""
     body = f"{repo_html}{links_html}"
     if not body:
         return ""

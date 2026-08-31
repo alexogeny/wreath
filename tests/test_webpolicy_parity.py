@@ -74,11 +74,7 @@ def test_every_helper_this_file_covers_is_exported() -> None:
         # "content coding values are case-insensitive" (§8.4.1), and OWS is
         # allowed around the parameter separators (§5.6.1.2, §12.4.2).
         (b"GZip ; q=1.000", "gzip"),
-        # zstd is offered only to a client that named it. A bare wildcard still
-        # means gzip, so nothing that used to get gzip gets an unasked-for
-        # coding. §12.5.3 would permit reading `*` as consent to zstd; a client
-        # sending `*` is far likelier to be old than to be new, and the decoder
-        # it lacks shows up as a corrupt body rather than as a 415.
+        # A wildcard selects gzip; zstd requires an explicit token.
         (b"*;q=0.5", "gzip"),
         (b"zstd", "zstd"),
         (b"ZStd ; q=1.000", "zstd"),

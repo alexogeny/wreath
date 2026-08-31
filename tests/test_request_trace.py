@@ -80,9 +80,7 @@ def test_check_reports_a_scenario_that_grew(monkeypatch: pytest.MonkeyPatch) -> 
     assert request_trace._check_baseline() == 1
 
 
-def test_check_and_update_are_refused_together(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_check_and_update_are_refused_together(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(request_trace, "_baseline_path", lambda: tmp_path / "baseline.json")
     with pytest.raises(SystemExit, match="exclusive"):
         request_trace.main(["--check", "--update-baseline"])

@@ -111,7 +111,6 @@ async def test_the_budget_is_concurrency_not_a_lifetime_cap() -> None:
 @requires_h2load_h3
 @pytest.mark.network
 async def test_the_default_budget_survives_a_long_lived_connection() -> None:
-    # The shipped default is 100, which is exactly where this used to break.
     server, port = await _serve(_ok_app)
     try:
         done, succeeded, failed = await _one_connection(port, 250)

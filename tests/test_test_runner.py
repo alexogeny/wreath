@@ -1627,11 +1627,6 @@ def test_green_files_still_earn_mutation_confidence_beside_a_red_file(
         "    pytest.fail('the removed guard admitted bad')\n",
         encoding="utf-8",
     )
-    # Keep the mutation-bearing file first so one nested worker can seal its
-    # green evidence before entering the red waiter. Two nested workers used to
-    # create a competing mini test farm inside the already saturated outer
-    # suite, making this contract time out for scheduler load rather than
-    # behavior.
     live_wait = (
         "    deadline = time.monotonic() + 28.0\n"
         f"    while not Path({str(mutant_ran)!r}).exists():\n"

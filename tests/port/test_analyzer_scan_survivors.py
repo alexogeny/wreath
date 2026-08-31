@@ -73,7 +73,7 @@ def test_constructor_defaults_and_supplied_indexes_are_preserved() -> None:
 
 
 def test_class_shapes_keep_distinct_verdicts(tmp_path: Path) -> None:
-    source = '''from fastapi import FastAPI
+    source = """from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict
 import strawberry
 
@@ -100,7 +100,7 @@ class Configured(BaseModel):
 class Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
     count: int
-'''
+"""
 
     assert _findings(tmp_path, source) == [
         (6, "graphql.type"),
@@ -120,7 +120,7 @@ class Strict(BaseModel):
 
 
 def test_class_decorators_and_settings_messages_keep_their_exact_shape() -> None:
-    source = '''from fastapi import Form
+    source = """from fastapi import Form
 from pydantic import BaseModel, ConfigDict
 from pydantic_settings import BaseSettings
 
@@ -142,7 +142,7 @@ class Environment(BaseSettings):
 
 class ComplexEnvironment(BaseSettings):
     values: list[str]
-'''
+"""
     findings = _direct_findings(source)
 
     assert findings == [
@@ -173,7 +173,7 @@ class ComplexEnvironment(BaseSettings):
 
 def test_graphql_mirror_requires_exact_auto_model_fields() -> None:
     tree = ast.parse(
-        '''import strawberry
+        """import strawberry
 class Exact:
     value: strawberry.auto
 class Empty:
@@ -189,7 +189,7 @@ class Method:
 class Mixed:
     automatic: strawberry.auto
     declared: str
-'''
+"""
     )
     imports = _Imports().visit(tree)
     analyzer = _Analyzer(
@@ -224,10 +224,10 @@ class Mixed:
 
 
 def test_foreign_key_attribute_targets_use_the_indexed_primary_key_type() -> None:
-    tree = ast.parse('''import ormar
+    tree = ast.parse("""import ormar
 class Item(ormar.Model):
     owner = ormar.ForeignKey(models.User)
-''')
+""")
     analyzer = _Analyzer(
         Path("app.py"),
         Path("."),
@@ -244,7 +244,7 @@ class Item(ormar.Model):
 
 
 def test_orm_fields_require_field_calls_and_supported_origins(tmp_path: Path) -> None:
-    source = '''import ormar
+    source = """import ormar
 from sqlmodel import SQLModel, Field
 
 class OrmarModel(ormar.Model):
@@ -259,7 +259,7 @@ class SqlModel(SQLModel):
     id: int = Field(primary_key=True)
     ignored: int = other.Field()
     values: list[int] = ARRAY()
-'''
+"""
 
     assert _findings(tmp_path, source) == [
         (4, "orm.model"),
@@ -272,7 +272,7 @@ class SqlModel(SQLModel):
 
 
 def test_orm_field_shape_rejects_non_names_and_preserves_foreign_targets() -> None:
-    source = '''import ormar
+    source = """import ormar
 from sqlmodel import SQLModel, Field
 
 class OrmarModel(ormar.Model):
@@ -286,7 +286,7 @@ class OrmarModel(ormar.Model):
 class SqlModel(SQLModel):
     value = custom.Integer()
     field = Field()
-'''
+"""
 
     assert _direct_findings(source) == [
         (4, "orm.model"),
@@ -299,7 +299,7 @@ class SqlModel(SQLModel):
 
 
 def test_decorators_and_parameter_markers_are_origin_sensitive(tmp_path: Path) -> None:
-    source = '''from fastapi import FastAPI, Body, Query, UploadFile
+    source = """from fastapi import FastAPI, Body, Query, UploadFile
 from cachetools import cached
 import strawberry
 app = FastAPI()
@@ -330,7 +330,7 @@ async def route(
     upload: UploadFile = None,
     untyped = None,
 ): pass
-'''
+"""
 
     assert _findings(tmp_path, source) == [
         (4, "route.app"),
@@ -350,7 +350,7 @@ async def route(
 
 
 def test_decorator_lookalikes_do_not_activate_routes_or_special_rules() -> None:
-    source = '''from fastapi import FastAPI, Body
+    source = """from fastapi import FastAPI, Body
 from cachetools import other
 app = FastAPI()
 
@@ -368,13 +368,13 @@ def local_field(): pass
 
 @strawberry.other
 def strawberry_lookalike(): pass
-'''
+"""
 
     assert _direct_findings(source) == [(3, "route.app")]
 
 
 def test_call_rules_require_the_exact_imported_api(tmp_path: Path) -> None:
-    source = '''import asyncio
+    source = """import asyncio
 import multiprocessing
 import cachetools
 import aioboto3
@@ -406,7 +406,7 @@ async def socket(ws):
     await ws.send_json({})
     await ws.receive_json()
     await local.create_task(job())
-'''
+"""
 
     assert _findings(tmp_path, source) == [
         (13, "route.app"),
@@ -425,7 +425,7 @@ async def socket(ws):
 
 
 def test_call_lookalikes_do_not_inherit_framework_or_library_rules() -> None:
-    source = '''import jwt
+    source = """import jwt
 import gql
 import local
 from dlock import lock
@@ -448,7 +448,7 @@ operation(postgresql_using="name::text")
 def local_clients():
     one = two = TestClient(app)
     holder.client = TestClient(app)
-'''
+"""
 
     assert _direct_findings(source) == [
         (9, "lock.dlock"),
@@ -463,18 +463,21 @@ def local_clients():
 
 
 def test_isolated_call_lookalikes_do_not_consume_once_keys() -> None:
-    assert _direct_findings(
-        '''import local
+    assert (
+        _direct_findings(
+            """import local
 import multiprocessing
 local.Client()
 local.Process()
 multiprocessing.Other()
-'''
-    ) == []
+"""
+        )
+        == []
+    )
 
 
 def test_route_and_client_contexts_are_classified_separately(tmp_path: Path) -> None:
-    source = '''from fastapi import FastAPI
+    source = """from fastapi import FastAPI
 from fastapi.testclient import TestClient
 app = FastAPI()
 router = object()
@@ -487,7 +490,7 @@ module_client = TestClient(app)
 def test_local():
     client = TestClient(app)
     wrapped = factory(TestClient(app))
-'''
+"""
 
     assert _findings(tmp_path, source) == [
         (3, "route.app"),
@@ -500,7 +503,7 @@ def test_local():
 
 
 def test_joined_asyncio_tasks_cover_each_supported_local_shape(tmp_path: Path) -> None:
-    source = '''import asyncio
+    source = """import asyncio
 
 async def work():
     await asyncio.create_task(job())
@@ -519,7 +522,7 @@ async def work():
 def sync_work():
     task = asyncio.create_task(job())
     return task
-'''
+"""
 
     assert _findings(tmp_path, source) == [
         (4, "bg.asyncio_joined"),
@@ -531,7 +534,7 @@ def sync_work():
 
 
 def test_join_detection_does_not_accept_lookalike_calls(tmp_path: Path) -> None:
-    source = '''import asyncio
+    source = """import asyncio
 
 async def work():
     task = asyncio.create_task(job())
@@ -543,50 +546,50 @@ async def work():
     later = asyncio.create_task(job())
     before.append(later)
     await local.gather(*before)
-'''
+"""
 
     assert _findings(tmp_path, source) == [(4, "bg.asyncio_loop")]
 
 
 def test_join_detection_rejects_each_unsupported_parent_shape() -> None:
     cases = [
-        '''import asyncio
+        """import asyncio
 async def work():
     holder.task: object = asyncio.create_task(job())
     await holder.task
-''',
-        '''import asyncio
+""",
+        """import asyncio
 async def work():
     left = right = asyncio.create_task(job())
     await left
-''',
-        '''import asyncio
+""",
+        """import asyncio
 async def work():
     holder.tasks.append(asyncio.create_task(job()))
     await asyncio.gather(*holder.tasks)
-''',
-        '''import asyncio
+""",
+        """import asyncio
 def work():
     task: object = asyncio.create_task(job())
     awaitable(task)
-''',
-        '''import asyncio
+""",
+        """import asyncio
 async def work():
     append(asyncio.create_task(job()))
-''',
-        '''import asyncio
+""",
+        """import asyncio
 async def work():
     holder.task = asyncio.create_task(job())
     await holder.task
-''',
-        '''import asyncio
+""",
+        """import asyncio
 def work():
     task = asyncio.create_task(job())
     await task
-''',
-        '''import asyncio
+""",
+        """import asyncio
 task = asyncio.create_task(job())
-''',
+""",
     ]
 
     for source, line in zip(cases, (3, 3, 3, 3, 3, 3, 3, 2), strict=True):
@@ -595,40 +598,40 @@ task = asyncio.create_task(job())
 
 def test_join_detection_requires_later_matching_accumulation_and_await() -> None:
     cases = [
-        '''import asyncio
+        """import asyncio
 async def work():
     tasks = []
     tasks.append(task)
     task = asyncio.create_task(job())
     await asyncio.gather(*tasks)
-''',
-        '''import asyncio
+""",
+        """import asyncio
 async def work():
     task = asyncio.create_task(job())
     tasks = []
     tasks.append(other)
     await asyncio.gather(*tasks)
-''',
-        '''import asyncio
+""",
+        """import asyncio
 async def work():
     task = asyncio.create_task(job())
     tasks = []
     holder.append(task)
     await asyncio.gather(*tasks)
-''',
-        '''import asyncio
+""",
+        """import asyncio
 async def work():
     task = asyncio.create_task(job())
     self.tasks.append(task)
     await asyncio.gather(*self.tasks)
-''',
-        '''import asyncio
+""",
+        """import asyncio
 async def work():
     task = asyncio.create_task(job())
     tasks = []
     tasks.append(task)
     await local.gather(*tasks)
-''',
+""",
     ]
 
     for source, line in zip(cases, (5, 3, 3, 3, 3), strict=True):
@@ -636,7 +639,7 @@ async def work():
 
 
 def test_django_manager_attributes_distinguish_verbs_values_and_patches(tmp_path: Path) -> None:
-    source = '''from django.db import models
+    source = """from django.db import models
 from fastapi import status
 
 class User(models.Model):
@@ -650,7 +653,7 @@ not_a_patch = thing.not_objects.__class__
 ok = status.HTTP_200_OK
 wrong_prefix = status.OK
 wrong_origin = other.HTTP_200_OK
-'''
+"""
 
     assert _findings(tmp_path, source) == [
         (4, "orm.django.model"),
@@ -664,11 +667,11 @@ wrong_origin = other.HTTP_200_OK
 
 
 def test_django_query_verb_accepts_only_an_objects_manager() -> None:
-    source = '''from django.db import models
+    source = """from django.db import models
 value = thing.not_objects.filter
 called = User.objects.filter(name="x")
 uncalled = User.objects.filter
-'''
+"""
 
     assert _direct_findings(source) == [
         (3, "foreign.django.query"),
@@ -695,7 +698,7 @@ def test_uncalled_query_normalizes_its_non_call_parent(monkeypatch: pytest.Monke
 
 
 def test_migration_arguments_preserve_manual_and_derived_boundaries(tmp_path: Path) -> None:
-    source = '''import sqlalchemy as sa
+    source = """import sqlalchemy as sa
 from alembic import op
 
 op.create_table("x", sa.Column("id", sa.Integer()), sa.UniqueConstraint("id"))
@@ -716,7 +719,7 @@ op.create_table(
     sa.Column("bad", object()),
 )
 op.create_table(42, sa.Column("id", sa.Integer()))
-'''
+"""
 
     assert _findings(tmp_path, source) == [
         (4, "mig.derived"),
@@ -737,7 +740,7 @@ op.create_table(42, sa.Column("id", sa.Integer()))
 
 
 def test_middleware_detection_uses_the_first_argument_and_named_hosts(tmp_path: Path) -> None:
-    source = '''from fastapi import FastAPI
+    source = """from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 app = FastAPI()
@@ -746,7 +749,7 @@ app.add_middleware(TrustedHostMiddleware, other=[name], allowed_hosts=["*"])
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=[name])
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=("*", "example.test"))
 app.add_middleware()
-'''
+"""
 
     assert _findings(tmp_path, source) == [
         (4, "route.app"),

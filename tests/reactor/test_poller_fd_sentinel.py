@@ -12,8 +12,6 @@ from _metal import requires_metal
 pytestmark = requires_metal
 
 
-#: Every one of these makes `rp_init` return -1, each from a different point
-#: relative to the `memset` that used to wipe the ring's sentinel.
 REFUSALS = {
     "recv-buffers-not-a-power-of-two": {"WREATH_METAL_RECV_BUFFERS": "24"},
     "connection-capacity-out-of-range": {"WREATH_METAL_CONNECTION_CAPACITY": "3"},

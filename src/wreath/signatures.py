@@ -861,9 +861,7 @@ class Signatures:
                 raise SignatureError("signature nonce was already used")
 
         # Curve verification follows every cheap refusal available to an untrusted caller.
-        base = _core.signature_plan_base(
-            _message(request, headers), plan, SignatureError, _derived
-        )
+        base = _core.signature_plan_base(_message(request, headers), plan, SignatureError, _derived)
         from ._auth._ecverify import verify_ed25519
 
         if not verify_ed25519(key.public, base, raw_bytes):

@@ -250,14 +250,7 @@ def _count_key_map_builds() -> Iterator[list[int]]:
 
 
 def _pk_offsets(spec: ModelSpec, columns: tuple[ColumnSpec, ...]) -> tuple[int, ...]:
-    """Where `spec`'s primary-key columns sit within `columns`.
-
-    Depends only on the compiled projection, so it is resolved once per query
-    and reused for every row. It used to be rebuilt inside `_hydrate`, which
-    made hydration O(rows x columns) in repeated setup -- and every joined
-    load pays that per row *per join step*, because a joined shape always takes
-    this decoded-record path rather than the direct decoder plan.
-    """
+    """Where `spec`'s primary-key columns sit within `columns`."""
     if _key_map_builds is not None:
         _key_map_builds[0] += 1
     positions = {item.python_name: index for index, item in enumerate(columns)}
@@ -914,13 +907,9 @@ class Session:
             return []
         native_plan = self._record_plan(compiled, spec, plan)
         models = _model_storage()
-        return _native_core.orm_hydrate_records(
-            self, native_plan, rows, models._MODEL_API
-        )
+        return _native_core.orm_hydrate_records(self, native_plan, rows, models._MODEL_API)
 
-    def _record_plan(
-        self, compiled: CompiledQuery, spec: ModelSpec, plan: LoadPlan
-    ) -> Any:
+    def _record_plan(self, compiled: CompiledQuery, spec: ModelSpec, plan: LoadPlan) -> Any:
         """Resolve and cache Record hydration constants by query shape."""
         cached = self._registry.cached_plan(compiled.shape_key)
         if cached is not None and cached.record_plan is not None:
@@ -1503,16 +1492,13 @@ class Session:
                     f"{spec.model_type.__name__}"
                 )
             decoded = tuple(
-                item.pg_type.from_wire(row[index])
-                for index, item in enumerate(returning)
+                item.pg_type.from_wire(row[index]) for index, item in enumerate(returning)
             )
         else:
             await connection.execute(plan.sql, *values)
         return _stage_insert(instance, spec, returning, decoded)
 
-    async def _insert_many(
-        self, instances: list[Any], spec: Any, mask: int
-    ) -> list[_InsertResult]:
+    async def _insert_many(self, instances: list[Any], spec: Any, mask: int) -> list[_InsertResult]:
         for instance in instances:
             self._audit_attribute(instance)
         connection = await self._acquire()
@@ -1523,9 +1509,7 @@ class Session:
             rows += await self._execute_insert_many(
                 connection, instances[offset : offset + limit], spec, mask
             )
-        plan = compile_insert_many(
-            self._registry, spec, mask, min(len(instances), limit)
-        )
+        plan = compile_insert_many(self._registry, spec, mask, min(len(instances), limit))
         decoded: list[tuple[Any, ...]]
         if plan.returning:
             if len(rows) != len(instances):
@@ -1535,8 +1519,7 @@ class Session:
                 )
             decoded = [
                 tuple(
-                    item.pg_type.from_wire(row[index])
-                    for index, item in enumerate(plan.returning)
+                    item.pg_type.from_wire(row[index]) for index, item in enumerate(plan.returning)
                 )
                 for row in rows
             ]
@@ -1552,9 +1535,7 @@ class Session:
     ) -> list[Any]:
         plan = compile_insert_many(self._registry, spec, mask, len(instances))
         values = [
-            _wire_value(instance, column)
-            for instance in instances
-            for column in plan.columns
+            _wire_value(instance, column) for instance in instances for column in plan.columns
         ]
         try:
             if plan.returning:
@@ -1576,11 +1557,7 @@ class Session:
         connection = await self._acquire()
         width = len(spec.primary_key) + mask.bit_count()
         probe = compile_update_many(self._registry, spec, mask, 1)
-        limit = (
-            MAX_BIND_PARAMETERS
-            if probe.array_oids
-            else max(1, MAX_BIND_PARAMETERS // width)
-        )
+        limit = MAX_BIND_PARAMETERS if probe.array_oids else max(1, MAX_BIND_PARAMETERS // width)
         returned: list[Any] = []
         for offset in range(0, len(instances), limit):
             returned += await self._execute_update_many(
@@ -1614,9 +1591,7 @@ class Session:
             ]
             if plan.array_oids
             else [
-                _wire_value(instance, column)
-                for instance in instances
-                for column in batch_columns
+                _wire_value(instance, column) for instance in instances for column in batch_columns
             ]
         )
         try:
@@ -1648,11 +1623,7 @@ class Session:
         connection = await self._acquire()
         width = len(spec.primary_key)
         probe = compile_delete_many(self._registry, spec, 1)
-        limit = (
-            MAX_BIND_PARAMETERS
-            if probe.array_oids
-            else max(1, MAX_BIND_PARAMETERS // width)
-        )
+        limit = MAX_BIND_PARAMETERS if probe.array_oids else max(1, MAX_BIND_PARAMETERS // width)
         returned: list[Any] = []
         for offset in range(0, len(instances), limit):
             returned += await self._execute_delete_many(
@@ -1675,9 +1646,7 @@ class Session:
                     [_wire_value(instance, column) for instance in instances],
                     oid,
                 )
-                for column, oid in zip(
-                    plan.key_columns, plan.array_oids, strict=True
-                )
+                for column, oid in zip(plan.key_columns, plan.array_oids, strict=True)
             ]
             if plan.array_oids
             else [
@@ -1883,9 +1852,7 @@ def _affected_count(status: Any, verb: str) -> int:
     )
 
 
-def _check_returned_keys(
-    instances: list[Any], rows: list[Any], spec: ModelSpec, verb: str
-) -> None:
+def _check_returned_keys(instances: list[Any], rows: list[Any], spec: ModelSpec, verb: str) -> None:
     expected = Counter(instance._orm_primary_key() for instance in instances)
     actual = Counter(
         tuple(column.pg_type.from_wire(row[index]) for index, column in enumerate(spec.primary_key))
@@ -2013,12 +1980,6 @@ def _key_tuple(spec: ModelSpec, primary_key: Any) -> tuple[Any, ...]:
     return values
 
 
-#: The batch sizes a select-in load is allowed to use. A statement's text
-#: contains one placeholder per key, so *every distinct key count* used to be a
-#: distinct statement -- a plan-cache entry per shape, evicting the shapes that
-#: matter. Rounding each batch up to one of these caps the number of shapes at
-#: the length of this tuple, at the cost of repeating a key to fill the last
-#: slot (which `IN` deduplicates for free).
 _BATCH_WIDTHS: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024)
 
 

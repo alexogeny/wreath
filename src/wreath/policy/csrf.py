@@ -356,11 +356,6 @@ class CsrfPolicy:
                 return False
             referer_origin = _referer_origin(referer_text)
             return referer_origin is not None and origin_matches(referer_origin, allowed)
-        # Neither header. Refused unless the application explicitly asked for
-        # the fallback: it used to be inferred from `secure=False`, which is
-        # what a TLS-terminating proxy leaves you with when ProxyHeaders is not
-        # mounted -- so a deployment could lose the origin check as a side
-        # effect of an unrelated flag it never connected to CSRF.
         return self._allow_missing_origin
 
     def describe(self) -> Any:

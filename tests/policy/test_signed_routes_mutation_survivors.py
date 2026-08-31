@@ -32,9 +32,7 @@ async def _receive() -> dict[str, Any]:
     return {"type": "http.request", "body": b"", "more_body": False}
 
 
-def _request(
-    *, method: str = "GET", path: str = "/download", query: bytes = b""
-) -> Request:
+def _request(*, method: str = "GET", path: str = "/download", query: bytes = b"") -> Request:
     return Request(
         {
             "type": "http",

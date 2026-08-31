@@ -16,6 +16,10 @@ application to other services without inventing another identity or schema layer
 
 ::: wreath.protobuf
 
+::: wreath.jsonpath
+
+::: wreath.linkset
+
 ::: wreath.http_client
 
 ::: wreath.bff

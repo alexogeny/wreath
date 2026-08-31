@@ -155,9 +155,7 @@ async def test_reject_broadcast_counts_only_connections_that_accept_the_frame() 
         return None
 
     full_task = asyncio.create_task(service.serve(cast(WebSocket, full), handle, key="full"))
-    open_task = asyncio.create_task(
-        service.serve(cast(WebSocket, open_socket), handle, key="open")
-    )
+    open_task = asyncio.create_task(service.serve(cast(WebSocket, open_socket), handle, key="open"))
     await asyncio.gather(full.ready.wait(), open_socket.ready.wait())
     await service.send("full", "writing")
     await service.send("open", "writing")

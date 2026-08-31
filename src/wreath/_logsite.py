@@ -406,12 +406,8 @@ def pack_value(registry: SiteRegistry, value: object, spec: LogField) -> tuple[L
     **Which is which, and why, is written once at the head of the log-record
     section in `_flight_schema.py`.**
 
-    Returns the argument and whether the value failed its declared type. A
-    mismatch is *counted*, never raised: a log call that can break the request
-    that made it is worse than a log line that reads `?`. Three values used to
-    break that promise from inside this function -- an int wider than the int64
-    slot, a float too wide to narrow, and a lone surrogate -- and each is now a
-    counted mismatch. The parity corpus is what found them.
+    Returns the argument and whether the value failed its declared type.
+    Mismatches are counted rather than raised.
     """
     if spec.disposition is CaptureDisposition.HASHED:
         return LogArg.hashed(registry.fingerprint(_as_bytes(value))), False
@@ -427,10 +423,6 @@ def pack_value(registry: SiteRegistry, value: object, spec: LogField) -> tuple[L
     if spec.type is int:
         if not isinstance(value, int) or isinstance(value, bool):
             return LogArg.none(), True
-        # A Python int is unbounded and the wire slot is int64. Out of range is
-        # a mismatch, not an exception: `struct.pack` used to raise here, out of
-        # the sink and into whatever made the log call, which is the one thing
-        # this function promises cannot happen.
         if not LOG_ARG_INT_MIN <= value <= LOG_ARG_INT_MAX:
             return LogArg.none(), True
         return LogArg.integer(value), False

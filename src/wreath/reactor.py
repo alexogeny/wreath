@@ -792,12 +792,6 @@ class EventLoop(_LoopBase):
         name: str | None = None,
         context: contextvars.Context | None = None,
     ) -> Any:
-        # The factory first, and in *every* mode. It used to be reachable only
-        # on the `auto` path, because `inline` returned a `WreathTask` before
-        # `BaseEventLoop.create_task` could consult it -- so `set_task_factory`
-        # on an inline loop installed a hook that was never called, which reads
-        # as the factory being wrong rather than skipped. Keywords are forwarded
-        # only when given, matching what the base class would have passed on.
         if self._task_factory is not None:
             keywords: dict[str, Any] = {}
             if name is not None:

@@ -570,6 +570,9 @@ static PyMethodDef core_methods[] = {
     {"json_loads", wreath_json_loads, METH_O,
      "json_loads(data) -> object\n"
      "Parse JSON from str/bytes/bytearray with stdlib json.loads semantics."},
+    {"jsonpath_find", wreath_jsonpath_find, METH_VARARGS,
+     "jsonpath_find(program, value, max_visits, error_type, fullmatch, search, "
+     "pattern_error) -> nodes\nExecute a compiled RFC 9535 query."},
     {"template_compile", wreath_template_compile, METH_O,
      "template_compile(tape) -> program\n"
      "Decode a template tape once for repeated rendering."},

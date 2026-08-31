@@ -203,8 +203,7 @@ def _cycles(graph: Graph, members: set[type]) -> list[tuple[type, ...]]:
     components: list[tuple[type, ...]] = []
     seen: set[type] = set()
     traversal_limit = 1 + sum(
-        len(graph.inbound.get(model, ())) + len(graph.outbound.get(model, ()))
-        for model in members
+        len(graph.inbound.get(model, ())) + len(graph.outbound.get(model, ())) for model in members
     )
     for start in sorted(members, key=lambda model: graph.nodes[model].qualified):
         if start in seen:

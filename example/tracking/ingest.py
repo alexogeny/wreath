@@ -1,50 +1,4 @@
-"""Accepting a batch of positions: decode, refuse, land, repair, announce.
-
-This is the one path in the example that writes, and it does five things in an
-order that matters.
-
-1. **Decode.** `wreath.protobuf` turns bytes into a `PositionBatch`, or raises
-   `ProtobufDecodeError` -- one exception covering truncation, a length prefix
-   past the end of the buffer, a varint longer than ten bytes, and invalid
-   UTF-8. The router turns that into a 400. Letting it surface as a 500 would
-   tell a retrying station to try again, and it will, forever.
-
-2. **Refuse the individual position, not the batch.** A collar with a corrupt
-   almanac reporting a latitude of 320 degrees must not stop the other
-   thirty-nine collars in the same upload from being recorded. Those positions
-   are dropped and *counted* in the receipt, so a station operator can see one
-   collar going wrong rather than discovering it a season later.
-
-3. **Land it idempotently.** `(collar_id, recorded_at)` is the primary key and
-   the insert is `ON CONFLICT DO NOTHING`, so a station whose upload timed out
-   after the write can retry the whole batch and land nothing. That property is
-   in the schema rather than in a flag somebody remembered to check.
-
-4. **Repair the legs.** `Fix.leg_m` is the distance from the previous fix, and
-   a batch that arrives *late* lands in the middle of history -- so the fix that
-   used to follow the gap has a leg measured across it. See
-   :func:`repair_legs`; this is the whole reason yesterday's distance can change
-   after yesterday ended, which is what the sealed daily view in
-   `tracking.views` then has to report honestly rather than rewrite.
-
-5. **Announce it.** One broadcast per batch onto the live map's room.
-
-## Why this handler still reads the body itself
-
-An annotation *does* bind a protobuf body now: `async def h(request, body: Ping)`
-decodes `application/x-protobuf` into a `@message` through the ordinary binding
-layer, and a route annotated `-> Ping` negotiates protobuf on the way out. This
-paragraph used to say the opposite, and was simply stale -- worth knowing,
-because it is the kind of note a reader trusts instead of checking.
-
-What this handler needs that the annotation does not give it is **partial
-acceptance**: a batch of forty positions where one collar reports a latitude of
-320 degrees must land the other thirty-nine and count the refusal, and a binding
-layer that validates the whole body either accepts all of it or rejects all of
-it. So `accept()` reads `await request.body()`, decodes once, and refuses per
-position. That is a property of this endpoint rather than a gap in the
-framework.
-"""
+"""Decode, partially accept, store, repair, and announce position batches."""
 
 from __future__ import annotations
 
@@ -200,35 +154,7 @@ async def accept(
 
 
 async def repair_legs(session: Any, animal_id: int, *, since: Any) -> int:
-    """Recompute `Fix.leg_m` for one animal, from `since` forward.
-
-    **Why this exists at all.** A leg is the distance from the previous fix, and
-    "previous" is decided by `recorded_at`, not by arrival. When a collar that
-    lost the sky for three days uploads its buffer, the rows land *between* rows
-    that are already there -- and the fix that used to come straight after the
-    gap now has a leg measured across three days of walking that has since been
-    filled in. Leaving it would make the animal's total distance count that
-    stretch twice.
-
-    So the repair starts one fix *before* `since`, which is the only way to give
-    the first repaired fix a predecessor to measure from, and walks forward.
-
-    **The distance is computed in Python, not in SQL,** and that is a decision
-    rather than a shortcut. Writing the haversine formula into this `UPDATE`
-    would give two implementations of "how far apart", and the stored column and
-    `wreath.geospatial.Trajectory` would be free to disagree by a rounding rule
-    nobody would notice for a year. `tests/tracking/test_ingest.py` asserts they
-    agree, and they can only agree because there is one of them.
-
-    The cost is one round trip per animal per batch and a read of everything
-    from `since` forward. For a live batch that is a handful of rows. For a
-    week-old buffer dump it is a week of that animal's fixes, once -- which is
-    the honest price of a stored derivation, and is why `Fix.leg_m`'s docstring
-    says it is maintained by this path.
-
-    Returns:
-        How many fixes had their leg rewritten.
-    """
+    """Recompute `Fix.leg_m` from the predecessor of `since` onward."""
     rows = await session.raw(
         f'SELECT collar_id, recorded_at, latitude, longitude FROM "{SCHEMA}"."fixes" '
         "WHERE animal_id = $1 AND recorded_at >= COALESCE("

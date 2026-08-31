@@ -257,9 +257,7 @@ class WritePlan:
     array_oids: tuple[int, ...] = ()
 
 
-def _write_shape_key(
-    registry: Any, spec: ModelSpec, op: bytes, mask: int, rows: int = 1
-) -> bytes:
+def _write_shape_key(registry: Any, spec: ModelSpec, op: bytes, mask: int, rows: int = 1) -> bytes:
     """A cache key over everything that changes a write statement.
 
     The mask is positional over `spec.columns`, so it identifies the
@@ -293,15 +291,11 @@ def compile_insert(registry: Any, spec: ModelSpec, mask: int) -> WritePlan:
     return compile_insert_many(registry, spec, mask, 1)
 
 
-def compile_insert_many(
-    registry: Any, spec: ModelSpec, mask: int, rows: int
-) -> WritePlan:
+def compile_insert_many(registry: Any, spec: ModelSpec, mask: int, rows: int) -> WritePlan:
     """An INSERT for `rows` instances sharing one supplied-column mask."""
     _require_write_rows(rows)
     _require_write_bind_budget(mask.bit_count(), rows)
-    cached = registry.cached_plan(
-        key := _write_shape_key(registry, spec, b"i", mask, rows)
-    )
+    cached = registry.cached_plan(key := _write_shape_key(registry, spec, b"i", mask, rows))
     if cached is not None:
         return cached
 
@@ -358,9 +352,7 @@ def compile_delete(registry: Any, spec: ModelSpec) -> WritePlan:
     )
 
 
-def compile_update_many(
-    registry: Any, spec: ModelSpec, mask: int, rows: int
-) -> WritePlan:
+def compile_update_many(registry: Any, spec: ModelSpec, mask: int, rows: int) -> WritePlan:
     """An UPDATE plan for equal dirty shapes."""
     _require_write_rows(rows)
     columns = tuple(item for position, item in enumerate(spec.columns) if mask & (1 << position))
@@ -369,9 +361,7 @@ def compile_update_many(
     array_oids = _array_oids(batch_columns)
     _require_write_bind_budget(len(batch_columns), 1 if array_oids else rows)
     cached = registry.cached_plan(
-        key := _write_shape_key(
-            registry, spec, b"U", mask, 0 if array_oids else rows
-        )
+        key := _write_shape_key(registry, spec, b"U", mask, 0 if array_oids else rows)
     )
     if cached is not None:
         return cached
@@ -381,8 +371,7 @@ def compile_update_many(
     target = quote("wreath_target")
     batch = quote("wreath_batch")
     assignments = ", ".join(
-        f"{quote(item.database_name)} = {batch}.{quote(item.database_name)}"
-        for item in columns
+        f"{quote(item.database_name)} = {batch}.{quote(item.database_name)}" for item in columns
     )
     aliases = ", ".join(quote(item.database_name) for item in batch_columns)
     predicate = " AND ".join(
@@ -419,9 +408,7 @@ def compile_delete_many(registry: Any, spec: ModelSpec, rows: int) -> WritePlan:
     array_oids = _array_oids(keys)
     _require_write_bind_budget(len(keys), 1 if array_oids else rows)
     cached = registry.cached_plan(
-        key := _write_shape_key(
-            registry, spec, b"D", 0, 0 if array_oids else rows
-        )
+        key := _write_shape_key(registry, spec, b"D", 0, 0 if array_oids else rows)
     )
     if cached is not None:
         return cached
@@ -437,9 +424,7 @@ def compile_delete_many(registry: Any, spec: ModelSpec, rows: int) -> WritePlan:
     )
     returning = ", ".join(f"{target}.{quote(item.database_name)}" for item in keys)
     source = (
-        _unnest_write_sql(keys)
-        if array_oids
-        else f"(VALUES {_typed_write_values_sql(keys, rows)})"
+        _unnest_write_sql(keys) if array_oids else f"(VALUES {_typed_write_values_sql(keys, rows)})"
     )
     sql = (
         f"DELETE FROM {qualified(spec)} AS {target} USING {source} "
@@ -478,9 +463,7 @@ def _require_write_bind_budget(width: int, rows: int) -> None:
 
 def _write_values_sql(width: int, rows: int) -> str:
     return ", ".join(
-        "("
-        + ", ".join(f"${row * width + column + 1}" for column in range(width))
-        + ")"
+        "(" + ", ".join(f"${row * width + column + 1}" for column in range(width)) + ")"
         for row in range(rows)
     )
 
@@ -507,8 +490,7 @@ def _array_oids(columns: tuple[ColumnSpec, ...]) -> tuple[int, ...]:
 
 def _unnest_write_sql(columns: tuple[ColumnSpec, ...]) -> str:
     parameters = ", ".join(
-        f"${index}::{item.pg_type.sql}[]"
-        for index, item in enumerate(columns, start=1)
+        f"${index}::{item.pg_type.sql}[]" for index, item in enumerate(columns, start=1)
     )
     return f"UNNEST({parameters})"
 

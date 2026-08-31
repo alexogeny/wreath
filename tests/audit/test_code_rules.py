@@ -733,9 +733,7 @@ def test_a_wildcard_proxy_boundary_does_not_silence_the_forwarded_rule() -> None
     assert_flags(source, "wildcard-trust-list")
 
 
-# =============================================================================
 # Taint and security-smell rules
-# =============================================================================
 # The tier's second half. The rules above ask "is this expression dangerous?";
 # these ask two further questions that the same AST walk can answer and that no
 # expression-level rule can:
@@ -1412,9 +1410,7 @@ def test_a_declared_body_walked_onto_a_model_is_flagged() -> None:
     )
 
 
-# =============================================================================
 # Precision, pinned
-# =============================================================================
 # Every test below exists because `wreath mutant --changed` removed a guard and
 # no test objected. A rule's *quiet* half is the half that decides whether it
 # survives contact with a real codebase, and an `assert_clean` passes trivially

@@ -26,14 +26,17 @@ def test_tokens_and_parameters_keep_their_structured_types() -> None:
 
 
 def test_a_dictionary_uses_structured_member_keys_and_values() -> None:
-    assert serialize_dictionary(
-        {
-            "public": Item(True),
-            "max-age": Item(60),
-            "label": Item("edge"),
-            "mode": Item(Token("fast")),
-        }
-    ) == b'public, max-age=60, label="edge", mode=fast'
+    assert (
+        serialize_dictionary(
+            {
+                "public": Item(True),
+                "max-age": Item(60),
+                "label": Item("edge"),
+                "mode": Item(Token("fast")),
+            }
+        )
+        == b'public, max-age=60, label="edge", mode=fast'
+    )
 
 
 def test_an_empty_structured_dictionary_is_refused() -> None:

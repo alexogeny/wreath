@@ -23,7 +23,7 @@ def test_schema_comments_are_removed_outside_strings() -> None:
 
 
 def test_comment_scanner_preserves_escaped_strings_and_ordinary_slashes() -> None:
-    source = '"quote\\\"//still text" / value'
+    source = '"quote\\"//still text" / value'
 
     assert _without_comments(source) == source
 

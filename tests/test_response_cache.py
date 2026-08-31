@@ -272,15 +272,6 @@ async def test_dict_return_is_cached() -> None:
     assert a == b == {"ok": True} and calls == 1
 
 
-# `cached`'s own comment records why this branch exists: "The default key is a
-# *shared* key: it carries no principal, so an entry stored for one caller would
-# be served to the next. The docstring said to pass a `key` that includes the
-# principal; nothing enforced it, and the failure is silent and cross-user."
-# `wreath mutant` deleted the branch and every test stayed green -- the whole
-# file builds requests with no `identity` attribute at all, so the case the
-# guard was written for was never presented to it.
-
-
 class _Identified(_Req):
     def __init__(self, who: str, **kwargs) -> None:
         super().__init__(**kwargs)

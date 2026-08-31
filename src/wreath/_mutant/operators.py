@@ -131,8 +131,6 @@ _CONTROL_PATTERN = re.compile(
     "|".join(map(re.escape, sorted(CONTROL_TOKENS, key=len, reverse=True)))
 )
 
-#: Keywords that *are* a control when they appear at a call site. Dropping one
-#: is the source-level spelling of "this control was never declared".
 CONTROL_KEYWORDS: frozenset[str] = frozenset(
     {
         "action",

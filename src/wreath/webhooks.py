@@ -983,8 +983,7 @@ class PostgresWebhookInbox:
     def statements(self) -> tuple[str, ...]:
         """DDL creating the inbox table and its retention index. Idempotent.
 
-        `IF NOT EXISTS` throughout, so it is safe to run at every boot -- which
-        is what wreath now does, during lifespan, before the receiver starts.
+        `IF NOT EXISTS` throughout, so it is safe to run at every boot.
 
         The table name is **unqualified**, so it lands in whatever `search_path`
         resolves to rather than in the `wreath` schema. That is where every

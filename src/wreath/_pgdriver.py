@@ -2083,26 +2083,6 @@ class Connection:
 
     async def _read_pipeline(self) -> None:
         try:
-            # **The reader waits on the socket, and only on the socket.**
-            # This loop used to end the moment `_emitted` emptied. At pipeline
-            # depth one -- a pooled connection serving one query per lease,
-            # which is every request on the Fortunes board -- that meant
-            # `_flush` built a fresh `Task` for the very next query: one Task
-            # allocated, scheduled, called back and torn down *per query*.
-            # The first fix parked on a wakeup future that `_flush` resolved.
-            # That removed the Task and added a future, a wake and a
-            # *suspension* -- and a suspension on this loop was measured at
-            # ~6,250 instructions, which is not a rounding error against a
-            # ~66,000-instruction query.
-            # Waiting on the socket unconditionally removes all three. There is
-            # nothing to wake: `_flush` writes, the server answers, and the read
-            # completes on its own. It is also what this loop already did
-            # whenever a LISTEN channel was registered, so it is one behaviour
-            # instead of two.
-            # The task now lives until the connection closes. `close()` cancels
-            # it; `_fail_connection` closes the transport, which fails the read
-            # waiter and lands in the handler below. A reader blocked on a
-            # socket costs nothing while it waits.
             while not self._closed:
                 # Publish the head-of-line operation as current BEFORE blocking
                 # on the socket: a concurrent cancel must observe an active
@@ -2379,24 +2359,6 @@ class Connection:
                 self._transaction_barrier = False
         elif operation.state == "emitted":
             operation.discarded = True
-            # `_current` alone is not enough to decide "is the backend running
-            # this right now".
-            # It is published by the reader just before it blocks on the socket,
-            # which used to be the same moment the operation was emitted --
-            # `_flush` started or woke the reader, and the reader's first act
-            # was to publish. Once the reader began waiting on the socket
-            # *unconditionally* it was already parked in `_receive_message()`
-            # when `_flush` emitted, so nothing re-published `_current` until
-            # the first response byte arrived. A cancel inside that window saw
-            # `_current is None`, sent no CancelRequest, and left the backend
-            # running the query -- which is precisely the defect the comment in
-            # `_read_pipeline` records the LISTEN/NOTIFY rewrite causing once
-            # before, reached the second time by a different route.
-            # The head of `_emitted` is the operation the backend is executing,
-            # by construction and without depending on the reader having been
-            # scheduled. `_current` still has to be tested as well: it is what
-            # names an operation that has been popped from `_emitted` and is in
-            # transit through decoding, belonging to no queue at all.
             head = self._emitted[0] if self._emitted else None
             if self._current is operation or head is operation:
                 if self._backend_pid and self._backend_key:
@@ -2439,17 +2401,6 @@ class Connection:
 
     def _resolve_pending(self, error: PostgresError) -> None:
         """Fail every operation this connection could still have resolved.
-
-        The three queues do not account for all of them. An operation moves
-        between queues without ever being in two at once, and the reader hands
-        it across those seams *while running code that can raise* -- decoding a
-        batch, caching a plan. `_read_pipeline` pops the head of `_emitted`
-        before decoding it and only then appends it to `_completed`, so a decode
-        failure left the operation in no queue at all: the sweep could not see
-        it, its future was never resolved, and the caller waited forever. The
-        `except BaseException` in the reader was already calling this and still
-        did not save that caller, because the operation had fallen through the
-        gap between two of the containers it was searching.
 
         `_current` closes the gap. The reader publishes the head-of-line
         operation there before it touches the socket and clears it only once the

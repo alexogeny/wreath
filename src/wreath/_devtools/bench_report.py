@@ -171,9 +171,7 @@ def _range(row: dict[str, Any], metric: str) -> tuple[float, float] | None:
 def _separated(rows: list[dict[str, Any]], metric: str, lower_better: bool) -> bool:
     """Is the leader's advantage bigger than the run-to-run spread?"""
     valid = [
-        r
-        for r in rows
-        if not int(r.get("errors", 0)) and isinstance(r.get(metric), int | float)
+        r for r in rows if not int(r.get("errors", 0)) and isinstance(r.get(metric), int | float)
     ]
     if len(valid) < 2:
         return True

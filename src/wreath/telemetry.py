@@ -273,22 +273,6 @@ class MemoryBudget:
     phase_scratch: int
     capture: int
     export_queue: int
-    #: Logging's fixed tables: the interned call sites, the per-call-site
-    #: limiter, and the writer hand-off queue.
-    #:
-    #: **This one is an estimate, and the others are not.** The recorder's
-    #: reservations above are exact because native code allocates exactly that
-    #: many bytes; logging's tables are Python objects, so this is their
-    #: approximate footprint from the per-entry constants above. It is here
-    #: rather than absent because a budget that silently omits a component is
-    #: worse than one that says which part it is estimating.
-    #:
-    #: It used to say it would become exact once the emitter moved to C. The
-    #: emitter has, and it did not: what these constants describe is the site
-    #: table, the limiter, the writer queue and the per-request scratch, none of
-    #: which were ever the packing. They are measured now instead --
-    #: `benchmarks/bench_logging.py --suite memory` -- which is the honest
-    #: version of the same intent.
     logging: int = 0
 
     @property

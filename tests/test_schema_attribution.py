@@ -77,9 +77,6 @@ async def _database(suffix: str, *schemas: str) -> str:
 
 
 async def _drive_startup(app: Wreath) -> list[dict[str, Any]]:
-    """Run one whole lifespan cycle -- startup then shutdown -- and return the
-    replies. Startup is where `_bootstrap_schema` runs, and where the refusal
-    this file is about used to arrive."""
     messages = iter([{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}])
     sent: list[dict[str, Any]] = []
 

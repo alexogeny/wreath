@@ -510,9 +510,7 @@ async def test_unit_gate_distinguishes_transient_and_permanent_refusals() -> Non
             units=units,
         )
 
-        assert await driver._gate_unit(
-            walk, object(), cursor_from=None, cursor_to=(1,)
-        ) == "no"
+        assert await driver._gate_unit(walk, object(), cursor_from=None, cursor_to=(1,)) == "no"
         assert ledger.block.await_args.kwargs["phase"] == phase
 
 

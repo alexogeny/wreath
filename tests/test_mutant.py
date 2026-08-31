@@ -1140,14 +1140,6 @@ def test_the_wholesale_keyword_mutant_is_the_one_that_overstates(
     assert all(m["outcome"] == "killed" for m in wholesale), wholesale
 
 
-# The shape every application writes, and the one this tool used to be unable
-# to touch: the text is bound to a module global and a `CedarPolicies` is built
-# from it on the next line, so rebinding the global reaches the string and not
-# the engine that answers. Measured over `example/camera_trap/policies.py`
-# before the fix: 0 killed, 18 survived. The project below is that shape in
-# miniature, with one watched policy and one unwatched one, so a run that
-# reports both KILLED is as wrong as one that reports both SURVIVED.
-
 CEDAR_PROJECT = {
     "guard/__init__.py": "",
     "guard/policy.py": textwrap.dedent(
@@ -1161,8 +1153,7 @@ CEDAR_PROJECT = {
         permit(principal in Role::"ranger", action == Action::"read", resource)
           when { resource.tier == "sensitive" };
 
-        // Anyone signed in may read an open record. Note the semicolon in this
-        // sentence; splitting the source on a bare `;` used to cut it in half.
+        // Anyone signed in may read an open record; comments may contain semicolons.
         permit(principal, action == Action::"read", resource)
           when { resource.tier == "open" };
 
@@ -1825,10 +1816,6 @@ def test_a_run_with_survivors_still_exits_zero(
     assert completed.returncode == 0, completed.stderr[-2000:]
     assert "SURVIVED" in completed.stdout or "UNREACHED" in completed.stdout
 
-    # The opt-in changes only the interpretation of this completed report. It
-    # used to launch the entire mutation engine a second time to prove one
-    # boolean at the end of `execute_mutant`, adding more than a second to every
-    # suite run while testing no additional mutation behavior.
     from wreath._mutant.cli import _exit_status
     from wreath._mutant.model import Mutation, Site
 

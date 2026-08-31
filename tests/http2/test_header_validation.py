@@ -218,14 +218,6 @@ async def test_connect_without_authority_is_protocol_error(make_driver):
     assert not captured
 
 
-# HTTP/2 used to check names for uppercase only and values not at all, so the
-# same process accepted over h2 exactly the octets its HTTP/1.1 parser refuses
-# -- CR, LF and NUL included. Anything that re-serializes these headers to an
-# HTTP/1.1 upstream (a proxy, a forwarded outbound call, a cache key) re-splits
-# on the CRLF, which is a request-splitting primitive the origin client was
-# never authorized to use. Both protocols now share one octet rule
-# (wreath_field_token in server_common.c); these cases pin the h2 half of it.
-
 BASE = [(b":method", b"GET"), (b":path", b"/"), (b":scheme", b"https"), (b":authority", b"x")]
 
 
@@ -281,9 +273,6 @@ async def test_ordinary_field_octets_are_still_accepted(make_driver):
     [b"100abc", b"0x10", b" 5", b"5 ", b"+5", b"-1", b"", b"1e3", b"99999999999999999999999999999"],
 )
 async def test_malformed_content_length_is_protocol_error(make_driver, value):
-    # A length that does not parse used to be swallowed and recorded as "no
-    # declared length", which silently skipped the end-of-stream length check
-    # below -- a smuggling-adjacent opt-out of the framing rule.
     d, captured = await _send_raw_headers(make_driver, [*BASE, (b"content-length", value)])
     assert _stream_error(d) == support.PROTOCOL_ERROR
     assert not captured

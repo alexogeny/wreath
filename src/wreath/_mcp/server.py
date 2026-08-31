@@ -434,11 +434,7 @@ class MCP:
         #: everything else because it is the one failure whose cause is entirely
         #: on the other side of the connection.
         self.client_request_timeouts = 0
-        #: Filesystem reads refused for lying outside the roots the client
-        #: declared -- as distinct from outside the server's own `file_root=`,
-        #: which is a `PermissionError` from the containment walk. Counted so a
-        #: deployment can tell "the client's workspace does not cover this" from
-        #: "this server was never allowed to read it".
+        #: Reads outside client-declared roots, distinct from `file_root` refusals.
         self.roots_refusals = 0
         if app is not None:
             self.mount(app)
@@ -1046,19 +1042,8 @@ class MCP:
         """Whether this request's caller is the subject that opened `session`.
 
         An `Mcp-Session-Id` is a bearer credential for that session's in-flight
-        calls, its notification stream, and the answers it may give to a tool's
-        `elicitation/create` -- so a session names a subject and a message from
-        anybody else is refused. **Both ways in have to resolve that subject or
-        neither does.** `MCPAuth` publishes an identity for the whole endpoint
-        and this used to read only that, so an application authenticating with
-        its own `app.configure_auth(...)` backend -- the supported second way,
-        and the one `expose_routes` exists for -- opened every session with
-        `principal=None` and bound nothing. A control that holds on one of two
-        supported configurations is not a control.
-
-        Resolving here rather than unconditionally keeps `_identify`'s laziness:
-        an endpoint whose sessions are unbound, because there was nobody to bind
-        them to, never runs a backend for this.
+        calls, notifications, and elicitation answers. Bound sessions therefore
+        require the same subject on every message.
         """
         principal = session.principal
         if principal is None:
@@ -1491,7 +1476,7 @@ class MCP:
             raise ClientRequestError(
                 f"this client did not advertise the {capability!r} capability in "
                 f"`initialize`, so {method} would be a request nothing will ever "
-                "answer. A refusal now is the only alternative to a hang whose "
+                "answer. Refusing avoids a hang whose "
                 "cause is invisible from either end."
             )
         channel = session.channel
@@ -1756,12 +1741,8 @@ class MCP:
                 "no way to read a path that is not beneath one."
             )
         declared = await self._roots(session)
-        # An empty answer from a client that advertised `roots` means it grants
-        # access beneath no client root.  It is not the same state as a client
-        # with no roots capability, where the server's `file_root` remains the
-        # only boundary.  Treating both as the falsey tuple used to let a
-        # hostile client answer `{"roots": []}` and then read anywhere beneath
-        # the server root.
+        # An advertised empty roots list grants no client-root access; absence
+        # of the capability leaves `file_root` as the only boundary.
         client_roots_apply = "roots" in session.client_capabilities
         outside_client_roots = client_roots_apply and not beneath_any(
             declared, os.path.join(root, path)

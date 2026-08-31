@@ -284,7 +284,7 @@ async def test_websocket_origin_requests_are_matched_exactly_and_required() -> N
         "https://user@app.example",  # userinfo is not part of an origin
         "https://user:pw@app.example",
         "https://app.example/path",  # an origin has no path ...
-        "https://app.example?q=1",  # ... no query ...
+        "https://app.example?q=1",
         "https://app.example#f",  # ... and no fragment
         "https://app.example:notaport",
     ],

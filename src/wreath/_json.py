@@ -38,6 +38,10 @@ _dumps: Callable[[object], bytes] = _core.json_dumps
 #: caller's claim about the document, not something this can know.
 loads: Callable[[str | bytes | bytearray], Any] = _core.json_loads
 
+#: Execute the immutable instruction tuples produced by ``wreath.jsonpath``.
+#: The mutable nodelist, Nothing sentinel, and visit budget belong to one call.
+jsonpath_find: Callable[..., list[tuple[Any, tuple[str | int, ...]]]] = _core.jsonpath_find
+
 #: `json_configure(temporal_types, format_iso)` -- installs the temporal hook.
 _configure: Callable[[tuple[type, ...], Callable[[Any], str]], None] = _core.json_configure
 
@@ -66,4 +70,4 @@ def dumps(obj: Any) -> bytes:
     return _dumps(obj)
 
 
-__all__ = ["dumps", "loads"]
+__all__ = ["dumps", "jsonpath_find", "loads"]

@@ -316,9 +316,7 @@ async def _run_arm(
                     max_in_flight=20,
                 )
             else:
-                raise SystemExit(
-                    f"unknown arm {arm!r}. Known: {', '.join(ARMS)}"
-                )
+                raise SystemExit(f"unknown arm {arm!r}. Known: {', '.join(ARMS)}")
 
         for connection in connections:  # warm plans, codec, statement cache
             for _ in range(3):

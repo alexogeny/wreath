@@ -121,6 +121,7 @@ _RESPONSE_CALL = Response.__call__
 # observable headers as an ordinary JSONResponse.
 _NATIVE_JSON_TYPE_HEADER = (b"content-type", JSONResponse.media_type)
 _OIDC_AUDIENCE_UNSET = object()
+_HTTP_FINISHED = object()
 
 
 def _arm_cancel_on_disconnect(send: Any, enabled: bool) -> None:
@@ -1105,29 +1106,7 @@ class Wreath:
         return {database: claims for database, claims in owners.values()}
 
     def _schema_database(self, holder: Any, candidate: Any) -> Any:
-        """The database an owner's claim belongs to, or None if it does not say.
-
-        Two explicit sources, and no guessing at field names:
-
-        * **What the declaration said.** `app.jobs(database=)` and
-          `app.messaging(database=)` name a database, and the application
-          records the object each produced against it. Reading that record back
-          is not a guess; recovering it from whatever private field the
-          subsystem happened to store it in was, and it was wrong. This lookup
-          used to try `_database` and then `database`; `JobRunner` and
-          `MessageBus` call theirs `_db`, so an application that had written
-          `app.jobs(database="analytics")` was refused at lifespan startup with
-          "cannot tell which database" -- for a question its own declaration had
-          already answered. Adding `_db` to the list would have fixed those two
-          subsystems and left the next one to be found the same way.
-        * **`schema_database`, which the owner opts into.** One documented name,
-          for an owner the application never constructed and so never saw a
-          database for -- a `PostgresRateLimitStore` a caller built and handed
-          to `RateLimitPolicy`.
-
-        None means the owner genuinely holds no database: a webhook inbox is
-        given a session per call and never sees one. The caller resolves that.
-        """
+        """Return an explicitly declared or owner-provided schema database."""
         declared = self._declared_databases.get(id(holder))
         if declared is not None:
             return declared[1]
@@ -3169,6 +3148,126 @@ class Wreath:
         response = await self._handle_exception(request, error)
         await self._finish_http_plain(response, send, method, scope, native_response)
 
+    async def _verified_identity(self, verified: Any) -> Identity | None:
+        if verified is None:
+            return None
+        if self._bearer_verifier_is_async:
+            return await verified
+        if isinstance(verified, Identity):
+            return verified
+        if is_awaitable(verified):
+            return await verified
+        return verified
+
+    async def _authenticate_plain_route(
+        self,
+        scope: Any,
+        receive: Any,
+        native_response: bool,
+        backend: AuthenticationBackend,
+    ) -> tuple[Request | None, Identity | None]:
+        verifier = self._bearer_verifier
+        if verifier is not None and native_response:
+            return None, await self._verified_identity(scope._bearer_verify(verifier))
+        request = _request_new(_REQUEST_LAYOUT, scope, receive, None, self._limits, self)
+        if _telemetry.PROPAGATING:
+            _telemetry.bind_propagation(request)
+        if verifier is None:
+            return request, await backend.authenticate(request)
+        return request, await self._verified_identity(request._bearer_verify(verifier))
+
+    async def _resolve_plain_protected(
+        self,
+        payload: Any,
+        request: Request | None,
+        identity: Identity | None,
+        backend: AuthenticationBackend | None,
+        scope: Any,
+        receive: Any,
+        send: Send,
+        method: str,
+        native_response: bool,
+    ) -> tuple[Any, Request | None]:
+        resolve: Any = self._resolve
+        resolve_identity: Any = self._resolve_identity
+        matched = (
+            resolve(payload, 0)
+            if identity is None
+            else resolve_identity(
+                payload,
+                self._capability_descriptor,
+                identity.roles,
+                identity.permissions,
+            )
+        )
+        if matched is not None:
+            return matched, request
+        if request is None:
+            request = _request_new(
+                _REQUEST_LAYOUT, scope, receive, None, self._limits, self, identity
+            )
+        else:
+            request._set_identity(identity)
+        try:
+            refusal: HTTPException = (
+                Unauthorized(challenge=None if backend is None else backend.challenge(request))
+                if identity is None
+                else Forbidden("Forbidden")
+            )
+        except Exception as error:  # noqa: BLE001 -- see _handle_exception
+            response = await self._handle_exception(request, error)
+        else:
+            response = await self._handle_exception(request, refusal)
+        await self._finish_http(request, response, send, method, scope, native_response, 0)
+        return _HTTP_FINISHED, request
+
+    async def _authorize_plain_route(
+        self,
+        request: Request,
+        handler: Handler,
+        identity: Identity | None,
+        backend: AuthenticationBackend | None,
+        access_resolved: bool,
+        send: Send,
+        method: str,
+        scope: Any,
+        native_response: bool,
+    ) -> bool:
+        requirement = self._handler_requirements[handler]
+        if identity is None and requirement.access_level > 0:
+            try:
+                challenge = None if backend is None else backend.challenge(request)
+                response = await self._handle_exception(
+                    request, Unauthorized(challenge=challenge)
+                )
+            except Exception as error:  # noqa: BLE001 -- see _handle_exception
+                response = await self._handle_exception(request, error)
+            await self._finish_http(
+                request, response, send, method, scope, native_response, 0
+            )
+            return True
+        if not (
+            requirement.second_factor is not None
+            or requirement.oauth_step_up is not None
+            or requirement.policies
+        ):
+            return False
+        try:
+            response = await self._authorize_request(
+                request,
+                requirement,
+                authentication_attempted=True,
+                access_resolved=access_resolved,
+            )
+        except Exception as error:  # noqa: BLE001 -- see _handle_exception
+            response = await self._handle_exception(request, error)
+        if response is None:
+            return False
+        await self._finish_http(
+            request, response, send, method, scope, native_response, 0
+        )
+        return True
+
     async def _handle_http_plain_auth(
         self,
         scope: Any,
@@ -3225,81 +3324,33 @@ class Wreath:
         backend = self._auth_backend
         if needs_auth and backend is not None:
             try:
-                verifier = self._bearer_verifier
-                if verifier is not None and native_response:
-                    verified = scope._bearer_verify(verifier)
-                    if verified is None:
-                        identity = None
-                    elif self._bearer_verifier_is_async:
-                        identity = await verified
-                    elif isinstance(verified, Identity):
-                        identity = verified
-                    elif is_awaitable(verified):
-                        identity = await verified
-                    else:
-                        identity = verified
-                else:
-                    request = _request_new(
-                        _REQUEST_LAYOUT, scope, receive, None, self._limits, self
-                    )
-                    if _telemetry.PROPAGATING:
-                        _telemetry.bind_propagation(request)
-                    if verifier is None:
-                        identity = await backend.authenticate(request)
-                    else:
-                        verified = request._bearer_verify(verifier)
-                        if verified is None:
-                            identity = None
-                        elif self._bearer_verifier_is_async:
-                            identity = await verified
-                        elif isinstance(verified, Identity):
-                            identity = verified
-                        elif is_awaitable(verified):
-                            identity = await verified
-                        else:
-                            identity = verified
+                request, identity = await self._authenticate_plain_route(
+                    scope, receive, native_response, backend
+                )
             except Exception as error:  # noqa: BLE001 -- see _handle_exception
                 if request is None:
                     request = _request_new(
                         _REQUEST_LAYOUT, scope, receive, None, self._limits, self
                     )
                 response = await self._handle_exception(request, error)
-                await self._finish_http(request, response, send, method, scope, native_response, 0)
+                await self._finish_http(
+                    request, response, send, method, scope, native_response, 0
+                )
                 return
 
         if classification == 2:
-            resolve: Any = self._resolve
-            resolve_identity: Any = self._resolve_identity
-            matched = (
-                resolve(payload, 0)
-                if identity is None
-                else resolve_identity(
-                    payload,
-                    self._capability_descriptor,
-                    identity.roles,
-                    identity.permissions,
-                )
+            matched, request = await self._resolve_plain_protected(
+                payload,
+                request,
+                identity,
+                backend,
+                scope,
+                receive,
+                send,
+                method,
+                native_response,
             )
-            if matched is None:
-                if request is None:
-                    request = _request_new(
-                        _REQUEST_LAYOUT, scope, receive, None, self._limits, self, identity
-                    )
-                else:
-                    request._set_identity(identity)
-                try:
-                    error: HTTPException = (
-                        Unauthorized(
-                            challenge=None if backend is None else backend.challenge(request)
-                        )
-                        if identity is None
-                        else Forbidden("Forbidden")
-                    )
-                except Exception as raised:  # noqa: BLE001 -- see _handle_exception
-                    response = await self._handle_exception(request, raised)
-                else:
-                    response = await self._handle_exception(request, error)
-                await self._finish_http(request, response, send, method, scope, native_response, 0)
+            if matched is _HTTP_FINISHED:
                 return
 
         if matched is None:
@@ -3326,47 +3377,18 @@ class Wreath:
             request.path_params = path_params or {}
             request._set_identity(identity)
 
-        if needs_auth:
-            requirement = self._handler_requirements[handler]
-            if identity is None and requirement.access_level > 0:
-                try:
-                    challenge = None if backend is None else backend.challenge(request)
-                    response = await self._handle_exception(
-                        request, Unauthorized(challenge=challenge)
-                    )
-                except Exception as error:  # noqa: BLE001 -- see _handle_exception
-                    response = await self._handle_exception(request, error)
-                await self._finish_http(request, response, send, method, scope, native_response, 0)
-                return
-            if (
-                requirement.second_factor is not None
-                or requirement.oauth_step_up is not None
-                or requirement.policies
-            ):
-                try:
-                    stage_response = await self._authorize_request(
-                        request,
-                        requirement,
-                        authentication_attempted=True,
-                        access_resolved=classification == 2,
-                    )
-                except Exception as error:  # noqa: BLE001 -- see _handle_exception
-                    response = await self._handle_exception(request, error)
-                    await self._finish_http(
-                        request, response, send, method, scope, native_response, 0
-                    )
-                    return
-                if stage_response is not None:
-                    await self._finish_http(
-                        request,
-                        stage_response,
-                        send,
-                        method,
-                        scope,
-                        native_response,
-                        0,
-                    )
-                    return
+        if needs_auth and await self._authorize_plain_route(
+            request,
+            handler,
+            identity,
+            backend,
+            classification == 2,
+            send,
+            method,
+            scope,
+            native_response,
+        ):
+            return
 
         json_body: bytes | None = None
         response: Response | StreamingResponse | FileResponse | PreparedResponse
@@ -3546,6 +3568,340 @@ class Wreath:
             after_hooks,
         )
 
+    async def _resolve_protected_route(
+        self,
+        ticket: Any,
+        request: Request | None,
+        scope: Any,
+        receive: Any,
+        send: Send,
+        method: str,
+        native_response: bool,
+        policy: Any,
+        policy_activated: bool,
+        global_hooks: bool,
+        active_global: int,
+    ) -> tuple[Any, Request, bool]:
+        if request is None:
+            request = _request_new(_REQUEST_LAYOUT, scope, receive, None, self._limits, self)
+        if policy is not None and policy._has_activation:
+            try:
+                await policy._reference_activation(request)
+                policy_activated = True
+            except Exception as error:  # noqa: BLE001 -- see _handle_exception
+                response = await self._handle_exception(request, error)
+                await self._finish_http(
+                    request,
+                    response,
+                    send,
+                    method,
+                    scope,
+                    native_response,
+                    active_global,
+                )
+                return _HTTP_FINISHED, request, policy_activated
+        backend = self._auth_backend
+        if backend is None:
+            if global_hooks:
+                request._set_route_outcome("protected")
+            response = await self._handle_exception(request, Unauthorized())
+            await self._finish_http(
+                request, response, send, method, scope, native_response, active_global
+            )
+            return _HTTP_FINISHED, request, policy_activated
+        stage_response = (
+            await self._run_stage("pre_auth", request)
+            if "pre_auth" in self._stage_hooks
+            else None
+        )
+        if stage_response is not None:
+            await self._finish_http(
+                request,
+                stage_response,
+                send,
+                method,
+                scope,
+                native_response,
+                active_global,
+            )
+            return _HTTP_FINISHED, request, policy_activated
+        auth_start = _monotonic_ns() if native_response and scope.flight == 2 else 0
+        try:
+            verifier = self._bearer_verifier
+            if verifier is None:
+                identity = await backend.authenticate(request)
+            else:
+                identity = await self._verified_identity(request._bearer_verify(verifier))
+        except Exception as error:  # noqa: BLE001 -- see _handle_exception
+            if global_hooks:
+                request._set_route_outcome("protected")
+            response = await self._handle_exception(request, error)
+            await self._finish_http(
+                request, response, send, method, scope, native_response, active_global
+            )
+            return _HTTP_FINISHED, request, policy_activated
+        if auth_start:
+            scope._flight_phase(_PH_AUTH, 0, _COV_PYTHON, _monotonic_ns() - auth_start)
+        request._set_identity(identity)
+        stage_response = (
+            await self._run_stage("identity", request)
+            if "identity" in self._stage_hooks
+            else None
+        )
+        if stage_response is not None:
+            await self._finish_http(
+                request,
+                stage_response,
+                send,
+                method,
+                scope,
+                native_response,
+                active_global,
+            )
+            return _HTTP_FINISHED, request, policy_activated
+        resolve: Any = self._resolve
+        resolve_identity: Any = self._resolve_identity
+        matched = (
+            resolve(ticket, 0)
+            if identity is None
+            else resolve_identity(
+                ticket,
+                self._capability_descriptor,
+                identity.roles,
+                identity.permissions,
+            )
+        )
+        if matched is not None:
+            return matched, request, policy_activated
+        if identity is None:
+            try:
+                refusal: HTTPException = Unauthorized(challenge=backend.challenge(request))
+            except Exception as error:  # noqa: BLE001 -- see _handle_exception
+                if global_hooks:
+                    request._set_route_outcome("protected")
+                response = await self._handle_exception(request, error)
+                await self._finish_http(
+                    request,
+                    response,
+                    send,
+                    method,
+                    scope,
+                    native_response,
+                    active_global,
+                )
+                return _HTTP_FINISHED, request, policy_activated
+        else:
+            refusal = Forbidden("Forbidden")
+        if global_hooks:
+            request._set_route_outcome("protected")
+        response = await self._handle_exception(request, refusal)
+        await self._finish_http(
+            request, response, send, method, scope, native_response, active_global
+        )
+        return _HTTP_FINISHED, request, policy_activated
+
+    async def _resolve_route_miss(
+        self,
+        request: Request,
+        method: str,
+        path: str,
+        send: Send,
+        scope: Any,
+        native_response: bool,
+        active_global: int,
+        global_hooks: bool,
+    ) -> Any:
+        if global_hooks:
+            request._set_route_outcome("miss")
+        stage_response = (
+            await self._run_stage("miss", request)
+            if "miss" in self._stage_hooks
+            else None
+        )
+        if stage_response is not None:
+            await self._finish_http(
+                request,
+                stage_response,
+                send,
+                method,
+                scope,
+                native_response,
+                active_global,
+            )
+            return _HTTP_FINISHED
+        if method == "OPTIONS" and self._preflight_fallback is not None:
+            preflight_response = await self._preflight_fallback(request)
+            if preflight_response is not None:
+                await self._finish_http(
+                    request,
+                    _coerce_response(preflight_response),
+                    send,
+                    method,
+                    scope,
+                    native_response,
+                    active_global,
+                )
+                return _HTTP_FINISHED
+        matched = self._static_matcher.match(path)
+        if matched is not None:
+            if global_hooks:
+                request._set_route_outcome("static")
+            return matched
+        allow = self._allowed_methods(
+            method, path, _host_name(request.header("host", "") or "")
+        )
+        if allow:
+            response = await self._handle_exception(request, MethodNotAllowed(allow=allow))
+        else:
+            response = (
+                _NOT_FOUND
+                if not self._exception_handlers and not self._status_handlers
+                else await self._handle_exception(request, NotFound("Not Found"))
+            )
+        await self._finish_http(
+            request, response, send, method, scope, native_response, active_global
+        )
+        return _HTTP_FINISHED
+
+    def _begin_http_flight(self, scope: Any, handler: Handler, native_response: bool) -> Any:
+        if native_response:
+            flight = scope.flight
+            if not flight:
+                return None
+            _log_begin_request(scope)
+            ids = self._flight_route_ids or self._build_flight_route_ids()
+            attribution = ids.get(handler)
+            if attribution is not None:
+                scope._flight_stamp(attribution[0], attribution[1])
+            if flight == 2:
+                flight_phase = scope._flight_phase
+                _phase_marker.set(flight_phase)
+                return flight_phase
+            return None
+        if "_wreath_flight" not in scope:
+            return None
+        _log_begin_seeded(scope)
+        ids = self._flight_route_ids or self._build_flight_route_ids()
+        attribution = ids.get(handler)
+        if attribution is not None:
+            scope["_wreath_flight"] = attribution
+        return None
+
+    async def _authorize_http_route(
+        self,
+        request: Request,
+        requirement: AuthRequirement,
+        flight_phase: Any,
+        authentication_attempted: bool,
+        access_resolved: bool,
+    ) -> Any:
+        if flight_phase is None:
+            return await self._authorize_request(
+                request,
+                requirement,
+                authentication_attempted=authentication_attempted,
+                access_resolved=access_resolved,
+            )
+        auth_start = _monotonic_ns()
+        response = await self._authorize_request(
+            request,
+            requirement,
+            authentication_attempted=authentication_attempted,
+            access_resolved=access_resolved,
+        )
+        flight_phase(_PH_AUTH, 0, _COV_PYTHON, _monotonic_ns() - auth_start)
+        return response
+
+    async def _run_http_route_policy(
+        self,
+        request: Request,
+        requirement: AuthRequirement | None,
+        policy: Any,
+        policy_activated: bool,
+        flight_phase: Any,
+        authentication_attempted: bool,
+        access_resolved: bool,
+        send: Send,
+        method: str,
+        scope: Any,
+        native_response: bool,
+        active_global: int,
+    ) -> bool:
+        if policy is not None and policy._has_activation and not policy_activated:
+            try:
+                await policy._reference_activation(request)
+            except Exception as error:  # noqa: BLE001 -- see _handle_exception
+                response = await self._handle_exception(request, error)
+                await self._finish_http(
+                    request, response, send, method, scope, native_response, active_global
+                )
+                return True
+        if requirement is not None:
+            try:
+                response = await self._authorize_http_route(
+                    request,
+                    requirement,
+                    flight_phase,
+                    authentication_attempted,
+                    access_resolved,
+                )
+            except Exception as error:  # noqa: BLE001 -- see _handle_exception
+                response = await self._handle_exception(request, error)
+            if response is not None:
+                await self._finish_http(
+                    request,
+                    response,
+                    send,
+                    method,
+                    scope,
+                    native_response,
+                    active_global,
+                )
+                return True
+        if policy is not None and policy._has_post_auth:
+            response = await policy._reference_post_auth(request)
+            if response is not None:
+                await self._finish_http(
+                    request,
+                    response,
+                    send,
+                    method,
+                    scope,
+                    native_response,
+                    active_global,
+                )
+                return True
+        if "action" in self._stage_hooks:
+            response = await self._run_stage("action", request)
+            if response is not None:
+                await self._finish_http(
+                    request,
+                    response,
+                    send,
+                    method,
+                    scope,
+                    native_response,
+                    active_global,
+                )
+                return True
+        return False
+
+    async def _invoke_with_deadline(self, handler: Handler, request: Request, deadline: Any) -> Any:
+        started = _monotonic_ns()
+        scope = _asyncio_timeout(deadline.seconds)
+        try:
+            async with scope:
+                value = handler(request)
+                if value.__class__ is _COROUTINE:
+                    value = await value
+                elif _monotonic_ns() - started > deadline._nanoseconds:
+                    value = deadline._refusal()
+                return value
+        except TimeoutError:
+            if not scope.expired():
+                raise
+            return deadline._refusal()
+
     async def _handle_http(
         self,
         scope: Any,
@@ -3586,20 +3942,16 @@ class Wreath:
         active_global = len(after_hooks)
         if global_hooks:
             if request is None:
-                request = _request_new(_REQUEST_LAYOUT, scope, receive, None, self._limits, self)
+                request = _request_new(
+                    _REQUEST_LAYOUT, scope, receive, None, self._limits, self
+                )
                 request._route_outcome = "ingress"
-            # Bind before the first `before` hook: a global middleware may itself
-            # call out (an auth introspection, a feature-flag fetch), and that
-            # call is caused by this request exactly as a handler's is.
             if _telemetry.PROPAGATING and request._policy_mask == 0:
                 _telemetry.bind_propagation(request)
             for before, is_sync, error_afters, success_afters in before_hooks:
                 try:
                     candidate = before(request) if is_sync else await before(request)
                 except Exception as error:  # noqa: BLE001 -- see _handle_exception
-                    # `error_afters` excludes this hook's own egress: its
-                    # `before` did not complete, so cleanup preconditions may
-                    # not exist. Earlier hooks did complete and still unwind.
                     await self._finish_http(
                         request,
                         _coerce_response(await self._handle_exception(request, error)),
@@ -3611,8 +3963,6 @@ class Wreath:
                     )
                     return
                 if candidate is not None:
-                    # Returning a response is a *completed* `before`, so this
-                    # hook keeps its egress, which `success_afters` includes.
                     active_global = success_afters
                     await self._finish_http(
                         request,
@@ -3662,208 +4012,37 @@ class Wreath:
                 classification, payload = classify(method, path)
             matched = payload if classification == 1 else None
             if classification == 2:
-                ticket = payload
-                if request is None:
-                    request = _request_new(
-                        _REQUEST_LAYOUT, scope, receive, None, self._limits, self
-                    )
-                # A classifying router authenticates before it resolves the
-                # route.  First-class activation policy (notably sessions) must
-                # therefore run here, before the backend reads request state;
-                # the ordinary resolved-route activation below is too late for
-                # this branch.
-                if policy is not None and policy._has_activation:
-                    try:
-                        await policy._reference_activation(request)
-                        policy_activated = True
-                    except Exception as error:  # noqa: BLE001 -- see _handle_exception
-                        response = await self._handle_exception(request, error)
-                        await self._finish_http(
-                            request,
-                            response,
-                            send,
-                            method,
-                            scope,
-                            native_response,
-                            active_global,
-                        )
-                        return
-                backend = self._auth_backend
-                if backend is None:
-                    if global_hooks:
-                        request._set_route_outcome("protected")
-                    response = await self._handle_exception(request, Unauthorized())
-                    await self._finish_http(
-                        request, response, send, method, scope, native_response, active_global
-                    )
-                    return
-                stage_response = (
-                    await self._run_stage("pre_auth", request)
-                    if "pre_auth" in self._stage_hooks
-                    else None
+                matched, request, policy_activated = await self._resolve_protected_route(
+                    payload,
+                    request,
+                    scope,
+                    receive,
+                    send,
+                    method,
+                    native_response,
+                    policy,
+                    policy_activated,
+                    global_hooks,
+                    active_global,
                 )
-                if stage_response is not None:
-                    await self._finish_http(
-                        request,
-                        stage_response,
-                        send,
-                        method,
-                        scope,
-                        native_response,
-                        active_global,
-                    )
+                if matched is _HTTP_FINISHED:
                     return
-                # Armed-only AUTH phase. `flight == 2` only on the native path
-                # with a recorder attached and this request sampled into
-                # Detailed; every other request pays just the member read.
-                auth_start = _monotonic_ns() if native_response and scope.flight == 2 else 0
-                try:
-                    verifier = self._bearer_verifier
-                    if verifier is None:
-                        identity = await backend.authenticate(request)
-                    else:
-                        verified = request._bearer_verify(verifier)
-                        if verified is None:
-                            identity = None
-                        elif self._bearer_verifier_is_async:
-                            identity = await verified
-                        elif isinstance(verified, Identity):
-                            identity = verified
-                        elif is_awaitable(verified):
-                            identity = await verified
-                        else:
-                            identity = verified
-                    authentication_attempted = True
-                except Exception as error:  # noqa: BLE001 -- see _handle_exception
-                    if global_hooks:
-                        request._set_route_outcome("protected")
-                    response = await self._handle_exception(request, error)
-                    await self._finish_http(
-                        request, response, send, method, scope, native_response, active_global
-                    )
-                    return
-                if auth_start:
-                    scope._flight_phase(_PH_AUTH, 0, _COV_PYTHON, _monotonic_ns() - auth_start)
-                request._set_identity(identity)
-                stage_response = (
-                    await self._run_stage("identity", request)
-                    if "identity" in self._stage_hooks
-                    else None
-                )
-                if stage_response is not None:
-                    await self._finish_http(
-                        request,
-                        stage_response,
-                        send,
-                        method,
-                        scope,
-                        native_response,
-                        active_global,
-                    )
-                    return
-                resolve_identity: Any = self._resolve_identity
-                matched = (
-                    resolve(ticket, 0)
-                    if identity is None
-                    else resolve_identity(
-                        ticket,
-                        self._capability_descriptor,
-                        identity.roles,
-                        identity.permissions,
-                    )
-                )
-                if matched is None:
-                    error: HTTPException
-                    if identity is None:
-                        try:
-                            error = Unauthorized(challenge=backend.challenge(request))
-                        except Exception as raised:  # noqa: BLE001 -- as above
-                            if global_hooks:
-                                request._set_route_outcome("protected")
-                            response = await self._handle_exception(request, raised)
-                            await self._finish_http(
-                                request,
-                                response,
-                                send,
-                                method,
-                                scope,
-                                native_response,
-                                active_global,
-                            )
-                            return
-                    else:
-                        error = Forbidden("Forbidden")
-                    if global_hooks:
-                        request._set_route_outcome("protected")
-                    response = await self._handle_exception(request, error)
-                    await self._finish_http(
-                        request, response, send, method, scope, native_response, active_global
-                    )
-                    return
+                authentication_attempted = True
                 access_resolved = True
         if matched is None:
             if request is None:
                 request = _request_new(_REQUEST_LAYOUT, scope, receive, None, self._limits, self)
-            if global_hooks:
-                request._set_route_outcome("miss")
-            stage_response = (
-                await self._run_stage("miss", request) if "miss" in self._stage_hooks else None
+            matched = await self._resolve_route_miss(
+                request,
+                method,
+                path,
+                send,
+                scope,
+                native_response,
+                active_global,
+                global_hooks,
             )
-            if stage_response is not None:
-                await self._finish_http(
-                    request,
-                    stage_response,
-                    send,
-                    method,
-                    scope,
-                    native_response,
-                    active_global,
-                )
-                return
-            if method == "OPTIONS" and self._preflight_fallback is not None:
-                preflight_response = await self._preflight_fallback(request)
-                if preflight_response is not None:
-                    await self._finish_http(
-                        request,
-                        _coerce_response(preflight_response),
-                        send,
-                        method,
-                        scope,
-                        native_response,
-                        active_global,
-                    )
-                    return
-            static_match = self._static_matcher.match(path)
-            if static_match is not None:
-                matched = static_match
-                if global_hooks:
-                    request._set_route_outcome("static")
-            else:
-                # The path may exist under another method. Answering that 404
-                # told a client to stop looking when the correct reply is "not
-                # like that": RFC 9110 15.5.6 is a 405 carrying `Allow`. The
-                # probe re-runs classification once per registered method, which
-                # is a handful of lookups on a path that is already an error --
-                # nothing on the hot path pays for it.
-                allow = self._allowed_methods(
-                    method, path, _host_name(request.header("host", "") or "")
-                )
-                # Through the exception path rather than straight to a
-                # ProblemResponse, so a registered 404 status handler (or a
-                # NotFound exception handler) covers a routing miss -- which is
-                # the case people register one for. With nothing registered this
-                # produces the same response it always did.
-                if allow:
-                    response = await self._handle_exception(request, MethodNotAllowed(allow=allow))
-                else:
-                    response = (
-                        _NOT_FOUND
-                        if not self._exception_handlers and not self._status_handlers
-                        else await self._handle_exception(request, NotFound("Not Found"))
-                    )
-                await self._finish_http(
-                    request, response, send, method, scope, native_response, active_global
-                )
+            if matched is _HTTP_FINISHED:
                 return
         handler, path_params = matched
         # See `_handle_http_plain` for why this is repeated per dispatcher.
@@ -3872,56 +4051,11 @@ class Wreath:
             declared = overrides.get(handler)
             if declared is not None:
                 _arm_cancel_on_disconnect(send, declared)
-        # Attribute this completion to its route in the recorder. Only the native
-        # HTTP/1 fast path (native_response) carries a _RequestContext, and its
-        # `flight` flag is a T_INT member that is truthy only when a live recorder
-        # context is attached -- so native Off skips with no new crossing, and the
-        # stamp rides the context that already crossed into C.
-        # HTTP/2 and HTTP/3 dispatch through the dict-scope path (no
-        # _RequestContext). Their native protocol seeds `_wreath_flight` into the
-        # scope only when a recorder is attached; we overwrite it with the
-        # (route_id, plan_id) tuple, which C reads from the retained scope at
-        # completion before it emits the cell. A pure ASGI server (uvicorn) never
-        # seeds the key, so it pays only one dict membership test and no crossing.
         flight_phase = None
-        if native_response:
-            flight = scope.flight
-            if flight:
-                # One log scope per request, keyed on the recorder's own request
-                # id so a record joins the completion the projector will
-                # assemble. The context goes in rather than the id: reading the
-                # id crosses into C, and `begin_request_for` checks for an
-                # installed runtime first, so a recorder without logging pays a
-                # call and a branch and no crossing. `_finish_http` closes the
-                # scope -- every exit from this method funnels through there,
-                # error paths included.
-                _log_begin_request(scope)
-                ids = self._flight_route_ids or self._build_flight_route_ids()
-                attribution = ids.get(handler)
-                if attribution is not None:
-                    scope._flight_stamp(attribution[0], attribution[1])
-                if flight == 2:
-                    # Armed for Detailed capture: bind the phase marker once so
-                    # the handler/serialize timing below is a plain local call,
-                    # and propagate it so dependency seams (PostgreSQL, HTTP
-                    # client) can record their phases from inside the handler.
-                    # Set-without-reset is safe: the request task's context dies
-                    # with it, and the protocol severs the context at completion
-                    # so an escaped binding no-ops instead of writing stale.
-                    flight_phase = scope._flight_phase
-                    _phase_marker.set(flight_phase)
-        elif "_wreath_flight" in scope:
-            # HTTP/2 and HTTP/3 dispatch through a dict scope with no request
-            # context, so their protocols seed the recorder's request id into
-            # `_wreath_flight`. The seeded id opens this request's log scope
-            # before the line below overwrites it with route attribution; the
-            # helper reads the key itself, so a server without a logging runtime
-            # pays a Python call and no crossing.
-            _log_begin_seeded(scope)
-            ids = self._flight_route_ids or self._build_flight_route_ids()
-            attribution = ids.get(handler)
-            if attribution is not None:
-                scope["_wreath_flight"] = attribution
+        if (native_response and scope.flight) or (
+            not native_response and "_wreath_flight" in scope
+        ):
+            flight_phase = self._begin_http_flight(scope, handler, native_response)
         if request is None:
             request = _request_new(_REQUEST_LAYOUT, scope, receive, path_params, self._limits, self)
             # The no-global-middleware path: the branch above never ran, so this
@@ -3950,79 +4084,34 @@ class Wreath:
                 _capture_marker.set(_make_dependency_capturer(scope, dep_rule))
         if global_hooks and request._get_route_outcome() in (None, "ingress"):
             request._set_route_outcome("route")
-        if policy is not None and policy._has_activation and not policy_activated:
-            try:
-                await policy._reference_activation(request)
-            except Exception as error:  # noqa: BLE001 -- see _handle_exception
-                response = await self._handle_exception(request, error)
-                await self._finish_http(
-                    request, response, send, method, scope, native_response, active_global
-                )
-                return
-        # `_auth_handlers` is `needs_backend` decided once, at compile time: the
-        # answer cannot change between requests, and asking a requirement per
-        # request costs a property call and several attribute reads on the path
-        # every public route takes. `_handler_requirements` stays complete --
-        # `wreath-request-trace` reads it to learn which compiled endpoints are
-        # route code.
         requirement = (
             self._handler_requirements.get(handler) if handler in self._auth_handlers else None
         )
-        if requirement is not None:
-            try:
-                if flight_phase is None:
-                    stage_response = await self._authorize_request(
-                        request,
-                        requirement,
-                        authentication_attempted=authentication_attempted,
-                        access_resolved=access_resolved,
-                    )
-                else:
-                    auth_start = _monotonic_ns()
-                    stage_response = await self._authorize_request(
-                        request,
-                        requirement,
-                        authentication_attempted=authentication_attempted,
-                        access_resolved=access_resolved,
-                    )
-                    flight_phase(_PH_AUTH, 0, _COV_PYTHON, _monotonic_ns() - auth_start)
-            except Exception as error:  # noqa: BLE001 -- see _handle_exception
-                response = await self._handle_exception(request, error)
-                await self._finish_http(
-                    request, response, send, method, scope, native_response, active_global
+        needs_route_policy = (
+            requirement is not None
+            or "action" in self._stage_hooks
+            or (
+                policy is not None
+                and (
+                    policy._has_post_auth
+                    or (policy._has_activation and not policy_activated)
                 )
-                return
-            if stage_response is not None:
-                await self._finish_http(
-                    request,
-                    stage_response,
-                    send,
-                    method,
-                    scope,
-                    native_response,
-                    active_global,
-                )
-                return
-        if policy is not None and policy._has_post_auth:
-            stage_response = await policy._reference_post_auth(request)
-            if stage_response is not None:
-                await self._finish_http(
-                    request,
-                    stage_response,
-                    send,
-                    method,
-                    scope,
-                    native_response,
-                    active_global,
-                )
-                return
-        stage_response = (
-            await self._run_stage("action", request) if "action" in self._stage_hooks else None
-        )
-        if stage_response is not None:
-            await self._finish_http(
-                request, stage_response, send, method, scope, native_response, active_global
             )
+        )
+        if needs_route_policy and await self._run_http_route_policy(
+            request,
+            requirement,
+            policy,
+            policy_activated,
+            flight_phase,
+            authentication_attempted,
+            access_resolved,
+            send,
+            method,
+            scope,
+            native_response,
+            active_global,
+        ):
             return
         try:
             action_response = (
@@ -4047,19 +4136,7 @@ class Wreath:
                         if value.__class__ is _COROUTINE:
                             value = await value
                     else:
-                        deadline_started = _monotonic_ns()
-                        deadline_scope = _asyncio_timeout(deadline.seconds)
-                        try:
-                            async with deadline_scope:
-                                value = handler(request)
-                                if value.__class__ is _COROUTINE:
-                                    value = await value
-                                elif _monotonic_ns() - deadline_started > deadline._nanoseconds:
-                                    value = deadline._refusal()
-                        except TimeoutError:
-                            if not deadline_scope.expired():
-                                raise
-                            value = deadline._refusal()
+                        value = await self._invoke_with_deadline(handler, request, deadline)
                 finally:
                     if has_permit and policy is not None:
                         policy._reference_action_exit()
@@ -5373,25 +5450,8 @@ class Wreath:
     async def _close_all(self, steps: list[tuple[str, Callable[[], Any]]]) -> BaseException | None:
         """Run every teardown step in order, even when one of them raises.
 
-        Releasing resources on a failing path is the one place where stopping at
-        the first error is strictly wrong: the steps are independent, nothing
-        later depends on an earlier one succeeding, and whatever is skipped is
-        never released at all -- on the startup path the server is told startup
-        failed and never calls shutdown. A refusing `close()` used to abandon
-        every pool queued behind it *and* the lifespan reply itself.
-
-        Each failure is counted on `lifespan_teardown_errors` and logged with its
-        traceback. The first is returned so the shutdown path can report it,
-        while the startup path keeps reporting the error that caused the failure
-        rather than the one raised while cleaning up after it.
-
-        Args:
-            steps: `(label, callable)` pairs in teardown order. The callable
-                takes no arguments; an awaitable result is awaited.
-
-        Returns:
-            The first exception raised by a step, or None if all of them ran
-            cleanly.
+        Steps are independent. Every failure is counted and logged; the first
+        is returned after all remaining resources have had a chance to close.
         """
         import logging
 
@@ -5402,11 +5462,8 @@ class Wreath:
                 if is_awaitable(result):
                     await result
             except Exception as failure:
-                # Broad by necessity: these are user-supplied and driver-supplied
-                # closers, so there is no set of types to name, and the whole
-                # point of this loop is that one failure must not stop the rest.
-                # It is not a swallow -- counted, logged with its traceback, and
-                # the first one is handed back to the caller.
+                # User and driver closers may raise arbitrary exceptions. Count
+                # and log each one before continuing with independent cleanup.
                 self.lifespan_teardown_errors += 1
                 logging.getLogger("wreath").exception(
                     "lifespan teardown step %r failed; continuing", label

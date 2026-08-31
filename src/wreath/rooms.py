@@ -44,11 +44,6 @@ from collections.abc import Awaitable, Callable
 from time import monotonic_ns as _monotonic_ns
 from typing import Any
 
-#: A broadcast encodes the whole payload once per room, so this is the one
-#: base64 call in the tree that reliably meets large inputs, where the native
-#: encoder's AVX2 arm is about ten times `base64.b64encode`. The dispatch
-#: lives in `wreath._b64`; this module used to carry its own copy of it, as
-#: did `binding`.
 from ._b64 import b64_encode as _b64encode_str
 from ._busbridge import BusBridge
 from ._flight_markers import COV_PYTHON as _COV_PYTHON
@@ -235,13 +230,7 @@ class RoomRegistry:
 
     @staticmethod
     def _bus_payload(room: str, payload: str | bytes) -> dict[str, Any]:
-        """The JSON-safe cross-worker form of one broadcast.
-
-        `encoding` is absent for text and for UTF-8 bytes, which is the wire
-        format rooms already published; only the case that used to raise adds a
-        field. A worker still running the older code therefore keeps receiving
-        every payload it used to receive, unchanged.
-        """
+        """The JSON-safe cross-worker form of one broadcast."""
         if not isinstance(payload, bytes):
             return {"room": room, "data": payload, "binary": False}
         try:

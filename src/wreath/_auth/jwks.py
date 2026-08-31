@@ -141,10 +141,6 @@ class JwksCache:
         keys: dict[str, JwtKey] = {}
         for index, jwk in enumerate(document.get("keys", ())):
             if not isinstance(jwk, Mapping):
-                # `keys` is meant to hold objects. A string or number in there
-                # used to reach `.get` and raise out of the whole refresh --
-                # one junk entry discarded every valid key after it, because the
-                # guard below started one line too late.
                 self.malformed_keys += 1
                 continue
             use = jwk.get("use")

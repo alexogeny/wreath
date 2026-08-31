@@ -662,9 +662,7 @@ async def test_a_precomputed_integrity_field_prevents_a_later_content_coding() -
         return response
 
     async with TestClient(app) as client:
-        content_response = await client.get(
-            "/content", headers={"accept-encoding": "gzip"}
-        )
+        content_response = await client.get("/content", headers={"accept-encoding": "gzip"})
         representation_response = await client.get(
             "/representation", headers={"accept-encoding": "gzip"}
         )

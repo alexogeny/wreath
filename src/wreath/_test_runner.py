@@ -40,15 +40,8 @@ _HISTORY_RUNS = 20
 _MAX_HISTORY_FILES = 50_000
 _MAX_HISTORY_TESTS = 200_000
 
-#: Runs of memory in `mean_seconds`, which exists to predict the *next* run.
-#:
-#: The divisor used to be the lifetime sample count, which makes the mean
-#: unreachable rather than merely slow: at 200 samples one new observation moves
-#: it by half a percent of the difference, so a test whose cost genuinely changed
-#: was scheduled at its old weight indefinitely. Capping the divisor turns it into
-#: a rolling mean with a ~20-run time constant -- still steady enough that one
-#: noisy run does not reorder the head, and now able to follow a real change.
-#: `samples` keeps counting for the record; only the weighting is bounded.
+#: Weighting window for the next-run duration estimate; the sample count remains
+#: unbounded for reporting.
 _MEAN_WINDOW = 20
 _DEFAULT_HISTORY = ".wreath/test-history.json"
 _MAX_AUTO_WORKERS = 8

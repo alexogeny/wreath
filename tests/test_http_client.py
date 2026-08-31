@@ -184,8 +184,7 @@ async def test_response_head_skips_informational_status_and_returns_the_final_he
         destination=_local_policy(),
     )
     reader = _buffered_reader(
-        b"HTTP/1.1 100 Continue\r\n\r\n"
-        b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n"
+        b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n"
     )
 
     minor, status, reason, headers = await client._read_head(reader)
@@ -1600,10 +1599,6 @@ async def test_client_caches_dns_and_tls_setup(monkeypatch: pytest.MonkeyPatch) 
         return cast(asyncio.Transport, object()), factory()
 
     monkeypatch.setattr(loop, "getaddrinfo", getaddrinfo)
-    # Counted at the client's own builder rather than at `ssl` module level:
-    # the context is native where the reactor can provide one, so the module
-    # function is no longer the seam. What is under test -- built once, not per
-    # request -- is unchanged.
     monkeypatch.setattr(HTTPClient, "_build_ssl_context", build_ssl_context)
     monkeypatch.setattr("wreath.http_client._ClientStream", Stream)
     monkeypatch.setattr(loop, "create_connection", create_connection)

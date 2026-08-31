@@ -111,9 +111,7 @@ async def test_invalid_response_header_is_refused_before_start() -> None:
 
     async def app(scope, receive, send):
         with pytest.raises(RuntimeError, match="response header must be a pair") as caught:
-            await send(
-                {"type": "http.response.start", "status": 200, "headers": [(b"x",)]}
-            )
+            await send({"type": "http.response.start", "status": 200, "headers": [(b"x",)]})
         observed.append(str(caught.value))
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b"ok"})

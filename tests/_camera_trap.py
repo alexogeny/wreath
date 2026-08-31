@@ -30,21 +30,6 @@ async def build_schema(connection, *, seed_rows: int | None = None) -> None:
     await connection.execute(f'CREATE SCHEMA "{SCHEMA}"')
     for statement in statements():
         await connection.execute(statement)
-    # The durable queue's tables are not in the migration artifact -- `wreath
-    # migrations` derives that from the ORM models, and the queue is not one.
-    # `app.jobs(...)` registers the runner as a schema component and wreath
-    # creates its tables at lifespan startup, so an application never applies
-    # this by hand. A fixture is the one caller that legitimately does: it
-    # prepares a database *before* any app starts, and some tests here read the
-    # schema without ever entering a lifespan.
-    # So it asks the runner's own schema component for its statements, rather
-    # than keeping an example-local copy of the DDL. The example used to export
-    # a `queue_schema_sql` for this; that was a workaround for a gap wreath has
-    # since closed.
-    # Not `wreath.schema.emit_sql`, which is the DBA-facing spelling and wraps
-    # its output in transaction control -- correct for `psql -f`, and rejected
-    # by the driver, which refuses `BEGIN` on a connection with an operation
-    # already in flight.
     from camera_trap.tasks import QUEUE
 
     from wreath.jobs import JobRunner

@@ -113,9 +113,7 @@ def bff_session_policy(
 
 def _validate_access_token(value: object, *, source: str) -> str:
     if not isinstance(value, str) or not value or _TOKEN.fullmatch(value) is None:
-        raise ValueError(
-            f"{source} must be a non-empty RFC 6750 bearer token without whitespace"
-        )
+        raise ValueError(f"{source} must be a non-empty RFC 6750 bearer token without whitespace")
     return value
 
 
@@ -182,8 +180,10 @@ def bff_access_token(request: Request) -> str | None:
     if not isinstance(access_token, str) or _TOKEN.fullmatch(access_token) is None:
         return None
     expires_at = token_set.get("expires_at")
-    if isinstance(expires_at, bool) or expires_at is not None and not isinstance(
-        expires_at, int | float
+    if (
+        isinstance(expires_at, bool)
+        or expires_at is not None
+        and not isinstance(expires_at, int | float)
     ):
         return None
     if isinstance(expires_at, float) and not isfinite(expires_at):

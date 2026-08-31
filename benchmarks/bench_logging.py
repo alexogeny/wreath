@@ -785,10 +785,6 @@ def suite_request(rounds: int, iterations: int, warmup: int) -> dict[str, Any]:
     percentage, because the base here excludes the server.
     """
     counting = CountingSink()
-    # The production configuration: a recorder-backed sink and the native
-    # emitter behind it. Measuring the Python packer here would report what
-    # logging used to cost rather than what it costs, and the two differ by
-    # more than the whole request the arms are built around.
     native_arm: NativeArm | None = None
     if _flight is not None:
         native_arm = NativeArm("request", warmup + rounds * iterations * 8)
