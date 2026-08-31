@@ -48,9 +48,10 @@ def test_integrity_preferences_follow_rfc_weights_and_server_tie_order() -> None
 
     assert preferences.header == b"sha-512=3, sha-256=10, unixsum=0"
     assert preferences.preferred("sha-512", "sha-256") == "sha-256"
-    assert DigestPreferences.parse("sha-512=10, sha-256=10").preferred(
-        "sha-256", "sha-512"
-    ) == "sha-256"
+    assert (
+        DigestPreferences.parse("sha-512=10, sha-256=10").preferred("sha-256", "sha-512")
+        == "sha-256"
+    )
     assert DigestPreferences.parse("sha-256=0").preferred("sha-256") is None
 
 
@@ -66,9 +67,7 @@ def test_response_can_emit_content_and_selected_representation_digests() -> None
     response.set_content_digest("sha-256")
     response.set_repr_digest("sha-512")
 
-    assert [value for name, value in response.headers if name == b"content-digest"] == [
-        RFC_SHA256
-    ]
+    assert [value for name, value in response.headers if name == b"content-digest"] == [RFC_SHA256]
     assert [value for name, value in response.headers if name == b"repr-digest"] == [RFC_SHA512]
 
 
@@ -124,9 +123,7 @@ async def test_request_selects_wanted_digest_algorithms_without_failing_on_a_bad
         preferred = await client.get(
             "/asset", headers={"want-content-digest": "sha-512=3, sha-256=10"}
         )
-        malformed = await client.get(
-            "/asset", headers={"want-content-digest": "sha-256=99"}
-        )
+        malformed = await client.get("/asset", headers={"want-content-digest": "sha-256=99"})
 
     assert preferred.header("content-digest") == RFC_SHA256.decode()
     assert malformed.header("content-digest") is None

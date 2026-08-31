@@ -48,10 +48,7 @@ dev = [
   "fastapi>=0.116",
   "msgspec>=0.19",
   "sanic>=25.3",
-  # Generating the throwaway self-signed certificates the TLS and HTTP/3 tests
-  # need. Declared here deliberately: it used to arrive only as a transitive of
-  # the benchmark group, so any `uv sync` without that group pruned it and 21
-  # HTTP/3 tests plus the TLS transport tests skipped themselves silently.
+  # Generates throwaway self-signed certificates for the TLS and HTTP/3 tests.
   "cryptography>=44",
   # The reference peer for `tests/test_grpc_interop.py`. Wreath serves gRPC but
   # ships no client, and a framing implementation that satisfies only its own
@@ -146,13 +143,10 @@ benchmark = [
 # drags Uvicorn *and its C HTTP parser* down for every Uvicorn-hosted arm --
 # a competitor silently moving the baseline the whole matrix is compared against,
 # and invalidating every result already recorded under the current one.
-#
 # The pin is metadata only: Panther imports no httptools itself and runs fine
 # against 0.8. So install it without letting it re-resolve the environment:
-#
 #     uv pip install --no-deps panther
 #     uv run wreath-bench --framework panther ...
-#
 # It is excluded from DEFAULT_FRAMEWORKS (see benchmarks/scenarios.py) so a bare
 # run never reaches for it. Syncing this group *instead* of `--no-deps` will
 # perform the downgrade described above; if you do that, label the results.
@@ -243,14 +237,7 @@ markers = [
   "fuzz: expensive deterministic or randomized fuzz coverage",
   "performance: repeatable performance-ordering checks",
   "network: tests using real sockets, TLS, or external clients",
-  # `database` is deliberately NOT in the default deselect list above. A test
-  # that needs only a PostgreSQL DSN used to carry `network`, so it was excluded
-  # by default alongside tests that need a live socket -- and therefore never ran
-  # even on a machine where a database *was* available. That is how the
-  # DSN-gated suites went a long time without running once, and when they finally
-  # did they found a defect in a default code path. These are gated by a skipif
-  # on WREATH_TEST_POSTGRES_DSN, so they skip cleanly without one and run
-  # whenever there is a database to run against.
+  # Selected by WREATH_TEST_POSTGRES_DSN rather than the default network filter.
   "database: tests needing a PostgreSQL DSN, but no listening socket of ours",
   "thesis: intentionally red deterministic architecture checklist",
   # Not in the default deselect list either: these run like any other test. The
@@ -277,7 +264,6 @@ line-length = 100
 # same reason). Linting them reports style findings in someone else's dialect,
 # and "fixing" one would delete the pattern the analyzer exists to recognize:
 # UP045 would rewrite the `Optional[X]` that tests/port/golden asserts on.
-#
 # `tests/port/foreign` is the same tree in another dialect: Flask, aiohttp,
 # Tornado, Pyramid, Bottle and Django applications, read as source, never
 # imported, excluded from collection by the same `collect_ignore_glob`. The
@@ -293,16 +279,7 @@ extend-exclude = [".sanitizers", "nghttp2", "tests/port/corpus", "tests/port/for
 # counter and a waiver carrying a written reason. It is on repo-wide rather than
 # scoped to `src` -- `tests` and `benchmarks` cost eleven sites between them, and
 # a test that swallows around the code under test is a test that cannot fail.
-# Enabled after the fact: 49 `# noqa: BLE001` waivers were already written here
-# against a rule that had never run, which is its own kind of check with nothing
-# to check.
-#
-# RUF100 closes that class permanently: it fails on a `noqa` waiving a rule this
-# ruleset does not enforce, so a waiver can no longer be written against nothing.
-# It is on repo-wide with no per-file exemption, because when it was first
-# measured the 31 genuinely dead waivers were *all* in `tests` and `benchmarks` --
-# the two trees an exemption would have covered.
-#
+# RUF100 rejects a `noqa` for a rule this configuration does not enforce.
 # S102 and S310 are selected individually rather than by taking all of `S`. Both
 # are tiny here (7 `exec` sites, 4 URL-open sites) and both already carried
 # waiver prose explaining why the call is safe; enabling them turns that prose
@@ -353,7 +330,6 @@ extend-immutable-calls = ["wreath.binding.Depends", "Depends"]
 "benchmarks/lifecycle.py" = ["ASYNC220", "ASYNC240"]
 "benchmarks/run.py" = ["ASYNC220", "ASYNC240"]
 
-# --- binary wheels ----------------------------------------------------------
 # Users should not need a C toolchain to `pip install wreath`. Before this the
 # only artifact on PyPI was an sdist, so every install compiled four extensions
 # locally -- and failed outright on a machine without a compiler.
@@ -388,7 +364,6 @@ test-command = "python {project}/tools/wheel_smoke.py --base"
 # on `IORING_REGISTER_PBUF_RING`, `struct io_uring_buf_ring` and
 # `IORING_CQE_F_MORE`. The header being present is what makes this worth
 # writing down -- the obvious check passes and the compile still fails.
-#
 # It costs less reach than it looks. `auditwheel` tags by the glibc symbols
 # actually *linked*, not by the image, and a wheel built here comes out
 # `manylinux_2_28_x86_64.manylinux_2_34_x86_64` -- so it still installs on

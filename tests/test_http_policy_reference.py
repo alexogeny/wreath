@@ -105,9 +105,7 @@ async def test_reference_ingress_returns_an_ai_scraping_refusal_immediately() ->
     calls: list[str] = []
     refusal = object()
     policy = HttpPolicy()
-    policy.ai_scraping = RecordingComponent(
-        "ai_scraping", calls, result=refusal
-    )
+    policy.ai_scraping = RecordingComponent("ai_scraping", calls, result=refusal)
     policy.traffic = RecordingComponent("traffic", calls)
 
     assert await policy._reference_ingress(SimpleNamespace()) is refusal
@@ -159,10 +157,7 @@ async def test_reference_dynamic_egress_skips_empty_and_native_stages() -> None:
 
     assert await absent._reference_dynamic_egress(object(), response) is response
     assert (
-        await native._reference_dynamic_egress(
-            object(), response, native_one_shot=True
-        )
-        is response
+        await native._reference_dynamic_egress(object(), response, native_one_shot=True) is response
     )
     assert calls == []
 
@@ -199,8 +194,5 @@ async def test_reference_egress_with_an_empty_mask_runs_no_stage() -> None:
     response = object()
 
     assert (
-        await HttpPolicy()._reference_egress(
-            SimpleNamespace(_policy_mask=0), response
-        )
-        is response
+        await HttpPolicy()._reference_egress(SimpleNamespace(_policy_mask=0), response) is response
     )

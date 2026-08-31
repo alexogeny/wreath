@@ -33,8 +33,7 @@ async def run(dsn: str, mode: str, rows: int, iterations: int) -> None:
         await connection.execute(f'DROP SCHEMA IF EXISTS "{_SCHEMA}" CASCADE')
         await connection.execute(f'CREATE SCHEMA "{_SCHEMA}"')
         await connection.execute(
-            f'CREATE TABLE "{_SCHEMA}"."rows" '
-            "(id bigint PRIMARY KEY, label text NOT NULL)"
+            f'CREATE TABLE "{_SCHEMA}"."rows" (id bigint PRIMARY KEY, label text NOT NULL)'
         )
     finally:
         await database.release("write", connection)
@@ -53,9 +52,7 @@ async def run(dsn: str, mode: str, rows: int, iterations: int) -> None:
             for item in loaded:
                 item.label = f"{iteration}:{item.id}"
             await session.flush()
-        final = await session.raw(
-            f'SELECT id, label FROM "{_SCHEMA}"."rows" ORDER BY id'
-        ).fetch()
+        final = await session.raw(f'SELECT id, label FROM "{_SCHEMA}"."rows" ORDER BY id').fetch()
     finally:
         session_settings.MAX_BIND_PARAMETERS = original_limit
         await session.close()
@@ -67,9 +64,7 @@ async def run(dsn: str, mode: str, rows: int, iterations: int) -> None:
             await database.stop()
 
     expected_iteration = iterations - 1
-    if len(final) != rows or any(
-        row[1] != f"{expected_iteration}:{row[0]}" for row in final
-    ):
+    if len(final) != rows or any(row[1] != f"{expected_iteration}:{row[0]}" for row in final):
         raise RuntimeError("ORM write benchmark returned incorrect rows")
     print(
         json.dumps(

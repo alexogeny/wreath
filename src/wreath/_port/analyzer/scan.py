@@ -377,10 +377,6 @@ class _Analyzer(ast.NodeVisitor):
             if (
                 isinstance(dec, ast.Call)
                 and isinstance(dec.func, ast.Attribute)
-                # Bottle, Sanic and Flask all spell their route decorators the
-                # way FastAPI does. Counting them scored a monkeypatched Bottle
-                # app at 100% auto-translatable off nineteen decorators the tool
-                # had never seen the framework of.
                 and self.imports.serves_asgi
             ):
                 attr = dec.func.attr
@@ -466,9 +462,10 @@ class _Analyzer(ast.NodeVisitor):
                     )
                     continue
                 rule_id = _MARKER_RULE.get(marker)
-                if (rule_id, any(
-                    k.arg in _STR_CONSTRAINTS for k in default.keywords
-                )) == ("param.query", True):
+                if (rule_id, any(k.arg in _STR_CONSTRAINTS for k in default.keywords)) == (
+                    "param.query",
+                    True,
+                ):
                     self._emit("param.query_strconstraint", arg.lineno)
                     continue
                 if rule_id:

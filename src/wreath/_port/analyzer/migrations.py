@@ -35,11 +35,6 @@ _MIG_REVIEW_OPS = frozenset(
 # `sa.<T>` / `postgresql.<T>` column types that have a wreath PgType
 # (wreath/orm/types.py). Time, Interval, Enum, INET, TSVECTOR, HSTORE, MONEY and
 # a bare `CHAR(n)` are absent on purpose: there is no PgType to derive them from.
-# Numeric/DECIMAL used to be on that absent list and no longer belong there —
-# `wreath.orm.types.Numeric` ships, so every money column was being told to stay
-# in Alembic over a type wreath has had all along. That is the specific way this
-# table goes stale, and it is why each entry is a name that was checked against
-# `orm/types.py` rather than remembered.
 _SA_MODELLED_TYPES = frozenset(
     {
         "Integer",

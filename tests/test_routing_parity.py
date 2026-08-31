@@ -146,9 +146,6 @@ def test_compiled_native_policy_table_is_sealed_and_keeps_both_route_shapes() ->
 
 @pytest.mark.parametrize("name", list(IMPLS))
 def test_head_falls_back_after_dynamic_verification_miss(name: str) -> None:
-    # Regression: an explicit dynamic HEAD route that reaches a leaf but fails
-    # literal verification must still fall back to the GET tree. The C
-    # An earlier router used to report a plain miss here.
     table = IMPLS[name]()
     table.add("/h/{x}/only-head", "HEAD", "head-route")
     table.add("/h/{x}/other", "GET", "get-route")

@@ -874,8 +874,5 @@ def test_it_runs_on_this_repository_and_stays_a_report(
     groups, scanned = dup_scan.scan(repo_root(), dup_scan.DEFAULT_ROOTS, dup_scan.DEFAULT_MIN_LINES)
     assert scanned > 100
     assert all(len(group.sites) > 1 for group in groups)
-    # `main` consumes the real result above. Re-scanning the whole repository
-    # here used to double this test from roughly three seconds to six merely to
-    # prove that findings do not turn the report into a failing gate.
     monkeypatch.setattr(dup_scan, "scan", lambda *_args: (groups, scanned))
     assert dup_scan.main(["--top", "1"]) == 0

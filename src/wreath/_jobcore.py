@@ -127,15 +127,5 @@ def check_notify_payload(payload: bytes) -> None:
 
 
 def CronSchedule(expression: str) -> Recurrence:
-    """The old spelling of `Recurrence.cron`, kept so existing callers still run.
-
-    The cron parser used to live here, and `wreath.temporal.Recurrence` now owns
-    it -- along with the zone this spelling could never carry. Everything a
-    caller of this got before, it still gets: the returned object answers
-    `matches(minute=..., hour=...)` identically, and a bad expression still
-    raises a `ValueError` (`RecurrenceError` is one).
-
-    What it gets *now* is UTC, because that is what it always meant. Reach for
-    `Recurrence.cron(expression, tz=...)` to say otherwise.
-    """
+    """Create a UTC recurrence; use `Recurrence.cron` to select another zone."""
     return Recurrence.cron(expression)

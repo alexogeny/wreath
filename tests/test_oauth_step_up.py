@@ -13,9 +13,7 @@ from wreath.testing import TestClient
 def _app(claims: dict[str, Any], **requirement: Any) -> Wreath:
     app = Wreath()
     identity = Identity("ada", claims=claims)
-    app.configure_auth(
-        BearerTokenBackend(lambda token: identity if token == "token" else None)
-    )
+    app.configure_auth(BearerTokenBackend(lambda token: identity if token == "token" else None))
 
     @app.get("/transfer")
     @oauth_step_up(**requirement)
@@ -31,9 +29,7 @@ async def test_rfc_9470_challenges_for_more_recent_authentication(monkeypatch: A
     app = _app({"auth_time": 1_700_000_000}, max_age=5)
 
     async with TestClient(app) as client:
-        response = await client.get(
-            "/transfer", headers={"authorization": "Bearer token"}
-        )
+        response = await client.get("/transfer", headers={"authorization": "Bearer token"})
 
     assert response.status == 401
     assert response.header("www-authenticate") == (
@@ -48,9 +44,7 @@ async def test_a_recent_oauth_authentication_satisfies_max_age(monkeypatch: Any)
     app = _app({"auth_time": 1_700_000_000}, max_age=5)
 
     async with TestClient(app) as client:
-        response = await client.get(
-            "/transfer", headers={"authorization": "Bearer token"}
-        )
+        response = await client.get("/transfer", headers={"authorization": "Bearer token"})
 
     assert response.status == 200
 
@@ -60,9 +54,7 @@ async def test_rfc_9470_challenges_for_an_acceptable_authentication_class() -> N
     app = _app({"acr": "urn:example:loa:1"}, acr_values=("urn:example:loa:3", "myACR"))
 
     async with TestClient(app) as client:
-        response = await client.get(
-            "/transfer", headers={"authorization": "Bearer token"}
-        )
+        response = await client.get("/transfer", headers={"authorization": "Bearer token"})
 
     assert response.status == 401
     assert response.header("www-authenticate") == (
@@ -77,9 +69,7 @@ async def test_one_of_the_declared_authentication_classes_satisfies_the_route() 
     app = _app({"acr": "myACR"}, acr_values=("urn:example:loa:3", "myACR"))
 
     async with TestClient(app) as client:
-        response = await client.get(
-            "/transfer", headers={"authorization": "Bearer token"}
-        )
+        response = await client.get("/transfer", headers={"authorization": "Bearer token"})
 
     assert response.status == 200
 
@@ -94,9 +84,7 @@ async def test_both_oauth_step_up_requirements_must_be_met(monkeypatch: Any) -> 
     )
 
     async with TestClient(app) as client:
-        response = await client.get(
-            "/transfer", headers={"authorization": "Bearer token"}
-        )
+        response = await client.get("/transfer", headers={"authorization": "Bearer token"})
 
     assert response.status == 401
     assert response.header("www-authenticate") == (
@@ -169,9 +157,7 @@ def test_oauth_and_session_step_up_cannot_declare_two_remediation_flows() -> Non
 async def test_session_second_factor_guard_keeps_its_403_contract() -> None:
     app = Wreath()
     app.configure_auth(
-        BearerTokenBackend(
-            lambda token: Identity("ada", claims={}) if token == "token" else None
-        )
+        BearerTokenBackend(lambda token: Identity("ada", claims={}) if token == "token" else None)
     )
 
     @app.get("/session-step-up")
@@ -180,9 +166,7 @@ async def test_session_second_factor_guard_keeps_its_403_contract() -> None:
         return None
 
     async with TestClient(app) as client:
-        response = await client.get(
-            "/session-step-up", headers={"authorization": "Bearer token"}
-        )
+        response = await client.get("/session-step-up", headers={"authorization": "Bearer token"})
 
     assert response.status == 403
     assert response.header("www-authenticate") is None

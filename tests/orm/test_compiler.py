@@ -52,7 +52,7 @@ def test_update_many_unnests_fixed_shape_arrays_and_returns_the_complete_key(
     assert plan.sql == (
         'UPDATE "public"."memberships" AS "wreath_target" '
         'SET "role" = "wreath_batch"."role" '
-        'FROM UNNEST($1::text[], $2::bigint[], $3::bigint[]) '
+        "FROM UNNEST($1::text[], $2::bigint[], $3::bigint[]) "
         'AS "wreath_batch" ("role", "org_id", "user_id") '
         'WHERE "wreath_target"."org_id" = "wreath_batch"."org_id" AND '
         '"wreath_target"."user_id" = "wreath_batch"."user_id" '
@@ -71,7 +71,7 @@ def test_delete_many_unnests_fixed_shape_arrays_and_returns_the_complete_key(
 
     assert plan.sql == (
         'DELETE FROM "public"."memberships" AS "wreath_target" '
-        'USING UNNEST($1::bigint[], $2::bigint[]) '
+        "USING UNNEST($1::bigint[], $2::bigint[]) "
         'AS "wreath_batch" ("org_id", "user_id") '
         'WHERE "wreath_target"."org_id" = "wreath_batch"."org_id" AND '
         '"wreath_target"."user_id" = "wreath_batch"."user_id" '
@@ -108,9 +108,7 @@ def test_unnest_write_plan_is_independent_of_row_count(registry: Registry) -> No
     assert compile_update_many(registry, spec, 1 << 2, 2) is compile_update_many(
         registry, spec, 1 << 2, 200
     )
-    assert compile_delete_many(registry, spec, 2) is compile_delete_many(
-        registry, spec, 200
-    )
+    assert compile_delete_many(registry, spec, 2) is compile_delete_many(registry, spec, 200)
 
 
 def test_an_in_expression_rebinds_a_placeholder_among_fixed_values() -> None:
@@ -509,12 +507,6 @@ def test_count_ignores_a_projected_count_query_never_returns_star(registry: Regi
         Post.select().where((Post.author.email == "x") & (Post.author.name == "y")),
     )
     assert sql.count("JOIN") == 1
-
-
-# `in_` used to take a list and nothing else, so filtering by "the rows some
-# other table names" meant two round trips and a list of ids on the wire. That
-# is correct at forty rows and wrong at a million, and the canonical example was
-# written around the limitation rather than the shape it wanted.
 
 
 def test_in_with_a_subquery_renders_one_statement(registry: Registry) -> None:

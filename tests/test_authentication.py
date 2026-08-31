@@ -477,14 +477,6 @@ def test_a_bearer_only_app_may_still_use_route_scoped_sessions() -> None:
 
 
 def _step_up_app() -> tuple[Wreath, Any]:
-    """One route carrying a *bare* second-factor requirement, exposed as a tool.
-
-    Bare meaning `authenticated` is not set beside it, which no decorator
-    produces -- `@second_factor` sets both. Constructed directly here because
-    that is the case the two enforcers used to answer differently, and the next
-    feature that builds an `AuthRequirement` itself is the one that would meet
-    it.
-    """
     from wreath._auth.requirements import set_requirement
     from wreath.authorization import AuthRequirement
     from wreath.mcp import MCP, expose_routes

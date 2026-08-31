@@ -33,7 +33,6 @@ from .exceptions import (
 from .state import BODY_CHECK_SLOT, State
 
 if TYPE_CHECKING:
-    # **This one import decides whether `wreath` can be entered from any door.**
     # At runtime it would load `._auth`, whose `__init__` imports `.backends`
     # and `.cedar`, and both of those import `Request` back from this module --
     # a cycle through a half-built `wreath.request`. Nothing hit it while

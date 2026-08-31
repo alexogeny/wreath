@@ -57,9 +57,7 @@ def _noop() -> None:
     return None
 
 
-# =========================================================================
 # 1. heap (asyncio's algorithm: heapq + lazy cancel + 50% compaction)
-# =========================================================================
 _MIN_SCHED, _CANCEL_FRAC = 100, 0.5
 
 
@@ -113,9 +111,7 @@ class HeapTimers:
         return fired
 
 
-# =========================================================================
 # 2/3. single-level hashed wheel (rounds) and sized wheel (no rounds)
-# =========================================================================
 class _WNode:
     __slots__ = ("cb", "rounds", "slot", "prev", "next", "cancelled")
 
@@ -190,9 +186,7 @@ class SizedWheel(HashedWheel):
         super().__init__(resolution=resolution, slots=int(max_delay / resolution) + 2)
 
 
-# =========================================================================
 # 4. hierarchical cascading wheel (Varghese-Lauck). S power of two.
-# =========================================================================
 class _HNode:
     __slots__ = ("cb", "deadline", "prev", "next", "head_list", "slot", "cancelled")
 
@@ -289,9 +283,7 @@ class HierWheel:
         return fired
 
 
-# =========================================================================
 # 5. FIFO list per fixed duration (Redis / TCP keepalive)
-# =========================================================================
 class _FNode:
     __slots__ = ("cb", "deadline", "prev", "next", "bucket", "cancelled")
 
@@ -364,9 +356,7 @@ class FixedList:
         return fired
 
 
-# =========================================================================
 # Native + real-loop adapters
-# =========================================================================
 class _WheelStore:
     """Adapter for TimingWheel (handle.cancel())."""
 
@@ -441,9 +431,7 @@ class LoopArm:
         self.loop.close()
 
 
-# =========================================================================
 # Workloads. Each returns median ns per unit of work for one arm factory.
-# =========================================================================
 def _median_ns(fn: Callable[[], int], work_units: int, trials: int) -> float:
     samples = []
     for _ in range(trials):
@@ -559,7 +547,6 @@ def w_mixed_realistic(make, iters, trials):
     return _median_ns(run, iters, trials)
 
 
-# =========================================================================
 def w_ultra_mixed(make, iters, trials):
     """Maximal diversity in one stream: fixed-duration requests (arm+cancel),
     idle keep-alive resets, agent long-polls (far future), arbitrary app

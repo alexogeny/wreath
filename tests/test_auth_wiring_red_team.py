@@ -43,11 +43,6 @@ def _cookie(response: Any) -> str:
 
 
 def _session_app(*, scope: str) -> Wreath:
-    """A session-authenticated app with the session middleware in `scope`.
-
-    `global` is the correct wiring. The other four are the same mistake made in
-    four supported places, and only one of them used to be refused.
-    """
     app = Wreath()
     app.configure_auth(SessionIdentityBackend())
     session = SessionPolicy(secret=SECRET, secure=False)
@@ -181,12 +176,7 @@ async def test_a_backend_that_reads_no_session_is_not_refused() -> None:
 
 
 class _KeyedSessionStore:
-    """A session store that records which key it was asked to enumerate by.
-
-    Its `delete_for` takes the key rather than assuming one, which is the
-    capability the shipped `PostgresSessionStore` grew. `enumerated` is what
-    makes the attack legible: the old code always said `principal`.
-    """
+    """A session store that records which key it was asked to enumerate by."""
 
     def __init__(self, session_key: str = "principal") -> None:
         self.rows: dict[str, dict[str, Any]] = {}

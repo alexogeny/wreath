@@ -154,13 +154,7 @@ def compile_scope(tree: ast.Module, qualname: str, filename: str) -> CodeType:
 
 
 def same_bytecode(left: CodeType, right: CodeType) -> bool:
-    """Whether two code objects are indistinguishable to the interpreter.
-
-    Used to answer the equivalent-mutant question *definitively* for the subset
-    where it is decidable at all: if the compiler emits the same instructions
-    and the same constants, the mutation changed nothing and is not a finding
-    in either direction. Everything else stays honestly undecided.
-    """
+    """Whether two code objects are indistinguishable to the interpreter."""
     if left.co_code != right.co_code:
         return False
     if left.co_names != right.co_names or left.co_varnames != right.co_varnames:

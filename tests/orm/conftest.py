@@ -128,23 +128,6 @@ class FakeConnection:
         self._plans[sql] = FakePlan(names, oids, checked)
 
     def _check_against_plan(self, sql: str, rows: list[Any]) -> None:
-        """Refuse a scripted value the driver could not have produced.
-
-        A `describe()` call declares the result OIDs, and from that moment the
-        fake knows exactly what a real connection would hand back for each
-        column: `driver_row_value` runs the driver's own `_decode_value`, so the
-        answer comes from the shipped codec table rather than from a wish.
-
-        Checked here rather than in `script()` because a test may script before
-        it describes, and a rule that depends on call order is a rule that gets
-        worked around. Untyped rows -- no `describe()` for this statement --
-        stay positional-only and unchecked, which is honest: the fake was never
-        told what they are.
-
-        This is the guard that was missing when thirteen introspection tests
-        scripted `str` for a `name` column and `validate_schema="error"`, the
-        framework default, had never once worked against a real PostgreSQL.
-        """
         plan = next((p for stmt, p in self._plans.items() if stmt in sql), None)
         if plan is None or not plan.checked or not plan.result_oids:
             return

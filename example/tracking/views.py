@@ -1,39 +1,4 @@
-"""How far an animal walked yesterday, and what to do when yesterday changes.
-
-One declaration, and it carries the whole of the late-data argument.
-
-A collar under thick canopy or in a gorge cannot see a satellite. It keeps
-taking positions -- that is what the buffer is for -- and uploads them when the
-sky comes back, which is hours later on a bad day and *days* later in the wet
-season. So the distance an animal walked on Tuesday is a number that this
-application confidently reported on Wednesday morning and may have to revise on
-Friday afternoon.
-
-There are three things one can do about that, and only one of them is
-defensible:
-
-* **Refuse the late write.** Decisively wrong. `fixes` is the business table --
-  it is the record of where the animals were -- and a chart's watermark must
-  never be able to fail a business write.
-* **Rewrite Tuesday's number.** This is the failure that sealing exists to
-  prevent. A weekly report went out on Wednesday quoting 14.2 km. If Tuesday can
-  silently become 19.8 km, then it was never settled and nobody can reconcile
-  the report against the system that produced it.
-* **Record the difference beside it.** Tuesday stays 14.2 km, the +5.6 km is
-  stored as a correction, the read folds them together, and
-  `result.state.corrections` names Tuesday as a day that carries one. Late data
-  then *looks* like late data arriving, rather than like a number that changed
-  on its own.
-
-`.seal(after=...)` is how the third one is spelled, and `on_late="correct"` --
-the default -- is the behaviour above. This module declares it and nothing else.
-
-**Why this is a function and not a constant.** A sealed bucket stores the zone
-it was cut in: a Nairobi day cannot be re-cut into a London day after the fact,
-so the zone is part of the view's identity rather than a per-request argument.
-The camera-trap example's `sealed_activity` is a function for exactly this
-reason and says so at more length.
-"""
+"""A zone-bound daily distance view with corrections for late positions."""
 
 from __future__ import annotations
 

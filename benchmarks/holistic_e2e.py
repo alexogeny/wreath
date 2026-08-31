@@ -818,8 +818,7 @@ async def holistic(
         array(
             "d",
             (
-                math.sin((index + account_id) / 17.0)
-                * math.cos((index + item_id) / 29.0)
+                math.sin((index + account_id) / 17.0) * math.cos((index + item_id) / 29.0)
                 for index in range(128)
             ),
         )

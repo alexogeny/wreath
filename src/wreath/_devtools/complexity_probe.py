@@ -1131,14 +1131,7 @@ def _append_missing_headers(n: int):
     group="metal-http1",
 )
 def _replace_reused_response_headers(n: int):
-    """Replacing built-in headers on a reused response is O(n), then bounded.
-
-    Request ID, CSRF, and Server-Timing used to append a new line on every
-    send. Security-header scans then made n sends quadratic and retained O(n)
-    memory. This adversarial input starts with n stale copies of each header;
-    each replacement compacts once, retains unrelated values, and leaves one
-    current line rather than front-deleting from the list.
-    """
+    """Replace n stale built-in headers in one compaction per header name."""
     from wreath._native import _core
 
     headers = (
@@ -1531,15 +1524,7 @@ def _pagination_apply_sort(n: int):
     metric="key_map_builds",
 )
 def _orm_hydrate_key_maps(rows: int):
-    """Resolving a projection's key offsets is O(1) in the row count.
-
-    `_hydrate` used to rebuild a `{python_name: index}` dict for every row, off
-    a mapping that is fixed by the compiled projection -- O(rows x columns) of
-    pure repetition, paid again per join step per row on any joined shape (a
-    joined load always takes this Record path rather than the native hydrate
-    plan). Fitted on the deterministic build counter rather than wall time, so
-    the contract holds regardless of machine noise; the timing column still
-    shows the linear per-row hydration underneath it."""
+    """Count projection key-map builds independently of linear row hydration."""
     from wreath.orm.session import _count_key_map_builds, _row_plan
 
     spec, columns, session, make_row = _orm_hydrate_fixture()
@@ -3024,6 +3009,7 @@ def _msgpack_array_control(n: int):
 def _xml_wide_harness(n: int, *, attributes: bool, canonical: bool) -> float:
     """Price native XML parsing/canonicalization over a wide sibling set."""
     from wreath._native import _core
+    from wreath.xml import Element
 
     child = b'<item a="v">text</item>' if attributes else b"<item>text-value</item>"
     wire = b"<root>" + child * n + b"</root>"
@@ -3034,7 +3020,7 @@ def _xml_wide_harness(n: int, *, attributes: bool, canonical: bool) -> float:
         if canonical:
             result = _core.xml_c14n(wire, 0, len(wire), (), (), *limits)
         else:
-            result = _core.xml_parse(wire, *limits)
+            result = _core.xml_parse(wire, Element, *limits)
         if result is None:
             raise RuntimeError("XML operation produced no result")
     return (time.perf_counter() - before) / loops

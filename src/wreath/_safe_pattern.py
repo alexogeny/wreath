@@ -24,12 +24,16 @@ _ATOMS = frozenset(
         _PARSER.NOT_LITERAL,
     }
 )
-_ALLOWED = _ATOMS | _REPEATS | frozenset(
-    {
-        _PARSER.AT,
-        _PARSER.BRANCH,
-        _PARSER.SUBPATTERN,
-    }
+_ALLOWED = (
+    _ATOMS
+    | _REPEATS
+    | frozenset(
+        {
+            _PARSER.AT,
+            _PARSER.BRANCH,
+            _PARSER.SUBPATTERN,
+        }
+    )
 )
 
 

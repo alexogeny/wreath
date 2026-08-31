@@ -87,8 +87,7 @@ def test_nonce_template_drops_blank_segments_and_adds_missing_directives() -> No
         (b"referrer-policy", b"strict-origin-when-cross-origin"),
     )
     assert policy._csp_template == (
-        b"default-src 'self'; script-src 'self' 'nonce-{nonce}'; "
-        b"style-src 'nonce-{nonce}'"
+        b"default-src 'self'; script-src 'self' 'nonce-{nonce}'; style-src 'nonce-{nonce}'"
     )
     assert policy._has_nonce
 

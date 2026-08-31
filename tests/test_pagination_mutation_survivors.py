@@ -220,7 +220,7 @@ def _predicate_shape(predicate: BinaryExpr | BooleanExpr) -> Any:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("sort", "expected_comparison"),
-    [(('name',), ">"), (("-name",), "<")],
+    [(("name",), ">"), (("-name",), "<")],
 )
 async def test_cursor_builds_the_full_lexicographic_after_predicate(
     sort: tuple[str, ...],

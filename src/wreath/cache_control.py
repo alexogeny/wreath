@@ -109,9 +109,7 @@ def _set_cdn_cache_control(headers: list[tuple[bytes, bytes]], policy: CacheCont
     if not value:
         raise ValueError("CDN-Cache-Control needs at least one directive")
     headers[:] = [
-        (name, existing)
-        for name, existing in headers
-        if name.lower() != b"cdn-cache-control"
+        (name, existing) for name, existing in headers if name.lower() != b"cdn-cache-control"
     ]
     headers.append((b"cdn-cache-control", value))
 

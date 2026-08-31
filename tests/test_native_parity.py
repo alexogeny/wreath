@@ -75,11 +75,7 @@ QUERY_SAMPLES = [
 #     cookie-name   = token
 # Whitespace is trimmed from both halves of a pair, per RFC 6265bis section
 # 5.8.3 ("Remove any leading or trailing WSP characters from the name string and
-# the value string"). This used to be trimmed only around the ";" separators and
-# never around the "=", so `" a = 1 "` yielded the name `"a "` -- which RFC 9110
-# section 5.6.2 says is not a `token` at all, SP not being a `tchar`. A
-# comparison test could not see that: agreeing on a deviation looks exactly like
-# agreeing on conformance.
+# the value string"). RFC 9110 section 5.6.2 excludes SP from `tchar`.
 COOKIE_EXPECTATIONS = [
     pytest.param(b"", {}, id="empty"),
     pytest.param(b"a=1", {"a": "1"}, id="one-pair"),

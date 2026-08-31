@@ -453,15 +453,6 @@ class RateLimitPolicy:
         if capacity < cost:
             raise ValueError("burst must be at least the per-request cost")
         if key is principal_key and not _route_scoped:
-            # A global stage runs at ingress, before route authorization has
-            # identified anyone, so `principal_key` would silently degrade to
-            # the client address and put every caller in one bucket. That is a
-            # production incident, not a preference -- refuse it at startup.
-            # `_route_scoped` is how `TieredRateLimitPolicy` says "I run
-            # after authentication". It used to assign `child._key` afterwards
-            # instead, which meant the guard could be stepped around by anyone
-            # who noticed the attribute -- and read as an oversight rather than
-            # a declaration.
             raise ValueError(
                 "RateLimitPolicy is a global stage and runs before "
                 "authentication, so it cannot key on the principal; use "

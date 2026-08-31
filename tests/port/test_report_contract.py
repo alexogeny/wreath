@@ -14,14 +14,6 @@ def test_report_shape_and_every_query_is_still_reported(corpus_app_roots):
         assert finding["tag"] in VALID_TAGS
         assert isinstance(finding["line"], int)
 
-    # This used to assert that no query is ever tagged ``translated``. That was a
-    # proxy for "the emitter does not rewrite queries", and it stopped being one
-    # once the analyzer began reading arguments: ``filter(id=x)`` has a fully
-    # determined target and says so, while the emitter still copies the body
-    # byte-for-byte. The rewrite contract is pinned directly in
-    # ``test_query_classification.test_the_emitter_never_rewrites_a_query``; what
-    # matters here is that every chain still produces a finding, because silence
-    # is the only genuinely useless verdict.
     query_findings = [f for f in doc["findings"] if f["construct"] == "orm_query"]
     assert query_findings, "corpus deliberately contains .objects. query calls"
     assert all(f["tag"] in {"translated", "needs-review", "unsupported"} for f in query_findings)

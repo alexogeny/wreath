@@ -15,10 +15,6 @@ PYDANTIC: dict[str, tuple[str, str, str, str]] = {
         TRANSLATED,
         "plain field maps 1:1: `Field(default=x)`/`Field(x)` -> `= x`, `Field(default_factory=f)` -> `= field(default_factory=f)`, and a list/dict/set default -> field(default_factory=...). Keep descriptions, examples, aliases and constraints in Annotated[T, wreath.binding.Field(...)].",
     ),
-    # Pydantic does not care what order defaulted and required fields are
-    # declared in. `@dataclass` does, and raises at class-creation time -- which
-    # `ast.parse` and `compile` both accept, so this port used to fail only when
-    # the module was first imported, and it is an ordinary shape to write.
     "pydantic.model_kw_only": (
         "model",
         "pydantic_models",

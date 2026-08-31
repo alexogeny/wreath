@@ -1017,11 +1017,6 @@ RING_FILE_HEADER_BYTES: Final = 4096
 RING_FILE_CURSOR_OFFSET: Final = 64
 
 #: Offset of the mirrored loss counters, one per `LossReason`.
-#:
-#: A crash file without these is a file you cannot draw a conclusion from: "the
-#: last thing it did was serve /orders" means something different when the ring
-#: was also full four thousand times. The counters are already maintained on the
-#: drop path, so mirroring them costs a store somewhere that was never fast.
 RING_FILE_LOSS_OFFSET: Final = 128
 
 # Fixed provenance (little-endian), at offset 0:
@@ -1403,9 +1398,7 @@ MAX_CHUNK_BYTES = 64 * 1024 * 1024
 MAX_ROWS = 5_000_000
 
 
-# The decoder consumes the canonical metadata wire form. Every declared length
-# is bounds-checked before it is used to slice, and a round trip preserves the
-# container hash.
+# The decoder bounds-checks every declared length before slicing.
 
 
 def decode_metadata_image(data: bytes) -> MetadataImage:

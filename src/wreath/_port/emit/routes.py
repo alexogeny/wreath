@@ -256,11 +256,6 @@ class _RouteRewrite(_SessionThreading, _TestClient, _BackgroundWork, _ForeignRew
             s = self.buf.start_of(first)
             self.buf._edits.append((s, s, f"request: Request, {star}{extra}".encode()))
             return
-        # A handler with no positional parameters: write into the parentheses,
-        # in front of whatever keyword-only ones are already there. Writing
-        # `request` used to be left as a note, and it was the single most common
-        # thing the emitter asked a human to type, and it is the same fifteen
-        # characters every time.
         open_paren = self.buf.b.find(b"(", self.buf.start_of_line(node.lineno))
         if open_paren == -1:
             self._note(
@@ -286,15 +281,7 @@ class _RouteRewrite(_SessionThreading, _TestClient, _BackgroundWork, _ForeignRew
         self.buf._edits.append((open_paren + 1, close_paren, f"request: Request{tail}".encode()))
 
     def _route_needs_keyword_only(self, node) -> bool:
-        """Whether porting this signature leaves a required parameter after a defaulted one.
-
-        `q: str = Query(...)` is FastAPI's spelling of a *required* query
-        parameter, and wreath spells it `q: Annotated[str, Query()]` with no
-        default at all. Written back in place that is a syntax error whenever
-        anything before it has a default, which is why these used to be left
-        alone with a note. Marking the parameters keyword-only removes the
-        ordering rule entirely.
-        """
+        """Whether porting this signature leaves a required parameter after a defaulted one."""
         args = node.args
         defaults = dict(
             zip(
@@ -356,18 +343,7 @@ class _RouteRewrite(_SessionThreading, _TestClient, _BackgroundWork, _ForeignRew
                 self.buf._edits.append((s, e, new.encode("utf-8")))
 
     def _rewrite_route_options(self, dec: ast.Call, node) -> None:
-        """Translate `status_code=`/`response_model=`; annotate what can't be done safely.
-
-        The verdict comes from `status_code_rule`, the same function the report
-        uses, and only the two verdicts that name a *response class* are rewritten
-        here. That boundary is load-bearing: this used to wrap any single-`return`
-        body in `JSONResponse(...)`, which produced `JSONResponse(<dataclass>)` for
-        a handler returning a DTO — and wreath's JSON encoder raises on a
-        dataclass, so the ported handler failed on its first request. A verdict
-        that is not rewritten keeps its kwarg *and* gains an annotation naming the
-        exact edit, because silently dropping `status_code=` would leave the route
-        answering 200.
-        """
+        """Translate `status_code=`/`response_model=`; annotate what can't be done safely."""
         drop: set[str] = set()
         sc = next((kw for kw in dec.keywords if kw.arg == "status_code"), None)
         if sc is not None:

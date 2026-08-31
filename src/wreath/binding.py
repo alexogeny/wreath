@@ -413,101 +413,7 @@ def _validate(annotation: Any, value: Any, loc: tuple[Any, ...], errors: list, b
 
     origin = typing.get_origin(annotation)
     if origin is None:
-        if annotation is float:
-            # JSON has one number type: accept ints as floats.
-            if isinstance(value, float):
-                return value
-            if isinstance(value, int) and not isinstance(value, bool):
-                return float(value)
-            errors.append(_error(loc, "value is not a number", "float"))
-            return value
-        if annotation is int:
-            if isinstance(value, int) and not isinstance(value, bool):
-                return value
-            errors.append(_error(loc, "value is not an integer", "int"))
-            return value
-        if annotation is bool:
-            if isinstance(value, bool):
-                return value
-            errors.append(_error(loc, "value is not a boolean", "bool"))
-            return value
-        if annotation is str:
-            if isinstance(value, str):
-                return value
-            errors.append(_error(loc, "value is not a string", "str"))
-            return value
-        if annotation is Decimal:
-            if isinstance(value, bool) or not isinstance(value, (str, int, float)):
-                errors.append(_error(loc, "value is not a decimal", "decimal"))
-                return value
-            try:
-                return Decimal(str(value))
-            except InvalidOperation:
-                errors.append(_error(loc, "value is not a decimal", "decimal"))
-                return value
-        if annotation is UUID:
-            if not isinstance(value, str):
-                errors.append(_error(loc, "value is not a UUID", "uuid"))
-                return value
-            try:
-                return UUID(value)
-            except ValueError:
-                errors.append(_error(loc, "value is not a UUID", "uuid"))
-                return value
-        if annotation is bytes:
-            if not isinstance(value, str):
-                errors.append(_error(loc, "value is not base64 text", "bytes"))
-                return value
-            try:
-                return base64.b64decode(value, validate=True)
-            except ValueError:
-                errors.append(_error(loc, "value is not base64 text", "bytes"))
-                return value
-        if annotation is Instant or annotation is _datetime.datetime:
-            if not isinstance(value, str):
-                errors.append(_error(loc, "value is not an ISO-8601 instant", "instant"))
-                return value
-            try:
-                return Instant.parse(value)
-            except TemporalError as error:
-                errors.append(_error(loc, str(error), "instant"))
-                return value
-        if annotation is Coordinate:
-            # An object, never a bare pair. GeoJSON orders `[lon, lat]` and
-            # people say "lat, lon", so a two-element array is ambiguous at
-            # exactly the moment it matters -- and `Coordinate(...)` refuses
-            # positional arguments for that reason. Accepting one here would
-            # reopen the trap at the wire.
-            if not isinstance(value, dict):
-                errors.append(_error(loc, "value is not a {lat, lon} object", "coordinate"))
-                return value
-            if set(value) != {"lat", "lon"}:
-                errors.append(_error(loc, "value needs exactly lat and lon", "coordinate"))
-                return value
-            try:
-                return Coordinate(lat=value["lat"], lon=value["lon"])
-            except (TypeError, ValueError) as error:
-                errors.append(_error(loc, str(error), "coordinate"))
-                return value
-        if annotation is _datetime.date:
-            if not isinstance(value, str):
-                errors.append(_error(loc, "value is not an ISO-8601 date", "date"))
-                return value
-            try:
-                return _datetime.date.fromisoformat(value)
-            except ValueError:
-                errors.append(_error(loc, "value is not an ISO-8601 date", "date"))
-                return value
-        if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
-            try:
-                return annotation(value)
-            except TypeError, ValueError:
-                errors.append(_error(loc, "value is not an allowed enum member", "enum"))
-                return value
-        if dataclasses.is_dataclass(annotation):
-            return _validate_dataclass(annotation, value, loc, errors, budget)
-        errors.append(_error(loc, f"unsupported annotation {annotation!r}", "unsupported"))
-        return value
+        return _validate_scalar(annotation, value, loc, errors, budget)
 
     if origin is typing.Literal:
         choices = typing.get_args(annotation)
@@ -517,72 +423,240 @@ def _validate(annotation: Any, value: Any, loc: tuple[Any, ...], errors: list, b
         return value
 
     if origin in (types.UnionType, typing.Union):
-        options = typing.get_args(annotation)
-        if value is None and _NONE_TYPE in options:
-            return None
-        for option in options:
-            if option is _NONE_TYPE:
-                continue
-            attempt: list[dict[str, Any]] = []
-            result = _validate(option, value, loc, attempt, budget)
-            if not attempt and budget[0] >= 0:
-                return result
-            if budget[0] < 0:
-                # Budget ran out mid-union: an empty attempt from here is a
-                # silent bail, not a real match, so stop trying options. The
-                # top-level reports too_complex.
-                return value
-        errors.append(_error(loc, f"value matches no option of {annotation}", "union"))
-        return value
+        return _validate_union(annotation, value, loc, errors, budget)
 
     if origin in (list, tuple, set, frozenset):
-        if not isinstance(value, list):
-            errors.append(_error(loc, "value is not an array", "list"))
-            return value
-        args = typing.get_args(annotation)
-        if origin is tuple and args and not (len(args) == 2 and args[1] is Ellipsis):
-            if len(value) != len(args):
-                errors.append(_error(loc, f"array must contain exactly {len(args)} items", "tuple"))
-                return value
-            result = tuple(
-                _validate(item_type, item, (*loc, index), errors, budget)
-                for index, (item_type, item) in enumerate(zip(args, value, strict=True))
-            )
-            return result
-        item_type = args[0] if args else Any
-        items = [
-            _validate(item_type, item, (*loc, index), errors, budget)
-            for index, item in enumerate(value)
-        ]
-        if origin is tuple:
-            return tuple(items)
-        if origin is set:
-            try:
-                return set(items)
-            except TypeError:
-                errors.append(_error(loc, "array items are not hashable", "set"))
-                return value
-        if origin is frozenset:
-            try:
-                return frozenset(items)
-            except TypeError:
-                errors.append(_error(loc, "array items are not hashable", "set"))
-                return value
-        return items
+        return _validate_sequence(annotation, origin, value, loc, errors, budget)
 
     if origin is dict:
-        if not isinstance(value, dict):
-            errors.append(_error(loc, "value is not an object", "dict"))
-            return value
-        args = typing.get_args(annotation)
-        value_type = args[1] if len(args) == 2 else Any
-        return {
-            key: _validate(value_type, item, (*loc, key), errors, budget)
-            for key, item in value.items()
-        }
+        return _validate_mapping(annotation, value, loc, errors, budget)
 
     errors.append(_error(loc, f"unsupported annotation {annotation!r}", "unsupported"))
     return value
+
+
+def _validate_scalar(
+    annotation: Any,
+    value: Any,
+    loc: tuple[Any, ...],
+    errors: list[dict[str, Any]],
+    budget: list[int],
+) -> Any:
+    if annotation is float:
+        if isinstance(value, float):
+            return value
+        if isinstance(value, int) and not isinstance(value, bool):
+            return float(value)
+        errors.append(_error(loc, "value is not a number", "float"))
+        return value
+    if annotation is int:
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        errors.append(_error(loc, "value is not an integer", "int"))
+        return value
+    if annotation is bool:
+        if isinstance(value, bool):
+            return value
+        errors.append(_error(loc, "value is not a boolean", "bool"))
+        return value
+    if annotation is str:
+        if isinstance(value, str):
+            return value
+        errors.append(_error(loc, "value is not a string", "str"))
+        return value
+    return _validate_extended_scalar(annotation, value, loc, errors, budget)
+
+
+def _validate_extended_scalar(
+    annotation: Any,
+    value: Any,
+    loc: tuple[Any, ...],
+    errors: list[dict[str, Any]],
+    budget: list[int],
+) -> Any:
+    if annotation is Decimal:
+        return _validate_decimal(value, loc, errors)
+    if annotation is UUID:
+        return _validate_uuid(value, loc, errors)
+    if annotation is bytes:
+        return _validate_bytes(value, loc, errors)
+    if annotation is Instant or annotation is _datetime.datetime:
+        return _validate_instant(value, loc, errors)
+    if annotation is Coordinate:
+        return _validate_coordinate(value, loc, errors)
+    if annotation is _datetime.date:
+        return _validate_date(value, loc, errors)
+    if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
+        try:
+            return annotation(value)
+        except TypeError, ValueError:
+            errors.append(_error(loc, "value is not an allowed enum member", "enum"))
+            return value
+    if dataclasses.is_dataclass(annotation):
+        return _validate_dataclass(annotation, value, loc, errors, budget)
+    errors.append(_error(loc, f"unsupported annotation {annotation!r}", "unsupported"))
+    return value
+
+
+def _validate_decimal(value: Any, loc: tuple[Any, ...], errors: list[dict[str, Any]]) -> Any:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        errors.append(_error(loc, "value is not a decimal", "decimal"))
+        return value
+    try:
+        return Decimal(str(value))
+    except InvalidOperation:
+        errors.append(_error(loc, "value is not a decimal", "decimal"))
+        return value
+
+
+def _validate_uuid(value: Any, loc: tuple[Any, ...], errors: list[dict[str, Any]]) -> Any:
+    if not isinstance(value, str):
+        errors.append(_error(loc, "value is not a UUID", "uuid"))
+        return value
+    try:
+        return UUID(value)
+    except ValueError:
+        errors.append(_error(loc, "value is not a UUID", "uuid"))
+        return value
+
+
+def _validate_bytes(value: Any, loc: tuple[Any, ...], errors: list[dict[str, Any]]) -> Any:
+    if not isinstance(value, str):
+        errors.append(_error(loc, "value is not base64 text", "bytes"))
+        return value
+    try:
+        return base64.b64decode(value, validate=True)
+    except ValueError:
+        errors.append(_error(loc, "value is not base64 text", "bytes"))
+        return value
+
+
+def _validate_instant(value: Any, loc: tuple[Any, ...], errors: list[dict[str, Any]]) -> Any:
+    if not isinstance(value, str):
+        errors.append(_error(loc, "value is not an ISO-8601 instant", "instant"))
+        return value
+    try:
+        return Instant.parse(value)
+    except TemporalError as error:
+        errors.append(_error(loc, str(error), "instant"))
+        return value
+
+
+def _validate_coordinate(
+    value: Any, loc: tuple[Any, ...], errors: list[dict[str, Any]]
+) -> Any:
+    if not isinstance(value, dict):
+        errors.append(_error(loc, "value is not a {lat, lon} object", "coordinate"))
+        return value
+    if set(value) != {"lat", "lon"}:
+        errors.append(_error(loc, "value needs exactly lat and lon", "coordinate"))
+        return value
+    try:
+        return Coordinate(lat=value["lat"], lon=value["lon"])
+    except (TypeError, ValueError) as error:
+        errors.append(_error(loc, str(error), "coordinate"))
+        return value
+
+
+def _validate_date(value: Any, loc: tuple[Any, ...], errors: list[dict[str, Any]]) -> Any:
+    if not isinstance(value, str):
+        errors.append(_error(loc, "value is not an ISO-8601 date", "date"))
+        return value
+    try:
+        return _datetime.date.fromisoformat(value)
+    except ValueError:
+        errors.append(_error(loc, "value is not an ISO-8601 date", "date"))
+        return value
+
+
+def _validate_union(
+    annotation: Any,
+    value: Any,
+    loc: tuple[Any, ...],
+    errors: list[dict[str, Any]],
+    budget: list[int],
+) -> Any:
+    options = typing.get_args(annotation)
+    if value is None and _NONE_TYPE in options:
+        return None
+    for option in options:
+        if option is _NONE_TYPE:
+            continue
+        attempt: list[dict[str, Any]] = []
+        result = _validate(option, value, loc, attempt, budget)
+        if not attempt and budget[0] >= 0:
+            return result
+        if budget[0] < 0:
+            return value
+    errors.append(_error(loc, f"value matches no option of {annotation}", "union"))
+    return value
+
+
+def _validate_sequence(
+    annotation: Any,
+    origin: Any,
+    value: Any,
+    loc: tuple[Any, ...],
+    errors: list[dict[str, Any]],
+    budget: list[int],
+) -> Any:
+    if not isinstance(value, list):
+        errors.append(_error(loc, "value is not an array", "list"))
+        return value
+    args = typing.get_args(annotation)
+    if origin is tuple and args and not (len(args) == 2 and args[1] is Ellipsis):
+        if len(value) != len(args):
+            errors.append(_error(loc, f"array must contain exactly {len(args)} items", "tuple"))
+            return value
+        return tuple(
+            _validate(item_type, item, (*loc, index), errors, budget)
+            for index, (item_type, item) in enumerate(zip(args, value, strict=True))
+        )
+    item_type = args[0] if args else Any
+    items = [
+        _validate(item_type, item, (*loc, index), errors, budget)
+        for index, item in enumerate(value)
+    ]
+    if origin is tuple:
+        return tuple(items)
+    if origin is set:
+        return _validated_set(items, value, loc, errors, frozen=False)
+    if origin is frozenset:
+        return _validated_set(items, value, loc, errors, frozen=True)
+    return items
+
+
+def _validated_set(
+    items: list[Any],
+    original: Any,
+    loc: tuple[Any, ...],
+    errors: list[dict[str, Any]],
+    *,
+    frozen: bool,
+) -> Any:
+    try:
+        return frozenset(items) if frozen else set(items)
+    except TypeError:
+        errors.append(_error(loc, "array items are not hashable", "set"))
+        return original
+
+
+def _validate_mapping(
+    annotation: Any,
+    value: Any,
+    loc: tuple[Any, ...],
+    errors: list[dict[str, Any]],
+    budget: list[int],
+) -> Any:
+    if not isinstance(value, dict):
+        errors.append(_error(loc, "value is not an object", "dict"))
+        return value
+    args = typing.get_args(annotation)
+    value_type = args[1] if len(args) == 2 else Any
+    return {
+        key: _validate(value_type, item, (*loc, key), errors, budget)
+        for key, item in value.items()
+    }
 
 
 def _validate_field(
@@ -2992,21 +3066,10 @@ def compile_binder(
     ):
 
         def bound_path(request: Request) -> Any:
-            """Convert and call once; the application owns the one necessary await.
-
-            ``activate_path_call`` returns the handler's result verbatim.  An
-            async wrapper here used to await the user coroutine and return a
-            second coroutine to the dispatcher, which then performed the same
-            exact-type awaitability check around the wrapper.  Keeping this
-            adapter synchronous lets the dispatcher await the user coroutine
-            directly; synchronous endpoints remain synchronous too.
-            """
+            """Convert path values and return the handler result verbatim."""
             return _core.activate_path_call(handler, request, compiled_path_plan, ValidationError)
 
-        # Startup wrappers use this predicate to decide whether their result
-        # must be awaited before validation/negotiation.  Preserve the original
-        # endpoint's convention even though this adapter deliberately returns
-        # its coroutine instead of awaiting it itself.
+        # Startup wrappers need the original endpoint's awaitability convention.
         selected = (
             inspect.markcoroutinefunction(bound_path)
             if inspect.iscoroutinefunction(handler)

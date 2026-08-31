@@ -1276,3 +1276,744 @@ wreath_json_loads(PyObject *Py_UNUSED(self), PyObject *arg)
     PyBuffer_Release(&view);
     return result;
 }
+
+typedef struct {
+    Py_ssize_t remaining;
+    PyObject *error_type;
+    PyObject *fullmatch;
+    PyObject *search;
+    PyObject *pattern_error;
+    PyObject *nothing;
+} JSONPathEval;
+
+enum {
+    JP_NAME,
+    JP_INDEX,
+    JP_SLICE,
+    JP_WILDCARD,
+    JP_FILTER
+};
+
+enum {
+    JP_LITERAL,
+    JP_QUERY,
+    JP_FUNCTION,
+    JP_COMPARE,
+    JP_NOT,
+    JP_LOGICAL
+};
+
+enum {
+    JP_LENGTH,
+    JP_COUNT,
+    JP_VALUE,
+    JP_MATCH,
+    JP_SEARCH
+};
+
+static PyObject *
+jp_refusal(JSONPathEval *eval, const char *message)
+{
+    PyErr_SetString(eval->error_type, message);
+    return NULL;
+}
+
+static int
+jp_visit(JSONPathEval *eval)
+{
+    eval->remaining--;
+    if (eval->remaining >= 0) {
+        return 0;
+    }
+    PyErr_SetString(eval->error_type, "JSONPath evaluation exceeded its node visit limit");
+    return -1;
+}
+
+static int
+jp_code(JSONPathEval *eval, PyObject *operation, Py_ssize_t minimum_size, long *code)
+{
+    if (!PyTuple_Check(operation) || PyTuple_GET_SIZE(operation) < minimum_size) {
+        jp_refusal(eval, "compiled JSONPath operation has the wrong shape");
+        return -1;
+    }
+    *code = PyLong_AsLong(PyTuple_GET_ITEM(operation, 0));
+    if (*code == -1 && PyErr_Occurred()) {
+        PyErr_Clear();
+        jp_refusal(eval, "compiled JSONPath operation code must be an integer");
+        return -1;
+    }
+    return 0;
+}
+
+static PyObject *
+jp_tokens_append(JSONPathEval *eval, PyObject *tokens, PyObject *token)
+{
+    if (!PyTuple_Check(tokens)) {
+        return jp_refusal(eval, "compiled JSONPath node path is not a tuple");
+    }
+    Py_ssize_t size = PyTuple_GET_SIZE(tokens);
+    PyObject *result = PyTuple_New(size + 1);
+    if (result == NULL) {
+        return NULL;
+    }
+    for (Py_ssize_t index = 0; index < size; index++) {
+        PyTuple_SET_ITEM(result, index, Py_NewRef(PyTuple_GET_ITEM(tokens, index)));
+    }
+    PyTuple_SET_ITEM(result, size, Py_NewRef(token));
+    return result;
+}
+
+static PyObject *
+jp_node(JSONPathEval *eval, PyObject *value, PyObject *tokens, PyObject *token)
+{
+    PyObject *next_tokens = jp_tokens_append(eval, tokens, token);
+    if (next_tokens == NULL) {
+        return NULL;
+    }
+    PyObject *node = PyTuple_Pack(2, value, next_tokens);
+    Py_DECREF(next_tokens);
+    return node;
+}
+
+static int
+jp_append_child(JSONPathEval *eval, PyObject *result, PyObject *node,
+                PyObject *value, PyObject *token, int count_visit)
+{
+    if (!PyTuple_Check(node) || PyTuple_GET_SIZE(node) != 2) {
+        jp_refusal(eval, "compiled JSONPath node has the wrong shape");
+        return -1;
+    }
+    if (count_visit && jp_visit(eval) < 0) {
+        return -1;
+    }
+    PyObject *child = jp_node(eval, value, PyTuple_GET_ITEM(node, 1), token);
+    if (child == NULL) {
+        return -1;
+    }
+    int rc = PyList_Append(result, child);
+    Py_DECREF(child);
+    return rc;
+}
+
+static PyObject *
+jp_children(JSONPathEval *eval, PyObject *node, int count_visits)
+{
+    if (!PyTuple_Check(node) || PyTuple_GET_SIZE(node) != 2) {
+        return jp_refusal(eval, "compiled JSONPath node has the wrong shape");
+    }
+    PyObject *value = PyTuple_GET_ITEM(node, 0);
+    PyObject *result = PyList_New(0);
+    if (result == NULL) {
+        return NULL;
+    }
+    if (PyDict_Check(value)) {
+        Py_ssize_t position = 0;
+        PyObject *key;
+        PyObject *child_value;
+        while (PyDict_Next(value, &position, &key, &child_value)) {
+            if (!PyUnicode_Check(key)) {
+                Py_DECREF(result);
+                return jp_refusal(eval, "JSONPath input objects must have string member names");
+            }
+            if (jp_append_child(eval, result, node, child_value, key, count_visits) < 0) {
+                Py_DECREF(result);
+                return NULL;
+            }
+        }
+    }
+    else if (PyList_Check(value)) {
+        Py_ssize_t size = PyList_GET_SIZE(value);
+        for (Py_ssize_t index = 0; index < size; index++) {
+            PyObject *token = PyLong_FromSsize_t(index);
+            if (token == NULL) {
+                Py_DECREF(result);
+                return NULL;
+            }
+            int rc = jp_append_child(eval, result, node, PyList_GET_ITEM(value, index),
+                                     token, count_visits);
+            Py_DECREF(token);
+            if (rc < 0) {
+                Py_DECREF(result);
+                return NULL;
+            }
+        }
+    }
+    return result;
+}
+
+static PyObject *
+jp_descendants(JSONPathEval *eval, PyObject *node)
+{
+    PyObject *found = PyList_New(0);
+    PyObject *pending = PyList_New(1);
+    if (found == NULL || pending == NULL) {
+        Py_XDECREF(found);
+        Py_XDECREF(pending);
+        return NULL;
+    }
+    PyList_SET_ITEM(pending, 0, Py_NewRef(node));
+    while (PyList_GET_SIZE(pending)) {
+        Py_ssize_t last = PyList_GET_SIZE(pending) - 1;
+        PyObject *current = Py_NewRef(PyList_GET_ITEM(pending, last));
+        if (PySequence_DelItem(pending, last) < 0 || PyList_Append(found, current) < 0) {
+            Py_DECREF(current);
+            Py_DECREF(found);
+            Py_DECREF(pending);
+            return NULL;
+        }
+        PyObject *children = jp_children(eval, current, 1);
+        Py_DECREF(current);
+        if (children == NULL) {
+            Py_DECREF(found);
+            Py_DECREF(pending);
+            return NULL;
+        }
+        for (Py_ssize_t index = PyList_GET_SIZE(children); index > 0; index--) {
+            if (PyList_Append(pending, PyList_GET_ITEM(children, index - 1)) < 0) {
+                Py_DECREF(children);
+                Py_DECREF(found);
+                Py_DECREF(pending);
+                return NULL;
+            }
+        }
+        Py_DECREF(children);
+    }
+    Py_DECREF(pending);
+    return found;
+}
+
+static PyObject *jp_run(JSONPathEval *eval, PyObject *segments, PyObject *nodes,
+                        PyObject *root);
+static PyObject *jp_evaluate(JSONPathEval *eval, PyObject *expression,
+                             PyObject *root, PyObject *current);
+
+static int
+jp_truth(JSONPathEval *eval, PyObject *value)
+{
+    if (value == eval->nothing) {
+        return 0;
+    }
+    return PyObject_IsTrue(value);
+}
+
+static PyObject *
+jp_query_nodes(JSONPathEval *eval, PyObject *query, PyObject *root, PyObject *current)
+{
+    long code;
+    if (jp_code(eval, query, 4, &code) < 0 || code != JP_QUERY) {
+        return jp_refusal(eval, "compiled JSONPath query has the wrong shape");
+    }
+    PyObject *start = PyObject_IsTrue(PyTuple_GET_ITEM(query, 1))
+                          ? root
+                          : current;
+    if (start == NULL || PyErr_Occurred()) {
+        return NULL;
+    }
+    PyObject *nodes = PyList_New(1);
+    if (nodes == NULL) {
+        return NULL;
+    }
+    PyList_SET_ITEM(nodes, 0, Py_NewRef(start));
+    PyObject *result = jp_run(eval, PyTuple_GET_ITEM(query, 2), nodes, root);
+    Py_DECREF(nodes);
+    return result;
+}
+
+static PyObject *
+jp_operand(JSONPathEval *eval, PyObject *expression, PyObject *root, PyObject *current)
+{
+    long code;
+    if (jp_code(eval, expression, 2, &code) < 0) {
+        return NULL;
+    }
+    if (code == JP_LITERAL) {
+        return Py_NewRef(PyTuple_GET_ITEM(expression, 1));
+    }
+    if (code == JP_QUERY) {
+        PyObject *nodes = jp_query_nodes(eval, expression, root, current);
+        if (nodes == NULL) {
+            return NULL;
+        }
+        int singular = PyObject_IsTrue(PyTuple_GET_ITEM(expression, 3));
+        if (singular < 0) {
+            Py_DECREF(nodes);
+            return NULL;
+        }
+        if (!singular) {
+            return nodes;
+        }
+        PyObject *result = PyList_GET_SIZE(nodes) == 1
+                               ? Py_NewRef(PyTuple_GET_ITEM(PyList_GET_ITEM(nodes, 0), 0))
+                               : Py_NewRef(eval->nothing);
+        Py_DECREF(nodes);
+        return result;
+    }
+    if (code != JP_FUNCTION || PyTuple_GET_SIZE(expression) != 3) {
+        return jp_evaluate(eval, expression, root, current);
+    }
+    long function = PyLong_AsLong(PyTuple_GET_ITEM(expression, 1));
+    PyObject *arguments = PyTuple_GET_ITEM(expression, 2);
+    if ((function == -1 && PyErr_Occurred()) || !PyTuple_Check(arguments)) {
+        PyErr_Clear();
+        return jp_refusal(eval, "compiled JSONPath function has the wrong shape");
+    }
+    if (function == JP_COUNT || function == JP_VALUE) {
+        if (PyTuple_GET_SIZE(arguments) != 1) {
+            return jp_refusal(eval, "compiled JSONPath function has the wrong arity");
+        }
+        PyObject *nodes = jp_query_nodes(
+            eval, PyTuple_GET_ITEM(arguments, 0), root, current);
+        if (nodes == NULL) {
+            return NULL;
+        }
+        if (function == JP_COUNT) {
+            PyObject *result = PyLong_FromSsize_t(PyList_GET_SIZE(nodes));
+            Py_DECREF(nodes);
+            return result;
+        }
+        PyObject *result = PyList_GET_SIZE(nodes) == 1
+                               ? Py_NewRef(PyTuple_GET_ITEM(PyList_GET_ITEM(nodes, 0), 0))
+                               : Py_NewRef(eval->nothing);
+        Py_DECREF(nodes);
+        return result;
+    }
+    if (function == JP_LENGTH) {
+        if (PyTuple_GET_SIZE(arguments) != 1) {
+            return jp_refusal(eval, "compiled JSONPath length function has the wrong arity");
+        }
+        PyObject *value = jp_operand(eval, PyTuple_GET_ITEM(arguments, 0), root, current);
+        if (value == NULL) {
+            return NULL;
+        }
+        if (!PyUnicode_Check(value) && !PyList_Check(value) && !PyDict_Check(value)) {
+            Py_DECREF(value);
+            return Py_NewRef(eval->nothing);
+        }
+        Py_ssize_t size = PyObject_Length(value);
+        Py_DECREF(value);
+        return size < 0 ? NULL : PyLong_FromSsize_t(size);
+    }
+    if ((function == JP_MATCH || function == JP_SEARCH) &&
+        PyTuple_GET_SIZE(arguments) == 2) {
+        PyObject *value = jp_operand(eval, PyTuple_GET_ITEM(arguments, 0), root, current);
+        PyObject *pattern = value == NULL
+                                ? NULL
+                                : jp_operand(eval, PyTuple_GET_ITEM(arguments, 1), root, current);
+        if (value == NULL || pattern == NULL) {
+            Py_XDECREF(value);
+            Py_XDECREF(pattern);
+            return NULL;
+        }
+        if (!PyUnicode_Check(value) || !PyUnicode_Check(pattern)) {
+            Py_DECREF(value);
+            Py_DECREF(pattern);
+            return Py_NewRef(Py_False);
+        }
+        PyObject *callable = function == JP_MATCH ? eval->fullmatch : eval->search;
+        PyObject *matched = PyObject_CallFunctionObjArgs(callable, pattern, value, NULL);
+        Py_DECREF(value);
+        Py_DECREF(pattern);
+        if (matched == NULL) {
+            int invalid_pattern = PyErr_ExceptionMatches(eval->pattern_error);
+            if (!invalid_pattern) {
+                return NULL;
+            }
+            PyErr_Clear();
+            return Py_NewRef(Py_False);
+        }
+        PyObject *result = Py_NewRef(matched == Py_None ? Py_False : Py_True);
+        Py_DECREF(matched);
+        return result;
+    }
+    return jp_refusal(eval, "compiled JSONPath function is not supported");
+}
+
+static int
+jp_number(PyObject *value)
+{
+    return value != Py_True && value != Py_False &&
+           (PyLong_Check(value) || PyFloat_Check(value));
+}
+
+static int
+jp_equal(JSONPathEval *eval, PyObject *left, PyObject *right)
+{
+    if (left == eval->nothing || right == eval->nothing) {
+        return left == right;
+    }
+    if (jp_number(left)) {
+        return jp_number(right) ? PyObject_RichCompareBool(left, right, Py_EQ) : 0;
+    }
+    if (Py_TYPE(left) != Py_TYPE(right)) {
+        return 0;
+    }
+    return PyObject_RichCompareBool(left, right, Py_EQ);
+}
+
+static int
+jp_less(PyObject *left, PyObject *right)
+{
+    if ((PyUnicode_Check(left) && PyUnicode_Check(right)) ||
+        (jp_number(left) && jp_number(right))) {
+        return PyObject_RichCompareBool(left, right, Py_LT);
+    }
+    return 0;
+}
+
+static PyObject *
+jp_evaluate(JSONPathEval *eval, PyObject *expression, PyObject *root, PyObject *current)
+{
+    long code;
+    if (jp_code(eval, expression, 2, &code) < 0) {
+        return NULL;
+    }
+    if (code == JP_LOGICAL) {
+        if (PyTuple_GET_SIZE(expression) != 4) {
+            return jp_refusal(eval, "compiled JSONPath logical expression has the wrong shape");
+        }
+        PyObject *left = jp_evaluate(eval, PyTuple_GET_ITEM(expression, 2), root, current);
+        if (left == NULL) {
+            return NULL;
+        }
+        int left_truth = jp_truth(eval, left);
+        Py_DECREF(left);
+        if (left_truth < 0) {
+            return NULL;
+        }
+        int conjunction = PyObject_IsTrue(PyTuple_GET_ITEM(expression, 1));
+        if (conjunction < 0) {
+            return NULL;
+        }
+        if ((conjunction && !left_truth) || (!conjunction && left_truth)) {
+            return PyBool_FromLong(left_truth);
+        }
+        PyObject *right = jp_evaluate(eval, PyTuple_GET_ITEM(expression, 3), root, current);
+        if (right == NULL) {
+            return NULL;
+        }
+        int right_truth = jp_truth(eval, right);
+        Py_DECREF(right);
+        return right_truth < 0 ? NULL : PyBool_FromLong(right_truth);
+    }
+    if (code == JP_NOT) {
+        PyObject *value = jp_evaluate(eval, PyTuple_GET_ITEM(expression, 1), root, current);
+        if (value == NULL) {
+            return NULL;
+        }
+        int truth = jp_truth(eval, value);
+        Py_DECREF(value);
+        return truth < 0 ? NULL : PyBool_FromLong(!truth);
+    }
+    if (code == JP_COMPARE) {
+        if (PyTuple_GET_SIZE(expression) != 4) {
+            return jp_refusal(eval, "compiled JSONPath comparison has the wrong shape");
+        }
+        long comparison = PyLong_AsLong(PyTuple_GET_ITEM(expression, 1));
+        if (comparison == -1 && PyErr_Occurred()) {
+            return NULL;
+        }
+        PyObject *left = jp_operand(eval, PyTuple_GET_ITEM(expression, 2), root, current);
+        PyObject *right = left == NULL
+                              ? NULL
+                              : jp_operand(eval, PyTuple_GET_ITEM(expression, 3), root, current);
+        if (left == NULL || right == NULL) {
+            Py_XDECREF(left);
+            Py_XDECREF(right);
+            return NULL;
+        }
+        int equal = jp_equal(eval, left, right);
+        if (equal < 0) {
+            Py_DECREF(left);
+            Py_DECREF(right);
+            return NULL;
+        }
+        int less = 0;
+        int reverse_less = 0;
+        if (comparison >= 2) {
+            less = jp_less(left, right);
+            reverse_less = less < 0 ? -1 : jp_less(right, left);
+        }
+        Py_DECREF(left);
+        Py_DECREF(right);
+        if (less < 0 || reverse_less < 0) {
+            return NULL;
+        }
+        int result;
+        switch (comparison) {
+            case 0: result = equal; break;
+            case 1: result = !equal; break;
+            case 2: result = less || equal; break;
+            case 3: result = reverse_less || equal; break;
+            case 4: result = less; break;
+            case 5: result = reverse_less; break;
+            default:
+                return jp_refusal(eval, "compiled JSONPath comparison is not supported");
+        }
+        return PyBool_FromLong(result);
+    }
+    if (code == JP_QUERY) {
+        PyObject *nodes = jp_query_nodes(eval, expression, root, current);
+        if (nodes == NULL) {
+            return NULL;
+        }
+        PyObject *result = PyBool_FromLong(PyList_GET_SIZE(nodes) != 0);
+        Py_DECREF(nodes);
+        return result;
+    }
+    PyObject *value = jp_operand(eval, expression, root, current);
+    if (value == NULL) {
+        return NULL;
+    }
+    int truth = jp_truth(eval, value);
+    Py_DECREF(value);
+    return truth < 0 ? NULL : PyBool_FromLong(truth);
+}
+
+static int
+jp_select(JSONPathEval *eval, PyObject *selector, PyObject *node,
+          PyObject *root, PyObject *selected)
+{
+    long code;
+    if (jp_code(eval, selector, 1, &code) < 0 ||
+        !PyTuple_Check(node) || PyTuple_GET_SIZE(node) != 2) {
+        return -1;
+    }
+    PyObject *value = PyTuple_GET_ITEM(node, 0);
+    if (code == JP_NAME) {
+        if (PyTuple_GET_SIZE(selector) != 2 ||
+            !PyUnicode_Check(PyTuple_GET_ITEM(selector, 1))) {
+            jp_refusal(eval, "compiled JSONPath name selector has the wrong shape");
+            return -1;
+        }
+        if (!PyDict_Check(value)) {
+            return 0;
+        }
+        PyObject *key = PyTuple_GET_ITEM(selector, 1);
+        PyObject *member = PyDict_GetItemWithError(value, key);
+        if (member == NULL) {
+            return PyErr_Occurred() ? -1 : 0;
+        }
+        return jp_append_child(eval, selected, node, member, key, 1);
+    }
+    if (code == JP_INDEX) {
+        if (PyTuple_GET_SIZE(selector) != 2 || !PyList_Check(value)) {
+            return 0;
+        }
+        long long raw = PyLong_AsLongLong(PyTuple_GET_ITEM(selector, 1));
+        if (raw == -1 && PyErr_Occurred()) {
+            PyErr_Clear();
+            return 0;
+        }
+        Py_ssize_t size = PyList_GET_SIZE(value);
+        long long index = raw < 0 ? (long long)size + raw : raw;
+        if (index < 0 || index >= size) {
+            return 0;
+        }
+        PyObject *token = PyLong_FromLongLong(index);
+        if (token == NULL) {
+            return -1;
+        }
+        int rc = jp_append_child(eval, selected, node, PyList_GET_ITEM(value, (Py_ssize_t)index),
+                                 token, 1);
+        Py_DECREF(token);
+        return rc;
+    }
+    if (code == JP_SLICE) {
+        if (PyTuple_GET_SIZE(selector) != 4 || !PyList_Check(value)) {
+            return 0;
+        }
+        PyObject *step_object = PyTuple_GET_ITEM(selector, 3);
+        if (step_object != Py_None) {
+            long long step_value = PyLong_AsLongLong(step_object);
+            if (step_value == -1 && PyErr_Occurred()) {
+                return -1;
+            }
+            if (step_value == 0) {
+                return 0;
+            }
+        }
+        PyObject *slice = PySlice_New(PyTuple_GET_ITEM(selector, 1),
+                                      PyTuple_GET_ITEM(selector, 2), step_object);
+        if (slice == NULL) {
+            return -1;
+        }
+        Py_ssize_t start;
+        Py_ssize_t stop;
+        Py_ssize_t step;
+        Py_ssize_t length;
+        int rc = PySlice_GetIndicesEx(slice, PyList_GET_SIZE(value),
+                                     &start, &stop, &step, &length);
+        Py_DECREF(slice);
+        if (rc < 0) {
+            return -1;
+        }
+        Py_ssize_t index = start;
+        for (Py_ssize_t count = 0; count < length; count++, index += step) {
+            PyObject *token = PyLong_FromSsize_t(index);
+            if (token == NULL) {
+                return -1;
+            }
+            rc = jp_append_child(eval, selected, node, PyList_GET_ITEM(value, index),
+                                 token, 1);
+            Py_DECREF(token);
+            if (rc < 0) {
+                return -1;
+            }
+        }
+        return 0;
+    }
+    if (code == JP_WILDCARD) {
+        PyObject *children = jp_children(eval, node, 1);
+        if (children == NULL) {
+            return -1;
+        }
+        Py_ssize_t size = PyList_GET_SIZE(children);
+        for (Py_ssize_t index = 0; index < size; index++) {
+            if (PyList_Append(selected, PyList_GET_ITEM(children, index)) < 0) {
+                Py_DECREF(children);
+                return -1;
+            }
+        }
+        Py_DECREF(children);
+        return 0;
+    }
+    if (code == JP_FILTER && PyTuple_GET_SIZE(selector) == 2) {
+        PyObject *children = jp_children(eval, node, 1);
+        if (children == NULL) {
+            return -1;
+        }
+        Py_ssize_t size = PyList_GET_SIZE(children);
+        for (Py_ssize_t index = 0; index < size; index++) {
+            PyObject *child = PyList_GET_ITEM(children, index);
+            PyObject *answer = jp_evaluate(
+                eval, PyTuple_GET_ITEM(selector, 1), root, child);
+            if (answer == NULL) {
+                Py_DECREF(children);
+                return -1;
+            }
+            int truth = jp_truth(eval, answer);
+            Py_DECREF(answer);
+            if (truth < 0 || (truth && PyList_Append(selected, child) < 0)) {
+                Py_DECREF(children);
+                return -1;
+            }
+        }
+        Py_DECREF(children);
+        return 0;
+    }
+    jp_refusal(eval, "compiled JSONPath selector is not supported");
+    return -1;
+}
+
+static PyObject *
+jp_run(JSONPathEval *eval, PyObject *segments, PyObject *nodes, PyObject *root)
+{
+    if (!PyTuple_Check(segments) || !PyList_Check(nodes)) {
+        return jp_refusal(eval, "compiled JSONPath program has the wrong shape");
+    }
+    PyObject *current = Py_NewRef(nodes);
+    Py_ssize_t segment_count = PyTuple_GET_SIZE(segments);
+    for (Py_ssize_t segment_index = 0; segment_index < segment_count; segment_index++) {
+        PyObject *segment = PyTuple_GET_ITEM(segments, segment_index);
+        if (!PyTuple_Check(segment) || PyTuple_GET_SIZE(segment) != 2 ||
+            !PyTuple_Check(PyTuple_GET_ITEM(segment, 1))) {
+            Py_DECREF(current);
+            return jp_refusal(eval, "compiled JSONPath segment has the wrong shape");
+        }
+        int descendant = PyObject_IsTrue(PyTuple_GET_ITEM(segment, 0));
+        if (descendant < 0) {
+            Py_DECREF(current);
+            return NULL;
+        }
+        PyObject *sources;
+        if (!descendant) {
+            sources = Py_NewRef(current);
+        }
+        else {
+            sources = PyList_New(0);
+            if (sources == NULL) {
+                Py_DECREF(current);
+                return NULL;
+            }
+            Py_ssize_t current_size = PyList_GET_SIZE(current);
+            for (Py_ssize_t index = 0; index < current_size; index++) {
+                PyObject *found = jp_descendants(eval, PyList_GET_ITEM(current, index));
+                if (found == NULL) {
+                    Py_DECREF(sources);
+                    Py_DECREF(current);
+                    return NULL;
+                }
+                for (Py_ssize_t item = 0; item < PyList_GET_SIZE(found); item++) {
+                    if (PyList_Append(sources, PyList_GET_ITEM(found, item)) < 0) {
+                        Py_DECREF(found);
+                        Py_DECREF(sources);
+                        Py_DECREF(current);
+                        return NULL;
+                    }
+                }
+                Py_DECREF(found);
+            }
+        }
+        PyObject *selected = PyList_New(0);
+        if (selected == NULL) {
+            Py_DECREF(sources);
+            Py_DECREF(current);
+            return NULL;
+        }
+        PyObject *selectors = PyTuple_GET_ITEM(segment, 1);
+        for (Py_ssize_t source_index = 0; source_index < PyList_GET_SIZE(sources);
+             source_index++) {
+            for (Py_ssize_t selector_index = 0;
+                 selector_index < PyTuple_GET_SIZE(selectors); selector_index++) {
+                if (jp_select(eval, PyTuple_GET_ITEM(selectors, selector_index),
+                              PyList_GET_ITEM(sources, source_index), root, selected) < 0) {
+                    Py_DECREF(selected);
+                    Py_DECREF(sources);
+                    Py_DECREF(current);
+                    return NULL;
+                }
+            }
+        }
+        Py_DECREF(sources);
+        Py_DECREF(current);
+        current = selected;
+    }
+    return current;
+}
+
+PyObject *
+wreath_jsonpath_find(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *program;
+    PyObject *value;
+    Py_ssize_t max_visits;
+    JSONPathEval eval;
+    if (!PyArg_ParseTuple(args, "OOnOOOO:jsonpath_find", &program, &value,
+                          &max_visits, &eval.error_type, &eval.fullmatch,
+                          &eval.search, &eval.pattern_error)) {
+        return NULL;
+    }
+    if (max_visits <= 0 || !PyExceptionClass_Check(eval.error_type) ||
+        !PyCallable_Check(eval.fullmatch) || !PyCallable_Check(eval.search) ||
+        !PyExceptionClass_Check(eval.pattern_error)) {
+        PyErr_SetString(PyExc_TypeError, "jsonpath_find received an invalid evaluator argument");
+        return NULL;
+    }
+    eval.remaining = max_visits;
+    eval.nothing = PyObject_CallNoArgs((PyObject *)&PyBaseObject_Type);
+    if (eval.nothing == NULL) {
+        return NULL;
+    }
+    PyObject *tokens = PyTuple_New(0);
+    PyObject *root = tokens == NULL ? NULL : PyTuple_Pack(2, value, tokens);
+    Py_XDECREF(tokens);
+    PyObject *nodes = root == NULL ? NULL : PyList_New(1);
+    if (nodes != NULL) {
+        PyList_SET_ITEM(nodes, 0, Py_NewRef(root));
+    }
+    PyObject *result = nodes == NULL ? NULL : jp_run(&eval, program, nodes, root);
+    Py_XDECREF(nodes);
+    Py_XDECREF(root);
+    Py_DECREF(eval.nothing);
+    return result;
+}

@@ -44,11 +44,7 @@ INTERNAL_ERROR = -32603
 # should not.
 #: The caller is authenticated but this tool's Cedar policy said no.
 UNAUTHORIZED = -32001
-#: No such resource. **This code is the specification's, not Wreath's**: the
-#: resources chapter names -32002 for a `resources/read` of a URI the server
-#: does not serve, and clients special-case it. Wreath's own rate-limit and
-#: concurrency codes used to sit here and were moved down one each so that this
-#: one could mean what every other MCP server means by it.
+#: MCP's specified code for a `resources/read` URI the server does not serve.
 RESOURCE_NOT_FOUND = -32002
 #: The caller is over this tool's rate limit. `data.retryAfter` is in seconds.
 RATE_LIMITED = -32003

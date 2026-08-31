@@ -196,8 +196,7 @@ def serialize_link_templates(templates: Iterable[LinkTemplate]) -> bytes:
     for index, template in enumerate(templates):
         if not isinstance(template, LinkTemplate):
             raise TypeError(
-                f"Link-Template member {index} must be LinkTemplate, not "
-                f"{type(template).__name__}"
+                f"Link-Template member {index} must be LinkTemplate, not {type(template).__name__}"
             )
         members.append(template.to_header())
     if not members:

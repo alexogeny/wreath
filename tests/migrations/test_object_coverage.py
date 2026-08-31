@@ -183,17 +183,6 @@ def test_table_constraints_change_the_deployment_fingerprint() -> None:
     assert plain.deployment_fingerprint != constrained.deployment_fingerprint
 
 
-# `render_column_type` maps a built-in's OID to its SQL spelling through a switch
-# in `migration_sql.c`, and a type missing from that switch does not fail loudly:
-# it becomes an empty MANUAL statement, so `generate` silently omits the column
-# and then emits the indexes and constraints that reference it. Applying such a
-# plan fails on a column that was never added.
-# Three types were missing when this test was written -- `character varying`,
-# `json`, and `bit(n)` -- and `Varchar` is not an obscure corner. The point of
-# enumerating rather than adding three cases is that the next type added to
-# `wreath.orm.types` is checked without anyone remembering to check it.
-
-
 def _renders_as(pg_type: Any) -> str:
     """The single `add column` statement a one-column model of this type yields."""
 

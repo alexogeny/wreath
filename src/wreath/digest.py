@@ -63,9 +63,7 @@ class Digest:
         for algorithm in algorithms:
             if algorithm not in SUPPORTED_DIGEST_ALGORITHMS:
                 supported = ", ".join(SUPPORTED_DIGEST_ALGORITHMS)
-                raise ValueError(
-                    f"unsupported digest algorithm {algorithm!r}; use {supported}"
-                )
+                raise ValueError(f"unsupported digest algorithm {algorithm!r}; use {supported}")
             values[algorithm] = _checksum(algorithm, content)
         return cls(values)
 
@@ -142,9 +140,7 @@ class DigestPreferences:
         weights: dict[str, int] = {}
         for algorithm, item in members.items():
             if item.parameters:
-                raise DigestError(
-                    f"digest preference for {algorithm!r} must not have parameters"
-                )
+                raise DigestError(f"digest preference for {algorithm!r} must not have parameters")
             weight = item.value
             if isinstance(weight, bool) or not isinstance(weight, int):
                 raise DigestError(

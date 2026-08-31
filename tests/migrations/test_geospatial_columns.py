@@ -390,18 +390,6 @@ async def test_a_geography_migration_applies_and_downgrades() -> None:
         await db.close()
 
 
-# `geography(Point,4326)` is the first declared type whose modifier carries
-# *letters*. The renderer's whitelist admitted only digits, commas and spaces
-# inside the parentheses, so the column became an empty MANUAL and `generate`
-# omitted it while still emitting the index that referenced it -- applying such
-# a plan fails on a column that was never added.
-# The alphabet is wider now, and these pin that widening: nothing that could
-# close a statement or open a literal is admitted at any point. The spelling
-# comes from a declaration rather than from a request, so this is defence in
-# depth -- but it is emitted into DDL text rather than bound, which is the one
-# place in the migration engine where that distinction stops being academic.
-
-
 def _one_column_descriptor(spelling: str) -> bytes:
     header = b"WMD1\x01\x00\x00\x00\x01\x00\x00\x00"
     return header + migrations._descriptor_record(

@@ -52,9 +52,9 @@ def test_response_sets_cdn_cache_control_independently() -> None:
     response.set_cdn_cache_control(CacheControl(public=True, max_age=600))
 
     assert (b"cache-control", b"private, max-age=60") in response.headers
-    assert [
-        value for name, value in response.headers if name.lower() == b"cdn-cache-control"
-    ] == [b"public, max-age=600"]
+    assert [value for name, value in response.headers if name.lower() == b"cdn-cache-control"] == [
+        b"public, max-age=600"
+    ]
 
 
 def test_response_refuses_an_empty_cdn_cache_policy() -> None:
@@ -159,9 +159,9 @@ async def test_cache_middleware_preserves_an_explicit_cdn_policy() -> None:
 
     await middleware.after(_request(), response)
 
-    assert [
-        value for name, value in response.headers if name.lower() == b"cdn-cache-control"
-    ] == [b"no-store"]
+    assert [value for name, value in response.headers if name.lower() == b"cdn-cache-control"] == [
+        b"no-store"
+    ]
 
 
 @pytest.mark.asyncio

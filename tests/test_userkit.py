@@ -53,9 +53,7 @@ def test_memory_store_batch_lookup_preserves_order_duplicates_and_misses():
         first = await store.create("first@example.com", "hash-1")
         second = await store.create("second@example.com", "hash-2")
 
-        found = await store.get_many_by_id(
-            (second.id, "missing", first.id, second.id)
-        )
+        found = await store.get_many_by_id((second.id, "missing", first.id, second.id))
 
         assert found == [second, None, first, second]
 

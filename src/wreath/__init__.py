@@ -54,16 +54,7 @@ def __getattr__(name: str) -> Any:
 
     Caching is what keeps this off the hot path: `__getattr__` runs only until
     the name exists as a module global, so the second `wreath.Wreath` is an
-    ordinary dict lookup rather than an `import_module` call.
-
-    Nothing here forces an import order, and that is only safe because the one
-    edge that made order matter is gone -- see the `TYPE_CHECKING` note in
-    `wreath/request.py`. The eager top level used to import `.app` first, which
-    quietly resolved a cycle between `wreath.request` and `._auth` for every
-    entry path in the package. `test_pytest_plugin.py` now enters through each
-    public name in turn, from a cold interpreter, so a new cycle is a red test
-    rather than an `ImportError` in somebody's quickstart.
-    """
+    ordinary dict lookup rather than an `import_module` call."""
     module = _EXPORTS.get(name)
     if module is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

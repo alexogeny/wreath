@@ -107,9 +107,7 @@ class _ModelRewrite(_EmitterState):
                 factory = _mutable_factory(value)
                 if factory:
                     self.needs_field = True
-                    self._replace_all_of(
-                        cast(ast.expr, value), f"field(default_factory={factory})"
-                    )
+                    self._replace_all_of(cast(ast.expr, value), f"field(default_factory={factory})")
             self._resolve(statement.lineno, "settings.field_complex")
             self._resolve(statement.lineno, "settings.nested")
 
@@ -336,18 +334,14 @@ class _ModelRewrite(_EmitterState):
                 for child in stmt.body
                 if isinstance(child, ast.Assign)
             }
-            if (
-                settings
-                and settings
-                <= {
-                    "arbitrary_types_allowed",
-                    "from_attributes",
-                    "orm_mode",
-                    "protected_namespaces",
-                    "use_enum_values",
-                    "validate_default",
-                }
-            ):
+            if settings and settings <= {
+                "arbitrary_types_allowed",
+                "from_attributes",
+                "orm_mode",
+                "protected_namespaces",
+                "use_enum_values",
+                "validate_default",
+            }:
                 self._replace_all_of(stmt, "# wreath-port: redundant model config removed")
                 self._resolve(stmt.lineno, "pydantic.config_class")
             else:
@@ -393,9 +387,7 @@ class _ModelRewrite(_EmitterState):
             factory = _mutable_factory(default)
             if factory:
                 self.needs_field = True
-                self.buf.replace(
-                    cast(ast.expr, default), f"field(default_factory={factory})"
-                )
+                self.buf.replace(cast(ast.expr, default), f"field(default_factory={factory})")
         elif isinstance(stmt, ast.Assign) and any(
             isinstance(t, ast.Name) and t.id == "model_config" for t in stmt.targets
         ):

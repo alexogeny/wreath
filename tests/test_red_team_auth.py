@@ -436,17 +436,6 @@ def test_a_nested_audience_is_a_refusal_not_a_server_error(
         raise AssertionError(f"a nested aud answered {probes['nested_aud']}")
 
 
-# The third "the control holds on one supported wiring and not another" of the
-# day. On a classifying table (`bitset`, the default, and `decision`)
-# authentication runs early, before the route is resolved, and used to run
-# outside every error boundary the rest of the request has. On `trie`, and on
-# the lazy `identify()` path in every mode, the same backend answered 500.
-# A backend is documented to refuse with None rather than raise, so a raising
-# one is misuse -- but escaping the application is not an acceptable response to
-# misuse, and it is reachable without any application mistake at all:
-# `OidcProvider.bearer_verifier()` awaits a JWKS fetch inside `authenticate`, so
-# an identity provider that is merely unreachable raises straight through here.
-
 _ROUTING_MODES = ("policy",)
 
 

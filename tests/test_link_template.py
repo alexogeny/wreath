@@ -9,9 +9,7 @@ from wreath.response import FileResponse, Response, StreamingResponse
 
 
 def test_link_template_serializes_rfc_9652_examples() -> None:
-    assert LinkTemplate("/{username}", rel="item").to_header() == (
-        b'"/{username}";rel="item"'
-    )
+    assert LinkTemplate("/{username}", rel="item").to_header() == (b'"/{username}";rel="item"')
     assert serialize_link_templates(
         [
             LinkTemplate("/books/{book_id}/author", rel="author", anchor="#{book_id}"),
@@ -40,9 +38,7 @@ def test_link_template_uses_display_strings_for_unicode_attributes() -> None:
         },
     )
 
-    assert template.to_header() == (
-        b'"/author";rel="author";title=%"Bj%c3%b6rn J%c3%a4rnsida"'
-    )
+    assert template.to_header() == (b'"/author";rel="author";title=%"Bj%c3%b6rn J%c3%a4rnsida"')
 
 
 def test_link_template_response_setter_replaces_existing_fields() -> None:
@@ -59,9 +55,9 @@ def test_link_template_response_setter_replaces_existing_fields() -> None:
         LinkTemplate("/items{?cursor}", rel="collection"),
     )
 
-    assert [
-        value for name, value in response.headers if name.lower() == b"link-template"
-    ] == [b'"/items/{id}";rel="item", "/items{?cursor}";rel="collection"']
+    assert [value for name, value in response.headers if name.lower() == b"link-template"] == [
+        b'"/items/{id}";rel="item", "/items{?cursor}";rel="collection"'
+    ]
 
 
 def test_streaming_response_supports_link_templates() -> None:

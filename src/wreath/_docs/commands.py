@@ -28,11 +28,7 @@ def _blocks(text: str) -> Iterator[Block]:
         body: list[str] = []
         while index < len(lines):
             candidate = lines[index].strip()
-            if (
-                len(candidate) >= len(marker)
-                and candidate
-                and set(candidate) == {marker[0]}
-            ):
+            if len(candidate) >= len(marker) and candidate and set(candidate) == {marker[0]}:
                 break
             body.append(lines[index])
             index += 1

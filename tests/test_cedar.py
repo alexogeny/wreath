@@ -332,14 +332,6 @@ async def test_cedar_adapter_is_final_authorization_after_coarse_route_pruning()
     }
 
 
-# A cached permission manifest is tagged by the policy set behind the authorizer.
-# That tag used to be found by reaching through `authorizer._engine` from
-# `_auth/permissions.py` -- a private name owned by `_auth/cedar.py` and read
-# from another module, where a rename would not raise but would silently drop
-# every ETag to a per-instance token. Delegating keeps the name in the file that
-# owns it, and hands out only the value.
-
-
 class _Identified:
     """An engine that offers its policy text, the way `CedarPolicies` does."""
 

@@ -74,15 +74,10 @@ def test_repeated_scalars_pack_into_one_length_delimited_field() -> None:
 def test_packed_float_buffers_match_boxed_sequences_and_the_wire_format() -> None:
     doubles = array("d", (1.5, -0.0, 3.25))
     floats = array("f", (0.5, -2.0, 7.25))
-    buffered = encode(
-        PackedFloats(doubles=cast(Any, doubles), floats=cast(Any, floats))
-    )
+    buffered = encode(PackedFloats(doubles=cast(Any, doubles), floats=cast(Any, floats)))
     boxed = encode(PackedFloats(doubles=list(doubles), floats=list(floats)))
     expected = (
-        b"\x0a\x18"
-        + struct.pack("<3d", *doubles)
-        + b"\x12\x0c"
-        + struct.pack("<3f", *floats)
+        b"\x0a\x18" + struct.pack("<3d", *doubles) + b"\x12\x0c" + struct.pack("<3f", *floats)
     )
 
     assert buffered == boxed == expected

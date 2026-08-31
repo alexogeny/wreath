@@ -145,7 +145,6 @@ async def test_rotation_replaces_the_id_on_a_privilege_change() -> None:
 
     assert first != second
     assert len(store.rows) == 1  # the old row is gone
-    # The old cookie no longer resolves to anything.
     stale = await client.get("/whoami", headers={"cookie": f"wreath_session={first}"})
     assert stale.json() == {"user": None}
 

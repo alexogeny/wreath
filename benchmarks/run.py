@@ -319,16 +319,7 @@ def _generator_threads(requested: int | None, connections: int) -> int:
 def _server_command(
     args: argparse.Namespace, framework: str, protocol: str, port: int, tls: bool
 ) -> tuple[list[str], str]:
-    """Build one server invocation and its display label for a single boot.
-
-    Every arm is given exactly `args.workers` workers, and the harness pins the
-    whole tree to `args.workers` physical cores. That symmetry is the point: a
-    server left on its own defaults takes whatever parallelism its runtime
-    prefers, and then the row compares deployments rather than frameworks. Two
-    arms used to do exactly that -- Tokio sizes its pool from the CPU affinity,
-    and Granian defaults to more than one worker -- so both are pinned here in
-    both directions, at one worker as much as at eight.
-    """
+    """Build one server invocation and its display label for a single boot."""
     workers = getattr(args, "workers", 1)
     if framework in ("wreath-native", "wreath-metal"):
         if framework == "wreath-metal":

@@ -112,7 +112,7 @@ async def test_update_distinct_dirty_sets_compile_separately(
         else:
             user.email = f"changed{position}@e.x"
     database.connection.script('SET "email"', [[user.id] for user in users[::2]])
-    database.connection.script("SET \"name\"", [[user.id] for user in users[1::2]])
+    database.connection.script('SET "name"', [[user.id] for user in users[1::2]])
 
     with _count_write_sql_builds() as builds:
         await _flush(session)

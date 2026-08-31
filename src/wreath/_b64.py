@@ -1,9 +1,4 @@
-"""Strict, unpadded base64url, both directions, vectorised where the CPU allows.
-
-One module for base64 so there is one answer to "how does wreath encode this".
-The decode half came first and the encode half followed the same evidence; the
-whole argument for the decode half is below, and the encode half's numbers are
-recorded on `b64url_encode` itself.
+"""Strict base64 codecs, vectorised where the CPU allows.
 
 `base64.urlsafe_b64decode` is the wrong primitive for decoding anything that
 arrived over the wire, for three separate reasons: it re-pads, it translates
@@ -12,21 +7,7 @@ discards characters outside the alphabet entirely. So two different spellings of
 one value decode to the same bytes, and a value with a space in it decodes to
 something rather than failing.
 
-`jose.c` is strict about all three, and `simd.h` runs it at a vector width
-chosen per call. `wreath._auth.jwt` has resolved it since it shipped; this
-module is that resolution lifted out so the session cookie, the WebAuthn
-payloads and the password record share it rather than each keeping a laxer copy.
-What each of those used to do:
-
-    padded = text + "=" * (-len(text) % 4)
-    return base64.urlsafe_b64decode(padded)
-
-Measured against that idiom, this is 85% faster on a 32-byte value and 96% on
-4 KiB, and the whole signed-cookie read -- HMAC verify included -- is 33% to 47%
-faster. The per-call C boundary was the stated hypothesis against doing this and
-it does not survive contact: the stdlib path is several *Python-level*
-operations, and one `METH_O` call is cheaper than the string concatenation
-alone.
+`jose.c` enforces those constraints and `simd.h` chooses a vector width per call.
 """
 
 from __future__ import annotations
@@ -58,24 +39,7 @@ _b64encode = _core.b64encode
 
 
 def b64url_encode(raw: bytes, _encode: Any = _b64encode) -> str:
-    """Unpadded base64url.
-
-    Five modules each kept a copy of the three-step stdlib chain this replaces
-    -- `_userkit._b64`, `_webauthn.b64url_encode`, `_webpush._b64`, and an
-    inline spelling in the session cookie and in PKCE -- while the primitive
-    with exactly these flags was already built and exposed.
-
-    Measured against that chain over three runs, with an A/A floor of 0.0-1.1%:
-    8.5-14.4% faster on 16 bytes, 17.0-19.6% on 32, 21.6-33.7% on 64, 56.6-58.5%
-    on 256, and 86.1-86.2% on 4 KiB. The floor is what makes the small end
-    meaningful rather than noise; the large end is the AVX2 arm. The measurement
-    was taken through this wrapper, not around it.
-
-    `_encode` is captured as a default rather than read from the module globals
-    on every call: bound once at definition, it is one dictionary lookup fewer
-    per encode, and `binding` encodes on the response path while `rooms` encodes
-    once per room per broadcast.
-    """
+    """Encode unpadded base64url."""
     return _encode(raw, urlsafe=True, pad=False)
 
 

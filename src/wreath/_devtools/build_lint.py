@@ -1,28 +1,11 @@
-"""Keep a compiled extension honest about the sources it was built from.
-
-A stale `.so` is importable. That is the whole problem: nothing about a build
-that silently did not happen looks different from a build that did, so the
-symptoms arrive later and somewhere else. `_http3.cpython-314-x86_64-linux-gnu.so`
-was dated 19 July while its sources were 22-23 July -- 336 insertions across
-three files, an entire ACK-backpressure commit, absent from the binary. Five
-HTTP/3 tests failed against it, and would have been filed as protocol defects
-if the agent running them had not thought to check the artifact's date.
-
-It survived because HTTP/3 is opt-in: `WREATH_BUILD_HTTP3=1` gates the
-extension, so every ordinary `setup.py build_ext --inplace` skips it and leaves
-the previous artifact in place, still importable, still four days behind. The
-mechanism is not specific to HTTP/3 -- it recurs for any extension a default
-build does not compile.
+"""Validate compiled extensions against the source lists in ``setup.py``.
 
 Findings:
 
 * `BUILD001` -- a built extension is older than a source it compiles. The
   message names the file and the delta, because "stale" without a number
   invites the assumption that it is stale by a second.
-* `BUILD002` -- an extension names a source that does not exist. `setup.py`
-  kept building `wreath._exp._reactor` from `src/wreath/_exp/` for some time
-  after that directory was deleted, so the one flag that would have compiled it
-  failed instead. A name without a file is a plan, not a build input.
+* `BUILD002` -- an extension names a source that does not exist.
 
 **Absent is not stale.** An extension that was never built has no artifact to
 compare, and reporting it would make the lint useless on a default install --
@@ -33,13 +16,8 @@ that includes it just as surely as changing the `.c` does, and the reactor
 extension lists `.c` files under `depends` because they are `#include`d rather
 than compiled separately.
 
-The source list is read out of `setup.py` rather than restated here, so it
-cannot drift from what is actually built. `setup.py` is read as text, not
-imported: it runs `pkg-config` for the optional HTTP/3 backend at import time,
-and a lint that needed QUIC libraries installed in order to check a file date
-would not run.
-
-Run it with `uv run wreath-build-lint`; `0` means clean.
+``setup.py`` is read as text because importing it probes optional native
+dependencies. Run ``uv run wreath-build-lint``; zero means clean.
 """
 
 from __future__ import annotations

@@ -23,13 +23,7 @@ _PK_PGTYPE = {
 
 
 def module_pk_types(tree: ast.Module, imports: _Imports) -> dict[str, str]:
-    """{ORM model name -> wreath PgType of its primary key}, resolved within one module.
-
-    Used to give a ForeignKey its real column type instead of a guess. See
-    `tree_pk_types` for the whole-tree version, which is what actually resolves
-    most of them — a model is usually declared in a different file from the one
-    that points at it.
-    """
+    """{ORM model name -> wreath PgType of its primary key}, resolved within one module."""
     out: dict[str, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and _base_kind(imports, node) in ("ormar", "sqlmodel"):
@@ -90,10 +84,6 @@ def _base_kind(imports: _Imports, cls: ast.ClassDef) -> str | None:
         origin = imports.origin(base)
         if origin == "pydantic.BaseModel":
             return "pydantic"
-        # A BaseHTTPMiddleware subclass is the middleware itself — the construct
-        # a porter rewrites. `mw.custom` used to fire only where one was *wired
-        # up* (`add_middleware(...)`), so a class defined in its own module and
-        # imported elsewhere went unreported entirely.
         if origin in (
             "starlette.middleware.base.BaseHTTPMiddleware",
             "fastapi.middleware.base.BaseHTTPMiddleware",

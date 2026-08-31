@@ -38,9 +38,6 @@ def test_corpus_analysis_is_complete_and_meets_coverage_floors(corpus_app_roots)
     report = port.Report.merge(reports)
     for category, floor in CATEGORY_FLOORS.items():
         measured = report.coverage(category)
-        # `None` means the category recognized nothing at all — which used to
-        # report as 1.0 and sail over every floor here. Name it, so a category
-        # the analyzer stopped seeing fails as a gap rather than as a triumph.
         assert measured is not None, f"{category}: nothing recognized"
         assert measured >= floor, category
 

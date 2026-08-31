@@ -97,9 +97,7 @@ def test_pending_pass_hazard_explains_every_operational_detail(
 
 
 def test_blocked_pass_error_distinguishes_waiting_from_holes() -> None:
-    waiting = migrations.PendingPassHazard(
-        "app", "widgets", "a", "alter", "clean", "", "scan", 0
-    )
+    waiting = migrations.PendingPassHazard("app", "widgets", "a", "alter", "clean", "", "scan", 0)
     barred = migrations.PendingPassHazard(
         "app", "widgets", "b", "drop", "clean", "tenant-2", "scan", 1
     )
@@ -272,10 +270,7 @@ def test_fleet_descriptor_neutralises_both_sides_of_a_foreign_key() -> None:
             "object 0 is invalid",
         ),
         (
-            b"WMD1"
-            + struct.pack("<II", 1, 1)
-            + struct.pack("<HHHHI", 0, 2, 0, 0, 1)
-            + b"x",
+            b"WMD1" + struct.pack("<II", 1, 1) + struct.pack("<HHHHI", 0, 2, 0, 0, 1) + b"x",
             "object 0 is invalid",
         ),
     ],
@@ -431,9 +426,7 @@ async def test_adopt_baseline_refuses_existing_history(monkeypatch) -> None:
     connection = _Connection(previous=(b"existing",))
 
     with pytest.raises(RuntimeError, match="already has Wreath history"):
-        await migrations.adopt_single_baseline(
-            _Registry((_spec(),)), connection, b"artifact"
-        )
+        await migrations.adopt_single_baseline(_Registry((_spec(),)), connection, b"artifact")
 
     assert connection.executed == ["BEGIN", "ROLLBACK"]
 
@@ -572,9 +565,7 @@ async def test_revert_refuses_missing_history_and_catalog_drift(
     monkeypatch.setattr(migrations, "_fingerprint_image", lambda image: fingerprint)
 
     with pytest.raises(RuntimeError, match=message):
-        await migrations.revert_single_artifact(
-            _Registry((_spec(),)), connection, b"artifact"
-        )
+        await migrations.revert_single_artifact(_Registry((_spec(),)), connection, b"artifact")
 
     assert connection.executed == ["BEGIN", "ROLLBACK"]
 

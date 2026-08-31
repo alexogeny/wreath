@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
+
 import pytest
 
+from wreath._b64 import b64url_decode
 from wreath.auth import JwtVerifier, SymmetricKey
-from wreath.oauth import AuthorizationServer, ClientRegistration, OAuthRefusal
+from wreath.oauth import (
+    TOKEN_INTROSPECTION_JWT_MEDIA_TYPE,
+    AuthorizationServer,
+    ClientRegistration,
+    OAuthRefusal,
+)
 
 CLIENT_SECRET = b"console-secret-material" * 2
 CLIENT = ClientRegistration(
@@ -16,6 +25,20 @@ CLIENT = ClientRegistration(
 PUBLIC = ClientRegistration(
     client_id="spa", redirect_uris=("https://app.example/spa",), scopes=("read",)
 )
+RESOURCE_SECRET = b"resource-server-secret" * 2
+RESOURCE = ClientRegistration(
+    client_id="resource-api",
+    confidential=True,
+    client_secret=RESOURCE_SECRET,
+    scopes=("read",),
+    introspection_signed_response_alg="HS256",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class AccountInformation:
+    actions: list[str]
+    locations: list[str]
 
 
 @pytest.fixture
@@ -30,10 +53,241 @@ def test_metadata_names_the_issuer_and_its_endpoints(server) -> None:
     assert metadata["issuer"] == "https://app.example"
     assert metadata["token_endpoint"].endswith("/oauth/token")
     assert metadata["code_challenge_methods_supported"] == ["S256"]
+    assert metadata["authorization_response_iss_parameter_supported"] is True
+
+
+def test_jwt_introspection_exposes_its_registered_media_type() -> None:
+    assert TOKEN_INTROSPECTION_JWT_MEDIA_TYPE == b"application/token-introspection+jwt"
+
+
+def test_jwt_introspection_is_authenticated_audience_bound_and_cross_jwt_safe() -> None:
+    introspection_server = AuthorizationServer(
+        issuer="https://app.example",
+        secret=b"a" * 32,
+        clients=(RESOURCE,),
+    )
+    issued = introspection_server.issue_access(
+        subject="user-1",
+        audience="resource-api",
+        scope=("read", "write"),
+        client_id="resource-api",
+        now=1000,
+    )
+    response = introspection_server.introspection_jwt(
+        issued.access_token,
+        client_id="resource-api",
+        client_secret=RESOURCE_SECRET,
+        now=1001,
+    )
+    header_segment, payload_segment, _signature = response.split(".")
+    header = json.loads(b64url_decode(header_segment))
+    payload = json.loads(b64url_decode(payload_segment))
+    assert header == {"alg": "HS256", "typ": "token-introspection+jwt"}
+    assert payload["iss"] == "https://app.example"
+    assert payload["aud"] == "resource-api"
+    assert payload["iat"] == 1001
+    assert "sub" not in payload
+    assert "exp" not in payload
+    assert payload["token_introspection"]["active"] is True
+    assert payload["token_introspection"]["sub"] == "user-1"
+    assert payload["token_introspection"]["client_id"] == "resource-api"
+    assert payload["token_introspection"]["scope"] == "read"
+    metadata = introspection_server.metadata()
+    assert metadata["introspection_endpoint"].endswith("/oauth/introspect")
+    assert metadata["introspection_signing_alg_values_supported"] == ["HS256"]
+
+
+def test_jwt_introspection_discloses_nothing_for_the_wrong_resource_server() -> None:
+    other_secret = b"other-resource-secret" * 2
+    other = ClientRegistration(
+        client_id="other-api",
+        confidential=True,
+        client_secret=other_secret,
+        introspection_signed_response_alg="HS256",
+    )
+    introspection_server = AuthorizationServer(
+        issuer="https://app.example",
+        secret=b"a" * 32,
+        clients=(RESOURCE, other),
+    )
+    issued = introspection_server.issue_access(
+        subject="user-1", audience="resource-api", now=1000
+    )
+    response = introspection_server.introspection_jwt(
+        issued.access_token,
+        client_id="other-api",
+        client_secret=other_secret,
+        now=1001,
+    )
+    payload = json.loads(b64url_decode(response.split(".")[1]))
+    assert payload["token_introspection"] == {"active": False}
+
+
+def test_jwt_introspection_uses_the_servers_asymmetric_signer() -> None:
+    from wreath._auth.jwt import _parse_compact, _verify_signature
+    from wreath.oauth import Es256Signer
+
+    signer = Es256Signer.generate()
+    resource = ClientRegistration(
+        client_id="resource-api",
+        confidential=True,
+        client_secret=RESOURCE_SECRET,
+        introspection_signed_response_alg="ES256",
+    )
+    introspection_server = AuthorizationServer(
+        issuer="https://app.example",
+        signer=signer,
+        clients=(resource,),
+    )
+    issued = introspection_server.issue_access(
+        subject="user-1", audience="resource-api", now=1000
+    )
+    response = introspection_server.introspection_jwt(
+        issued.access_token,
+        client_id="resource-api",
+        client_secret=RESOURCE_SECRET,
+        now=1001,
+    )
+    header, _claims, signing_input, signature = _parse_compact(response)
+    assert header == {
+        "alg": "ES256",
+        "typ": "token-introspection+jwt",
+        "kid": signer.kid,
+    }
+    assert _verify_signature("ES256", signer.verifying_key(), signing_input, signature)
+    assert introspection_server.metadata()["introspection_signing_alg_values_supported"] == [
+        "ES256"
+    ]
+
+
+def test_jwt_introspection_requires_registered_resource_server_authentication() -> None:
+    introspection_server = AuthorizationServer(
+        issuer="https://app.example",
+        secret=b"a" * 32,
+        clients=(RESOURCE,),
+    )
+    with pytest.raises(OAuthRefusal, match="secret") as raised:
+        introspection_server.introspection_jwt(
+            "not-a-token",
+            client_id="resource-api",
+            client_secret=b"wrong" * 8,
+        )
+    assert raised.value.reason == "invalid-client"
+
+
+def test_introspection_encryption_is_refused_at_registration() -> None:
+    encrypted = ClientRegistration(
+        client_id="resource-api",
+        confidential=True,
+        client_secret=RESOURCE_SECRET,
+        introspection_signed_response_alg="HS256",
+        introspection_encrypted_response_alg="RSA-OAEP",
+        introspection_encrypted_response_enc="A128CBC-HS256",
+    )
+    with pytest.raises(ValueError, match="introspection response encryption.*not supported"):
+        AuthorizationServer(issuer="https://app.example", clients=(encrypted,))
+
+
+def test_authorization_success_response_identifies_its_issuer(server) -> None:
+    assert server.authorization_response(code="code", state="state") == {
+        "code": "code",
+        "state": "state",
+        "iss": "https://app.example",
+    }
+
+
+def test_authorization_error_response_identifies_its_issuer(server) -> None:
+    assert server.authorization_response(error="access_denied", state="state") == {
+        "error": "access_denied",
+        "state": "state",
+        "iss": "https://app.example",
+    }
+
+
+def test_authorization_response_refuses_ambiguous_success_and_error(server) -> None:
+    with pytest.raises(ValueError, match="exactly one of code or error"):
+        server.authorization_response(code="code", error="access_denied")
 
 
 def test_the_jwks_is_empty_for_an_hmac_signer_and_that_is_a_fact(server) -> None:
     assert server.jwks() == {"keys": []}
+
+
+def test_rich_authorization_details_are_validated_and_carried_by_the_token() -> None:
+    client = ClientRegistration(
+        client_id="rich-client",
+        redirect_uris=("https://app.example/cb",),
+        authorization_detail_types=("account_information",),
+    )
+    rich = AuthorizationServer(
+        issuer="https://app.example",
+        secret=b"a" * 32,
+        clients=(client,),
+        authorization_detail_types={"account_information": AccountInformation},
+    )
+    verifier, challenge = _pkce()
+    code = rich.issue_code(
+        client_id="rich-client",
+        subject="u",
+        challenge=challenge,
+        redirect_uri="https://app.example/cb",
+        authorization_details=json.dumps(
+            [
+                {
+                    "type": "account_information",
+                    "actions": ["list_accounts"],
+                    "locations": ["https://api.example/accounts"],
+                }
+            ]
+        ),
+    )
+    token = rich.redeem(
+        code,
+        verifier=verifier,
+        client_id="rich-client",
+        redirect_uri="https://app.example/cb",
+    )
+    claims = json.loads(b64url_decode(token.access_token.split(".")[1]))
+    assert token.authorization_details == (
+        {
+            "type": "account_information",
+            "actions": ["list_accounts"],
+            "locations": ["https://api.example/accounts"],
+        },
+    )
+    assert claims["authorization_details"] == list(token.authorization_details)
+    assert rich.metadata()["authorization_details_types_supported"] == [
+        "account_information"
+    ]
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        [{"type": "unknown", "actions": []}],
+        [{"type": "account_information", "actions": [], "locations": [], "extra": True}],
+        [{"type": "account_information", "actions": "read", "locations": []}],
+        [{"type": "account_information", "actions": []}],
+        {"type": "account_information"},
+    ],
+)
+def test_invalid_rich_authorization_details_are_refused(details) -> None:
+    rich = AuthorizationServer(
+        issuer="https://app.example",
+        authorization_detail_types={"account_information": AccountInformation},
+    )
+    with pytest.raises(OAuthRefusal, match="authorization_details") as raised:
+        rich.validate_authorization_details(details)
+    assert raised.value.reason == "invalid-authorization-details"
+
+
+def test_client_registration_refuses_an_unknown_authorization_detail_type() -> None:
+    client = ClientRegistration(
+        client_id="rich-client",
+        authorization_detail_types=("not-registered",),
+    )
+    with pytest.raises(ValueError, match="not-registered.*authorization detail type"):
+        AuthorizationServer(issuer="https://app.example", clients=(client,))
 
 
 def test_a_redirect_uri_is_matched_exactly_and_never_by_prefix(server) -> None:

@@ -1,10 +1,4 @@
-"""What the search index knows about a section, beyond its first two sentences.
-
-The index used to carry 280 characters per section — the snippet — and match
-against that. On wreath's own corpus that indexed 287 KB of 1.27 MB of prose:
-**84% of sections were truncated**, so anything explained below the opening of a
-section could not be found at all. A reader searching "query parameters" was
-told the docs did not discuss them.
+"""What the search index knows about a section beyond its snippet.
 
 So each section also carries a *word set*: every distinct word in the whole
 section, stemmed, minus the ones the snippet already answers for. It is a set,

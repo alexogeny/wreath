@@ -11,11 +11,18 @@ router is built rather than serving a provisioning API to anyone with a session.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import secrets
+import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace as _replace
 from typing import Any
 
+from .._b64 import b64url_decode, b64url_encode
 from .._codecs import parse_qs
+from .._json import dumps as _json_dumps
+from .._json import loads as _json_loads
 from .._userkit import hash_password
 from ..authorization import authorize
 from ..cache import BoundedCache
@@ -58,6 +65,10 @@ MAX_FILTER_SCAN = 1000
 # lookup key. Invalid filters are deliberately not cached, so they still take
 # the parser's exact refusal path on every request.
 _FILTER_CACHE_SIZE = 64
+_SEARCH_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:SearchRequest"
+_CURSOR_ALPHABET = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+)
 
 
 class ScimResponse(JSONResponse):
@@ -158,6 +169,8 @@ def scim_router(
     page_size: int = DEFAULT_PAGE_SIZE,
     max_page_size: int = MAX_PAGE_SIZE,
     max_filter_scan: int = MAX_FILTER_SCAN,
+    cursor_secret: bytes | str | None = None,
+    cursor_timeout: int = 3600,
 ) -> Router:
     """SCIM 2.0 provisioning endpoints for one organisation, over stores you already have.
 
@@ -174,8 +187,10 @@ def scim_router(
     | `GET {prefix}/ResourceTypes[/{name}]` | `User` and `Group` |
     | `GET {prefix}/Schemas[/{urn}]` | the attributes actually implemented |
     | `GET/POST {prefix}/Users` | list with `filter`, or provision one |
+    | `POST {prefix}/Users/.search` | list with body-carried search parameters |
     | `GET/PUT/PATCH/DELETE {prefix}/Users/{id}` | one member |
     | `GET {prefix}/Groups[/{id}]` | the organisation's roles |
+    | `POST {prefix}/Groups/.search` | list roles with body-carried search parameters |
     | `PUT/PATCH {prefix}/Groups/{id}` | who holds a role |
 
     **SCIM keeps no store of its own.** A `User` is a record in `users`, a
@@ -251,6 +266,9 @@ def scim_router(
             refusing with `tooMany`. A filter is evaluated per member and
             building the representations reads their accounts in one batch, so
             this bounds the work one request can ask for.
+        cursor_secret: key authenticating opaque cursors. A single-process
+            deployment may omit it; every worker in a fleet must share one.
+        cursor_timeout: seconds a cursor remains valid between page requests.
 
     Returns:
         A `Router` to pass to `app.include_router`.
@@ -260,6 +278,14 @@ def scim_router(
             an empty action name, an inconsistent page size, or an organisation
             id that cannot be spelled inside a Cedar entity reference.
     """
+    if cursor_timeout <= 0:
+        raise ValueError("scim_router cursor_timeout must be positive")
+    supplied_cursor_secret = (
+        cursor_secret.encode("utf-8") if isinstance(cursor_secret, str) else cursor_secret
+    )
+    if supplied_cursor_secret is not None and len(supplied_cursor_secret) < 32:
+        raise ValueError("scim_router cursor_secret must contain at least 32 bytes")
+    cursor_key = supplied_cursor_secret or secrets.token_bytes(32)
     _require(
         users,
         ("get_by_id", "get_many_by_id", "get_by_email", "create", "update"),
@@ -466,6 +492,53 @@ def scim_router(
             values.setdefault(key.lower(), value)
         return values
 
+    async def search_query_of(request: Any) -> dict[str, str]:
+        body = await _json(request)
+        if not isinstance(body, Mapping):
+            raise PatchError("invalidSyntax", "SCIM search body must be a JSON object")
+        normalized: dict[str, Any] = {}
+        for raw_name, value in body.items():
+            if not isinstance(raw_name, str):
+                raise PatchError("invalidSyntax", "SCIM search member names must be strings")
+            name = raw_name.lower()
+            if name in normalized:
+                raise PatchError(
+                    "invalidSyntax",
+                    f"SCIM search contains {raw_name!r} more than once ignoring case",
+                )
+            normalized[name] = value
+        schemas = normalized.pop("schemas", None)
+        if schemas != [_SEARCH_SCHEMA]:
+            raise PatchError(
+                "invalidSyntax",
+                f"SCIM search schemas must be exactly [{_SEARCH_SCHEMA!r}]",
+            )
+        unsupported = {"attributes", "excludedattributes"}.intersection(normalized)
+        if unsupported:
+            raise PatchError(
+                "invalidValue",
+                "this SCIM provider does not implement response projection; omit "
+                + ", ".join(sorted(unsupported)),
+            )
+        allowed = {"filter", "sortby", "sortorder", "startindex", "count", "cursor"}
+        unknown = set(normalized).difference(allowed)
+        if unknown:
+            raise PatchError(
+                "invalidSyntax",
+                "SCIM search contains unknown member(s): " + ", ".join(sorted(unknown)),
+            )
+        query: dict[str, str] = {}
+        for name, value in normalized.items():
+            if name in {"startindex", "count"}:
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise PatchError("invalidValue", f"SCIM search {name} must be an integer")
+                query[name] = str(value)
+            elif not isinstance(value, str):
+                raise PatchError("invalidValue", f"SCIM search {name} must be a string")
+            else:
+                query[name] = value
+        return query
+
     def sort_documents(
         documents: list[dict[str, Any]],
         query: Mapping[str, str],
@@ -520,6 +593,146 @@ def scim_router(
             count = min(max_page_size, max(0, _integer(query["count"], "count")))
         return start, count
 
+    def cursor_count(query: Mapping[str, str]) -> int:
+        count = page_size
+        if "count" in query:
+            try:
+                count = max(0, int(query["count"]))
+            except ValueError:
+                raise PatchError(
+                    "invalidCount",
+                    f"cursor count must be an integer (got {query['count']!r})",
+                ) from None
+        if count > max_page_size:
+            raise PatchError(
+                "invalidCount",
+                f"cursor count must be between 0 and {max_page_size} (got {count})",
+            )
+        return count
+
+    def cursor_query(query: Mapping[str, str]) -> str:
+        stable = {key: value for key, value in query.items() if key not in {"cursor", "count"}}
+        encoded = _json_dumps(dict(sorted(stable.items())))
+        return b64url_encode(hashlib.sha256(encoded).digest())
+
+    def encode_cursor(
+        position: int,
+        *,
+        count: int,
+        query: Mapping[str, str],
+        shape: resources.Shape,
+        organization_id: str,
+    ) -> str:
+        payload = b64url_encode(
+            _json_dumps(
+                [
+                    1,
+                    position,
+                    int(time.time()) + cursor_timeout,
+                    shape.name,
+                    organization_id,
+                    count,
+                    cursor_query(query),
+                ]
+            )
+        )
+        tag = b64url_encode(hmac.new(cursor_key, payload.encode("ascii"), hashlib.sha256).digest())
+        return f"{payload}.{tag}"
+
+    def decode_cursor(
+        value: str,
+        *,
+        count: int,
+        query: Mapping[str, str],
+        shape: resources.Shape,
+        organization_id: str,
+    ) -> int:
+        if len(value) > 2048 or not value or any(char not in _CURSOR_ALPHABET for char in value):
+            raise PatchError("invalidCursor", "cursor is not an opaque URL-safe value issued here")
+        payload, separator, tag = value.partition(".")
+        if not separator or "." in tag:
+            raise PatchError("invalidCursor", "cursor is not an opaque value issued here")
+        expected = b64url_encode(
+            hmac.new(cursor_key, payload.encode("ascii"), hashlib.sha256).digest()
+        )
+        if not hmac.compare_digest(tag, expected):
+            raise PatchError("invalidCursor", "cursor signature is invalid")
+        try:
+            decoded = _json_loads(b64url_decode(payload))
+        except (TypeError, ValueError):
+            raise PatchError("invalidCursor", "cursor payload is malformed") from None
+        if not isinstance(decoded, list) or len(decoded) != 7:
+            raise PatchError("invalidCursor", "cursor payload has the wrong shape")
+        version, position, expires, resource_name, cursor_org, original_count, fingerprint = decoded
+        if (
+            version != 1
+            or isinstance(position, bool)
+            or not isinstance(position, int)
+            or position < 0
+        ):
+            raise PatchError("invalidCursor", "cursor position is invalid")
+        if isinstance(expires, bool) or not isinstance(expires, int):
+            raise PatchError("invalidCursor", "cursor expiry is invalid")
+        if expires < int(time.time()):
+            raise PatchError("expiredCursor", "cursor has expired; begin a new cursor query")
+        if original_count != count:
+            raise PatchError(
+                "invalidCount",
+                f"cursor count must remain {original_count} for every page (got {count})",
+            )
+        if (
+            resource_name != shape.name
+            or cursor_org != organization_id
+            or fingerprint != cursor_query(query)
+        ):
+            raise PatchError(
+                "invalidCursor",
+                "cursor belongs to a different resource, organization, or query",
+            )
+        return position
+
+    def cursor_window(
+        documents: list[dict[str, Any]],
+        query: Mapping[str, str],
+        shape: resources.Shape,
+        organization_id: str,
+    ) -> ScimResponse:
+        if "startindex" in query:
+            raise PatchError(
+                "invalidCursor", "use cursor or startIndex pagination, not both in one request"
+            )
+        count = cursor_count(query)
+        raw_cursor = query.get("cursor", "")
+        position = (
+            decode_cursor(
+                raw_cursor,
+                count=count,
+                query=query,
+                shape=shape,
+                organization_id=organization_id,
+            )
+            if raw_cursor
+            else 0
+        )
+        window = documents[position : position + count]
+        next_position = position + len(window)
+        next_cursor = ""
+        if count and next_position < len(documents):
+            next_cursor = encode_cursor(
+                next_position,
+                count=count,
+                query=query,
+                shape=shape,
+                organization_id=organization_id,
+            )
+        return ScimResponse(
+            resources.cursor_list_response(
+                window,
+                total=len(documents),
+                next_cursor=next_cursor,
+            )
+        )
+
     def _integer(raw: str, name: str) -> int:
         try:
             return int(raw)
@@ -527,7 +740,10 @@ def scim_router(
             raise PatchError("invalidValue", f"{name} must be an integer (got {raw!r})") from None
 
     def selected(
-        documents: list[dict[str, Any]], query: Mapping[str, str], shape: resources.Shape
+        documents: list[dict[str, Any]],
+        query: Mapping[str, str],
+        shape: resources.Shape,
+        organization_id: str,
     ) -> ScimResponse:
         """Filter, page and envelope a list of already-built representations."""
         expression = query.get("filter")
@@ -536,6 +752,8 @@ def scim_router(
             node = _parsed_filter(cache, expression, shape.queryable)
             documents = select(node, documents)
         documents = sort_documents(documents, query, shape)
+        if "cursor" in query:
+            return cursor_window(documents, query, shape, organization_id)
         start, count = paging(query)
         window = documents[start - 1 : start - 1 + count]
         return ScimResponse(
@@ -580,6 +798,9 @@ def scim_router(
                 base=base_of(request),
                 max_results=max_filter_scan,
                 scheme=authentication_scheme(request),
+                default_page_size=page_size,
+                max_page_size=max_page_size,
+                cursor_timeout=cursor_timeout,
             )
         )
 
@@ -642,26 +863,47 @@ def scim_router(
             if record is not None
         ]
 
-    @router.get("/Users")
-    @authorize(action=read_action, resource=cedar_resource)
-    async def scim_list_users(request: Any) -> Response:
+    async def search_users(request: Any, query: Mapping[str, str]) -> Response:
         org = org_of(request)
         base = base_of(request)
-        query = query_of(request)
         try:
             if query.get("filter") or query.get("sortby"):
                 return selected(
                     await user_documents(org, base, max_filter_scan),
                     query,
                     resources.USER,
+                    org,
                 )
             # Unfiltered: page over the membership list and read only the users
             # on the page, so an organisation larger than one page costs one
             # page of lookups rather than all of them.
             held = await membership_map(org)
-            start, count = paging(query)
             ordered = sorted(held)
-            page = ordered[start - 1 : start - 1 + count]
+            if "cursor" in query:
+                if "startindex" in query:
+                    raise PatchError(
+                        "invalidCursor",
+                        "use cursor or startIndex pagination, not both in one request",
+                    )
+                count = cursor_count(query)
+                raw_cursor = query.get("cursor", "")
+                position = (
+                    decode_cursor(
+                        raw_cursor,
+                        count=count,
+                        query=query,
+                        shape=resources.USER,
+                        organization_id=org,
+                    )
+                    if raw_cursor
+                    else 0
+                )
+                page = ordered[position : position + count]
+                start = position + 1
+            else:
+                start, count = paging(query)
+                position = start - 1
+                page = ordered[position : position + count]
             records = await users.get_many_by_id(page) if page else []
             if len(records) != len(page):
                 raise RuntimeError(
@@ -673,15 +915,50 @@ def scim_router(
                 for user_id, record in zip(page, records, strict=True)
                 if record is not None
             ]
+            if "cursor" in query:
+                next_position = position + len(page)
+                next_cursor = ""
+                if count and next_position < len(ordered):
+                    next_cursor = encode_cursor(
+                        next_position,
+                        count=count,
+                        query=query,
+                        shape=resources.USER,
+                        organization_id=org,
+                    )
+                return ScimResponse(
+                    resources.cursor_list_response(
+                        found,
+                        total=len(ordered),
+                        next_cursor=next_cursor,
+                    )
+                )
             return ScimResponse(
                 resources.list_response(
-                    found, total=len(ordered), start_index=start, per_page=len(found)
+                    found,
+                    total=len(ordered),
+                    start_index=start,
+                    per_page=len(found),
                 )
             )
         except FilterError as error:
             return _error(400, error.detail, "invalidFilter")
         except PatchError as error:
             return _error(400, error.detail, error.scim_type)
+
+    @router.get("/Users")
+    @authorize(action=read_action, resource=cedar_resource)
+    async def scim_list_users(request: Any) -> Response:
+        return await search_users(request, query_of(request))
+
+    @router.post("/Users/.search")
+    @authorize(action=read_action, resource=cedar_resource)
+    async def scim_search_users(request: Any) -> Response:
+        try:
+            query = await search_query_of(request)
+        except PatchError as error:
+            return _error(400, error.detail, error.scim_type)
+        return await search_users(request, query)
 
     @router.get("/Users/{id}")
     @authorize(action=read_action, resource=cedar_resource)
@@ -795,17 +1072,30 @@ def scim_router(
             for role in sorted(organizations.roles())
         ]
 
-    @router.get("/Groups")
-    @authorize(action=read_action, resource=cedar_resource)
-    async def scim_list_groups(request: Any) -> Response:
+    async def search_groups(request: Any, query: Mapping[str, str]) -> Response:
         org = org_of(request)
-        query = query_of(request)
         try:
-            return selected(await group_documents(org, base_of(request)), query, resources.GROUP)
+            return selected(
+                await group_documents(org, base_of(request)), query, resources.GROUP, org
+            )
         except FilterError as error:
             return _error(400, error.detail, "invalidFilter")
         except PatchError as error:
             return _error(400, error.detail, error.scim_type)
+
+    @router.get("/Groups")
+    @authorize(action=read_action, resource=cedar_resource)
+    async def scim_list_groups(request: Any) -> Response:
+        return await search_groups(request, query_of(request))
+
+    @router.post("/Groups/.search")
+    @authorize(action=read_action, resource=cedar_resource)
+    async def scim_search_groups(request: Any) -> Response:
+        try:
+            query = await search_query_of(request)
+        except PatchError as error:
+            return _error(400, error.detail, error.scim_type)
+        return await search_groups(request, query)
 
     @router.get("/Groups/{id}")
     @authorize(action=read_action, resource=cedar_resource)

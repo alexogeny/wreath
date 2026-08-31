@@ -207,12 +207,6 @@ def test_concurrent_producers_conserve_every_trace() -> None:
 
 
 class _OtlpHandler(BaseHTTPRequestHandler):
-    #: The raw body, deliberately not parsed. This handler used to
-    #: `json.loads` it, which quietly made every test through it a JSON-encoding
-    #: test as well as a routing one. The exporter now defaults to protobuf, and
-    #: the assertions below are about *which paths get posted to* and *that
-    #: empty requests are skipped* -- neither of which is about the encoding.
-    #: `tests/test_otlp_protobuf.py` covers the bodies in both encodings.
     posts: list[tuple[str, bytes]] = []
 
     def do_POST(self) -> None:  # http.server API

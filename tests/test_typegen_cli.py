@@ -80,10 +80,8 @@ def test_write_removes_only_owned_files(tmp_path: Path) -> None:
 
     files = render_typescript(build_api_model(app), react_query=True)
     write(files, tmp_path)
-    # A hand-authored file is not owned and must survive regeneration.
     handwritten = tmp_path / "handwritten.ts"
     handwritten.write_text("export const mine = 1;\n")
-    # A previously-owned file that is no longer generated must be removed.
     orphan = tmp_path / "react-query.ts"
     assert orphan.exists()
     write({k: v for k, v in files.items() if k != "react-query.ts"}, tmp_path)
@@ -96,10 +94,7 @@ def test_check_reports_orphaned_owned_file(tmp_path: Path) -> None:
 
     files = render_typescript(build_api_model(app), react_query=True)
     write(files, tmp_path)
-    # Regeneration without react-query drops react-query.ts; --check must notice
-    # the still-listed owned file rather than silently passing.
     without = {k: v for k, v in files.items() if k != "react-query.ts"}
-    # rebuild manifest reference: current files list no longer includes it
     problems = check(without, tmp_path)
     assert any("no longer generated" in problem for problem in problems)
 

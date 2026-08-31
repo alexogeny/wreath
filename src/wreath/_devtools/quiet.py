@@ -973,13 +973,8 @@ def _read(path: Path) -> str:
 def _service_states(units: Sequence[str]) -> tuple[str, ...]:
     """Return every unit's active state with one systemd round trip.
 
-    `systemctl is-active` accepts multiple units and emits one state per unit in
-    argument order.  The quieting plan used to launch one process for every
-    named service; on a runner with a slow or absent system bus those fourteen
-    identical connection attempts dominated every caller of `plan()`.
-
-    Missing output is treated as unknown in the same safe direction as the old
-    per-unit probe: only an explicit ``active`` state creates a stop step.
+    Missing output is unknown; only an explicit ``active`` state creates a stop
+    step.
     """
     if not units:
         return ()
@@ -1191,10 +1186,6 @@ def apply(
             _apply_one(change)
             applied += 1
     except OSError as error:
-        # Nothing was changed, so nothing needs undoing -- and a timer left armed
-        # over an empty machine is litter that accrues one unit per failed attempt.
-        # Past the first change the opposite holds: the watchdog stays, because a
-        # half-quieted machine is precisely what it exists to recover.
         if applied == 0:
             disarm_watchdog(journal.watchdog)
             journal_path.unlink(missing_ok=True)

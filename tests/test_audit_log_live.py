@@ -300,8 +300,7 @@ async def test_batched_updates_and_deletes_create_one_audit_record_per_row(
 ):
     session = sessions(registry, trail)
     photos = [
-        Photo(id=identifier, caption="before", exif_gps=None)
-        for identifier in range(120, 124)
+        Photo(id=identifier, caption="before", exif_gps=None) for identifier in range(120, 124)
     ]
     with actor("user:41"):
         for photo in photos:
@@ -324,10 +323,7 @@ async def test_a_stale_update_batch_creates_no_partial_audit_records(
     registry, trail, database, sessions
 ):
     session = sessions(registry, trail)
-    photos = [
-        Photo(id=identifier, caption="before", exif_gps=None)
-        for identifier in (140, 141)
-    ]
+    photos = [Photo(id=identifier, caption="before", exif_gps=None) for identifier in (140, 141)]
     with actor("user:41"):
         for photo in photos:
             session.add(photo)
@@ -340,19 +336,14 @@ async def test_a_stale_update_batch_creates_no_partial_audit_records(
 
     assert all(photo._orm_has_changes() for photo in photos)
     for photo in photos:
-        assert [record["op"] for record in await _records(trail, str(photo.id))] == [
-            "insert"
-        ]
+        assert [record["op"] for record in await _records(trail, str(photo.id))] == ["insert"]
 
 
 async def test_a_caught_stale_update_batch_cannot_commit_matching_rows(
     registry, trail, database, sessions
 ):
     session = sessions(registry, trail)
-    photos = [
-        Photo(id=identifier, caption="before", exif_gps=None)
-        for identifier in (150, 151)
-    ]
+    photos = [Photo(id=identifier, caption="before", exif_gps=None) for identifier in (150, 151)]
     with actor("user:41"):
         for photo in photos:
             session.add(photo)
@@ -374,19 +365,14 @@ async def test_a_caught_stale_update_batch_cannot_commit_matching_rows(
     assert caption == "before"
     assert all(photo._orm_has_changes() for photo in photos)
     for photo in photos:
-        assert [record["op"] for record in await _records(trail, str(photo.id))] == [
-            "insert"
-        ]
+        assert [record["op"] for record in await _records(trail, str(photo.id))] == ["insert"]
 
 
 async def test_a_caught_stale_delete_batch_cannot_commit_matching_rows(
     registry, trail, database, sessions
 ):
     session = sessions(registry, trail)
-    photos = [
-        Photo(id=identifier, caption="before", exif_gps=None)
-        for identifier in (160, 161)
-    ]
+    photos = [Photo(id=identifier, caption="before", exif_gps=None) for identifier in (160, 161)]
     with actor("user:41"):
         for photo in photos:
             session.add(photo)
@@ -407,9 +393,7 @@ async def test_a_caught_stale_delete_batch_cannot_commit_matching_rows(
         await database.release("write", connection)
     assert caption == "before"
     for photo in photos:
-        assert [record["op"] for record in await _records(trail, str(photo.id))] == [
-            "insert"
-        ]
+        assert [record["op"] for record in await _records(trail, str(photo.id))] == ["insert"]
 
 
 async def test_a_rolled_back_flush_of_many_leaves_none_of_their_records(registry, trail, sessions):

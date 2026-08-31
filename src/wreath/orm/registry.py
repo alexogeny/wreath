@@ -139,12 +139,6 @@ class Registry:
         self.deployment_fingerprint = b""
         # Plan cache insertion and eviction must stay correct without the GIL.
         self._lock = threading.Lock()
-        # One `wreath.kv.KV`, bounded by entry count *and* by retained bytes.
-        # What used to be here -- an OrderedDict, a running byte total, a
-        # `move_to_end` on every hit and an eviction loop over both bounds --
-        # was the same fifteen lines the PostgreSQL driver's statement cache
-        # also carried, differing only in what it did with the evicted entry.
-        # This one wants nothing done with it, so it does not ask.
         self._cache: Any = KV(max_entries=query_cache_size, max_bytes=query_cache_bytes)
         # Declared-query identity -> its registry-specific shape key. The plan
         # itself remains in the bounded LRU above; this small index lets a hot

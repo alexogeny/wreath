@@ -280,7 +280,7 @@ def test_dup_scan_json_dispatches_every_detailed_report(
     )
     report = json.loads(capsys.readouterr().out)
 
-    assert collect_calls == [(('src/wreath/sample.py',), ("python",), "alpha")]
+    assert collect_calls == [(("src/wreath/sample.py",), ("python",), "alpha")]
     assert report["scanned_functions"] == 2
     assert report["langs"] == ["python"]
     assert report["normalization"] == "alpha"

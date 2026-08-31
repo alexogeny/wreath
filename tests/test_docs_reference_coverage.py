@@ -37,17 +37,19 @@ def public_modules() -> set[str]:
 def documented_modules() -> set[str]:
     reference = ROOT / "docs" / "reference"
     return {
-        target
-        for page in reference.glob("*.md")
-        for target in DIRECTIVE.findall(page.read_text())
+        target for page in reference.glob("*.md") for target in DIRECTIVE.findall(page.read_text())
     }
 
 
 def subcommands(parser: argparse.ArgumentParser) -> dict[str, argparse.ArgumentParser]:
     for action in parser._actions:
         choices = getattr(action, "choices", None)
-        if isinstance(choices, dict) and choices and all(
-            isinstance(candidate, argparse.ArgumentParser) for candidate in choices.values()
+        if (
+            isinstance(choices, dict)
+            and choices
+            and all(
+                isinstance(candidate, argparse.ArgumentParser) for candidate in choices.values()
+            )
         ):
             return choices
     raise AssertionError(f"{parser.prog} has no subcommands")

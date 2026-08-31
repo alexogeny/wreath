@@ -42,10 +42,6 @@ OWNED: frozenset[bytes] = frozenset(
 )
 
 
-#: Everything dropped on every message, unioned once at import. The
-#: per-request union used to be `HOP_BY_HOP | _connection_named(...) | OWNED`,
-#: which built three sets and two unions for a request that almost never names
-#: a field in `Connection`.
 _ALWAYS_DROP: frozenset[bytes] = HOP_BY_HOP | OWNED
 
 

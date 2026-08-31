@@ -160,9 +160,7 @@ def test_changed_artifact_errors_preserve_a_declared_name() -> None:
     assert str(countersign_error.value) == (
         "artifact 'release.whl' changed after provenance was created"
     )
-    assert str(verify_error.value) == (
-        "artifact 'release.whl' does not match its signed digest"
-    )
+    assert str(verify_error.value) == ("artifact 'release.whl' does not match its signed digest")
 
 
 def test_verify_refuses_a_boolean_quorum() -> None:

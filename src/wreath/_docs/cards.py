@@ -41,7 +41,7 @@ def _render(config: list[str]) -> str:
         cards.append(
             f'<a class="story-card" href="{_esc(href)}">'
             f'<span class="story-index">{index:02}</span>'
-            f'<h2>{_esc(title)}</h2><p>{_esc(description)}</p>'
+            f"<h2>{_esc(title)}</h2><p>{_esc(description)}</p>"
             f'<span class="story-meta">{_esc(meta)}</span>'
             '<span class="story-arrow" aria-hidden="true">&#8599;</span></a>'
         )
@@ -51,8 +51,5 @@ def _render(config: list[str]) -> str:
 
 def _esc(text: str) -> str:
     return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
     )

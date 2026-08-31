@@ -1,5 +1,4 @@
 # The compiled arms of the framework matrix, as one workspace.
-#
 # A workspace rather than four independent crates so they share a single
 # `target/` and a single `cargo build --release`: they overlap heavily in
 # dependencies, and building them separately would compile tokio, hyper and

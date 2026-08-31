@@ -224,13 +224,7 @@ _OTHER_FILL = "#9aa4b2"
 
 
 def _hatch_defs(uid: str) -> str:
-    """The `field` hatch, with an id unique to this chart.
-
-    An SVG `pattern` id is document-scoped, so a page carrying two charts used to
-    emit `wc-hatch` twice — invalid HTML, and the second chart's bars resolve
-    against the first chart's pattern. `wreath audit` reports it as a
-    duplicate-id error, which is how it was found.
-    """
+    """The `field` hatch, with an id unique to this chart."""
     return (
         f'<defs><pattern id="wc-hatch-{uid}" width="7" height="7" '
         'patternUnits="userSpaceOnUse" patternTransform="rotate(45)">'

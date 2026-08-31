@@ -712,10 +712,6 @@ async def _with_deadline(awaitable: Any, deadline: float | None) -> Any:
     except TimeoutError as exc:
         raise GrpcError(Status.DEADLINE_EXCEEDED, "deadline exceeded") from exc
     except asyncio.CancelledError:
-        # A peer RST_STREAM can cancel the application task in the small window
-        # between constructing a handler coroutine and awaiting it.  Owning a
-        # Task before the timeout context means that coroutine is always either
-        # driven or explicitly cancelled, never leaked as "was never awaited".
         task.cancel()
         try:
             await task

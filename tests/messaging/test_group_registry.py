@@ -16,7 +16,6 @@ class FakeConnection:
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         #: Rows `SELECT ... FROM ...message_groups` returns.
         self.group_rows: list[dict[str, str]] = []
-        #: When set, `fetch` raises it -- the "DDL was never applied" case.
         self.fetch_error: Exception | None = None
         #: When set, `execute` raises it -- registration against a missing table.
         self.execute_error: Exception | None = None

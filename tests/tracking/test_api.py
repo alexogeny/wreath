@@ -34,9 +34,6 @@ def seeded_schema():
     neighbours' rows, and the failure would be order-dependent, so if one is
     added it builds its own schema instead of joining this.
 
-    The seed was previously rebuilt per test: 1.7s of `setup` on each of
-    nineteen tests made this the slowest file in the suite at 87.3s.
-
     Deliberately synchronous, driving its own loop with `asyncio.run`, following
     `test_place.py`: the tests are function-scoped and async, so each gets its
     own event loop, and only the DDL is shared here. The `TestClient` below stays

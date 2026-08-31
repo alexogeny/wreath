@@ -52,8 +52,7 @@ async def registry() -> Any:
         await connection.execute(f'DROP SCHEMA IF EXISTS "{_SCHEMA}" CASCADE')
         await connection.execute(f'CREATE SCHEMA "{_SCHEMA}"')
         await connection.execute(
-            f'CREATE TABLE "{_SCHEMA}"."events" '
-            "(id bigint PRIMARY KEY, label text NOT NULL)"
+            f'CREATE TABLE "{_SCHEMA}"."events" (id bigint PRIMARY KEY, label text NOT NULL)'
         )
         await connection.execute(
             f'CREATE TABLE "{_SCHEMA}"."generated_events" '
@@ -145,7 +144,7 @@ async def test_a_caught_insert_postflight_failure_rolls_back_every_row(
             "RETURN NEW; END; $body$ LANGUAGE plpgsql"
         )
         await connection.execute(
-            f'CREATE TRIGGER skip_generated_event BEFORE INSERT ON '
+            f"CREATE TRIGGER skip_generated_event BEFORE INSERT ON "
             f'"{_SCHEMA}".generated_events FOR EACH ROW EXECUTE FUNCTION '
             f'"{_SCHEMA}".skip_generated_event()'
         )
@@ -192,9 +191,7 @@ async def test_update_and_delete_batches_round_trip_through_postgresql(
         session.delete(events[-1])
         await session.flush()
 
-        rows = await session.raw(
-            f'SELECT id, label FROM "{_SCHEMA}"."events" ORDER BY id'
-        ).fetch()
+        rows = await session.raw(f'SELECT id, label FROM "{_SCHEMA}"."events" ORDER BY id').fetch()
     finally:
         await session.close()
 
@@ -205,9 +202,7 @@ async def test_composite_key_update_and_delete_batches_round_trip(
     registry: Registry,
 ) -> None:
     session = Session(registry, "write")
-    memberships = [
-        LiveMembership(org_id=1, user_id=index, role="member") for index in range(1, 4)
-    ]
+    memberships = [LiveMembership(org_id=1, user_id=index, role="member") for index in range(1, 4)]
     try:
         for membership in memberships:
             session.add(membership)
@@ -218,9 +213,7 @@ async def test_composite_key_update_and_delete_batches_round_trip(
         for membership in memberships:
             session.delete(membership)
         await session.flush()
-        count = await session.raw(
-            f'SELECT count(*) FROM "{_SCHEMA}"."memberships"'
-        ).fetchval()
+        count = await session.raw(f'SELECT count(*) FROM "{_SCHEMA}"."memberships"').fetchval()
     finally:
         await session.close()
 
@@ -256,9 +249,7 @@ async def test_cached_model_reads_keep_data_rows_on_the_native_receive_path(
     registry: Registry,
 ) -> None:
     session = Session(registry, "write")
-    memberships = [
-        LiveMembership(org_id=9, user_id=index, role="member") for index in range(1, 4)
-    ]
+    memberships = [LiveMembership(org_id=9, user_id=index, role="member") for index in range(1, 4)]
     try:
         for membership in memberships:
             session.add(membership)

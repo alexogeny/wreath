@@ -289,15 +289,7 @@ _STEP_FIXED = struct.Struct("<iIII")
 
 
 class WorkflowStepOutcome(StrEnum):
-    """How one execution of one step of one workflow instance ended.
-
-    Three, and the third is the one worth having. `raised` is a saga that
-    stopped and unwound cleanly -- bad, and recoverable by re-running it.
-    `compensation_failed` is a saga that stopped and *did not* unwind: the card
-    was charged, the refund did not run, and no retry reaches that state from
-    where it now is. Folding the second into the first would send every reader
-    to the original failure and past the one that needs a person.
-    """
+    """How one execution of one step of one workflow instance ended."""
 
     COMPLETED = "completed"
     RAISED = "raised"

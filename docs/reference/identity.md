@@ -28,6 +28,8 @@ modules cover proof, authorization, user lifecycle and tenant lifecycle.
 
 ::: wreath.oauth
 
+::: wreath.dpop
+
 ::: wreath.quota
 
 ::: wreath.platform

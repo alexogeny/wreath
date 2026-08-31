@@ -90,14 +90,17 @@ def test_capture_command_disarms_only_with_a_non_boolean_integer() -> None:
 def test_paged_traces_reports_both_truncated_states() -> None:
     server = _server()
     server._projector = object()
-    snapshot = SimpleNamespace(assembled=3, loss=SimpleNamespace(
-        orphan_phase=0,
-        orphan_correlation=0,
-        pending_evicted=0,
-        decode_error=0,
-        export_error=0,
-        recent_evicted=0,
-    ))
+    snapshot = SimpleNamespace(
+        assembled=3,
+        loss=SimpleNamespace(
+            orphan_phase=0,
+            orphan_correlation=0,
+            pending_evicted=0,
+            decode_error=0,
+            export_error=0,
+            recent_evicted=0,
+        ),
+    )
     rows = [_trace(index) for index in range(3)]
     body, flags = server._paged_traces({"limit": 2}, rows, snapshot)
     assert body["truncated"] is True

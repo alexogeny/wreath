@@ -109,8 +109,7 @@ def test_header_only_method_still_declares_a_parameters_object() -> None:
     operation = ("getItem", "GET", "/items", params, None, None, STRING)
 
     assert _method_lines(operation)[0] == (
-        "    async getItem(parameters: GetItemParameters, init?: RequestInit): "
-        "Promise<string> {"
+        "    async getItem(parameters: GetItemParameters, init?: RequestInit): Promise<string> {"
     )
 
 

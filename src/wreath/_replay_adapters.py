@@ -207,7 +207,7 @@ _CAST_REQUIRES: dict[str, tuple[type, ...]] = {
 
 _PLACEHOLDER_CAST = re.compile(r"\$(\d+)::(\w+)")
 _PLACEHOLDER = re.compile(r"\$(\d+)")
-_SQL_REGION_START = re.compile(r'''--|/\*|'|"|\$''')
+_SQL_REGION_START = re.compile(r"""--|/\*|'|"|\$""")
 
 
 def _dollar_delimiter(sql: str, start: int) -> str | None:
@@ -266,8 +266,10 @@ def _sql_code(sql: str) -> str:
                 else:
                     end += 1
         elif sql[start] == "'":
-            escaped = start > 0 and sql[start - 1] in "eE" and (
-                start == 1 or not (sql[start - 2] == "_" or sql[start - 2].isalnum())
+            escaped = (
+                start > 0
+                and sql[start - 1] in "eE"
+                and (start == 1 or not (sql[start - 2] == "_" or sql[start - 2].isalnum()))
             )
             end = _quoted_end(sql, start, "'", backslash=escaped)
         elif sql[start] == '"':
@@ -390,12 +392,6 @@ def refuse_what_postgres_refuses(sql: object, args: tuple[Any, ...], seen: set[s
     refuse_parameter_arity(sql, args)
     refuse_uninferable_cast(sql, args, seen)
 
-
-# The refusals above model what the driver rejects on the way in. A double is
-# equally able to lie on the way out, and that lie is the one that shipped: a
-# fake scripted with `str` and `int` rows modelled a driver with catalog codecs,
-# and `validate_schema="error"` -- the framework default -- had never once
-# completed lifespan startup against a real PostgreSQL.
 
 #: Column surface of `wreath._native._postgres.Record`, and nothing else.
 #: Measured, not assumed: a `dict`-shaped fake let `row.values()` through and
@@ -579,15 +575,7 @@ class _ConnectionDouble:
 
         `NOTIFY_STREAM_END` returns without raising, mirroring the real
         connection closing; `NOTIFY_STREAM_ERROR` raises. A supervisor that
-        only handles the second is the bug this seam exists to catch.
-
-        With **no** fault the stream *stays open*, which is what a real one does
-        when there is simply nothing to deliver. It used to return, so an
-        un-faulted double made the doorbell churn exactly as hard as
-        `NOTIFY_STREAM_END` did -- and a region whose behaviour is
-        indistinguishable from the control is a region that proves nothing. Held
-        open, the reconnect counter is a signal again.
-        """
+        only handles the second is the bug this seam exists to catch."""
         self._double.streams += 1
         fault = self._double.stream_fault
         for notification in self._double.notifications:
@@ -1005,7 +993,6 @@ class DatabaseDouble:
 
     @property
     def leaked(self) -> bool:
-        """Whether an acquisition was never returned to the pool."""
         return self.acquired != self.released
 
 
@@ -1080,7 +1067,6 @@ class FaultyHttpClient(HTTPClient):
 # attempt that has already happened can be replayed later. They are the same
 # shape on purpose: an observer records a `(seam, target, coordinate)` triple,
 # which is exactly the coordinate a `FaultSchedule` addresses a double with.
-# **A `Statement` registered before the observer was installed is not seen.**
 # `postgres.Statement` holds its own reference to the `Database` it was
 # registered on, so swapping the registry entry does not reach it. That is the
 # same gap `DatabaseDouble` has on the replay side, and it is symmetric: a

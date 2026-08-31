@@ -63,9 +63,7 @@ def test_perf_counters_runs_userspace_hardware_events(monkeypatch: pytest.Monkey
 
     def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         captured.extend(command)
-        stderr = "\n".join(
-            f"1,,cpu_core/{name}/u,1,100.00,," for name in cpu_probe.COUNTERS
-        )
+        stderr = "\n".join(f"1,,cpu_core/{name}/u,1,100.00,," for name in cpu_probe.COUNTERS)
         return subprocess.CompletedProcess(command, 0, "", stderr)
 
     monkeypatch.setattr(subprocess, "run", run)

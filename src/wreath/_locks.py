@@ -450,21 +450,8 @@ class SingletonRunner:
                             unlock=held,
                         )
                     except PostgresError, OSError:
-                        # A failed release degrades this round; it must not end
-                        # the runner. Escaping a `finally` is exactly how it did:
-                        # the task died for the process lifetime, and because
-                        # nothing awaits `_task` until `stop()`, it surfaced only
-                        # as "Task exception was never retrieved" at GC. A runner
-                        # that has silently stopped contending is indistinguishable
-                        # from one that is simply not the leader.
-                        # Named types, not `Exception`: `Pool.release` raises
-                        # `InterfaceError` on a double release, and the trailing
-                        # `connection.close()` fails with `OSError` on a dead
-                        # socket. Neither leaks the slot this catch lets through --
-                        # the `InterfaceError` is raised *before* `_borrowed` is
-                        # touched, and the close runs *after* the slot is already
-                        # back. `CancelledError` still propagates, because `stop()`
-                        # is waiting for it.
+                        # Release failures degrade one round; cancellation must
+                        # still propagate to `stop()`.
                         self._release_errors += 1
                         logging.getLogger("wreath").exception(
                             "advisory lock release failed for %r; still contending",

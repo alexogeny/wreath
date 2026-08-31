@@ -66,9 +66,7 @@ def refusal(answer: dict) -> str:
     return " ".join(str(item.get("text", "")) for item in content)
 
 
-# ===========================================================================
 # Step-up x MCP
-# ===========================================================================
 
 
 class _Backend:
@@ -261,7 +259,6 @@ async def test_a_cedar_gated_tool_sees_the_second_factor_age_in_its_context() ->
 def declared_stepup_app(
     identity: Identity | None, *, window: float = 300.0
 ) -> tuple[Wreath, MCP, list[str]]:
-    """A tool that was never a route, asking for step-up in its own right."""
     ran: list[str] = []
     app = Wreath()
     app.configure_auth(_Backend(identity))
@@ -351,9 +348,7 @@ def test_a_window_that_can_never_be_satisfied_is_refused() -> None:
             return {}
 
 
-# ===========================================================================
 # The caller, resolved before the controls that name them
-# ===========================================================================
 # An endpoint with no `MCPAuth` and an `app.configure_auth(...)` backend is the
 # configuration `expose_routes` exists for, and on it the identity is resolved
 # lazily -- inside `_authorize`, which runs *after* the rate limit is charged
@@ -470,9 +465,7 @@ async def test_the_marker_names_the_caller_the_request_authenticated() -> None:
     assert marker["principal"] == "ada"
 
 
-# ===========================================================================
 # Retrieval x MCP
-# ===========================================================================
 
 _DSN = os.environ.get("WREATH_TEST_POSTGRES_DSN")
 _WORKER = os.environ.get("PYTEST_XDIST_WORKER", "main")

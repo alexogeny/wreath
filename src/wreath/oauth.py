@@ -50,22 +50,28 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 import secrets
 import time
 from base64 import urlsafe_b64encode
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
-from typing import Any, Final, cast
+from dataclasses import dataclass, is_dataclass
+from typing import Any, ClassVar, Final, cast
 from urllib.parse import urlsplit
 
+from ._json import dumps as _json_dumps
+from ._json import loads as _json_loads
+from .binding import ValidationError, validate
+
 __all__ = [
+    "TOKEN_INTROSPECTION_JWT_MEDIA_TYPE",
     "AuthorizationServer",
     "ClientRegistration",
     "Es256Signer",
     "IssuedToken",
     "OAuthRefusal",
 ]
+
+TOKEN_INTROSPECTION_JWT_MEDIA_TYPE: Final = b"application/token-introspection+jwt"
 
 
 class OAuthRefusal(Exception):
@@ -93,8 +99,21 @@ class ClientRegistration:
     #: (a browser or a mobile app, which cannot keep a secret) may not.
     confidential: bool = False
     client_secret: bytes | str | None = None
+    dpop_bound_access_tokens: bool = False
+    authorization_detail_types: tuple[str, ...] = ()
+    introspection_signed_response_alg: str | None = None
+    introspection_encrypted_response_alg: str | None = None
+    introspection_encrypted_response_enc: str | None = None
 
     def __post_init__(self) -> None:
+        if (
+            self.introspection_encrypted_response_enc is not None
+            and self.introspection_encrypted_response_alg is None
+        ):
+            raise ValueError(
+                "introspection_encrypted_response_enc requires "
+                "introspection_encrypted_response_alg"
+            )
         if not self.confidential:
             if self.client_secret is not None:
                 raise ValueError("a public OAuth client cannot hold a client secret")
@@ -125,6 +144,8 @@ class IssuedToken:
     #: must not read another's data, whatever roles the bearer holds.
     tenant: str = ""
     refresh_token: str = ""
+    token_type: str = "Bearer"
+    authorization_details: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +157,7 @@ class _Code:
     redirect_uri: str
     tenant: str
     issued_at: float
+    authorization_details: tuple[dict[str, Any], ...]
     #: The access token this code produced, once redeemed. Kept so a second
     #: redemption can revoke it -- which is the only safe answer when two
     #: parties demonstrably hold the same code.
@@ -154,6 +176,8 @@ class _Refresh:
     scope: tuple[str, ...]
     tenant: str
     client_id: str
+    dpop_jkt: str
+    authorization_details: tuple[dict[str, Any], ...]
 
 
 def _b64(raw: bytes) -> str:
@@ -200,6 +224,7 @@ class Es256Signer:
     """
 
     private: int
+    algorithm: ClassVar[str] = "ES256"
     #: Names this key in the JWS header and in the key set, so a verifier can
     #: pick during a rotation instead of trying every key.
     kid: str = "wreath-es256"
@@ -255,16 +280,13 @@ class Es256Signer:
         ]
 
     def encode(self, claims: Mapping[str, Any]) -> str:
+        return self.encode_with_type(claims, "JWT")
+
+    def encode_with_type(self, claims: Mapping[str, Any], typ: str) -> str:
         from ._webpush import _ecdsa_sign
 
-        header = _b64(
-            json.dumps(
-                {"alg": "ES256", "typ": "JWT", "kid": self.kid}, separators=(",", ":")
-            ).encode("utf-8")
-        )
-        payload = _b64(
-            json.dumps(dict(claims), separators=(",", ":"), sort_keys=True).encode("utf-8")
-        )
+        header = _b64(_json_dumps({"alg": "ES256", "typ": typ, "kid": self.kid}))
+        payload = _b64(_json_dumps(dict(sorted(claims.items()))))
         signing_input = f"{header}.{payload}".encode("ascii")
         signature = _ecdsa_sign(self.private, hashlib.sha256(signing_input).digest())
         return f"{header}.{payload}.{_b64(signature)}"
@@ -288,6 +310,7 @@ class AuthorizationServer:
 
     __slots__ = (
         "_chains",
+        "_authorization_detail_types",
         "_clients",
         "_code_ttl",
         "_codes",
@@ -299,8 +322,10 @@ class AuthorizationServer:
         "_revoked",
         "_secret",
         "_signer",
+        "_signing_alg",
         "_signing_seconds",
         "_spent",
+        "_verifying_key",
     )
 
     def __init__(
@@ -313,6 +338,7 @@ class AuthorizationServer:
         code_ttl: float = 60.0,
         refresh_ttl: float = 30 * 24 * 3600.0,
         signer: Any = None,
+        authorization_detail_types: Mapping[str, type] | None = None,
     ) -> None:
         normalized_issuer = issuer.rstrip("/")
         parsed_issuer = urlsplit(normalized_issuer)
@@ -335,20 +361,33 @@ class AuthorizationServer:
         if raw and len(raw) < 32:
             raise ValueError("OAuth HMAC signing secret must contain at least 32 bytes")
         self._secret = raw or secrets.token_bytes(32)
-        self._clients = {client.client_id: client for client in clients}
+        self._signer = signer
+        self._signing_alg = self._resolve_signing_algorithm()
+        self._verifying_key = None
+        detail_types = dict(authorization_detail_types or {})
+        for detail_name, model in detail_types.items():
+            if not isinstance(detail_name, str) or not detail_name:
+                raise ValueError("OAuth authorization detail type names must be non-empty strings")
+            if not isinstance(model, type) or not is_dataclass(model):
+                raise ValueError(
+                    f"OAuth authorization detail type {detail_name!r} must map to a dataclass type"
+                )
+        self._authorization_detail_types = detail_types
+        self._clients: dict[str, ClientRegistration] = {}
+        for client in clients:
+            self.register(client)
         self._lifetime = lifetime
         self._code_ttl = code_ttl
         if refresh_ttl <= 0:
             raise ValueError("OAuth refresh_ttl must be positive")
         self._refresh_ttl = refresh_ttl
-        self._signer = signer
         self._codes: dict[str, _Code] = {}
         self._refresh: dict[str, _Refresh] = {}
         self._chains: dict[str, list[str]] = {}
         #: Refresh token -> the chain it belonged to, kept after rotation spends
         #: it. Without this a reused token's chain is unknowable: `rotate` pops
         #: the record, so the reuse branch has nothing to revoke.
-        self._spent: dict[str, tuple[str, str]] = {}
+        self._spent: dict[str, tuple[str, str, str]] = {}
         self._revoked: set[str] = set()
         self._issued = 0
         self._signing_seconds = 0.0
@@ -359,12 +398,41 @@ class AuthorizationServer:
             "issuer": self._issuer,
             "authorization_endpoint": f"{self._issuer}/oauth/authorize",
             "token_endpoint": f"{self._issuer}/oauth/token",
+            "introspection_endpoint": f"{self._issuer}/oauth/introspect",
             "jwks_uri": f"{self._issuer}/oauth/jwks",
             "response_types_supported": ["code"],
             "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials"],
             "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": ["client_secret_basic"],
+            "authorization_response_iss_parameter_supported": True,
+            "dpop_signing_alg_values_supported": ["ES256", "EdDSA"],
+            "authorization_details_types_supported": sorted(self._authorization_detail_types),
+            "introspection_signing_alg_values_supported": [self._signing_algorithm()],
         }
+
+    def authorization_response(
+        self,
+        *,
+        code: str | None = None,
+        error: str | None = None,
+        state: str | None = None,
+    ) -> dict[str, str]:
+        """Build RFC 9207 authorization response parameters.
+
+        The issuer is present on both success and error responses. Keeping this
+        in the authorization server prevents endpoint glue from remembering the
+        mix-up defence on one branch and forgetting it on another.
+        """
+        if (code is None) == (error is None):
+            raise ValueError("an authorization response needs exactly one of code or error")
+        response = {"iss": self._issuer}
+        if code is not None:
+            response["code"] = code
+        elif error is not None:
+            response["error"] = error
+        if state is not None:
+            response["state"] = state
+        return response
 
     def jwks(self) -> dict[str, Any]:
         """The public keys, which for an HMAC signer are none.
@@ -380,7 +448,153 @@ class AuthorizationServer:
         return {"keys": list(self._signer.public_jwks())}
 
     def register(self, client: ClientRegistration) -> None:
+        if client.introspection_encrypted_response_alg is not None:
+            raise ValueError(
+                f"client {client.client_id!r} requests introspection response encryption, "
+                "which is not supported"
+            )
+        requested_alg = client.introspection_signed_response_alg
+        if requested_alg is not None:
+            if not client.confidential:
+                raise ValueError(
+                    f"client {client.client_id!r} must be confidential to receive "
+                    "token introspection responses"
+                )
+            signing_alg = self._signing_algorithm()
+            if requested_alg != signing_alg:
+                raise ValueError(
+                    f"client {client.client_id!r} requests introspection signing algorithm "
+                    f"{requested_alg!r}; this server signs with {signing_alg!r}"
+                )
+            if self._signer is not None and not callable(
+                getattr(self._signer, "encode_with_type", None)
+            ):
+                raise ValueError(
+                    "the configured OAuth signer must expose encode_with_type(claims, typ) "
+                    "for JWT token introspection responses"
+                )
+            if self._verifying_key is None:
+                if self._signer is None:
+                    from ._auth.jwt import SymmetricKey
+
+                    self._verifying_key = SymmetricKey(self._secret)
+                else:
+                    verifying_key = getattr(self._signer, "verifying_key", None)
+                    if not callable(verifying_key):
+                        raise ValueError(
+                            "the configured OAuth signer must expose verifying_key() "
+                            "for JWT token introspection"
+                        )
+                    self._verifying_key = verifying_key()
+        unknown = sorted(
+            set(client.authorization_detail_types) - set(self._authorization_detail_types)
+        )
+        if unknown:
+            raise ValueError(
+                f"client {client.client_id!r} names {', '.join(unknown)} as an unknown "
+                "authorization detail type"
+            )
         self._clients[client.client_id] = client
+
+    def _signing_algorithm(self) -> str:
+        return self._signing_alg
+
+    def _resolve_signing_algorithm(self) -> str:
+        if self._signer is None:
+            return "HS256"
+        declared = getattr(self._signer, "algorithm", None)
+        if isinstance(declared, str) and declared:
+            return declared
+        keys = self._signer.public_jwks()
+        if not isinstance(keys, list) or not keys:
+            raise ValueError("the configured OAuth signer must publish a signing algorithm")
+        algorithm = keys[0].get("alg")
+        if not isinstance(algorithm, str) or not algorithm:
+            raise ValueError("the configured OAuth signer JWK must name its alg")
+        return algorithm
+
+    def validate_authorization_details(
+        self, authorization_details: Any
+    ) -> tuple[dict[str, Any], ...]:
+        """Validate and normalize one RFC 9396 ``authorization_details`` value."""
+        details = authorization_details
+        if isinstance(details, str):
+            if len(details) > 64 * 1024:
+                raise OAuthRefusal(
+                    "invalid-authorization-details",
+                    "authorization_details exceeds the 64 KiB validation limit",
+                )
+            try:
+                details = _json_loads(details)
+            except ValueError:
+                raise OAuthRefusal(
+                    "invalid-authorization-details",
+                    "authorization_details must be a JSON array of objects",
+                ) from None
+        if not isinstance(details, (list, tuple)):
+            raise OAuthRefusal(
+                "invalid-authorization-details",
+                "authorization_details must be a JSON array of objects",
+            )
+        if len(details) > 64:
+            raise OAuthRefusal(
+                "invalid-authorization-details",
+                "authorization_details may contain at most 64 objects",
+            )
+        normalized: list[dict[str, Any]] = []
+        for index, detail in enumerate(details):
+            if not isinstance(detail, Mapping):
+                raise OAuthRefusal(
+                    "invalid-authorization-details",
+                    f"authorization_details[{index}] must be an object",
+                )
+            detail_type = detail.get("type")
+            if not isinstance(detail_type, str) or not detail_type:
+                raise OAuthRefusal(
+                    "invalid-authorization-details",
+                    f"authorization_details[{index}].type must be a non-empty string",
+                )
+            model = self._authorization_detail_types.get(detail_type)
+            if model is None:
+                raise OAuthRefusal(
+                    "invalid-authorization-details",
+                    f"authorization_details[{index}] names unknown type {detail_type!r}",
+                )
+            body = {name: value for name, value in detail.items() if name != "type"}
+            try:
+                validate(model, body, ("authorization_details", index))
+            except ValidationError as error:
+                first = error.errors[0]
+                location = ".".join(str(part) for part in first["loc"])
+                raise OAuthRefusal(
+                    "invalid-authorization-details",
+                    f"authorization_details does not conform at {location}: {first['msg']}",
+                ) from None
+            except (TypeError, ValueError) as error:
+                raise OAuthRefusal(
+                    "invalid-authorization-details",
+                    f"authorization_details[{index}] is invalid: {error}",
+                ) from None
+            normalized.append({"type": detail_type, **body})
+        return tuple(normalized)
+
+    def _client_authorization_details(
+        self,
+        client: ClientRegistration,
+        authorization_details: Any,
+    ) -> tuple[dict[str, Any], ...]:
+        if authorization_details in (None, (), []):
+            return ()
+        details = self.validate_authorization_details(authorization_details)
+        allowed = set(client.authorization_detail_types)
+        outside = sorted({detail["type"] for detail in details} - allowed)
+        if outside:
+            raise OAuthRefusal(
+                "invalid-authorization-details",
+                f"client {client.client_id!r} is not registered for authorization detail type "
+                + ", ".join(outside),
+            )
+        return details
 
     def _client(self, client_id: str) -> ClientRegistration:
         client = self._clients.get(client_id)
@@ -415,6 +629,13 @@ class AuthorizationServer:
                 "the confidential client's client secret is missing or invalid",
             )
         return client
+
+    def _require_dpop(self, client_id: str, dpop_jkt: str) -> None:
+        if client_id and self._client(client_id).dpop_bound_access_tokens and not dpop_jkt:
+            raise OAuthRefusal(
+                "invalid-dpop-proof",
+                f"client {client_id!r} requires a DPoP proof for every token request",
+            )
 
     def authorize(
         self,
@@ -452,6 +673,7 @@ class AuthorizationServer:
         redirect_uri: str,
         scope: Iterable[str] = (),
         tenant: str = "",
+        authorization_details: Any = (),
         now: float | None = None,
     ) -> str:
         """Mint one authorization code, bound to a client, a URI and a challenge.
@@ -466,6 +688,7 @@ class AuthorizationServer:
                 an S256 digest.
         """
         client = self._client(client_id)
+        rich_details = self._client_authorization_details(client, authorization_details)
         _check_challenge(challenge)
         # The same exact match `authorize` makes, made again here: `authorize`
         # is a separate call and nothing obliges a caller to have made it.
@@ -492,6 +715,7 @@ class AuthorizationServer:
             redirect_uri=redirect_uri,
             tenant=tenant,
             issued_at=time.time() if now is None else now,
+            authorization_details=rich_details,
         )
         return code
 
@@ -503,6 +727,7 @@ class AuthorizationServer:
         client_id: str,
         client_secret: bytes | str | None = None,
         redirect_uri: str,
+        dpop_jkt: str = "",
         now: float | None = None,
     ) -> IssuedToken:
         """Exchange a code once. A second exchange revokes what the first issued.
@@ -520,6 +745,7 @@ class AuthorizationServer:
                 verifier that does not match the challenge.
         """
         self._authenticate_client(client_id, client_secret)
+        self._require_dpop(client_id, dpop_jkt)
         record = self._codes.get(code)
         if record is None:
             raise OAuthRefusal("unknown-code", "no such authorization code; it was never issued")
@@ -579,6 +805,9 @@ class AuthorizationServer:
             now=now,
             with_refresh=True,
             refresh_client_id=record.client_id,
+            authorization_details=record.authorization_details,
+            dpop_jkt=dpop_jkt,
+            client_id=client_id,
         )
         self._codes[code] = _Code(
             client_id=record.client_id,
@@ -588,6 +817,7 @@ class AuthorizationServer:
             redirect_uri=record.redirect_uri,
             tenant=record.tenant,
             issued_at=record.issued_at,
+            authorization_details=record.authorization_details,
             issued_token=token.access_token,
         )
         return token
@@ -602,8 +832,17 @@ class AuthorizationServer:
         now: float | None = None,
         with_refresh: bool = False,
         refresh_client_id: str = "",
+        dpop_jkt: str = "",
+        client_id: str = "",
+        authorization_details: Any = (),
     ) -> IssuedToken:
         """Mint one access token. What comes out is what `JwtVerifier` verifies."""
+        self._require_dpop(client_id, dpop_jkt)
+        rich_details = (
+            self.validate_authorization_details(authorization_details)
+            if authorization_details not in (None, (), [])
+            else ()
+        )
         moment = time.time() if now is None else now
         expires = moment + self._lifetime
         claims: dict[str, Any] = {
@@ -615,11 +854,17 @@ class AuthorizationServer:
         }
         if subject is not None:
             claims["sub"] = subject
+        if client_id:
+            claims["client_id"] = client_id
         wanted = tuple(scope)
         if wanted:
             claims["scope"] = " ".join(wanted)
         if tenant:
             claims["tenant"] = tenant
+        if dpop_jkt:
+            claims["cnf"] = {"jkt": dpop_jkt}
+        if rich_details:
+            claims["authorization_details"] = list(rich_details)
         refresh = chain = ""
         if with_refresh and subject is not None:
             minted = self.issue_refresh(
@@ -628,6 +873,8 @@ class AuthorizationServer:
                 scope=wanted,
                 tenant=tenant,
                 client_id=refresh_client_id,
+                dpop_jkt=dpop_jkt,
+                authorization_details=rich_details,
                 now=moment,
             )
             refresh, chain = minted.token, minted.chain
@@ -642,6 +889,8 @@ class AuthorizationServer:
             expires_at=expires,
             tenant=tenant,
             refresh_token=refresh,
+            token_type="DPoP" if dpop_jkt else "Bearer",
+            authorization_details=rich_details,
         )
 
     def client_credentials(
@@ -651,6 +900,8 @@ class AuthorizationServer:
         client_secret: bytes | str | None = None,
         subject: str | None = None,
         scope: Iterable[str] = (),
+        dpop_jkt: str = "",
+        authorization_details: Any = (),
     ) -> IssuedToken:
         """A machine token. It carries no `sub`, and asking for one is refused.
 
@@ -672,6 +923,8 @@ class AuthorizationServer:
                 "cannot use the client-credentials grant",
             )
         self._authenticate_client(client_id, client_secret)
+        self._require_dpop(client_id, dpop_jkt)
+        rich_details = self._client_authorization_details(client, authorization_details)
         wanted = tuple(scope) or client.scopes
         outside = sorted(set(wanted) - set(client.scopes))
         if outside:
@@ -679,7 +932,14 @@ class AuthorizationServer:
                 "invalid-scope",
                 f"client {client_id!r} is not registered for scope {', '.join(outside)}",
             )
-        return self.issue_access(subject=None, audience=client_id, scope=wanted)
+        return self.issue_access(
+            subject=None,
+            audience=client_id,
+            scope=wanted,
+            dpop_jkt=dpop_jkt,
+            client_id=client_id,
+            authorization_details=rich_details,
+        )
 
     def issue_refresh(
         self,
@@ -689,9 +949,16 @@ class AuthorizationServer:
         scope: Iterable[str] = (),
         tenant: str = "",
         client_id: str = "",
+        dpop_jkt: str = "",
+        authorization_details: Any = (),
         now: float | None = None,
     ) -> _Refresh:
         chain = secrets.token_urlsafe(12)
+        rich_details = (
+            self.validate_authorization_details(authorization_details)
+            if authorization_details not in (None, (), [])
+            else ()
+        )
         record = _Refresh(
             token=secrets.token_urlsafe(32),
             subject=subject,
@@ -701,6 +968,8 @@ class AuthorizationServer:
             scope=tuple(scope),
             tenant=tenant,
             client_id=client_id,
+            dpop_jkt=dpop_jkt,
+            authorization_details=rich_details,
         )
         self._refresh[record.token] = record
         self._chains[chain] = []
@@ -713,6 +982,7 @@ class AuthorizationServer:
         audience: str = "",
         client_id: str | None = None,
         client_secret: bytes | str | None = None,
+        dpop_jkt: str = "",
         now: float | None = None,
     ) -> IssuedToken:
         """Exchange a refresh token for a new pair. Reuse revokes the whole chain."""
@@ -721,12 +991,17 @@ class AuthorizationServer:
         if record is None:
             spent = self._spent.get(token)
             if spent is not None:
-                chain, spent_client_id = spent
+                chain, spent_client_id, spent_dpop_jkt = spent
                 self._authenticate_refresh_client(
                     spent_client_id,
                     client_id=client_id,
                     client_secret=client_secret,
                 )
+                if spent_dpop_jkt and not hmac.compare_digest(spent_dpop_jkt, dpop_jkt):
+                    raise OAuthRefusal(
+                        "invalid-dpop-proof",
+                        "this spent refresh token was bound to a different DPoP key",
+                    )
                 self.revoke_chain(chain)
             raise OAuthRefusal(
                 "refresh-reused",
@@ -739,6 +1014,11 @@ class AuthorizationServer:
             client_id=client_id,
             client_secret=client_secret,
         )
+        if record.dpop_jkt and not hmac.compare_digest(record.dpop_jkt, dpop_jkt):
+            raise OAuthRefusal(
+                "invalid-dpop-proof",
+                "this refresh token can only be rotated with the same DPoP key",
+            )
         if audience and audience != record.audience:
             raise OAuthRefusal(
                 "audience-mismatch",
@@ -758,6 +1038,9 @@ class AuthorizationServer:
             audience=record.audience,
             scope=record.scope,
             tenant=record.tenant,
+            dpop_jkt=record.dpop_jkt,
+            client_id=record.client_id,
+            authorization_details=record.authorization_details,
             now=moment,
         )
         successor = _Refresh(
@@ -769,9 +1052,11 @@ class AuthorizationServer:
             scope=record.scope,
             tenant=record.tenant,
             client_id=record.client_id,
+            dpop_jkt=record.dpop_jkt,
+            authorization_details=record.authorization_details,
         )
         self._refresh[successor.token] = successor
-        self._spent[token] = (record.chain, record.client_id)
+        self._spent[token] = (record.chain, record.client_id, record.dpop_jkt)
         self._chains.setdefault(record.chain, []).append(issued.access_token)
         return IssuedToken(
             access_token=issued.access_token,
@@ -781,6 +1066,8 @@ class AuthorizationServer:
             expires_at=issued.expires_at,
             tenant=issued.tenant,
             refresh_token=successor.token,
+            token_type=issued.token_type,
+            authorization_details=issued.authorization_details,
         )
 
     def _authenticate_refresh_client(
@@ -813,7 +1100,7 @@ class AuthorizationServer:
         # Spent tokens go too, or a third presentation of an already-revoked
         # token would try to revoke a chain that is no longer there and read as
         # a fresh incident.
-        for token, (spent_chain, _client_id) in list(self._spent.items()):
+        for token, (spent_chain, _client_id, _dpop_jkt) in list(self._spent.items()):
             if spent_chain == chain:
                 del self._spent[token]
         return len(issued)
@@ -821,6 +1108,100 @@ class AuthorizationServer:
     def is_revoked(self, access_token: str) -> bool:
         """The `RevocationCheck` `JwtVerifier` already takes."""
         return access_token in self._revoked
+
+    def introspection_jwt(
+        self,
+        token: str,
+        *,
+        client_id: str,
+        client_secret: bytes | str | None,
+        now: float | None = None,
+    ) -> str:
+        """Return an RFC 9701 JWT token-introspection response."""
+        client = self._authenticate_client(client_id, client_secret)
+        if client.introspection_signed_response_alg is None:
+            raise OAuthRefusal(
+                "invalid-client",
+                f"client {client_id!r} is not registered for JWT token introspection",
+            )
+        moment = time.time() if now is None else now
+        response = {
+            "iss": self._issuer,
+            "aud": client_id,
+            "iat": int(moment),
+            "token_introspection": self._introspection_claims(
+                token,
+                audience=client_id,
+                scopes=client.scopes,
+                now=moment,
+            ),
+        }
+        return self._encode(
+            response,
+            typ="token-introspection+jwt",
+            count_issued=False,
+        )
+
+    def _introspection_claims(
+        self,
+        token: str,
+        *,
+        audience: str,
+        scopes: tuple[str, ...],
+        now: float,
+    ) -> dict[str, Any]:
+        from ._auth.jwt import _parse_compact, _verify_signature
+
+        try:
+            header, claims, signing_input, signature = _parse_compact(token)
+            algorithm = self._signing_algorithm()
+            if header.get("alg") != algorithm or header.get("typ") != "JWT":
+                return {"active": False}
+            if self._verifying_key is None:
+                raise RuntimeError(
+                    "JWT token introspection client registered without a verifying key"
+                )
+            if not _verify_signature(
+                algorithm,
+                self._verifying_key,
+                signing_input,
+                signature,
+            ):
+                return {"active": False}
+        except (KeyError, OverflowError, TypeError, ValueError):
+            return {"active": False}
+
+        issuer = claims.get("iss")
+        expires = claims.get("exp")
+        token_audience = claims.get("aud")
+        if isinstance(token_audience, str):
+            audiences = (token_audience,)
+        elif isinstance(token_audience, list) and all(
+            isinstance(item, str) for item in token_audience
+        ):
+            audiences = tuple(token_audience)
+        else:
+            return {"active": False}
+        if (
+            issuer != self._issuer
+            or isinstance(expires, bool)
+            or not isinstance(expires, (int, float))
+            or expires <= now
+            or audience not in audiences
+            or token in self._revoked
+        ):
+            return {"active": False}
+        introspection = dict(claims)
+        scope = introspection.get("scope")
+        if scopes and isinstance(scope, str):
+            allowed_scopes = frozenset(scopes)
+            relevant = [item for item in scope.split() if item in allowed_scopes]
+            if relevant:
+                introspection["scope"] = " ".join(relevant)
+            else:
+                introspection.pop("scope")
+        introspection["active"] = True
+        return introspection
 
     def counters(self) -> Any:
         """What signing has cost, so the ceiling is watched rather than warned about.
@@ -845,25 +1226,31 @@ class AuthorizationServer:
             },
         )
 
-    def _encode(self, claims: Mapping[str, Any]) -> str:
+    def _encode(
+        self,
+        claims: Mapping[str, Any],
+        *,
+        typ: str = "JWT",
+        count_issued: bool = True,
+    ) -> str:
         if self._signer is not None:
             started = time.perf_counter()
             try:
-                return self._signer.encode(claims)
+                if typ == "JWT":
+                    return self._signer.encode(claims)
+                return self._signer.encode_with_type(claims, typ)
             finally:
                 # Counted around the asymmetric path only. The HMAC path is
                 # ~12us and measuring it would cost a meaningful fraction of
                 # what it measures, which is the trap `AGENTS.md` names about
                 # cProfile one order of magnitude down.
                 self._signing_seconds += time.perf_counter() - started
-                self._issued += 1
-        self._issued += 1
-        header = _b64(
-            json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode("utf-8")
-        )
-        payload = _b64(
-            json.dumps(dict(claims), separators=(",", ":"), sort_keys=True).encode("utf-8")
-        )
+                if count_issued:
+                    self._issued += 1
+        if count_issued:
+            self._issued += 1
+        header = _b64(_json_dumps({"alg": "HS256", "typ": typ}))
+        payload = _b64(_json_dumps(dict(sorted(claims.items()))))
         signing_input = f"{header}.{payload}".encode("ascii")
         signature = _b64(hmac.new(self._secret, signing_input, hashlib.sha256).digest())
         return f"{header}.{payload}.{signature}"

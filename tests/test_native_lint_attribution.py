@@ -20,8 +20,6 @@ def test_a_wrapped_return_call_is_not_a_definition() -> None:
 
 
 def test_the_wrapped_call_line_itself_is_attributed_to_the_getter() -> None:
-    # Index 4 is `return PyLong_FromUnsignedLongLong(` -- the line that used to
-    # be read as the start of a new function.
     assert _enclosing_function(GETTER, 4) == "rp_get_stale_events"
 
 

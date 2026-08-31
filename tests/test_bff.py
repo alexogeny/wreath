@@ -77,9 +77,7 @@ def _cookie(response: Any) -> str:
 
 def _app(client: RecordingClient) -> tuple[Wreath, MemoryStore]:
     store = MemoryStore()
-    app = Wreath(
-        http_policy=HttpPolicy(session=bff_session_policy("s" * 32, store=store))
-    )
+    app = Wreath(http_policy=HttpPolicy(session=bff_session_policy("s" * 32, store=store)))
 
     @app.post("/oauth/callback")
     async def callback(request: Any) -> dict[str, bool]:
@@ -92,9 +90,7 @@ def _app(client: RecordingClient) -> tuple[Wreath, MemoryStore]:
         return {"ok": True}
 
     app.include_router(
-        bff_router(
-            {"catalog": BFFResource(client, target_prefix="/v2", methods={"GET", "POST"})}
-        )
+        bff_router({"catalog": BFFResource(client, target_prefix="/v2", methods={"GET", "POST"})})
     )
     return app, store
 
@@ -234,9 +230,7 @@ async def test_proxy_requires_an_active_bff_session() -> None:
     upstream = RecordingClient()
     app, _store = _app(upstream)
 
-    response = await TestClient(app).get(
-        "/bff/catalog/widgets", headers={"x-wreath-bff": "1"}
-    )
+    response = await TestClient(app).get("/bff/catalog/widgets", headers={"x-wreath-bff": "1"})
 
     assert response.status == 401
     assert response.header("www-authenticate") == "BFF"
@@ -249,9 +243,7 @@ async def test_static_resource_routes_make_unknown_resources_404_and_methods_405
     browser = TestClient(app)
 
     unknown = await browser.get("/bff/unknown/widgets", headers={"x-wreath-bff": "1"})
-    disallowed = await browser.delete(
-        "/bff/catalog/widgets", headers={"x-wreath-bff": "1"}
-    )
+    disallowed = await browser.delete("/bff/catalog/widgets", headers={"x-wreath-bff": "1"})
 
     assert unknown.status == 404
     assert disallowed.status == 405

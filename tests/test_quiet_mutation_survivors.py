@@ -8,9 +8,7 @@ import pytest
 from wreath._devtools import quiet
 
 
-def _result(
-    *, returncode: int = 0, stdout: str = "", stderr: str | None = ""
-) -> SimpleNamespace:
+def _result(*, returncode: int = 0, stdout: str = "", stderr: str | None = "") -> SimpleNamespace:
     return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
 
@@ -28,12 +26,15 @@ class _CgroupFile:
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        ("0::/user.slice/app.slice/app-terminal.scope\n", (
-            "/user.slice/app.slice/app-terminal.scope",
-            "/user.slice/app.slice",
-            "/user.slice",
-            "/",
-        )),
+        (
+            "0::/user.slice/app.slice/app-terminal.scope\n",
+            (
+                "/user.slice/app.slice/app-terminal.scope",
+                "/user.slice/app.slice",
+                "/user.slice",
+                "/",
+            ),
+        ),
         ("9:cpu:/legacy\n0::/only\n", ("/only", "/")),
         ("9:cpu:/legacy\nmalformed\n", ()),
         ("0\n", ()),
@@ -184,9 +185,7 @@ def _isolate_plan(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(quiet, "session_ancestry", lambda _pid=None: ())
 
 
-def test_plan_tier_boundaries_are_exact(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_plan_tier_boundaries_are_exact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _isolate_plan(monkeypatch, tmp_path)
 
     assert quiet.plan(-1) == []
@@ -297,9 +296,7 @@ def test_tier_one_plan_does_not_change_absent_or_already_target_state(
         return ""
 
     monkeypatch.setattr(quiet, "_read", read)
-    actual = {
-        change.target for step in quiet.plan(1) if (change := step.change) is not None
-    }
+    actual = {change.target for step in quiet.plan(1) if (change := step.change) is not None}
     assert actual == expected_targets
 
 
@@ -313,11 +310,7 @@ def test_tier_one_plan_preserves_an_already_unrestricted_perf_setting(
         lambda path: "-1" if str(path).endswith("/perf_event_paranoid") else "",
     )
 
-    targets = {
-        change.target
-        for step in quiet.plan(1)
-        if (change := step.change) is not None
-    }
+    targets = {change.target for step in quiet.plan(1) if (change := step.change) is not None}
     assert "/proc/sys/kernel/perf_event_paranoid" not in targets
 
 

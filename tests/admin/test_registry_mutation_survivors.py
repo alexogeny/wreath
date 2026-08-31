@@ -45,7 +45,7 @@ async def test_overview_home_link_is_valid_for_trimmed_and_root_prefixes(
     account_model: type, prefix: str, expected: str
 ) -> None:
     admin = _admin(account_model, FakeSession())
-    index = routes(admin.router(prefix))[('GET', expected)]
+    index = routes(admin.router(prefix))[("GET", expected)]
 
     assert f'href="{expected}"' in (await index(Request())).body.decode()
 
@@ -81,9 +81,7 @@ async def test_missing_rows_are_404s_on_every_row_write_view(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "path", ["/admin/account/{pk}/edit", "/admin/account/{pk}/delete"]
-)
+@pytest.mark.parametrize("path", ["/admin/account/{pk}/edit", "/admin/account/{pk}/delete"])
 async def test_csrf_refusal_stops_existing_row_writes(account_model: type, path: str) -> None:
     row = account_model(id=1, name="a", email="e")
     session = FakeSession({1: row})
@@ -105,14 +103,17 @@ async def test_csrf_refusal_stops_existing_row_writes(account_model: type, path:
 
 def test_operation_rule_precedes_group_and_star_rules() -> None:
     exact = Access.roles("exact")
-    assert registry._rule_for(
-        {
-            "update": exact,
-            "write": Access.roles("group"),
-            "*": Access.roles("fallback"),
-        },
-        "update",
-    ) is exact
+    assert (
+        registry._rule_for(
+            {
+                "update": exact,
+                "write": Access.roles("group"),
+                "*": Access.roles("fallback"),
+            },
+            "update",
+        )
+        is exact
+    )
 
 
 def test_missing_operation_group_and_star_resolves_to_public() -> None:

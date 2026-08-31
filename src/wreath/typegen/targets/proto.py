@@ -86,11 +86,6 @@ def _field_type(ref: TypeRef, where: str) -> tuple[str, str]:
         return prefix, _SCALARS[ref.kind]
     if ref.kind == "reference":
         if ref.name is None:
-            # Unreachable today -- the registry names every reference before it
-            # reaches a target. A fallback here used to emit
-            # `google.protobuf.Struct`, a type this schema never imports, so
-            # the one time it fired it would have produced a `.proto` that does
-            # not compile. Refusing is the honest failure.
             raise _refuse("an unnamed model reference", where)
         return prefix, ref.name
     if ref.kind == "array":

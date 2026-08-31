@@ -793,16 +793,10 @@ def _registry_descriptor(registry: Any, *, fleet: bool = False) -> bytes:
     comes out unqualified so it binds to whatever `search_path` the applying
     transaction set -- which `wreath.orm.TenantContext` is already how you set.
 
-    A `tenant_search_path` spec declares no schema of its own and is therefore
-    only describable this way; it used to be refused outright, with a message
-    naming the compiler that did not exist yet.
+    A `tenant_search_path` spec declares no schema and is only describable this
+    way.
     """
     records: list[bytes] = []
-    # This database's default operator class per (access method, indexed type),
-    # if anything has read it yet. See the operator-class comment below; a
-    # registry that was never resolved against a database contributes none and
-    # every declared operator class is written out verbatim, which is what the
-    # offline renderers want.
     default_opclasses = registry.default_opclasses or {}
     for spec in registry.specs:
         if not fleet and (spec.sql_namespace != "qualified" or not spec.schema):

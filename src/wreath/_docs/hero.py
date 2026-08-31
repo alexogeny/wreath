@@ -77,7 +77,7 @@ def _render(config: list[str]) -> str:
     if signals:
         parts.append(
             '<div class="hero-signals">'
-            + "".join(f'<span>{_esc(signal)}</span>' for signal in signals)
+            + "".join(f"<span>{_esc(signal)}</span>" for signal in signals)
             + "</div>"
         )
     if actions:

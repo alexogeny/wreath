@@ -1080,17 +1080,8 @@ def _dotted(node: ast.AST) -> str:
     return ""
 
 
-#: Reads off the request object whose value is whatever the caller sent.
-#:
-#: **`request` is framework-injected, so the parameter itself is not a taint
-#: source** (`_INJECTED_PARAMS`) -- which used to mean *nothing reached through
-#: it was either.* The same handler was an ERROR when the value arrived as a
-#: bound parameter and clean when it arrived through `request.query_params`,
-#: which is the more idiomatic of the two spellings.
-#:
-#: `request.state` is deliberately absent: it holds what middleware resolved --
-#: a tenant, an identity, a correlation id -- not what the caller sent, and
-#: flagging it would fire on the tenant-scoped query that is the correct answer.
+#: Request methods that expose caller-controlled values. `request.state` is
+#: excluded because it contains middleware-resolved values rather than input.
 _REQUEST_READS: Final = (
     "request.json",
     "request.form",

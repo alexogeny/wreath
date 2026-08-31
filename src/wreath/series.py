@@ -35,8 +35,7 @@ async def herd_activity(request, herd_id: int, session: Session):
     )
 ```
 
-Four things follow from declaring rather than building, and each of them is a
-bug that no longer has anywhere to happen:
+Declaration enforces four properties:
 
 * **Every bucket in the range exists**, because the range generates a spine and
   the aggregate is joined onto it. An empty Tuesday is a zero, not an absence.
@@ -1668,9 +1667,8 @@ class Series(_Builder):
         `retain` is a promise about what stays warm, not an instruction to
         expire. What it changes today is which tier a read prefers: a range
         older than raw's window is answered from the coarsest tier that still
-        covers it, *even though raw happens to still be present*. Keeping that
-        promise now is what stops a query changing shape on the day a later
-        stage begins enforcing the window.
+        covers it, *even though raw happens to still be present*. This keeps the
+        query shape stable when retention enforcement begins.
 
         A tier coarser than `raw` requires `seal`, because a tier stores
         a value on the understanding that it is final and only the seal says
@@ -2298,11 +2296,8 @@ class Series(_Builder):
                 "already recomputes from the source rows and there is nothing "
                 "to compare against"
             )
-        # Settle first, because reading no longer does. Without this an
-        # application that only ever `run()`s a sealed view would never store a
-        # bucket at all, and a reconcile would keep finding nothing to compare
-        # against -- sealing would be a declaration with no effect. One job, two
-        # steps, in the only order that makes the second one meaningful.
+        # Reconciliation compares against a settled bucket, so settlement must
+        # run first.
         await self.settle(session, range=range, zone=zone, now=now, **values)
         zone_name = _zone_name(zone if zone is not None else self._stored_in)
         predicates = self._bind(values)

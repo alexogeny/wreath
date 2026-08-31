@@ -1029,13 +1029,8 @@ def second_factor_router(
     **Enrolling a factor stamps the session only when it is the first one.** A
     stamp says the caller proved a factor the account already had; a factor the
     caller has just chosen proves possession of their own authenticator instead.
-    That condition is necessary and was once believed sufficient: it stops the
-    enrolment stamping directly, but not the caller who registers a passkey of
-    their own and then *proves* it at `POST /webauthn/verify` one request later,
-    which stamps for real. Somebody holding a stolen session walked through
-    `DELETE /{factor_id}` and every `wreath.auth.second_factor` route that way,
-    for the cost of one extra round trip. Refusing the enrolment is what closes
-    it; declining to stamp it remains true and is no longer load-bearing.
+    Enrolment is refused for an already signed-in session that has not completed
+    step-up, including when the caller intends to prove the new factor next.
 
     `POST /verify` is the other end, and it serves two moments with one route.
     Given a **pending** login it finishes it, rotating the session id before

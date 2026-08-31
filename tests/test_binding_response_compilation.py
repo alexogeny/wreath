@@ -54,8 +54,6 @@ class Node:
 
 @dataclasses.dataclass
 class Recursive:
-    """A direct recursion, used to exercise the compiler's cycle cut."""
-
     child: Recursive
 
 
@@ -265,7 +263,7 @@ def test_a_self_referential_response_mapping_uses_the_finite_fallback() -> None:
 
 
 class _DictSubclass(dict):
-    """A Mapping that is not exactly a `dict`, so it must take the old path."""
+    pass
 
 
 class _ListSubclass(list):

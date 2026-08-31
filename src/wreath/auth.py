@@ -16,6 +16,8 @@ from ._auth.jwt import (
     SymmetricKey,
     UnsupportedAlgorithm,
     default_identity,
+    jwk_thumbprint,
+    jwk_thumbprint_uri,
     key_from_jwk,
     key_from_pem,
 )
@@ -41,6 +43,8 @@ __all__ = [
     "authenticated",
     "default_identity",
     "identify",
+    "jwk_thumbprint",
+    "jwk_thumbprint_uri",
     "key_from_jwk",
     "key_from_pem",
     "oauth_step_up",

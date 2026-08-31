@@ -1,22 +1,7 @@
-"""The lifecycle benchmark's route table, shared by the apps and the runner.
+"""A side-effect-free, noun-based route table shared by the lifecycle benchmarks.
 
-Kept free of import side effects so both ``lifecycle_apps`` (which builds an
-application on import) and ``lifecycle`` (which only needs the target URL) can
-import it.
-
-The literals here are words on purpose. The table used to be built from
-numbered literals -- ``domain-7``, ``group-2``, ``resource-13`` -- which is not
-what a real route table looks like: real path segments are nouns, and the
-numbers in a real API are path *parameters*, which this table already has. The
-distinction is not cosmetic. A router that keys on segment bytes behaves very
-differently on ``resource-137`` (a long shared prefix, discriminated only by
-digits deep in the segment) than on ``invoices``, and measuring the numbered
-shape reports a number that no real application would see.
-
-Shape, count, depth, and per-branch permissions are unchanged from the numbered
-version, so this is the same benchmark with a realistic vocabulary -- but
-results are not comparable across the change, because the route table is an
-input to what it measures.
+Numeric API values are path parameters. Results are comparable only when the
+route vocabulary, count, depth, and per-branch permissions are unchanged.
 """
 
 from __future__ import annotations

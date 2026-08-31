@@ -29,13 +29,10 @@ rewrites the literal's format. Each would be a permanent-drift bug. Widening
 `_LITERAL` means measuring the new type's normal form first and pinning it
 in `tests/postgres/test_partial_index_roundtrip.py`.
 
-`IS NULL` and `IS NOT NULL` render **no literal**, and so accept any declared
-column type. That branch used to compute the type kind and then throw it away,
-which meant it refused `timestamptz` for a reason that only applies to the
-comparison branches -- and `retired_at IS NULL` is the archetypal partial index.
-Measured against PostgreSQL 17.10: every one of the 32 types
+`IS NULL` and `IS NOT NULL` render **no literal**, so they accept every declared
+column type. PostgreSQL 17.10 deparses all 32 types
 `wreath.orm.types.BY_OID` can declare (16 scalars and their array forms), in
-both polarities, deparses to exactly `(<ident> IS [NOT] NULL)`. A `NullTest`
+both polarities to exactly `(<ident> IS [NOT] NULL)`. A `NullTest`
 node carries no operand to coerce, so there is nothing for the type to change.
 """
 

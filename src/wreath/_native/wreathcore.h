@@ -473,6 +473,7 @@ PyObject *wreath_json_loads(PyObject *self, PyObject *arg);
 PyObject *wreath_json_loads_validation(PyObject *arg, PyObject *plan,
                                        PyObject *loc_seq);
 PyObject *wreath_json_configure(PyObject *self, PyObject *args);
+PyObject *wreath_jsonpath_find(PyObject *self, PyObject *args);
 int wreath_json_write_string(WreathBytesWriter *writer, PyObject *value);
 int wreath_json_write_value(WreathBytesWriter *writer, PyObject *value, int depth);
 

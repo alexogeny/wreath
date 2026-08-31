@@ -163,9 +163,6 @@ def sign_token(
     """Sign an expiring, purpose-scoped token bound to `subject` (+ optional `bound`)."""
     issued = int(time.time() if now is None else now)
     expires = issued + int(ttl)
-    # Length-framed rather than delimiter-joined: a subject or bound value
-    # containing ":" used to shift the fields, so `verify_token` could read a
-    # different subject than `sign_token` wrote.
     body = _frame(purpose, subject, str(expires), bound)
     encoded = _b64(body.encode("utf-8"))
     mac = hmac.new(secret.encode("utf-8"), encoded.encode("ascii"), "sha256").hexdigest()
@@ -911,9 +908,6 @@ async def reset_password(
     try:
         hashed = await _hash_password_off_loop(new_password)
     except ValueError:
-        # An empty or over-long new password is a caller error, not a server
-        # fault: it used to raise out of `hash_password` and become a 500 on an
-        # input a form can submit.
         return False
     await store.update(replace(user, hashed_password=hashed))
     return True

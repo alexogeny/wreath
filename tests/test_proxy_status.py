@@ -60,9 +60,7 @@ def test_proxy_status_serializes_rfc_9532_next_hop_alias_examples() -> None:
 
 
 def test_proxy_status_can_report_that_dns_returned_no_aliases() -> None:
-    assert ProxyStatus("edge", next_hop_aliases=()).to_header() == (
-        b'edge;next-hop-aliases=""'
-    )
+    assert ProxyStatus("edge", next_hop_aliases=()).to_header() == (b'edge;next-hop-aliases=""')
 
 
 @pytest.mark.parametrize(
@@ -75,9 +73,7 @@ def test_proxy_status_can_report_that_dns_returned_no_aliases() -> None:
         (("snowman.\N{SNOWMAN}",), "IDNA"),
     ],
 )
-def test_proxy_status_refuses_invalid_next_hop_aliases(
-    aliases: object, message: str
-) -> None:
+def test_proxy_status_refuses_invalid_next_hop_aliases(aliases: object, message: str) -> None:
     with pytest.raises((TypeError, ValueError), match=message):
         ProxyStatus("edge", next_hop_aliases=cast(Iterable[str] | None, aliases))
 

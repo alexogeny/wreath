@@ -87,6 +87,10 @@ def test_graphql_policy_plan_probes_reach_both_same_size_arms() -> None:
     assert _graphql_policy_plan_alias_control(4) > 0.0
 
 
+def test_xml_parse_probe_supplies_the_element_type() -> None:
+    assert complexity._xml_wide_harness(1, attributes=True, canonical=False) >= 0.0
+
+
 def test_livedoc_close_probe_reaches_both_principal_distributions() -> None:
     assert complexity._livedoc_close_harness(4, shared_principal=True) >= 0.0
     assert complexity._livedoc_close_harness(4, shared_principal=False) >= 0.0
