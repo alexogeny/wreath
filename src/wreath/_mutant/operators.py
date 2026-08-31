@@ -302,7 +302,7 @@ ESTABLISH_TOKENS: frozenset[str] = frozenset(
 _IGNORED_IF_TESTS = ("TYPE_CHECKING", "__name__")
 
 
-@dataclass
+@dataclass(slots=True)
 class Candidate:
     """One mutation, before it has been compiled or resolved."""
 

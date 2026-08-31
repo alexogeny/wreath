@@ -77,6 +77,26 @@ async def test_join_is_idempotent() -> None:
     assert rooms.members("chat") == 1
 
 
+async def test_join_reuses_one_membership_set_per_socket(monkeypatch) -> None:
+    import wreath.rooms as rooms_module
+
+    allocations = 0
+    builtin_set = set
+
+    def counted_set():
+        nonlocal allocations
+        allocations += 1
+        return builtin_set()
+
+    monkeypatch.setattr(rooms_module, "set", counted_set, raising=False)
+    rooms = RoomRegistry()
+    socket = FakeSocket()
+    await rooms.join("a", socket)
+    await rooms.join("b", socket)
+    assert rooms._memberships[socket] == {"a", "b"}
+    assert allocations == 3
+
+
 async def test_leaving_a_room_never_joined_is_safe() -> None:
     rooms = RoomRegistry()
     await rooms.leave("nope", FakeSocket())

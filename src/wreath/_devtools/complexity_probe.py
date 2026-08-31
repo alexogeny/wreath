@@ -4842,7 +4842,9 @@ def _mcp_subscriber_harness(size: int, *, dense: bool) -> float:
 
     store = SessionStore(max_sessions=size + 1, idle_seconds=None)
     sessions = [Session(str(index), "2025-06-18") for index in range(size)]
-    store._sessions.update((session.id, session) for session in sessions)
+    for session in sessions:
+        if not store._sessions.put(session.id, session):
+            raise RuntimeError("MCP subscriber probe could not seed its sessions")
     selected = sessions if dense else (sessions[0],)
     for session in selected:
         store.subscribe(session, "camera://ridge")

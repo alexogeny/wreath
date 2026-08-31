@@ -80,6 +80,18 @@ def test_header_without_headers_in_scope() -> None:
     assert request.header("host", "d") == "d"
 
 
+def test_present_scope_headers_need_no_eager_fallback() -> None:
+    class Scope(dict[str, Any]):
+        def get(self, key: str, default: Any = None) -> Any:
+            if key == "headers" and isinstance(default, list):
+                raise AssertionError("headers allocated an unused fallback list")
+            return super().get(key, default)
+
+    headers = [(b"host", b"example")]
+    request = Request(Scope(type="http", headers=headers), _no_receive)
+    assert request.headers is headers
+
+
 @pytest.mark.parametrize(
     "attribute",
     ["scope", "method", "path", "client", "scheme", "query_string", "headers"],

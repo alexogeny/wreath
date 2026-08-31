@@ -205,6 +205,28 @@ def test_taint_propagation_reaches_a_fixed_point() -> None:
     ) == ["the destination of this request comes from url"]
 
 
+def test_taint_propagation_has_no_arbitrary_chain_depth_limit() -> None:
+    assert findings(
+        """
+        @router.get("/fetch")
+        async def fetch(request, client, callback: str):
+            url = hop_1
+            hop_1 = hop_2
+            hop_2 = hop_3
+            hop_3 = hop_4
+            hop_4 = hop_5
+            hop_5 = hop_6
+            hop_6 = hop_7
+            hop_7 = hop_8
+            hop_8 = hop_9
+            hop_9 = hop_10
+            hop_10 = callback
+            return await client.get(url)
+        """,
+        "outbound-url-from-request",
+    ) == ["the destination of this request comes from url"]
+
+
 def test_taint_propagation_stops_walking_at_the_fixed_point() -> None:
     with patch.object(audit_code.ast, "walk", wraps=audit_code.ast.walk) as walk:
         scan_source("value = 1\n", surface="mutation-survivor.py")

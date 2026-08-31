@@ -715,6 +715,28 @@ wreath_headers_unique_count(PyObject *headers)
     }
     Py_ssize_t count = wreath_headers_count(headers);
     if (count < 0) return -1;
+    Py_ssize_t capacity = 8;
+    if (count > PY_SSIZE_T_MAX / 2) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    Py_ssize_t wanted = count * 2;
+    while (capacity < wanted) {
+        if (capacity > PY_SSIZE_T_MAX / 2) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        capacity *= 2;
+    }
+    if ((size_t)capacity > SIZE_MAX / sizeof(Py_ssize_t)) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    Py_ssize_t *slots = PyMem_Calloc((size_t)capacity, sizeof(*slots));
+    if (slots == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
     Py_ssize_t unique = 0;
     for (Py_ssize_t index = 0; index < count; index++) {
         const char *name;
@@ -722,16 +744,36 @@ wreath_headers_unique_count(PyObject *headers)
         Py_ssize_t name_size;
         Py_ssize_t value_size;
         if (wreath_headers_view(headers, index, &name, &name_size,
-                                &value, &value_size) < 0) return -1;
+                                &value, &value_size) < 0) goto error;
         (void)value;
         (void)value_size;
-        Py_ssize_t first;
-        if (wreath_headers_find(headers, name, name_size, &first, NULL) < 0) {
-            return -1;
+        Py_ssize_t slot = (Py_ssize_t)(
+            header_hash(name, name_size) & (uint64_t)(capacity - 1));
+        for (;;) {
+            Py_ssize_t stored = slots[slot];
+            if (stored == 0) {
+                slots[slot] = index + 1;
+                unique++;
+                break;
+            }
+            const char *candidate;
+            const char *ignored_value;
+            Py_ssize_t candidate_size;
+            Py_ssize_t ignored_value_size;
+            if (wreath_headers_view(
+                    headers, stored - 1, &candidate, &candidate_size,
+                    &ignored_value, &ignored_value_size) < 0) goto error;
+            if (candidate_size == name_size &&
+                memcmp(candidate, name, (size_t)name_size) == 0) break;
+            slot = (slot + 1) & (capacity - 1);
         }
-        if (first == index) unique++;
     }
+    PyMem_Free(slots);
     return unique;
+
+error:
+    PyMem_Free(slots);
+    return -1;
 }
 
 int

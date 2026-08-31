@@ -53,6 +53,23 @@ def test_h2_response_decoder_reassembles_many_data_frames_linearly() -> None:
     assert stream.ended
 
 
+def test_h2_response_decoder_allocates_one_body_buffer_per_stream(monkeypatch) -> None:
+    import wreath._h2_codec as codec
+
+    allocations = 0
+    builtin_bytearray = bytearray
+
+    def counted_bytearray(value=b""):
+        nonlocal allocations
+        allocations += 1
+        return builtin_bytearray(value)
+
+    monkeypatch.setattr(codec, "bytearray", counted_bytearray, raising=False)
+    frame = b"\x00\x00\x01" + bytes((codec.DATA, 0)) + b"\x00\x00\x00\x01x"
+    assert codec.decode_response(frame * 3)[1].body == b"xxx"
+    assert allocations == 1
+
+
 def exchange() -> RecordedHttpExchange:
     return RecordedHttpExchange(
         dependency_id=3,

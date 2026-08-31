@@ -115,6 +115,26 @@ async def test_stream_pump_reassembles_one_data_line_from_many_fragments() -> No
     assert written == [payload]
 
 
+async def test_stream_pump_emits_every_complete_data_line_in_one_chunk() -> None:
+    written: list[bytes] = []
+
+    class BatchedClient:
+        def _scope(self, *_args, **_kwargs):
+            return {}, b""
+
+        async def app(self, _scope, _receive, send):
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": b'data: {"id":1}\n\ndata: {"id":2}\n',
+                }
+            )
+
+    await _pump(BatchedClient(), "/rpc", "session", written.append, asyncio.Lock())
+
+    assert written == [b'{"id":1}', b'{"id":2}']
+
+
 async def test_end_of_input_stops_the_relay() -> None:
     pipe = Pipe()
     pipe.close()

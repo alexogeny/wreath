@@ -26,7 +26,7 @@ from wreath._mutant.patch import (
     transform_module,
 )
 from wreath._mutant.runner import build_plan, module_name_for, sample_identifiers
-from wreath.mutant import OPERATORS, Outcome, Report, Verdict, render
+from wreath.mutant import OPERATORS, Mutation, Outcome, Report, Site, Verdict, render
 
 SOURCE = textwrap.dedent(
     '''
@@ -56,6 +56,16 @@ SOURCE = textwrap.dedent(
         return limiter(key)
     '''
 )
+
+
+def test_catalog_records_do_not_allocate_instance_dictionaries() -> None:
+    candidate = operators.Candidate("operator", "control", 1, ("scope",))
+    site = Site("module.py", 1, "scope")
+    mutation = Mutation("id", "operator", "control", site, "module")
+
+    assert not hasattr(candidate, "__dict__")
+    assert not hasattr(site, "__dict__")
+    assert not hasattr(mutation, "__dict__")
 
 
 def test_mutant_command_defaults_to_the_native_baseline_and_candidate_engine() -> None:

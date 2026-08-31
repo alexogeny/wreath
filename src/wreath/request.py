@@ -934,7 +934,10 @@ class Request:
         scope = self._scope
         if scope is None:
             raise RuntimeError("request scope is unavailable")
-        return scope.get("headers", [])
+        try:
+            return scope["headers"]
+        except KeyError:
+            return []
 
     @property
     def cookies(self) -> dict[str, str]:

@@ -92,6 +92,10 @@ from typing import Any, Protocol, cast, runtime_checkable
 from ._scim import scim_router
 from .store import _Statements, rows_affected, sql_identifier
 
+
+def _invitation_digest(token: str) -> bytes:
+    return hashlib.sha256(token.encode("utf-8")).digest()
+
 __all__ = [
     "Invitation",
     "InMemoryOrganizationStore",
@@ -268,7 +272,7 @@ class InMemoryOrganizationStore:
             )
         self._organizations: dict[str, Organization] = {org.id: org for org in organizations}
         self._memberships: dict[str, dict[str, frozenset[str]]] = {}
-        self._invitations: dict[str, Invitation] = {}
+        self._invitations: dict[bytes, Invitation] = {}
 
     def roles(self) -> frozenset[str]:
         """The declared role vocabulary."""
@@ -363,7 +367,7 @@ class InMemoryOrganizationStore:
             roles=wanted,
             expires_at=None if ttl is None else moment + ttl,
         )
-        self._invitations[invitation.token] = invitation
+        self._invitations[_invitation_digest(invitation.token)] = invitation
         return invitation
 
     async def accept(self, token: str, user_id: str, *, now: float | None = None) -> Membership:
@@ -376,18 +380,15 @@ class InMemoryOrganizationStore:
                 refusal here would otherwise mention the token.
         """
         moment = time.time() if now is None else now
-        invitation = None
-        for held in self._invitations.values():
-            if secrets.compare_digest(held.token, token):
-                invitation = held
-                break
+        token_digest = _invitation_digest(token)
+        invitation = self._invitations.get(token_digest)
         if invitation is None:
             raise ValueError("no such invitation")
         if invitation.accepted_by is not None:
             raise ValueError("invitation has already been accepted")
         if invitation.expired(moment):
             raise ValueError("invitation has expired")
-        self._invitations[invitation.token] = Invitation(
+        self._invitations[token_digest] = Invitation(
             token=invitation.token,
             organization=invitation.organization,
             email=invitation.email,
@@ -631,7 +632,7 @@ class PostgresOrganizationStore:
 
     @staticmethod
     def _token_hash(token: str) -> bytes:
-        return hashlib.sha256(token.encode("utf-8")).digest()
+        return _invitation_digest(token)
 
     @property
     def schema_database(self) -> Any:

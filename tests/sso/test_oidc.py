@@ -108,10 +108,10 @@ def test_oidc_pending_state_sweeps_only_when_expiry_is_possible() -> None:
 
     assert party._next_sweep == 110
     party.begin_login(organization="acme", session_id="s3", now=110)
-    assert first.state in party._flows
+    assert party._flows.held(first.state) is first
 
     party.begin_login(organization="acme", session_id="s4", now=111)
-    assert first.state not in party._flows
+    assert party._flows.held(first.state) is None
     assert party._next_sweep == 119
 
 

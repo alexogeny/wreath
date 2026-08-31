@@ -149,12 +149,18 @@ class WebSocket:
         from this list. Selecting one the client did not offer is a protocol
         violation the peer is entitled to fail the connection over.
         """
-        return self.scope.get("subprotocols", [])
+        try:
+            return self.scope["subprotocols"]
+        except KeyError:
+            return []
 
     @property
     def headers(self) -> list[tuple[bytes, bytes]]:
         """Handshake headers as raw `(name, value)` byte pairs, names lowercased."""
-        return self.scope.get("headers", [])
+        try:
+            return self.scope["headers"]
+        except KeyError:
+            return []
 
     def header(self, name: str | bytes, default: str | None = None) -> str | None:
         """One handshake header, decoded latin-1, or `default` when absent.

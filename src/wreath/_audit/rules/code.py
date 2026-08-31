@@ -1300,26 +1300,30 @@ class _Scanner(ast.NodeVisitor):
                 self.str_names.add(argument.arg)
 
     def _propagate(self) -> None:
-        """One hop at a time until nothing new is caller-controlled.
+        """Propagate caller control through assignment dependencies."""
+        dependents: dict[str, list[tuple[str, ...]]] = {}
+        for node in ast.walk(self.tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names = tuple(name for target in targets for name in _bound_names(target))
+            if not names:
+                continue
+            referenced = {item.id for item in ast.walk(node.value) if isinstance(item, ast.Name)}
+            for source in referenced:
+                dependents.setdefault(source, []).append(names)
 
-        A fixed point rather than a single pass, because `needle = q.strip()`
-        followed by `sql = f"...{needle}..."` needs two, and the statements are
-        not guaranteed to be walked in that order.
-        """
-        for _ in range(8):  # bounded; real chains are short
-            before = len(self.caller_controlled) + len(self.dynamic_strings)
-            for node in ast.walk(self.tree):
-                if not isinstance(node, (ast.Assign, ast.AnnAssign)):
-                    continue
-                value = node.value
-                if value is None:
-                    continue
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                names = [name for target in targets for name in _bound_names(target)]
-                if self._tainted(value):
-                    self.caller_controlled.update(names)
-            if len(self.caller_controlled) + len(self.dynamic_strings) == before:
-                return
+        pending = list(self.caller_controlled | self.request_bound)
+        position = 0
+        while position < len(pending):
+            source = pending[position]
+            position += 1
+            for targets in dependents.get(source, ()):
+                for target in targets:
+                    if target in self.caller_controlled:
+                        continue
+                    self.caller_controlled.add(target)
+                    pending.append(target)
 
     def _bind(self, node: ast.Assign | ast.AnnAssign) -> None:
         value = node.value

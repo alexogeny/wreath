@@ -935,6 +935,24 @@ def test_a_socket_without_path_params_gets_an_empty_mapping() -> None:
     assert ws.path_params == {}
 
 
+def test_websocket_scope_lists_need_no_eager_fallback() -> None:
+    from wreath.websocket import WebSocket
+
+    class Scope(dict):
+        def get(self, key, default=None):
+            if key in {"headers", "subprotocols"} and isinstance(default, list):
+                raise AssertionError(f"{key} allocated an unused fallback list")
+            return super().get(key, default)
+
+    headers = [(b"host", b"example")]
+    subprotocols = ["chat"]
+    websocket = WebSocket(
+        Scope(type="websocket", headers=headers, subprotocols=subprotocols), None, None
+    )
+    assert websocket.headers is headers
+    assert websocket.subprotocols is subprotocols
+
+
 @pytest.mark.parametrize("code", [1004, 1005, 1006, 1015, 999, 2999, 5000])
 def test_a_close_code_an_endpoint_may_not_send_is_refused(code: int) -> None:
     import asyncio

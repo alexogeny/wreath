@@ -99,7 +99,7 @@ def _query_media_range(value: str) -> tuple[str, Item]:
 
 
 class _QueryContentPolicy:
-    __slots__ = ("_accept_query", "_media_types")
+    __slots__ = ("_accept_any", "_accept_query", "_exact_media_types", "_media_prefixes")
 
     def __init__(self, media_ranges: Iterable[str]) -> None:
         parsed = tuple(_query_media_range(value) for value in media_ranges)
@@ -107,7 +107,19 @@ class _QueryContentPolicy:
             raise ValueError(
                 "accept_query must name at least one media range; use ('*/*',) for any"
             )
-        self._media_types = tuple(media_type for media_type, _item in parsed)
+        media_types = tuple(media_type for media_type, _item in parsed)
+        self._accept_any = "*/*" in media_types
+        exact_media_types = tuple(
+            media_type for media_type in media_types if not media_type.endswith("/*")
+        )
+        self._exact_media_types = (
+            frozenset(exact_media_types) if len(exact_media_types) >= 8 else exact_media_types
+        )
+        self._media_prefixes = tuple(
+            media_type[:-1]
+            for media_type in media_types
+            if media_type.endswith("/*") and media_type != "*/*"
+        )
         self._accept_query = serialize_list(item for _media_type, item in parsed)
 
     def describe(self) -> Any:
@@ -156,12 +168,10 @@ class _QueryContentPolicy:
                 status=400,
                 detail="QUERY Content-Type must be ASCII",
             )
-        if not any(
-            offered == "*/*"
-            or offered.endswith("/*")
-            and received.startswith(offered[:-1])
-            or offered == received
-            for offered in self._media_types
+        if (
+            not self._accept_any
+            and received not in self._exact_media_types
+            and not any(received.startswith(prefix) for prefix in self._media_prefixes)
         ):
             return ProblemResponse(
                 status=415,

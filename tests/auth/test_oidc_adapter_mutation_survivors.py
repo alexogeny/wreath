@@ -132,7 +132,7 @@ async def test_default_bearer_verifier_uses_the_provider_audience(monkeypatch) -
     monkeypatch.setattr(oidc, "verify_jwt", capture_verify)
 
     assert await provider.bearer_verifier()(_token({"kid": "key-1"})) is not None
-    assert seen["audiences"] == ("api",)
+    assert seen["audiences"] == frozenset({"api"})
 
 
 async def test_bearer_verifier_fails_closed_before_discovery() -> None:

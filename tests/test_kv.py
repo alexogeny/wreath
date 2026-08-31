@@ -165,6 +165,14 @@ class TestExpiry:
         assert table.get("key", now=9.5) == 3
         assert table.get("key", now=10.0) is None
 
+    def test_held_reads_an_expired_entry_without_releasing_it(self, arm) -> None:
+        table = arm(max_entries=2, ttl=10.0, clock=lambda: 20.0)
+        table.set("key", "value", now=0.0)
+
+        assert table.held("key") == "value"
+        assert table.peek("key", now=20.0) is None
+        assert table.held("key") == "value"
+
     def test_keep_deadline_starts_a_fresh_window_once_the_old_one_is_gone(self, arm) -> None:
         table = arm(max_entries=8, ttl=10.0)
         table.set("key", 1, now=0.0)

@@ -542,7 +542,7 @@ enum {
 };
 
 /* jose_validate_claims(claims: dict, now: int, leeway: int,
- *                       issuer: str | None, audiences: tuple[str, ...],
+ *                       issuer: str | None, audiences: frozenset[str],
  *                       required: tuple[str, ...]) -> int
  *
  * Registered-claim checks only. `audiences` empty means "do not check aud".
@@ -557,10 +557,16 @@ wreath_jose_validate_claims(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject *audiences;
     PyObject *required;
 
-    if (!PyArg_ParseTuple(args, "O!LLOO!O!:jose_validate_claims",
+    if (!PyArg_ParseTuple(args, "O!LLOOO!:jose_validate_claims",
                           &PyDict_Type, &claims, &now, &leeway,
-                          &issuer, &PyTuple_Type, &audiences,
+                          &issuer, &audiences,
                           &PyTuple_Type, &required)) {
+        return NULL;
+    }
+    if (!PyFrozenSet_Check(audiences) && !PyTuple_Check(audiences)) {
+        PyErr_SetString(
+            PyExc_TypeError,
+            "audiences must be a frozenset or tuple of strings");
         return NULL;
     }
 
@@ -607,7 +613,9 @@ wreath_jose_validate_claims(PyObject *Py_UNUSED(self), PyObject *args)
 
     /* aud: the claim is a string or a list of strings; require a non-empty
      * intersection with the accepted audiences. */
-    if (PyTuple_GET_SIZE(audiences) > 0) {
+    Py_ssize_t audience_count = PyFrozenSet_Check(audiences)
+        ? PySet_GET_SIZE(audiences) : PyTuple_GET_SIZE(audiences);
+    if (audience_count > 0) {
         PyObject *claim_aud = PyDict_GetItemWithError(claims, jose_claim_aud);
         if (claim_aud == NULL && PyErr_Occurred()) return NULL;
         if (claim_aud == NULL) {
@@ -615,12 +623,16 @@ wreath_jose_validate_claims(PyObject *Py_UNUSED(self), PyObject *args)
         }
         int matched = 0;
         if (PyUnicode_Check(claim_aud)) {
-            for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(audiences); i++) {
-                int eq = PyObject_RichCompareBool(claim_aud, PyTuple_GET_ITEM(audiences, i), Py_EQ);
-                if (eq < 0) {
-                    return NULL;
+            if (PyFrozenSet_Check(audiences)) {
+                matched = PySet_Contains(audiences, claim_aud);
+                if (matched < 0) return NULL;
+            } else {
+                for (Py_ssize_t i = 0; i < audience_count; i++) {
+                    int eq = PyObject_RichCompareBool(
+                        claim_aud, PyTuple_GET_ITEM(audiences, i), Py_EQ);
+                    if (eq < 0) return NULL;
+                    if (eq) { matched = 1; break; }
                 }
-                if (eq) { matched = 1; break; }
             }
         }
         else if (PyList_Check(claim_aud)) {
@@ -629,12 +641,16 @@ wreath_jose_validate_claims(PyObject *Py_UNUSED(self), PyObject *args)
                 if (!PyUnicode_Check(entry)) {
                     continue;
                 }
-                for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(audiences); i++) {
-                    int eq = PyObject_RichCompareBool(entry, PyTuple_GET_ITEM(audiences, i), Py_EQ);
-                    if (eq < 0) {
-                        return NULL;
+                if (PyFrozenSet_Check(audiences)) {
+                    matched = PySet_Contains(audiences, entry);
+                    if (matched < 0) return NULL;
+                } else {
+                    for (Py_ssize_t i = 0; i < audience_count; i++) {
+                        int eq = PyObject_RichCompareBool(
+                            entry, PyTuple_GET_ITEM(audiences, i), Py_EQ);
+                        if (eq < 0) return NULL;
+                        if (eq) { matched = 1; break; }
                     }
-                    if (eq) { matched = 1; break; }
                 }
             }
         }

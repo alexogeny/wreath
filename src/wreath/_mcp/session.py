@@ -42,6 +42,7 @@ from functools import partial
 from types import MappingProxyType
 from typing import Any
 
+from .._capability_map import CapabilityMap
 from ..progress import ProgressReporter
 from ..queue import Queue, QueueEmpty
 from .outbound import ClientChannel
@@ -161,7 +162,12 @@ class SessionStore:
         self._publish: Callable[[Session, bytes], bool] = (
             (lambda session, payload: session.publish(payload)) if publish is None else publish
         )
-        self._sessions: dict[str, Session] = {}
+        self._sessions = CapabilityMap(
+            max_entries=max_sessions,
+            ttl=idle_seconds,
+            clock=time.monotonic,
+            overflow="refuse",
+        )
         self._subscribers: dict[str, dict[str, Session]] = {}
         #: Sessions collected for exceeding the idle bound.
         self.expired = 0
@@ -215,9 +221,11 @@ class SessionStore:
             max_pending=self._max_pending_requests,
             timeout=self._request_seconds,
         )
-        self._sessions[session.id] = session
-        if self._idle_seconds is not None:
-            self._next_sweep = min(self._next_sweep, moment + self._idle_seconds)
+        if not self._sessions.put(session.id, session, now=moment):
+            raise RuntimeError(
+                f"the MCP session store is at its ceiling of {self._max_sessions} sessions"
+            )
+        self._next_sweep = self._sessions.next_deadline
         return session
 
     def get(self, identifier: str, *, now: float | None = None) -> Session | None:
@@ -227,7 +235,7 @@ class SessionStore:
         conversation that runs for a day never expires under it, and one that
         stops for an hour does.
         """
-        session = self._sessions.get(identifier)
+        session = self._sessions.held(identifier)
         if session is None:
             return None
         moment = time.monotonic() if now is None else now
@@ -235,6 +243,9 @@ class SessionStore:
             self._collect(session)
             return None
         session.touch(moment)
+        if self._idle_seconds is not None:
+            self._sessions.put(identifier, session, now=moment)
+            self._next_sweep = self._sessions.next_deadline
         return session
 
     def subscribers(self, uri: str) -> list[Session]:
@@ -266,29 +277,21 @@ class SessionStore:
         moment = time.monotonic() if now is None else now
         if not force and moment < self._next_sweep:
             return 0
-        stale: list[Session] = []
-        next_sweep = float("inf")
-        for session in self._sessions.values():
-            if self._expired(session, moment):
-                stale.append(session)
-            else:
-                deadline = session.last_seen + idle_seconds
-                if deadline < next_sweep:
-                    next_sweep = deadline
+        stale = self._sessions.sweep(now=moment)
         for session in stale:
-            self._collect(session)
-        self._next_sweep = next_sweep
+            self._expire_collected(session)
+        self._next_sweep = self._sessions.next_deadline
         return len(stale)
 
     def discard(self, identifier: str) -> bool:
         """End a session, cancelling anything it still has in flight."""
-        session = self._sessions.pop(identifier, None)
+        session = self._sessions.held(identifier)
         if session is None:
             return False
+        self._sessions.discard(identifier)
         self._drop_subscriptions(session)
         _cancel_all(session)
-        if not self._sessions:
-            self._next_sweep = float("inf")
+        self._next_sweep = self._sessions.next_deadline
         return True
 
     def _expired(self, session: Session, now: float) -> bool:
@@ -296,13 +299,16 @@ class SessionStore:
         return idle is not None and now - session.last_seen >= idle
 
     def _collect(self, session: Session) -> None:
-        if self._sessions.pop(session.id, None) is None:
+        if self._sessions.held(session.id) is None:
             return
+        self._sessions.discard(session.id)
+        self._expire_collected(session)
+        self._next_sweep = self._sessions.next_deadline
+
+    def _expire_collected(self, session: Session) -> None:
         self._drop_subscriptions(session)
         self.expired += 1
         _cancel_all(session)
-        if not self._sessions:
-            self._next_sweep = float("inf")
 
     def _drop_subscriptions(self, session: Session) -> None:
         for uri in session.subscriptions:

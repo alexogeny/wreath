@@ -422,7 +422,7 @@ def _reason_valid(
     now: int,
     leeway: int,
     issuer: str | None,
-    audiences: tuple[str, ...],
+    audiences: frozenset[str],
     required: tuple[str, ...],
 ) -> int:
     return int(_native_claims(dict(claims), now, leeway, issuer, audiences, required))
@@ -483,7 +483,7 @@ class JwtVerifier:
                 "audience must be configured; pass audience='service' or "
                 "audience=None only when another layer validates it"
             )
-        self._audiences = _freeze_audiences(audience)
+        self._audiences = _compile_audiences(audience)
         self._leeway = int(leeway)
         self._required = tuple(required)
         self._identity = identity
@@ -509,7 +509,7 @@ def verify_jwt(
     key_resolver: KeyResolver,
     algorithms: frozenset[str],
     issuer: str | None,
-    audiences: tuple[str, ...],
+    audiences: frozenset[str],
     leeway: int,
     required: tuple[str, ...],
     identity: IdentityMapper,
@@ -612,6 +612,10 @@ def _freeze_audiences(audience: str | Sequence[str] | None) -> tuple[str, ...]:
     return tuple(audience)
 
 
+def _compile_audiences(audience: str | Sequence[str] | None) -> frozenset[str]:
+    return frozenset(_freeze_audiences(audience))
+
+
 def _coerce_key(key: JwtKey | bytes | bytearray | str) -> JwtKey:
     if isinstance(key, (SymmetricKey, RsaPublicKey, EcPublicKey, OkpPublicKey)):
         return key
@@ -639,3 +643,4 @@ FAMILY = _FAMILY
 SUPPORTED = _SUPPORTED
 freeze_algorithms = _freeze_algorithms
 freeze_audiences = _freeze_audiences
+compile_audiences = _compile_audiences

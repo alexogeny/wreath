@@ -75,6 +75,43 @@ expected_type(const char *expected, PyObject *value)
 }
 
 PyObject *
+wreath_validate_bit_string(
+    PyObject *Py_UNUSED(self), PyObject *const *args, Py_ssize_t nargs)
+{
+    if (nargs != 2) {
+        PyErr_Format(PyExc_TypeError,
+                     "validate_bit_string() takes exactly 2 arguments (%zd given)",
+                     nargs);
+        return NULL;
+    }
+    PyObject *value = args[0];
+    if (!PyUnicode_Check(value)) {
+        PyErr_SetString(PyExc_TypeError, "bit string must be str");
+        return NULL;
+    }
+    Py_ssize_t expected = PyLong_AsSsize_t(args[1]);
+    if (expected == -1 && PyErr_Occurred() != NULL) return NULL;
+    Py_ssize_t length;
+    const char *bits = PyUnicode_AsUTF8AndSize(value, &length);
+    if (bits == NULL) return NULL;
+    Py_ssize_t characters = PyUnicode_GET_LENGTH(value);
+    if (characters != expected) {
+        PyErr_Format(PyExc_ValueError,
+                     "bit(%zd) requires exactly %zd bits, got %zd",
+                     expected, expected, characters);
+        return NULL;
+    }
+    for (Py_ssize_t index = 0; index < length; index++) {
+        if (bits[index] != '0' && bits[index] != '1') {
+            PyErr_SetString(PyExc_ValueError,
+                            "a bit string may hold only '0' and '1'");
+            return NULL;
+        }
+    }
+    return Py_NewRef(value);
+}
+
+PyObject *
 wreath_float_sequence(PyObject *Py_UNUSED(self), PyObject *args)
 {
     PyObject *value;

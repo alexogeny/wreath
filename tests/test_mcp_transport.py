@@ -305,7 +305,9 @@ async def test_an_idle_session_expires_and_frees_its_slot() -> None:
         first, _ = await initialize(client)
         # Advance this session's idle age directly. Wall-clock sleeping adds no
         # coverage when the store already records the clock value explicitly.
-        mcp._sessions._sessions[first].last_seen -= 0.08
+        session = mcp._sessions._sessions.held(first)
+        assert session is not None
+        mcp._sessions.get(first, now=session.last_seen - 0.08)
         # The abandoned session is gone, so the ceiling it was holding is free:
         # a client that never sends DELETE cannot wedge the endpoint shut.
         second, response = await initialize(client)
@@ -332,7 +334,8 @@ async def test_traffic_keeps_a_session_alive() -> None:
     )
     async with TestClient(app) as client:
         session_id, _ = await initialize(client)
-        session = mcp._sessions._sessions[session_id]
+        session = mcp._sessions._sessions.held(session_id)
+        assert session is not None
         for _ in range(4):
             # Without each request touching `last_seen`, the accumulated 240ms
             # crosses the 150ms idle bound on the third pass.

@@ -99,7 +99,7 @@ def rate_counts(counts: Mapping[str, int]) -> ConfidenceRating:
     )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Site:
     """Where in the tree a control is written down."""
 
@@ -137,7 +137,7 @@ class Patch(Protocol):
         """Restore. Only used by the in-process self-tests, never by a fork."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Mutation:
     """One control, removed one way."""
 

@@ -223,6 +223,19 @@ def test_the_duplicate_statement_guard_holds_across_threads(monkeypatch: Any) ->
     assert db._for_workload("read") == (won[0],)
 
 
+def test_workload_statements_are_retrieved_without_walking_every_statement() -> None:
+    class NoValueWalk(dict):
+        def values(self):
+            raise AssertionError("all statements were walked")
+
+    db = Database("main", "postgresql://primary/app")
+    read = db.statement("read_one", "SELECT 1")
+    db.statement("write_one", "SELECT 2", workload="write")
+    db._statements = NoValueWalk(db._statements)
+
+    assert db._for_workload("read") == (read,)
+
+
 @pytest.mark.asyncio
 async def test_snapshot_reports_the_pool_as_it_stands() -> None:
     connector = Connector()

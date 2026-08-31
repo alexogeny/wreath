@@ -140,14 +140,23 @@ class UpstreamPool:
             The upstream to use, or None when `exclude` covers all of them.
         """
         now = time.monotonic() if now is None else now
-        candidates = [upstream for upstream in self._upstreams if upstream.url not in exclude]
-        if not candidates:
+        fallback: Upstream | None = None
+        healthy: list[Upstream] = []
+        untried: list[Upstream] = []
+        for upstream in self._upstreams:
+            if upstream.url in exclude:
+                continue
+            if fallback is None or upstream.ejected_until < fallback.ejected_until:
+                fallback = upstream
+            if upstream.healthy(now):
+                healthy.append(upstream)
+                if upstream.total == 0:
+                    untried.append(upstream)
+        if fallback is None:
             return None
-        healthy = [upstream for upstream in candidates if upstream.healthy(now)]
         if not healthy:
-            return min(candidates, key=lambda upstream: upstream.ejected_until)
+            return fallback
         # Score only after every healthy upstream has one real measurement.
-        untried = [upstream for upstream in healthy if upstream.total == 0]
         if untried:
             self._cursor = (self._cursor + 1) % len(untried)
             return untried[self._cursor]

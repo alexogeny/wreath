@@ -102,7 +102,10 @@ class RoomRegistry:
         if members is None:
             members = self._rooms[room] = set()
         members.add(websocket)
-        self._memberships.setdefault(websocket, set()).add(room)
+        memberships = self._memberships.get(websocket)
+        if memberships is None:
+            memberships = self._memberships[websocket] = set()
+        memberships.add(room)
 
     async def leave(self, room: str, websocket: Any) -> None:
         """Remove `websocket` from `room`; drop the room when it empties.

@@ -497,6 +497,7 @@ def cached(
         raise TypeError(f"cached(cache_status=...) must be str, got {type(cache_status).__name__}")
     status_values = _cache_status_values(cache_status) if cache_status is not None else None
     public_key = key is default_cache_key or getattr(key, "_wreath_public", False)
+    cached_methods = frozenset(methods) if len(methods) >= 8 else methods
 
     window = None if ttl is None else Duration.of(ttl).total_seconds()
     the_store: BoundedCache = (
@@ -509,7 +510,7 @@ def cached(
 
         @wraps(handler)
         async def wrapper(request: Any, *args: Any, **kwargs: Any) -> Any:
-            if request.method not in methods:
+            if request.method not in cached_methods:
                 result = await handler(request, *args, **kwargs)
                 if group_value is not None and request.method not in _SAFE_METHODS:
                     _apply_header(result, _CACHE_GROUP_INVALIDATION, group_value)

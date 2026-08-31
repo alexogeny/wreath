@@ -636,9 +636,9 @@ class StripeWebhookVerifier(_NormalizedWebhookVerifier):
             if not separator:
                 raise ValueError("invalid Stripe-Signature field")
             parts.setdefault(key, []).append(value)
-        timestamps = parts.get(b"t", [])
-        signatures = parts.get(b"v1", [])
-        if len(timestamps) != 1 or not signatures:
+        timestamps = parts.get(b"t")
+        signatures = parts.get(b"v1")
+        if timestamps is None or len(timestamps) != 1 or not signatures:
             raise ValueError("Stripe-Signature needs one t and at least one v1")
         timestamp = _unix_timestamp(timestamps[0], now, self.max_age)
         signed = timestamps[0] + b"." + body

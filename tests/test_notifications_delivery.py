@@ -271,6 +271,20 @@ async def test_a_404_also_removes_the_subscription() -> None:
     assert await subscriptions.for_recipient("u1") == ()
 
 
+async def test_subscription_removal_does_not_walk_unrelated_recipients() -> None:
+    class NoValueWalk(dict):
+        def values(self):
+            raise AssertionError("every recipient was walked")
+
+    subscriptions = InMemoryPushSubscriptions()
+    await subscriptions.add("u1", SUBSCRIPTION)
+    subscriptions._by_recipient = NoValueWalk(subscriptions._by_recipient)
+
+    await subscriptions.remove(SUBSCRIPTION.endpoint)
+
+    assert await subscriptions.for_recipient("u1") == ()
+
+
 async def test_a_500_keeps_the_subscription_and_raises_for_the_job_to_retry() -> None:
     subscriptions = InMemoryPushSubscriptions()
     await subscriptions.add("u1", SUBSCRIPTION)

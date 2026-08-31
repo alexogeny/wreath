@@ -179,9 +179,9 @@ async def test_a_reconnect_wakes_workers_again() -> None:
     runner, supervisor = await _started(database)
     try:
         # Registered as one more waiter: the doorbell wakes every worker, so a
-        # counting waiter in the list sees each edge.
+        # counting waiter in the set sees each edge.
         counter = CountingEvent()
-        runner._waiters.append(counter)
+        runner._waiters.add(counter)
         database.live.drop()
         assert await _until(lambda: len(database.listeners) >= 2)
 

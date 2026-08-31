@@ -990,11 +990,7 @@ def Bit(length: int) -> PgType:
             return format(number >> padding, f"0{length}b")
         if not isinstance(value, str):
             raise _type_error("str of '0' and '1', or packed bytes", value)
-        if len(value) != length:
-            raise ValueError(f"bit({length}) requires exactly {length} bits, got {len(value)}")
-        if len(value) != value.count("0") + value.count("1"):
-            raise ValueError("a bit string may hold only '0' and '1'")
-        return value
+        return _core.validate_bit_string(value, length)
 
     return PgType(f"bit({length})", BIT_OID, f"bit({length})", coerce)
 
