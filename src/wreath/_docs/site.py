@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import posixpath
 import re
+import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass
 from fnmatch import fnmatch
@@ -42,7 +43,7 @@ from . import (
     search,
     theme,
 )
-from .config import Page, Section, Site
+from .config import Page, PageContext, Section, Site
 
 _CSS_PATH = "assets/docs.css"
 _JS_PATH = "assets/docs.js"
@@ -270,7 +271,7 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
     source_dir = base / site.source
     output_dir = base / site.output
     pages = site.nav.pages()
-    navigation = _compile_navigation(site)
+    navigation = _compile_navigation(site) if site.layout == "docs" else _NavigationImage((), {})
     known = {_output_path(p.source) for p in pages}
 
     errors: list[str] = []
@@ -399,6 +400,28 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
     output_dir.mkdir(parents=True, exist_ok=True)
     _write_asset(output_dir / _CSS_PATH, theme.stylesheet(site.palette, site.feel))
     _write_asset(output_dir / _JS_PATH, scripts.runtime())
+    source_root = source_dir.resolve()
+    _copy_theme_assets(
+        site,
+        base,
+        output_dir,
+        known
+        | {
+            path.relative_to(source_root).as_posix()
+            for path in chart_sources
+            if path.is_relative_to(source_root)
+        }
+        | {
+            _CSS_PATH,
+            _JS_PATH,
+            "assets/search-index.json",
+            "404.html",
+            "llms.txt",
+            "robots.txt",
+            "sitemap.xml",
+        },
+        errors,
+    )
     index_pages: list[dict] = []
     index_sections: list[dict] = []
     # One resolution per build, not per page: the counts are a property of the
@@ -410,34 +433,45 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
     for pos, rp in enumerate(rendered_pages):
         prev = rendered_pages[pos - 1] if pos > 0 else None
         nxt = rendered_pages[pos + 1] if pos + 1 < len(rendered_pages) else None
-        tabs_html, nav_html, section_title, section_href = _nav_context(
-            site,
-            rp.out_rel,
-            navigation,
-        )
+        if site.layout == "docs":
+            tabs_html, nav_html, section_title, section_href = _nav_context(
+                site,
+                rp.out_rel,
+                navigation,
+            )
+        else:
+            tabs_html, nav_html, section_title, section_href = "", "", "", ""
         content = _rewrite_md_links(rp.html)
-        html = theme.page(
+        context = PageContext(
             site_name=site.name,
             page_title=rp.title,
             content=content,
+            output=rp.out_rel,
             nav_html=nav_html,
             tabs_html=tabs_html,
             section_title=section_title,
             section_href=section_href,
-            toc_html=_render_toc(rp.toc),
+            toc_html=_render_toc(rp.toc) if site.layout == "docs" else "",
             css_href=_relative(rp.out_rel, _CSS_PATH),
             js_href=_relative(rp.out_rel, _JS_PATH),
             palette=site.palette,
             feel=site.feel,
+            layout=site.layout,
             search_root="../" * rp.out_rel.count("/"),
             description=rp.description,
-            footer=_footer(rp.out_rel, prev, nxt, site),
+            footer=_footer(rp.out_rel, prev, nxt, site) if site.layout == "docs" else "",
             home_href=_relative(rp.out_rel, "index.html"),
-            map_href=(_relative(rp.out_rel, _output_path(site.map_page)) if site.map_page else ""),
+            map_href=(
+                _relative(rp.out_rel, _output_path(site.map_page))
+                if site.layout == "docs" and site.map_page
+                else ""
+            ),
             canonical=f"{site.base_url.rstrip('/')}/{rp.out_rel}" if site.base_url else "",
             repo_html=repo_html,
             links_html=links_html,
+            theme=site.theme,
         )
+        html = _render_page(context)
         out_file = output_dir / rp.out_rel
         out_file.parent.mkdir(parents=True, exist_ok=True)
         out_file.write_text(html, encoding="utf-8")
@@ -467,7 +501,7 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
     _write_llms_txt(output_dir, site, rendered_pages)
     _write_robots(output_dir, site)
     _write_404(output_dir, site, repo_html, links_html, navigation)
-    _copy_chart_sources(chart_sources, source_dir.resolve(), output_dir)
+    _copy_chart_sources(chart_sources, source_root, output_dir)
     if site.base_url:
         _write_sitemap(output_dir, site, rendered_pages)
 
@@ -572,15 +606,19 @@ def _write_404(
         "Head back to the [home page](index.html) or press "
         "`Ctrl K` to search the docs.\n"
     )
-    tabs_html, nav_html, section_title, section_href = _nav_context(
-        site,
-        "404.html",
-        navigation,
-    )
-    html = theme.page(
+    if site.layout == "docs":
+        tabs_html, nav_html, section_title, section_href = _nav_context(
+            site,
+            "404.html",
+            navigation,
+        )
+    else:
+        tabs_html, nav_html, section_title, section_href = "", "", "", ""
+    context = PageContext(
         site_name=site.name,
         page_title="Page not found",
         content=_rewrite_md_links(body.html),
+        output="404.html",
         nav_html=nav_html,
         tabs_html=tabs_html,
         section_title=section_title,
@@ -590,14 +628,63 @@ def _write_404(
         js_href=_relative("404.html", _JS_PATH),
         palette=site.palette,
         feel=site.feel,
+        layout=site.layout,
         search_root="",
         description="",
         footer="",
-        map_href=(_relative("404.html", _output_path(site.map_page)) if site.map_page else ""),
+        map_href=(
+            _relative("404.html", _output_path(site.map_page))
+            if site.layout == "docs" and site.map_page
+            else ""
+        ),
         repo_html=repo_html,
         links_html=links_html,
+        theme=site.theme,
     )
+    html = _render_page(context)
     (output_dir / "404.html").write_text(html, encoding="utf-8")
+
+
+def _render_page(context: PageContext) -> str:
+    extension = context.theme
+    if extension is not None and extension.template is not None:
+        rendered = extension.template(context)
+        if not isinstance(rendered, str):
+            raise TypeError(
+                f"Theme.template for {context.output!r} must return str, not "
+                f"{type(rendered).__name__}"
+            )
+        return rendered
+    stylesheets = (
+        () if extension is None else tuple(context.asset(n) for n in extension.stylesheets)
+    )
+    extra_scripts = () if extension is None else tuple(context.asset(n) for n in extension.scripts)
+    return theme.page(
+        site_name=context.site_name,
+        page_title=context.page_title,
+        content=context.content,
+        nav_html=context.nav_html,
+        tabs_html=context.tabs_html,
+        section_title=context.section_title,
+        section_href=context.section_href,
+        toc_html=context.toc_html,
+        css_href=context.css_href,
+        js_href=context.js_href,
+        palette=context.palette,
+        feel=context.feel,
+        search_root=context.search_root,
+        description=context.description,
+        footer=context.footer,
+        home_href=context.home_href,
+        map_href=context.map_href,
+        canonical=context.canonical,
+        repo_html=context.repo_html,
+        links_html=context.links_html,
+        head_html="" if extension is None else extension.head_html,
+        extra_stylesheets=stylesheets,
+        extra_scripts=extra_scripts,
+        layout=context.layout,
+    )
 
 
 def _footer(
@@ -708,6 +795,48 @@ def _check_page(
 def _write_asset(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _copy_theme_assets(
+    site: Site,
+    root: Path,
+    output_dir: Path,
+    reserved: set[str],
+    errors: list[str],
+) -> None:
+    root = root.resolve()
+    claimed = set(reserved)
+    for asset in site.theme.assets.assets:
+        source = (root / asset.source).resolve()
+        try:
+            source.relative_to(root)
+        except ValueError:
+            errors.append(
+                f"theme asset {asset.name!r} source resolves outside the build root: "
+                f"{asset.source!r}"
+            )
+            continue
+        if source.is_file():
+            files = ((source, asset.output),)
+        elif source.is_dir():
+            files = tuple(
+                (path, posixpath.join(asset.output, path.relative_to(source).as_posix()))
+                for path in sorted(source.rglob("*"))
+                if path.is_file()
+            )
+        else:
+            errors.append(f"theme asset {asset.name!r} source is missing: {asset.source!r}")
+            continue
+        for path, target in files:
+            if target in claimed:
+                errors.append(
+                    f"theme asset {asset.name!r} output collides with generated path: {target!r}"
+                )
+                continue
+            claimed.add(target)
+            destination = output_dir / target
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, destination)
 
 
 def _copy_chart_sources(sources: set[Path], source_root: Path, output_dir: Path) -> None:

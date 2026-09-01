@@ -516,7 +516,7 @@ class AuthorizationServer:
     def validate_authorization_details(
         self, authorization_details: Any
     ) -> tuple[dict[str, Any], ...]:
-        """Validate and normalize one RFC 9396 ``authorization_details`` value."""
+        """Validate and normalize one RFC 9396 `authorization_details` value."""
         details = authorization_details
         if isinstance(details, str):
             if len(details) > 64 * 1024:

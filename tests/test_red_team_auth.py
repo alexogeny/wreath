@@ -25,6 +25,8 @@ from wreath.policy.sessions import SessionPolicy
 from wreath.testing import TestClient
 from wreath.users import (
     InMemoryUserStore,
+    OrmSecondFactorStore,
+    OrmUserStore,
     hash_password,
     second_factor_router,
     user_router,
@@ -137,6 +139,26 @@ class _SharedUserStore(InMemoryUserStore):
         self._by_id = shared["by_id"]
         self._by_email = shared["by_email"]
         self.store_id = store_id
+
+
+class _StoreSession:
+    def __init__(self, database: object, tenant: object | None = None) -> None:
+        self.registry = type("Registry", (), {"database": database})()
+        self._tenant = tenant
+
+
+def test_orm_store_identity_includes_database_and_tenant() -> None:
+    model = type("User", (), {})
+    database = object()
+    first = _StoreSession(database, "tenant-a")
+    same = _StoreSession(database, "tenant-a")
+    other_tenant = _StoreSession(database, "tenant-b")
+    other_database = _StoreSession(object(), "tenant-a")
+
+    assert OrmUserStore(first, model).store_id == OrmUserStore(same, model).store_id
+    assert OrmSecondFactorStore(first, model).store_id == OrmSecondFactorStore(same, model).store_id
+    assert OrmUserStore(first, model).store_id != OrmUserStore(other_tenant, model).store_id
+    assert OrmUserStore(first, model).store_id != OrmUserStore(other_database, model).store_id
 
 
 async def test_two_user_store_objects_over_one_table_do_not_defeat_the_wiring_check() -> None:

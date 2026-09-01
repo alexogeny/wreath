@@ -57,7 +57,7 @@ from .orm.compiler import (
     compile_rebind,
     compile_select,
 )
-from .orm.errors import DeclarationError
+from .orm.errors import DeclarationError, MultipleResultsError
 from .orm.expressions import (
     EQ,
     GE,
@@ -472,7 +472,13 @@ class BoundQuery:
         declaration = self.declaration
         compiled, execution_select = declaration._compile(self.session.registry, values)
         if declaration.single:
-            return await self.session._fetch_one_compiled(execution_select, compiled)
+            results = await self.session._fetch_compiled(execution_select, compiled)
+            if len(results) > 1:
+                raise MultipleResultsError(
+                    f"fetch_one() matched {len(results)} rows for "
+                    f"{execution_select.model.__name__}; use fetch() or narrow the query"
+                )
+            return results[0] if results else None
         return await self.session._fetch_compiled(execution_select, compiled)
 
     async def count(self, **values: Any) -> int:

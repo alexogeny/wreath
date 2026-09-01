@@ -246,6 +246,12 @@ class LiveDocument:
         max_per_principal: int = 4,
         keepalive: float = DEFAULT_KEEPALIVE,
     ) -> None:
+        if max_subscribers < 0:
+            raise ValueError("max_subscribers must be non-negative")
+        if max_per_principal < 0:
+            raise ValueError("max_per_principal must be non-negative")
+        if keepalive <= 0:
+            raise ValueError("keepalive must be positive")
         self._by_principal: dict[str, dict[Subscription, None]] = {}
         self._count = 0
         self._max_subscribers = max_subscribers
@@ -442,11 +448,13 @@ async def change_events(
     The slot is released in `finally`, so a client that disconnects -- which
     closes this generator -- frees it without anything else having to notice.
     """
-    if keepalive is None:
-        keepalive = subscription.document.keepalive
     document = subscription.document
-    seen = document.fingerprint()
     try:
+        if keepalive is None:
+            keepalive = document.keepalive
+        if keepalive <= 0:
+            raise ValueError("keepalive must be positive")
+        seen = document.fingerprint()
         while True:
             try:
                 change = await asyncio.wait_for(subscription.wait(), keepalive)

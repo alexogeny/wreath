@@ -900,24 +900,29 @@ class WebSocketService:
                 pass
             connection.heartbeat_ack.clear()
             await self.send(connection.key, heartbeat.frame)
+            heartbeat_wait = asyncio.create_task(connection.heartbeat_ack.wait())
+            stopping_wait = asyncio.create_task(connection.stopping.wait())
             try:
                 async with asyncio.timeout(heartbeat.timeout):
-                    heartbeat_wait = asyncio.create_task(connection.heartbeat_ack.wait())
-                    stopping_wait = asyncio.create_task(connection.stopping.wait())
-                    done, pending = await asyncio.wait(
+                    done, _pending = await asyncio.wait(
                         (heartbeat_wait, stopping_wait),
                         return_when=asyncio.FIRST_COMPLETED,
                     )
-                    for task in pending:
-                        task.cancel()
-                    await asyncio.gather(*pending, return_exceptions=True)
                     if stopping_wait in done:
                         return
             except TimeoutError:
                 self._heartbeat_timeouts += 1
                 connection.stopping.set()
+                send_task = connection.send_task
+                if send_task is not None:
+                    send_task.cancel()
+                    await asyncio.gather(send_task, return_exceptions=True)
                 await connection.close(1011, "heartbeat timed out")
                 return
+            finally:
+                heartbeat_wait.cancel()
+                stopping_wait.cancel()
+                await asyncio.gather(heartbeat_wait, stopping_wait, return_exceptions=True)
 
 
 __all__ = [

@@ -1954,15 +1954,20 @@ class _WorkerProgressObserver:
                     break
 
     def finish(self) -> None:
-        descriptor = self.descriptor
-        if descriptor is None:
-            return
-        os.close(descriptor)
-        self.descriptor = None
-        control = self.control_descriptor
-        if control is not None:
-            os.close(control)
-            self.control_descriptor = None
+        error: OSError | None = None
+        for attribute in ("descriptor", "control_descriptor"):
+            descriptor = getattr(self, attribute)
+            if descriptor is None:
+                continue
+            try:
+                os.close(descriptor)
+            except OSError as cleanup_error:
+                if error is None:
+                    error = cleanup_error
+            else:
+                setattr(self, attribute, None)
+        if error is not None:
+            raise error
 
 
 def _reap_owned_worker(pids: Iterable[int]) -> tuple[int, int]:
@@ -1984,52 +1989,114 @@ def _terminate_owned_worker(pid: int) -> None:
     os.waitpid(pid, 0)
 
 
-def _run_parallel(
-    collection: Collection,
-    *,
-    shards: tuple[tuple[Case, ...], ...],
-    max_failures: int,
-    renderer: Any,
-    activity: Any,
-    trace_spec: Any | None = None,
-    stage_events: Path | None = None,
-    mutation_process: Any | None = None,
-    mutation_mode: str = "auto",
-    adaptive_mutation: bool = False,
-    live_mutation_limit: int = 3,
-    fuzz_namespace: Any | None = None,
-    fuzz_directory: Path | None = None,
-) -> tuple[tuple[Result, ...], Any | None]:
-    """Run module-local C dispatch loops in isolated fork workers."""
-    controller_pid = os.getpid()
-    append_stage_event = None
-    if stage_events is not None:
-        from ._test_runner import _append_stage_event
+def _attempt_cleanup(
+    error: BaseException | None, operation: Callable[[], Any]
+) -> BaseException | None:
+    try:
+        operation()
+    except BaseException as cleanup_error:
+        return error if error is not None else cleanup_error
+    return error
 
-        append_stage_event = _append_stage_event
-    temporary = tempfile.TemporaryDirectory(prefix="wreath-native-workers-")
-    directory = Path(temporary.name)
-    children: dict[int, tuple[Path, Path, tuple[Case, ...], int, int | None]] = {}
-    progress_buffers: dict[int, bytes] = {}
-    progress_owners: dict[int, int] = {}
-    completed_worker_cases: dict[int, int] = {}
-    running_children: set[int] = set()
-    waiting_children: deque[int] = deque()
-    waiting_children_by_pid: dict[int, bool] = {}
-    finished_stage_files: set[str] = set()
-    finished_progress_files: set[str] = set()
-    progress_stream = None
-    live_fuzz = None
-    live_fuzz_started = False
 
-    if trace_spec is not None:
-        trace_spec.output_dir.mkdir(parents=True, exist_ok=True)
-        progress_path = trace_spec.output_dir / f"live-progress-{os.getpid()}.jsonl"
-        progress_stream = progress_path.open("w", encoding="utf-8", buffering=1)
+@dataclass(frozen=True, slots=True)
+class _ChildRun:
+    shard: tuple[Case, ...]
+    target: Path
+    output: Path
+    read_progress: int
+    write_progress: int
+    read_control: int | None
+    write_control: int | None
 
-    def sync_mutation_activity() -> None:
-        nonlocal live_fuzz, live_fuzz_started
-        if mutation_process is None:
+
+@dataclass(slots=True)
+class _ChildRuntime:
+    observer: Any = None
+    tracer: Any = None
+    trace_observer: Any = None
+    owns_progress: bool = False
+
+    def finish(self) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        error: BaseException | None = None
+        hits: tuple[tuple[str, tuple[str, ...]], ...] = ()
+        tracer = self.tracer
+        if tracer is not None:
+            try:
+                tracer.stop()
+                hits = tuple(
+                    (f"{path}:{line}", tuple(nodes))
+                    for (path, line), nodes in tracer.index().items()
+                )
+            except BaseException as cleanup_error:
+                error = cleanup_error
+            else:
+                self.tracer = None
+        for attribute in ("trace_observer", "observer"):
+            resource = getattr(self, attribute)
+            if resource is None:
+                continue
+            try:
+                resource.finish()
+            except BaseException as cleanup_error:
+                if error is None:
+                    error = cleanup_error
+            else:
+                setattr(self, attribute, None)
+        if error is not None:
+            raise error
+        return hits
+
+
+@dataclass(slots=True)
+class _ParallelRun:
+    collection: Collection
+    shards: tuple[tuple[Case, ...], ...]
+    max_failures: int
+    renderer: Any
+    activity: Any
+    trace_spec: Any | None = None
+    stage_events: Path | None = None
+    mutation_process: Any | None = None
+    mutation_mode: str = "auto"
+    adaptive_mutation: bool = False
+    live_mutation_limit: int = 3
+    fuzz_namespace: Any | None = None
+    fuzz_directory: Path | None = None
+    controller_pid: int = field(init=False)
+    temporary: Any = field(init=False)
+    directory: Path = field(init=False)
+    append_stage_event: Any = field(init=False, default=None)
+    children: dict[int, tuple[Path, Path, tuple[Case, ...], int, int | None]] = field(
+        init=False, default_factory=dict
+    )
+    progress_buffers: dict[int, bytes] = field(init=False, default_factory=dict)
+    progress_owners: dict[int, int] = field(init=False, default_factory=dict)
+    completed_worker_cases: dict[int, int] = field(init=False, default_factory=dict)
+    running_children: set[int] = field(init=False, default_factory=set)
+    waiting_children: deque[int] = field(init=False, default_factory=deque)
+    waiting_children_by_pid: dict[int, bool] = field(init=False, default_factory=dict)
+    finished_stage_files: set[str] = field(init=False, default_factory=set)
+    finished_progress_files: set[str] = field(init=False, default_factory=set)
+    progress_stream: Any = field(init=False, default=None)
+    live_fuzz: Any = field(init=False, default=None)
+    live_fuzz_started: bool = field(init=False, default=False)
+
+    def __post_init__(self) -> None:
+        self.controller_pid = os.getpid()
+        if self.stage_events is not None:
+            from ._test_runner import _append_stage_event
+
+            self.append_stage_event = _append_stage_event
+        self.temporary = tempfile.TemporaryDirectory(prefix="wreath-native-workers-")
+        self.directory = Path(self.temporary.name)
+        if self.trace_spec is not None:
+            self.trace_spec.output_dir.mkdir(parents=True, exist_ok=True)
+            path = self.trace_spec.output_dir / f"live-progress-{os.getpid()}.jsonl"
+            self.progress_stream = path.open("w", encoding="utf-8", buffering=1)
+
+    def sync_mutation_activity(self) -> None:
+        if self.mutation_process is None:
             return
         from ._test_runner import (
             _consume_mutation_events,
@@ -2038,12 +2105,12 @@ def _run_parallel(
             _sync_fuzz_process,
         )
 
-        state = mutation_process.event_state
+        state = self.mutation_process.event_state
         processed = state.processed
-        _consume_mutation_events(mutation_process.activity_path, state)
+        _consume_mutation_events(self.mutation_process.activity_path, state)
         if state.processed != processed:
-            renderer.mutation_progress(
-                mutation_mode,
+            self.renderer.mutation_progress(
+                self.mutation_mode,
                 state.total,
                 mutating_files=frozenset(state.mutating_files),
                 verified_files=frozenset(state.verified_files),
@@ -2051,22 +2118,19 @@ def _run_parallel(
                 test_workers=state.test_workers,
                 mutant_workers=state.mutant_workers,
             )
-        # A survivor is evidence about its source control, not a retraction of
-        # a different mutant's exact killing test. Every positively verified
-        # file is eligible to advance into fuzz.
         gold = tuple(sorted(state.verified_files))
-        gold_lookup = dict.fromkeys(gold, True)
-        passed_files = sum(file_state.outcome == "passed" for file_state in activity.files.values())
+        passed = sum(file_state.outcome == "passed" for file_state in self.activity.files.values())
         if (
-            not live_fuzz_started
-            and fuzz_namespace is not None
-            and fuzz_directory is not None
-            and _live_fuzz_ready(len(gold), passed_files)
+            not self.live_fuzz_started
+            and self.fuzz_namespace is not None
+            and self.fuzz_directory is not None
+            and _live_fuzz_ready(len(gold), passed)
         ):
-            live_fuzz = _start_fuzz_process(
-                fuzz_namespace,
+            gold_lookup = dict.fromkeys(gold, True)
+            self.live_fuzz = _start_fuzz_process(
+                self.fuzz_namespace,
                 gold,
-                directory=fuzz_directory,
+                directory=self.fuzz_directory,
                 workers="1",
                 case_ids=tuple(
                     sorted(
@@ -2076,105 +2140,112 @@ def _run_parallel(
                     )
                 ),
             )
-            live_fuzz_started = True
-        if live_fuzz is not None and renderer.mutation is not None:
+            self.live_fuzz_started = True
+        if self.live_fuzz is not None and self.renderer.mutation is not None:
             _sync_fuzz_process(
-                live_fuzz,
-                renderer.mutation,
-                renderer=renderer,
+                self.live_fuzz,
+                self.renderer.mutation,
+                renderer=self.renderer,
             )
 
-    def mutation_slots() -> int:
+    def mutation_slots(self) -> int:
         if (
-            not adaptive_mutation
-            or mutation_process is None
-            or mutation_process.event_state.total <= 0
+            not self.adaptive_mutation
+            or self.mutation_process is None
+            or self.mutation_process.event_state.total <= 0
         ):
             return 0
         from ._mutant.runner import _progressive_live_jobs
 
         return _progressive_live_jobs(
-            len(shards),
-            len(finished_progress_files),
-            len(activity.files),
-            max_live=live_mutation_limit,
+            len(self.shards),
+            len(self.finished_progress_files),
+            len(self.activity.files),
+            max_live=self.live_mutation_limit,
         )
 
-    def rebalance_test_workers() -> None:
-        fuzz_slots = 1 if live_fuzz is not None and live_fuzz.process.poll() is None else 0
-        target = max(1, len(shards) - mutation_slots() - fuzz_slots)
-        while waiting_children_by_pid and len(running_children) < target:
-            pid = waiting_children.popleft()
-            if not waiting_children_by_pid.pop(pid, False):
+    def rebalance_test_workers(self) -> None:
+        fuzz_slots = (
+            1 if self.live_fuzz is not None and self.live_fuzz.process.poll() is None else 0
+        )
+        target = max(1, len(self.shards) - self.mutation_slots() - fuzz_slots)
+        while self.waiting_children_by_pid and len(self.running_children) < target:
+            pid = self.waiting_children.popleft()
+            if not self.waiting_children_by_pid.pop(pid, False):
                 continue
-            child = children.get(pid)
+            child = self.children.get(pid)
             if child is None or child[4] is None:
                 continue
             try:
                 os.write(child[4], b"1")
             except BrokenPipeError:
                 continue
-            running_children.add(pid)
+            self.running_children.add(pid)
 
-    def record_progress(row: Any, descriptor: int) -> None:
+    def record_progress(self, row: Any, descriptor: int) -> None:
         if not isinstance(row, list) or len(row) != 3:
             return
         node_id, outcome, duration_ns = row
         if not isinstance(node_id, str) or not isinstance(duration_ns, int):
             return
         if outcome is None:
-            activity.start_test(node_id)
-            test = activity.tests[node_id]
-            if stage_events is not None and append_stage_event is not None:
-                append_stage_event(
-                    stage_events,
-                    activity.files[test.path],
-                    outcome="running",
-                )
+            self._record_test_started(node_id)
         elif isinstance(outcome, str):
-            report_outcome = "failed" if outcome == "interrupted" else outcome
-            activity.add_native_result(
-                node_id,
-                report_outcome,
-                duration_ns / 1_000_000_000,
-            )
-            file_state = activity.files[activity.tests[node_id].path]
-            pid = progress_owners[descriptor]
-            completed_worker_cases[pid] += 1
-            shard = children[pid][2]
-            if completed_worker_cases[pid] >= len(shard):
-                running_children.discard(pid)
-            elif adaptive_mutation:
-                running_children.discard(pid)
-                waiting_children.append(pid)
-                waiting_children_by_pid[pid] = True
-            if (
-                stage_events is not None
-                and append_stage_event is not None
-                and file_state.path not in finished_stage_files
-                and file_state.finished == len(file_state.nodeids)
-            ):
-                append_stage_event(stage_events, file_state)
-                finished_stage_files.add(file_state.path)
-            elif stage_events is not None and append_stage_event is not None:
-                append_stage_event(stage_events, file_state, outcome="idle")
-            if (
-                progress_stream is not None
-                and file_state.path not in finished_progress_files
-                and file_state.finished == len(file_state.nodeids)
-            ):
-                progress_stream.write(
-                    json.dumps(
-                        {"event": "block_finished", "path": file_state.path},
-                        separators=(",", ":"),
-                    )
-                    + "\n"
-                )
-                finished_progress_files.add(file_state.path)
-            sync_mutation_activity()
-            rebalance_test_workers()
+            self._record_test_finished(node_id, outcome, duration_ns, descriptor)
 
-    def consume_progress_chunk(descriptor: int, pending: bytes) -> tuple[bytes, bool]:
+    def _record_test_started(self, node_id: str) -> None:
+        self.activity.start_test(node_id)
+        test = self.activity.tests[node_id]
+        if self.stage_events is not None and self.append_stage_event is not None:
+            self.append_stage_event(
+                self.stage_events,
+                self.activity.files[test.path],
+                outcome="running",
+            )
+
+    def _record_test_finished(
+        self, node_id: str, outcome: str, duration_ns: int, descriptor: int
+    ) -> None:
+        report_outcome = "failed" if outcome == "interrupted" else outcome
+        self.activity.add_native_result(node_id, report_outcome, duration_ns / 1_000_000_000)
+        file_state = self.activity.files[self.activity.tests[node_id].path]
+        pid = self.progress_owners[descriptor]
+        self.completed_worker_cases[pid] += 1
+        shard = self.children[pid][2]
+        if self.completed_worker_cases[pid] >= len(shard):
+            self.running_children.discard(pid)
+        elif self.adaptive_mutation:
+            self.running_children.discard(pid)
+            self.waiting_children.append(pid)
+            self.waiting_children_by_pid[pid] = True
+        self._record_file_progress(file_state)
+        self.sync_mutation_activity()
+        self.rebalance_test_workers()
+
+    def _record_file_progress(self, file_state: Any) -> None:
+        if self.stage_events is not None and self.append_stage_event is not None:
+            if file_state.path not in self.finished_stage_files and file_state.finished == len(
+                file_state.nodeids
+            ):
+                self.append_stage_event(self.stage_events, file_state)
+                self.finished_stage_files.add(file_state.path)
+            else:
+                self.append_stage_event(self.stage_events, file_state, outcome="idle")
+        if (
+            self.progress_stream is not None
+            and file_state.path not in self.finished_progress_files
+            and file_state.finished == len(file_state.nodeids)
+        ):
+            self.progress_stream.write(
+                json.dumps(
+                    {"event": "block_finished", "path": file_state.path},
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+            self.finished_progress_files.add(file_state.path)
+
+    def consume_progress_chunk(self, descriptor: int, pending: bytes) -> tuple[bytes, bool]:
         try:
             chunk = os.read(descriptor, 65536)
         except BlockingIOError:
@@ -2182,492 +2253,555 @@ def _run_parallel(
         if not chunk:
             return pending, False
         rows = (pending + chunk).split(b"\n")
-        last_index = len(rows) - 1
-        for index, raw in enumerate(rows):
-            if index == last_index:
-                break
+        for raw in rows[:-1]:
             try:
-                record_progress(json.loads(raw), descriptor)
+                self.record_progress(json.loads(raw), descriptor)
             except UnicodeDecodeError, ValueError:
                 continue
-        return rows[last_index], True
+        return rows[-1], True
 
-    def consume_progress(descriptor: int, *, until_eof: bool = False) -> None:
-        pending = progress_buffers[descriptor]
-        pending, consumed = consume_progress_chunk(descriptor, pending)
+    def consume_progress(self, descriptor: int, *, until_eof: bool = False) -> None:
+        pending, consumed = self.consume_progress_chunk(
+            descriptor, self.progress_buffers[descriptor]
+        )
         while until_eof and consumed:
-            pending, consumed = consume_progress_chunk(descriptor, pending)
-        progress_buffers[descriptor] = pending
+            pending, consumed = self.consume_progress_chunk(descriptor, pending)
+        self.progress_buffers[descriptor] = pending
 
-    try:
-        activity.collect(tuple(case.node_id for case in collection.cases))
-        if progress_stream is not None:
-            progress_stream.write(
+    def start_workers(self) -> None:
+        self.activity.collect(tuple(case.node_id for case in self.collection.cases))
+        if self.progress_stream is not None:
+            self.progress_stream.write(
                 json.dumps(
-                    {"event": "suite_started", "total_blocks": len(activity.files)},
+                    {"event": "suite_started", "total_blocks": len(self.activity.files)},
                     separators=(",", ":"),
                 )
                 + "\n"
             )
-        for ordinal, shard in enumerate(shards):
-            target = directory / f"worker-{ordinal}.json"
-            output = directory / f"worker-{ordinal}.log"
-            read_progress, write_progress = os.pipe()
-            if adaptive_mutation:
-                read_control, write_control = os.pipe()
-            else:
-                read_control = None
-                write_control = None
-            pid = os.fork()
-            if pid == 0:  # pragma: no cover - worker process
-                if os.getpid() == controller_pid:
-                    os.kill(os.getpid(), 9)
-                os.close(read_progress)
-                if write_control is not None:
-                    os.close(write_control)
-                exit_code = 1
-                progress_observer = None
-                try:
-                    descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                    os.dup2(descriptor, 1)
-                    os.dup2(descriptor, 2)
-                    os.close(descriptor)
-                    worker_collection = Collection(
-                        shard,
-                        (),
-                        runtime=collection.runtime,
-                    )
-                    tracer = None
-                    trace_observer = None
-                    if trace_spec is not None:
-                        from ._mutant.trace import LineTracer
+        for ordinal, shard in enumerate(self.shards):
+            self._start_worker(ordinal, shard)
 
-                        tracer = LineTracer(trace_spec.watched)
-
-                        trace_observer = _TraceObserver(
-                            tracer,
-                            trace_spec.output_dir / f"live-{os.getpid()}.jsonl",
-                        )
-                        tracer.start()
-                    progress_observer = _WorkerProgressObserver(
-                        write_progress,
-                        trace_observer,
-                        control_descriptor=read_control,
-                        case_count=len(shard),
-                    )
-                    try:
-                        results = _run_raw(worker_collection, max_failures, progress_observer)
-                    finally:
-                        if tracer is not None:
-                            tracer.stop()
-                        if trace_observer is not None:
-                            trace_observer.finish()
-                        progress_observer.finish()
-                    hits = (
-                        ()
-                        if tracer is None
-                        else tuple(
-                            (f"{path}:{line}", tuple(nodes))
-                            for (path, line), nodes in tracer.index().items()
-                        )
-                    )
-                    target.write_bytes(_encode_raw_worker_payload(results, hits))
-                    exit_code = 0
-                except Exception:
-                    target.write_bytes(_encode_worker_payload((), (), traceback.format_exc()))
-                finally:
-                    if progress_observer is not None:
-                        progress_observer.finish()
-                    else:
-                        os.close(write_progress)
-                    os._exit(exit_code)
-            if os.getpid() != controller_pid:
-                os.kill(os.getpid(), 9)
-            os.close(write_progress)
-            if read_control is not None:
-                os.close(read_control)
-            os.set_blocking(read_progress, False)
-            progress_buffers[read_progress] = b""
-            progress_owners[read_progress] = pid
-            completed_worker_cases[pid] = 0
-            running_children.add(pid)
-            children[pid] = (
-                target,
-                output,
-                shard,
-                read_progress,
-                write_control,
+    def _start_worker(self, ordinal: int, shard: tuple[Case, ...]) -> None:
+        target = self.directory / f"worker-{ordinal}.json"
+        output = self.directory / f"worker-{ordinal}.log"
+        read_progress, write_progress = os.pipe()
+        if self.adaptive_mutation:
+            read_control, write_control = os.pipe()
+        else:
+            read_control = None
+            write_control = None
+        pid = os.fork()
+        if pid == 0:  # pragma: no cover - worker process
+            self._run_child(
+                _ChildRun(
+                    shard,
+                    target,
+                    output,
+                    read_progress,
+                    write_progress,
+                    read_control,
+                    write_control,
+                )
             )
-
-        combined: list[Result] = []
-        while children:
-            ready, _, _ = select.select(progress_buffers, (), (), 0.05)
-            for descriptor in ready:
-                consume_progress(descriptor)
-            sync_mutation_activity()
-            rebalance_test_workers()
-            pid, status = _reap_owned_worker(children)
-            if pid == 0:
-                continue
-            child = children.get(pid)
-            if child is None:
-                continue
-            target, output, shard, progress_descriptor, control_descriptor = child
-            os.set_blocking(progress_descriptor, True)
-            # The child can exit after writing progress but before select marks
-            # the pipe readable. Keep its ownership record alive until every
-            # buffered row has been attributed; record_progress needs the shard
-            # while draining this EOF tail.
-            consume_progress(progress_descriptor, until_eof=True)
-            children.pop(pid, None)
-            os.close(progress_descriptor)
-            progress_buffers.pop(progress_descriptor, None)
-            progress_owners.pop(progress_descriptor, None)
-            running_children.discard(pid)
-            waiting_children_by_pid.pop(pid, None)
-            if control_descriptor is not None:
-                os.close(control_descriptor)
-            rebalance_test_workers()
-            if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0 or not target.exists():
-                log = (
-                    output.read_text(encoding="utf-8", errors="replace") if output.exists() else ""
+        if os.getpid() != self.controller_pid:
+            os.kill(os.getpid(), 9)
+        self.children[pid] = (target, output, shard, read_progress, write_control)
+        parent_descriptors = (
+            (write_progress,) if read_control is None else (write_progress, read_control)
+        )
+        attempted_parent_descriptors = 0
+        try:
+            for descriptor in parent_descriptors:
+                attempted_parent_descriptors += 1
+                os.close(descriptor)
+            os.set_blocking(read_progress, False)
+        except BaseException as error:
+            self.children.pop(pid, None)
+            cleanup_error = _attempt_cleanup(error, lambda: _terminate_owned_worker(pid))
+            cleanup_error = _attempt_cleanup(cleanup_error, lambda: os.close(read_progress))
+            if write_control is not None:
+                cleanup_error = _attempt_cleanup(cleanup_error, lambda: os.close(write_control))
+            for descriptor in parent_descriptors[attempted_parent_descriptors:]:
+                cleanup_error = _attempt_cleanup(
+                    cleanup_error, lambda descriptor=descriptor: os.close(descriptor)
                 )
-                detail = log or f"native worker {pid} exited with status {status}"
-                rows: Sequence[tuple[str, str, int, str | None]] = ()
-                hits: Sequence[tuple[str, Sequence[str]]] = ()
-                error: str | None = detail
-            else:
+            if cleanup_error is not None:
+                raise cleanup_error from None
+            raise
+        self.progress_buffers[read_progress] = b""
+        self.progress_owners[read_progress] = pid
+        self.completed_worker_cases[pid] = 0
+        self.running_children.add(pid)
+
+    def _run_child(self, child: _ChildRun) -> None:
+        if os.getpid() == self.controller_pid:
+            os.kill(os.getpid(), 9)
+        os.close(child.read_progress)
+        if child.write_control is not None:
+            os.close(child.write_control)
+        runtime = _ChildRuntime()
+        exit_code = 1
+        try:
+            results, hits = self._execute_child_cases(child, runtime)
+            child.target.write_bytes(_encode_raw_worker_payload(results, hits))
+            exit_code = 0
+        except Exception:
+            child.target.write_bytes(_encode_worker_payload((), (), traceback.format_exc()))
+        finally:
+            try:
+                runtime.finish()
+            finally:
                 try:
-                    rows, hits, error = _decode_worker_payload(target.read_bytes())
-                except (EOFError, TypeError, ValueError) as payload_error:
-                    rows = ()
-                    hits = ()
-                    error = f"native worker produced an invalid result: {payload_error}"
-            if error is not None:
-                detail = error
-                shard_results = tuple(
-                    Result(case.node_id, "failed", 0, RuntimeError(detail)) for case in shard
-                )
-            else:
-                shard_results = tuple(
-                    Result(
-                        str(row[0]),
-                        str(row[1]),
-                        int(row[2]),
-                        RuntimeError(str(row[3])) if row[3] is not None else None,
-                    )
-                    for row in rows
-                )
-                if trace_spec is not None:
-                    trace_spec.output_dir.mkdir(parents=True, exist_ok=True)
-                    trace_target = trace_spec.output_dir / f"trace-{pid}.json"
-                    trace_target.write_text(json.dumps({"hits": hits}), encoding="utf-8")
-            finished_ids = {result.node_id for result in shard_results}
-            for case in shard:
-                if case.node_id not in finished_ids:
-                    shard_results += (
-                        Result(
-                            case.node_id,
-                            "interrupted",
-                            0,
-                            RuntimeError("not run after the native failure limit"),
-                        ),
-                    )
-            for result in shard_results:
-                report_outcome = "failed" if result.outcome == "interrupted" else result.outcome
-                duration = result.duration_ns / 1_000_000_000
-                test = activity.tests[result.node_id]
-                if test.finished:
-                    activity.reconcile_native_duration(result.node_id, duration)
+                    if not runtime.owns_progress:
+                        os.close(child.write_progress)
+                finally:
+                    os._exit(exit_code)
+
+    def _execute_child_cases(
+        self, child: _ChildRun, runtime: _ChildRuntime
+    ) -> tuple[Sequence[_RawResult], tuple[tuple[str, tuple[str, ...]], ...]]:
+        descriptor = os.open(child.output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.dup2(descriptor, 1)
+        os.dup2(descriptor, 2)
+        os.close(descriptor)
+        worker_collection = Collection(child.shard, (), runtime=self.collection.runtime)
+        if self.trace_spec is not None:
+            from ._mutant.trace import LineTracer
+
+            runtime.tracer = LineTracer(self.trace_spec.watched)
+            runtime.trace_observer = _TraceObserver(
+                runtime.tracer,
+                self.trace_spec.output_dir / f"live-{os.getpid()}.jsonl",
+            )
+            runtime.tracer.start()
+        runtime.observer = _WorkerProgressObserver(
+            child.write_progress,
+            runtime.trace_observer,
+            control_descriptor=child.read_control,
+            case_count=len(child.shard),
+        )
+        runtime.owns_progress = True
+        try:
+            results = _run_raw(worker_collection, self.max_failures, runtime.observer)
+        finally:
+            hits = runtime.finish()
+        return results, hits
+
+    def monitor_workers(self) -> tuple[Result, ...]:
+        combined: list[Result] = []
+        while self.children:
+            ready, _, _ = select.select(self.progress_buffers, (), (), 0.05)
+            for descriptor in ready:
+                self.consume_progress(descriptor)
+            self.sync_mutation_activity()
+            self.rebalance_test_workers()
+            pid, status = _reap_owned_worker(self.children)
+            if pid:
+                combined.extend(self._finish_worker(pid, status))
+        return tuple(combined)
+
+    def _finish_worker(self, pid: int, status: int) -> tuple[Result, ...]:
+        child = self.children.get(pid)
+        if child is None:
+            return ()
+        target, output, shard, progress_descriptor, control_descriptor = child
+        self._release_worker(pid, progress_descriptor, control_descriptor)
+        rows, hits, error = self._read_worker_payload(pid, status, target, output)
+        shard_results = self._shard_results(shard, rows, error)
+        if error is None and self.trace_spec is not None:
+            self.trace_spec.output_dir.mkdir(parents=True, exist_ok=True)
+            trace_target = self.trace_spec.output_dir / f"trace-{pid}.json"
+            trace_target.write_text(json.dumps({"hits": hits}), encoding="utf-8")
+        self._record_shard_results(shard, shard_results, replace_streamed_results=error is not None)
+        return shard_results
+
+    def _release_worker(
+        self, pid: int, progress_descriptor: int, control_descriptor: int | None
+    ) -> None:
+        os.set_blocking(progress_descriptor, True)
+        self.consume_progress(progress_descriptor, until_eof=True)
+        self.children.pop(pid, None)
+        os.close(progress_descriptor)
+        self.progress_buffers.pop(progress_descriptor, None)
+        self.progress_owners.pop(progress_descriptor, None)
+        self.running_children.discard(pid)
+        self.waiting_children_by_pid.pop(pid, None)
+        if control_descriptor is not None:
+            os.close(control_descriptor)
+        self.rebalance_test_workers()
+
+    @staticmethod
+    def _read_worker_payload(
+        pid: int, status: int, target: Path, output: Path
+    ) -> tuple[Sequence[Any], Sequence[Any], str | None]:
+        if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0 or not target.exists():
+            log = output.read_text(encoding="utf-8", errors="replace") if output.exists() else ""
+            return (), (), log or f"native worker {pid} exited with status {status}"
+        try:
+            return _decode_worker_payload(target.read_bytes())
+        except (EOFError, TypeError, ValueError) as error:
+            return (), (), f"native worker produced an invalid result: {error}"
+
+    @staticmethod
+    def _shard_results(
+        shard: tuple[Case, ...], rows: Sequence[Any], error: str | None
+    ) -> tuple[Result, ...]:
+        if error is not None:
+            return tuple(Result(case.node_id, "failed", 0, RuntimeError(error)) for case in shard)
+        results = [
+            Result(
+                str(row[0]),
+                str(row[1]),
+                int(row[2]),
+                RuntimeError(str(row[3])) if row[3] is not None else None,
+            )
+            for row in rows
+        ]
+        finished = {result.node_id for result in results}
+        results.extend(
+            Result(
+                case.node_id,
+                "interrupted",
+                0,
+                RuntimeError("not run after the native failure limit"),
+            )
+            for case in shard
+            if case.node_id not in finished
+        )
+        return tuple(results)
+
+    def _record_shard_results(
+        self,
+        shard: tuple[Case, ...],
+        shard_results: tuple[Result, ...],
+        *,
+        replace_streamed_results: bool = False,
+    ) -> None:
+        for result in shard_results:
+            report_outcome = "failed" if result.outcome == "interrupted" else result.outcome
+            duration = result.duration_ns / 1_000_000_000
+            test = self.activity.tests[result.node_id]
+            if test.finished:
+                if replace_streamed_results:
+                    self.activity.reconcile_native_result(result.node_id, report_outcome, duration)
                 else:
-                    activity.add_native_result(
-                        result.node_id,
-                        report_outcome,
-                        duration,
-                    )
-            if stage_events is not None and append_stage_event is not None:
-                shard_paths = {case.node_id.split("::", 1)[0] for case in shard}
-                for path in sorted(shard_paths):
-                    file_state = activity.files[path]
-                    if path not in finished_stage_files and file_state.finished == len(
-                        file_state.nodeids
-                    ):
-                        append_stage_event(stage_events, file_state)
-                        finished_stage_files.add(path)
-            combined.extend(shard_results)
-        return tuple(combined), live_fuzz
+                    self.activity.reconcile_native_duration(result.node_id, duration)
+            else:
+                self.activity.add_native_result(result.node_id, report_outcome, duration)
+        if self.stage_events is None or self.append_stage_event is None:
+            return
+        shard_paths = {case.node_id.split("::", 1)[0] for case in shard}
+        for path in sorted(shard_paths):
+            file_state = self.activity.files[path]
+            if (
+                replace_streamed_results or path not in self.finished_stage_files
+            ) and file_state.finished == len(file_state.nodeids):
+                self.append_stage_event(self.stage_events, file_state)
+                self.finished_stage_files.add(path)
+
+    def cleanup(self) -> None:
+        error: BaseException | None = None
+        if self.progress_stream is not None:
+            error = _attempt_cleanup(error, self.progress_stream.close)
+        for pid, (_, _, _, descriptor, control) in tuple(self.children.items()):
+            error = _attempt_cleanup(error, lambda pid=pid: _terminate_owned_worker(pid))
+            error = _attempt_cleanup(error, lambda descriptor=descriptor: os.close(descriptor))
+            if control is not None:
+                error = _attempt_cleanup(error, lambda control=control: os.close(control))
+        error = _attempt_cleanup(error, self.temporary.cleanup)
+        if error is not None:
+            raise error
+
+
+def _run_parallel(run: _ParallelRun) -> tuple[tuple[Result, ...], Any | None]:
+    """Run module-local C dispatch loops in isolated fork workers."""
+    try:
+        run.start_workers()
+        return run.monitor_workers(), run.live_fuzz
     finally:
-        if progress_stream is not None:
-            progress_stream.close()
-        for pid, (_, _, _, descriptor, control_descriptor) in tuple(children.items()):
-            _terminate_owned_worker(pid)
-            os.close(descriptor)
-            if control_descriptor is not None:
-                os.close(control_descriptor)
-        temporary.cleanup()
+        run.cleanup()
 
 
-def execute(namespace: Any) -> int:
-    """Collect once and execute module shards through native C worker loops."""
-    _validate_runner_options(namespace)
-    from ._test_runner import (
-        ActivityRenderer,
-        FuzzActivity,
-        MutationActivity,
-        RunActivity,
-        _atomic_json,
-        _attach_fuzz_report,
-        _attach_mutation_report,
-        _finish_fuzz_process,
-        _finish_mutation_process,
-        _fuzz_confidence,
-        _merge_fuzz_batches,
-        _mutation_activity_from_report,
-        _mutation_arguments,
-        _mutation_confidence,
-        _mutation_gold_files,
-        _no_gold_fuzz,
-        _prepare_mutation_trace,
-        _resolve_mutant_workers,
-        _resolve_workers,
-        _start_mutation_process,
-        _stop_fuzz_process,
-        _stop_mutation_process,
-        _update_history,
-        _write_reused_baseline,
-    )
-
-    if int(namespace.slowest) < 0:
-        raise ValueError("--slowest must be a non-negative integer")
-    if namespace.mutant != "off":
-        _mutation_arguments(namespace)
-    workers = _resolve_workers(str(namespace.workers))
-    options = _parse(tuple(getattr(namespace, "pytest_args", ())))
-    if options.markers is None:
-        options = replace(options, markers=_configured_markers())
-    temporary = tempfile.TemporaryDirectory(prefix="wreath-native-run-")
-    temporary_path = Path(temporary.name)
-    trace_spec = None
-    selection_path = None
-    baseline_wait_path = None
-    prepared_mutation = None
-    live_fuzz = None
-    live_fuzz_started = False
+@dataclass(slots=True)
+class _NativeRunState:
+    temporary: Any
+    directory: Path
+    trace_spec: Any = None
+    selection_path: Path | None = None
+    baseline_wait_path: Path | None = None
+    prepared_mutation: Any = None
+    live_fuzz: Any = None
+    live_fuzz_started: bool = False
     fuzz_case_ids: tuple[str, ...] = ()
-    renderer = None
-    if namespace.mutant in {"auto", "sample"}:
-        trace_spec = _prepare_mutation_trace(namespace, temporary_path)
-        if namespace.mutant == "sample" and trace_spec is None:
+    renderer: Any = None
+
+    def cleanup(self) -> None:
+        from ._test_runner import _stop_fuzz_process, _stop_mutation_process
+
+        error: BaseException | None = None
+        for attribute, finish in (
+            ("renderer", lambda resource: resource.restore()),
+            ("prepared_mutation", _stop_mutation_process),
+            ("live_fuzz", _stop_fuzz_process),
+        ):
+            resource = getattr(self, attribute)
+            if resource is None:
+                continue
+            try:
+                finish(resource)
+            except BaseException as cleanup_error:
+                if error is None:
+                    error = cleanup_error
+            else:
+                setattr(self, attribute, None)
+        try:
+            self.temporary.cleanup()
+        except BaseException as cleanup_error:
+            if error is None:
+                error = cleanup_error
+        if error is not None:
+            raise error
+
+    @classmethod
+    def prepare(cls, namespace: Any, options: Options) -> _NativeRunState:
+        temporary = tempfile.TemporaryDirectory(prefix="wreath-native-run-")
+        state = cls(temporary, Path(temporary.name))
+        if namespace.mutant not in {"auto", "sample"}:
+            return state
+        from ._test_runner import _prepare_mutation_trace, _start_mutation_process
+
+        state.trace_spec = _prepare_mutation_trace(namespace, state.directory)
+        if namespace.mutant == "sample" and state.trace_spec is None:
             temporary.cleanup()
             raise ValueError("--mutant sample found no eligible controls")
-        if trace_spec is not None:
-            selection_path = temporary_path / "mutation-selection.json"
-            selection_path.write_text(json.dumps(sorted(trace_spec.selected)), encoding="utf-8")
-            if not options.collect_only:
-                baseline_wait_path = temporary_path / "mutation-baseline.json"
-                prepared_mutation = _start_mutation_process(
-                    namespace,
-                    directory=temporary_path,
-                    baseline_wait=baseline_wait_path,
-                    baseline_stream=trace_spec.output_dir,
-                    selection=selection_path,
-                )
+        if state.trace_spec is None:
+            return state
+        state.selection_path = state.directory / "mutation-selection.json"
+        state.selection_path.write_text(
+            json.dumps(sorted(state.trace_spec.selected)), encoding="utf-8"
+        )
+        if not options.collect_only:
+            state.baseline_wait_path = state.directory / "mutation-baseline.json"
+            state.prepared_mutation = _start_mutation_process(
+                namespace,
+                directory=state.directory,
+                baseline_wait=state.baseline_wait_path,
+                baseline_stream=state.trace_spec.output_dir,
+                selection=state.selection_path,
+            )
+        return state
+
+
+def _select_native_cases(
+    namespace: Any, collection: Collection
+) -> tuple[Collection, tuple[str, ...]]:
+    case_selection = getattr(namespace, "case_selection", None)
+    if case_selection is None:
+        return collection, ()
+    path = Path(str(case_selection))
     try:
-        with _facade_import():
-            collection = collect(options)
-            try:
-                if options.collect_only:
-                    for case in collection.cases:
-                        print(case.node_id)
-                    return 0 if collection.cases else 5
-                case_selection = getattr(namespace, "case_selection", None)
-                if case_selection is not None:
-                    case_selection_path = Path(str(case_selection))
-                    try:
-                        selected_value = json.loads(case_selection_path.read_text(encoding="utf-8"))
-                    except (OSError, ValueError) as error:
-                        raise ValueError(
-                            f"--case-selection must name a readable JSON test list: {error}"
-                        ) from error
-                    if not isinstance(selected_value, list) or not all(
-                        isinstance(nodeid, str) for nodeid in selected_value
-                    ):
-                        raise ValueError(
-                            "--case-selection must contain a JSON list of test node IDs"
-                        )
-                    selected_ids = dict.fromkeys(selected_value, True)
-                    missing = set(selected_ids).difference(collection.index)
-                    if missing:
-                        raise ValueError(
-                            "--case-selection names uncollected test "
-                            f"{min(missing)!r}; select its test file and use its exact node ID"
-                        )
-                    fuzz_case_ids = tuple(
-                        sorted(case.node_id for case in collection.cases if case.has_mark("fuzz"))
-                    )
-                    selected_cases = tuple(
-                        case
-                        for case in collection.cases
-                        if selected_ids.get(case.node_id, False) or case.has_mark("fuzz")
-                    )
-                    schedule_seed = os.environ.get("WREATH_FUZZ_SCHEDULE_SEED")
-                    if schedule_seed is not None:
-                        selected_cases = _schedule_fuzz_cases(selected_cases, schedule_seed)
-                    collection = Collection(
-                        selected_cases,
-                        collection.modules,
-                        collection.files,
-                        collection.runtime,
-                        {case.node_id: case for case in selected_cases},
-                    )
-                history = None if namespace.no_history else Path(namespace.history)
-                shards = _native_shards(collection, workers, history)
-                if options.max_failures and len(shards) > 1:
-                    shards = (tuple(collection.cases),)
-                actual_workers = len(shards)
-                activity = RunActivity(workers=actual_workers)
-                renderer = ActivityRenderer(
-                    activity,
-                    stream=sys.stderr,
-                    mode=str(namespace.grid),
-                    slowest=int(namespace.slowest),
-                )
-                with _test_import_paths(collection.files):
-                    results, live_fuzz = _run_parallel(
-                        collection,
-                        shards=shards,
-                        max_failures=options.max_failures,
-                        renderer=renderer,
-                        activity=activity,
-                        trace_spec=trace_spec,
-                        mutation_process=prepared_mutation,
-                        mutation_mode=str(namespace.mutant),
-                        adaptive_mutation=(
-                            prepared_mutation is not None
-                            and str(namespace.mutant_workers) == "auto"
-                        ),
-                        live_mutation_limit=max(
-                            1,
-                            _resolve_mutant_workers("auto")
-                            - (1 if getattr(namespace, "fuzz", "off") == "on" else 0),
-                        ),
-                        fuzz_namespace=(
-                            namespace if getattr(namespace, "fuzz", "off") == "on" else None
-                        ),
-                        fuzz_directory=temporary_path / "live-fuzz",
-                        stage_events=(
-                            Path(namespace.stage_events)
-                            if getattr(namespace, "stage_events", None) is not None
-                            else None
-                        ),
-                    )
-                    live_fuzz_started = live_fuzz is not None
-                    if live_fuzz is not None and live_fuzz.process.poll() is None:
-                        # The live batch owns one suite slot only. Do not carry
-                        # that serial allocation into the sealed tail: discard
-                        # speculative partial work and redispatch the final gold
-                        # set across the full native worker pool below.
-                        _stop_fuzz_process(live_fuzz)
-                        renderer.fuzz = FuzzActivity(
-                            state="running",
-                            selected_files=frozenset(live_fuzz.selected),
-                        )
-                        live_fuzz = None
-            finally:
-                if collection.runtime is not None:
-                    collection.runtime.close()
-                _forget_modules(collection.modules)
-        if any(result.outcome == "interrupted" for result in results):
+        selected_value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ValueError(
+            f"--case-selection must name a readable JSON test list: {error}"
+        ) from error
+    if not isinstance(selected_value, list) or not all(
+        isinstance(nodeid, str) for nodeid in selected_value
+    ):
+        raise ValueError("--case-selection must contain a JSON list of test node IDs")
+    selected_ids = dict.fromkeys(selected_value, True)
+    missing = set(selected_ids).difference(collection.index)
+    if missing:
+        raise ValueError(
+            "--case-selection names uncollected test "
+            f"{min(missing)!r}; select its test file and use its exact node ID"
+        )
+    fuzz_ids = tuple(sorted(case.node_id for case in collection.cases if case.has_mark("fuzz")))
+    selected_cases = tuple(
+        case
+        for case in collection.cases
+        if selected_ids.get(case.node_id, False) or case.has_mark("fuzz")
+    )
+    schedule_seed = os.environ.get("WREATH_FUZZ_SCHEDULE_SEED")
+    if schedule_seed is not None:
+        selected_cases = _schedule_fuzz_cases(selected_cases, schedule_seed)
+    return (
+        Collection(
+            selected_cases,
+            collection.modules,
+            collection.files,
+            collection.runtime,
+            {case.node_id: case for case in selected_cases},
+        ),
+        fuzz_ids,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _NativeSuite:
+    collection: Collection
+    results: tuple[Result, ...]
+    activity: Any
+    history: Path | None
+
+
+@dataclass(slots=True)
+class _NativeOutcome:
+    namespace: Any
+    options: Options
+    state: _NativeRunState
+    suite: _NativeSuite
+    status: int
+    activity_path: Path
+    user_report: Path | None
+
+    @classmethod
+    def prepare(
+        cls,
+        namespace: Any,
+        options: Options,
+        state: _NativeRunState,
+        suite: _NativeSuite,
+    ) -> _NativeOutcome:
+        from ._test_runner import _atomic_json, _update_history
+
+        if any(result.outcome == "interrupted" for result in suite.results):
             status = 2
-        elif any(result.outcome == "failed" for result in results):
+        elif any(result.outcome == "failed" for result in suite.results):
             status = 1
         else:
-            status = 0 if collection.cases else 5
-        activity.finish(status)
-        report = activity.report(slowest=int(namespace.slowest))
+            status = 0 if suite.collection.cases else 5
+        suite.activity.finish(status)
+        report = suite.activity.report(slowest=int(namespace.slowest))
         if getattr(namespace, "case_selection", None) is not None:
-            report["fuzz_case_ids"] = list(fuzz_case_ids)
+            report["fuzz_case_ids"] = list(state.fuzz_case_ids)
             schedule_seed = os.environ.get("WREATH_FUZZ_SCHEDULE_SEED")
             if schedule_seed is not None:
                 report["fuzz_schedule_seed"] = schedule_seed
-        activity_path = temporary_path / "activity.json"
+        activity_path = state.directory / "activity.json"
         _atomic_json(activity_path, report)
         user_report = Path(namespace.report) if namespace.report is not None else None
         if user_report is not None:
             _atomic_json(user_report, report)
-        if history is not None:
-            _update_history(history, report)
-        if len(collection.cases) <= 200:
-            _render(results, quiet=options.quiet, slowest=int(namespace.slowest))
+        if suite.history is not None:
+            _update_history(suite.history, report)
+        if len(suite.collection.cases) <= 200:
+            _render(suite.results, quiet=options.quiet, slowest=int(namespace.slowest))
         if status:
-            for result in results:
-                if result.outcome not in {"failed", "interrupted"}:
-                    continue
-                print(f"\n{result.node_id} {result.outcome.upper()}")
-                if result.exception is not None:
-                    print(result.exception)
-        passed = activity.counts()["passed"]
-        if namespace.mutant == "off":
+            cls._render_failures(suite.results)
+        return cls(namespace, options, state, suite, status, activity_path, user_report)
+
+    @staticmethod
+    def _render_failures(results: Sequence[Result]) -> None:
+        for result in results:
+            if result.outcome not in {"failed", "interrupted"}:
+                continue
+            print(f"\n{result.node_id} {result.outcome.upper()}")
+            if result.exception is not None:
+                print(result.exception)
+
+    def finish(self) -> int:
+        from ._test_runner import MutationActivity, _no_gold_fuzz
+
+        renderer = self.state.renderer
+        if renderer is None:
+            raise RuntimeError("native activity renderer was not prepared")
+        if self.namespace.mutant == "off":
             renderer.finish()
-            return status
-        if not passed:
-            mutation_activity = MutationActivity(mode=str(namespace.mutant), state="no_green")
-            if namespace.fuzz == "on":
+            return self.status
+        if not self.suite.activity.counts()["passed"]:
+            mutation_activity = MutationActivity(mode=str(self.namespace.mutant), state="no_green")
+            if self.namespace.fuzz == "on":
                 fuzz, fuzz_activity = _no_gold_fuzz()
-                if user_report is not None:
-                    _attach_fuzz_report(user_report, fuzz)
+                self._attach_fuzz(fuzz)
                 renderer.finish_pipeline(mutation_activity, fuzz_activity)
             else:
                 renderer.finish_with_mutation(mutation_activity)
-            return status
-        if namespace.mutant == "auto" and trace_spec is None:
+            return self.status
+        if self.namespace.mutant == "auto" and self.state.trace_spec is None:
             mutation_activity = MutationActivity(mode="auto", state="unrated")
-            if namespace.fuzz == "on":
+            if self.namespace.fuzz == "on":
                 fuzz, fuzz_activity = _no_gold_fuzz()
-                if user_report is not None:
-                    _attach_fuzz_report(user_report, fuzz)
+                self._attach_fuzz(fuzz)
                 renderer.finish_pipeline(mutation_activity, fuzz_activity)
             else:
                 renderer.finish_with_mutation(mutation_activity)
-            return status
-        baseline_path = None
-        if trace_spec is not None:
-            if baseline_wait_path is None:
-                raise RuntimeError("native mutation baseline path was not prepared")
-            if _write_reused_baseline(trace_spec, activity_path, baseline_wait_path):
-                baseline_path = baseline_wait_path
-            elif prepared_mutation is not None:
-                _stop_mutation_process(prepared_mutation)
-                prepared_mutation = None
-        if prepared_mutation is not None:
-            mutation, mutation_status = _finish_mutation_process(
-                namespace,
-                prepared_mutation,
-                renderer=renderer,
-                live_fuzz=live_fuzz,
-            )
-        else:
-            mutation, mutation_status = _mutation_confidence(
-                namespace,
-                baseline=baseline_path,
-                selection=selection_path,
-                renderer=renderer,
-            )
-        mutation_activity = _mutation_activity_from_report(str(namespace.mutant), mutation)
-        if user_report is not None:
-            _attach_mutation_report(user_report, mutation)
-        if namespace.fuzz == "off":
+            return self.status
+        mutation, mutation_status, mutation_activity = self._finish_mutation(renderer)
+        if self.namespace.fuzz == "off":
             renderer.finish_with_mutation(mutation_activity)
-            return status if status != 0 else mutation_status
+            return self.status if self.status != 0 else mutation_status
+        fuzz_status = self._finish_fuzz(mutation, mutation_activity, renderer)
+        if self.status != 0:
+            return self.status
+        return mutation_status if mutation_status != 0 else fuzz_status
+
+    def _attach_fuzz(self, fuzz: dict[str, Any]) -> None:
+        if self.user_report is None:
+            return
+        from ._test_runner import _attach_fuzz_report
+
+        _attach_fuzz_report(self.user_report, fuzz)
+
+    def _finish_mutation(self, renderer: Any) -> tuple[dict[str, Any], int, Any]:
+        from ._test_runner import (
+            _attach_mutation_report,
+            _finish_mutation_process,
+            _mutation_activity_from_report,
+            _mutation_confidence,
+            _stop_mutation_process,
+            _write_reused_baseline,
+        )
+
+        baseline_path = None
+        trace = self.state.trace_spec
+        prepared = self.state.prepared_mutation
+        if trace is not None:
+            baseline_wait = self.state.baseline_wait_path
+            if baseline_wait is None:
+                raise RuntimeError("native mutation baseline path was not prepared")
+            if _write_reused_baseline(trace, self.activity_path, baseline_wait):
+                baseline_path = baseline_wait
+            elif prepared is not None:
+                _stop_mutation_process(prepared)
+                self.state.prepared_mutation = None
+                prepared = None
+        if prepared is not None:
+            mutation, status = _finish_mutation_process(
+                self.namespace,
+                prepared,
+                renderer=renderer,
+                live_fuzz=self.state.live_fuzz,
+            )
+            self.state.prepared_mutation = None
+        else:
+            mutation, status = _mutation_confidence(
+                self.namespace,
+                baseline=baseline_path,
+                selection=self.state.selection_path,
+                renderer=renderer,
+            )
+        activity = _mutation_activity_from_report(str(self.namespace.mutant), mutation)
+        if self.user_report is not None:
+            _attach_mutation_report(self.user_report, mutation)
+        return mutation, status, activity
+
+    def _finish_fuzz(self, mutation: dict[str, Any], mutation_activity: Any, renderer: Any) -> int:
+        from ._test_runner import (
+            _finish_fuzz_process,
+            _fuzz_confidence,
+            _merge_fuzz_batches,
+            _mutation_gold_files,
+            _no_gold_fuzz,
+        )
+
         final_gold = _mutation_gold_files(mutation)
+        live_fuzz = self.state.live_fuzz
+        early_selected = frozenset() if live_fuzz is None else frozenset(live_fuzz.selected)
         early_batch = None
         if live_fuzz is not None:
-            early_batch = _finish_fuzz_process(
-                live_fuzz,
-                mutation_activity,
-                renderer=renderer,
-            )
-        early_selected = frozenset() if live_fuzz is None else frozenset(live_fuzz.selected)
+            early_batch = _finish_fuzz_process(live_fuzz, mutation_activity, renderer=renderer)
+            self.state.live_fuzz = None
         final_gold_set = frozenset(final_gold)
         batches = []
         if early_batch is not None and early_selected <= final_gold_set:
@@ -2678,7 +2812,7 @@ def execute(namespace: Any) -> int:
         if remaining:
             batches.append(
                 _fuzz_confidence(
-                    namespace,
+                    self.namespace,
                     mutation,
                     mutation_activity,
                     renderer=renderer,
@@ -2686,30 +2820,118 @@ def execute(namespace: Any) -> int:
                 )
             )
         if batches:
-            fuzz, fuzz_activity, fuzz_status = _merge_fuzz_batches(
-                batches,
-                final_gold,
-            )
+            fuzz, fuzz_activity, status = _merge_fuzz_batches(batches, final_gold)
         else:
             fuzz, fuzz_activity = _no_gold_fuzz()
-            fuzz_status = 0
-        fuzz["live_started"] = live_fuzz_started
-        if user_report is not None:
-            _attach_fuzz_report(user_report, fuzz)
+            status = 0
+        fuzz["live_started"] = self.state.live_fuzz_started
+        self._attach_fuzz(fuzz)
         renderer.finish_pipeline(mutation_activity, fuzz_activity)
-        if status != 0:
-            return status
-        if mutation_status != 0:
-            return mutation_status
-        return fuzz_status
+        return status
+
+
+def _run_native_suite(
+    namespace: Any, options: Options, workers: int, state: _NativeRunState
+) -> _NativeSuite | int:
+    from ._test_runner import (
+        ActivityRenderer,
+        FuzzActivity,
+        RunActivity,
+        _resolve_mutant_workers,
+        _stop_fuzz_process,
+    )
+
+    with _facade_import():
+        collection = collect(options)
+        try:
+            if options.collect_only:
+                for case in collection.cases:
+                    print(case.node_id)
+                return 0 if collection.cases else 5
+            collection, state.fuzz_case_ids = _select_native_cases(namespace, collection)
+            history = None if namespace.no_history else Path(namespace.history)
+            shards = _native_shards(collection, workers, history)
+            if options.max_failures and len(shards) > 1:
+                shards = (tuple(collection.cases),)
+            activity = RunActivity(workers=len(shards))
+            state.renderer = ActivityRenderer(
+                activity,
+                stream=sys.stderr,
+                mode=str(namespace.grid),
+                slowest=int(namespace.slowest),
+            )
+            with _test_import_paths(collection.files):
+                results, state.live_fuzz = _run_parallel(
+                    _ParallelRun(
+                        collection,
+                        shards=shards,
+                        max_failures=options.max_failures,
+                        renderer=state.renderer,
+                        activity=activity,
+                        trace_spec=state.trace_spec,
+                        mutation_process=state.prepared_mutation,
+                        mutation_mode=str(namespace.mutant),
+                        adaptive_mutation=(
+                            state.prepared_mutation is not None
+                            and str(namespace.mutant_workers) == "auto"
+                        ),
+                        live_mutation_limit=max(
+                            1,
+                            _resolve_mutant_workers("auto")
+                            - (1 if getattr(namespace, "fuzz", "off") == "on" else 0),
+                        ),
+                        fuzz_namespace=(
+                            namespace if getattr(namespace, "fuzz", "off") == "on" else None
+                        ),
+                        fuzz_directory=state.directory / "live-fuzz",
+                        stage_events=(
+                            Path(namespace.stage_events)
+                            if getattr(namespace, "stage_events", None) is not None
+                            else None
+                        ),
+                    )
+                )
+            state.live_fuzz_started = state.live_fuzz is not None
+            if state.live_fuzz is not None and state.live_fuzz.process.poll() is None:
+                _stop_fuzz_process(state.live_fuzz)
+                state.renderer.fuzz = FuzzActivity(
+                    state="running",
+                    selected_files=frozenset(state.live_fuzz.selected),
+                )
+                state.live_fuzz = None
+            return _NativeSuite(collection, results, activity, history)
+        finally:
+            if collection.runtime is not None:
+                collection.runtime.close()
+            _forget_modules(collection.modules)
+
+
+def _execute_native(namespace: Any) -> int:
+    """Collect once and execute module shards through native C worker loops."""
+    _validate_runner_options(namespace)
+    from ._test_runner import _mutation_arguments, _resolve_workers
+
+    if int(namespace.slowest) < 0:
+        raise ValueError("--slowest must be a non-negative integer")
+    if namespace.mutant != "off":
+        _mutation_arguments(namespace)
+    workers = _resolve_workers(str(namespace.workers))
+    options = _parse(tuple(getattr(namespace, "pytest_args", ())))
+    if options.markers is None:
+        options = replace(options, markers=_configured_markers())
+    state = _NativeRunState.prepare(namespace, options)
+    try:
+        suite = _run_native_suite(namespace, options, workers, state)
+        if isinstance(suite, int):
+            return suite
+        return _NativeOutcome.prepare(namespace, options, state, suite).finish()
     finally:
-        if renderer is not None:
-            renderer.restore()
-        if prepared_mutation is not None:
-            _stop_mutation_process(prepared_mutation)
-        if live_fuzz is not None:
-            _stop_fuzz_process(live_fuzz)
-        temporary.cleanup()
+        state.cleanup()
+
+
+def execute(namespace: Any) -> int:
+    """Collect once and execute module shards through native C worker loops."""
+    return _execute_native(namespace)
 
 
 class _PytestOracle:

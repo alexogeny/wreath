@@ -11,6 +11,11 @@ from wreath.response import Response
 pytestmark = pytest.mark.asyncio
 
 
+def test_idempotency_refuses_a_negative_response_body_ceiling() -> None:
+    with pytest.raises(ValueError, match="max_body_bytes must be non-negative"):
+        IdempotencyPolicy(max_body_bytes=-1)
+
+
 async def _receive() -> dict:
     return {"type": "http.request", "body": b"", "more_body": False}
 

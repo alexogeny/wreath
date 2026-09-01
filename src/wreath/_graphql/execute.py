@@ -26,6 +26,7 @@ level's object count, so a slow field is distinguishable from a wide one.
 
 from __future__ import annotations
 
+import asyncio
 from time import monotonic_ns as _monotonic_ns
 from typing import Any
 
@@ -43,6 +44,26 @@ __all__ = ["ExecutionError", "execute", "execute_json"]
 
 #: Returned instead of a value when a field is denied under `on_denied="null"`.
 _DENIED = object()
+_RESOLVER_TASK_LIMIT = 32
+
+
+async def _resolve_wave(awaitables: tuple[Any, ...]) -> list[Any]:
+    tasks = tuple(asyncio.create_task(awaitable) for awaitable in awaitables)
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    if any(task.cancelled() or task.exception() is not None for task in done):
+        for task in pending:
+            task.cancel()
+        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
+    return [task.result() for task in tasks]
 
 
 class ExecutionError(Exception):
@@ -303,12 +324,14 @@ class _Run:
                     path=path,
                 )
             return values
-        values = []
-        for parent in parents:
-            result = spec.fn(parent, info)
-            if is_awaitable(result):
-                result = await result
-            values.append(result)
+        async def resolve(parent: Any) -> Any:
+            value = spec.fn(parent, info)
+            return await value if is_awaitable(value) else value
+
+        values: list[Any] = []
+        for start in range(0, len(parents), _RESOLVER_TASK_LIMIT):
+            batch = parents[start : start + _RESOLVER_TASK_LIMIT]
+            values.extend(await _resolve_wave(tuple(resolve(parent) for parent in batch)))
         return values
 
     async def _project(

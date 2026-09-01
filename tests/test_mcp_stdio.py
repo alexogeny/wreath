@@ -7,9 +7,12 @@ import json
 import os
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
+from typing import Any
 from unittest import mock
 
-from wreath import Wreath
+import pytest
+
+from wreath import Wreath, testing
 from wreath._mcp import stdio
 from wreath._mcp.stdio import _pump
 from wreath.mcp import MCP, PROTOCOL_VERSION
@@ -95,6 +98,130 @@ def build() -> Wreath:
         return {"summary": answer["content"]["text"]}
 
     return app
+
+
+async def test_relay_applies_backpressure_at_its_inflight_ceiling(monkeypatch) -> None:
+    monkeypatch.setattr(stdio, "_MAX_INFLIGHT", 2)
+    app = Wreath()
+    mcp = MCP(app, name="bounded", version="1.0.0")
+    release = asyncio.Event()
+    started = 0
+    two_started = asyncio.Event()
+
+    @mcp.tool(description="Waits so the relay ceiling is observable.")
+    async def wait(request) -> dict:
+        nonlocal started
+        started += 1
+        if started == 2:
+            two_started.set()
+        await release.wait()
+        return {}
+
+    pipe = Pipe()
+    sink = Sink()
+    relay = asyncio.create_task(stdio.serve(app, stdin=pipe.reader, stdout=sink))
+    try:
+        pipe.send(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": PROTOCOL_VERSION, "capabilities": {}},
+            }
+        )
+        await sink.next()
+        for identifier in range(2, 5):
+            pipe.send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": identifier,
+                    "method": "tools/call",
+                    "params": {"name": "wait"},
+                }
+            )
+        await asyncio.wait_for(two_started.wait(), timeout=0.5)
+        await asyncio.sleep(0)
+        assert started == 2
+        release.set()
+        await asyncio.gather(*(sink.next() for _ in range(3)))
+    finally:
+        pipe.close()
+        await asyncio.wait_for(relay, timeout=0.5)
+        pipe.reader.close()
+
+
+async def test_backpressure_observes_every_completed_failure(monkeypatch) -> None:
+    monkeypatch.setattr(stdio, "_MAX_INFLIGHT", 2)
+    release = asyncio.Event()
+    two_started = asyncio.Event()
+    relay_tasks: list[ObservedTask] = []
+    calls = 0
+
+    class Response:
+        body = b""
+
+        @staticmethod
+        def header(name: str) -> str:
+            return "session" if name == "mcp-session-id" else ""
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc: Any) -> None:
+            return None
+
+        async def post(self, *args: Any, **kwargs: Any) -> Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return Response()
+            if calls == 3:
+                two_started.set()
+            await release.wait()
+            raise RuntimeError(f"relay {calls} failed")
+
+    class ObservedTask(asyncio.Task):
+        observed = False
+
+        def result(self):
+            self.observed = True
+            return super().result()
+
+        def exception(self):
+            self.observed = True
+            return super().exception()
+
+    async def idle_pump(*args: Any, **kwargs: Any) -> None:
+        await asyncio.Event().wait()
+
+    def create_task(coro):
+        task = ObservedTask(coro)
+        if getattr(coro, "cr_code", None) is not None and coro.cr_code.co_name == "relay":
+            relay_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(testing, "TestClient", lambda app: Client())
+    monkeypatch.setattr(stdio, "_pump", idle_pump)
+    monkeypatch.setattr(stdio.asyncio, "create_task", create_task)
+    pipe = Pipe()
+    sink = Sink()
+    serving = asyncio.create_task(stdio.serve(Wreath(), stdin=pipe.reader, stdout=sink))
+    try:
+        for identifier in range(4):
+            pipe.send({"jsonrpc": "2.0", "id": identifier})
+        await asyncio.wait_for(two_started.wait(), timeout=0.5)
+        release.set()
+        with pytest.raises(RuntimeError, match="relay"):
+            await asyncio.wait_for(serving, timeout=0.5)
+        assert len(relay_tasks) == 2
+        assert all(task.observed for task in relay_tasks)
+    finally:
+        pipe.close()
+        if not serving.done():
+            serving.cancel()
+            await asyncio.gather(serving, return_exceptions=True)
+        pipe.reader.close()
 
 
 async def test_stream_pump_reassembles_one_data_line_from_many_fragments() -> None:

@@ -50,7 +50,7 @@ from hashlib import blake2b
 from typing import Any, Final
 
 from ._native import _core
-from ._orm_events import subscribe_writes
+from ._orm_events import subscribe_writes, unsubscribe_writes
 from ._structured_fields import Item, Token, serialize_list
 from .cache import BoundedCache
 from .response import Response
@@ -232,7 +232,20 @@ class CDNPurge:
     page and nothing in the application looks wrong.
     """
 
-    __slots__ = ("_dropped", "_enqueued", "_jobs", "_key", "_tags", "_task", "_watching")
+    __slots__ = (
+        "__weakref__",
+        "_closed",
+        "_dropped",
+        "_enqueued",
+        "_jobs",
+        "_key",
+        "_pending",
+        "_runner",
+        "_subscribed",
+        "_tags",
+        "_task",
+        "_watching",
+    )
 
     def __init__(
         self,
@@ -248,6 +261,10 @@ class CDNPurge:
         self._key = key or (lambda tag: f"purge:{tag}")
         self._dropped = 0
         self._enqueued = 0
+        self._closed = False
+        self._pending: set[str] = set()
+        self._runner: asyncio.Task[None] | None = None
+        self._subscribed = False
         self._watching: frozenset[str] = frozenset()
 
     @property
@@ -281,10 +298,35 @@ class CDNPurge:
         """Purge these models' tags whenever the ORM says they were written.
 
         Registered against the process-global write signal, so a `CDNPurge` is
-        an application-lifetime object. Call it once during startup.
+        an application-lifetime object. Call it during startup and call `close`
+        during shutdown. Repeated calls extend the watched model set.
+
+        Raises:
+            RuntimeError: This purger has been closed and cannot be restarted.
         """
+        if self._closed:
+            raise RuntimeError(
+                "cannot watch models after the CDN purger was closed; create a new CDNPurge"
+            )
         self._watching = self._watching | {watched_name(model) for model in models}
-        subscribe_writes(self._on_write)
+        if self._watching and not self._subscribed:
+            subscribe_writes(self._on_write, owner=self)
+            self._subscribed = True
+
+    def unwatch(self, *models: Any) -> None:
+        """Stop purging the named models, or every model when none are given."""
+        removed = self._watching if not models else {watched_name(model) for model in models}
+        self._watching = self._watching - removed
+        if not self._watching and self._subscribed:
+            unsubscribe_writes(self._on_write)
+            self._subscribed = False
+
+    def close(self) -> None:
+        """Stop receiving writes while allowing already scheduled enqueues to finish."""
+        if self._closed:
+            return
+        self.unwatch()
+        self._closed = True
 
     def _on_write(self, written: frozenset[str]) -> None:
         """Enqueue one purge per written model this purge watches.
@@ -301,17 +343,42 @@ class CDNPurge:
             self._schedule(self._tags.key(name))
 
     def _schedule(self, tag: str) -> None:
-        """Hand one purge to the job queue without delaying the committed write."""
+        """Hand purges to one coalescing runner without delaying the committed write."""
+        if tag in self._pending:
+            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             # A committed write has no transaction left to fail.
             self._dropped += 1
             return
-        task = loop.create_task(self._enqueue(tag))
-        # Hold the task strongly until its callback runs.
-        _PENDING.add(task)
-        task.add_done_callback(_PENDING.discard)
+        self._pending.add(tag)
+        self._start_runner(loop)
+
+    def _start_runner(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
+        if self._runner is not None or not self._pending:
+            return
+        if loop is None:
+            loop = asyncio.get_running_loop()
+        task = loop.create_task(self._drain_pending())
+        self._runner = task
+        task.add_done_callback(self._runner_done)
+
+    async def _drain_pending(self) -> None:
+        while self._pending:
+            tag = next(iter(self._pending))
+            await self._enqueue(tag)
+            self._pending.remove(tag)
+
+    def _runner_done(self, task: asyncio.Task[None]) -> None:
+        if self._runner is not task:
+            return
+        self._runner = None
+        if task.cancelled():
+            self._dropped += len(self._pending)
+            self._pending.clear()
+            return
+        self._start_runner()
 
     async def _enqueue(self, tag: str) -> None:
         try:
@@ -337,10 +404,6 @@ class CDNPurge:
             f"<CDNPurge task={self._task!r} watching={sorted(self._watching)} "
             f"enqueued={self._enqueued} dropped={self._dropped}>"
         )
-
-
-#: In-flight purge tasks, held so the event loop does not collect one mid-await.
-_PENDING: set[asyncio.Task[None]] = set()
 
 
 def _apply_header(result: Any, name: bytes, value: bytes) -> None:

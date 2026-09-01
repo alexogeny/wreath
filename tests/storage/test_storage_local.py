@@ -74,6 +74,28 @@ def test_stream_write_and_list_glob(tmp_path):
     _run(go())
 
 
+def test_list_pushes_a_directory_prefix_into_the_native_walk(tmp_path, monkeypatch):
+    s = LocalObjectStore(tmp_path)
+    walked: list[str] = []
+    real_walk = objects._core.local_walk
+
+    def recording_walk(root, scandir, join):
+        walked.append(os.fspath(root))
+        return real_walk(root, scandir, join)
+
+    monkeypatch.setattr(objects._core, "local_walk", recording_walk)
+
+    async def go():
+        await s.write("logs/2026/a.log", b"a")
+        await s.write("archive/old.log", b"old")
+        assert [item.key async for item in s.list("logs/2026/")] == ["logs/2026/a.log"]
+
+    _run(go())
+    assert len(walked) == 1
+    assert walked[0] != os.fspath(tmp_path), "the unrelated archive must not be traversed"
+    s.close()
+
+
 def test_missing_and_delete(tmp_path):
     async def go():
         s = LocalObjectStore(tmp_path)

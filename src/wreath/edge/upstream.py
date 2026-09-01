@@ -102,9 +102,18 @@ class UpstreamPool:
             raise ValueError("an upstream pool needs at least one upstream")
         if policy not in ("ewma", "round-robin", "least-connections"):
             raise ValueError(f"unknown policy: {policy!r}")
+        selected_ejection = ejection or Ejection()
+        if selected_ejection.failures < 1:
+            raise ValueError("ejection.failures must be at least 1")
+        if selected_ejection.seconds <= 0:
+            raise ValueError("ejection.seconds must be positive")
+        if selected_ejection.cap <= 0:
+            raise ValueError("ejection.cap must be positive")
+        if selected_ejection.cap < selected_ejection.seconds:
+            raise ValueError("ejection.cap must be at least ejection.seconds")
         self._upstreams = upstreams
         self._policy = policy
-        self._ejection = ejection or Ejection()
+        self._ejection = selected_ejection
         self._cursor = 0
 
     @property

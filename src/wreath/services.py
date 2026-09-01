@@ -124,7 +124,6 @@ class Supervisor:
         task = asyncio.ensure_future(coro)
         task.set_name(name)
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
         return task
 
     async def start(self) -> None:

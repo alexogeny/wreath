@@ -77,6 +77,11 @@ def test_halt_is_the_default_because_nothing_should_be_skipped_by_omission():
     assert purge_pass().on_chunk_failure == "halt"
 
 
+async def test_retry_before_a_pass_has_run_queues_nothing(database, world):
+    assert await purge_pass().retry(database) == 0
+    assert world.ledger == {}
+
+
 def test_a_store_purge_opts_into_skip_because_it_has_no_terminal_step():
     from wreath._passes.stores import keyed_purge_pass
 
@@ -299,6 +304,28 @@ async def test_retry_clears_the_hole_only_when_the_chunk_succeeds(database, worl
     assert status.gate_barred is False
     # And the rows the skip left behind are finally gone.
     assert len(world.rows) == 0
+
+
+async def test_retry_batches_every_hole_into_one_ledger_update(database, world):
+    walk = purge_pass(on_chunk_failure="skip")
+
+    def poison_every_chunk(sql, _args):
+        if sql.startswith("DELETE FROM replays"):
+            raise RuntimeError("cursed")
+
+    world.before = poison_every_chunk
+    await walk.run(database, sleep=_nap)
+    assert (await walk.status(database)).holes_open == 3
+
+    world.before = None
+    world.statements.clear()
+    assert await walk.retry(database) == 3
+
+    assert len(world.statements) == 1
+    assert "pass_holes" in world.statements[0][0]
+    assert "SET pending" in world.statements[0][0]
+    assert await walk.retry(database) == 0
+    assert len(world.ledger_row()["pending"]) == 3
 
 
 async def test_a_requeued_unit_is_walked_without_rewinding_the_cursor(database, world):

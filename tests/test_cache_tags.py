@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from wreath._orm_events import publish_write, unsubscribe_writes
+from wreath._orm_events import publish_write
 from wreath.response import Response
 from wreath.response_cache import TAG_HEADERS, CDNPurge, Tags, cached
 
@@ -33,6 +33,18 @@ class FakeQueue:
         return len(self.calls)
 
 
+class BlockingQueue(FakeQueue):
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+        self.started = 0
+
+    async def enqueue(self, task, *args, key=None, **kwargs):
+        self.started += 1
+        await self.release.wait()
+        return await super().enqueue(task, *args, key=key, **kwargs)
+
+
 class FakeRequest:
     def __init__(self, path: str = "/reports", method: str = "GET") -> None:
         self.path = path
@@ -51,7 +63,7 @@ def _drop_subscriptions():
     registered: list[CDNPurge] = []
     yield registered
     for purge in registered:
-        unsubscribe_writes(purge._on_write)
+        purge.close()
 
 
 def test_a_secret_is_required_and_says_why():
@@ -233,6 +245,90 @@ async def test_a_write_enqueues_a_purge_for_the_watched_model(_drop_subscription
     assert queue.calls == [("wreath_cdn_purge", (tags.key(Report),), f"purge:{tags.key(Report)}")]
     assert purge.enqueued() == 1
     assert purge.dropped() == 0
+
+
+async def test_close_stops_watching_for_writes(_drop_subscriptions):
+    queue = FakeQueue()
+    purge = CDNPurge(queue, tags=Tags(secret=SECRET))
+    _drop_subscriptions.append(purge)
+    purge.watch(Report)
+
+    purge.close()
+    publish_write(frozenset({"Report"}))
+    await asyncio.sleep(0)
+
+    assert queue.calls == []
+    assert purge.watching == set()
+
+
+async def test_unwatch_keeps_other_models_subscribed(_drop_subscriptions):
+    queue = FakeQueue()
+    tags = Tags(secret=SECRET)
+    purge = CDNPurge(queue, tags=tags)
+    _drop_subscriptions.append(purge)
+    purge.watch(Report, Invoice)
+
+    purge.unwatch(Report)
+    publish_write(frozenset({"Report", "Invoice"}))
+    await asyncio.sleep(0)
+
+    assert queue.calls == [("wreath_cdn_purge", (tags.key(Invoice),), f"purge:{tags.key(Invoice)}")]
+    assert purge.watching == {"Invoice"}
+
+
+async def test_a_blocked_enqueue_coalesces_repeated_writes(_drop_subscriptions):
+    queue = BlockingQueue()
+    tags = Tags(secret=SECRET)
+    purge = CDNPurge(queue, tags=tags)
+    _drop_subscriptions.append(purge)
+    purge.watch(Report)
+
+    for _ in range(20):
+        publish_write(frozenset({"Report"}))
+    await asyncio.sleep(0)
+
+    assert queue.started == 1
+    queue.release.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert queue.calls == [("wreath_cdn_purge", (tags.key(Report),), f"purge:{tags.key(Report)}")]
+
+
+async def test_work_arriving_between_runner_exit_and_done_callback_is_drained(
+    _drop_subscriptions,
+):
+    queue = FakeQueue()
+    tags = Tags(secret=SECRET)
+    purge = CDNPurge(queue, tags=tags)
+    _drop_subscriptions.append(purge)
+    purge.watch(Report, Invoice)
+
+    publish_write(frozenset({"Report"}))
+    asyncio.get_running_loop().call_soon(publish_write, frozenset({"Invoice"}))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert {call[1][0] for call in queue.calls} == {tags.key(Report), tags.key(Invoice)}
+
+
+async def test_a_cancelled_runner_does_not_restart_during_loop_shutdown(_drop_subscriptions):
+    queue = BlockingQueue()
+    purge = CDNPurge(queue, tags=Tags(secret=SECRET))
+    _drop_subscriptions.append(purge)
+    purge.watch(Report, Invoice)
+
+    publish_write(frozenset({"Report", "Invoice"}))
+    await asyncio.sleep(0)
+    runner = purge._runner
+    assert runner is not None
+
+    runner.cancel()
+    await asyncio.gather(runner, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    assert purge._runner is None
+    assert purge.dropped() == 2
 
 
 async def test_an_unwatched_model_enqueues_nothing(_drop_subscriptions):

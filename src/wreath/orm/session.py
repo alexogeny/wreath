@@ -631,10 +631,14 @@ class Session:
         """Fetch one object by primary key, or None."""
         self._check_usable()
         spec = self._registry.spec_for(model)
-        values = _key_tuple(spec, primary_key)
         query = Select.build(model, ())
-        for column, value in zip(spec.primary_key, values, strict=True):
-            query = query.where(column.column.expression == value)
+        columns = spec.primary_key
+        if len(columns) == 1 and not isinstance(primary_key, tuple):
+            query = query.where(columns[0].column.expression == primary_key)
+        else:
+            values = _key_tuple(spec, primary_key)
+            for column, value in zip(columns, values, strict=True):
+                query = query.where(column.column.expression == value)
         options = tuple(load)
         if options:
             query = query.include(*options)
@@ -670,7 +674,9 @@ class Session:
             )
         else:
             objects = await self._fetch_recorded(model_ids, connection, compiled)
-        await self._run_selectin(compiled.load_plan.selectin, objects)
+        selectin = compiled.load_plan.selectin
+        if selectin:
+            await self._run_selectin(selectin, objects)
         return objects
 
     async def _fetch_compiled(self, query: Select, compiled: CompiledQuery) -> list[Any]:
@@ -701,17 +707,10 @@ class Session:
             )
         else:
             objects = await self._fetch_recorded(model_ids, connection, compiled)
-        await self._run_selectin(compiled.load_plan.selectin, objects)
+        selectin = compiled.load_plan.selectin
+        if selectin:
+            await self._run_selectin(selectin, objects)
         return objects
-
-    async def _fetch_one_compiled(self, query: Select, compiled: CompiledQuery) -> Any:
-        results = await self._fetch_compiled(query, compiled)
-        if len(results) > 1:
-            raise MultipleResultsError(
-                f"fetch_one() matched {len(results)} rows for "
-                f"{query.model.__name__}; use fetch() or narrow the query"
-            )
-        return results[0] if results else None
 
     def _count_read(self, spec: ModelSpec | None) -> None:
         ledger = _query_ledger.get(None)

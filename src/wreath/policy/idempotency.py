@@ -443,6 +443,8 @@ class IdempotencyPolicy:
         store: IdempotencyStore | None = None,
         max_body_bytes: int = 256 * 1024,
     ) -> None:
+        if max_body_bytes < 0:
+            raise ValueError("max_body_bytes must be non-negative")
         self._store: IdempotencyStore = (
             store if store is not None else MemoryIdempotencyStore(ttl=ttl, max_entries=max_entries)
         )

@@ -93,6 +93,72 @@ WHERE i.indisunique
   AND c.relname = $2::text
 """
 
+_BATCH_COLUMNS_SQL = """
+WITH wanted AS (
+    SELECT schema_name, table_name
+    FROM jsonb_to_recordset($1::jsonb) AS item(schema_name text, table_name text)
+)
+SELECT
+    n.nspname::text AS schema_name,
+    c.relname::text AS table_name,
+    a.attname::text AS column_name,
+    a.attnum::int AS position,
+    a.atttypid::bigint AS type_oid,
+    a.attnotnull AS not_null,
+    COALESCE(t.typelem, 0)::bigint AS element_oid,
+    COALESCE(pg_get_expr(d.adbin, d.adrelid), '')::text AS column_default
+FROM wanted w
+JOIN pg_catalog.pg_namespace n ON n.nspname = w.schema_name
+JOIN pg_catalog.pg_class c ON c.relnamespace = n.oid AND c.relname = w.table_name
+JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
+JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum
+WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
+  AND a.attnum > 0
+  AND NOT a.attisdropped
+ORDER BY n.nspname, c.relname, a.attnum
+"""
+
+_BATCH_CONSTRAINTS_SQL = """
+WITH wanted AS (
+    SELECT schema_name, table_name
+    FROM jsonb_to_recordset($1::jsonb) AS item(schema_name text, table_name text)
+)
+SELECT
+    n.nspname::text AS schema_name,
+    c.relname::text AS table_name,
+    con.contype::text AS kind,
+    con.conkey::text AS local_positions,
+    con.confkey::text AS remote_positions,
+    COALESCE(fn.nspname::text, '') AS remote_schema,
+    COALESCE(fc.relname::text, '') AS remote_table
+FROM wanted w
+JOIN pg_catalog.pg_namespace n ON n.nspname = w.schema_name
+JOIN pg_catalog.pg_class c ON c.relnamespace = n.oid AND c.relname = w.table_name
+JOIN pg_catalog.pg_constraint con ON con.conrelid = c.oid
+LEFT JOIN pg_catalog.pg_class fc ON fc.oid = con.confrelid
+LEFT JOIN pg_catalog.pg_namespace fn ON fn.oid = fc.relnamespace
+WHERE con.contype IN ('p', 'u', 'f')
+ORDER BY n.nspname, c.relname, con.contype, con.conname
+"""
+
+_BATCH_INDEXES_SQL = """
+WITH wanted AS (
+    SELECT schema_name, table_name
+    FROM jsonb_to_recordset($1::jsonb) AS item(schema_name text, table_name text)
+)
+SELECT
+    n.nspname::text AS schema_name,
+    c.relname::text AS table_name,
+    i.indkey::text AS positions
+FROM wanted w
+JOIN pg_catalog.pg_namespace n ON n.nspname = w.schema_name
+JOIN pg_catalog.pg_class c ON c.relnamespace = n.oid AND c.relname = w.table_name
+JOIN pg_catalog.pg_index i ON i.indrelid = c.oid
+WHERE i.indisunique
+ORDER BY n.nspname, c.relname
+"""
+
 
 #: One extension type's OID, resolved by name against the connection's own
 #: `search_path`. `to_regtype` returns NULL rather than raising for a type that
@@ -100,15 +166,22 @@ WHERE i.indisunique
 #: readiness fact to report, not an error to catch. The extension and schema
 #: come back alongside it so the failure message can name where wreath looked.
 _EXTENSION_TYPE_SQL = """
+WITH wanted AS (
+    SELECT type_name
+    FROM jsonb_to_recordset($1::jsonb) AS item(type_name text)
+)
 SELECT
-    COALESCE(pg_catalog.to_regtype($1::text)::oid::bigint, 0) AS type_oid,
+    wanted.type_name,
+    COALESCE(pg_catalog.to_regtype(wanted.type_name)::oid::bigint, 0) AS type_oid,
     COALESCE((
         SELECT n.nspname
         FROM pg_catalog.pg_type t
         JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
-        WHERE t.oid = pg_catalog.to_regtype($1::text)::oid
+        WHERE t.oid = pg_catalog.to_regtype(wanted.type_name)::oid
     ), '')::text AS type_schema,
     pg_catalog.current_schema()::text AS current_schema
+FROM wanted
+ORDER BY wanted.type_name
 """
 
 
@@ -173,19 +246,34 @@ async def probe_extension_types(
     same reading without the startup failure: a readiness report that raised
     would be a worse tool than the startup check it duplicates.
     """
-    found: list[ExtensionTypeResolution] = []
-    for type_name in sorted(wanted):
-        row = await connection.fetchrow(_EXTENSION_TYPE_SQL, type_name)
-        found.append(
-            ExtensionTypeResolution(
-                type_name=type_name,
-                extension=wanted[type_name],
-                oid=int(row[0]) if row is not None else 0,
-                schema=_text(row[1]) if row is not None else "",
-                current_schema=_text(row[2]) if row is not None else "",
-            )
+    if not wanted:
+        return ()
+    payload = _extension_payload(sorted(wanted))
+    fetch = getattr(connection, "fetch", None)
+    if callable(fetch):
+        rows = await fetch(_EXTENSION_TYPE_SQL, payload)
+    else:
+        rows = []
+        for name in sorted(wanted):
+            row = await connection.fetchrow(_EXTENSION_TYPE_SQL, _extension_payload((name,)))
+            if row is not None:
+                rows.append(row)
+    return tuple(
+        ExtensionTypeResolution(
+            type_name=_text(row[0]),
+            extension=wanted[_text(row[0])],
+            oid=int(row[1]),
+            schema=_text(row[2]),
+            current_schema=_text(row[3]),
         )
-    return tuple(found)
+        for row in rows
+    )
+
+
+def _extension_payload(names: Any) -> str:
+    from .._json import dumps
+
+    return dumps([{"type_name": name} for name in names]).decode("utf-8")
 
 
 async def resolve_extension_types(registry: Any) -> tuple[ExtensionTypeResolution, ...]:
@@ -371,17 +459,60 @@ async def validate_registry(registry: Any) -> SchemaDiff:
     mode = registry.validate_schema
     if mode == "off":
         return SchemaDiff(())
+    if not registry.specs:
+        return SchemaDiff(())
     workload = "read" if _has_workload(registry.database, "read") else "write"
     connection = await registry.database.acquire(workload)
     try:
         issues: list[SchemaIssue] = []
-        # One position->name map per table, shared across every spec in the run.
-        # A foreign key has to resolve its *target* table's columns, and that
-        # target is usually another mapped model, so the cache turns what would
-        # be a per-constraint catalog read into one read per table.
-        columns: dict[tuple[str, str], dict[int, str]] = {}
+        table_keys = {
+            (spec.schema, spec.table)
+            for spec in registry.specs
+        }
+        table_keys.update(
+            (str(column.reference.schema), column.reference.table)
+            for spec in registry.specs
+            for column in spec.columns
+            if column.reference is not None
+        )
+        from .._json import dumps
+
+        payload = dumps(
+            [
+                {"schema_name": schema, "table_name": table}
+                for schema, table in sorted(table_keys)
+            ]
+        ).decode("utf-8")
+        all_column_rows = await connection.fetch(_BATCH_COLUMNS_SQL, payload)
+        all_constraint_rows = await connection.fetch(_BATCH_CONSTRAINTS_SQL, payload)
+        all_index_rows = await connection.fetch(_BATCH_INDEXES_SQL, payload)
+        column_rows: dict[tuple[str, str], list[Any]] = {}
+        constraint_rows: dict[tuple[str, str], list[Any]] = {}
+        index_rows: dict[tuple[str, str], list[Any]] = {}
+        for row in all_column_rows:
+            column_rows.setdefault((_text(row[0]), _text(row[1])), []).append(row)
+        for row in all_constraint_rows:
+            constraint_rows.setdefault((_text(row[0]), _text(row[1])), []).append(
+                tuple(row[index] for index in range(2, 7))
+            )
+        for row in all_index_rows:
+            index_rows.setdefault((_text(row[0]), _text(row[1])), []).append((row[2],))
+        columns = {
+            key: {int(row[3]): _text(row[2]) for row in rows}
+            for key, rows in column_rows.items()
+        }
         for spec in registry.specs:
-            issues.extend(await _validate_model(connection, spec, columns))
+            key = (spec.schema, spec.table)
+            issues.extend(
+                await _validate_model(
+                    connection,
+                    spec,
+                    columns,
+                    rows=column_rows.get(key, []),
+                    constraint_rows=constraint_rows.get(key, []),
+                    index_rows=index_rows.get(key, []),
+                )
+            )
     finally:
         await registry.database.release(workload, connection)
     diff = SchemaDiff(tuple(sorted(issues)))
@@ -418,10 +549,15 @@ async def _validate_model(
     connection: Any,
     spec: ModelSpec,
     columns: dict[tuple[str, str], dict[int, str]] | None = None,
+    *,
+    rows: Any = None,
+    constraint_rows: Any = None,
+    index_rows: Any = None,
 ) -> list[SchemaIssue]:
     if columns is None:
         columns = {}
-    rows = await connection.fetch(_COLUMNS_SQL, spec.schema, spec.table)
+    if rows is None:
+        rows = await connection.fetch(_COLUMNS_SQL, spec.schema, spec.table)
     if not rows:
         return [
             SchemaIssue(
@@ -490,7 +626,16 @@ async def _validate_model(
                     )
                 )
 
-    issues.extend(await _validate_constraints(connection, spec, by_position, columns))
+    issues.extend(
+        await _validate_constraints(
+            connection,
+            spec,
+            by_position,
+            columns,
+            rows=constraint_rows,
+            index_rows=index_rows,
+        )
+    )
     return issues
 
 
@@ -521,12 +666,16 @@ async def _validate_constraints(
     spec: ModelSpec,
     by_position: dict[int, str],
     columns: dict[tuple[str, str], dict[int, str]] | None = None,
+    *,
+    rows: Any = None,
+    index_rows: Any = None,
 ) -> list[SchemaIssue]:
     if columns is None:
         columns = {}
     columns.setdefault((spec.schema, spec.table), by_position)
     issues: list[SchemaIssue] = []
-    rows = await connection.fetch(_CONSTRAINTS_SQL, spec.schema, spec.table)
+    if rows is None:
+        rows = await connection.fetch(_CONSTRAINTS_SQL, spec.schema, spec.table)
     primary: tuple[str, ...] = ()
     unique: set[tuple[str, ...]] = set()
     foreign: set[tuple[tuple[tuple[str, str], ...], str, str]] = set()
@@ -550,7 +699,9 @@ async def _validate_constraints(
                 )
             )
 
-    for row in await connection.fetch(_INDEXES_SQL, spec.schema, spec.table):
+    if index_rows is None:
+        index_rows = await connection.fetch(_INDEXES_SQL, spec.schema, spec.table)
+    for row in index_rows:
         unique.add(_names(row[0], by_position))
 
     declared_primary = tuple(item.database_name for item in spec.primary_key)

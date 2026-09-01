@@ -78,6 +78,8 @@ from ._webauthn import (
 )
 
 __all__ = [
+    "BulkSecondFactorRemovalStore",
+    "BulkSecondFactorStore",
     "DEFAULT_DIGITS",
     "DEFAULT_PERIOD",
     "DEFAULT_SKEW",
@@ -572,6 +574,24 @@ class SecondFactorStore(Protocol):
 
 
 @runtime_checkable
+class BulkSecondFactorStore(SecondFactorStore, Protocol):
+    """A second-factor store that can persist one credential set together."""
+
+    async def add_many(self, credentials: Sequence[SecondFactor]) -> tuple[SecondFactor, ...]:
+        """Store every credential and return them in input order."""
+        ...
+
+
+@runtime_checkable
+class BulkSecondFactorRemovalStore(SecondFactorStore, Protocol):
+    """A second-factor store that can remove one credential set together."""
+
+    async def remove_many(self, user_id: str, credential_ids: Sequence[str]) -> None:
+        """Delete the named credentials only when they belong to `user_id`."""
+        ...
+
+
+@runtime_checkable
 class DiscoverableSecondFactorStore(SecondFactorStore, Protocol):
     """The additional indexed lookup required by first-factor passkeys.
 
@@ -613,13 +633,7 @@ class InMemorySecondFactorStore:
         rows = self._by_user.get(user_id)
         return [] if rows is None else list(rows.values())
 
-    async def add(self, credential: SecondFactor) -> SecondFactor:
-        """Store `credential`.
-
-        Raises:
-            ValueError: the id is already taken. Silently overwriting would drop
-                a live credential -- and, for TOTP, its replay counter with it.
-        """
+    def _add(self, credential: SecondFactor) -> SecondFactor:
         if credential.id in self._rows:
             raise ValueError(f"duplicate second-factor id: {credential.id!r}")
         rows = self._by_user.setdefault(credential.user_id, {})
@@ -633,9 +647,39 @@ class InMemorySecondFactorStore:
             raise
         return credential
 
+    async def add(self, credential: SecondFactor) -> SecondFactor:
+        """Store `credential`.
+
+        Raises:
+            ValueError: the id is already taken. Silently overwriting would drop
+                a live credential -- and, for TOTP, its replay counter with it.
+        """
+        return self._add(credential)
+
+    async def add_many(self, credentials: Sequence[SecondFactor]) -> tuple[SecondFactor, ...]:
+        """Store one credential set without suspending between rows."""
+        batch = tuple(credentials)
+        seen: set[str] = set()
+        for credential in batch:
+            if credential.id in seen or credential.id in self._rows:
+                raise ValueError(f"duplicate second-factor id: {credential.id!r}")
+            seen.add(credential.id)
+        for credential in batch:
+            self._add(credential)
+        return batch
+
     async def credential(self, credential_id: str) -> SecondFactor | None:
         """Return one credential by id, or `None`."""
         return self._rows.get(credential_id)
+
+    def _remove(self, user_id: str, credential_id: str) -> None:
+        row = self._rows.get(credential_id)
+        if row is not None and row.user_id == user_id:
+            del self._rows[credential_id]
+            rows = self._by_user[user_id]
+            del rows[credential_id]
+            if not rows:
+                del self._by_user[user_id]
 
     async def remove(self, user_id: str, credential_id: str) -> None:
         """Delete one credential, but only if it belongs to `user_id`.
@@ -644,13 +688,12 @@ class InMemorySecondFactorStore:
         gone. The ownership check is not decoration -- the id is the only thing
         a caller passes, so without it any user could delete any factor.
         """
-        row = self._rows.get(credential_id)
-        if row is not None and row.user_id == user_id:
-            del self._rows[credential_id]
-            rows = self._by_user[user_id]
-            del rows[credential_id]
-            if not rows:
-                del self._by_user[user_id]
+        self._remove(user_id, credential_id)
+
+    async def remove_many(self, user_id: str, credential_ids: Sequence[str]) -> None:
+        """Delete one owned credential set."""
+        for credential_id in dict.fromkeys(credential_ids):
+            await self.remove(user_id, credential_id)
 
     def _advance(self, credential_id: str, counter: int, at: datetime) -> bool:
         """Compare and set, in a **synchronous** function. Returns whether it won.
@@ -800,48 +843,50 @@ async def confirm_totp_enrolment(
     if counter is None:
         return None
     now = datetime.now(UTC) if at is None else datetime.fromtimestamp(at, UTC)
-    credential = await store.add(
-        SecondFactor(
-            id=new_credential_id(),
-            user_id=user_id,
-            kind="totp",
-            label=label,
-            created_at=now,
-            last_used_at=now,
-            material=bytes(secret),
-            counter=counter,
-        )
+    credential = SecondFactor(
+        id=new_credential_id(),
+        user_id=user_id,
+        kind="totp",
+        label=label,
+        created_at=now,
+        last_used_at=now,
+        material=bytes(secret),
+        counter=counter,
     )
-    plaintext = await _mint_recovery_codes(store, user_id, recovery_codes, now)
+    recoveries, plaintext = _new_recovery_codes(user_id, recovery_codes, now)
+    credentials = (credential, *recoveries)
+    await _store_credentials(store, credentials)
     return credential, plaintext
 
 
-async def _mint_recovery_codes(
-    store: SecondFactorStore, user_id: str, count: int, now: datetime
-) -> list[str]:
-    """Issue `count` recovery codes, store their hashes, return the plaintext.
+async def _store_credentials(store: SecondFactorStore, credentials: Sequence[SecondFactor]) -> None:
+    if isinstance(store, BulkSecondFactorStore):
+        await store.add_many(credentials)
+    else:
+        for item in credentials:
+            await store.add(item)
 
-    The plaintext exists only in the returned list. Nothing writes it anywhere,
-    so a caller that does not show it to the user has thrown it away.
-    """
+
+def _new_recovery_codes(
+    user_id: str, count: int, now: datetime
+) -> tuple[tuple[SecondFactor, ...], list[str]]:
     if count < 1:
-        return []
+        return (), []
     plaintext = generate_recovery_codes(count)
-    for code_text in plaintext:
-        hashed = hash_recovery_code(code_text)
-        await store.add(
-            SecondFactor(
-                id=new_credential_id(),
-                user_id=user_id,
-                kind="recovery",
-                label="Recovery code",
-                created_at=now,
-                last_used_at=None,
-                material=hashed.encode("utf-8"),
-                counter=0,
-            )
+    credentials = tuple(
+        SecondFactor(
+            id=new_credential_id(),
+            user_id=user_id,
+            kind="recovery",
+            label="Recovery code",
+            created_at=now,
+            last_used_at=None,
+            material=hash_recovery_code(code_text).encode("utf-8"),
+            counter=0,
         )
-    return plaintext
+        for code_text in plaintext
+    )
+    return credentials, plaintext
 
 
 async def verify_second_factor(
@@ -907,6 +952,7 @@ async def verify_second_factor(
     candidate = _normalize_recovery_code(code)
     if not candidate:
         return None
+    candidate_digest: str | None = None
     for row in rows:
         if row.kind != "recovery":
             continue
@@ -917,7 +963,12 @@ async def verify_second_factor(
             # SHA-256 rows below are a microsecond and stay inline.
             matched = await asyncio.to_thread(verify_recovery_code, candidate, stored)
         else:
-            matched = verify_recovery_code(candidate, stored)
+            if candidate_digest is None:
+                candidate_digest = hashlib.sha256(candidate.encode("utf-8")).hexdigest()
+            matched = hmac.compare_digest(
+                candidate_digest,
+                stored[len(_RECOVERY_SCHEME) :],
+            )
         if matched:
             # Single use is decided where the write happens, exactly as it is
             # for a TOTP counter -- and for exactly the same reason. The read,
@@ -967,12 +1018,15 @@ async def remove_second_factor(
     target = next((row for row in rows if row.id == credential_id), None)
     if target is None or target.kind == "recovery":
         return None
-    await store.remove(user_id, credential_id)
+    removing = [credential_id]
     survivors = [row for row in rows if row.id != credential_id and row.kind != "recovery"]
     if not survivors:
-        for row in rows:
-            if row.kind == "recovery":
-                await store.remove(user_id, row.id)
+        removing = [row.id for row in rows]
+    if len(removing) > 1 and isinstance(store, BulkSecondFactorRemovalStore):
+        await store.remove_many(user_id, removing)
+    else:
+        for item in removing:
+            await store.remove(user_id, item)
     return target
 
 
@@ -1253,29 +1307,29 @@ async def confirm_webauthn_registration(
         if hmac.compare_digest(stored.credential_id, auth_data.credential_id):
             raise WebAuthnError("this credential is already registered")
     now = datetime.now(UTC) if at is None else datetime.fromtimestamp(at, UTC)
-    credential = await store.add(
-        SecondFactor(
-            # The stable public authenticator handle is never rendered by the
-            # factor-management API. Its domain-separated digest is still
-            # derivable at username-less login and uses the store's primary-key
-            # index instead of scanning accounts or unpacking Python objects.
-            id=discoverable_credential_id(auth_data.credential_id),
-            user_id=user_id,
-            kind="webauthn",
-            label=label,
-            created_at=now,
-            last_used_at=now,
-            material=pack_credential(
-                auth_data.credential_id,
-                auth_data.public_key,
-                user_verified=auth_data.user_verified,
-            ),
-            counter=auth_data.sign_count,
-        )
+    credential = SecondFactor(
+        # The stable public authenticator handle is never rendered by the
+        # factor-management API. Its domain-separated digest is still
+        # derivable at username-less login and uses the store's primary-key
+        # index instead of scanning accounts or unpacking Python objects.
+        id=discoverable_credential_id(auth_data.credential_id),
+        user_id=user_id,
+        kind="webauthn",
+        label=label,
+        created_at=now,
+        last_used_at=now,
+        material=pack_credential(
+            auth_data.credential_id,
+            auth_data.public_key,
+            user_verified=auth_data.user_verified,
+        ),
+        counter=auth_data.sign_count,
     )
-    issued: list[str] = []
     if not any(row.kind == "recovery" for row in rows):
-        issued = await _mint_recovery_codes(store, user_id, recovery_codes, now)
+        recoveries, issued = _new_recovery_codes(user_id, recovery_codes, now)
+    else:
+        recoveries, issued = (), []
+    await _store_credentials(store, (credential, *recoveries))
     return credential, issued
 
 

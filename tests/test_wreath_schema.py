@@ -9,6 +9,7 @@ from wreath.schema import (
     Component,
     SchemaNotManaged,
     Step,
+    _missing_relations,
     bootstrap,
     emit_sql,
     marker_statements,
@@ -42,6 +43,38 @@ def _jobs(schema: str, *, version: int = 1) -> Component:
             )
         )
     return Component(name="jobs", schema=schema, relations=("jobs",), steps=tuple(steps))
+
+
+async def test_relation_verification_batches_catalog_boundaries() -> None:
+    class Connection:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple[str, ...]]] = []
+
+        async def fetch(self, sql: str, *args: str):
+            self.calls.append((sql, args))
+            if "pg_catalog.pg_class" in sql:
+                return [("alpha", "jobs")]
+            return [("plain_a",)]
+
+    connection = Connection()
+    components = (
+        Component(name="a", schema="alpha", relations=("jobs", "missing_a"), steps=()),
+        Component(name="b", schema="beta", relations=("missing_b",), steps=()),
+        Component(name="c", schema="", relations=("plain_a", "plain_b"), steps=()),
+        Component(name="d", schema="", relations=("plain_c",), steps=()),
+    )
+
+    missing = await _missing_relations(connection, "wreath", components)
+
+    assert missing == {
+        "a": ("missing_a",),
+        "b": ("missing_b",),
+        "c": ("plain_b",),
+        "d": ("plain_c",),
+    }
+    assert len(connection.calls) == 2
+    assert connection.calls[0][1] == ("alpha", "beta")
+    assert connection.calls[1][1] == ("plain_a", "plain_b", "plain_c")
 
 
 async def test_a_step_must_carry_statements() -> None:

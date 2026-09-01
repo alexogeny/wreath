@@ -51,6 +51,11 @@ from typing import Any
 #: would have seen inside the event.
 _DATA = "data: "
 
+# Twice the server's default call ceiling leaves capacity for replies to the
+# client requests that those calls can be waiting on. Input waits at this bound
+# instead of allocating one task per line forever.
+_MAX_INFLIGHT = 16
+
 
 def _sse_line_text(pending: bytearray, start: int, end: int) -> str:
     """Materialize one complete, disjoint SSE line at the output boundary."""
@@ -114,14 +119,30 @@ async def serve(
                             asyncio.create_task(_pump(client, path, session, write, lock))
                         )
                     continue
-                task = asyncio.ensure_future(relay(message))
+                if len(inflight) >= _MAX_INFLIGHT:
+                    done, _pending = await asyncio.wait(
+                        inflight,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    inflight.difference_update(done)
+                    outcomes = await asyncio.gather(*done, return_exceptions=True)
+                    for outcome in outcomes:
+                        if isinstance(outcome, BaseException):
+                            raise outcome
+                task = asyncio.create_task(relay(message))
                 inflight.add(task)
-                task.add_done_callback(inflight.discard)
         finally:
             tasks = (*inflight, *streams)
             for task in tasks:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+            current = asyncio.current_task()
+            if current is not None and not current.cancelling():
+                for outcome in outcomes:
+                    if isinstance(outcome, asyncio.CancelledError):
+                        continue
+                    if isinstance(outcome, BaseException):
+                        raise outcome
 
 
 async def _pump(

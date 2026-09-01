@@ -317,3 +317,34 @@ async def test_protocol_supplied_heartbeat_is_bounded_and_consumes_ack() -> None
     assert socket.sent[0] == "ping"
     assert handled == []
     assert service.snapshot.heartbeat_timeouts == 0
+
+
+async def test_heartbeat_timeout_joins_its_acknowledgement_waits(monkeypatch) -> None:
+    service = await _start_service(
+        heartbeat=Heartbeat(
+            frame="ping",
+            acknowledge=lambda frame: frame == "pong",
+            interval=0.01,
+            timeout=0.01,
+        )
+    )
+    socket = FakeSocket()
+    children: list[asyncio.Task[object]] = []
+    create_task = asyncio.create_task
+
+    def track(coro):
+        task = create_task(coro)
+        children.append(task)
+        return task
+
+    monkeypatch.setattr("wreath.websocket.asyncio.create_task", track)
+
+    async def handle(frame: str | bytes) -> None:
+        return None
+
+    serving = create_task(service.serve(cast(WebSocket, socket), handle, key="heartbeat"))
+    await asyncio.wait_for(serving, timeout=1)
+
+    assert service.snapshot.heartbeat_timeouts == 1
+    assert children
+    assert all(task.done() for task in children)

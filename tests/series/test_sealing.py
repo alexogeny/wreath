@@ -312,6 +312,26 @@ class TestReadingASealedView:
         assert any("INSERT INTO" in sql and "series_buckets" in sql for sql in statements)
         assert written == (utc(2026, 3, 1),)
 
+    async def test_settling_many_buckets_uses_one_write_statement(
+        self, declared, session, database
+    ):
+        database.connection.script(
+            "generate_series",
+            _rows((utc(2026, 3, 1), 5), (utc(2026, 3, 2), 7)),
+        )
+        written = await declared.settle(
+            session,
+            range=Range(utc(2026, 3, 1), utc(2026, 3, 3)),
+            now=utc(2026, 3, 4),
+        )
+        writes = [
+            sql
+            for sql, _args in database.connection.calls
+            if "INSERT INTO" in sql and "series_buckets" in sql
+        ]
+        assert written == (utc(2026, 3, 1), utc(2026, 3, 2))
+        assert len(writes) == 1
+
     async def test_settling_the_same_range_twice_writes_once(self, declared, session, database):
         database.connection.script("series_buckets", [(utc(2026, 3, 1), {"n": 5}, None)])
         written = await declared.settle(
@@ -404,7 +424,35 @@ class TestTheWriteThatArrivesLate:
         # the driver has no encoder for `dict` and refuses one outright. This
         # assertion used to compare against a mapping, which passed only because
         # the fake accepted a parameter PostgreSQL never would.
-        assert json.loads(written[0][3]) == {"n": 2}, "the delta, not the new total"
+        payload = json.loads(written[0][2])
+        assert payload[0]["value"] == {"n": 2}, "the delta, not the new total"
+
+    async def test_reconcile_batches_corrections_for_many_buckets(
+        self, declared, session, database
+    ):
+        database.connection.script(
+            "series_buckets",
+            [
+                (utc(2026, 3, 1), {"n": 5}, None),
+                (utc(2026, 3, 2), {"n": 6}, None),
+            ],
+        )
+        database.connection.script(
+            "generate_series",
+            _rows((utc(2026, 3, 1), 7), (utc(2026, 3, 2), 9)),
+        )
+        moved = await declared.reconcile(
+            session,
+            range=Range(utc(2026, 3, 1), utc(2026, 3, 3)),
+            now=utc(2026, 3, 4),
+        )
+        writes = [
+            sql
+            for sql, _args in database.connection.calls
+            if "series_corrections" in sql and "INSERT" in sql
+        ]
+        assert moved == (utc(2026, 3, 1), utc(2026, 3, 2))
+        assert len(writes) == 1
 
     async def test_the_settled_value_itself_is_never_rewritten(self, declared, session, database):
         database.connection.script("series_buckets", [(utc(2026, 3, 1), {"n": 5}, None)])

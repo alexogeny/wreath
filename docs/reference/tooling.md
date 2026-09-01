@@ -43,4 +43,6 @@ request path. For the complete command map and operator examples, start with the
 
 ::: wreath.mutant
 
+::: wreath.docs
+
 ::: wreath.cli

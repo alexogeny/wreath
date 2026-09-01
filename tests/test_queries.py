@@ -4,9 +4,10 @@ import pytest
 
 # The ORM suite's scriptable driver, reused rather than reinvented; its fixtures
 # are scoped to tests/orm/, so the three below rebuild them here.
-from tests.orm.conftest import FakeDatabase, Membership, Post, User, user_row
-from wreath.orm import DeclarationError, ORMError, Select
+from tests.orm.conftest import FakeDatabase, Membership, Post, User, post_row, user_row
+from wreath.orm import DeclarationError, MultipleResultsError, ORMError, Select
 from wreath.orm import compiler as orm_compiler
+from wreath.orm import session as orm_session
 from wreath.orm.compiler import shape_of
 from wreath.orm.registry import Registry
 from wreath.orm.session import Session
@@ -38,6 +39,11 @@ class Users(Queries[User]):
     in_paddock = query(User.name == Param("name"), User.email == Param("email"))
 
 
+class CapturingSession(Session):
+    async def fetch_one(self, query):
+        return query
+
+
 def scripted(session) -> None:
     session.registry.database.connection.script("FROM", [user_row(1), user_row(2)])
 
@@ -59,6 +65,12 @@ async def test_one_returns_a_single_object(session):
 
 async def test_one_returns_none_on_a_miss(session):
     assert await Users(session).by_email(email="nobody@example.com") is None
+
+
+async def test_one_rejects_multiple_rows(session):
+    scripted(session)
+    with pytest.raises(MultipleResultsError, match="matched 2 rows for User"):
+        await Users(session).by_email(email="a@b.c")
 
 
 async def test_declaration_without_parameters_takes_no_arguments(session):
@@ -290,3 +302,41 @@ def test_the_bound_query_carries_its_session(session):
     users = Users(session)
     assert users.session is session
     assert repr(users.named) == "<Users.named bound>"
+
+
+async def test_get_single_primary_key_does_not_build_a_zip(registry, monkeypatch):
+    def reject_zip(*args, **kwargs):
+        raise AssertionError("single-column get() must use direct indexing")
+
+    monkeypatch.setattr(orm_session, "zip", reject_zip, raising=False)
+    built = await CapturingSession(registry, "read").get(User, 7)
+    assert built.predicates[0].right.value == 7
+
+
+async def test_get_preserves_explicit_key_tuples(registry):
+    session = CapturingSession(registry, "read")
+    single = await session.get(User, (7,))
+    composite = await session.get(Membership, (3, 4))
+    assert [item.right.value for item in single.predicates] == [7]
+    assert [item.right.value for item in composite.predicates] == [3, 4]
+
+
+async def test_reads_without_selectin_do_not_enter_the_selectin_runner(registry):
+    class RejectingSelectinSession(Session):
+        async def _run_selectin(self, steps, objects):
+            raise AssertionError("an empty selectin plan must skip the coroutine")
+
+    session = RejectingSelectinSession(registry, "read")
+    scripted(session)
+    assert len(await session.fetch(User.select())) == 2
+    assert len(await Users(session).everyone()) == 2
+
+
+async def test_a_declared_query_runs_its_selectin_plan(session):
+    class LoadedUsers(Queries[User]):
+        with_posts = query().include(User.posts.selectin())
+
+    session.registry.database.connection.script("users", [user_row(1), user_row(2)])
+    session.registry.database.connection.script("posts", [post_row(10, 1)])
+    users = await LoadedUsers(session).with_posts()
+    assert [[post.id for post in user.posts] for user in users] == [[10], []]

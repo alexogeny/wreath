@@ -70,6 +70,23 @@ async def test_a_service_task_that_dies_on_its_way_out_is_counted() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_completed_failed_task_remains_owned_until_shutdown() -> None:
+    supervisor = Supervisor(drain_timeout=0.1)
+    supervisor.add(_Service())
+    await supervisor.start()
+
+    async def dies() -> None:
+        raise RuntimeError("worker failed before shutdown")
+
+    supervisor.spawn("already-doomed", dies())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    await supervisor.stop()
+    assert supervisor.drain_errors == 1
+
+
+@pytest.mark.asyncio
 async def test_a_task_we_cancelled_ourselves_is_not_an_error() -> None:
     supervisor = Supervisor(drain_timeout=0.1)
     supervisor.add(_Service())

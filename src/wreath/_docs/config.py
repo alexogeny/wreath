@@ -7,7 +7,7 @@ here is a frozen dataclass, so a config is validated once and cheap to pass
 around.
 
     # wreath_docs.py
-    from wreath._docs.config import Site, Nav, Section, Page, Palette
+    from wreath.docs import Site, Nav, Section, Page, Palette
 
     site = Site(
         name="Wreath",
@@ -23,7 +23,10 @@ around.
 
 from __future__ import annotations
 
+import posixpath
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,6 +330,157 @@ THEMES: dict[str, Palette] = {
 
 
 @dataclass(frozen=True, slots=True)
+class StaticAsset:
+    """One build input copied to a stable public path."""
+
+    name: str
+    source: str
+    output: str
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("StaticAsset.name must not be empty")
+        source = Path(self.source)
+        if self.source in ("", ".") or source.is_absolute() or ".." in source.parts:
+            raise ValueError(
+                f"StaticAsset {self.name!r} source must be a root-relative path without '..': "
+                f"{self.source!r}"
+            )
+        output = PurePosixPath(self.output)
+        if (
+            self.output in ("", ".")
+            or output.is_absolute()
+            or ".." in output.parts
+            or "\\" in self.output
+        ):
+            raise ValueError(
+                f"StaticAsset {self.name!r} output must be a site-relative URL path without "
+                f"'..' or backslashes: {self.output!r}"
+            )
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class AssetManifest:
+    """Named build assets, including hashed outputs from an external renderer."""
+
+    assets: tuple[StaticAsset, ...]
+    _by_name: dict[str, StaticAsset] = field(repr=False, compare=False)
+
+    def __init__(self, *assets: StaticAsset) -> None:
+        by_name: dict[str, StaticAsset] = {}
+        by_output: dict[str, str] = {}
+        for asset in assets:
+            if not isinstance(asset, StaticAsset):
+                raise TypeError(
+                    f"AssetManifest entries must be StaticAsset, not {type(asset).__name__}"
+                )
+            if asset.name in by_name:
+                raise ValueError(f"duplicate asset name: {asset.name!r}")
+            previous = by_output.get(asset.output)
+            if previous is not None:
+                raise ValueError(
+                    f"asset output {asset.output!r} is shared by {previous!r} and "
+                    f"{asset.name!r}; give each StaticAsset its own output"
+                )
+            by_name[asset.name] = asset
+            by_output[asset.output] = asset.name
+        object.__setattr__(self, "assets", tuple(assets))
+        object.__setattr__(self, "_by_name", by_name)
+
+    @classmethod
+    def from_mapping(
+        cls,
+        assets: Mapping[str, str],
+        *,
+        source_root: str = "",
+        output_root: str = "",
+    ) -> AssetManifest:
+        """Create a manifest from logical names mapped to renderer output paths."""
+        return cls(
+            *(
+                StaticAsset(
+                    name,
+                    Path(source_root, path).as_posix(),
+                    posixpath.join(output_root, path),
+                )
+                for name, path in assets.items()
+            )
+        )
+
+    def path(self, name: str) -> str:
+        """Return the public path for `name`, refusing an undeclared asset."""
+        asset = self._by_name.get(name)
+        if asset is None:
+            raise KeyError(name)
+        return asset.output
+
+
+@dataclass(frozen=True, slots=True)
+class PageContext:
+    """The complete, pre-rendered input passed to a custom page template."""
+
+    site_name: str
+    page_title: str
+    content: str
+    output: str
+    nav_html: str
+    toc_html: str
+    css_href: str
+    js_href: str
+    palette: Palette
+    feel: str
+    layout: str
+    search_root: str = ""
+    description: str = ""
+    footer: str = ""
+    home_href: str = "index.html"
+    map_href: str = ""
+    canonical: str = ""
+    repo_html: str = ""
+    links_html: str = ""
+    tabs_html: str = ""
+    section_title: str = ""
+    section_href: str = ""
+    theme: Theme | None = None
+
+    def asset(self, name: str) -> str:
+        """A page-relative URL for one declared theme asset."""
+        if self.theme is None:
+            raise KeyError(name)
+        target = self.theme.assets.path(name)
+        return posixpath.relpath(target, start=posixpath.dirname(self.output)) or "."
+
+
+type PageTemplate = Callable[[PageContext], str]
+
+
+@dataclass(frozen=True, slots=True)
+class Theme:
+    """Optional page template, head content, and named browser assets."""
+
+    template: PageTemplate | None = None
+    assets: AssetManifest = field(default_factory=AssetManifest)
+    stylesheets: tuple[str, ...] = ()
+    scripts: tuple[str, ...] = ()
+    head_html: str = ""
+
+    def __post_init__(self) -> None:
+        if self.template is not None and not callable(self.template):
+            raise TypeError(f"Theme.template must be callable, not {type(self.template).__name__}")
+        object.__setattr__(self, "stylesheets", tuple(self.stylesheets))
+        object.__setattr__(self, "scripts", tuple(self.scripts))
+        for kind, names in (("stylesheet", self.stylesheets), ("script", self.scripts)):
+            for name in names:
+                try:
+                    self.assets.path(name)
+                except KeyError:
+                    raise ValueError(
+                        f"{kind} asset {name!r} is not in Theme.assets; add a "
+                        f"StaticAsset({name!r}, source, output)"
+                    ) from None
+
+
+@dataclass(frozen=True, slots=True)
 class Site:
     """A whole documentation site: sources, output, nav, and theme.
 
@@ -387,6 +541,10 @@ class Site:
     links: tuple[Link, ...] = ()
     #: Source page behind the persistent Browse link; empty disables it.
     map_page: str = ""
+    #: "docs" renders documentation navigation; "page" renders general pages.
+    layout: str = "docs"
+    #: Page rendering and browser asset extensions.
+    theme: Theme = field(default_factory=Theme)
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -402,6 +560,8 @@ class Site:
                 f"Site.map_page {self.map_page!r} is not in nav; add Page(..., "
                 f"{self.map_page!r}) so Browse cannot point at an unpublished page"
             )
+        if self.layout not in ("docs", "page"):
+            raise ValueError(f"Site.layout must be 'docs' or 'page', not {self.layout!r}")
         if self.palette.font not in _FACES:
             raise ValueError(
                 f"unknown Palette.font {self.palette.font!r}; choose from {sorted(_FACES)}"
@@ -423,4 +583,19 @@ _FEELS = frozenset({"flat", "elevated", "papery", "hardcore", "orby", "luminous"
 _FACES = frozenset({"system", "sans", "serif", "mono"})
 
 
-__all__ = ["ICONS", "THEMES", "Link", "Nav", "Page", "Palette", "Repo", "Section", "Site"]
+__all__ = [
+    "ICONS",
+    "THEMES",
+    "AssetManifest",
+    "Link",
+    "Nav",
+    "Page",
+    "PageContext",
+    "PageTemplate",
+    "Palette",
+    "Repo",
+    "Section",
+    "Site",
+    "StaticAsset",
+    "Theme",
+]

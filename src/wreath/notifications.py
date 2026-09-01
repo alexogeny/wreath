@@ -47,6 +47,7 @@ Reference: `wreath.users` for the sending side of account mail, and
 
 from __future__ import annotations
 
+import asyncio
 import heapq
 import time
 from collections import deque
@@ -66,6 +67,8 @@ from ._webpush import (
 )
 from .email import MailClass, Message, SuppressedError, Unsubscribe
 from .temporal import Duration
+
+_DELIVERY_CONCURRENCY = 8
 
 __all__ = [
     "Channel",
@@ -303,22 +306,27 @@ class Notifications:
         delivered: list[str] = []
         declined: list[str] = []
         failed: dict[str, str] = {}
+        selected: list[Channel] = []
         for channel in self._channels:
             if spec.only and channel.name not in spec.only:
                 continue
             if not await self._preferences.allows(to, spec.name, channel.name):
                 declined.append(channel.name)
                 continue
-            try:
-                await self._run(channel, to, note, spec)
-            except (OSError, PushError, SuppressedError, ValueError) as exc:
-                # Per channel, and named. One channel failing must not cost the
-                # others: a push service outage is not a reason to withhold the
-                # email, and the two failures have different causes and
-                # different fixes.
-                failed[channel.name] = f"{type(exc).__name__}: {exc}"
-            else:
-                delivered.append(channel.name)
+            selected.append(channel)
+        for start in range(0, len(selected), _DELIVERY_CONCURRENCY):
+            batch = selected[start : start + _DELIVERY_CONCURRENCY]
+            outcomes = await asyncio.gather(
+                *(self._run(channel, to, note, spec) for channel in batch),
+                return_exceptions=True,
+            )
+            for channel, outcome in zip(batch, outcomes, strict=True):
+                if isinstance(outcome, (OSError, PushError, SuppressedError, ValueError)):
+                    failed[channel.name] = f"{type(outcome).__name__}: {outcome}"
+                elif isinstance(outcome, BaseException):
+                    raise outcome
+                else:
+                    delivered.append(channel.name)
         if delivered:
             self.delivered += 1
             if spec.digest > 0:
@@ -524,20 +532,48 @@ class WebPush:
                 f"{MAX_PAYLOAD_BYTES}-byte push limit; send an identifier and let the "
                 "client fetch the detail"
             )
+        subscriptions = tuple(await self.subscriptions.for_recipient(recipient.key))
+        requests: list[tuple[PushSubscription, bytes, dict[str, str]]] = []
         errors: list[str] = []
-        for subscription in await self.subscriptions.for_recipient(recipient.key):
-            body = encrypt(subscription, payload)
-            headers = {
-                **vapid_headers(self.keys, subscription.endpoint),
-                "Content-Encoding": "aes128gcm",
-                "Content-Type": "application/octet-stream",
-                "TTL": str(self.ttl),
-            }
-            result = await self._send(subscription.endpoint, body, headers)
-            if result.expired:
-                await self.subscriptions.remove(subscription.endpoint)
-            elif not result.delivered:
-                errors.append(f"{subscription.endpoint}: {result.status} {result.detail}")
+
+        async def send_batch() -> None:
+            results = await asyncio.gather(
+                *(
+                    self._send(subscription.endpoint, body, headers)
+                    for subscription, body, headers in requests
+                ),
+                return_exceptions=True,
+            )
+            for (subscription, _body, _headers), result in zip(
+                requests, results, strict=True
+            ):
+                if isinstance(result, BaseException):
+                    raise result
+                if result.expired:
+                    await self.subscriptions.remove(subscription.endpoint)
+                elif not result.delivered:
+                    errors.append(
+                        f"{subscription.endpoint}: {result.status} {result.detail}"
+                    )
+            requests.clear()
+
+        for subscription in subscriptions:
+            try:
+                body = encrypt(subscription, payload)
+                headers = {
+                    **vapid_headers(self.keys, subscription.endpoint),
+                    "Content-Encoding": "aes128gcm",
+                    "Content-Type": "application/octet-stream",
+                    "TTL": str(self.ttl),
+                }
+            except PushError:
+                await send_batch()
+                raise
+            requests.append((subscription, body, headers))
+            if len(requests) == _DELIVERY_CONCURRENCY:
+                await send_batch()
+        if requests:
+            await send_batch()
         if errors:
             raise PushError("; ".join(errors))
 

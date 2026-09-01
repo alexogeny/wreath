@@ -96,6 +96,7 @@ Handler = Callable[..., Awaitable[Any] | Any]
 _MISSING = dataclasses.MISSING
 _NONE_TYPE = type(None)
 _BINDING_SPEC_UNSET = object()
+_CACHE_MISSING = object()
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -2645,121 +2646,195 @@ def _inspect_handler_facts(handler: Handler, path: str, host: str | None = None)
     return _HandlerFacts(binding, returns, not signature.parameters)
 
 
-def compile_binder(
-    handler: Handler,
-    path: str,
-    *,
-    databases: Mapping[str, Any] | None = None,
-    orm_registries: Mapping[str, Any] | None = None,
-    dependencies: tuple[Depends, ...] = (),
-    binding_spec: BindingSpec | None | object = _BINDING_SPEC_UNSET,
-    requestless: bool | None = None,
-    app_scope: AppScope | None = None,
-) -> Handler:
-    """Wrap `handler` so its typed parameters are bound on each request.
+type _ScalarExtractor = Callable[[Request, dict[str, Any]], None]
+type _BodyDecoder = Callable[[Request, dict[str, Any]], Awaitable[None]]
+type _PathSpec = tuple[str, str, Any]
+type _QuerySpec = tuple[str, str, Any, Any, Any]
 
-    Everything expensive happens here, once: the signature is resolved, the body
-    validator is compiled, dependency graphs are flattened into resolvers, and
-    the database and ORM registry names are looked up. A request then only runs
-    the resulting closure.
+_SCALAR_OPCODES = {str: 0, int: 1, float: 2, bool: 3}
 
-    A handler whose signature is exactly `(request)` and that carries no
-    route-level dependencies is returned unchanged, so binding costs an
-    unbound handler nothing. A handler that needs no connection, session, or
-    dependency gets a leaner closure with no acquire/release machinery around
-    it — that machinery was measured at roughly half the cost of a small
-    request, which is why the distinction exists.
 
-    Args:
-        handler: The endpoint callable to wrap.
-        path: The route path, including its `{placeholder}` segments.
-        databases: Configured PostgreSQL databases by name, for `Connection` params.
-        orm_registries: Configured ORM registries by name, for `Session` params.
-        dependencies: Route-level dependencies resolved for their side effects only.
-        binding_spec: A spec already computed by `inspect_handler`, to avoid redoing it.
-        app_scope: The application's container for `scope="app"` dependencies.
+@dataclasses.dataclass(frozen=True, slots=True)
+class _RequestBinding:
+    extract_scalars: _ScalarExtractor
+    decode_body: _BodyDecoder
+    compiled_path_plan: Any
+    has_query: bool
+    has_headers: bool
+    has_cookies: bool
+    needs_body: bool
 
-    Returns:
-        The wrapped handler, or the original when there is nothing to bind.
 
-    Raises:
-        TypeError: A named database is unknown, or a security_read connection was asked for.
-    """
-    spec = (
-        inspect_handler(handler, path)
-        if binding_spec is _BINDING_SPEC_UNSET
-        else typing.cast(BindingSpec | None, binding_spec)
-    )
-    if spec is None and not dependencies:
-        if requestless is None:
-            try:
-                requestless = not inspect.signature(handler).parameters
-            except TypeError, ValueError:
-                requestless = False
-        if requestless:
-            if inspect.iscoroutinefunction(handler):
-
-                async def without_request(_request: Request) -> Any:
-                    return await handler()
-
-            else:
-
-                def without_request(_request: Request) -> Any:
-                    return handler()
-
-            without_request.__name__ = getattr(handler, "__name__", "without_request")
-            without_request.__qualname__ = getattr(handler, "__qualname__", "without_request")
-            return without_request
-        return handler
+def _compile_path_plans(
+    spec: BindingSpec | None,
+) -> tuple[tuple[_PathSpec, ...], Any, Any]:
     path_specs = () if spec is None else spec.path_params
-    path_opcodes = {str: 0, int: 1, float: 2, bool: 3}
-    compiled_path_entries = (
-        tuple((name, alias, path_opcodes[annotation]) for name, alias, annotation in path_specs)
-        if all(annotation in path_opcodes for _name, _alias, annotation in path_specs)
+    compiled_entries = (
+        tuple(
+            (name, alias, _SCALAR_OPCODES[annotation])
+            for name, alias, annotation in path_specs
+        )
+        if all(annotation in _SCALAR_OPCODES for _name, _alias, annotation in path_specs)
         else None
     )
-    compiled_path_plan = (
-        (compiled_path_entries, tuple(name for name, _alias, _opcode in compiled_path_entries))
-        if compiled_path_entries
+    compiled_plan = (
+        (compiled_entries, tuple(name for name, _alias, _opcode in compiled_entries))
+        if compiled_entries
         else None
     )
+    return path_specs, compiled_entries, compiled_plan
+
+
+def _compile_query_plans(
+    spec: BindingSpec | None,
+) -> tuple[tuple[Any, ...], tuple[_QuerySpec, ...], Any]:
     query_specs = () if spec is None else spec.query_params
-    query_constraints = {} if spec is None else dict(spec.query_constraints)
+    constraints = {} if spec is None else dict(spec.query_constraints)
     query_plan = tuple(
-        (name, alias, annotation, default, query_constraints.get(name))
+        (name, alias, annotation, default, constraints.get(name))
         for name, alias, annotation, default in query_specs
     )
-    compiled_query_plan = None
-    if query_plan and all(annotation in path_opcodes for _, _, annotation, _, _ in query_plan):
-        query_entries = []
-        alias_positions: dict[str, list[int]] = {}
-        for index, (name, alias, annotation, default, constraint) in enumerate(query_plan):
-            minimum, maximum, overflow = (None, None, "error") if constraint is None else constraint
-            query_entries.append(
-                (
-                    name,
-                    alias,
-                    path_opcodes[annotation],
-                    default is inspect.Parameter.empty,
-                    default,
-                    minimum,
-                    maximum,
-                    overflow == "clamp",
-                )
+    if not query_plan or not all(
+        annotation in _SCALAR_OPCODES for _, _, annotation, _, _ in query_plan
+    ):
+        return query_specs, query_plan, None
+    entries = []
+    alias_positions: dict[str, list[int]] = {}
+    for index, (name, alias, annotation, default, constraint) in enumerate(query_plan):
+        minimum, maximum, overflow = (None, None, "error") if constraint is None else constraint
+        entries.append(
+            (
+                name,
+                alias,
+                _SCALAR_OPCODES[annotation],
+                default is inspect.Parameter.empty,
+                default,
+                minimum,
+                maximum,
+                overflow == "clamp",
             )
-            alias_positions.setdefault(alias, []).append(index)
-        compiled_query_plan = (
-            {alias: tuple(positions) for alias, positions in alias_positions.items()},
-            tuple(query_entries),
         )
-    header_specs = () if spec is None else spec.header_params
-    cookie_specs = () if spec is None else spec.cookie_params
+        alias_positions.setdefault(alias, []).append(index)
+    return (
+        query_specs,
+        query_plan,
+        (
+            {alias: tuple(positions) for alias, positions in alias_positions.items()},
+            tuple(entries),
+        ),
+    )
+
+
+def _merge_validation_errors(
+    errors: list[dict[str, Any]] | None, invalid: ValidationError
+) -> list[dict[str, Any]]:
+    if errors is None:
+        return invalid.errors
+    return [*errors, *invalid.errors]
+
+
+def _merge_missing_error(
+    errors: list[dict[str, Any]] | None, error: dict[str, Any]
+) -> list[dict[str, Any]]:
+    if errors is None:
+        return [error]
+    return [*errors, error]
+
+
+def _compile_scalar_extractor(
+    path_specs: tuple[_PathSpec, ...],
+    compiled_path_entries: Any,
+    query_specs: tuple[Any, ...],
+    query_plan: tuple[_QuerySpec, ...],
+    compiled_query_plan: Any,
+    header_specs: tuple[Any, ...],
+    cookie_specs: tuple[Any, ...],
+) -> _ScalarExtractor:
+    named_specs = tuple(("header", False, *item) for item in header_specs) + tuple(
+        ("cookie", True, *item) for item in cookie_specs
+    )
+
+    def extract_scalars(request: Request, kwargs: dict[str, Any]) -> None:
+        """Bind all scalar sources and report every conversion failure together."""
+        errors: list[dict[str, Any]] | None = None
+        if compiled_path_entries:
+            errors = _core.bind_path_into(request.path_params, compiled_path_entries, kwargs)
+        else:
+            for name, alias, annotation in path_specs:
+                try:
+                    kwargs[name] = _convert_scalar(
+                        annotation, request.path_params[alias], ("path", alias)
+                    )
+                except ValidationError as invalid:
+                    errors = _merge_validation_errors(errors, invalid)
+        if query_specs:
+            if compiled_query_plan is not None:
+                errors = _core.bind_query_into(
+                    request.query_string, compiled_query_plan, kwargs, errors
+                )
+            else:
+                query = _core.parse_qs(request.query_string)
+                # Reversing before dict construction keeps the first wire value.
+                values: dict[str, str] = dict(reversed(query))
+                for name, alias, annotation, default, constraint in query_plan:
+                    raw = values.get(alias)
+                    if raw is None:
+                        if default is inspect.Parameter.empty:
+                            error = _error(("query", alias), "parameter is required", "missing")
+                            errors = _merge_missing_error(errors, error)
+                            continue
+                        kwargs[name] = default
+                    else:
+                        try:
+                            converted = _convert_scalar(annotation, raw, ("query", alias))
+                            if constraint is not None:
+                                converted = _apply_constraint(
+                                    converted, constraint, ("query", alias)
+                                )
+                        except ValidationError as invalid:
+                            errors = _merge_validation_errors(errors, invalid)
+                            continue
+                        kwargs[name] = converted
+        cookie_values: Any = request.cookies if cookie_specs else None
+        for source, from_cookie, name, alias, annotation, default in named_specs:
+            raw = cookie_values.get(alias) if from_cookie else request.header(alias)
+            if raw is None:
+                if default is inspect.Parameter.empty:
+                    error = _error((source, alias), "parameter is required", "missing")
+                    errors = _merge_missing_error(errors, error)
+                    continue
+                kwargs[name] = default
+            else:
+                try:
+                    kwargs[name] = _convert_scalar(annotation, raw, (source, alias))
+                except ValidationError as invalid:
+                    errors = _merge_validation_errors(errors, invalid)
+        if errors is not None:
+            raise ValidationError(errors)
+
+    return extract_scalars
+
+
+def _compile_scalar_binding(spec: BindingSpec | None) -> tuple[_ScalarExtractor, Any]:
+    path_specs, compiled_path_entries, compiled_path_plan = _compile_path_plans(spec)
+    query_specs, query_plan, compiled_query_plan = _compile_query_plans(spec)
+    extractor = _compile_scalar_extractor(
+        path_specs,
+        compiled_path_entries,
+        query_specs,
+        query_plan,
+        compiled_query_plan,
+        () if spec is None else spec.header_params,
+        () if spec is None else spec.cookie_params,
+    )
+    return extractor, compiled_path_plan
+
+
+def _compile_body_binding(spec: BindingSpec | None) -> tuple[_BodyDecoder, bool]:
     form_specs = () if spec is None else spec.form_params
     file_specs = () if spec is None else spec.file_params
     form_tape = _MultipartValidationTape(form_specs, file_specs)
     body_spec = None if spec is None else spec.body
-    # Compiled here, never per request: a model body resolves to a validator
-    # over its own columns.
     body_validator = None if body_spec is None else _body_validator(body_spec[1])
     form_model_spec = None if spec is None else spec.form_model
     form_model_tape = (
@@ -2771,7 +2846,69 @@ def compile_binder(
             _body_validator(form_model_spec[1]),
         )
     )
-    resolvers: tuple[tuple[str, tuple[Any, str], bool, Resolver], ...] = tuple(
+
+    async def decode_body(request: Request, kwargs: dict[str, Any]) -> None:
+        try:
+            if form_specs or file_specs:
+                await form_tape.decode_multipart_validation_tape(request, kwargs)
+            if form_model_tape is not None:
+                await form_model_tape.decode(request, kwargs)
+        except ValueError as exc:
+            raise BadRequest(f"invalid form body: {exc}") from None
+        if body_spec is not None and body_validator is not None:
+            name, annotation = body_spec
+            body = await request.body()
+            # The media type, not the model annotation, selects the decoder.
+            if _protobuf_requested(request):
+                kwargs[name] = _decode_protobuf_body(annotation, body)
+            else:
+                try:
+                    kwargs[name] = body_validator.decode_json_validation_tape(body, ("body",))
+                except ValueError as exc:
+                    raise BadRequest(f"invalid JSON body: {exc}") from None
+
+    needs_body = bool(
+        form_specs or file_specs or form_model_tape is not None or body_spec is not None
+    )
+    return decode_body, needs_body
+
+
+def _compile_request_binding(spec: BindingSpec | None) -> _RequestBinding:
+    extract_scalars, compiled_path_plan = _compile_scalar_binding(spec)
+    decode_body, needs_body = _compile_body_binding(spec)
+    return _RequestBinding(
+        extract_scalars,
+        decode_body,
+        compiled_path_plan,
+        bool(spec and spec.query_params),
+        bool(spec and spec.header_params),
+        bool(spec and spec.cookie_params),
+        needs_body,
+    )
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _ResourceBinding:
+    connections: tuple[tuple[str, Any, Any], ...]
+    sessions: tuple[tuple[str, tuple[str, str], Any, Any, Any], ...]
+    resolvers: tuple[tuple[str, tuple[Any, str], bool, Resolver], ...]
+    side_effect_resolvers: tuple[tuple[tuple[Any, str], bool, Resolver], ...]
+
+    @property
+    def needed(self) -> bool:
+        return bool(
+            self.connections or self.sessions or self.resolvers or self.side_effect_resolvers
+        )
+
+
+def _compile_resource_binding(
+    spec: BindingSpec | None,
+    databases: Mapping[str, Any] | None,
+    orm_registries: Mapping[str, Any] | None,
+    dependencies: tuple[Depends, ...],
+    app_scope: AppScope | None,
+) -> _ResourceBinding:
+    resolvers = tuple(
         (
             name,
             (marker.fn, marker.scope),
@@ -2807,8 +2944,6 @@ def compile_binder(
             raise TypeError(f"unknown PostgreSQL database: {database_name}") from None
         connections.append((name, database, marker.workload))
 
-    # One session per distinct (registry, workload), however many parameters
-    # ask for it: two parameters naming the same pair share one unit of work.
     registries = orm_registries or {}
     sessions: list[tuple[str, tuple[str, str], Any, Any, Any]] = []
     if spec is not None and spec.sessions:
@@ -2819,235 +2954,158 @@ def compile_binder(
             sessions.append(
                 (name, (registry_name, marker.workload), registry, marker.workload, marker.tenant)
             )
-
-    # Which machinery this handler actually needs is known here, not per
-    # request. A handler that asks for no connection, session, or dependency
-    # was still paying for all of it: four container allocations, a try/finally,
-    # an unconditional `await _release([], [])`, and a `reversed()` over an empty
-    # list. Measured at ~1.0us on a ~2.0us request (benchmarks/bench_scalar_
-    # binding.py), against a ~0.06us floor -- larger than the scalar conversion
-    # it surrounds, which is itself below that floor.
-    needs_resources = bool(connections or sessions or resolvers or side_effect_resolvers)
-    needs_body = bool(
-        form_specs or file_specs or form_model_tape is not None or body_spec is not None
+    return _ResourceBinding(
+        tuple(connections), tuple(sessions), resolvers, side_effect_resolvers
     )
 
-    def _extract_scalars(request: Request, kwargs: dict[str, Any]) -> None:
-        """Path, query, header, and cookie parameters. Synchronous by nature.
 
-        **Fail-complete, like the body validator.** `?limit=nope&offset=nope`
-        reports both, not the first -- a caller fixing a form one field per
-        round trip was the only thing the old fail-fast shape bought, and the
-        `errors` list has always been able to carry more than one.
+def _compile_requestless_handler(handler: Handler) -> Handler:
+    if inspect.iscoroutinefunction(handler):
 
-        It costs nothing on the path that matters. `errors` is allocated only
-        once something has already failed, and under CPython's zero-cost
-        exceptions an untaken `try` is free -- so a request that binds cleanly
-        does exactly the work it did before. The extra comparisons happen only
-        on a request that was going to be a 422 anyway. Every conversion here is
-        pure (parse a string, compare two numbers), so collecting them all has
-        no side effect and no I/O; that is what makes continuing safe rather
-        than merely cheap.
-        """
-        errors: list[dict[str, Any]] | None = None
-        if compiled_path_entries:
-            errors = _core.bind_path_into(request.path_params, compiled_path_entries, kwargs)
-        else:
-            for name, alias, annotation in path_specs:
-                try:
-                    kwargs[name] = _convert_scalar(
-                        annotation, request.path_params[alias], ("path", alias)
-                    )
-                except ValidationError as invalid:
-                    errors = invalid.errors if errors is None else [*errors, *invalid.errors]
-        if query_specs:
-            # Exact scalars are compiled into one native scan. It decodes only
-            # declared values, keeps the first occurrence, and writes directly
-            # into the already-owned kwargs dict, avoiding the generic pair
-            # list and reversed lookup dict. Unions and temporal annotations
-            # retain the reference path below.
-            if compiled_query_plan is not None:
-                errors = _core.bind_query_into(
-                    request.query_string, compiled_query_plan, kwargs, errors
-                )
-            else:
-                # `request.query_string`, not `request.scope[...]`: on the native
-                # server the scope is a lazily materialized dict over
-                # `_RequestContext`, so reading it here built the whole thing on
-                # every bound handler purely to reach one member.
-                query = _core.parse_qs(request.query_string)
-                # First occurrence wins, which `dict` gives from the pairs reversed:
-                # the earliest pair is assigned last. `parse_qs` returns a list, so
-                # `reversed` is a view rather than a copy and the whole fold is one
-                # C loop -- it was a Python loop of `setdefault` calls, one per pair,
-                # over pairs a C parser had just produced.
-                values: dict[str, str] = dict(reversed(query))
-                for name, alias, annotation, default, constraint in query_plan:
-                    raw = values.get(alias)
-                    if raw is None:
-                        if default is inspect.Parameter.empty:
-                            error = _error(("query", alias), "parameter is required", "missing")
-                            errors = [error] if errors is None else [*errors, error]
-                            continue
-                        kwargs[name] = default
-                    else:
-                        try:
-                            converted = _convert_scalar(annotation, raw, ("query", alias))
-                            if constraint is not None:
-                                converted = _apply_constraint(
-                                    converted, constraint, ("query", alias)
-                                )
-                        except ValidationError as invalid:
-                            errors = (
-                                invalid.errors if errors is None else [*errors, *invalid.errors]
-                            )
-                            continue
-                        kwargs[name] = converted
-        for name, alias, annotation, default in header_specs:
-            raw = request.header(alias)
-            if raw is None:
-                if default is inspect.Parameter.empty:
-                    error = _error(("header", alias), "parameter is required", "missing")
-                    errors = [error] if errors is None else [*errors, error]
-                    continue
-                kwargs[name] = default
-            else:
-                try:
-                    kwargs[name] = _convert_scalar(annotation, raw, ("header", alias))
-                except ValidationError as invalid:
-                    errors = invalid.errors if errors is None else [*errors, *invalid.errors]
-        if cookie_specs:
-            cookies = request.cookies
-            for name, alias, annotation, default in cookie_specs:
-                raw = cookies.get(alias)
-                if raw is None:
-                    if default is inspect.Parameter.empty:
-                        error = _error(("cookie", alias), "parameter is required", "missing")
-                        errors = [error] if errors is None else [*errors, error]
-                        continue
-                    kwargs[name] = default
-                else:
-                    try:
-                        kwargs[name] = _convert_scalar(annotation, raw, ("cookie", alias))
-                    except ValidationError as invalid:
-                        errors = invalid.errors if errors is None else [*errors, *invalid.errors]
-        if errors is not None:
-            raise ValidationError(errors)
+        async def without_request(_request: Request) -> Any:
+            return await handler()
 
-    async def _decode_body(request: Request, kwargs: dict[str, Any]) -> None:
-        """Multipart, form-model, and JSON body parameters."""
-        # A body the multipart parser cannot read is the caller's fault, and
-        # `Request.form` reports it as `ValueError` and leaves the status to its
-        # caller -- which is here. The two inner guards are the complete shape
-        # test; wrapping them in their disjunction added an equivalent branch.
-        try:
-            if form_specs or file_specs:
-                await form_tape.decode_multipart_validation_tape(request, kwargs)
-            if form_model_tape is not None:
-                await form_model_tape.decode(request, kwargs)
-        except ValueError as exc:
-            raise BadRequest(f"invalid form body: {exc}") from None
-        if body_spec is not None and body_validator is not None:
-            name, annotation = body_spec
-            body = await request.body()
-            # Which decoder reads the bytes is the client's to say. A `@message`
-            # annotation does **not** mean protobuf-only: it is an ordinary
-            # dataclass and bound from JSON before this branch existed, so
-            # narrowing it here would have silently broken every handler that
-            # already had one -- and OTLP/HTTP, the format's own reference
-            # consumer, serves both encodings of one message behind one path.
-            # See `_decode_protobuf_body` for the strictness that comes with it.
-            if _protobuf_requested(request):
-                kwargs[name] = _decode_protobuf_body(annotation, body)
-            else:
-                try:
-                    kwargs[name] = body_validator.decode_json_validation_tape(body, ("body",))
-                except ValueError as exc:
-                    raise BadRequest(f"invalid JSON body: {exc}") from None
+    else:
+
+        def without_request(_request: Request) -> Any:
+            return handler()
+
+    without_request.__name__ = getattr(handler, "__name__", "without_request")
+    without_request.__qualname__ = getattr(handler, "__qualname__", "without_request")
+    return without_request
+
+
+def _compile_path_handler(handler: Handler, compiled_path_plan: Any) -> Handler:
+    def bound_path(request: Request) -> Any:
+        return _core.activate_path_call(handler, request, compiled_path_plan, ValidationError)
+
+    if inspect.iscoroutinefunction(handler):
+        return inspect.markcoroutinefunction(bound_path)
+    return bound_path
+
+
+def _compile_simple_handler_wrapper(
+    handler: Handler, request_binding: _RequestBinding
+) -> Handler:
+    extract_scalars = request_binding.extract_scalars
+    decode_body = request_binding.decode_body
+    needs_body = request_binding.needs_body
 
     async def bound_simple(request: Request) -> Any:
-        """No connection, session, or dependency: nothing to lease or release."""
         kwargs: dict[str, Any] = {}
-        _extract_scalars(request, kwargs)
+        extract_scalars(request, kwargs)
         if needs_body:
-            await _decode_body(request, kwargs)
-        # The binder itself has to stay `async` here because binding a body is
-        # asynchronous, so the convention is decided per call rather than
-        # compiled away as it is in `compile_response_validator`.
+            await decode_body(request, kwargs)
         result = handler(request, **kwargs)
         return await result if result.__class__ is _COROUTINE_TYPE else result
 
+    return bound_simple
+
+
+def _compile_resource_wrapper_parts(
+    request_binding: _RequestBinding,
+    resources: _ResourceBinding,
+) -> tuple[Any, ...]:
+    connections = resources.connections
+    sessions = resources.sessions
+    resolver_plan = tuple(
+        (None, key, use_cache, resolver)
+        for key, use_cache, resolver in resources.side_effect_resolvers
+    ) + tuple(
+        (name, key, use_cache, resolver)
+        for name, key, use_cache, resolver in resources.resolvers
+    )
+    session_type: Any = None
+    if sessions:
+        from .orm.session import Session
+
+        session_type = Session
+    streaming_type: Any = ()
+    if connections or sessions:
+        from .response import StreamingResponse
+
+        streaming_type = StreamingResponse
+    return (
+        request_binding.extract_scalars,
+        request_binding.decode_body,
+        request_binding.needs_body,
+        resources.connections,
+        resources.sessions,
+        resolver_plan,
+        session_type,
+        streaming_type,
+    )
+
+
+def _compile_resource_handler_wrapper(
+    handler: Handler,
+    request_binding: _RequestBinding,
+    resources: _ResourceBinding,
+) -> Handler:
+    (
+        extract_scalars,
+        decode_body,
+        needs_body,
+        connections,
+        sessions,
+        resolver_plan,
+        session_type,
+        streaming_type,
+    ) = _compile_resource_wrapper_parts(request_binding, resources)
+
     async def bound(request: Request) -> Any:
         kwargs: dict[str, Any] = {}
-        _extract_scalars(request, kwargs)
+        extract_scalars(request, kwargs)
         if needs_body:
-            await _decode_body(request, kwargs)
+            await decode_body(request, kwargs)
         cache: dict[Any, Any] = {}
         cleanups: list[Any] = []
         borrowed: list[tuple[Any, Any, str]] = []
         opened: list[Any] = []
-        defer_release = False
         try:
             for name, database, workload in connections:
                 connection = await database.acquire(workload)
                 borrowed.append((database, connection, workload))
                 kwargs[name] = connection
-            if sessions:
-                from .orm.session import Session
-
-                by_key: dict[tuple[str, str], Any] = {}
-                for name, key, registry, workload, tenant_marker in sessions:
-                    session = by_key.get(key)
-                    if session is None:
-                        # Lazy: no connection is leased until the handler
-                        # actually runs a statement. The tenant is *not* lazy:
-                        # resolving it later would mean a session that exists
-                        # without one, which is the state the whole binding
-                        # exists to make unreachable.
-                        context = None if tenant_marker is None else tenant_marker.resolve(request)
-                        session = Session(registry, workload, tenant=context)
-                        by_key[key] = session
-                        opened.append(session)
-                    kwargs[name] = session
-            for key, use_cache, resolver in side_effect_resolvers:
-                if use_cache and key in cache:
-                    continue
-                value = await resolver(request, cache, cleanups)
-                if use_cache:
-                    cache[key] = value
-            for name, key, use_cache, resolver in resolvers:
-                if use_cache and key in cache:
-                    kwargs[name] = cache[key]
-                else:
+            by_key: dict[tuple[str, str], Any] = {}
+            for name, key, registry, workload, tenant_marker in sessions:
+                session = by_key.get(key)
+                if session is None:
+                    # Connections stay lazy, but tenant context must exist
+                    # before the session can escape into handler code.
+                    context = None if tenant_marker is None else tenant_marker.resolve(request)
+                    session = session_type(registry, workload, tenant=context)
+                    by_key[key] = session
+                    opened.append(session)
+                kwargs[name] = session
+            for name, key, use_cache, resolver in resolver_plan:
+                value = cache.get(key, _CACHE_MISSING) if use_cache else _CACHE_MISSING
+                if value is _CACHE_MISSING:
                     value = await resolver(request, cache, cleanups)
                     if use_cache:
                         cache[key] = value
+                if name is not None:
                     kwargs[name] = value
             result = handler(request, **kwargs)
             if result.__class__ is _COROUTINE_TYPE:
                 result = await result
-            if borrowed or opened:
-                from .response import StreamingResponse
+            if isinstance(result, streaming_type):
+                empty_borrowed: list[tuple[Any, Any, str]] = []
+                empty_opened: list[Any] = []
 
-                if isinstance(result, StreamingResponse):
+                async def release_after_stream(
+                    borrowed_resources: list = borrowed,
+                    opened_sessions: list = opened,
+                ) -> None:
+                    # Emission owns these resources until its finally block.
+                    await _release(borrowed_resources, opened_sessions)
 
-                    async def release_after_stream() -> None:
-                        # This internal cleanup belongs to the borrowed request
-                        # resources, not to user background work. StreamingResponse
-                        # runs it in a finally block so failed or cancelled emission
-                        # still releases the connection. On success it finishes
-                        # before _finish_http starts the user background callback.
-                        await _release(borrowed, opened)
-
-                    result._cleanup = release_after_stream
-                    defer_release = True
+                result._cleanup = release_after_stream
+                borrowed = empty_borrowed
+                opened = empty_opened
             return result
         finally:
-            if not defer_release:
-                # Runs on success, exception, and cancellation alike, so a
-                # connection is returned exactly once on every path.
-                await _release(borrowed, opened)
-            # Resume generator dependencies for cleanup, innermost first.
+            await _release(borrowed, opened)
             for generator in reversed(cleanups):
                 try:
                     await anext(generator)
@@ -3056,30 +3114,88 @@ def compile_binder(
                 else:
                     await generator.aclose()
 
-    if (
-        compiled_path_plan
-        and not query_specs
-        and not header_specs
-        and not cookie_specs
-        and not needs_body
-        and not needs_resources
-    ):
+    return bound
 
-        def bound_path(request: Request) -> Any:
-            """Convert path values and return the handler result verbatim."""
-            return _core.activate_path_call(handler, request, compiled_path_plan, ValidationError)
 
-        # Startup wrappers need the original endpoint's awaitability convention.
-        selected = (
-            inspect.markcoroutinefunction(bound_path)
-            if inspect.iscoroutinefunction(handler)
-            else bound_path
-        )
-    else:
-        selected = bound if needs_resources else bound_simple
-    selected.__name__ = getattr(handler, "__name__", "bound")
-    selected.__qualname__ = getattr(handler, "__qualname__", "bound")
+def _compile_handler_wrapper(
+    handler: Handler,
+    request_binding: _RequestBinding,
+    resources: _ResourceBinding,
+) -> Handler:
+    if resources.needed:
+        return _compile_resource_handler_wrapper(handler, request_binding, resources)
+    return _compile_simple_handler_wrapper(handler, request_binding)
+
+
+def _name_binder(selected: Handler, handler: Handler) -> Handler:
+    named = typing.cast(Any, selected)
+    named.__name__ = getattr(handler, "__name__", "bound")
+    named.__qualname__ = getattr(handler, "__qualname__", "bound")
     return selected
+
+
+def compile_binder(
+    handler: Handler,
+    path: str,
+    *,
+    databases: Mapping[str, Any] | None = None,
+    orm_registries: Mapping[str, Any] | None = None,
+    dependencies: tuple[Depends, ...] = (),
+    binding_spec: BindingSpec | None | object = _BINDING_SPEC_UNSET,
+    requestless: bool | None = None,
+    app_scope: AppScope | None = None,
+) -> Handler:
+    """Wrap `handler` so its typed parameters are bound on each request.
+
+    Signature inspection, validation tapes, dependency graphs, and named resource
+    lookups all finish here. A request-only handler is returned unchanged. A
+    path-only handler uses the native adapter, and handlers without leased
+    resources use a lean wrapper without acquire/release machinery.
+
+    Args:
+        handler: The endpoint callable to wrap.
+        path: The route path, including its placeholders.
+        databases: Configured PostgreSQL databases by name.
+        orm_registries: Configured ORM registries by name.
+        dependencies: Route dependencies resolved for side effects.
+        binding_spec: A previously inspected binding specification.
+        requestless: Whether the handler accepts no request argument.
+        app_scope: Container for application-scoped dependencies.
+
+    Returns:
+        The narrowest compiled wrapper, or the original unbound handler.
+    """
+    spec = (
+        inspect_handler(handler, path)
+        if binding_spec is _BINDING_SPEC_UNSET
+        else typing.cast(BindingSpec | None, binding_spec)
+    )
+    if spec is None and not dependencies:
+        if requestless is None:
+            try:
+                requestless = not inspect.signature(handler).parameters
+            except TypeError, ValueError:
+                requestless = False
+        if requestless:
+            return _compile_requestless_handler(handler)
+        return handler
+
+    request_binding = _compile_request_binding(spec)
+    resources = _compile_resource_binding(
+        spec, databases, orm_registries, dependencies, app_scope
+    )
+    if (
+        request_binding.compiled_path_plan
+        and not request_binding.has_query
+        and not request_binding.has_headers
+        and not request_binding.has_cookies
+        and not request_binding.needs_body
+        and not resources.needed
+    ):
+        selected = _compile_path_handler(handler, request_binding.compiled_path_plan)
+    else:
+        selected = _compile_handler_wrapper(handler, request_binding, resources)
+    return _name_binder(selected, handler)
 
 
 async def _release(borrowed: list, opened: list) -> None:

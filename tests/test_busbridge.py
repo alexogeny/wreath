@@ -56,6 +56,14 @@ def _collecting(bus: Any = None, *, channel: str = "test_channel"):
     return BusBridge(bus, channel=channel, apply=apply), accepted
 
 
+async def test_a_bridge_refuses_a_nonpositive_publish_ceiling() -> None:
+    async def apply(payload: dict) -> None:
+        return None
+
+    with pytest.raises(ValueError, match="max_inflight must be at least 1"):
+        BusBridge(FakeBus(), channel="events", apply=apply, max_inflight=0)
+
+
 async def test_it_subscribes_once_at_construction() -> None:
     bus = FakeBus()
     _collecting(bus, channel="shard_a")

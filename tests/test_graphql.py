@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from dataclasses import dataclass, make_dataclass
 from pathlib import Path
@@ -842,6 +843,77 @@ async def test_a_per_object_resolver_is_available_when_batching_makes_no_sense(
 
     body = await api.run("{ users { tag } }", Session(registry, "read"))
     assert [row["tag"] for row in body["data"]["users"]] == ["u1", "u2"]
+
+
+@pytest.mark.asyncio
+async def test_async_per_object_resolvers_start_the_whole_level_together(
+    registry: Registry, database: FakeDatabase
+) -> None:
+    database.connection.script("users", [user_row(index) for index in range(1, 41)])
+    api = GraphQL(registry, models=[User, Post])
+    release_first_wave = asyncio.Event()
+    started: list[int] = []
+    active = 0
+    peak = 0
+    second_wave_initial_active = -1
+
+    @api.field("User", "tag", returns="String", batch=False)
+    async def tag(user, info):
+        nonlocal active, peak, second_wave_initial_active
+        if user.id == 33:
+            second_wave_initial_active = active
+        started.append(user.id)
+        active += 1
+        peak = max(peak, active)
+        if len(started) == 32:
+            release_first_wave.set()
+        await asyncio.wait_for(release_first_wave.wait(), timeout=0.2)
+        try:
+            return f"u{user.id}"
+        finally:
+            active -= 1
+
+    body = await api.run("{ users { tag } }", Session(registry, "read"))
+
+    assert started == list(range(1, 41))
+    assert peak == 32
+    assert second_wave_initial_active == 0
+    assert [row["tag"] for row in body["data"]["users"]] == [
+        f"u{index}" for index in range(1, 41)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_resolver_cancels_and_joins_its_wave(
+    registry: Registry, database: FakeDatabase
+) -> None:
+    database.connection.script("users", [user_row(1), user_row(2)])
+    api = GraphQL(registry, models=[User, Post])
+    both_started = asyncio.Event()
+    sibling_cleaned = asyncio.Event()
+    started = 0
+
+    @api.field("User", "tag", returns="String", batch=False)
+    async def tag(user, info):
+        nonlocal started
+        started += 1
+        if started == 2:
+            both_started.set()
+        await both_started.wait()
+        if user.id == 1:
+            raise RuntimeError("first resolver failed")
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            sibling_cleaned.set()
+
+    body = await asyncio.wait_for(
+        api.run("{ users { tag } }", Session(registry, "read")), timeout=0.5
+    )
+
+    assert body["errors"][0]["extensions"]["code"] == "RESOLVER_ERROR"
+    assert sibling_cleaned.is_set()
 
 
 @pytest.mark.asyncio

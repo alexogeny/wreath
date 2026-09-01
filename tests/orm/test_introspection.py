@@ -8,11 +8,12 @@ from typing import Any
 
 import pytest
 
-from wreath.orm import Mapped, Model, column
+from wreath.orm import Mapped, Model, column, introspection
 from wreath.orm.errors import SchemaMismatchError
 from wreath.orm.introspection import (
     _validate_constraints,
     _validate_model,
+    probe_extension_types,
     validate_registry,
 )
 from wreath.orm.registry import Registry
@@ -74,6 +75,20 @@ def catalog_row(name: str, position: int, oid: int, not_null: bool, default: str
     return ["public", "accounts", name, position, oid, not_null, 0, default]
 
 
+def catalog_constraints(
+    database: FakeDatabase, rows: list[list[Any]], *, table: str = "accounts"
+) -> None:
+    database.connection.script(
+        "pg_constraint", [["public", table, *row] for row in rows]
+    )
+
+
+def catalog_indexes(
+    database: FakeDatabase, rows: list[list[Any]], *, table: str = "accounts"
+) -> None:
+    database.connection.script("pg_index", [["public", table, *row] for row in rows])
+
+
 def healthy(database: FakeDatabase) -> None:
     database.connection.script(
         "pg_attribute",
@@ -83,8 +98,8 @@ def healthy(database: FakeDatabase) -> None:
             catalog_row("note", 3, Text.oid, False),
         ],
     )
-    database.connection.script("pg_constraint", [["p", "{1}", None, "", ""]])
-    database.connection.script("pg_index", [["1"], ["2"]])
+    catalog_constraints(database, [["p", "{1}", None, "", ""]])
+    catalog_indexes(database, [["1"], ["2"]])
 
 
 def build(mode: str) -> tuple[Registry, FakeDatabase]:
@@ -118,8 +133,8 @@ async def test_a_missing_column_is_reported() -> None:
         "pg_attribute",
         [catalog_row("id", 1, Int64.oid, True), catalog_row("email", 2, Text.oid, True)],
     )
-    database.connection.script("pg_constraint", [["p", "{1}", None, "", ""]])
-    database.connection.script("pg_index", [["1"], ["2"]])
+    catalog_constraints(database, [["p", "{1}", None, "", ""]])
+    catalog_indexes(database, [["1"], ["2"]])
     with pytest.raises(SchemaMismatchError, match="missing_column"):
         await validate_registry(registry)
 
@@ -134,8 +149,8 @@ async def test_a_type_mismatch_is_reported_by_oid() -> None:
             catalog_row("note", 3, Text.oid, False),
         ],
     )
-    database.connection.script("pg_constraint", [["p", "{1}", None, "", ""]])
-    database.connection.script("pg_index", [["1"], ["2"]])
+    catalog_constraints(database, [["p", "{1}", None, "", ""]])
+    catalog_indexes(database, [["1"], ["2"]])
     with pytest.raises(SchemaMismatchError, match="type_mismatch"):
         await validate_registry(registry)
 
@@ -150,8 +165,8 @@ async def test_a_nullability_mismatch_is_reported() -> None:
             catalog_row("note", 3, Text.oid, False),
         ],
     )
-    database.connection.script("pg_constraint", [["p", "{1}", None, "", ""]])
-    database.connection.script("pg_index", [["1"], ["2"]])
+    catalog_constraints(database, [["p", "{1}", None, "", ""]])
+    catalog_indexes(database, [["1"], ["2"]])
     with pytest.raises(SchemaMismatchError, match="nullability_mismatch"):
         await validate_registry(registry)
 
@@ -164,7 +179,7 @@ async def test_a_primary_key_mismatch_is_reported() -> None:
         for fragment, rows in database.connection.responses
         if fragment != "pg_constraint"
     ]
-    database.connection.script("pg_constraint", [["p", "{2}", None, "", ""]])
+    catalog_constraints(database, [["p", "{2}", None, "", ""]])
     with pytest.raises(SchemaMismatchError, match="primary_key_mismatch"):
         await validate_registry(registry)
 
@@ -179,8 +194,8 @@ async def test_a_missing_unique_constraint_is_reported() -> None:
             catalog_row("note", 3, Text.oid, False),
         ],
     )
-    database.connection.script("pg_constraint", [["p", "{1}", None, "", ""]])
-    database.connection.script("pg_index", [["1"]])
+    catalog_constraints(database, [["p", "{1}", None, "", ""]])
+    catalog_indexes(database, [["1"]])
     with pytest.raises(SchemaMismatchError, match="missing_unique"):
         await validate_registry(registry)
 
@@ -202,8 +217,8 @@ async def test_the_diff_is_sorted_deterministically() -> None:
             catalog_row("id", 1, Text.oid, True),
         ],
     )
-    database.connection.script("pg_constraint", [["p", "{1}", None, "", ""]])
-    database.connection.script("pg_index", [["1"], ["2"]])
+    catalog_constraints(database, [["p", "{1}", None, "", ""]])
+    catalog_indexes(database, [["1"], ["2"]])
     with pytest.warns(RuntimeWarning):
         diff = await validate_registry(registry)
     keys = [(item.schema, item.table, item.column, item.issue_code) for item in diff.issues]
@@ -232,8 +247,8 @@ async def test_a_declared_server_default_is_compared_normalized() -> None:
             ["public", "stamped", "state", 2, Text.oid, True, 0, "('new'::text)"],
         ],
     )
-    database.connection.script("pg_constraint", [["p", "{1}", None, "", ""]])
-    database.connection.script("pg_index", [["1"]])
+    catalog_constraints(database, [["p", "{1}", None, "", ""]], table="stamped")
+    catalog_indexes(database, [["1"]], table="stamped")
     # Parentheses and case differences are PostgreSQL's rendering, not a drift.
     assert not await validate_registry(registry)
 
@@ -243,7 +258,55 @@ async def test_validation_never_writes_ddl() -> None:
     healthy(database)
     await validate_registry(registry)
     for sql, _ in database.connection.calls:
-        assert sql.strip().upper().startswith("SELECT")
+        statement = sql.strip().upper()
+        assert statement.startswith(("SELECT", "WITH"))
+        assert not any(word in statement for word in ("INSERT INTO", "UPDATE ", "DELETE FROM"))
+
+
+async def test_catalog_validation_uses_a_fixed_number_of_table_queries() -> None:
+    database = FakeDatabase()
+    registry = Registry(database, [Parent, Child], validate_schema="warn")
+    with pytest.warns(RuntimeWarning):
+        await validate_registry(registry)
+
+    catalog_calls = [
+        sql
+        for sql, _args in database.connection.calls
+        if any(name in sql for name in ("pg_attribute", "pg_constraint", "pg_index"))
+    ]
+    assert len(catalog_calls) == 3
+
+
+async def test_extension_type_probe_batches_all_requested_types() -> None:
+    database = FakeDatabase()
+    database.connection.script(
+        "to_regtype",
+        [
+            ["halfvec", 12, "public", "public"],
+            ["vector", 13, "public", "public"],
+        ],
+    )
+
+    found = await probe_extension_types(
+        database.connection, {"vector": "vector", "halfvec": "vector"}
+    )
+
+    assert [item.type_name for item in found] == ["halfvec", "vector"]
+    assert len(database.connection.calls) == 1
+
+
+async def test_extension_type_probe_adapts_the_fetchrow_result_shape() -> None:
+    class FetchrowOnly:
+        async def fetchrow(self, sql: str, payload: str) -> list[Any]:
+            return ["vector", 13, "extensions", "public"]
+
+    found = await probe_extension_types(FetchrowOnly(), {"vector": "vector"})
+
+    assert found == (
+        introspection.ExtensionTypeResolution(
+            "vector", "vector", 13, "extensions", "public"
+        ),
+    )
 
 
 # Against a real catalog.

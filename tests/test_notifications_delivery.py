@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 import pytest
 
+from wreath import notifications
 from wreath._userkit import (
     CapturingEmailSender,
     InMemorySuppressionList,
@@ -225,6 +227,32 @@ async def test_one_channel_failing_does_not_stop_the_others() -> None:
     assert len(sender.messages) == 1
 
 
+async def test_one_slow_channel_does_not_block_the_other_channels() -> None:
+    release = asyncio.Event()
+    fast_delivered = asyncio.Event()
+
+    class Slow:
+        name = "slow"
+
+        async def deliver(self, recipient: Recipient, note: object, kind: object) -> None:
+            await release.wait()
+
+    class Fast:
+        name = "fast"
+
+        async def deliver(self, recipient: Recipient, note: object, kind: object) -> None:
+            fast_delivered.set()
+
+    notify = Notifications(channels=[Slow(), Fast()])
+    notify.kind("photo_shared")(PhotoShared)
+    sending = asyncio.create_task(notify.send(PhotoShared("Ada"), to=Recipient("u1")))
+    await asyncio.wait_for(fast_delivered.wait(), timeout=0.5)
+    release.set()
+
+    result = await sending
+    assert result.delivered == ("slow", "fast")
+
+
 async def test_the_hourly_rate_limit_stops_a_notification_loop() -> None:
     notify = Notifications(channels=[Email(CapturingEmailSender())], rate_limit=2)
     notify.kind("photo_shared")(PhotoShared)
@@ -318,6 +346,64 @@ async def test_a_successful_push_carries_the_vapid_and_encoding_headers() -> Non
     assert seen["Authorization"].startswith("vapid t=")
     assert ", k=" in seen["Authorization"]
     assert int(seen["_len"]) > 86  # header plus a non-empty ciphertext
+
+
+async def test_one_slow_push_endpoint_does_not_block_another_subscription() -> None:
+    subscriptions = InMemoryPushSubscriptions()
+    second = PushSubscription(
+        "https://push.example.net/second",
+        SUBSCRIPTION.p256dh,
+        SUBSCRIPTION.auth,
+    )
+    await subscriptions.add("u1", SUBSCRIPTION)
+    await subscriptions.add("u1", second)
+    release = asyncio.Event()
+    second_started = asyncio.Event()
+
+    async def post(endpoint: str, body: bytes, headers: dict[str, str]) -> PushResult:
+        if endpoint == SUBSCRIPTION.endpoint:
+            await release.wait()
+        else:
+            second_started.set()
+        return PushResult(201, expired=False)
+
+    channel = WebPush(VapidKeys.generate("mailto:ops@example.com"), subscriptions, post=post)
+    delivery = asyncio.create_task(channel.deliver(Recipient("u1"), PhotoShared("Ada"), object()))
+    await asyncio.wait_for(second_started.wait(), timeout=0.5)
+    release.set()
+    await delivery
+
+
+async def test_an_encryption_failure_sends_only_the_valid_prefix(monkeypatch) -> None:
+    subscriptions = InMemoryPushSubscriptions()
+    invalid = PushSubscription(
+        "https://push.example.net/invalid", SUBSCRIPTION.p256dh, SUBSCRIPTION.auth
+    )
+    later = PushSubscription(
+        "https://push.example.net/later", SUBSCRIPTION.p256dh, SUBSCRIPTION.auth
+    )
+    await subscriptions.add("u1", SUBSCRIPTION)
+    await subscriptions.add("u1", invalid)
+    await subscriptions.add("u1", later)
+    sent: list[str] = []
+    real_encrypt = notifications.encrypt
+
+    def encrypt(subscription: PushSubscription, payload: bytes) -> bytes:
+        if subscription.endpoint == invalid.endpoint:
+            raise PushError("invalid subscription key")
+        return real_encrypt(subscription, payload)
+
+    async def post(endpoint: str, body: bytes, headers: dict[str, str]) -> PushResult:
+        sent.append(endpoint)
+        return PushResult(201, expired=False)
+
+    monkeypatch.setattr(notifications, "encrypt", encrypt)
+    channel = WebPush(VapidKeys.generate("mailto:ops@example.com"), subscriptions, post=post)
+
+    with pytest.raises(PushError, match="invalid subscription key"):
+        await channel.deliver(Recipient("u1"), PhotoShared("Ada"), object())
+
+    assert sent == [SUBSCRIPTION.endpoint]
 
 
 async def test_an_oversized_notification_is_refused_before_it_is_encrypted() -> None:

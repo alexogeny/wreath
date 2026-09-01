@@ -39,6 +39,7 @@ durable delivery.
 
 from __future__ import annotations
 
+import asyncio
 from base64 import b64decode
 from collections.abc import Awaitable, Callable
 from time import monotonic_ns as _monotonic_ns
@@ -55,6 +56,8 @@ __all__ = ["RoomRegistry"]
 #: Default bus channel carrying every room's traffic. A valid SQL identifier,
 #: because `wreath.messaging` validates channel names as one.
 DEFAULT_CHANNEL = "wreath_rooms"
+
+_FANOUT_CONCURRENCY = 32
 
 Sender = Callable[[Any], Awaitable[None]]
 
@@ -270,15 +273,20 @@ class RoomRegistry:
         # The payload object is built once and shared by every recipient.
         delivered = 0
         dead: list[Any] = []
-        for websocket in tuple(members):
-            try:
-                await websocket.send(payload)
-            except Exception:  # noqa: BLE001 - one dead socket is not a failure
-                # A peer that vanished mid-broadcast must not abort the rest of
-                # the room, and must not stay in it.
-                dead.append(websocket)
-            else:
-                delivered += 1
+        sockets = tuple(members)
+        for start in range(0, len(sockets), _FANOUT_CONCURRENCY):
+            batch = sockets[start : start + _FANOUT_CONCURRENCY]
+            outcomes = await asyncio.gather(
+                *(websocket.send(payload) for websocket in batch),
+                return_exceptions=True,
+            )
+            for websocket, outcome in zip(batch, outcomes, strict=True):
+                if isinstance(outcome, Exception):
+                    dead.append(websocket)
+                elif isinstance(outcome, BaseException):
+                    raise outcome
+                else:
+                    delivered += 1
         for websocket in dead:
             await self.leave(room, websocket)
         if marker is not None:
@@ -336,6 +344,7 @@ class RoomRegistry:
             graded.setdefault(key, []).append(websocket)
         delivered = 0
         dead: list[Any] = []
+        deliveries: list[tuple[Any, Any]] = []
         for key, sockets in graded.items():
             shaped = render(key, payload)
             if shaped is None:
@@ -343,11 +352,18 @@ class RoomRegistry:
                 # withheld field. Not an error, and not an empty frame either:
                 # sending "nothing" would still announce that an event happened.
                 continue
-            for websocket in sockets:
-                try:
-                    await websocket.send(shaped)
-                except Exception:  # noqa: BLE001 - one dead socket is not a failure
+            deliveries.extend((websocket, shaped) for websocket in sockets)
+        for start in range(0, len(deliveries), _FANOUT_CONCURRENCY):
+            batch = deliveries[start : start + _FANOUT_CONCURRENCY]
+            outcomes = await asyncio.gather(
+                *(websocket.send(shaped) for websocket, shaped in batch),
+                return_exceptions=True,
+            )
+            for (websocket, _shaped), outcome in zip(batch, outcomes, strict=True):
+                if isinstance(outcome, Exception):
                     dead.append(websocket)
+                elif isinstance(outcome, BaseException):
+                    raise outcome
                 else:
                     delivered += 1
         for websocket in dead:

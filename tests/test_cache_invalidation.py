@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import sys
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -88,6 +90,41 @@ def test_unsubscribe_stops_delivery() -> None:
     unsubscribe_writes(seen.append)
     publish_write(frozenset({"User"}))
     assert seen == []
+
+
+def test_unsubscribe_removes_every_registration_for_a_callback() -> None:
+    class Owner:
+        pass
+
+    first = Owner()
+    second = Owner()
+    seen: list[frozenset[str]] = []
+    subscribe_writes(seen.append, owner=first)
+    subscribe_writes(seen.append, owner=second)
+
+    unsubscribe_writes(seen.append)
+    publish_write(frozenset({"User"}))
+
+    assert seen == []
+
+
+def test_an_owned_bound_callback_does_not_keep_its_owner_alive() -> None:
+    from wreath import _orm_events
+
+    class Listener:
+        def receive(self, written: frozenset[str]) -> None:
+            pass
+
+    listener = Listener()
+    reference = weakref.ref(listener)
+    subscription_key = (_orm_events._callback_key(listener.receive), id(listener))
+    subscribe_writes(listener.receive, owner=listener)
+
+    del listener
+    gc.collect()
+
+    assert reference() is None
+    assert subscription_key not in _orm_events._subscribers
 
 
 def test_publishing_nothing_is_a_no_op() -> None:

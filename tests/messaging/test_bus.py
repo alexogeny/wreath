@@ -126,6 +126,13 @@ def test_durable_subscription_requires_group():
             pass
 
 
+def test_subscription_refuses_a_negative_retry_budget() -> None:
+    bus = _bus(DatabaseDouble())
+
+    with pytest.raises(ValueError, match="retries must be non-negative"):
+        bus.subscribe("booking_created", retries=-1)
+
+
 async def test_publish_durable_fans_out_per_group():
     db = DatabaseDouble()
     bus = _bus(db)
