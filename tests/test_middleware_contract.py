@@ -114,6 +114,23 @@ def test_a_declared_response_reaches_the_operation() -> None:
     assert "Retry-After" in responses["429"]["headers"]
 
 
+def test_a_route_response_shadows_a_middleware_model_without_rendering_it() -> None:
+    contract = MiddlewareContract(
+        responses=((409, ResponseSpec(complex, description="shadowed")),)
+    )
+    app = _app_with(_Described(contract), routes=())
+
+    @app.get("/widgets", responses={409: ResponseSpec(description="Route conflict")})
+    async def widgets(request: Any) -> dict[str, str]:
+        return {"ok": "yes"}
+
+    document = generate_openapi(app)
+
+    assert document["paths"]["/widgets"]["get"]["responses"]["409"] == {
+        "description": "Route conflict"
+    }
+
+
 def test_an_applies_to_predicate_scopes_the_contract() -> None:
     contract = MiddlewareContract(responses=((429, ResponseSpec(description="Too Many Requests")),))
     scoped = _Described(contract, applies_to=lambda route: route.path == "/widgets")

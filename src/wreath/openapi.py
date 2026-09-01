@@ -234,246 +234,283 @@ def _component_schema(model: Model) -> dict[str, Any]:
     return schema
 
 
+class _OpenAPIDocument:
+    __slots__ = ("app", "builder", "paths")
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+        self.builder = _Builder(allow_unknown=False)
+        self.paths: dict[str, dict[str, Any]] = {}
+
+    def schema(self, annotation: Any) -> dict[str, Any]:
+        from .response import FileResponse, PreparedResponse, Response, StreamingResponse
+
+        if isinstance(annotation, type) and issubclass(
+            annotation, (Response, StreamingResponse, FileResponse, PreparedResponse)
+        ):
+            return {}
+        before = len(self.builder.diagnostics)
+        reference = self.builder.type_ref(annotation)
+        if len(self.builder.diagnostics) != before:
+            raise TypeError(self.builder.diagnostics[-1].message)
+        return _openapi_schema(reference)
+
+    def parameters(self, definition: Any, spec: Any) -> list[dict[str, Any]]:
+        if spec is None:
+            return [
+                {
+                    "name": segment[1:-1],
+                    "in": "path",
+                    "required": True,
+                    "schema": {"type": "string"},
+                }
+                for segment in definition.path.split("/")
+                if segment.startswith("{")
+            ]
+        parameters = [
+            {
+                "name": alias,
+                "in": "path",
+                "required": True,
+                "schema": self.schema(annotation),
+            }
+            for _name, alias, annotation in spec.path_params
+        ]
+        constraints = dict(spec.query_constraints)
+        for location, bindings in (
+            ("query", spec.query_params),
+            ("header", spec.header_params),
+            ("cookie", spec.cookie_params),
+        ):
+            parameters.extend(
+                self._bound_parameters(location, bindings, constraints)
+            )
+        return parameters
+
+    def _bound_parameters(
+        self,
+        location: str,
+        bindings: Any,
+        constraints: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        parameters: list[dict[str, Any]] = []
+        for name, alias, annotation, default in bindings:
+            parameter = {
+                "name": alias,
+                "in": location,
+                "required": default is inspect.Parameter.empty,
+                "schema": self.schema(annotation),
+            }
+            if default is not inspect.Parameter.empty and default is not None:
+                parameter["schema"]["default"] = default
+            constraint = constraints.get(name)
+            if constraint is not None:
+                minimum, maximum, _overflow = constraint
+                if minimum is not None:
+                    parameter["schema"]["minimum"] = minimum
+                if maximum is not None:
+                    parameter["schema"]["maximum"] = maximum
+            parameters.append(parameter)
+        return parameters
+
+    def request_body(self, spec: Any) -> dict[str, Any] | None:
+        if spec is None:
+            return None
+        if spec.body is not None:
+            annotation = spec.body[1]
+            body_schema = self.schema(annotation)
+            content: dict[str, Any] = {"application/json": {"schema": body_schema}}
+            if _is_message(annotation):
+                content[_PROTOBUF_MEDIA] = {"schema": body_schema}
+            return {"required": True, "content": content}
+        if not (spec.form_params or spec.file_params):
+            return None
+        properties = {
+            alias: self.schema(annotation)
+            for _name, alias, annotation, _default in spec.form_params
+        }
+        properties.update(
+            {
+                alias: {"type": "string", "format": "binary"}
+                for _name, alias, _annotation, _default in spec.file_params
+            }
+        )
+        required = [
+            alias
+            for _name, alias, _annotation, default in spec.form_params + spec.file_params
+            if default is inspect.Parameter.empty
+        ]
+        form_schema: dict[str, Any] = {"type": "object", "properties": properties}
+        if required:
+            form_schema["required"] = required
+        return {
+            "required": bool(required),
+            "content": {"multipart/form-data": {"schema": form_schema}},
+        }
+
+    def security(self, definition: Any, method: str) -> list[dict[str, list[str]]] | None:
+        if not definition.security:
+            return None
+        missing = [
+            name
+            for name, _scopes in definition.security
+            if name not in self.app._openapi_security_schemes
+        ]
+        if missing:
+            raise ValueError(
+                f"route {method} {definition.path} names undeclared OpenAPI "
+                f"security scheme(s): {', '.join(missing)}"
+            )
+        return [{name: list(scopes)} for name, scopes in definition.security]
+
+    def responses(self, definition: Any, returns: Any, contracts: list[Any]) -> dict[str, Any]:
+        primary: dict[str, Any] = {"description": definition.response_description}
+        response_schema = self.schema(returns)
+        if response_schema:
+            primary["content"] = {
+                definition.response_media_type: {"schema": response_schema}
+            }
+            if _is_message(returns) and definition.response_media_type == "application/json":
+                primary["content"][_PROTOBUF_MEDIA] = {"schema": response_schema}
+        responses = {str(definition.status_code): primary}
+        for status, declared in definition.responses:
+            responses[str(status)] = self._response(declared)
+        for contract in contracts:
+            for status, declared in contract.responses:
+                key = str(status)
+                if key not in responses:
+                    responses[key] = self._response(declared)
+        self._response_headers(definition, contracts, responses)
+        return responses
+
+    def _response(self, declared: Any) -> dict[str, Any]:
+        response_spec = declared if isinstance(declared, ResponseSpec) else ResponseSpec(declared)
+        response: dict[str, Any] = {"description": response_spec.description}
+        response_schema = self.schema(response_spec.model)
+        if response_schema:
+            response["content"] = {response_spec.media_type: {"schema": response_schema}}
+        return response
+
+    @staticmethod
+    def _response_headers(
+        definition: Any,
+        contracts: list[Any],
+        responses: dict[str, Any],
+    ) -> None:
+        for contract in contracts:
+            for status, header in contract.response_headers:
+                key = str(definition.status_code if status is None else status)
+                target = responses.get(key)
+                if target is None:
+                    continue
+                entry: dict[str, Any] = {"schema": _header_schema(header)}
+                if header.description:
+                    entry["description"] = header.description
+                target.setdefault("headers", {}).setdefault(header.name, entry)
+
+    def operation(
+        self,
+        definition: Any,
+        method: str,
+        operation_id: str,
+        spec: Any,
+        returns: Any,
+    ) -> dict[str, Any]:
+        operation: dict[str, Any] = {"operationId": operation_id}
+        doc = inspect.getdoc(definition.endpoint)
+        for present, key, value in (
+            (definition.tags, "tags", list(definition.tags)),
+            (definition.summary, "summary", definition.summary),
+            (definition.deprecated, "deprecated", True),
+            (doc, "description", doc),
+        ):
+            if present:
+                operation[key] = value
+        security = self.security(definition, method)
+        if security is not None:
+            operation["security"] = security
+        parameters = self.parameters(definition, spec)
+        contracts = _collect_contracts(self.app, definition, method)
+        self._request_headers(parameters, contracts)
+        if parameters:
+            operation["parameters"] = parameters
+        request_body = self.request_body(spec)
+        if request_body is not None:
+            operation["requestBody"] = request_body
+        behaviours = sorted({name for contract in contracts for name in contract.behaviours})
+        if behaviours:
+            operation[BEHAVIOUR_EXTENSION] = behaviours
+        operation["responses"] = self.responses(definition, returns, contracts)
+        return operation
+
+    @staticmethod
+    def _request_headers(parameters: list[dict[str, Any]], contracts: list[Any]) -> None:
+        for contract in contracts:
+            for header in contract.request_headers:
+                parameter = {
+                    "name": header.name,
+                    "in": "header",
+                    "required": header.required,
+                    "schema": _header_schema(header),
+                }
+                if header.description:
+                    parameter["description"] = header.description
+                parameters.append(parameter)
+
+    def add_routes(self) -> None:
+        image = self.app._application_image
+        routes = list(image.routes())
+        binding_specs = image.binding_specs()
+        return_annotations = image.return_annotations()
+        resolved_ids, _diagnostics = image.operation_ids()
+        for index, definition in enumerate(routes):
+            if not definition.include_in_schema:
+                continue
+            path = _PATH_CONVERTER.sub(r"{\1}", definition.path)
+            operations = self.paths.setdefault(path, {})
+            for method in definition.methods:
+                operation = self.operation(
+                    definition,
+                    method,
+                    resolved_ids[(index, method)],
+                    binding_specs[index],
+                    return_annotations[index],
+                )
+                if method == "QUERY":
+                    operation["x-wreath-http-method"] = "QUERY"
+                    operations["x-wreath-query"] = operation
+                else:
+                    operations[method.lower()] = operation
+
+    def document(self, title: str, version: str) -> dict[str, Any]:
+        self.add_routes()
+        document: dict[str, Any] = {
+            "openapi": "3.1.0",
+            "info": {"title": title, "version": version},
+            "paths": self.paths,
+        }
+        components = {
+            model.name: _component_schema(model) for model in self.builder.registry.models()
+        }
+        component_document: dict[str, Any] = {}
+        if components:
+            component_document["schemas"] = components
+        if self.app._openapi_security_schemes:
+            component_document["securitySchemes"] = {
+                name: dict(value) for name, value in self.app._openapi_security_schemes.items()
+            }
+        if component_document:
+            document["components"] = component_document
+        return document
+
+
 def generate_openapi(
     app: Any,
     *,
     title: str = "Wreath",
     version: str = "0.1.0",
 ) -> dict[str, Any]:
-    builder = _Builder(allow_unknown=False)
-
-    def schema(annotation: Any) -> dict[str, Any]:
-        from .response import FileResponse, PreparedResponse, Response, StreamingResponse
-
-        if isinstance(annotation, type):
-            if issubclass(
-                annotation, (Response, StreamingResponse, FileResponse, PreparedResponse)
-            ):
-                return {}
-        before = len(builder.diagnostics)
-        reference = builder.type_ref(annotation)
-        if len(builder.diagnostics) != before:
-            raise TypeError(builder.diagnostics[-1].message)
-        return _openapi_schema(reference)
-
-    image = app._application_image
-    routes = list(image.routes())
-    binding_specs = image.binding_specs()
-    return_annotations = image.return_annotations()
-    resolved_ids, _diagnostics = image.operation_ids()
-    paths: dict[str, dict[str, Any]] = {}
-
-    for index, definition in enumerate(routes):
-        if not definition.include_in_schema:
-            continue
-        openapi_path = _PATH_CONVERTER.sub(r"{\1}", definition.path)
-        operations = paths.setdefault(openapi_path, {})
-        spec = binding_specs[index]
-        returns = return_annotations[index]
-        doc = inspect.getdoc(definition.endpoint)
-        for method in definition.methods:
-            operation: dict[str, Any] = {
-                "operationId": resolved_ids[(index, method)],
-            }
-            if definition.tags:
-                operation["tags"] = list(definition.tags)
-            if definition.summary:
-                operation["summary"] = definition.summary
-            if definition.deprecated:
-                operation["deprecated"] = True
-            if definition.security:
-                missing = [
-                    name
-                    for name, _scopes in definition.security
-                    if name not in app._openapi_security_schemes
-                ]
-                if missing:
-                    raise ValueError(
-                        f"route {method} {definition.path} names undeclared OpenAPI "
-                        f"security scheme(s): {', '.join(missing)}"
-                    )
-                operation["security"] = [
-                    {name: list(scopes)} for name, scopes in definition.security
-                ]
-            if doc:
-                operation["description"] = doc
-            parameters: list[dict[str, Any]] = []
-            if spec is not None:
-                query_constraints = dict(spec.query_constraints)
-                for _parameter_name, alias, annotation in spec.path_params:
-                    parameters.append(
-                        {
-                            "name": alias,
-                            "in": "path",
-                            "required": True,
-                            "schema": schema(annotation),
-                        }
-                    )
-                for location, bindings in (
-                    ("query", spec.query_params),
-                    ("header", spec.header_params),
-                    ("cookie", spec.cookie_params),
-                ):
-                    for _parameter_name, alias, annotation, default in bindings:
-                        parameter = {
-                            "name": alias,
-                            "in": location,
-                            "required": default is inspect.Parameter.empty,
-                            "schema": schema(annotation),
-                        }
-                        if default is not inspect.Parameter.empty and default is not None:
-                            parameter["schema"]["default"] = default
-                        constraint = query_constraints.get(_parameter_name)
-                        if constraint is not None:
-                            minimum, maximum, _overflow = constraint
-                            if minimum is not None:
-                                parameter["schema"]["minimum"] = minimum
-                            if maximum is not None:
-                                parameter["schema"]["maximum"] = maximum
-                        parameters.append(parameter)
-                if spec.body is not None:
-                    body_schema = schema(spec.body[1])
-                    body_content: dict[str, Any] = {"application/json": {"schema": body_schema}}
-                    # `wreath.binding` reads a protobuf body for any `@message`
-                    # annotation, and has since `_decode_protobuf_body` landed.
-                    # A document that advertises only JSON understates what the
-                    # endpoint accepts, and a generated client believes it.
-                    if _is_message(spec.body[1]):
-                        body_content[_PROTOBUF_MEDIA] = {"schema": body_schema}
-                    operation["requestBody"] = {
-                        "required": True,
-                        "content": body_content,
-                    }
-                elif spec.form_params or spec.file_params:
-                    properties = {
-                        alias: schema(annotation)
-                        for _name, alias, annotation, _default in spec.form_params
-                    }
-                    properties.update(
-                        {
-                            alias: {"type": "string", "format": "binary"}
-                            for _name, alias, _annotation, _default in spec.file_params
-                        }
-                    )
-                    required = [
-                        alias
-                        for _name, alias, _annotation, default in (
-                            spec.form_params + spec.file_params
-                        )
-                        if default is inspect.Parameter.empty
-                    ]
-                    form_schema: dict[str, Any] = {"type": "object", "properties": properties}
-                    if required:
-                        form_schema["required"] = required
-                    operation["requestBody"] = {
-                        "required": bool(required),
-                        "content": {"multipart/form-data": {"schema": form_schema}},
-                    }
-            else:
-                # Untyped handler: still document path placeholders as strings.
-                # Route registration has already established that a segment
-                # starting with "{" is a complete, well-formed placeholder.
-                for segment in definition.path.split("/"):
-                    if segment.startswith("{"):
-                        parameters.append(
-                            {
-                                "name": segment[1:-1],
-                                "in": "path",
-                                "required": True,
-                                "schema": {"type": "string"},
-                            }
-                        )
-            # The tape describes itself. Collected by asking every middleware
-            # that actually covers this operation, so a router-scoped limiter
-            # never decorates a route outside that router.
-            contracts = _collect_contracts(app, definition, method)
-            for contract in contracts:
-                for header in contract.request_headers:
-                    parameters.append(
-                        {
-                            "name": header.name,
-                            "in": "header",
-                            "required": header.required,
-                            "schema": _header_schema(header),
-                        }
-                        | ({"description": header.description} if header.description else {})
-                    )
-            if parameters:
-                operation["parameters"] = parameters
-            response: dict[str, Any] = {"description": definition.response_description}
-            response_schema = schema(returns)
-            if response_schema:
-                response["content"] = {definition.response_media_type: {"schema": response_schema}}
-                # The same fact on the way out: a route whose return annotation
-                # is a `@message` negotiates protobuf, so the document says so.
-                # Only when the route has not overridden its media type -- an
-                # explicit `response_media_type` is a decision, not a default.
-                if _is_message(returns) and definition.response_media_type == "application/json":
-                    response["content"][_PROTOBUF_MEDIA] = {"schema": response_schema}
-            operation_responses = {str(definition.status_code): response}
-            for status, declared in definition.responses:
-                response_spec = (
-                    declared if isinstance(declared, ResponseSpec) else ResponseSpec(declared)
-                )
-                additional: dict[str, Any] = {"description": response_spec.description}
-                additional_schema = schema(response_spec.model)
-                if additional_schema:
-                    additional["content"] = {
-                        response_spec.media_type: {"schema": additional_schema}
-                    }
-                operation_responses[str(status)] = additional
-            # A middleware's response is additive: the route's own declaration
-            # for a status is the more specific source and wins outright.
-            for contract in contracts:
-                for status, declared in contract.responses:
-                    key = str(status)
-                    if key in operation_responses:
-                        continue
-                    response_spec = (
-                        declared if isinstance(declared, ResponseSpec) else ResponseSpec(declared)
-                    )
-                    from_tape: dict[str, Any] = {"description": response_spec.description}
-                    tape_schema = schema(response_spec.model)
-                    if tape_schema:
-                        from_tape["content"] = {response_spec.media_type: {"schema": tape_schema}}
-                    operation_responses[key] = from_tape
-            for contract in contracts:
-                for status, header in contract.response_headers:
-                    key = str(definition.status_code if status is None else status)
-                    target = operation_responses.get(key)
-                    if target is None:
-                        continue
-                    headers = target.setdefault("headers", {})
-                    entry: dict[str, Any] = {"schema": _header_schema(header)}
-                    if header.description:
-                        entry["description"] = header.description
-                    headers.setdefault(header.name, entry)
-            behaviours = sorted({name for contract in contracts for name in contract.behaviours})
-            if behaviours:
-                operation[BEHAVIOUR_EXTENSION] = behaviours
-            operation["responses"] = operation_responses
-            if method == "QUERY":
-                operation["x-wreath-http-method"] = "QUERY"
-                operations["x-wreath-query"] = operation
-            else:
-                operations[method.lower()] = operation
-
-    components = {model.name: _component_schema(model) for model in builder.registry.models()}
-    document: dict[str, Any] = {
-        "openapi": "3.1.0",
-        "info": {"title": title, "version": version},
-        "paths": paths,
-    }
-    component_document: dict[str, Any] = {}
-    if components:
-        component_document["schemas"] = components
-    if app._openapi_security_schemes:
-        component_document["securitySchemes"] = {
-            name: dict(value) for name, value in app._openapi_security_schemes.items()
-        }
-    if component_document:
-        document["components"] = component_document
-    return document
+    return _OpenAPIDocument(app).document(title, version)
 
 
 def compare_openapi(

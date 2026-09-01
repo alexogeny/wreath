@@ -118,6 +118,12 @@ class ReverseProxy:
         attempts: int = DEFAULT_ATTEMPTS,
         buffer_below: int = DEFAULT_BUFFER_BELOW,
     ) -> None:
+        if max_body < 0:
+            raise ValueError("max_body must be non-negative")
+        if attempts < 1:
+            raise ValueError("attempts must be at least 1")
+        if buffer_below < 0:
+            raise ValueError("buffer_below must be non-negative")
         missing = [u.url for u in pool.upstreams if u.url not in clients]
         if missing:
             # At construction, not at the first request: a pool with no client
@@ -135,7 +141,7 @@ class ReverseProxy:
             error="incremental_refused",
         ).to_header()
         self._max_body = max_body
-        self._attempts = max(1, attempts)
+        self._attempts = attempts
         self._buffer_below = buffer_below
 
     async def __call__(self, request: Any) -> Response | StreamingResponse:

@@ -216,6 +216,88 @@ async def test_cancelling_an_unknown_request_id_is_a_no_op() -> None:
         assert response.status == 202
 
 
+async def test_a_cancelled_call_joins_async_tool_cleanup() -> None:
+    app = Wreath()
+    mcp = MCP(app, name="x", version="1.0.0")
+    started = asyncio.Event()
+    cleaned = asyncio.Event()
+
+    @mcp.tool(description="Owns asynchronous cleanup.")
+    async def wait_forever(request) -> dict:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            cleaned.set()
+        return {}
+
+    async with TestClient(app) as client:
+        session_id, _ = await initialize(client)
+        call = asyncio.create_task(
+            client.post(
+                "/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 60,
+                    "method": "tools/call",
+                    "params": {"name": "wait_forever"},
+                },
+                headers={"mcp-session-id": session_id},
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": {"requestId": 60},
+            },
+            headers={"mcp-session-id": session_id},
+        )
+        await asyncio.wait_for(call, timeout=5)
+        assert cleaned.is_set()
+
+
+async def test_a_completed_call_joins_its_cancelled_progress_watcher(monkeypatch) -> None:
+    app = Wreath()
+    mcp = MCP(app, name="x", version="1.0.0")
+    watcher_started = asyncio.Event()
+    watcher_cleaned = asyncio.Event()
+
+    async def relay_progress(self, session, task_id, token) -> None:
+        watcher_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            watcher_cleaned.set()
+
+    monkeypatch.setattr(MCP, "_relay_progress", relay_progress)
+
+    @mcp.tool(description="Finishes after its progress watcher starts.")
+    async def finish(request) -> dict:
+        await watcher_started.wait()
+        return {}
+
+    async with TestClient(app) as client:
+        session_id, _ = await initialize(client)
+        response = await client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 61,
+                "method": "tools/call",
+                "params": {"name": "finish", "_meta": {"progressToken": "p"}},
+            },
+            headers={"mcp-session-id": session_id},
+        )
+
+        assert response.status == 200
+        assert watcher_cleaned.is_set()
+
+
 async def test_ending_a_session_cancels_what_it_still_has_in_flight() -> None:
     app = Wreath()
     mcp = MCP(app, name="x", version="1.0.0")

@@ -383,6 +383,27 @@ def _ledger_statement(world: World, text: str, args: tuple[Any, ...]) -> Any:
             row["trace_context"] = row.get("trace_context") or args[5]
         return "INSERT 0 1"
     if text.startswith("WITH held"):
+        if "jsonb_agg(unit ORDER BY failed_at)" in text:
+            row = world.ledger.get(_key(args))
+            if row is None:
+                return []
+            holes = [
+                hole
+                for hole in world.holes.values()
+                if hole["name"] == args[0] and hole["tenant"] == args[1]
+            ]
+            holes.sort(key=lambda hole: hole["failed_at"])
+            fresh = [
+                {"from": hole["cursor_from"], "to": hole["cursor_to"]}
+                for hole in holes
+                if {"from": hole["cursor_from"], "to": hole["cursor_to"]}
+                not in row["pending"]
+            ]
+            row["pending"].extend(fresh)
+            if row["phase"] == "blocked":
+                row["phase"] = "walking"
+                row["last_error"] = None
+            return [{"queued": len(fresh)}]
         # claim_pending: take the oldest queued unit, atomically.
         row = world.ledger.get(_key(args))
         if row is None or not row["pending"]:

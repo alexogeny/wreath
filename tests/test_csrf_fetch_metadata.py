@@ -44,6 +44,46 @@ def _vary(response: Response) -> bytes | None:
     return next((v for n, v in response.headers if n == b"vary"), None)
 
 
+@pytest.mark.parametrize(
+    ("method", "headers"),
+    [
+        ("GET", [(b"host", b"example.test")]),
+        (
+            "POST",
+            [(b"host", b"example.test"), (b"sec-fetch-site", b"same-origin")],
+        ),
+    ],
+    ids=["safe-absent", "unsafe-present"],
+)
+@pytest.mark.asyncio
+async def test_form_enabled_policy_reads_fetch_metadata_once(
+    method: str,
+    headers: list[tuple[bytes, bytes]],
+) -> None:
+    class CountingRequest(Request):
+        fetch_metadata_reads = 0
+
+        def header(self, name: str | bytes, default: str | None = None) -> str | None:
+            if name == b"sec-fetch-site":
+                self.fetch_metadata_reads += 1
+            return super().header(name, default)
+
+    request = CountingRequest(
+        {
+            "type": "http",
+            "method": method,
+            "scheme": "https",
+            "path": "/",
+            "query_string": b"",
+            "headers": headers,
+        },
+        _receive,
+    )
+
+    assert await CsrfPolicy(SECRET, form_field="csrf_token")._ingress(request) is None
+    assert request.fetch_metadata_reads == 1
+
+
 @pytest.mark.parametrize("site", [b"cross-site", b"same-site"])
 @pytest.mark.asyncio
 async def test_an_unsafe_request_from_another_site_is_refused(site: bytes) -> None:
@@ -146,8 +186,9 @@ async def test_a_response_whose_cookie_turned_on_the_header_varies_on_it() -> No
     safe = _request("GET", [(b"host", b"example.test"), (b"sec-fetch-site", b"same-origin")])
     await middleware._ingress(safe)
     response = await middleware._egress(safe, Response(b"ok"))
-    assert _vary(response) is not None
-    assert b"sec-fetch-site" in _vary(response).lower()
+    vary = _vary(response)
+    assert vary is not None
+    assert b"sec-fetch-site" in vary.lower()
 
 
 @pytest.mark.asyncio
@@ -158,7 +199,9 @@ async def test_vary_is_merged_not_overwritten() -> None:
     response = Response(b"ok")
     response.headers.append((b"vary", b"accept-encoding"))
     response = await middleware._egress(safe, response)
-    vary = _vary(response).lower()
+    vary_header = _vary(response)
+    assert vary_header is not None
+    vary = vary_header.lower()
     assert b"accept-encoding" in vary
     assert b"sec-fetch-site" in vary
 

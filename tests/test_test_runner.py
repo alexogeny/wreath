@@ -1164,6 +1164,31 @@ def test_live_and_sealed_fuzz_batches_merge_without_repeating_files() -> None:
     assert status == 1
 
 
+def test_fuzz_confidence_stops_child_when_finishing_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fuzz = object()
+    stopped: list[object] = []
+    monkeypatch.setattr(runner, "_start_fuzz_process", lambda *args, **kwargs: fuzz)
+
+    def fail_finish(*args: Any, **kwargs: Any) -> None:
+        raise ValueError("invalid fuzz report")
+
+    monkeypatch.setattr(runner, "_finish_fuzz_process", fail_finish)
+    monkeypatch.setattr(runner, "_stop_fuzz_process", stopped.append)
+
+    with pytest.raises(ValueError, match="invalid fuzz report"):
+        runner._fuzz_confidence(
+            SimpleNamespace(),
+            {},
+            runner.MutationActivity(mode="sample", state="complete"),
+            renderer=None,
+            selected=("tests/test_policy.py",),
+        )
+
+    assert stopped == [fuzz]
+
+
 def test_rerunning_a_killer_is_the_generic_fuzz_contract(
     tmp_path: Path,
 ) -> None:

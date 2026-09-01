@@ -54,6 +54,48 @@ def _document(**kwargs: Any) -> LiveDocument:
     return LiveDocument(**kwargs)
 
 
+@pytest.mark.parametrize(
+    ("option", "message"),
+    [
+        ({"max_subscribers": -1}, "max_subscribers must be non-negative"),
+        ({"max_per_principal": -1}, "max_per_principal must be non-negative"),
+        ({"keepalive": 0}, "keepalive must be positive"),
+    ],
+)
+async def test_document_refuses_invalid_stream_limits(
+    option: dict[str, int], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _document(**option)
+
+
+async def test_change_events_refuses_a_nonpositive_keepalive_override() -> None:
+    document = _document()
+    subscription = document.subscribe("User::ada")
+    assert subscription is not None
+    events = change_events(subscription, keepalive=0)
+
+    with pytest.raises(ValueError, match="keepalive must be positive"):
+        await anext(events)
+
+    assert subscription.closed
+
+
+async def test_change_events_releases_the_slot_when_initial_fingerprinting_fails() -> None:
+    def explode() -> str:
+        raise RuntimeError("fingerprint unavailable")
+
+    document = _document(fingerprint=explode)
+    subscription = document.subscribe("User::ada")
+    assert subscription is not None
+    events = change_events(subscription)
+
+    with pytest.raises(RuntimeError, match="fingerprint unavailable"):
+        await anext(events)
+
+    assert subscription.closed and document.subscribers == 0
+
+
 async def _soon(condition, *, limit: float = 1.0) -> None:
     """Yield to the loop until ``condition()`` holds, rather than sleeping."""
     deadline = asyncio.get_running_loop().time() + limit

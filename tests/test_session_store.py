@@ -34,6 +34,21 @@ class MemoryStore:
         self.rows.pop(sid, None)
 
 
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"max_age": 0}, "max_age must be positive"),
+        ({"cookie": "bad;name"}, "cookie"),
+        ({"same_site": "sometimes"}, "samesite"),
+    ],
+)
+def test_session_policy_refuses_invalid_cookie_configuration(
+    options: dict[str, Any], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        SessionPolicy(secret="s" * 32, **options)
+
+
 def _app(store: Any) -> tuple[Wreath, MemoryStore]:
     app = Wreath()
     app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, store=store)))

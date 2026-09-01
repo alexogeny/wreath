@@ -1089,11 +1089,11 @@ class LocalObjectStore:
     ) -> AsyncIterator[ObjectStat]:
         """Every object whose key starts with `prefix`, in key order.
 
-        The whole tree beneath the root is walked once, on a thread, before the
-        first result is yielded -- so this is not incremental, and its cost is
-        the size of the tree rather than of the prefix. Symlinks are skipped and
-        never followed, both for entries and for directories, so the listing
-        cannot leave the root.
+        The native walker materializes and sorts one subtree on a thread before
+        the first result is yielded. A prefix containing complete directory
+        components starts at that directory, so unrelated sibling trees are not
+        visited. Symlinks are skipped and never followed, both for entries and
+        for directories, so the listing cannot leave the root.
 
         A key that vanishes between the walk and its stat is dropped silently
         rather than raising: a listing that races a delete should report what is
@@ -1112,7 +1112,7 @@ class LocalObjectStore:
         listed. A key that happens to collide with the pattern is invisible
         here, though `read` and `stat` still answer for it.
         """
-        entries = await asyncio.to_thread(self._walk)
+        entries = await asyncio.to_thread(self._walk, prefix)
         for key in entries:
             if key.startswith(prefix):
                 try:
@@ -1120,8 +1120,29 @@ class LocalObjectStore:
                 except ObjectError:
                     continue
 
-    def _walk(self) -> _List[str]:
-        return _core.local_walk(self._root, os.scandir, os.path.join)
+    def _walk(self, prefix: str) -> _List[str]:
+        parent = prefix.rpartition("/")[0]
+        if not parent:
+            return _core.local_walk(self._root, os.scandir, os.path.join)
+        try:
+            if normalize_key(parent) != parent:
+                return _core.local_walk(self._root, os.scandir, os.path.join)
+            parent_fd, opened, _name = self._open_parent(
+                [*parent.split("/"), "listing"], False
+            )
+        except (ObjectError, NotADirectoryError):
+            return []
+        descriptor_path = f"/proc/self/fd/{parent_fd}"
+        try:
+            if not os.path.exists(descriptor_path):
+                return _core.local_walk(self._root, os.scandir, os.path.join)
+            return [
+                f"{parent}/{key}"
+                for key in _core.local_walk(descriptor_path, os.scandir, os.path.join)
+            ]
+        finally:
+            for fd in opened:
+                os.close(fd)
 
     async def delete(self, key: str) -> None:
         """Remove `key`. Not an error when it is already gone.

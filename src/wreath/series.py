@@ -77,14 +77,10 @@ from ._series.settle import (
     Seal,
     SealState,
     SettledStore,
-    clear_correction,
     difference,
     fold,
-    insert_settled,
     params_key,
-    replace_settled,
     select_settled,
-    upsert_correction,
     view_key,
     watermark,
 )
@@ -2186,12 +2182,11 @@ class Series(_Builder):
         view, params = self._identity(zone_name, values, grain=grain)
         stored = await session.declared(select_settled(), (view, params, start, end))
         already = {row[0] for row in stored}
-        added: list[Any] = []
-        for bucket, measures in sorted(fresh.items()):
-            if bucket in already:
-                continue
-            await session.declared(insert_settled(), (view, params, bucket, _as_jsonb(measures)))
-            added.append(bucket)
+        added = [bucket for bucket in sorted(fresh) if bucket not in already]
+        if added:
+            await _insert_settled_rows(
+                session, view, params, ((bucket, fresh[bucket]) for bucket in added)
+            )
         return tuple(added)
 
     async def settle(
@@ -2250,14 +2245,11 @@ class Series(_Builder):
         if gap_from >= sealed_end:
             return ()
         fresh = await self._compute(session, predicates, gap_from, sealed_end, zone_name)
-        written: list[Any] = []
-        for bucket in sorted(fresh):
-            if bucket in known:
-                continue
-            await session.declared(
-                insert_settled(), (view, params, bucket, _as_jsonb(fresh[bucket]))
+        written = [bucket for bucket in sorted(fresh) if bucket not in known]
+        if written:
+            await _insert_settled_rows(
+                session, view, params, ((bucket, fresh[bucket]) for bucket in written)
             )
-            written.append(bucket)
         return tuple(written)
 
     async def reconcile(
@@ -2313,24 +2305,20 @@ class Series(_Builder):
         if not settled:
             return ()
         current = await self._compute(session, predicates, start, sealed_end, zone_name)
-        moved: list[Any] = []
+        changes: list[tuple[Any, dict[str, Any]]] = []
         for bucket, was in settled.items():
             if bucket not in current:
                 continue
             delta = difference(was, current[bucket], self._d.measures)
             if delta is None:
                 continue
-            moved.append(bucket)
+            changes.append((bucket, current[bucket] if self._seal.on_late == "reopen" else delta))
+        if changes:
             if self._seal.on_late == "reopen":
-                await session.declared(
-                    replace_settled(), (view, params, bucket, _as_jsonb(current[bucket]))
-                )
-                await session.declared(clear_correction(), (view, params, bucket))
+                await _replace_settled_rows(session, view, params, changes)
             else:
-                await session.declared(
-                    upsert_correction(), (view, params, bucket, _as_jsonb(delta))
-                )
-        return tuple(sorted(moved))
+                await _upsert_correction_rows(session, view, params, changes)
+        return tuple(sorted(bucket for bucket, _value in changes))
 
     async def _markers(self, session: Any, range: Range, zone_name: str) -> tuple[SeriesEvent, ...]:
         """The annotation layer, over the same range and in the same zone."""
@@ -2718,22 +2706,70 @@ def _lateness(value: Any) -> float:
     return seconds
 
 
-def _as_jsonb(value: Any) -> str:
-    """A mapping as the JSON text a `jsonb` placeholder can actually bind.
+_INSERT_SETTLED_ROWS = """
+INSERT INTO "wreath"."series_buckets" (view, params, bucket, measures)
+SELECT $1, $2, item.bucket, item.measures
+FROM jsonb_to_recordset($3::jsonb) AS item(bucket timestamptz, measures jsonb)
+ON CONFLICT (view, params, bucket) DO NOTHING
+"""
 
-    The driver infers a parameter's type from the Python value and has no
-    encoder for `dict` -- `_infer_oid` raises `unsupported PostgreSQL value
-    type: dict`. So binding a mapping directly cannot reach PostgreSQL at all,
-    and every settled bucket and correction written that way failed against a
-    real database while passing against a fake that accepted anything.
-    Confirmed against PostgreSQL 17: a `dict` is refused, the JSON text is
-    accepted.
+_UPSERT_CORRECTION_ROWS = """
+INSERT INTO "wreath"."series_corrections" (view, params, bucket, delta)
+SELECT $1, $2, item.bucket, item.value
+FROM jsonb_to_recordset($3::jsonb) AS item(bucket timestamptz, value jsonb)
+ON CONFLICT (view, params, bucket) DO UPDATE
+SET delta = EXCLUDED.delta, noticed_at = now()
+"""
 
-    The pair of `_as_mapping`, which reads the column back.
-    """
+_REPLACE_SETTLED_ROWS = """
+WITH reopened AS (
+    INSERT INTO "wreath"."series_buckets" (view, params, bucket, measures)
+    SELECT $1, $2, item.bucket, item.value
+    FROM jsonb_to_recordset($3::jsonb) AS item(bucket timestamptz, value jsonb)
+    ON CONFLICT (view, params, bucket) DO UPDATE
+    SET measures = EXCLUDED.measures, settled_at = now()
+    RETURNING bucket
+)
+DELETE FROM "wreath"."series_corrections" AS correction
+USING reopened
+WHERE correction.view = $1 AND correction.params = $2
+  AND correction.bucket = reopened.bucket
+"""
+
+
+def _jsonb_row_payload(rows: Any, value_name: str) -> str:
     from ._json import dumps
 
-    return dumps(dict(value)).decode("utf-8")
+    return dumps(
+        [
+            {"bucket": bucket.isoformat(), value_name: value}
+            for bucket, value in rows
+        ]
+    ).decode("utf-8")
+
+
+async def _insert_settled_rows(
+    session: Any, view: str, params: str, rows: Any
+) -> None:
+    await session.declared(
+        _INSERT_SETTLED_ROWS, (view, params, _jsonb_row_payload(rows, "measures"))
+    )
+
+
+async def _upsert_correction_rows(
+    session: Any, view: str, params: str, rows: Any
+) -> None:
+    await session.declared(
+        _UPSERT_CORRECTION_ROWS, (view, params, _jsonb_row_payload(rows, "value"))
+    )
+
+
+async def _replace_settled_rows(
+    session: Any, view: str, params: str, rows: Any
+) -> None:
+    await session.declared(
+        _REPLACE_SETTLED_ROWS, (view, params, _jsonb_row_payload(rows, "value"))
+    )
 
 
 def _as_mapping(value: Any) -> dict[str, Any]:

@@ -430,6 +430,30 @@ class TestRollup:
             for sql in database.connection.statements
         )
 
+    async def test_it_materialises_many_buckets_with_one_write(self, session, database):
+        database.connection.script(
+            "generate_series",
+            _rows((utc(2026, 1, 1), 30), (utc(2026, 2, 1), 28)),
+        )
+        database.connection.script("series_buckets", [])
+        declared = tiered(raw="3 days", month=None)
+        written = await declared._materialise(
+            session,
+            (),
+            Month,
+            utc(2026, 1, 1),
+            utc(2026, 3, 1),
+            "UTC",
+            {},
+        )
+        writes = [
+            sql
+            for sql, _args in database.connection.calls
+            if "INSERT INTO" in sql and "series_buckets" in sql
+        ]
+        assert written == (utc(2026, 1, 1), utc(2026, 2, 1))
+        assert len(writes) == 1
+
     async def test_it_reconciles_before_it_rolls_up(self, session, database):
         database.connection.script("generate_series", _rows((utc(2026, 1, 1), 30)))
         database.connection.script("series_buckets", [(utc(2026, 1, 15), {"n": 1}, None)])

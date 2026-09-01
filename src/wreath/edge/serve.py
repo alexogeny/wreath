@@ -76,6 +76,17 @@ def _endpoint(url: str) -> tuple[str, int, bytes, bool]:
         )
     if not parts.hostname:
         raise ValueError(f"upstream URL has no host: {url!r}")
+    if (
+        parts.username is not None
+        or parts.password is not None
+        or parts.path not in ("", "/")
+        or parts.query
+        or parts.fragment
+    ):
+        raise ValueError(
+            f"upstream must be an origin URL such as 'https://example.com:443', "
+            f"without credentials, a path, query, or fragment; got {url!r}"
+        )
     secure = parts.scheme == "https"
     port = parts.port or (443 if secure else 80)
     authority = parts.netloc.encode("latin-1")
@@ -199,10 +210,17 @@ async def serve(
             docstring for what is not supported yet. Raised here, at
             configuration time, rather than on the request that first selects it.
     """
+    if connections < 1:
+        raise ValueError("connections must be at least 1")
+    if max_body < 0:
+        raise ValueError("max_body must be non-negative")
+    if backlog < 1:
+        raise ValueError("backlog must be at least 1")
     endpoints = [_endpoint(u.url) for u in pool.upstreams]
     loop = asyncio.get_running_loop()
     ejection = pool.ejection
     handle: EdgeHandle | None = None
+    closing = False
     reopen_tasks: set[asyncio.Task[None]] = set()
     # One context for every https upstream, built while the proxy is being
     # configured. Native where the reactor can provide it, so the handshake and
@@ -215,7 +233,7 @@ async def serve(
         upstream_tls = metal_tls_client_context(cafile=upstream_cafile, verify=upstream_verify)
 
     def handle_closed() -> bool:
-        return handle is not None and handle.closed
+        return closing or (handle is not None and handle.closed)
 
     async def reopen(index: int) -> None:
         """Replace one lost upstream connection, forever, until the proxy stops.
@@ -264,24 +282,35 @@ async def serve(
         on_lost=on_lost,
     )
 
-    for index, (upstream_host, upstream_port, _authority, secure) in enumerate(endpoints):
-        for _ in range(connections):
-            await loop.create_connection(
-                lambda i=index: _edge.UpstreamConnection(table, i),
-                upstream_host,
-                upstream_port,
-                ssl=upstream_tls if secure else None,
-                server_hostname=upstream_host if secure else None,
-            )
+    try:
+        for index, (upstream_host, upstream_port, _authority, secure) in enumerate(endpoints):
+            for _ in range(connections):
+                await loop.create_connection(
+                    lambda i=index: _edge.UpstreamConnection(table, i),
+                    upstream_host,
+                    upstream_port,
+                    ssl=upstream_tls if secure else None,
+                    server_hostname=upstream_host if secure else None,
+                )
 
-    server = await loop.create_server(
-        lambda: _edge.EdgeProtocol(table),
-        host,
-        port,
-        backlog=backlog,
-        reuse_port=reuse_port,
-        ssl=ssl,
-        start_serving=True,
-    )
+        server = await loop.create_server(
+            lambda: _edge.EdgeProtocol(table),
+            host,
+            port,
+            backlog=backlog,
+            reuse_port=reuse_port,
+            ssl=ssl,
+            start_serving=True,
+        )
+    except BaseException:
+        closing = True
+        table.close()
+        pending_reopens = tuple(reopen_tasks)
+        for task in pending_reopens:
+            task.cancel()
+        if pending_reopens:
+            await asyncio.gather(*pending_reopens, return_exceptions=True)
+        reopen_tasks.clear()
+        raise
     handle = EdgeHandle(server, table, endpoints, connections, reopen_tasks)
     return handle

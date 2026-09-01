@@ -26,6 +26,7 @@ see `CsrfPolicy` for why the origin check depends on it.
 from __future__ import annotations
 
 import hmac
+import re
 import time
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -58,6 +59,7 @@ _STATE_ISSUE = "_wreath_csrf_issue"
 #: Recorded when Fetch Metadata answered a safe request and no token was minted,
 #: so `csrf_token` can still mint one for a caller that asks for it.
 _STATE_MINTER = "_wreath_csrf_minter"
+_SITE_UNREAD = object()
 
 # Bytes, already lowercased: `Request.header` encodes a `str` argument on every
 # call, and this one is on the request path for every request.
@@ -69,6 +71,7 @@ _SEC_FETCH_SITE = b"sec-fetch-site"
 #: same place, and drawing it anywhere looser would make the header check weaker
 #: than the token check it fronts.
 _TRUSTED_SITES = frozenset({"same-origin", "none"})
+_CANONICAL_HOST = re.compile(rb"[a-z0-9.-]+").fullmatch
 
 
 def _referer_origin(value: str) -> bytes | None:
@@ -344,9 +347,12 @@ class CsrfPolicy:
         expected = _request_origin(request, headers)
         if expected is None:
             return False
-        allowed = (expected, *self._trusted_origins)
         origin = headers.get(b"origin")
         if origin is not None:
+            host = headers[b"host"]
+            if origin == expected and _CANONICAL_HOST(host) is not None:
+                return True
+            allowed = (expected, *self._trusted_origins)
             return origin_matches(origin, allowed)
         referer = headers.get(b"referer")
         if referer is not None:
@@ -355,6 +361,9 @@ class CsrfPolicy:
             except UnicodeDecodeError:
                 return False
             referer_origin = _referer_origin(referer_text)
+            if referer_origin == expected:
+                return True
+            allowed = (expected, *self._trusted_origins)
             return referer_origin is not None and origin_matches(referer_origin, allowed)
         return self._allow_missing_origin
 
@@ -438,7 +447,7 @@ class CsrfPolicy:
         request.state.__setattr__(_STATE_ISSUE, renew)
         return None
 
-    def _ingress_sync(self, request: Request):
+    def _ingress_sync(self, request: Request, site: Any = _SITE_UNREAD):
         """Answer from `Sec-Fetch-Site` when the browser sent it; else the token.
 
         Two checks, in cost order, and the cheap one is also the stronger one.
@@ -459,7 +468,8 @@ class CsrfPolicy:
         A safe request answered by Fetch Metadata records nothing except how to
         mint on demand, which is where the saving comes from -- see `csrf_token`.
         """
-        site = request.header(_SEC_FETCH_SITE)
+        if site is _SITE_UNREAD:
+            site = request.header(_SEC_FETCH_SITE)
         if site is not None:
             if request.method in _SAFE_METHODS:
                 # Nothing to validate and nothing to mint: this client will send
@@ -503,12 +513,11 @@ class CsrfPolicy:
 
     async def _ingress(self, request: Request):
         """Validate a header token, or lazily parse an enabled form field."""
-        if (
-            self._form_field is None
-            or request.header(_SEC_FETCH_SITE) is not None
-            or request.method in _SAFE_METHODS
-        ):
+        if self._form_field is None:
             return self._ingress_sync(request)
+        site = request.header(_SEC_FETCH_SITE)
+        if site is not None or request.method in _SAFE_METHODS:
+            return self._ingress_sync(request, site)
 
         exemption = self._check_exemption(request)
         if exemption is True:

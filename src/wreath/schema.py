@@ -281,28 +281,42 @@ async def _recorded_versions(connection: Any, schema: str) -> dict[str, int]:
     return {str(row[0]): int(row[1]) for row in rows}
 
 
-async def _present_in(connection: Any, schema: str) -> set[str]:
+async def _present_in(connection: Any, schemas: tuple[str, ...]) -> dict[str, set[str]]:
+    if not schemas:
+        return {}
+    values = ", ".join(f"(${index}::text)" for index in range(1, len(schemas) + 1))
     rows = await connection.fetch(
-        "SELECT c.relname::text FROM pg_catalog.pg_class c "
+        "SELECT requested.name::text, c.relname::text FROM pg_catalog.pg_class c "
         "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
-        "WHERE n.nspname = $1::text AND c.relkind IN ('r', 'p', 'v', 'm')",
-        schema,
+        f"JOIN (VALUES {values}) AS requested(name) ON requested.name = n.nspname "
+        "WHERE c.relkind IN ('r', 'p', 'v', 'm')",
+        *schemas,
     )
-    return {str(row[0]) for row in rows}
+    present = {schema: set() for schema in schemas}
+    for schema, relation in rows:
+        present[str(schema)].add(str(relation))
+    return present
 
 
-async def _resolves(connection: Any, relation: str) -> bool:
-    """Whether an *unqualified* relation resolves through `search_path`.
+async def _resolved(connection: Any, relations: tuple[str, ...]) -> set[str]:
+    """Which *unqualified* relations resolve through `search_path`.
 
-    The qualified components can be answered with one catalog read per schema.
+    Qualified components are answered by one catalog read across every schema.
     An unqualified one cannot: which schema it lands in is a property of the
     session, so the only honest question is the one PostgreSQL itself answers.
     `to_regclass` returns NULL rather than raising for a name that does not
     resolve, which is why it is the right call here -- a `::regclass` cast
     would make "absent" an error to catch instead of a value to read.
     """
-    rows = await connection.fetch("SELECT to_regclass($1::text) IS NOT NULL", relation)
-    return bool(rows and rows[0][0])
+    if not relations:
+        return set()
+    values = ", ".join(f"(${index}::text)" for index in range(1, len(relations) + 1))
+    rows = await connection.fetch(
+        f"SELECT requested.name::text FROM (VALUES {values}) AS requested(name) "
+        "WHERE to_regclass(requested.name) IS NOT NULL",
+        *relations,
+    )
+    return {str(row[0]) for row in rows}
 
 
 async def _missing_relations(
@@ -318,24 +332,34 @@ async def _missing_relations(
     which is worse than no check at all.
     """
     missing: dict[str, tuple[str, ...]] = {}
-    present: dict[str, set[str]] = {}
+    schemas = tuple(
+        dict.fromkeys(
+            component.schema
+            for component in components
+            if component.relations and component.qualified
+        )
+    )
+    relations = tuple(
+        dict.fromkeys(
+            relation
+            for component in components
+            if component.relations and not component.qualified
+            for relation in component.relations
+        )
+    )
+    present = await _present_in(connection, schemas)
+    resolved = await _resolved(connection, relations)
     for component in components:
         if not component.relations:
             continue
         if component.qualified:
-            if component.schema not in present:
-                present[component.schema] = await _present_in(connection, component.schema)
             absent = tuple(
                 relation
                 for relation in component.relations
                 if relation not in present[component.schema]
             )
         else:
-            unresolved = []
-            for relation in component.relations:
-                if not await _resolves(connection, relation):
-                    unresolved.append(relation)
-            absent = tuple(unresolved)
+            absent = tuple(relation for relation in component.relations if relation not in resolved)
         if absent:
             missing[component.name] = absent
     return missing

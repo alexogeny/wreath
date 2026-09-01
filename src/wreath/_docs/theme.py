@@ -1404,6 +1404,10 @@ def page(
     section_title: str = "",
     section_href: str = "",
     map_href: str = "",
+    head_html: str = "",
+    extra_stylesheets: tuple[str, ...] = (),
+    extra_scripts: tuple[str, ...] = (),
+    layout: str = "docs",
 ) -> str:
     """Assemble one full HTML document (no external requests)."""
     title = f"{page_title} · {site_name}" if page_title else site_name
@@ -1441,37 +1445,21 @@ def page(
     )
     browse = f'<a class="browse" href="{_e(map_href)}">Browse</a>' if map_href else ""
     layout_class = "layout" if nav_html else "layout no-side"
-    return (
-        "<!doctype html>\n"
-        '<html lang="en" class="no-js"><head><meta charset="utf-8">'
-        '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f"<title>{_e(title)}</title>{meta_desc}{link_canonical}"
-        f'<meta name="color-scheme" content="light dark">'
-        f"<style>{critical_css(palette, feel)}</style>"
-        f'<link rel="stylesheet" href="{_e(css_href)}">'
-        f"<script>{BOOT}</script></head>"
-        "<body>"
-        '<a class="skip" href="#content">Skip to content</a>'
-        '<header class="site"><div class="bar">'
+    documentation = layout == "docs"
+    menu = (
         f'<button class="icon-btn" id="menu-toggle" type="button" aria-expanded="false"'
         f' aria-controls="site-nav" aria-label="Show navigation">{_ICON_MENU}</button>'
-        f'<a class="brand" href="{_e(home_href)}" aria-label="{_e(site_name)}, home">'
-        f'{_MARK}<span class="brand-name">{_e(site_name)}</span></a>'
-        f"{browse}"
-        f"{sections}"
-        '<span class="spacer"></span>'
+        if documentation
+        else ""
+    )
+    search_button = (
         f'<button class="search-open" id="search-open" type="button" '
         f'aria-label="Search documentation" aria-haspopup="dialog">{_ICON_SEARCH}'
         '<span class="label">Search</span><kbd>Ctrl K</kbd></button>'
-        f"{_more(repo_html, links_html)}"
-        f'<button class="icon-btn theme" id="theme-toggle" type="button"'
-        f' data-mode="system" aria-label="Theme: match system. Switch to light."'
-        f">{_ICONS_THEME}</button>"
-        f"</div></header>"
-        '<div class="scrim" id="nav-scrim"></div>'
-        f'<div class="{layout_class}">{side}'
-        f'<main id="content"><article class="prose">{content}</article>{footer}</main>'
-        f"{toc}</div>"
+        if documentation
+        else ""
+    )
+    search_dialog = (
         f'<dialog class="palette" id="search-dialog" aria-label="Search documentation">'
         f'<div class="palette-bar">{_ICON_SEARCH}'
         '<input id="docs-search" type="search" placeholder="Search the docs" '
@@ -1480,9 +1468,46 @@ def page(
         '<div class="palette-results" id="docs-results" aria-live="polite"></div>'
         '<div class="palette-hint"><kbd>&uarr;</kbd><kbd>&darr;</kbd> navigate'
         "<kbd>&crarr;</kbd> open<kbd>esc</kbd> close</div></dialog>"
+        if documentation
+        else ""
+    )
+    scrim = '<div class="scrim" id="nav-scrim"></div>' if documentation else ""
+    stylesheet_links = "".join(
+        f'<link rel="stylesheet" href="{_e(href)}">' for href in extra_stylesheets
+    )
+    script_links = "".join(f'<script src="{_e(src)}" defer></script>' for src in extra_scripts)
+    return (
+        "<!doctype html>\n"
+        '<html lang="en" class="no-js"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<title>{_e(title)}</title>{meta_desc}{link_canonical}{head_html}"
+        f'<meta name="color-scheme" content="light dark">'
+        f"<style>{critical_css(palette, feel)}</style>"
+        f'<link rel="stylesheet" href="{_e(css_href)}">{stylesheet_links}'
+        f"<script>{BOOT}</script></head>"
+        "<body>"
+        '<a class="skip" href="#content">Skip to content</a>'
+        '<header class="site"><div class="bar">'
+        f"{menu}"
+        f'<a class="brand" href="{_e(home_href)}" aria-label="{_e(site_name)}, home">'
+        f'{_MARK}<span class="brand-name">{_e(site_name)}</span></a>'
+        f"{browse}"
+        f"{sections}"
+        '<span class="spacer"></span>'
+        f"{search_button}"
+        f"{_more(repo_html, links_html)}"
+        f'<button class="icon-btn theme" id="theme-toggle" type="button"'
+        f' data-mode="system" aria-label="Theme: match system. Switch to light."'
+        f">{_ICONS_THEME}</button>"
+        f"</div></header>"
+        f"{scrim}"
+        f'<div class="{layout_class}">{side}'
+        f'<main id="content"><article class="prose">{content}</article>{footer}</main>'
+        f"{toc}</div>"
+        f"{search_dialog}"
         f'<button class="to-top" id="to-top" type="button" aria-label="Back to top">'
         f"{_ICON_TOP}</button>"
-        f'<script src="{_e(js_href)}" defer></script>'
+        f'<script src="{_e(js_href)}" defer></script>{script_links}'
         "</body></html>"
     )
 

@@ -28,6 +28,34 @@ from wreath.server import ServerConfig, serve
 _WORKER = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
 _SLOT = int("".join(c for c in _WORKER if c.isdigit()) or 0)
 _PORT = 28150 + _SLOT * 40
+
+
+@pytest.mark.parametrize(
+    "ejection",
+    [
+        Ejection(failures=0),
+        Ejection(seconds=0),
+        Ejection(cap=0),
+        Ejection(seconds=10, cap=5),
+    ],
+)
+def test_upstream_pool_refuses_invalid_ejection_policy(ejection: Ejection) -> None:
+    with pytest.raises(ValueError, match="ejection"):
+        UpstreamPool([Upstream("http://origin.test")], ejection=ejection)
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"attempts": 0}, "attempts must be at least 1"),
+        ({"max_body": -1}, "max_body must be non-negative"),
+        ({"buffer_below": -1}, "buffer_below must be non-negative"),
+    ],
+)
+def test_reverse_proxy_refuses_invalid_limits(options: dict[str, int], message: str) -> None:
+    upstream = Upstream("http://origin.test")
+    with pytest.raises(ValueError, match=message):
+        ReverseProxy(UpstreamPool([upstream]), {upstream.url: object()}, **options)
 _LOCAL = DestinationPolicy(allow_loopback=True)
 
 

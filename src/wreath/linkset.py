@@ -1,4 +1,4 @@
-"""Web links serialized as RFC 9264 ``application/linkset+json``."""
+"""Web links serialized as RFC 9264 `application/linkset+json`."""
 
 from __future__ import annotations
 

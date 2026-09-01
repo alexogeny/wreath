@@ -158,6 +158,30 @@ async def test_csrf_header_wins_without_reading_form_body() -> None:
 
 
 @pytest.mark.asyncio
+async def test_header_only_policy_never_reads_a_form_body() -> None:
+    async def should_not_receive() -> dict[str, Any]:
+        raise AssertionError("a header-only CSRF policy must not read the body")
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "scheme": "https",
+            "path": "/",
+            "headers": [
+                (b"host", b"example.test"),
+                (b"origin", b"https://example.test"),
+                (b"content-type", b"application/x-www-form-urlencoded"),
+            ],
+        },
+        should_not_receive,
+    )
+
+    refusal = await CsrfPolicy("s" * 32)._ingress(request)
+    assert refusal is not None and refusal.status == 403
+
+
+@pytest.mark.asyncio
 async def test_unsafe_requests_fail_closed_with_generic_response() -> None:
     middleware = CsrfPolicy("s" * 32)
     for headers in (
@@ -272,6 +296,28 @@ async def test_a_trusted_origin_passes_the_origin_check_and_others_do_not() -> N
     assert not await _admits(middleware, origin=b"https://app.example.evil")
     # Scheme is part of an origin.
     assert not await _admits(middleware, origin=b"http://app.example")
+
+
+async def test_exact_request_origin_skips_origin_normalisation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wreath.policy import csrf as csrf_module
+
+    def unexpected_normalisation(*_args: object) -> bool:
+        raise AssertionError("an exact origin does not need normalisation")
+
+    monkeypatch.setattr(csrf_module, "origin_matches", unexpected_normalisation)
+
+    assert await _admits(CsrfPolicy("s" * 32), origin=b"https://example.test")
+    assert await _admits(CsrfPolicy("s" * 32), referer=b"https://example.test/path")
+
+
+async def test_exact_but_invalid_request_origin_is_still_refused() -> None:
+    assert not await _admits(
+        CsrfPolicy("s" * 32),
+        host=b"example.test/path",
+        origin=b"https://example.test/path",
+    )
 
 
 async def test_a_trusted_origin_is_matched_after_normalisation() -> None:

@@ -390,6 +390,38 @@ class RunActivity:
         file_state.duration += exact - test.duration
         test.duration = exact
 
+    def reconcile_native_result(self, nodeid: str, outcome: str, duration: float) -> None:
+        """Replace a streamed native terminal result with the worker payload result."""
+        if outcome not in {"passed", "failed", "skipped"}:
+            raise ValueError(
+                f"native result {nodeid!r} has outcome {outcome!r}; "
+                "expected 'passed', 'failed', or 'skipped'"
+            )
+        test = self._test(nodeid)
+        if not test.finished:
+            self.add_native_result(nodeid, outcome, duration)
+            return
+        file_state = self.files[test.path]
+        previous = test.outcome
+        if previous == "passed":
+            file_state.passed -= 1
+        elif previous == "failed":
+            file_state.failed -= 1
+        elif previous == "skipped":
+            file_state.skipped -= 1
+        file_state.duration += max(0.0, duration) - test.duration
+        test.duration = max(0.0, duration)
+        test.call_passed = outcome == "passed"
+        test.failed = outcome == "failed"
+        test.skipped = outcome == "skipped"
+        test.error = False
+        if outcome == "passed":
+            file_state.passed += 1
+        elif outcome == "failed":
+            file_state.failed += 1
+        else:
+            file_state.skipped += 1
+
     def finish_test(self, nodeid: str) -> None:
         test = self._test(nodeid)
         if test.finished:
@@ -2578,11 +2610,14 @@ def _fuzz_confidence(
             directory=Path(directory),
             case_ids=_mutation_gold_tests(mutation_report, chosen),
         )
-        return _finish_fuzz_process(
-            fuzz,
-            mutation_activity,
-            renderer=renderer,
-        )
+        try:
+            return _finish_fuzz_process(
+                fuzz,
+                mutation_activity,
+                renderer=renderer,
+            )
+        finally:
+            _stop_fuzz_process(fuzz)
 
 
 def _no_gold_fuzz() -> tuple[dict[str, Any], FuzzActivity]:
@@ -2751,8 +2786,229 @@ def _attach_fuzz_report(path: Path, fuzz: dict[str, Any]) -> None:
     _atomic_json(path, report)
 
 
-def execute(namespace: Any) -> int:
-    """Run the selected engine with Wreath's activity controller."""
+@dataclass(frozen=True, slots=True)
+class _PytestPlan:
+    pytest: Any
+    arguments: list[str]
+    selection_arguments: list[str]
+    workers: int
+    history_path: Path | None
+    collection_shards: tuple[tuple[str, int], ...]
+
+
+@dataclass(slots=True)
+class _PytestMutationState:
+    trace_spec: Any = None
+    user_report: Path | None = None
+    activity_path: Path | None = None
+    selection_path: Path | None = None
+    baseline_wait_path: Path | None = None
+    prepared: Any = None
+
+    @classmethod
+    def prepare(cls, namespace: Any, directory: Path) -> _PytestMutationState:
+        trace_spec = _prepare_mutation_trace(namespace, directory)
+        if namespace.mutant == "sample" and trace_spec is None:
+            raise ValueError("--mutant sample found no eligible controls")
+        user_report = Path(namespace.report) if namespace.report else None
+        activity_path = user_report
+        if activity_path is None and trace_spec is not None:
+            activity_path = directory / "activity.json"
+        state = cls(trace_spec, user_report, activity_path)
+        if trace_spec is None:
+            return state
+        state.selection_path = directory / "mutation-selection.json"
+        state.selection_path.write_text(json.dumps(sorted(trace_spec.selected)), encoding="utf-8")
+        state.baseline_wait_path = directory / "mutation-baseline.json"
+        state.prepared = _start_mutation_process(
+            namespace,
+            directory=directory,
+            baseline_wait=state.baseline_wait_path,
+            baseline_stream=trace_spec.output_dir,
+            selection=state.selection_path,
+        )
+        return state
+
+
+def _prepare_pytest_plan(namespace: Any) -> _PytestPlan:
+    if namespace.slowest < 0:
+        raise ValueError("--slowest must be a non-negative integer")
+    if namespace.mutant != "off":
+        _mutation_arguments(namespace)
+    try:
+        import pytest
+    except ModuleNotFoundError as error:
+        if error.name != "pytest":
+            raise
+        raise ValueError(
+            "wreath test needs pytest; install Wreath's dev group or pytest>=8.4"
+        ) from error
+
+    arguments = [str(argument) for argument in getattr(namespace, "pytest_args", ())]
+    if arguments[:1] == ["--"]:
+        arguments.pop(0)
+    selection_arguments = list(arguments)
+    workers = _resolve_workers(str(namespace.workers))
+    if not _has_xdist_argument(arguments) and workers > 1:
+        if importlib.util.find_spec("xdist") is None:
+            print("wreath test: pytest-xdist is unavailable; running serially", file=sys.stderr)
+            workers = 1
+        else:
+            arguments.extend(("-n", str(workers)))
+            if not _has_xdist_distribution(arguments):
+                arguments.extend(("--dist", "loadgroup"))
+    history_path = None if namespace.no_history else Path(namespace.history)
+    collection_shards = _prepare_collection_shards(
+        str(namespace.collection),
+        selection_arguments,
+        workers=workers,
+        history=history_path,
+    )
+    if collection_shards:
+        arguments.append("--max-worker-restart=0")
+    return _PytestPlan(
+        pytest,
+        arguments,
+        selection_arguments,
+        workers,
+        history_path,
+        collection_shards,
+    )
+
+
+def _run_pytest_plan(plan: _PytestPlan, config: RunnerConfig, trace_spec: Any) -> int:
+    previous = {
+        _CONFIG_ENV: os.environ.get(_CONFIG_ENV),
+        _CONTROLLER_PID_ENV: os.environ.get(_CONTROLLER_PID_ENV),
+        _MUTATION_TRACE_ENV: os.environ.get(_MUTATION_TRACE_ENV),
+    }
+    os.environ[_CONFIG_ENV] = config.as_json()
+    os.environ[_CONTROLLER_PID_ENV] = str(os.getpid())
+    if trace_spec is not None:
+        os.environ[_MUTATION_TRACE_ENV] = _trace_environment(trace_spec)
+    try:
+        return int(plan.pytest.main(plan.arguments))
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+@dataclass(slots=True)
+class _PytestOutcome:
+    namespace: Any
+    pytest_status: int
+    plugin: Any
+    mutation: _PytestMutationState
+
+    def finish_early(self) -> int | None:
+        if self.namespace.mutant == "off":
+            return self.pytest_status
+        passed = self.plugin.activity.counts()["passed"] if self.plugin is not None else 0
+        if not passed:
+            self._finish_without_green()
+            return self.pytest_status
+        if self.namespace.mutant == "auto" and self.mutation.trace_spec is None:
+            self._finish_unrated()
+            return self.pytest_status
+        return None
+
+    def _finish_without_green(self) -> None:
+        if self.mutation.prepared is not None:
+            _stop_mutation_process(self.mutation.prepared)
+            self.mutation.prepared = None
+        if self.plugin is None:
+            print("Mutation confidence   not measured because no tests passed", file=sys.stderr)
+        elif self.namespace.fuzz == "on":
+            fuzz, fuzz_activity = _no_gold_fuzz()
+            if self.mutation.user_report is not None:
+                _attach_fuzz_report(self.mutation.user_report, fuzz)
+            self.plugin.finish_pipeline(
+                MutationActivity(mode=str(self.namespace.mutant), state="no_green"),
+                fuzz_activity,
+            )
+
+    def _finish_unrated(self) -> None:
+        if self.plugin is None:
+            print(
+                "Mutation confidence   unrated: no eligible declared controls",
+                file=sys.stderr,
+            )
+            return
+        activity = MutationActivity(mode="auto", state="unrated")
+        if self.namespace.fuzz == "on":
+            fuzz, fuzz_activity = _no_gold_fuzz()
+            if self.mutation.user_report is not None:
+                _attach_fuzz_report(self.mutation.user_report, fuzz)
+            self.plugin.finish_pipeline(activity, fuzz_activity)
+        else:
+            self.plugin.finish_mutation(activity)
+
+    def finish_pipeline(self) -> int:
+        baseline = self._prepare_baseline()
+        renderer = self.plugin.renderer if self.plugin is not None else None
+        try:
+            if self.mutation.prepared is not None:
+                report, mutation_status = _finish_mutation_process(
+                    self.namespace, self.mutation.prepared, renderer=renderer
+                )
+                self.mutation.prepared = None
+            else:
+                report, mutation_status = _mutation_confidence(
+                    self.namespace,
+                    baseline=baseline,
+                    selection=self.mutation.selection_path,
+                    renderer=renderer,
+                )
+        except OSError, ValueError:
+            if self.plugin is not None:
+                self.plugin.finish_mutation(
+                    MutationActivity(mode=str(self.namespace.mutant), state="error")
+                )
+            raise
+        return self._finish_fuzz(report, mutation_status, renderer)
+
+    def _prepare_baseline(self) -> Path | None:
+        trace = self.mutation.trace_spec
+        activity_path = self.mutation.activity_path
+        if trace is None or activity_path is None:
+            return None
+        baseline = self.mutation.baseline_wait_path
+        if baseline is None:
+            raise RuntimeError("mutation baseline path was not prepared")
+        if _write_reused_baseline(trace, activity_path, baseline):
+            return baseline
+        if self.mutation.prepared is not None:
+            _stop_mutation_process(self.mutation.prepared)
+            self.mutation.prepared = None
+        return None
+
+    def _finish_fuzz(self, report: dict[str, Any], mutation_status: int, renderer: Any) -> int:
+        activity = _mutation_activity_from_report(str(self.namespace.mutant), report)
+        if self.mutation.user_report is not None:
+            _attach_mutation_report(self.mutation.user_report, report)
+        if self.namespace.fuzz == "off":
+            if self.plugin is not None:
+                self.plugin.finish_mutation(activity)
+            return self.pytest_status if self.pytest_status != 0 else mutation_status
+        fuzz, fuzz_activity, fuzz_status = _fuzz_confidence(
+            self.namespace,
+            report,
+            activity,
+            renderer=renderer,
+        )
+        if self.mutation.user_report is not None:
+            _attach_fuzz_report(self.mutation.user_report, fuzz)
+        if self.plugin is not None:
+            self.plugin.finish_pipeline(activity, fuzz_activity)
+        if self.pytest_status != 0:
+            return self.pytest_status
+        return mutation_status if mutation_status != 0 else fuzz_status
+
+
+def _dispatch_test_engine(namespace: Any) -> int | None:
     if not hasattr(namespace, "fuzz"):
         namespace.fuzz = "auto"
     if not hasattr(namespace, "stage_events"):
@@ -2774,79 +3030,26 @@ def execute(namespace: Any) -> int:
         return execute_dual(namespace)
     if engine != "pytest":
         raise ValueError(f"unknown test engine {engine!r}; expected pytest, native, or dual")
+    return None
+
+
+def execute(namespace: Any) -> int:
+    """Run the selected engine with Wreath's activity controller."""
+    dispatched = _dispatch_test_engine(namespace)
+    if dispatched is not None:
+        return dispatched
     global _ACTIVE_ACTIVITY_PLUGIN
     _ACTIVE_ACTIVITY_PLUGIN = None
-    if namespace.slowest < 0:
-        raise ValueError("--slowest must be a non-negative integer")
-    if namespace.mutant != "off":
-        # Validate before spending the ordinary suite's time. The arguments
-        # are rebuilt after the ordinary run to keep subprocess construction local.
-        _mutation_arguments(namespace)
-    try:
-        import pytest
-    except ModuleNotFoundError as error:
-        if error.name != "pytest":
-            raise
-        raise ValueError(
-            "wreath test needs pytest; install Wreath's dev group or pytest>=8.4"
-        ) from error
-
-    pytest_arguments: list[str] = [
-        str(argument) for argument in getattr(namespace, "pytest_args", ())
-    ]
-    if pytest_arguments[:1] == ["--"]:
-        pytest_arguments.pop(0)
-    selection_arguments = list(pytest_arguments)
-    requested_workers = str(namespace.workers)
-    workers = _resolve_workers(requested_workers)
-    if not _has_xdist_argument(pytest_arguments) and workers > 1:
-        if importlib.util.find_spec("xdist") is None:
-            print(
-                "wreath test: pytest-xdist is unavailable; running serially",
-                file=sys.stderr,
-            )
-            workers = 1
-        else:
-            pytest_arguments.extend(("-n", str(workers)))
-            if not _has_xdist_distribution(pytest_arguments):
-                # Unmarked tests retain load balancing, while an expensive
-                # shared fixture can opt its consumers into one worker instead
-                # of being rebuilt independently on every worker that gets one.
-                pytest_arguments.extend(("--dist", "loadgroup"))
-
-    history_path = None if namespace.no_history else Path(namespace.history)
-    collection_shards = _prepare_collection_shards(
-        str(namespace.collection),
-        selection_arguments,
-        workers=workers,
-        history=history_path,
-    )
-    if collection_shards:
-        pytest_arguments.append("--max-worker-restart=0")
+    plan = _prepare_pytest_plan(namespace)
+    workers = plan.workers
+    collection_shards = plan.collection_shards
 
     with tempfile.TemporaryDirectory(prefix="wreath-test-") as temporary:
         temporary_path = Path(temporary)
-        trace_spec = _prepare_mutation_trace(namespace, temporary_path)
-        if namespace.mutant == "sample" and trace_spec is None:
-            raise ValueError("--mutant sample found no eligible controls")
-        user_report = Path(namespace.report) if namespace.report else None
-        activity_path = user_report
-        if activity_path is None and trace_spec is not None:
-            activity_path = temporary_path / "activity.json"
-        selection_path = None
-        baseline_wait_path = None
-        prepared_mutation = None
-        if trace_spec is not None:
-            selection_path = temporary_path / "mutation-selection.json"
-            selection_path.write_text(json.dumps(sorted(trace_spec.selected)), encoding="utf-8")
-            baseline_wait_path = temporary_path / "mutation-baseline.json"
-            prepared_mutation = _start_mutation_process(
-                namespace,
-                directory=temporary_path,
-                baseline_wait=baseline_wait_path,
-                baseline_stream=trace_spec.output_dir,
-                selection=selection_path,
-            )
+        mutation = _PytestMutationState.prepare(namespace, temporary_path)
+        trace_spec = mutation.trace_spec
+        activity_path = mutation.activity_path
+        prepared_mutation = mutation.prepared
         runner_config = RunnerConfig(
             grid=namespace.grid,
             workers=str(workers),
@@ -2863,119 +3066,16 @@ def execute(namespace: Any) -> int:
             stage_events=namespace.stage_events,
             collection_shards=collection_shards,
         )
-        previous_config = os.environ.get(_CONFIG_ENV)
-        previous_pid = os.environ.get(_CONTROLLER_PID_ENV)
-        previous_trace = os.environ.get(_MUTATION_TRACE_ENV)
-        os.environ[_CONFIG_ENV] = runner_config.as_json()
-        os.environ[_CONTROLLER_PID_ENV] = str(os.getpid())
-        if trace_spec is not None:
-            os.environ[_MUTATION_TRACE_ENV] = _trace_environment(trace_spec)
         try:
-            pytest_status = int(pytest.main(pytest_arguments))
+            pytest_status = _run_pytest_plan(plan, runner_config, trace_spec)
         except BaseException:
             if prepared_mutation is not None:
                 _stop_mutation_process(prepared_mutation)
             raise
-        finally:
-            if previous_config is None:
-                os.environ.pop(_CONFIG_ENV, None)
-            else:
-                os.environ[_CONFIG_ENV] = previous_config
-            if previous_pid is None:
-                os.environ.pop(_CONTROLLER_PID_ENV, None)
-            else:
-                os.environ[_CONTROLLER_PID_ENV] = previous_pid
-            if previous_trace is None:
-                os.environ.pop(_MUTATION_TRACE_ENV, None)
-            else:
-                os.environ[_MUTATION_TRACE_ENV] = previous_trace
         activity_plugin = _ACTIVE_ACTIVITY_PLUGIN
-        if namespace.mutant == "off":
-            return pytest_status
-        passed_tests = (
-            activity_plugin.activity.counts()["passed"] if activity_plugin is not None else 0
-        )
-        if not passed_tests:
-            if prepared_mutation is not None:
-                _stop_mutation_process(prepared_mutation)
-            if activity_plugin is None:
-                print(
-                    "Mutation confidence   not measured because no tests passed",
-                    file=sys.stderr,
-                )
-            elif namespace.fuzz == "on":
-                fuzz, fuzz_activity = _no_gold_fuzz()
-                if user_report is not None:
-                    _attach_fuzz_report(user_report, fuzz)
-                activity_plugin.finish_pipeline(
-                    MutationActivity(mode=str(namespace.mutant), state="no_green"),
-                    fuzz_activity,
-                )
-            return pytest_status
-        if namespace.mutant == "auto" and trace_spec is None:
-            if activity_plugin is not None:
-                mutation_activity = MutationActivity(mode="auto", state="unrated")
-                if namespace.fuzz == "on":
-                    fuzz, fuzz_activity = _no_gold_fuzz()
-                    if user_report is not None:
-                        _attach_fuzz_report(user_report, fuzz)
-                    activity_plugin.finish_pipeline(mutation_activity, fuzz_activity)
-                else:
-                    activity_plugin.finish_mutation(mutation_activity)
-            else:
-                print(
-                    "Mutation confidence   unrated: no eligible declared controls",
-                    file=sys.stderr,
-                )
-            return pytest_status
-        baseline_path = None
-        if trace_spec is not None and activity_path is not None:
-            if baseline_wait_path is None:
-                raise RuntimeError("mutation baseline path was not prepared")
-            if _write_reused_baseline(trace_spec, activity_path, baseline_wait_path):
-                baseline_path = baseline_wait_path
-            elif prepared_mutation is not None:
-                _stop_mutation_process(prepared_mutation)
-                prepared_mutation = None
-        try:
-            renderer = activity_plugin.renderer if activity_plugin is not None else None
-            if prepared_mutation is not None:
-                mutation, mutation_status = _finish_mutation_process(
-                    namespace, prepared_mutation, renderer=renderer
-                )
-            else:
-                mutation, mutation_status = _mutation_confidence(
-                    namespace,
-                    baseline=baseline_path,
-                    selection=selection_path,
-                    renderer=renderer,
-                )
-        except OSError, ValueError:
-            if activity_plugin is not None:
-                activity_plugin.finish_mutation(
-                    MutationActivity(mode=str(namespace.mutant), state="error")
-                )
-            raise
-        mutation_activity = _mutation_activity_from_report(str(namespace.mutant), mutation)
-        if user_report is not None:
-            _attach_mutation_report(user_report, mutation)
-        if namespace.fuzz == "off":
-            if activity_plugin is not None:
-                activity_plugin.finish_mutation(mutation_activity)
-            return pytest_status if pytest_status != 0 else mutation_status
-        renderer = activity_plugin.renderer if activity_plugin is not None else None
-        fuzz, fuzz_activity, fuzz_status = _fuzz_confidence(
-            namespace,
-            mutation,
-            mutation_activity,
-            renderer=renderer,
-        )
-        if user_report is not None:
-            _attach_fuzz_report(user_report, fuzz)
-        if activity_plugin is not None:
-            activity_plugin.finish_pipeline(mutation_activity, fuzz_activity)
-        if pytest_status != 0:
-            return pytest_status
-        if mutation_status != 0:
-            return mutation_status
-        return fuzz_status
+        mutation.prepared = prepared_mutation
+        outcome = _PytestOutcome(namespace, pytest_status, activity_plugin, mutation)
+        early_status = outcome.finish_early()
+        if early_status is not None:
+            return early_status
+        return outcome.finish_pipeline()

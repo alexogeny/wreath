@@ -485,6 +485,8 @@ class MessageBus:
         _validate_channel(channel)
         if concurrency < 1:
             raise ValueError("concurrency must be >= 1")
+        if retries < 0:
+            raise ValueError("retries must be non-negative")
         if durable and not group:
             raise ValueError("durable subscriptions require a group")
 

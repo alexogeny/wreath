@@ -1323,6 +1323,11 @@ class MCP:
                 task.cancel()
             if watcher is not None:
                 watcher.cancel()
+            await asyncio.gather(
+                task,
+                *((watcher,) if watcher is not None else ()),
+                return_exceptions=True,
+            )
         if task.cancelled():
             marker(_record.OUTCOME_CANCELLED)
             return _SUPPRESSED

@@ -237,7 +237,7 @@ class _NoExtensionConnection:
     """A connection whose database has no extensions at all."""
 
     async def fetchrow(self, sql: str, *args: Any) -> tuple[Any, ...]:
-        return (0, "", "public")
+        return ("geography", 0, "", "public")
 
 
 class _FakeDatabase:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import os
 import socket
 from typing import cast
@@ -17,6 +18,67 @@ _SLOT = int("".join(c for c in _WORKER if c.isdigit()) or 0)
 #: proxy makes an outbound connection per request and the kernel draws its
 #: source ports from there -- a listener inside that range can lose its own bind.
 _PORT = 27800 + _SLOT * 40
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://user:secret@example.test",
+        "http://example.test/api",
+        "http://example.test?tenant=acme",
+        "http://example.test#origin",
+    ],
+)
+async def test_native_serve_refuses_upstream_urls_that_are_not_origins(url: str) -> None:
+    with pytest.raises(ValueError, match="origin URL"):
+        await _serve()(UpstreamPool([Upstream(url)]), port=0)
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "message"),
+    [
+        ("connections", 0, "connections must be at least 1"),
+        ("max_body", -1, "max_body must be non-negative"),
+        ("backlog", 0, "backlog must be at least 1"),
+    ],
+)
+async def test_native_serve_refuses_invalid_resource_limits(
+    option: str, value: int, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        await _serve()(
+            UpstreamPool([Upstream("http://127.0.0.1:1")]),
+            port=0,
+            **{option: value},
+        )
+
+
+async def test_native_serve_closes_the_table_when_prewarming_fails(monkeypatch) -> None:
+    module = importlib.import_module("wreath.edge.serve")
+    tables = []
+
+    class Table:
+        def __init__(self, *args, **kwargs) -> None:
+            self.closed = False
+            tables.append(self)
+
+        def close(self) -> None:
+            self.closed = True
+
+    class Loop:
+        async def create_connection(self, *args, **kwargs):
+            raise OSError("upstream refused")
+
+    monkeypatch.setattr(module._edge, "UpstreamTable", Table)
+    monkeypatch.setattr(module.asyncio, "get_running_loop", lambda: Loop())
+
+    with pytest.raises(OSError, match="upstream refused"):
+        await module.serve(
+            UpstreamPool([Upstream("http://127.0.0.1:1")]),
+            connections=1,
+        )
+
+    assert len(tables) == 1 and tables[0].closed
 
 
 def _next_port() -> int:

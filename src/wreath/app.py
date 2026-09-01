@@ -2897,6 +2897,32 @@ class Wreath:
             response = await self._handle_exception(request, error)
         await self._finish_http_plain(response, send, method, scope, native_response)
 
+    def _plain_http_preflight(
+        self,
+        scope: Any,
+        receive: Any,
+        send: Send,
+        method: str,
+        path: str,
+        native_response: bool,
+    ) -> tuple[Awaitable[None] | None, bool]:
+        policy = self._http_policy
+        policy_native = native_response and getattr(scope, "policy_native", True)
+        ingress_only = bool(policy is not None and policy._native_ingress_only and policy_native)
+        if policy is not None and policy._native_ingress_only and not policy_native:
+            candidate = policy._reference_ingress_scope(scope, method, path)
+            if candidate is not None:
+                return (
+                    self._finish_http_plain(candidate, send, method, scope, native_response),
+                    True,
+                )
+            ingress_only = True
+        if policy is not None and not ingress_only and not policy_native:
+            return self._handle_http(scope, receive, send, method, path, native_response), False
+        if not native_response and _ambiguous_request_path(scope, path):
+            return self._handle_http(scope, receive, send, method, path, native_response), False
+        return None, ingress_only
+
     async def _handle_http_plain(
         self,
         scope: Any,
@@ -2928,22 +2954,14 @@ class Wreath:
         cost more than a lookup elsewhere.
         """
         policy = self._http_policy
-        policy_native = native_response and getattr(scope, "policy_native", True)
-        ingress_only_admitted = bool(
-            policy is not None and policy._native_ingress_only and policy_native
-        )
-        if policy is not None and policy._native_ingress_only and not policy_native:
-            candidate = policy._reference_ingress_scope(scope, method, path)
-            if candidate is not None:
-                await self._finish_http_plain(candidate, send, method, scope, native_response)
+        ingress_only_admitted = False
+        if policy is not None or not native_response:
+            delegated, ingress_only_admitted = self._plain_http_preflight(
+                scope, receive, send, method, path, native_response
+            )
+            if delegated is not None:
+                await delegated
                 return
-            ingress_only_admitted = True
-        if policy is not None and not ingress_only_admitted and (not policy_native):
-            await self._handle_http(scope, receive, send, method, path, native_response)
-            return
-        if not native_response and _ambiguous_request_path(scope, path):
-            await self._handle_http(scope, receive, send, method, path, native_response)
-            return
         matched = self._match(method, path)
         if matched is None:
             await self._handle_http(scope, receive, send, method, path, native_response)
@@ -3291,22 +3309,14 @@ class Wreath:
         portable ASGI retain their request-based authentication definition.
         """
         policy = self._http_policy
-        policy_native = native_response and getattr(scope, "policy_native", True)
-        native_ingress_only = bool(
-            policy is not None and policy._native_ingress_only and policy_native
-        )
-        if policy is not None and policy._native_ingress_only and not policy_native:
-            candidate = policy._reference_ingress_scope(scope, method, path)
-            if candidate is not None:
-                await self._finish_http_plain(candidate, send, method, scope, native_response)
+        native_ingress_only = False
+        if policy is not None or not native_response:
+            delegated, native_ingress_only = self._plain_http_preflight(
+                scope, receive, send, method, path, native_response
+            )
+            if delegated is not None:
+                await delegated
                 return
-            native_ingress_only = True
-        if policy is not None and not native_ingress_only and (not policy_native):
-            await self._handle_http(scope, receive, send, method, path, native_response)
-            return
-        if not native_response and _ambiguous_request_path(scope, path):
-            await self._handle_http(scope, receive, send, method, path, native_response)
-            return
 
         classify: Any = self._classify
         classification, payload = classify(method, path)

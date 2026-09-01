@@ -225,6 +225,44 @@ wreath passes retry dispatch.app:app --name account-rollup
 The jobs view defaults to dead-lettered rows. A barred chunked pass only resumes
 when its dead-lettered chunks are explicitly retried.
 
+## Build documentation and general static pages
+
+Configure the static builder through the public `wreath.docs` API. The default
+`layout="docs"` supplies navigation, search and page-to-page controls;
+`layout="page"` keeps content checking and output generation but removes those
+documentation assumptions.
+
+```python
+from wreath.docs import AssetManifest, Nav, Page, Site, StaticAsset, Theme
+
+assets = AssetManifest(
+    StaticAsset("site-css", "web/dist/site.a1.css", "assets/site.a1.css"),
+    StaticAsset("site-js", "web/dist/site.b2.js", "assets/site.b2.js"),
+)
+
+site = Site(
+    "Notes",
+    "notes",
+    "site",
+    Nav(Page("Home", "index.md")),
+    layout="page",
+    theme=Theme(
+        assets=assets,
+        stylesheets=("site-css",),
+        scripts=("site-js",),
+        head_html='<meta name="application-name" content="Notes">',
+    ),
+)
+```
+
+`StaticAsset.output` is the public path, so an external renderer can contribute
+hashed filenames without rewriting Wreath's HTML afterward. Use
+`AssetManifest.from_mapping()` when that renderer already exposes logical names
+mapped to output filenames. A custom `Theme.template` receives a `PageContext`;
+`context.asset(name)` resolves each declared asset relative to the page being
+rendered. Wreath continues to own Markdown stamping, link checking and final
+output, while Bun, Vite or another renderer owns browser bundles.
+
 ## Protocol and assurance tools
 
 | Task | Example |

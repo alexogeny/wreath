@@ -74,6 +74,8 @@ class BusBridge:
         apply: Apply,
         max_inflight: int = 1024,
     ) -> None:
+        if max_inflight < 1:
+            raise ValueError("max_inflight must be at least 1")
         self._bus = bus
         self._channel = channel
         self._apply = apply

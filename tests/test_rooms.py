@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -133,6 +134,32 @@ async def test_broadcast_reaches_every_member_of_that_room_only() -> None:
     assert await rooms.broadcast("chat", "hello") == 2
     assert here.sent == ["hello"] == also_here.sent
     assert elsewhere.sent == []
+
+
+async def test_one_slow_member_does_not_block_other_room_members() -> None:
+    rooms = RoomRegistry()
+    release = asyncio.Event()
+    fast_sent = asyncio.Event()
+
+    class Slow(FakeSocket):
+        async def send(self, payload: Any) -> None:
+            await release.wait()
+            await super().send(payload)
+
+    class Fast(FakeSocket):
+        async def send(self, payload: Any) -> None:
+            await super().send(payload)
+            fast_sent.set()
+
+    slow, fast = Slow(), Fast()
+    await rooms.join("chat", slow)
+    await rooms.join("chat", fast)
+    rooms._rooms["chat"] = [slow, fast]
+
+    broadcast = asyncio.create_task(rooms.broadcast("chat", "hello"))
+    await asyncio.wait_for(fast_sent.wait(), timeout=0.5)
+    release.set()
+    assert await broadcast == 2
 
 
 async def test_broadcast_to_an_empty_room_is_a_no_op() -> None:

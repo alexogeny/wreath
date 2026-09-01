@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -20,6 +21,7 @@ from wreath._secondfactor import (
     confirm_totp_enrolment,
     discoverable_credential_id,
     hash_recovery_code,
+    remove_second_factor,
     secret_to_base32,
     totp_code,
     totp_counter,
@@ -312,6 +314,35 @@ async def test_recovery_codes_are_compared_with_compare_digest(monkeypatch) -> N
     assert await verify_second_factor(store, "user-1", "ABCD-EFGH ") is not None
     assert seen
     assert await verify_second_factor(store, "user-1", "abcd-efgi") is None
+
+
+async def test_one_recovery_guess_is_hashed_once_for_every_current_code(monkeypatch) -> None:
+    import wreath._secondfactor as module
+
+    store = InMemorySecondFactorStore()
+    await store.add_many(
+        tuple(
+            _factor(
+                id=f"recovery-{index}",
+                kind="recovery",
+                label="Recovery code",
+                material=hash_recovery_code(f"code-{index:012d}").encode("utf-8"),
+            )
+            for index in range(10)
+        )
+    )
+    calls = 0
+    real = module.hashlib.sha256
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(module.hashlib, "sha256", spy)
+
+    assert await verify_second_factor(store, "user-1", "wrong-code") is None
+    assert calls == 1
 
 
 async def test_a_stage_one_scrypt_recovery_code_still_verifies() -> None:
@@ -932,6 +963,7 @@ class _FakeSession:
 
     def __init__(self, model: Any = None) -> None:
         self.rows: list[Any] = []
+        self.fetches = 0
         self.flushes = 0
         self.deleted: list[Any] = []
         self.statements: list[tuple[str, tuple[Any, ...]]] = []
@@ -949,6 +981,7 @@ class _FakeSession:
         self.flushes += 1
 
     async def fetch(self, query: Any) -> list[Any]:
+        self.fetches += 1
         wanted = _predicate_value(query)
         return [row for row in self.rows if row.user_id == wanted]
 
@@ -992,6 +1025,160 @@ async def test_orm_store_round_trips_a_credential() -> None:
     assert await store.credentials("user-2") == []
 
 
+async def test_orm_enrolment_flushes_the_factor_and_recovery_codes_once() -> None:
+    store, session, _ = _orm_store()
+    moment = 1_700_000_000.0
+
+    confirmed = await confirm_totp_enrolment(
+        store,
+        "user-1",
+        secret=SECRET,
+        code=_at(moment),
+        at=moment,
+    )
+
+    assert confirmed is not None
+    assert session.flushes == 1
+    assert [row.kind for row in session.rows].count("totp") == 1
+    assert [row.kind for row in session.rows].count("recovery") == 10
+
+
+async def test_in_memory_bulk_add_refuses_a_duplicate_within_the_batch() -> None:
+    store = InMemorySecondFactorStore()
+    duplicate = _factor(id="duplicate")
+
+    with pytest.raises(ValueError, match="duplicate second-factor id: 'duplicate'"):
+        await store.add_many((duplicate, duplicate))
+
+    assert await store.credentials("user-1") == []
+
+
+async def test_in_memory_bulk_add_refuses_an_existing_id_before_writing() -> None:
+    store = InMemorySecondFactorStore()
+    existing = _factor(id="existing")
+    await store.add(existing)
+
+    with pytest.raises(ValueError, match="duplicate second-factor id: 'existing'"):
+        await store.add_many((_factor(id="new"), existing))
+
+    assert await store.credentials("user-1") == [existing]
+
+
+async def test_orm_last_factor_removal_flushes_all_credentials_once() -> None:
+    store, session, _ = _orm_store()
+    credentials = (
+        _factor(id="totp-1"),
+        *(
+            _factor(
+                id=f"recovery-{index}",
+                kind="recovery",
+                label="Recovery code",
+                material=b"sha256$digest",
+            )
+            for index in range(10)
+        ),
+    )
+    await store.add_many(credentials)
+    session.flushes = 0
+
+    removed = await remove_second_factor(store, "user-1", "totp-1")
+
+    assert removed is not None
+    assert session.flushes == 1
+    assert await store.credentials("user-1") == []
+
+
+async def test_orm_empty_bulk_removal_does_no_work() -> None:
+    store, session, _ = _orm_store()
+
+    await store.remove_many("user-1", ())
+
+    assert session.fetches == 0
+    assert session.flushes == 0
+
+
+async def test_orm_bulk_removal_keeps_credentials_that_were_not_named() -> None:
+    store, session, _ = _orm_store()
+    removed = _factor(id="removed")
+    kept = _factor(id="kept", kind="webauthn")
+    await store.add_many((removed, kept))
+    session.flushes = 0
+
+    await store.remove_many("user-1", ("removed",))
+
+    assert session.flushes == 1
+    assert await store.credentials("user-1") == [kept]
+
+
+async def test_orm_bulk_removal_does_not_flush_a_missing_id() -> None:
+    store, session, _ = _orm_store()
+
+    await store.remove_many("user-1", ("missing",))
+
+    assert session.fetches == 1
+    assert session.flushes == 0
+
+
+async def test_scalar_store_removal_remains_the_compatibility_path() -> None:
+    class ScalarStore:
+        def __init__(self) -> None:
+            self.inner = InMemorySecondFactorStore()
+            self.removals: list[str] = []
+
+        async def credentials(self, user_id: str) -> list[SecondFactor]:
+            return await self.inner.credentials(user_id)
+
+        async def add(self, credential: SecondFactor) -> SecondFactor:
+            return await self.inner.add(credential)
+
+        async def remove(self, user_id: str, credential_id: str) -> None:
+            self.removals.append(credential_id)
+            await self.inner.remove(user_id, credential_id)
+
+        async def touch(self, credential_id: str, *, counter: int, at: datetime) -> bool:
+            return await self.inner.touch(credential_id, counter=counter, at=at)
+
+    store = ScalarStore()
+    await store.add(_factor(id="totp-1"))
+    await store.add(
+        _factor(
+            id="recovery-1",
+            kind="recovery",
+            label="Recovery code",
+            material=b"sha256$digest",
+        )
+    )
+
+    await remove_second_factor(store, "user-1", "totp-1")
+
+    assert store.removals == ["totp-1", "recovery-1"]
+
+
+async def test_one_removal_does_not_expand_into_a_bulk_read() -> None:
+    class RecordingStore(InMemorySecondFactorStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.scalar_removals = 0
+            self.bulk_removals = 0
+
+        async def remove(self, user_id: str, credential_id: str) -> None:
+            self.scalar_removals += 1
+            await super().remove(user_id, credential_id)
+
+        async def remove_many(self, user_id: str, credential_ids: Sequence[str]) -> None:
+            self.bulk_removals += 1
+            await super().remove_many(user_id, credential_ids)
+
+    store = RecordingStore()
+    await store.add(_factor(id="totp-1"))
+
+    await remove_second_factor(store, "user-1", "totp-1")
+
+    assert store.scalar_removals == 1
+    assert store.bulk_removals == 0
+    assert "user-1" not in store._by_user
+
+
 async def test_orm_store_remove_is_scoped_to_the_owner() -> None:
     store, session, _ = _orm_store()
     await store.add(_factor())
@@ -1029,11 +1216,19 @@ async def test_orm_store_touch_reports_losing_the_advance() -> None:
 
 
 async def test_orm_store_satisfies_the_protocol() -> None:
-    from wreath.users import SecondFactorStore
+    from wreath.users import (
+        BulkSecondFactorRemovalStore,
+        BulkSecondFactorStore,
+        SecondFactorStore,
+    )
 
     store, _, _ = _orm_store()
     assert isinstance(store, SecondFactorStore)
     assert isinstance(InMemorySecondFactorStore(), SecondFactorStore)
+    assert isinstance(store, BulkSecondFactorStore)
+    assert isinstance(InMemorySecondFactorStore(), BulkSecondFactorStore)
+    assert isinstance(store, BulkSecondFactorRemovalStore)
+    assert isinstance(InMemorySecondFactorStore(), BulkSecondFactorRemovalStore)
 
 
 # This is the one that could not be faked. The defect it covers is that two

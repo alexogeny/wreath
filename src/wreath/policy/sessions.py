@@ -30,6 +30,7 @@ from .._b64 import b64url_decode, b64url_encode
 from .._json import dumps as _json_dumps
 from .._json import loads as _json_loads
 from ..request import Request
+from ..response import Response
 
 
 def rotate_session(request: Request) -> None:
@@ -137,6 +138,16 @@ class SessionPolicy:
             # cookie that *is* the session, so a short one is a forgeable
             # session, and "not empty" was not a meaningful bar.
             raise ValueError(f"session secret must contain at least {MIN_SECRET_BYTES} bytes")
+        if max_age <= 0:
+            raise ValueError("session max_age must be positive")
+        Response().set_cookie(
+            cookie,
+            "configuration-check",
+            max_age=max_age,
+            secure=secure,
+            httponly=http_only,
+            samesite=same_site,
+        )
         self._secret = secret.encode("utf-8")
         # Secrets a cookie may still *verify* under, though nothing is signed
         # with them any more. Without this, rotating the secret invalidated

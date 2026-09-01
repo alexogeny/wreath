@@ -39,6 +39,8 @@ from ._secondfactor import (  # re-export the stdlib-only second-factor surface
     DEFAULT_PERIOD,
     DEFAULT_RECOVERY_CODES,
     DEFAULT_SKEW,
+    BulkSecondFactorRemovalStore,
+    BulkSecondFactorStore,
     DiscoverableSecondFactorStore,
     InMemorySecondFactorStore,
     MemoryChallengeStore,
@@ -75,6 +77,8 @@ from .response import JSONResponse
 from .router import Router
 
 __all__ = [
+    "BulkSecondFactorRemovalStore",
+    "BulkSecondFactorStore",
     "CapturingEmailSender",
     "DiscoverableSecondFactorStore",
     "EmailSender",
@@ -177,9 +181,9 @@ def _same_store(left: Any, right: Any) -> bool:
     The same object always does. Two *different* objects do when both declare
     the same `store_id` -- an optional attribute a store sets when its identity
     is something other than itself. `OrmUserStore` and `OrmSecondFactorStore`
-    return their model class, because that is what decides which table they
-    read; a store that holds its own data (`InMemoryUserStore`) declares none,
-    and `is` remains the right and only answer for it.
+    return their model, database, and tenant namespace; a store that holds its
+    own data (`InMemoryUserStore`) declares none, and `is` remains the right and
+    only answer for it.
 
     `None` on either side falls back to identity rather than matching, so a
     store that declares nothing is never fused with another that declares
@@ -931,6 +935,1312 @@ def user_router(
     return router
 
 
+@dataclass(frozen=True, slots=True)
+class _SecondFactorBuildContext:
+    values: dict[str, Any]
+
+
+def _make_second_factor_context(
+    *,
+    router: Router,
+    users: UserStore,
+    factors: SecondFactorStore,
+    issuer: str,
+    session_key: str,
+    pending_key: str,
+    enrolment_key: str,
+    label: str,
+    digits: int,
+    period: int,
+    skew: int,
+    recovery_codes: int,
+    enrolment_ttl: float,
+    pending_ttl: float,
+    step_up_ttl: float,
+    verify_window: float,
+    enrolments: Any,
+    challenges: Any,
+    rp_id: str,
+    rp_name: str,
+    accepted_origins: tuple[str, ...],
+    webauthn_key: str,
+    webauthn_label: str,
+    webauthn_ttl: float,
+    user_verification: str,
+    passkey_login: bool,
+    clock: Callable[[], float],
+    limiter: LoginLimiter,
+    discoverable_factors: DiscoverableSecondFactorStore,
+    ceremony_kinds: dict[str, str],
+) -> _SecondFactorBuildContext:
+    _CEREMONY_KINDS = ceremony_kinds
+
+    def _session(request: Any) -> dict[str, Any] | None:
+        return getattr(request.state, "session", None)
+
+    def _throttled() -> JSONResponse:
+        refused = JSONResponse({"error": "invalid_code"}, status=429)
+        refused.headers.append((b"retry-after", str(int(verify_window)).encode("ascii")))
+        return refused
+
+    def _principal(session: dict[str, Any]) -> dict[str, Any] | None:
+        principal = session.get(session_key)
+        if not isinstance(principal, dict) or principal.get("pending"):
+            return None
+        subject = principal.get("sub")
+        if not isinstance(subject, str) or not subject:
+            return None
+        return principal
+
+    async def _signed_in(session: dict[str, Any]) -> UserRecord | None:
+        principal = _principal(session)
+        if principal is None:
+            return None
+        return await users.get_by_id(str(principal["sub"]))
+
+    def _stale_step_up(session: dict[str, Any]) -> bool:
+        """Whether no factor has been proved on this session within the window.
+
+        The one reading of `second_factor_at`, so `DELETE` and the enrolment
+        routes cannot drift apart on what counts as recent. A `bool` is refused
+        before the numeric test because `True` is an `int` and would otherwise
+        read as one second past the epoch -- ancient, but the arithmetic below
+        would still run on it.
+        """
+        principal = _principal(session)
+        stamp = None if principal is None else principal.get("second_factor_at")
+        return (
+            isinstance(stamp, bool)
+            or not isinstance(stamp, (int, float))
+            or clock() - stamp > step_up_ttl
+        )
+
+    def _step_up_required() -> JSONResponse:
+        return JSONResponse({"error": "second_factor_required"}, status=403)
+
+    def _may_enrol(session: dict[str, Any], enrolled: Any) -> bool:
+        """Whether this session may add a factor, given what the account holds.
+
+        **Adding a factor to an account that already has one is a step-up.**
+        Declining to *stamp* such an enrolment is not enough on its own: the
+        caller can register a passkey of their own and then prove it at
+        `POST /webauthn/verify` a request later, which does stamp, and walk
+        through `DELETE /{factor_id}` with the victim's real factor. The detour
+        costs one round trip, so the enrolment itself is what has to be refused.
+
+        The *first* factor is exempt, because there is nothing to step up from
+        and the account would otherwise be unable to enrol at all. Recovery
+        codes do not count as a factor here: they are minted alongside TOTP and
+        never on their own, so an account holding only them is in the same
+        position as an account holding nothing.
+        """
+        return not any(row.kind != "recovery" for row in enrolled) or not _stale_step_up(session)
+
+    def _stamp(session: dict[str, Any], extra: dict[str, Any] | None = None) -> None:
+        """Record on the principal that a second factor was just proved.
+
+        An integer of Unix seconds, because it is serialized into the session
+        and then read back as a Cedar context value, and Cedar has no floats.
+        The principal is reassigned rather than mutated in place so that the
+        session middleware sees a changed session and rewrites the cookie.
+
+        `extra` carries whatever else the factor that was proved has to say --
+        for WebAuthn, `second_factor_uv`, the user-verification outcome.
+        """
+        principal = session.get(session_key)
+        if isinstance(principal, dict):
+            stamped = {**principal, "second_factor_at": int(clock())}
+            if extra:
+                stamped.update(extra)
+            session[session_key] = stamped
+
+    async def _save_record(
+        session: dict[str, Any], key: str, prefix: str, record: dict[str, Any], ttl: float
+    ) -> None:
+        """Park a begun enrolment server-side, under an opaque handle.
+
+        **Never in the session.** With `enrolments=` the unconfirmed record goes
+        there; otherwise it goes to the `ChallengeStore`. The cookie carries an
+        opaque handle and no TOTP secret in both cases.
+        """
+        handle = _secondfactor.new_credential_id()
+        if enrolments is not None:
+            await enrolments.save(prefix + handle, record, int(ttl))
+        else:
+            await challenges.put(
+                handle,
+                user_id=str(record.get("user", "")),
+                kind=CHALLENGE_ENROLMENT,
+                payload=record,
+                ttl=ttl,
+            )
+        session[key] = {"id": handle, "at": record["at"]}
+
+    async def _load_record(marker: dict[str, Any], prefix: str) -> dict[str, Any] | None:
+        """The begun enrolment behind a session marker, wherever it is kept.
+
+        A *read*, deliberately, and not a consume. An enrolment's property is
+        "confirmed exactly once", not "read exactly once": the digits are typed
+        by a human off an authenticator, and spending the secret on a mistyped
+        one would send them back to scanning a fresh QR code. `peek` is the
+        non-consuming read that says so in its own name.
+        """
+        handle = marker.get("id")
+        if not isinstance(handle, str) or not handle:
+            return None
+        if enrolments is not None:
+            loaded = await enrolments.load(prefix + handle)
+            return loaded if isinstance(loaded, dict) else None
+        row = await challenges.peek(handle)
+        if row is None or row.kind != CHALLENGE_ENROLMENT:
+            return None
+        return row.payload
+
+    async def _forget_record(
+        session: dict[str, Any], key: str, prefix: str, marker: dict[str, Any]
+    ) -> None:
+        """Drop a begun ceremony, from the session and from the store behind it.
+
+        Called on every exit from a `confirm` -- success, expiry, and each
+        refusal -- because state that outlives the attempt it belonged to is
+        exactly what moving it server-side was meant to bound. For a TOTP
+        enrolment that is an unconfirmed secret; for WebAuthn it is the
+        challenge, and there it is the single-use property itself.
+        """
+        session.pop(key, None)
+        handle = marker.get("id")
+        if not isinstance(handle, str) or not handle:
+            return
+        if enrolments is not None:
+            await enrolments.delete(prefix + handle)
+        else:
+            await challenges.discard(handle)
+
+    async def _load_enrolment(marker: dict[str, Any]) -> dict[str, Any] | None:
+        return await _load_record(marker, _ENROLMENT_PREFIX)
+
+    async def _forget_enrolment(session: dict[str, Any], marker: dict[str, Any]) -> None:
+        await _forget_record(session, enrolment_key, _ENROLMENT_PREFIX, marker)
+
+    return _SecondFactorBuildContext(
+        {
+            "_session": _session,
+            "_throttled": _throttled,
+            "_principal": _principal,
+            "_signed_in": _signed_in,
+            "_stale_step_up": _stale_step_up,
+            "_step_up_required": _step_up_required,
+            "_may_enrol": _may_enrol,
+            "_stamp": _stamp,
+            "_save_record": _save_record,
+            "_load_record": _load_record,
+            "_forget_record": _forget_record,
+            "_load_enrolment": _load_enrolment,
+            "_forget_enrolment": _forget_enrolment,
+            "router": router,
+            "users": users,
+            "factors": factors,
+            "issuer": issuer,
+            "session_key": session_key,
+            "pending_key": pending_key,
+            "enrolment_key": enrolment_key,
+            "label": label,
+            "digits": digits,
+            "period": period,
+            "skew": skew,
+            "recovery_codes": recovery_codes,
+            "enrolment_ttl": enrolment_ttl,
+            "pending_ttl": pending_ttl,
+            "step_up_ttl": step_up_ttl,
+            "verify_window": verify_window,
+            "enrolments": enrolments,
+            "challenges": challenges,
+            "rp_id": rp_id,
+            "rp_name": rp_name,
+            "accepted_origins": accepted_origins,
+            "webauthn_key": webauthn_key,
+            "webauthn_label": webauthn_label,
+            "webauthn_ttl": webauthn_ttl,
+            "user_verification": user_verification,
+            "passkey_login": passkey_login,
+            "clock": clock,
+            "limiter": limiter,
+            "discoverable_factors": discoverable_factors,
+            "_CEREMONY_KINDS": _CEREMONY_KINDS,
+        }
+    )
+
+
+def _mount_totp_enrolment_routes(
+    context: _SecondFactorBuildContext,
+) -> None:
+    values = context.values
+    (
+        _session,
+        _throttled,
+        _principal,
+        _signed_in,
+        _stale_step_up,
+        _step_up_required,
+        _may_enrol,
+        _stamp,
+        _save_record,
+        _load_record,
+        _forget_record,
+        _load_enrolment,
+        _forget_enrolment,
+        router,
+        _users,
+        factors,
+        issuer,
+        _session_key,
+        _pending_key,
+        enrolment_key,
+        label,
+        digits,
+        period,
+        skew,
+        recovery_codes,
+        enrolment_ttl,
+        _pending_ttl,
+        _step_up_ttl,
+        _verify_window,
+        _enrolments,
+        _challenges,
+        _rp_id,
+        _rp_name,
+        _accepted_origins,
+        _webauthn_key,
+        _webauthn_label,
+        _webauthn_ttl,
+        _user_verification,
+        _passkey_login,
+        clock,
+        limiter,
+        _discoverable_factors,
+        _CEREMONY_KINDS,
+    ) = (
+        values["_session"],
+        values["_throttled"],
+        values["_principal"],
+        values["_signed_in"],
+        values["_stale_step_up"],
+        values["_step_up_required"],
+        values["_may_enrol"],
+        values["_stamp"],
+        values["_save_record"],
+        values["_load_record"],
+        values["_forget_record"],
+        values["_load_enrolment"],
+        values["_forget_enrolment"],
+        values["router"],
+        values["users"],
+        values["factors"],
+        values["issuer"],
+        values["session_key"],
+        values["pending_key"],
+        values["enrolment_key"],
+        values["label"],
+        values["digits"],
+        values["period"],
+        values["skew"],
+        values["recovery_codes"],
+        values["enrolment_ttl"],
+        values["pending_ttl"],
+        values["step_up_ttl"],
+        values["verify_window"],
+        values["enrolments"],
+        values["challenges"],
+        values["rp_id"],
+        values["rp_name"],
+        values["accepted_origins"],
+        values["webauthn_key"],
+        values["webauthn_label"],
+        values["webauthn_ttl"],
+        values["user_verification"],
+        values["passkey_login"],
+        values["clock"],
+        values["limiter"],
+        values["discoverable_factors"],
+        values["_CEREMONY_KINDS"],
+    )
+
+    @router.post("/totp/begin")
+    async def totp_begin(request: Any):
+        session = _session(request)
+        if session is None:
+            return JSONResponse({"error": "session_middleware_required"}, status=500)
+        user = await _signed_in(session)
+        if user is None:
+            return JSONResponse({"error": "not_authenticated"}, status=401)
+        enrolled = await factors.credentials(user.id)
+        if any(row.kind == "totp" for row in enrolled):
+            # Enrolling twice would mint a second secret and a second set of
+            # recovery codes, invalidating neither -- so it is refused rather
+            # than quietly leaving the user with two of everything.
+            # Ahead of the step-up check below because it is the more specific
+            # answer and costs nothing to give: `GET /auth/2fa` already lists
+            # this account's factors to any signed-in session, so naming the
+            # collision tells a caller nothing they could not already read.
+            return JSONResponse({"error": "already_enrolled"}, status=409)
+        if not _may_enrol(session, enrolled):
+            return _step_up_required()
+        enrolment = _secondfactor.begin_totp_enrolment(
+            account=user.email,
+            issuer=issuer,
+            label=label,
+            digits=digits,
+            period=period,
+        )
+        # The unconfirmed secret has to survive one round trip, and where it
+        # waits is a real choice. With `enrolments`, it waits server-side and
+        # the cookie carries an opaque id: the response below hands the same
+        # secret to the same browser to be scanned, but a response body is
+        # transient where a cookie is written down, and a cookie can outlive the
+        # tab on a shared machine. Without a store it stays in the session,
+        # which is the stage-one behaviour and is only as server-side as the
+        # session middleware is.
+        # It is not a credential in either case: nothing in the store refers to
+        # it, and nothing ever will unless a code generated from it verifies.
+        # `user` is recorded with it so a session that changes hands -- signed
+        # out and signed in as somebody else -- cannot confirm an enrolment that
+        # was begun for a different account.
+        record = {"secret": enrolment.secret_base32, "user": user.id, "at": clock()}
+        await _save_record(session, enrolment_key, _ENROLMENT_PREFIX, record, enrolment_ttl)
+        return JSONResponse(
+            {
+                "uri": enrolment.uri,
+                "secret": enrolment.secret_base32,
+                "digits": enrolment.digits,
+                "period": enrolment.period,
+            },
+            status=200,
+        )
+
+    @router.post("/totp/confirm")
+    async def totp_confirm(request: Any, data: Annotated[CodeInput, Body()]):
+        session = _session(request)
+        if session is None:
+            return JSONResponse({"error": "session_middleware_required"}, status=500)
+        user = await _signed_in(session)
+        if user is None:
+            return JSONResponse({"error": "not_authenticated"}, status=401)
+        marker = session.get(enrolment_key)
+        if not isinstance(marker, dict):
+            return JSONResponse({"error": "no_enrolment_in_progress"}, status=400)
+        started = marker.get("at")
+        if not isinstance(started, (int, float)) or clock() - started > enrolment_ttl:
+            await _forget_enrolment(session, marker)
+            return JSONResponse({"error": "enrolment_expired"}, status=400)
+        pending = await _load_enrolment(marker)
+        if pending is None:
+            # The stored row is gone or was never written: expired under the
+            # store's own TTL, or revoked. Same answer as an expired marker.
+            await _forget_enrolment(session, marker)
+            return JSONResponse({"error": "enrolment_expired"}, status=400)
+        if pending.get("user") != user.id:
+            # This session began an enrolment for somebody else and has since
+            # changed hands. Confirming it would enrol a secret the previous
+            # holder chose onto this account.
+            await _forget_enrolment(session, marker)
+            return JSONResponse({"error": "no_enrolment_in_progress"}, status=400)
+        if not isinstance(pending.get("secret"), str):
+            await _forget_enrolment(session, marker)
+            return JSONResponse({"error": "no_enrolment_in_progress"}, status=400)
+        if not limiter.allow(user.id):
+            return _throttled()
+        try:
+            secret = _secondfactor.base32_to_secret(pending["secret"])
+        except ValueError:
+            # Only reachable from a session written by an older or different
+            # build of this router: this one signs what it wrote. Drop it and
+            # make the user start again rather than answering 500.
+            await _forget_enrolment(session, marker)
+            return JSONResponse({"error": "no_enrolment_in_progress"}, status=400)
+        enrolled = await factors.credentials(user.id)
+        if any(row.kind == "totp" for row in enrolled):
+            await _forget_enrolment(session, marker)
+            return JSONResponse({"error": "already_enrolled"}, status=409)
+        if not _may_enrol(session, enrolled):
+            # Re-checked at the write, not just at `begin`: a ceremony begun
+            # while the stamp was fresh must not be confirmable after it has
+            # gone stale, and the session may have changed hands in between.
+            await _forget_enrolment(session, marker)
+            return _step_up_required()
+        # Whether this is the *first* real factor decides whether confirming it
+        # may stamp the session. See `_stamp`'s caller below.
+        first_factor = not any(row.kind != "recovery" for row in enrolled)
+        confirmed = await _secondfactor.confirm_totp_enrolment(
+            factors,
+            user.id,
+            secret=secret,
+            code=data.code,
+            label=label,
+            digits=digits,
+            period=period,
+            skew=skew,
+            recovery_codes=recovery_codes,
+            at=clock(),
+        )
+        if confirmed is None:
+            limiter.record_failure(user.id)
+            # The enrolment survives a wrong code -- a mistyped digit should not
+            # send the user back to scanning a new QR code -- but the throttle
+            # above bounds how many times that is worth trying.
+            return JSONResponse({"error": "invalid_code"}, status=400)
+        limiter.record_success(user.id)
+        await _forget_enrolment(session, marker)
+        credential, codes = confirmed
+        # Confirming the user's **first** factor stamps the session: a code out
+        # of the authenticator was just checked, and without this a user who has
+        # only ever enrolled would have to step up separately before they could
+        # remove what they just added.
+        # Enrolling an *additional* factor stamps nothing, and that is the whole
+        # point of the condition. A stamp is the answer to "did this caller
+        # prove a factor the account already had", and a factor the caller has
+        # just chosen answers it with a secret they brought themselves --
+        # so somebody holding a stolen session could enrol their own
+        # authenticator, be stamped for it, and then satisfy `DELETE /{id}` and
+        # every `@second_factor(...)` route with the guard they were supposed
+        # not to be able to pass.
+        if first_factor:
+            _stamp(session)
+        # The only time the plaintext recovery codes exist outside the user's
+        # own hands. They are not stored, not logged, and not retrievable.
+        return JSONResponse(
+            {"status": "enrolled", "id": credential.id, "recovery_codes": codes},
+            status=200,
+        )
+
+
+def _mount_recovery_routes(
+    context: _SecondFactorBuildContext,
+) -> Callable[[dict[str, Any]], str | None]:
+    values = context.values
+    (
+        _session,
+        _throttled,
+        _principal,
+        _signed_in,
+        _stale_step_up,
+        _step_up_required,
+        _may_enrol,
+        _stamp,
+        _save_record,
+        _load_record,
+        _forget_record,
+        _load_enrolment,
+        _forget_enrolment,
+        router,
+        users,
+        factors,
+        _issuer,
+        session_key,
+        pending_key,
+        _enrolment_key,
+        _label,
+        digits,
+        period,
+        skew,
+        _recovery_codes,
+        _enrolment_ttl,
+        pending_ttl,
+        _step_up_ttl,
+        _verify_window,
+        _enrolments,
+        _challenges,
+        _rp_id,
+        _rp_name,
+        _accepted_origins,
+        _webauthn_key,
+        _webauthn_label,
+        _webauthn_ttl,
+        _user_verification,
+        _passkey_login,
+        clock,
+        limiter,
+        _discoverable_factors,
+        _CEREMONY_KINDS,
+    ) = (
+        values["_session"],
+        values["_throttled"],
+        values["_principal"],
+        values["_signed_in"],
+        values["_stale_step_up"],
+        values["_step_up_required"],
+        values["_may_enrol"],
+        values["_stamp"],
+        values["_save_record"],
+        values["_load_record"],
+        values["_forget_record"],
+        values["_load_enrolment"],
+        values["_forget_enrolment"],
+        values["router"],
+        values["users"],
+        values["factors"],
+        values["issuer"],
+        values["session_key"],
+        values["pending_key"],
+        values["enrolment_key"],
+        values["label"],
+        values["digits"],
+        values["period"],
+        values["skew"],
+        values["recovery_codes"],
+        values["enrolment_ttl"],
+        values["pending_ttl"],
+        values["step_up_ttl"],
+        values["verify_window"],
+        values["enrolments"],
+        values["challenges"],
+        values["rp_id"],
+        values["rp_name"],
+        values["accepted_origins"],
+        values["webauthn_key"],
+        values["webauthn_label"],
+        values["webauthn_ttl"],
+        values["user_verification"],
+        values["passkey_login"],
+        values["clock"],
+        values["limiter"],
+        values["discoverable_factors"],
+        values["_CEREMONY_KINDS"],
+    )
+
+    @router.get("/")
+    async def factor_list(request: Any):
+        session = _session(request)
+        if session is None:
+            return JSONResponse({"error": "session_middleware_required"}, status=500)
+        user = await _signed_in(session)
+        if user is None:
+            return JSONResponse({"error": "not_authenticated"}, status=401)
+        rows = await factors.credentials(user.id)
+        return JSONResponse(
+            {
+                # Labels and dates only. `material` is the shared secret for a
+                # TOTP factor and a password hash for a recovery code; neither
+                # is ever rendered, by this route or any other.
+                "factors": [
+                    {
+                        "id": row.id,
+                        "kind": row.kind,
+                        "label": row.label,
+                        "created_at": row.created_at.isoformat(),
+                        "last_used_at": (
+                            None if row.last_used_at is None else row.last_used_at.isoformat()
+                        ),
+                    }
+                    for row in rows
+                    if row.kind != "recovery"
+                ],
+                # Counted rather than listed: an individual recovery code has no
+                # label worth showing, and how many are left is the useful fact.
+                "recovery_codes_remaining": sum(1 for row in rows if row.kind == "recovery"),
+            },
+            status=200,
+        )
+
+    @router.post("/verify")
+    async def verify_factor(request: Any, data: Annotated[CodeInput, Body()]):
+        session = _session(request)
+        if session is None:
+            return JSONResponse({"error": "session_middleware_required"}, status=500)
+        pending = session.get(pending_key)
+        if not isinstance(pending, dict):
+            # No half-finished login, so this is step-up: an already
+            # authenticated caller proving a factor again before something that
+            # demands a recent one.
+            return await _step_up(request, session, data.code)
+        subject = pending.get("sub")
+        if not isinstance(subject, str) or not subject:
+            session.pop(pending_key, None)
+            return JSONResponse({"error": "no_pending_second_factor"}, status=401)
+        started = pending.get("at")
+        if not isinstance(started, (int, float)) or clock() - started > pending_ttl:
+            # A pending login is a password already accepted, waiting. Left
+            # open it is a standing invitation to brute-force the second half,
+            # so it expires on its own.
+            session.pop(pending_key, None)
+            return JSONResponse({"error": "second_factor_expired"}, status=401)
+        if not limiter.allow(subject):
+            return _throttled()
+        matched = await _secondfactor.verify_second_factor(
+            factors,
+            subject,
+            data.code,
+            at=clock(),
+            period=period,
+            digits=digits,
+            skew=skew,
+        )
+        if matched is None:
+            limiter.record_failure(subject)
+            return JSONResponse({"error": "invalid_code"}, status=401)
+        user = await users.get_by_id(subject)
+        if user is None or not user.is_active:
+            session.pop(pending_key, None)
+            return JSONResponse({"error": "invalid_code"}, status=401)
+        limiter.record_success(subject)
+        session.pop(pending_key, None)
+        # Promotion from pending to full is a privilege change, and so carries
+        # exactly the fixation risk login does; `user_router` rotates there and
+        # this rotates here.
+        rotate_session(request)
+        session[session_key] = {
+            "sub": user.id,
+            "type": "User",
+            "roles": [],
+            "second_factor_at": int(clock()),
+        }
+        return JSONResponse(_profile(user), status=200)
+
+    async def _step_up(request: Any, session: dict[str, Any], code: str) -> JSONResponse:
+        """Re-prove a factor on a session that is already signed in.
+
+        The same code check as promotion, the same per-user throttle, and the
+        same rotation: gaining the right to perform a destructive action is a
+        privilege change too, so the id that holds it is not the id that was
+        being watched a moment earlier.
+
+        A caller with no factors enrolled is told so plainly rather than being
+        given a code prompt it can never satisfy -- there is nothing to guess
+        at, so this reveals nothing a `GET /auth/2fa` would not.
+        """
+        principal = _principal(session)
+        if principal is None:
+            return JSONResponse({"error": "no_pending_second_factor"}, status=401)
+        subject = str(principal["sub"])
+        if not limiter.allow(subject):
+            return _throttled()
+        if not await factors.credentials(subject):
+            return JSONResponse({"error": "no_second_factor_enrolled"}, status=400)
+        matched = await _secondfactor.verify_second_factor(
+            factors,
+            subject,
+            code,
+            at=clock(),
+            period=period,
+            digits=digits,
+            skew=skew,
+        )
+        if matched is None:
+            limiter.record_failure(subject)
+            return JSONResponse({"error": "invalid_code"}, status=401)
+        limiter.record_success(subject)
+        rotate_session(request)
+        _stamp(session)
+        return JSONResponse({"status": "second_factor_verified"}, status=200)
+
+    def _pending_subject(session: dict[str, Any]) -> str | None:
+        """The subject of a live pending login on this session, or None.
+
+        None covers three cases on purpose -- no pending login, one with no
+        subject, and one that has waited longer than `pending_ttl` -- because
+        every caller treats all three the same way: there is nobody here whose
+        half-finished sign-in may be completed.
+        """
+        pending = session.get(pending_key)
+        if not isinstance(pending, dict):
+            return None
+        subject = pending.get("sub")
+        if not isinstance(subject, str) or not subject:
+            return None
+        started = pending.get("at")
+        if not isinstance(started, (int, float)) or clock() - started > pending_ttl:
+            return None
+        return subject
+
+    return _pending_subject
+
+
+def _mount_webauthn_routes(
+    context: _SecondFactorBuildContext,
+    pending_subject: Callable[[dict[str, Any]], str | None],
+) -> None:
+    values = context.values
+    (
+        _session,
+        _throttled,
+        _principal,
+        _signed_in,
+        _stale_step_up,
+        _step_up_required,
+        _may_enrol,
+        _stamp,
+        _save_record,
+        _load_record,
+        _forget_record,
+        _load_enrolment,
+        _forget_enrolment,
+        _router,
+        _users,
+        _factors,
+        _issuer,
+        _session_key,
+        _pending_key,
+        _enrolment_key,
+        _label,
+        _digits,
+        _period,
+        _skew,
+        _recovery_codes,
+        _enrolment_ttl,
+        _pending_ttl,
+        _step_up_ttl,
+        _verify_window,
+        _enrolments,
+        challenges,
+        _rp_id,
+        _rp_name,
+        _accepted_origins,
+        webauthn_key,
+        _webauthn_label,
+        webauthn_ttl,
+        _user_verification,
+        passkey_login,
+        clock,
+        _limiter,
+        _discoverable_factors,
+        _CEREMONY_KINDS,
+    ) = (
+        values["_session"],
+        values["_throttled"],
+        values["_principal"],
+        values["_signed_in"],
+        values["_stale_step_up"],
+        values["_step_up_required"],
+        values["_may_enrol"],
+        values["_stamp"],
+        values["_save_record"],
+        values["_load_record"],
+        values["_forget_record"],
+        values["_load_enrolment"],
+        values["_forget_enrolment"],
+        values["router"],
+        values["users"],
+        values["factors"],
+        values["issuer"],
+        values["session_key"],
+        values["pending_key"],
+        values["enrolment_key"],
+        values["label"],
+        values["digits"],
+        values["period"],
+        values["skew"],
+        values["recovery_codes"],
+        values["enrolment_ttl"],
+        values["pending_ttl"],
+        values["step_up_ttl"],
+        values["verify_window"],
+        values["enrolments"],
+        values["challenges"],
+        values["rp_id"],
+        values["rp_name"],
+        values["accepted_origins"],
+        values["webauthn_key"],
+        values["webauthn_label"],
+        values["webauthn_ttl"],
+        values["user_verification"],
+        values["passkey_login"],
+        values["clock"],
+        values["limiter"],
+        values["discoverable_factors"],
+        values["_CEREMONY_KINDS"],
+    )
+    _pending_subject = pending_subject
+    # Mounted only when there is a relying party to be. See the docstring:
+    # an application that does not want passkeys gets no passkey routes,
+    # rather than routes that answer 500 to the first person who finds them.
+
+    async def _take_ceremony(
+        session: dict[str, Any], marker: dict[str, Any], *, subject: str, kind: str
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Spend a begun ceremony, or refuse it without spending anything.
+
+        `subject` is a **precondition** of the consume, never something read
+        back out of the record. Consuming in order to learn who you are
+        makes the record its own authority: whoever holds a handle would
+        define who they are. So the caller derives the candidate from the
+        session first and the statement matches on it, which means a
+        mismatched attempt matches no row and costs the rightful user
+        nothing.
+
+        The returned payload *is* the consumption -- one DELETE ...
+        RETURNING, so two concurrent completions cannot both proceed. A
+        challenge that survived a failed attempt would let a recorded
+        assertion be posted again until it expired, so this spends on sight;
+        a caller whose ceremony failed begins another one.
+
+        Returns `(record, mismatched)`. `mismatched` says the row was there
+        and belonged to somebody else, which is the only reason the two
+        refusals answer differently: an expired ceremony is a 400, and
+        somebody else's is the binding refusing.
+        """
+        handle = marker.get("id")
+        session.pop(webauthn_key, None)
+        if not isinstance(handle, str) or not handle:
+            return None, False
+        record = await challenges.consume(handle, user_id=subject, kind=kind)
+        if record is not None:
+            return record, False
+        # Diagnostic only, and only after the refusal has already happened:
+        # it chooses which *error code* answers, never whether the caller
+        # may proceed. `discard` afterwards because the handle lived in the
+        # session marker we just dropped, so the row is now unreachable by
+        # anyone and would otherwise sit out its TTL as litter.
+        row = await challenges.peek(handle)
+        await challenges.discard(handle)
+        # The consume has already refused, so a live row under this handle
+        # means either the wrong ceremony or the wrong person. Only the
+        # second is the *binding* refusing; a registration challenge posted
+        # to `verify` is simply not the ceremony that was begun, and
+        # `ceremony_expired` says so. Testing the kind as well would be a
+        # clause no reachable state can distinguish.
+        return None, row is not None and row.user_id != subject
+
+    async def _forget_ceremony(session: dict[str, Any]) -> None:
+        """Drop whatever ceremony this session had, row included."""
+        previous = session.pop(webauthn_key, None)
+        if isinstance(previous, dict):
+            handle = previous.get("id")
+            if isinstance(handle, str) and handle:
+                await challenges.discard(handle)
+
+    async def _begin_ceremony(
+        session: dict[str, Any], ceremony: WebAuthnCeremony, subject: str
+    ) -> JSONResponse:
+        # One live challenge per session. Beginning a second ceremony
+        # abandons the first rather than leaving its row to sit out its TTL,
+        # so a caller who reloads the page ten times leaves one challenge
+        # behind instead of ten.
+        await _forget_ceremony(session)
+        handle = _secondfactor.new_credential_id()
+        # Bound to whoever began it, in the row rather than beside it. A
+        # session that changes hands -- signed out and signed in as somebody
+        # else -- carries its contents across rotation, so without this the
+        # new holder could finish the previous one's ceremony. Because the
+        # binding is a condition of the consuming statement, that attempt
+        # now matches no row at all instead of being caught afterwards.
+        await challenges.put(
+            handle,
+            user_id=subject,
+            kind=_CEREMONY_KINDS[ceremony.ceremony],
+            payload={"challenge": b64url_encode(ceremony.challenge)},
+            ttl=webauthn_ttl,
+        )
+        # The cookie carries an opaque handle and nothing else: no challenge,
+        # no subject. There is nothing in it worth replaying.
+        session[webauthn_key] = {"id": handle, "at": clock()}
+        return JSONResponse(ceremony.options, status=200)
+
+    ceremony_context = _SecondFactorBuildContext(
+        values
+        | {
+            "_begin_ceremony": _begin_ceremony,
+            "_forget_ceremony": _forget_ceremony,
+            "_pending_subject": pending_subject,
+            "_take_ceremony": _take_ceremony,
+        }
+    )
+    _mount_webauthn_registration(ceremony_context)
+    if passkey_login:
+        _mount_passkey_login(ceremony_context)
+    _mount_webauthn_verification(ceremony_context)
+
+
+def _second_factor_context_values(
+    context: _SecondFactorBuildContext, names: tuple[str, ...]
+) -> tuple[Any, ...]:
+    return tuple(context.values[name] for name in names)
+
+
+def _mount_webauthn_registration(context: _SecondFactorBuildContext) -> None:
+    (
+        router,
+        _session,
+        _signed_in,
+        factors,
+        _may_enrol,
+        _step_up_required,
+        rp_id,
+        rp_name,
+        passkey_login,
+        user_verification,
+        _begin_ceremony,
+        webauthn_key,
+        _take_ceremony,
+        _stamp,
+        accepted_origins,
+        webauthn_label,
+        clock,
+        recovery_codes,
+    ) = _second_factor_context_values(
+        context,
+        (
+            "router",
+            "_session",
+            "_signed_in",
+            "factors",
+            "_may_enrol",
+            "_step_up_required",
+            "rp_id",
+            "rp_name",
+            "passkey_login",
+            "user_verification",
+            "_begin_ceremony",
+            "webauthn_key",
+            "_take_ceremony",
+            "_stamp",
+            "accepted_origins",
+            "webauthn_label",
+            "clock",
+            "recovery_codes",
+        ),
+    )
+
+    @router.post("/webauthn/begin")
+    async def webauthn_begin(request: Any):
+        session = _session(request)
+        if session is None:
+            return JSONResponse({"error": "session_middleware_required"}, status=500)
+        user = await _signed_in(session)
+        if user is None:
+            return JSONResponse({"error": "not_authenticated"}, status=401)
+        existing = await factors.credentials(user.id)
+        if not _may_enrol(session, existing):
+            return _step_up_required()
+        ceremony = _secondfactor.begin_webauthn_registration(
+            user_id=user.id,
+            account=user.email,
+            rp_id=rp_id,
+            rp_name=rp_name,
+            existing=existing,
+            user_verification=("required" if passkey_login else user_verification),
+            discoverable=passkey_login,
+        )
+        return await _begin_ceremony(session, ceremony, user.id)
+
+    @router.post("/webauthn/confirm")
+    async def webauthn_confirm(request: Any, data: Annotated[WebAuthnRegistrationInput, Body()]):
+        session = _session(request)
+        if session is None:
+            return JSONResponse({"error": "session_middleware_required"}, status=500)
+        user = await _signed_in(session)
+        if user is None:
+            return JSONResponse({"error": "not_authenticated"}, status=401)
+        marker = session.get(webauthn_key)
+        if not isinstance(marker, dict):
+            return JSONResponse({"error": "no_ceremony_in_progress"}, status=400)
+        # The signed-in user is the precondition. A ceremony begun for
+        # somebody else matches no row, so it is refused by the statement
+        # rather than after the record has already been read back.
+        record, mismatched = await _take_ceremony(
+            session, marker, subject=user.id, kind=CHALLENGE_WEBAUTHN_REGISTER
+        )
+        if mismatched:
+            # Begun for somebody else; this session has changed hands since.
+            return JSONResponse({"error": "no_ceremony_in_progress"}, status=400)
+        if record is None:
+            return JSONResponse({"error": "ceremony_expired"}, status=400)
+        # Read before the registration writes, for the same reason
+        # `totp/confirm` reads before its own: only the *first* factor a
+        # user has may stamp the session.
+        existing = await factors.credentials(user.id)
+        if not _may_enrol(session, existing):
+            # Re-checked at the write, as `totp/confirm` re-checks its own:
+            # a ceremony begun on a fresh stamp must not land on a stale one.
+            return _step_up_required()
+        first_factor = not any(row.kind != "recovery" for row in existing)
+        try:
+            credential, codes = await _secondfactor.confirm_webauthn_registration(
+                factors,
+                user.id,
+                challenge=b64url_decode(str(record.get("challenge", ""))),
+                client_data=b64url_decode(data.client_data),
+                attestation_object=b64url_decode(data.attestation_object),
+                rp_id=rp_id,
+                origins=accepted_origins,
+                label=data.label or webauthn_label,
+                require_user_verification=passkey_login,
+                at=clock(),
+                recovery_codes=recovery_codes,
+            )
+        except WebAuthnError:
+            # One opaque answer for every way a ceremony fails to verify.
+            # The message names the check for the server's own operator; the
+            # caller learns only that it did not work.
+            return JSONResponse({"error": "invalid_registration"}, status=400)
+        verified = unpack_credential(credential.material).user_verified
+        # Registering the user's **first** factor stamps the session,
+        # exactly as confirming a first TOTP code does -- and registering an
+        # additional one stamps nothing, because a key the caller has just
+        # produced proves possession of their own authenticator and not of
+        # the account's. See `totp/confirm` for the attack that closes.
+        if first_factor:
+            _stamp(session, {"second_factor_uv": verified})
+        return JSONResponse(
+            {
+                "status": "enrolled",
+                "id": credential.id,
+                "user_verified": verified,
+                # Present and non-empty only when this was the user's first
+                # factor. They exist nowhere else, ever again.
+                "recovery_codes": codes,
+            },
+            status=200,
+        )
+
+
+def _mount_passkey_login(context: _SecondFactorBuildContext) -> None:
+    (
+        router,
+        _session,
+        rp_id,
+        _begin_ceremony,
+        webauthn_key,
+        _take_ceremony,
+        discoverable_factors,
+        limiter,
+        _throttled,
+        factors,
+        accepted_origins,
+        clock,
+        users,
+        pending_key,
+        session_key,
+    ) = _second_factor_context_values(
+        context,
+        (
+            "router",
+            "_session",
+            "rp_id",
+            "_begin_ceremony",
+            "webauthn_key",
+            "_take_ceremony",
+            "discoverable_factors",
+            "limiter",
+            "_throttled",
+            "factors",
+            "accepted_origins",
+            "clock",
+            "users",
+            "pending_key",
+            "session_key",
+        ),
+    )
+    _PASSKEY_LOGIN_SUBJECT = "wreath:passkey-login"
+
+    @router.post("/webauthn/login/begin")
+    async def webauthn_login_begin(request: Any):
+        session = _session(request)
+        if session is None:
+            return JSONResponse({"error": "session_middleware_required"}, status=500)
+        ceremony = _secondfactor.begin_webauthn_assertion(
+            (), rp_id=rp_id, user_verification="required"
+        )
+        return await _begin_ceremony(session, ceremony, _PASSKEY_LOGIN_SUBJECT)
+
+    @router.post("/webauthn/login")
+    async def webauthn_login(request: Any, data: Annotated[WebAuthnAssertionInput, Body()]):
+        session = _session(request)
+        if session is None:
+            return JSONResponse({"error": "session_middleware_required"}, status=500)
+        marker = session.get(webauthn_key)
+        if not isinstance(marker, dict):
+            return JSONResponse({"error": "no_ceremony_in_progress"}, status=400)
+        record, _ = await _take_ceremony(
+            session,
+            marker,
+            subject=_PASSKEY_LOGIN_SUBJECT,
+            kind=CHALLENGE_WEBAUTHN_ASSERT,
+        )
+        if record is None:
+            return JSONResponse({"error": "ceremony_expired"}, status=400)
+        subject: str | None = None
+        try:
+            public_id = b64url_decode(data.id)
+            credential = await discoverable_factors.credential(
+                _secondfactor.discoverable_credential_id(public_id)
+            )
+            if credential is None or credential.kind != "webauthn":
+                raise WebAuthnError("no such discoverable credential")
+            subject = credential.user_id
+            if not limiter.allow(subject):
+                return _throttled()
+            result = await _secondfactor.verify_webauthn_assertion(
+                factors,
+                subject,
+                challenge=b64url_decode(str(record.get("challenge", ""))),
+                credential_id=public_id,
+                client_data=b64url_decode(data.client_data),
+                authenticator_data=b64url_decode(data.authenticator_data),
+                signature=b64url_decode(data.signature),
+                rp_id=rp_id,
+                origins=accepted_origins,
+                require_user_verification=True,
+                at=clock(),
+            )
+        except ValueError, WebAuthnError:
+            if subject is not None:
+                limiter.record_failure(subject)
+            return JSONResponse({"error": "invalid_assertion"}, status=401)
+        user = await users.get_by_id(subject)
+        if user is None or not user.is_active:
+            limiter.record_failure(subject)
+            return JSONResponse({"error": "invalid_assertion"}, status=401)
+        limiter.record_success(subject)
+        rotate_session(request)
+        session.pop(pending_key, None)
+        session[session_key] = {
+            "sub": user.id,
+            "type": "User",
+            "roles": [],
+            "second_factor_at": int(clock()),
+            "second_factor_uv": result.user_verified,
+        }
+        return JSONResponse(_profile(user), status=200)
+
+
+def _mount_webauthn_verification(context: _SecondFactorBuildContext) -> None:
+    (
+        router,
+        _session,
+        _pending_subject,
+        _principal,
+        factors,
+        rp_id,
+        user_verification,
+        _begin_ceremony,
+        webauthn_key,
+        _forget_ceremony,
+        limiter,
+        _throttled,
+        _take_ceremony,
+        accepted_origins,
+        clock,
+        _stamp,
+        users,
+        pending_key,
+        session_key,
+    ) = _second_factor_context_values(
+        context,
+        (
+            "router",
+            "_session",
+            "_pending_subject",
+            "_principal",
+            "factors",
+            "rp_id",
+            "user_verification",
+            "_begin_ceremony",
+            "webauthn_key",
+            "_forget_ceremony",
+            "limiter",
+            "_throttled",
+            "_take_ceremony",
+            "accepted_origins",
+            "clock",
+            "_stamp",
+            "users",
+            "pending_key",
+            "session_key",
+        ),
+    )
+
+    @router.post("/webauthn/verify/begin")
+    async def webauthn_verify_begin(request: Any):
+        session = _session(request)
+        if session is None:
+            return JSONResponse({"error": "session_middleware_required"}, status=500)
+        subject = _pending_subject(session)
+        if subject is None:
+            principal = _principal(session)
+            if principal is None:
+                return JSONResponse({"error": "no_pending_second_factor"}, status=401)
+            subject = str(principal["sub"])
+        rows = [row for row in await factors.credentials(subject) if row.kind == "webauthn"]
+        if not rows:
+            return JSONResponse({"error": "no_second_factor_enrolled"}, status=400)
+        ceremony = _secondfactor.begin_webauthn_assertion(
+            rows, rp_id=rp_id, user_verification=user_verification
+        )
+        return await _begin_ceremony(session, ceremony, subject)
+
+    @router.post("/webauthn/verify")
+    async def webauthn_verify(request: Any, data: Annotated[WebAuthnAssertionInput, Body()]):
+        session = _session(request)
+        if session is None:
+            return JSONResponse({"error": "session_middleware_required"}, status=500)
+        marker = session.get(webauthn_key)
+        if not isinstance(marker, dict):
+            return JSONResponse({"error": "no_ceremony_in_progress"}, status=400)
+        # Who this session may be, derived exactly as `verify/begin` derived
+        # it when the challenge was bound -- a half-finished login first,
+        # then whoever is signed in. This is the *precondition*; the record
+        # never gets to say who the caller is.
+        pending = _pending_subject(session)
+        principal = _principal(session)
+        subject = (
+            pending
+            if pending is not None
+            else (None if principal is None else str(principal["sub"]))
+        )
+        if subject is None:
+            await _forget_ceremony(session)
+            return JSONResponse({"error": "no_pending_second_factor"}, status=401)
+        promoting = pending is not None
+        # Before the consume, because the limiter keys on a subject already
+        # known from the session: a throttled caller must not be able to
+        # spend a challenge on their way to being refused.
+        if not limiter.allow(subject):
+            return _throttled()
+        record, mismatched = await _take_ceremony(
+            session, marker, subject=subject, kind=CHALLENGE_WEBAUTHN_ASSERT
+        )
+        if mismatched:
+            # The challenge belongs to somebody this session is not.
+            return JSONResponse({"error": "no_pending_second_factor"}, status=401)
+        if record is None:
+            return JSONResponse({"error": "ceremony_expired"}, status=400)
+        try:
+            result = await _secondfactor.verify_webauthn_assertion(
+                factors,
+                subject,
+                challenge=b64url_decode(str(record.get("challenge", ""))),
+                credential_id=b64url_decode(data.id),
+                client_data=b64url_decode(data.client_data),
+                authenticator_data=b64url_decode(data.authenticator_data),
+                signature=b64url_decode(data.signature),
+                rp_id=rp_id,
+                origins=accepted_origins,
+                at=clock(),
+            )
+        except WebAuthnError:
+            limiter.record_failure(subject)
+            return JSONResponse({"error": "invalid_assertion"}, status=401)
+        limiter.record_success(subject)
+        if not promoting:
+            rotate_session(request)
+            _stamp(session, {"second_factor_uv": result.user_verified})
+            return JSONResponse({"status": "second_factor_verified"}, status=200)
+        user = await users.get_by_id(subject)
+        if user is None or not user.is_active:
+            session.pop(pending_key, None)
+            return JSONResponse({"error": "invalid_assertion"}, status=401)
+        session.pop(pending_key, None)
+        # Promotion is a privilege change and carries login's fixation risk.
+        rotate_session(request)
+        session[session_key] = {
+            "sub": user.id,
+            "type": "User",
+            "roles": [],
+            "second_factor_at": int(clock()),
+            "second_factor_uv": result.user_verified,
+        }
+        return JSONResponse(_profile(user), status=200)
+
+
 def second_factor_router(
     users: UserStore,
     factors: SecondFactorStore,
@@ -1176,788 +2486,46 @@ def second_factor_router(
     }
     limiter = LoginLimiter(max_attempts=max_verify_attempts, window=verify_window)
 
-    def _session(request: Any) -> dict[str, Any] | None:
-        return getattr(request.state, "session", None)
-
-    def _throttled() -> JSONResponse:
-        refused = JSONResponse({"error": "invalid_code"}, status=429)
-        refused.headers.append((b"retry-after", str(int(verify_window)).encode("ascii")))
-        return refused
-
-    def _principal(session: dict[str, Any]) -> dict[str, Any] | None:
-        principal = session.get(session_key)
-        if not isinstance(principal, dict) or principal.get("pending"):
-            return None
-        subject = principal.get("sub")
-        if not isinstance(subject, str) or not subject:
-            return None
-        return principal
-
-    async def _signed_in(session: dict[str, Any]) -> UserRecord | None:
-        principal = _principal(session)
-        if principal is None:
-            return None
-        return await users.get_by_id(str(principal["sub"]))
-
-    def _stale_step_up(session: dict[str, Any]) -> bool:
-        """Whether no factor has been proved on this session within the window.
-
-        The one reading of `second_factor_at`, so `DELETE` and the enrolment
-        routes cannot drift apart on what counts as recent. A `bool` is refused
-        before the numeric test because `True` is an `int` and would otherwise
-        read as one second past the epoch -- ancient, but the arithmetic below
-        would still run on it.
-        """
-        principal = _principal(session)
-        stamp = None if principal is None else principal.get("second_factor_at")
-        return (
-            isinstance(stamp, bool)
-            or not isinstance(stamp, (int, float))
-            or clock() - stamp > step_up_ttl
-        )
-
-    def _step_up_required() -> JSONResponse:
-        return JSONResponse({"error": "second_factor_required"}, status=403)
-
-    def _may_enrol(session: dict[str, Any], enrolled: Any) -> bool:
-        """Whether this session may add a factor, given what the account holds.
-
-        **Adding a factor to an account that already has one is a step-up.**
-        Declining to *stamp* such an enrolment is not enough on its own: the
-        caller can register a passkey of their own and then prove it at
-        `POST /webauthn/verify` a request later, which does stamp, and walk
-        through `DELETE /{factor_id}` with the victim's real factor. The detour
-        costs one round trip, so the enrolment itself is what has to be refused.
-
-        The *first* factor is exempt, because there is nothing to step up from
-        and the account would otherwise be unable to enrol at all. Recovery
-        codes do not count as a factor here: they are minted alongside TOTP and
-        never on their own, so an account holding only them is in the same
-        position as an account holding nothing.
-        """
-        return not any(row.kind != "recovery" for row in enrolled) or not _stale_step_up(session)
-
-    def _stamp(session: dict[str, Any], extra: dict[str, Any] | None = None) -> None:
-        """Record on the principal that a second factor was just proved.
-
-        An integer of Unix seconds, because it is serialized into the session
-        and then read back as a Cedar context value, and Cedar has no floats.
-        The principal is reassigned rather than mutated in place so that the
-        session middleware sees a changed session and rewrites the cookie.
-
-        `extra` carries whatever else the factor that was proved has to say --
-        for WebAuthn, `second_factor_uv`, the user-verification outcome.
-        """
-        principal = session.get(session_key)
-        if isinstance(principal, dict):
-            stamped = {**principal, "second_factor_at": int(clock())}
-            if extra:
-                stamped.update(extra)
-            session[session_key] = stamped
-
-    async def _save_record(
-        session: dict[str, Any], key: str, prefix: str, record: dict[str, Any], ttl: float
-    ) -> None:
-        """Park a begun enrolment server-side, under an opaque handle.
-
-        **Never in the session.** With `enrolments=` the unconfirmed record goes
-        there; otherwise it goes to the `ChallengeStore`. The cookie carries an
-        opaque handle and no TOTP secret in both cases.
-        """
-        handle = _secondfactor.new_credential_id()
-        if enrolments is not None:
-            await enrolments.save(prefix + handle, record, int(ttl))
-        else:
-            await challenges.put(
-                handle,
-                user_id=str(record.get("user", "")),
-                kind=CHALLENGE_ENROLMENT,
-                payload=record,
-                ttl=ttl,
-            )
-        session[key] = {"id": handle, "at": record["at"]}
-
-    async def _load_record(marker: dict[str, Any], prefix: str) -> dict[str, Any] | None:
-        """The begun enrolment behind a session marker, wherever it is kept.
-
-        A *read*, deliberately, and not a consume. An enrolment's property is
-        "confirmed exactly once", not "read exactly once": the digits are typed
-        by a human off an authenticator, and spending the secret on a mistyped
-        one would send them back to scanning a fresh QR code. `peek` is the
-        non-consuming read that says so in its own name.
-        """
-        handle = marker.get("id")
-        if not isinstance(handle, str) or not handle:
-            return None
-        if enrolments is not None:
-            loaded = await enrolments.load(prefix + handle)
-            return loaded if isinstance(loaded, dict) else None
-        row = await challenges.peek(handle)
-        if row is None or row.kind != CHALLENGE_ENROLMENT:
-            return None
-        return row.payload
-
-    async def _forget_record(
-        session: dict[str, Any], key: str, prefix: str, marker: dict[str, Any]
-    ) -> None:
-        """Drop a begun ceremony, from the session and from the store behind it.
-
-        Called on every exit from a `confirm` -- success, expiry, and each
-        refusal -- because state that outlives the attempt it belonged to is
-        exactly what moving it server-side was meant to bound. For a TOTP
-        enrolment that is an unconfirmed secret; for WebAuthn it is the
-        challenge, and there it is the single-use property itself.
-        """
-        session.pop(key, None)
-        handle = marker.get("id")
-        if not isinstance(handle, str) or not handle:
-            return
-        if enrolments is not None:
-            await enrolments.delete(prefix + handle)
-        else:
-            await challenges.discard(handle)
-
-    async def _load_enrolment(marker: dict[str, Any]) -> dict[str, Any] | None:
-        return await _load_record(marker, _ENROLMENT_PREFIX)
-
-    async def _forget_enrolment(session: dict[str, Any], marker: dict[str, Any]) -> None:
-        await _forget_record(session, enrolment_key, _ENROLMENT_PREFIX, marker)
-
-    @router.post("/totp/begin")
-    async def totp_begin(request: Any):
-        session = _session(request)
-        if session is None:
-            return JSONResponse({"error": "session_middleware_required"}, status=500)
-        user = await _signed_in(session)
-        if user is None:
-            return JSONResponse({"error": "not_authenticated"}, status=401)
-        enrolled = await factors.credentials(user.id)
-        if any(row.kind == "totp" for row in enrolled):
-            # Enrolling twice would mint a second secret and a second set of
-            # recovery codes, invalidating neither -- so it is refused rather
-            # than quietly leaving the user with two of everything.
-            # Ahead of the step-up check below because it is the more specific
-            # answer and costs nothing to give: `GET /auth/2fa` already lists
-            # this account's factors to any signed-in session, so naming the
-            # collision tells a caller nothing they could not already read.
-            return JSONResponse({"error": "already_enrolled"}, status=409)
-        if not _may_enrol(session, enrolled):
-            return _step_up_required()
-        enrolment = _secondfactor.begin_totp_enrolment(
-            account=user.email,
-            issuer=issuer,
-            label=label,
-            digits=digits,
-            period=period,
-        )
-        # The unconfirmed secret has to survive one round trip, and where it
-        # waits is a real choice. With `enrolments`, it waits server-side and
-        # the cookie carries an opaque id: the response below hands the same
-        # secret to the same browser to be scanned, but a response body is
-        # transient where a cookie is written down, and a cookie can outlive the
-        # tab on a shared machine. Without a store it stays in the session,
-        # which is the stage-one behaviour and is only as server-side as the
-        # session middleware is.
-        # It is not a credential in either case: nothing in the store refers to
-        # it, and nothing ever will unless a code generated from it verifies.
-        # `user` is recorded with it so a session that changes hands -- signed
-        # out and signed in as somebody else -- cannot confirm an enrolment that
-        # was begun for a different account.
-        record = {"secret": enrolment.secret_base32, "user": user.id, "at": clock()}
-        await _save_record(session, enrolment_key, _ENROLMENT_PREFIX, record, enrolment_ttl)
-        return JSONResponse(
-            {
-                "uri": enrolment.uri,
-                "secret": enrolment.secret_base32,
-                "digits": enrolment.digits,
-                "period": enrolment.period,
-            },
-            status=200,
-        )
-
-    @router.post("/totp/confirm")
-    async def totp_confirm(request: Any, data: Annotated[CodeInput, Body()]):
-        session = _session(request)
-        if session is None:
-            return JSONResponse({"error": "session_middleware_required"}, status=500)
-        user = await _signed_in(session)
-        if user is None:
-            return JSONResponse({"error": "not_authenticated"}, status=401)
-        marker = session.get(enrolment_key)
-        if not isinstance(marker, dict):
-            return JSONResponse({"error": "no_enrolment_in_progress"}, status=400)
-        started = marker.get("at")
-        if not isinstance(started, (int, float)) or clock() - started > enrolment_ttl:
-            await _forget_enrolment(session, marker)
-            return JSONResponse({"error": "enrolment_expired"}, status=400)
-        pending = await _load_enrolment(marker)
-        if pending is None:
-            # The stored row is gone or was never written: expired under the
-            # store's own TTL, or revoked. Same answer as an expired marker.
-            await _forget_enrolment(session, marker)
-            return JSONResponse({"error": "enrolment_expired"}, status=400)
-        if pending.get("user") != user.id:
-            # This session began an enrolment for somebody else and has since
-            # changed hands. Confirming it would enrol a secret the previous
-            # holder chose onto this account.
-            await _forget_enrolment(session, marker)
-            return JSONResponse({"error": "no_enrolment_in_progress"}, status=400)
-        if not isinstance(pending.get("secret"), str):
-            await _forget_enrolment(session, marker)
-            return JSONResponse({"error": "no_enrolment_in_progress"}, status=400)
-        if not limiter.allow(user.id):
-            return _throttled()
-        try:
-            secret = _secondfactor.base32_to_secret(pending["secret"])
-        except ValueError:
-            # Only reachable from a session written by an older or different
-            # build of this router: this one signs what it wrote. Drop it and
-            # make the user start again rather than answering 500.
-            await _forget_enrolment(session, marker)
-            return JSONResponse({"error": "no_enrolment_in_progress"}, status=400)
-        enrolled = await factors.credentials(user.id)
-        if any(row.kind == "totp" for row in enrolled):
-            await _forget_enrolment(session, marker)
-            return JSONResponse({"error": "already_enrolled"}, status=409)
-        if not _may_enrol(session, enrolled):
-            # Re-checked at the write, not just at `begin`: a ceremony begun
-            # while the stamp was fresh must not be confirmable after it has
-            # gone stale, and the session may have changed hands in between.
-            await _forget_enrolment(session, marker)
-            return _step_up_required()
-        # Whether this is the *first* real factor decides whether confirming it
-        # may stamp the session. See `_stamp`'s caller below.
-        first_factor = not any(row.kind != "recovery" for row in enrolled)
-        confirmed = await _secondfactor.confirm_totp_enrolment(
-            factors,
-            user.id,
-            secret=secret,
-            code=data.code,
-            label=label,
-            digits=digits,
-            period=period,
-            skew=skew,
-            recovery_codes=recovery_codes,
-            at=clock(),
-        )
-        if confirmed is None:
-            limiter.record_failure(user.id)
-            # The enrolment survives a wrong code -- a mistyped digit should not
-            # send the user back to scanning a new QR code -- but the throttle
-            # above bounds how many times that is worth trying.
-            return JSONResponse({"error": "invalid_code"}, status=400)
-        limiter.record_success(user.id)
-        await _forget_enrolment(session, marker)
-        credential, codes = confirmed
-        # Confirming the user's **first** factor stamps the session: a code out
-        # of the authenticator was just checked, and without this a user who has
-        # only ever enrolled would have to step up separately before they could
-        # remove what they just added.
-        # Enrolling an *additional* factor stamps nothing, and that is the whole
-        # point of the condition. A stamp is the answer to "did this caller
-        # prove a factor the account already had", and a factor the caller has
-        # just chosen answers it with a secret they brought themselves --
-        # so somebody holding a stolen session could enrol their own
-        # authenticator, be stamped for it, and then satisfy `DELETE /{id}` and
-        # every `@second_factor(...)` route with the guard they were supposed
-        # not to be able to pass.
-        if first_factor:
-            _stamp(session)
-        # The only time the plaintext recovery codes exist outside the user's
-        # own hands. They are not stored, not logged, and not retrievable.
-        return JSONResponse(
-            {"status": "enrolled", "id": credential.id, "recovery_codes": codes},
-            status=200,
-        )
-
-    @router.get("/")
-    async def factor_list(request: Any):
-        session = _session(request)
-        if session is None:
-            return JSONResponse({"error": "session_middleware_required"}, status=500)
-        user = await _signed_in(session)
-        if user is None:
-            return JSONResponse({"error": "not_authenticated"}, status=401)
-        rows = await factors.credentials(user.id)
-        return JSONResponse(
-            {
-                # Labels and dates only. `material` is the shared secret for a
-                # TOTP factor and a password hash for a recovery code; neither
-                # is ever rendered, by this route or any other.
-                "factors": [
-                    {
-                        "id": row.id,
-                        "kind": row.kind,
-                        "label": row.label,
-                        "created_at": row.created_at.isoformat(),
-                        "last_used_at": (
-                            None if row.last_used_at is None else row.last_used_at.isoformat()
-                        ),
-                    }
-                    for row in rows
-                    if row.kind != "recovery"
-                ],
-                # Counted rather than listed: an individual recovery code has no
-                # label worth showing, and how many are left is the useful fact.
-                "recovery_codes_remaining": sum(1 for row in rows if row.kind == "recovery"),
-            },
-            status=200,
-        )
-
-    @router.post("/verify")
-    async def verify_factor(request: Any, data: Annotated[CodeInput, Body()]):
-        session = _session(request)
-        if session is None:
-            return JSONResponse({"error": "session_middleware_required"}, status=500)
-        pending = session.get(pending_key)
-        if not isinstance(pending, dict):
-            # No half-finished login, so this is step-up: an already
-            # authenticated caller proving a factor again before something that
-            # demands a recent one.
-            return await _step_up(request, session, data.code)
-        subject = pending.get("sub")
-        if not isinstance(subject, str) or not subject:
-            session.pop(pending_key, None)
-            return JSONResponse({"error": "no_pending_second_factor"}, status=401)
-        started = pending.get("at")
-        if not isinstance(started, (int, float)) or clock() - started > pending_ttl:
-            # A pending login is a password already accepted, waiting. Left
-            # open it is a standing invitation to brute-force the second half,
-            # so it expires on its own.
-            session.pop(pending_key, None)
-            return JSONResponse({"error": "second_factor_expired"}, status=401)
-        if not limiter.allow(subject):
-            return _throttled()
-        matched = await _secondfactor.verify_second_factor(
-            factors,
-            subject,
-            data.code,
-            at=clock(),
-            period=period,
-            digits=digits,
-            skew=skew,
-        )
-        if matched is None:
-            limiter.record_failure(subject)
-            return JSONResponse({"error": "invalid_code"}, status=401)
-        user = await users.get_by_id(subject)
-        if user is None or not user.is_active:
-            session.pop(pending_key, None)
-            return JSONResponse({"error": "invalid_code"}, status=401)
-        limiter.record_success(subject)
-        session.pop(pending_key, None)
-        # Promotion from pending to full is a privilege change, and so carries
-        # exactly the fixation risk login does; `user_router` rotates there and
-        # this rotates here.
-        rotate_session(request)
-        session[session_key] = {
-            "sub": user.id,
-            "type": "User",
-            "roles": [],
-            "second_factor_at": int(clock()),
-        }
-        return JSONResponse(_profile(user), status=200)
-
-    async def _step_up(request: Any, session: dict[str, Any], code: str) -> JSONResponse:
-        """Re-prove a factor on a session that is already signed in.
-
-        The same code check as promotion, the same per-user throttle, and the
-        same rotation: gaining the right to perform a destructive action is a
-        privilege change too, so the id that holds it is not the id that was
-        being watched a moment earlier.
-
-        A caller with no factors enrolled is told so plainly rather than being
-        given a code prompt it can never satisfy -- there is nothing to guess
-        at, so this reveals nothing a `GET /auth/2fa` would not.
-        """
-        principal = _principal(session)
-        if principal is None:
-            return JSONResponse({"error": "no_pending_second_factor"}, status=401)
-        subject = str(principal["sub"])
-        if not limiter.allow(subject):
-            return _throttled()
-        if not await factors.credentials(subject):
-            return JSONResponse({"error": "no_second_factor_enrolled"}, status=400)
-        matched = await _secondfactor.verify_second_factor(
-            factors,
-            subject,
-            code,
-            at=clock(),
-            period=period,
-            digits=digits,
-            skew=skew,
-        )
-        if matched is None:
-            limiter.record_failure(subject)
-            return JSONResponse({"error": "invalid_code"}, status=401)
-        limiter.record_success(subject)
-        rotate_session(request)
-        _stamp(session)
-        return JSONResponse({"status": "second_factor_verified"}, status=200)
-
-    def _pending_subject(session: dict[str, Any]) -> str | None:
-        """The subject of a live pending login on this session, or None.
-
-        None covers three cases on purpose -- no pending login, one with no
-        subject, and one that has waited longer than `pending_ttl` -- because
-        every caller treats all three the same way: there is nobody here whose
-        half-finished sign-in may be completed.
-        """
-        pending = session.get(pending_key)
-        if not isinstance(pending, dict):
-            return None
-        subject = pending.get("sub")
-        if not isinstance(subject, str) or not subject:
-            return None
-        started = pending.get("at")
-        if not isinstance(started, (int, float)) or clock() - started > pending_ttl:
-            return None
-        return subject
-
+    context = _make_second_factor_context(
+        router=router,
+        users=users,
+        factors=factors,
+        issuer=issuer,
+        session_key=session_key,
+        pending_key=pending_key,
+        enrolment_key=enrolment_key,
+        label=label,
+        digits=digits,
+        period=period,
+        skew=skew,
+        recovery_codes=recovery_codes,
+        enrolment_ttl=enrolment_ttl,
+        pending_ttl=pending_ttl,
+        step_up_ttl=step_up_ttl,
+        verify_window=verify_window,
+        enrolments=enrolments,
+        challenges=challenges,
+        rp_id=rp_id,
+        rp_name=rp_name,
+        accepted_origins=accepted_origins,
+        webauthn_key=webauthn_key,
+        webauthn_label=webauthn_label,
+        webauthn_ttl=webauthn_ttl,
+        user_verification=user_verification,
+        passkey_login=passkey_login,
+        clock=clock,
+        limiter=limiter,
+        discoverable_factors=discoverable_factors,
+        ceremony_kinds=_CEREMONY_KINDS,
+    )
+    _mount_totp_enrolment_routes(context)
+    pending_subject = _mount_recovery_routes(context)
     if rp_id:
-        # Mounted only when there is a relying party to be. See the docstring:
-        # an application that does not want passkeys gets no passkey routes,
-        # rather than routes that answer 500 to the first person who finds them.
-
-        async def _take_ceremony(
-            session: dict[str, Any], marker: dict[str, Any], *, subject: str, kind: str
-        ) -> tuple[dict[str, Any] | None, bool]:
-            """Spend a begun ceremony, or refuse it without spending anything.
-
-            `subject` is a **precondition** of the consume, never something read
-            back out of the record. Consuming in order to learn who you are
-            makes the record its own authority: whoever holds a handle would
-            define who they are. So the caller derives the candidate from the
-            session first and the statement matches on it, which means a
-            mismatched attempt matches no row and costs the rightful user
-            nothing.
-
-            The returned payload *is* the consumption -- one DELETE ...
-            RETURNING, so two concurrent completions cannot both proceed. A
-            challenge that survived a failed attempt would let a recorded
-            assertion be posted again until it expired, so this spends on sight;
-            a caller whose ceremony failed begins another one.
-
-            Returns `(record, mismatched)`. `mismatched` says the row was there
-            and belonged to somebody else, which is the only reason the two
-            refusals answer differently: an expired ceremony is a 400, and
-            somebody else's is the binding refusing.
-            """
-            handle = marker.get("id")
-            session.pop(webauthn_key, None)
-            if not isinstance(handle, str) or not handle:
-                return None, False
-            record = await challenges.consume(handle, user_id=subject, kind=kind)
-            if record is not None:
-                return record, False
-            # Diagnostic only, and only after the refusal has already happened:
-            # it chooses which *error code* answers, never whether the caller
-            # may proceed. `discard` afterwards because the handle lived in the
-            # session marker we just dropped, so the row is now unreachable by
-            # anyone and would otherwise sit out its TTL as litter.
-            row = await challenges.peek(handle)
-            await challenges.discard(handle)
-            # The consume has already refused, so a live row under this handle
-            # means either the wrong ceremony or the wrong person. Only the
-            # second is the *binding* refusing; a registration challenge posted
-            # to `verify` is simply not the ceremony that was begun, and
-            # `ceremony_expired` says so. Testing the kind as well would be a
-            # clause no reachable state can distinguish.
-            return None, row is not None and row.user_id != subject
-
-        async def _forget_ceremony(session: dict[str, Any]) -> None:
-            """Drop whatever ceremony this session had, row included."""
-            previous = session.pop(webauthn_key, None)
-            if isinstance(previous, dict):
-                handle = previous.get("id")
-                if isinstance(handle, str) and handle:
-                    await challenges.discard(handle)
-
-        async def _begin_ceremony(
-            session: dict[str, Any], ceremony: WebAuthnCeremony, subject: str
-        ) -> JSONResponse:
-            # One live challenge per session. Beginning a second ceremony
-            # abandons the first rather than leaving its row to sit out its TTL,
-            # so a caller who reloads the page ten times leaves one challenge
-            # behind instead of ten.
-            await _forget_ceremony(session)
-            handle = _secondfactor.new_credential_id()
-            # Bound to whoever began it, in the row rather than beside it. A
-            # session that changes hands -- signed out and signed in as somebody
-            # else -- carries its contents across rotation, so without this the
-            # new holder could finish the previous one's ceremony. Because the
-            # binding is a condition of the consuming statement, that attempt
-            # now matches no row at all instead of being caught afterwards.
-            await challenges.put(
-                handle,
-                user_id=subject,
-                kind=_CEREMONY_KINDS[ceremony.ceremony],
-                payload={"challenge": b64url_encode(ceremony.challenge)},
-                ttl=webauthn_ttl,
-            )
-            # The cookie carries an opaque handle and nothing else: no challenge,
-            # no subject. There is nothing in it worth replaying.
-            session[webauthn_key] = {"id": handle, "at": clock()}
-            return JSONResponse(ceremony.options, status=200)
-
-        @router.post("/webauthn/begin")
-        async def webauthn_begin(request: Any):
-            session = _session(request)
-            if session is None:
-                return JSONResponse({"error": "session_middleware_required"}, status=500)
-            user = await _signed_in(session)
-            if user is None:
-                return JSONResponse({"error": "not_authenticated"}, status=401)
-            existing = await factors.credentials(user.id)
-            if not _may_enrol(session, existing):
-                return _step_up_required()
-            ceremony = _secondfactor.begin_webauthn_registration(
-                user_id=user.id,
-                account=user.email,
-                rp_id=rp_id,
-                rp_name=rp_name,
-                existing=existing,
-                user_verification=("required" if passkey_login else user_verification),
-                discoverable=passkey_login,
-            )
-            return await _begin_ceremony(session, ceremony, user.id)
-
-        @router.post("/webauthn/confirm")
-        async def webauthn_confirm(
-            request: Any, data: Annotated[WebAuthnRegistrationInput, Body()]
-        ):
-            session = _session(request)
-            if session is None:
-                return JSONResponse({"error": "session_middleware_required"}, status=500)
-            user = await _signed_in(session)
-            if user is None:
-                return JSONResponse({"error": "not_authenticated"}, status=401)
-            marker = session.get(webauthn_key)
-            if not isinstance(marker, dict):
-                return JSONResponse({"error": "no_ceremony_in_progress"}, status=400)
-            # The signed-in user is the precondition. A ceremony begun for
-            # somebody else matches no row, so it is refused by the statement
-            # rather than after the record has already been read back.
-            record, mismatched = await _take_ceremony(
-                session, marker, subject=user.id, kind=CHALLENGE_WEBAUTHN_REGISTER
-            )
-            if mismatched:
-                # Begun for somebody else; this session has changed hands since.
-                return JSONResponse({"error": "no_ceremony_in_progress"}, status=400)
-            if record is None:
-                return JSONResponse({"error": "ceremony_expired"}, status=400)
-            # Read before the registration writes, for the same reason
-            # `totp/confirm` reads before its own: only the *first* factor a
-            # user has may stamp the session.
-            existing = await factors.credentials(user.id)
-            if not _may_enrol(session, existing):
-                # Re-checked at the write, as `totp/confirm` re-checks its own:
-                # a ceremony begun on a fresh stamp must not land on a stale one.
-                return _step_up_required()
-            first_factor = not any(row.kind != "recovery" for row in existing)
-            try:
-                credential, codes = await _secondfactor.confirm_webauthn_registration(
-                    factors,
-                    user.id,
-                    challenge=b64url_decode(str(record.get("challenge", ""))),
-                    client_data=b64url_decode(data.client_data),
-                    attestation_object=b64url_decode(data.attestation_object),
-                    rp_id=rp_id,
-                    origins=accepted_origins,
-                    label=data.label or webauthn_label,
-                    require_user_verification=passkey_login,
-                    at=clock(),
-                    recovery_codes=recovery_codes,
-                )
-            except WebAuthnError:
-                # One opaque answer for every way a ceremony fails to verify.
-                # The message names the check for the server's own operator; the
-                # caller learns only that it did not work.
-                return JSONResponse({"error": "invalid_registration"}, status=400)
-            verified = unpack_credential(credential.material).user_verified
-            # Registering the user's **first** factor stamps the session,
-            # exactly as confirming a first TOTP code does -- and registering an
-            # additional one stamps nothing, because a key the caller has just
-            # produced proves possession of their own authenticator and not of
-            # the account's. See `totp/confirm` for the attack that closes.
-            if first_factor:
-                _stamp(session, {"second_factor_uv": verified})
-            return JSONResponse(
-                {
-                    "status": "enrolled",
-                    "id": credential.id,
-                    "user_verified": verified,
-                    # Present and non-empty only when this was the user's first
-                    # factor. They exist nowhere else, ever again.
-                    "recovery_codes": codes,
-                },
-                status=200,
-            )
-
-        if passkey_login:
-            _PASSKEY_LOGIN_SUBJECT = "wreath:passkey-login"
-
-            @router.post("/webauthn/login/begin")
-            async def webauthn_login_begin(request: Any):
-                session = _session(request)
-                if session is None:
-                    return JSONResponse({"error": "session_middleware_required"}, status=500)
-                ceremony = _secondfactor.begin_webauthn_assertion(
-                    (), rp_id=rp_id, user_verification="required"
-                )
-                return await _begin_ceremony(session, ceremony, _PASSKEY_LOGIN_SUBJECT)
-
-            @router.post("/webauthn/login")
-            async def webauthn_login(request: Any, data: Annotated[WebAuthnAssertionInput, Body()]):
-                session = _session(request)
-                if session is None:
-                    return JSONResponse({"error": "session_middleware_required"}, status=500)
-                marker = session.get(webauthn_key)
-                if not isinstance(marker, dict):
-                    return JSONResponse({"error": "no_ceremony_in_progress"}, status=400)
-                record, _ = await _take_ceremony(
-                    session,
-                    marker,
-                    subject=_PASSKEY_LOGIN_SUBJECT,
-                    kind=CHALLENGE_WEBAUTHN_ASSERT,
-                )
-                if record is None:
-                    return JSONResponse({"error": "ceremony_expired"}, status=400)
-                subject: str | None = None
-                try:
-                    public_id = b64url_decode(data.id)
-                    credential = await discoverable_factors.credential(
-                        _secondfactor.discoverable_credential_id(public_id)
-                    )
-                    if credential is None or credential.kind != "webauthn":
-                        raise WebAuthnError("no such discoverable credential")
-                    subject = credential.user_id
-                    if not limiter.allow(subject):
-                        return _throttled()
-                    result = await _secondfactor.verify_webauthn_assertion(
-                        factors,
-                        subject,
-                        challenge=b64url_decode(str(record.get("challenge", ""))),
-                        credential_id=public_id,
-                        client_data=b64url_decode(data.client_data),
-                        authenticator_data=b64url_decode(data.authenticator_data),
-                        signature=b64url_decode(data.signature),
-                        rp_id=rp_id,
-                        origins=accepted_origins,
-                        require_user_verification=True,
-                        at=clock(),
-                    )
-                except ValueError, WebAuthnError:
-                    if subject is not None:
-                        limiter.record_failure(subject)
-                    return JSONResponse({"error": "invalid_assertion"}, status=401)
-                user = await users.get_by_id(subject)
-                if user is None or not user.is_active:
-                    limiter.record_failure(subject)
-                    return JSONResponse({"error": "invalid_assertion"}, status=401)
-                limiter.record_success(subject)
-                rotate_session(request)
-                session.pop(pending_key, None)
-                session[session_key] = {
-                    "sub": user.id,
-                    "type": "User",
-                    "roles": [],
-                    "second_factor_at": int(clock()),
-                    "second_factor_uv": result.user_verified,
-                }
-                return JSONResponse(_profile(user), status=200)
-
-        @router.post("/webauthn/verify/begin")
-        async def webauthn_verify_begin(request: Any):
-            session = _session(request)
-            if session is None:
-                return JSONResponse({"error": "session_middleware_required"}, status=500)
-            subject = _pending_subject(session)
-            if subject is None:
-                principal = _principal(session)
-                if principal is None:
-                    return JSONResponse({"error": "no_pending_second_factor"}, status=401)
-                subject = str(principal["sub"])
-            rows = [row for row in await factors.credentials(subject) if row.kind == "webauthn"]
-            if not rows:
-                return JSONResponse({"error": "no_second_factor_enrolled"}, status=400)
-            ceremony = _secondfactor.begin_webauthn_assertion(
-                rows, rp_id=rp_id, user_verification=user_verification
-            )
-            return await _begin_ceremony(session, ceremony, subject)
-
-        @router.post("/webauthn/verify")
-        async def webauthn_verify(request: Any, data: Annotated[WebAuthnAssertionInput, Body()]):
-            session = _session(request)
-            if session is None:
-                return JSONResponse({"error": "session_middleware_required"}, status=500)
-            marker = session.get(webauthn_key)
-            if not isinstance(marker, dict):
-                return JSONResponse({"error": "no_ceremony_in_progress"}, status=400)
-            # Who this session may be, derived exactly as `verify/begin` derived
-            # it when the challenge was bound -- a half-finished login first,
-            # then whoever is signed in. This is the *precondition*; the record
-            # never gets to say who the caller is.
-            pending = _pending_subject(session)
-            principal = _principal(session)
-            subject = (
-                pending
-                if pending is not None
-                else (None if principal is None else str(principal["sub"]))
-            )
-            if subject is None:
-                await _forget_ceremony(session)
-                return JSONResponse({"error": "no_pending_second_factor"}, status=401)
-            promoting = pending is not None
-            # Before the consume, because the limiter keys on a subject already
-            # known from the session: a throttled caller must not be able to
-            # spend a challenge on their way to being refused.
-            if not limiter.allow(subject):
-                return _throttled()
-            record, mismatched = await _take_ceremony(
-                session, marker, subject=subject, kind=CHALLENGE_WEBAUTHN_ASSERT
-            )
-            if mismatched:
-                # The challenge belongs to somebody this session is not.
-                return JSONResponse({"error": "no_pending_second_factor"}, status=401)
-            if record is None:
-                return JSONResponse({"error": "ceremony_expired"}, status=400)
-            try:
-                result = await _secondfactor.verify_webauthn_assertion(
-                    factors,
-                    subject,
-                    challenge=b64url_decode(str(record.get("challenge", ""))),
-                    credential_id=b64url_decode(data.id),
-                    client_data=b64url_decode(data.client_data),
-                    authenticator_data=b64url_decode(data.authenticator_data),
-                    signature=b64url_decode(data.signature),
-                    rp_id=rp_id,
-                    origins=accepted_origins,
-                    at=clock(),
-                )
-            except WebAuthnError:
-                limiter.record_failure(subject)
-                return JSONResponse({"error": "invalid_assertion"}, status=401)
-            limiter.record_success(subject)
-            if not promoting:
-                rotate_session(request)
-                _stamp(session, {"second_factor_uv": result.user_verified})
-                return JSONResponse({"status": "second_factor_verified"}, status=200)
-            user = await users.get_by_id(subject)
-            if user is None or not user.is_active:
-                session.pop(pending_key, None)
-                return JSONResponse({"error": "invalid_assertion"}, status=401)
-            session.pop(pending_key, None)
-            # Promotion is a privilege change and carries login's fixation risk.
-            rotate_session(request)
-            session[session_key] = {
-                "sub": user.id,
-                "type": "User",
-                "roles": [],
-                "second_factor_at": int(clock()),
-                "second_factor_uv": result.user_verified,
-            }
-            return JSONResponse(_profile(user), status=200)
+        _mount_webauthn_routes(context, pending_subject)
+    _session = context.values["_session"]
+    _signed_in = context.values["_signed_in"]
+    _stale_step_up = context.values["_stale_step_up"]
+    _step_up_required = context.values["_step_up_required"]
 
     @router.delete("/{factor_id}")
     async def remove_factor(request: Any, factor_id: Annotated[str, Path()]):
@@ -2038,6 +2606,13 @@ def default_user_model(table: str = "users") -> type[Any]:
     return User
 
 
+def _orm_store_identity(session: Any, model: type[Any]) -> tuple[type[Any], object, object]:
+    registry = getattr(session, "registry", None)
+    database = getattr(registry, "database", session)
+    tenant = getattr(session, "_tenant", None)
+    return model, database, tenant
+
+
 class OrmUserStore:
     """Reference `UserStore` over a wreath ORM session and a user model.
 
@@ -2069,7 +2644,7 @@ class OrmUserStore:
         model: the ORM model class carrying the columns above.
     """
 
-    __slots__ = ("_model", "_session")
+    __slots__ = ("_model", "_session", "_store_id")
 
     # The model is whatever ORM class the application supplied, so its columns --
     # `select()`, `email`, and the rest -- exist only at runtime. `type[Any]` says
@@ -2077,18 +2652,19 @@ class OrmUserStore:
     def __init__(self, session: Any, model: type[Any]) -> None:
         self._session = session
         self._model = model
+        self._store_id = _orm_store_identity(session, model)
 
     @property
     def store_id(self) -> object:
-        """The model, which is what decides the rows this store serves.
+        """The model, database, and tenant that decide the rows served.
 
         Two of these over one model are one store wearing two objects, and a
         deployment that builds one inline for each router has exactly that. See
         `UserStore` for the convention and `_same_store` for what reads it; the
-        session is deliberately not part of it, since two sessions on one
-        database still see the same table.
+        session itself is deliberately not part of it, since two sessions over
+        one database and tenant still see the same table.
         """
-        return self._model
+        return self._store_id
 
     def _to_record(self, row: Any) -> UserRecord:
         return UserRecord(
@@ -2260,17 +2836,18 @@ class OrmSecondFactorStore:
         model: the ORM model class carrying the columns above.
     """
 
-    __slots__ = ("_advance_sql", "_model", "_session")
+    __slots__ = ("_advance_sql", "_model", "_session", "_store_id")
 
     def __init__(self, session: Any, model: type[Any]) -> None:
         self._session = session
         self._model = model
+        self._store_id = _orm_store_identity(session, model)
         self._advance_sql: str | None = None
 
     @property
     def store_id(self) -> object:
-        """The model. `OrmUserStore.store_id` says why."""
-        return self._model
+        """The model, database, and tenant. `OrmUserStore.store_id` says why."""
+        return self._store_id
 
     def _to_record(self, row: Any) -> SecondFactor:
         return SecondFactor(
@@ -2307,7 +2884,12 @@ class OrmSecondFactorStore:
         id the database holds -- which is what lets `confirm_totp_enrolment`
         return a credential that can be looked up again.
         """
-        instance = self._model(
+        self._session.add(self._instance(credential))
+        await self._session.flush()
+        return credential
+
+    def _instance(self, credential: SecondFactor) -> Any:
+        return self._model(
             id=credential.id,
             user_id=credential.user_id,
             kind=credential.kind,
@@ -2317,9 +2899,15 @@ class OrmSecondFactorStore:
             created_at=credential.created_at,
             last_used_at=credential.last_used_at,
         )
-        self._session.add(instance)
-        await self._session.flush()
-        return credential
+
+    async def add_many(self, credentials: Sequence[SecondFactor]) -> tuple[SecondFactor, ...]:
+        """Insert one credential set with a single unit-of-work flush."""
+        batch = tuple(credentials)
+        for credential in batch:
+            self._session.add(self._instance(credential))
+        if batch:
+            await self._session.flush()
+        return batch
 
     async def remove(self, user_id: str, credential_id: str) -> None:
         """Delete one credential, but only when it belongs to `user_id`.
@@ -2334,6 +2922,18 @@ class OrmSecondFactorStore:
             return
         self._session.delete(row)
         await self._session.flush()
+
+    async def remove_many(self, user_id: str, credential_ids: Sequence[str]) -> None:
+        """Delete one user's named credentials with one read and one flush."""
+        wanted = frozenset(credential_ids)
+        if not wanted:
+            return
+        query = self._model.select().where(self._model.user_id == user_id)
+        rows = [row for row in await self._session.fetch(query) if str(row.id) in wanted]
+        for row in rows:
+            self._session.delete(row)
+        if rows:
+            await self._session.flush()
 
     def _advance_statement(self) -> str:
         """`UPDATE ... WHERE counter < $1 RETURNING 1`, built once per store.

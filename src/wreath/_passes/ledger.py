@@ -827,6 +827,29 @@ class Ledger:
         )
         return _affected(tag) == 1
 
+    async def retry_holes(self, executor: Any) -> int:
+        """Queue every open hole and restart a pass blocked at one."""
+        queued = await executor.fetchval(
+            f"WITH held AS MATERIALIZED ("
+            f"SELECT pending FROM {self._table} "
+            "WHERE name = $1 AND tenant = $2 FOR UPDATE), "
+            "fresh AS MATERIALIZED ("
+            "SELECT COALESCE(jsonb_agg(unit ORDER BY failed_at), '[]'::jsonb) AS units "
+            "FROM held CROSS JOIN ("
+            "SELECT jsonb_build_object('from', cursor_from, 'to', cursor_to) AS unit, "
+            f"failed_at FROM {self._holes} WHERE name = $1 AND tenant = $2"
+            ") holes WHERE NOT held.pending @> jsonb_build_array(unit)) "
+            f"UPDATE {self._table} AS ledger SET "
+            "pending = ledger.pending || fresh.units, "
+            "phase = CASE WHEN ledger.phase = 'blocked' THEN 'walking' ELSE ledger.phase END, "
+            "last_error = CASE WHEN ledger.phase = 'blocked' THEN NULL ELSE ledger.last_error END "
+            "FROM held, fresh WHERE ledger.name = $1 AND ledger.tenant = $2 "
+            "RETURNING jsonb_array_length(fresh.units)",
+            self._name,
+            self._tenant,
+        )
+        return 0 if queued is None else int(queued)
+
     async def claim_pending(self, executor: Any) -> Any:
         """Take the oldest pending unit, as the chunk transaction's first statement.
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from wreath._docs import THEMES, Link, Nav, Page, Repo, Section, Site
+from wreath.docs import THEMES, Link, Nav, Page, Repo, Section, Site
 
 nav = Nav(
     Page("Home", "index.md"),

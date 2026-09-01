@@ -228,11 +228,13 @@ def test_finished_worker_keeps_ownership_until_buffered_progress_is_drained(
     )
 
     results, live_fuzz = native_runner._run_parallel(
-        collection,
-        shards=(cases,),
-        max_failures=0,
-        renderer=renderer,
-        activity=activity,
+        native_runner._ParallelRun(
+            collection,
+            shards=(cases,),
+            max_failures=0,
+            renderer=renderer,
+            activity=activity,
+        )
     )
 
     assert [result.outcome for result in results] == ["passed"] * 4
@@ -265,6 +267,224 @@ def test_worker_cleanup_refuses_a_process_group_identifier(
         native_runner._terminate_owned_worker(0)
 
     assert killed == []
+
+
+def test_worker_start_failure_reaps_child_and_closes_every_pipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    activity = test_runner.RunActivity(workers=1)
+    run = native_runner._ParallelRun(
+        native_runner.Collection((), ()),
+        shards=((),),
+        max_failures=0,
+        renderer=object(),
+        activity=activity,
+    )
+    closed: list[int] = []
+    reaped: list[int] = []
+    monkeypatch.setattr(native_runner.os, "pipe", lambda: (11, 12))
+    monkeypatch.setattr(native_runner.os, "fork", lambda: 101)
+    monkeypatch.setattr(native_runner.os, "getpid", lambda: run.controller_pid)
+    monkeypatch.setattr(
+        native_runner,
+        "_terminate_owned_worker",
+        lambda pid: reaped.append(pid),
+    )
+
+    def close(descriptor: int) -> None:
+        closed.append(descriptor)
+        if descriptor == 12:
+            raise OSError("parent pipe setup failed")
+
+    monkeypatch.setattr(native_runner.os, "close", close)
+    try:
+        with pytest.raises(OSError, match="parent pipe setup failed"):
+            run._start_worker(0, ())
+        assert reaped == [101]
+        assert closed == [12, 11]
+        assert run.children == {}
+    finally:
+        run.temporary.cleanup()
+
+
+def test_parallel_cleanup_attempts_every_owned_resource(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    run = native_runner._ParallelRun(
+        native_runner.Collection((), ()),
+        shards=(),
+        max_failures=0,
+        renderer=object(),
+        activity=test_runner.RunActivity(workers=1),
+    )
+    run.temporary.cleanup()
+
+    class Resource:
+        def __init__(self, name: str, *, fail: bool = False) -> None:
+            self.name = name
+            self.fail = fail
+
+        def close(self) -> None:
+            calls.append(self.name)
+            if self.fail:
+                raise OSError(f"{self.name} failed")
+
+        def cleanup(self) -> None:
+            calls.append(self.name)
+
+    run.progress_stream = Resource("progress stream", fail=True)
+    run.temporary = Resource("temporary")
+    run.children = {
+        101: (Path("one"), Path("one.log"), (), 11, 12),
+        102: (Path("two"), Path("two.log"), (), 21, 22),
+    }
+
+    def terminate(pid: int) -> None:
+        calls.append(f"terminate {pid}")
+        if pid == 101:
+            raise ChildProcessError("wait failed")
+
+    def close(descriptor: int) -> None:
+        calls.append(f"close {descriptor}")
+        if descriptor == 11:
+            raise OSError("progress fd failed")
+
+    monkeypatch.setattr(native_runner, "_terminate_owned_worker", terminate)
+    monkeypatch.setattr(native_runner.os, "close", close)
+
+    with pytest.raises(OSError, match="progress stream failed"):
+        run.cleanup()
+
+    assert calls == [
+        "progress stream",
+        "terminate 101",
+        "close 11",
+        "close 12",
+        "terminate 102",
+        "close 21",
+        "close 22",
+        "temporary",
+    ]
+
+
+def test_failed_worker_payload_reconciles_streamed_pass_and_stage_event(
+    tmp_path: Path,
+) -> None:
+    node_id = "tests/test_worker.py::test_contract"
+    case = native_runner.Case(node_id, lambda: None, (), None, frozenset())
+    activity = test_runner.RunActivity(workers=1)
+    activity.collect((node_id,))
+    run = native_runner._ParallelRun(
+        native_runner.Collection((case,), ()),
+        shards=((case,),),
+        max_failures=0,
+        renderer=object(),
+        activity=activity,
+        stage_events=tmp_path / "events.jsonl",
+    )
+    try:
+        activity.add_native_result(node_id, "passed", 0.001)
+        run._record_file_progress(activity.files["tests/test_worker.py"])
+        failed = run._shard_results((case,), (), "invalid worker payload")
+
+        run._record_shard_results((case,), failed, replace_streamed_results=True)
+    finally:
+        run.temporary.cleanup()
+
+    assert activity.tests[node_id].outcome == "failed"
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert events[-1]["outcome"] == "failed"
+
+
+def test_child_cleanup_attempts_every_resource_after_a_tracer_failure() -> None:
+    calls: list[str] = []
+
+    class BrokenTracer:
+        def stop(self) -> None:
+            calls.append("tracer")
+            raise RuntimeError("tracer cleanup failed")
+
+    class Resource:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def finish(self) -> None:
+            calls.append(self.name)
+
+    runtime = native_runner._ChildRuntime(
+        observer=Resource("progress"),
+        tracer=BrokenTracer(),
+        trace_observer=Resource("trace observer"),
+        owns_progress=True,
+    )
+
+    with pytest.raises(RuntimeError, match="tracer cleanup failed"):
+        runtime.finish()
+
+    assert calls == ["tracer", "trace observer", "progress"]
+    assert runtime.tracer is not None
+    assert runtime.trace_observer is None
+    assert runtime.observer is None
+
+
+def test_progress_cleanup_attempts_control_close_after_progress_close_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[int] = []
+
+    def close(descriptor: int) -> None:
+        closed.append(descriptor)
+        if descriptor == 11:
+            raise OSError("progress close failed")
+
+    monkeypatch.setattr(native_runner.os, "close", close)
+    observer = native_runner._WorkerProgressObserver(11, None, control_descriptor=12)
+
+    with pytest.raises(OSError, match="progress close failed"):
+        observer.finish()
+
+    assert closed == [11, 12]
+    assert observer.descriptor == 11
+    assert observer.control_descriptor is None
+
+
+def test_native_execute_cleans_state_created_before_suite_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[str] = []
+
+    class Temporary:
+        def cleanup(self) -> None:
+            calls.append("temporary")
+
+    class Renderer:
+        def restore(self) -> None:
+            calls.append("renderer")
+
+    state = native_runner._NativeRunState(Temporary(), tmp_path)
+    fuzz = object()
+    monkeypatch.setattr(
+        native_runner._NativeRunState,
+        "prepare",
+        classmethod(lambda cls, namespace, options: state),
+    )
+
+    def fail_suite(namespace: Any, options: Any, workers: int, run_state: Any) -> None:
+        run_state.renderer = Renderer()
+        run_state.live_fuzz = fuzz
+        raise RuntimeError("suite failed")
+
+    monkeypatch.setattr(native_runner, "_run_native_suite", fail_suite)
+    monkeypatch.setattr(test_runner, "_stop_fuzz_process", lambda process: calls.append("fuzz"))
+
+    with pytest.raises(RuntimeError, match="suite failed"):
+        native_runner.execute(_namespace("tests"))
+
+    assert calls == ["renderer", "fuzz", "temporary"]
 
 
 def test_native_core_honours_maxfail_without_calling_later_cases() -> None:
@@ -879,8 +1099,8 @@ def test_non_sampled_mutation_runs_without_a_trace_baseline(
         lambda mode, report: test_runner.MutationActivity(mode=mode, state="complete"),
     )
 
-    def run_parallel(*_args: object, **options: Any):
-        activity = options["activity"]
+    def run_parallel(run: Any):
+        activity = run.activity
         activity.start_native_tests((node_id,))
         activity.add_native_result(node_id, "passed", 0.001)
         return [native_runner.Result(node_id, "passed", 1, None)], None

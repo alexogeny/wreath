@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import weakref
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from ._busbridge import BusBridge
 
@@ -55,14 +55,29 @@ class _OwnedSubscriber:
         callback: Callable[[frozenset[str]], None],
         key: _SubscriptionKey,
     ) -> None:
-        self.callback = callback
-        self.owner = weakref.ref(owner, lambda dead: _reap(key, dead))
+        owner_ref = weakref.ref(owner, lambda dead: _reap(key, dead))
+        if getattr(callback, "__self__", None) is owner and hasattr(callback, "__func__"):
+            function = cast(Callable[[Any, frozenset[str]], None], callback.__func__)
+
+            def invoke(model_names: frozenset[str]) -> None:
+                instance = owner_ref()
+                if instance is not None:
+                    function(instance, model_names)
+
+            self.callback = invoke
+        else:
+            self.callback = callback
+        self.owner = owner_ref
 
     def __call__(self, model_names: frozenset[str]) -> None:
         self.callback(model_names)
 
 
 def _callback_key(callback: Callable[[frozenset[str]], None]) -> _CallbackKey:
+    instance = getattr(callback, "__self__", None)
+    function = getattr(callback, "__func__", None)
+    if instance is not None and function is not None:
+        return id(instance), function
     try:
         hash(callback)
     except TypeError:
@@ -112,7 +127,8 @@ def unsubscribe_writes(callback: Callable[[frozenset[str]], None]) -> None:
 def _unsubscribe(callback: Callable[[frozenset[str]], None]) -> None:
     keys = _subscriber_keys.get(_callback_key(callback))
     if keys:
-        _remove_subscription(next(iter(keys)))
+        for key in tuple(keys):
+            _remove_subscription(key)
 
 
 def register_bridge(callback: Callable[[frozenset[str]], None]) -> None:

@@ -13,19 +13,39 @@ CommonMark remains a follow-on at the same `wreath._docs.markdown.render` seam.
 
 from __future__ import annotations
 
-from .config import ICONS, THEMES, Link, Nav, Page, Palette, Repo, Section, Site
+from .config import (
+    ICONS,
+    THEMES,
+    AssetManifest,
+    Link,
+    Nav,
+    Page,
+    PageContext,
+    PageTemplate,
+    Palette,
+    Repo,
+    Section,
+    Site,
+    StaticAsset,
+    Theme,
+)
 from .site import BuildReport, build
 
 __all__ = [
     "ICONS",
     "THEMES",
+    "AssetManifest",
     "BuildReport",
     "Link",
     "Nav",
     "Page",
+    "PageContext",
+    "PageTemplate",
     "Palette",
     "Repo",
     "Section",
     "Site",
+    "StaticAsset",
+    "Theme",
     "build",
 ]

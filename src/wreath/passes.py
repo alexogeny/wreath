@@ -1214,14 +1214,7 @@ class ChunkedPass:
         """
         connection = await database.acquire(self._workload)
         try:
-            queued = 0
-            for hole in await self._ledger.holes(connection):
-                if await self._ledger.requeue(
-                    connection, cursor_from=hole.cursor_from, cursor_to=hole.cursor_to
-                ):
-                    queued += 1
-            await self._ledger.unblock(connection)
-            return queued
+            return await self._ledger.retry_holes(connection)
         finally:
             await database.release(self._workload, connection)
 
