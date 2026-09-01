@@ -64,6 +64,7 @@ QUERY_SAMPLES = [
     b"%zz=%",
     b"name=%E2%9C%93&n=1",
     b"a%20b=c%2Fd",
+    b"long=" + b"%41" * 300,
 ]
 # `parse_cookies` has no stdlib counterpart that agrees: `http.cookies.SimpleCookie`
 # implements the *response* `Set-Cookie` grammar, tolerates a bare token, and does

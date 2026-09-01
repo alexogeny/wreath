@@ -335,7 +335,19 @@ class TextResponse(Response):
     def __init__(
         self, body: str, status: int = 200, *, background: Background | None = None
     ) -> None:
-        super().__init__(body.encode("utf-8"), status=status, background=background)
+        encoded = body.encode("utf-8")
+        if type(status) is int and (status == 200 or status not in _STATUS_WITHOUT_BODY):
+            self.body = encoded
+            self.status = status
+            self.background = background
+            media_type_header = self._media_type_header
+            self._headers = (
+                [media_type_header, (_CONTENT_LENGTH, _content_length(len(encoded)))]
+                if media_type_header is not None
+                else [(_CONTENT_LENGTH, _content_length(len(encoded)))]
+            )
+        else:
+            super().__init__(encoded, status=status, background=background)
 
 
 class JSONResponse(Response):
@@ -355,7 +367,19 @@ class JSONResponse(Response):
     def __init__(
         self, data: Any, status: int = 200, *, background: Background | None = None
     ) -> None:
-        super().__init__(_json_dumps(data), status=status, background=background)
+        body = _json_dumps(data)
+        if type(status) is int and (status == 200 or status not in _STATUS_WITHOUT_BODY):
+            self.body = body
+            self.status = status
+            self.background = background
+            media_type_header = self._media_type_header
+            self._headers = (
+                [media_type_header, (_CONTENT_LENGTH, _content_length(len(body)))]
+                if media_type_header is not None
+                else [(_CONTENT_LENGTH, _content_length(len(body)))]
+            )
+        else:
+            super().__init__(body, status=status, background=background)
 
 
 # Common handler values take their fixed 200-response shape directly.
@@ -386,7 +410,7 @@ def _build_response(body: bytes, type_header: tuple[bytes, bytes]) -> Response:
     response.body = body
     response.status = 200
     response.background = None
-    response.headers = [type_header, (_CONTENT_LENGTH, _content_length(len(body)))]
+    response._headers = [type_header, (_CONTENT_LENGTH, _content_length(len(body)))]
     return response
 
 

@@ -953,14 +953,14 @@ def _bind_cached_plan(
             f"{MAX_BIND_PARAMETERS} limit"
         )
     return CompiledQuery(
-        sql=plan.sql,
-        bind_values=values,
-        bind_oids=plan.bind_oids,
-        result_model=plan.result_model,
-        selected_columns=plan.selected_columns,
-        load_plan=plan.load_plan,
-        shape_key=shape_key,
-        projected_columns=plan.projected_columns,
+        plan.sql,
+        values,
+        plan.bind_oids,
+        plan.result_model,
+        plan.selected_columns,
+        plan.load_plan,
+        shape_key,
+        plan.projected_columns,
     )
 
 

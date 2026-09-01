@@ -7,6 +7,7 @@ import pytest
 from wreath.negotiation import (
     JSON,
     MSGPACK,
+    Serializer,
     negotiate,
     parse_accept,
     serialize,
@@ -82,6 +83,18 @@ def test_parse_accept_takes_the_first_q_not_the_last() -> None:
     assert parse_accept("application/json;q=0.9;q=0.1") == [("application/json", 0.9)]
 
 
+def test_parse_accept_keeps_the_large_range_path() -> None:
+    header = ", ".join(f"application/x{index};q=0.{index + 1}" for index in range(9))
+    assert [media for media, _quality in parse_accept(header)] == [
+        f"application/x{index}" for index in reversed(range(9))
+    ]
+
+
+def test_parse_accept_keeps_the_large_text_path() -> None:
+    media_type = "application/" + "x" * 300
+    assert parse_accept(media_type) == [(media_type, 1.0)]
+
+
 def test_negotiate_defaults_to_json() -> None:
     assert negotiate(None) is JSON
     assert negotiate("*/*") is JSON
@@ -96,6 +109,19 @@ def test_negotiate_selects_msgpack_when_preferred() -> None:
 def test_negotiate_unsatisfiable_returns_none() -> None:
     assert negotiate("application/xml") is None
     assert negotiate("application/json;q=0") is None  # explicitly not acceptable
+
+
+def test_negotiate_keeps_the_large_offer_path() -> None:
+    serializers = tuple(
+        Serializer(f"application/x{index}", bytes) for index in range(9)
+    )
+    assert negotiate("application/x8", serializers) is serializers[8]
+
+
+def test_negotiate_keeps_the_large_offer_text_path() -> None:
+    subtype = "X" * 129
+    serializer = Serializer(f"application/{subtype}", bytes)
+    assert negotiate(f"application/{subtype.lower()}", (serializer,)) is serializer
 
 
 def test_serialize_picks_format_and_sets_headers() -> None:

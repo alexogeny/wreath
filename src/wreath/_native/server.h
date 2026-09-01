@@ -348,6 +348,7 @@ extern PyObject *immediate_none;  /* stateless completed awaitable */
 /* Cached callables for the per-request hot path. */
 extern PyTypeObject StartedCoroutineType;  /* adopts an already-stepped coroutine */
 PyObject *wreath_started_coroutine(PyObject *coroutine, PyObject *pending);
+PyObject *wreath_awaitable_iter(PyObject *awaitable);
 extern PyObject *task_add_done_callback;  /* unbound Task.add_done_callback */
 extern PyObject *task_exception_fn;  /* unbound Task.exception */
 

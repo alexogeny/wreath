@@ -549,6 +549,54 @@ static PyGetSetDef networks_getset[] = {
     {NULL, NULL, NULL, NULL, NULL},
 };
 
+static int
+forwarded_first_span(PyObject *value, const char **text_out, Py_ssize_t *length_out)
+{
+    if (!PyBytes_Check(value)) {
+        PyErr_SetString(PyExc_TypeError, "forwarded header value must be bytes");
+        return -1;
+    }
+    const char *text = PyBytes_AS_STRING(value);
+    Py_ssize_t end = 0, length = PyBytes_GET_SIZE(value);
+    while (end < length && text[end] != ',') end++;
+    Py_ssize_t start = 0;
+    while (start < end &&
+           (text[start] == ' ' || (text[start] >= '\t' && text[start] <= '\r'))) {
+        start++;
+    }
+    while (end > start &&
+           (text[end - 1] == ' ' ||
+            (text[end - 1] >= '\t' && text[end - 1] <= '\r'))) {
+        end--;
+    }
+    *text_out = text + start;
+    *length_out = end - start;
+    return 0;
+}
+
+PyObject *
+wreath_forwarded_proto(PyObject *Py_UNUSED(module), PyObject *value)
+{
+    const char *text;
+    Py_ssize_t length;
+    if (forwarded_first_span(value, &text, &length) < 0) return NULL;
+    if (wreath_ascii_equal_ci(text, length, "http", 4))
+        return PyUnicode_FromString("http");
+    if (wreath_ascii_equal_ci(text, length, "https", 5))
+        return PyUnicode_FromString("https");
+    Py_RETURN_NONE;
+}
+
+PyObject *
+wreath_forwarded_host(PyObject *Py_UNUSED(module), PyObject *value)
+{
+    const char *text;
+    Py_ssize_t length;
+    if (forwarded_first_span(value, &text, &length) < 0) return NULL;
+    if (length == 0) Py_RETURN_NONE;
+    return PyBytes_FromStringAndSize(text, length);
+}
+
 static PyTypeObject TrustedNetworksType = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name = "wreath._native._core.TrustedNetworks",

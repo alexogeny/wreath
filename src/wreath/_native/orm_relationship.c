@@ -524,7 +524,9 @@ wreath_orm_hydrate_records(PyObject *Py_UNUSED(self), PyObject *args)
 {
     PyObject *session, *plan_object, *rows_object, *models;
     PyObject *rows = NULL, *objects = NULL;
-    PyObject **unique = NULL, **seen = NULL;
+    PyObject *inline_unique[16];
+    PyObject *inline_seen[16] = {NULL};
+    PyObject **unique = inline_unique, **seen = inline_seen;
     CompiledHydratePlan *plan;
     Py_ssize_t unique_count = 0, seen_capacity = 8;
     HydrateContext context = {0};
@@ -547,11 +549,12 @@ wreath_orm_hydrate_records(PyObject *Py_UNUSED(self), PyObject *args)
             }
             seen_capacity *= 2;
         }
-        unique = row_count == 0 ? NULL : PyMem_Malloc(
-            (size_t)row_count * sizeof(*unique));
-        seen = PyMem_Calloc((size_t)seen_capacity, sizeof(*seen));
+        if (row_count > 16) {
+            unique = PyMem_Malloc((size_t)row_count * sizeof(*unique));
+            seen = PyMem_Calloc((size_t)seen_capacity, sizeof(*seen));
+        }
     }
-    if ((PySequence_Fast_GET_SIZE(rows) != 0 && unique == NULL) || seen == NULL ||
+    if (unique == NULL || seen == NULL ||
         hydrate_context_init(&context, session, models) < 0) goto error;
     for (Py_ssize_t index = 0; index < PySequence_Fast_GET_SIZE(rows); index++) {
         PyObject *row = PySequence_Fast(
@@ -590,14 +593,16 @@ wreath_orm_hydrate_records(PyObject *Py_UNUSED(self), PyObject *args)
         PyList_SET_ITEM(objects, index, unique[index]);
         unique[index] = NULL;
     }
-    PyMem_Free(seen); PyMem_Free(unique);
+    if (seen != inline_seen) PyMem_Free(seen);
+    if (unique != inline_unique) PyMem_Free(unique);
     hydrate_context_clear(&context);
     Py_DECREF(rows);
     return objects;
 error:
     for (Py_ssize_t index = 0; index < unique_count; index++)
         Py_XDECREF(unique == NULL ? NULL : unique[index]);
-    PyMem_Free(seen); PyMem_Free(unique);
+    if (seen != inline_seen) PyMem_Free(seen);
+    if (unique != inline_unique) PyMem_Free(unique);
     hydrate_context_clear(&context);
     Py_XDECREF(objects); Py_XDECREF(rows);
     return NULL;

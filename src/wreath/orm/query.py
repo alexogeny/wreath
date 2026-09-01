@@ -126,7 +126,7 @@ class Select:
                         "by search.rank(terms).desc(), or compare the rank against a "
                         "threshold"
                     )
-        return self._replace(predicates=self.predicates + tuple(predicates))
+        return self._replace(predicates=self.predicates + predicates)
 
     def rebound_orderings(self, orderings: tuple[OrderExpr, ...]) -> Select:
         """This query with its ORDER BY keys *replaced* rather than extended.
@@ -159,7 +159,7 @@ class Select:
                 raise TypeError(
                     f"include() takes load options such as User.posts.selectin(), got {item!r}"
                 )
-        return self._replace(includes=self.includes + tuple(load_options))
+        return self._replace(includes=self.includes + load_options)
 
     def order_by(self, *expressions: Any) -> Select:
         """Order rows by columns, `.asc()`/`.desc()`, or a vector distance.

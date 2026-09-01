@@ -69,6 +69,9 @@ from .schema import ColumnSpec, ModelSpec, RelationshipSpec
 from .types import WireList
 
 _WRITE_WORKLOADS = frozenset({"write"})
+_EMPTY_IDS: frozenset[int] = frozenset()
+_EMPTY_ITEMS: tuple[Any, ...] = ()
+_EMPTY_WRITTEN: frozenset[str] = frozenset()
 
 
 def _model_storage() -> Any:
@@ -465,25 +468,21 @@ class Session:
         # imports the store -- the dependency runs the other way, and
         # `wreath.orm` is the layer everything else is allowed to depend on.
         self._audit = audit
-        # Changes this flush has recorded but not yet appended. One list per
-        # session rather than per flush, because a session that audits nothing
-        # should allocate nothing: it stays empty and `_flush_inner` reads its
-        # length.
-        self._audit_pending: list[Any] = []
+        self._audit_pending: list[Any] | None = None
         self._registry = registry
         self._workload = workload
         self._connection: Any = None
         self._identity: dict[tuple[Any, tuple[Any, ...]], Any] = {}
-        self._new_items: list[Any] = []
+        self._new_items: list[Any] | tuple[Any, ...] = _EMPTY_ITEMS
         self._new_stale = False
-        self._new_ids: set[int] = set()
+        self._new_ids: set[int] | frozenset[int] = _EMPTY_IDS
         self._deleted: list[Any] = []
-        self._deleted_ids: set[int] = set()
-        self._dirty_items: list[Any] = []
+        self._deleted_ids: set[int] | frozenset[int] = _EMPTY_IDS
+        self._dirty_items: list[Any] | tuple[Any, ...] = _EMPTY_ITEMS
         self._depth = 0
-        self._rollback_state: list[list[_SessionUndo]] = []
+        self._rollback_state: list[list[_SessionUndo]] | None = None
         # Model names written inside an open transaction, published on commit.
-        self._written: frozenset[str] = frozenset()
+        self._written: frozenset[str] = _EMPTY_WRITTEN
         self._closed = False
         self._broken = False
         # Read from the registry only when the caller did not say, and only
@@ -526,10 +525,12 @@ class Session:
         self._closed = True
         connection = self._connection
         self._connection = None
-        for item in self._identity.values():
-            item._orm_state = DETACHED
-            item._orm_owner = None
-        self._identity.clear()
+        identity = self._identity
+        if identity:
+            for item in identity.values():
+                item._orm_state = DETACHED
+                item._orm_owner = None
+            identity.clear()
         self._clear_pending()
         if connection is None:
             return
@@ -1031,7 +1032,7 @@ class Session:
             identifiers = self._new_ids
             self._new_items = [item for item in self._new_items if id(item) in identifiers]
             self._new_stale = False
-        return self._new_items
+        return [] if isinstance(self._new_items, tuple) else self._new_items
 
     def _schedule_new(self, instance: Any) -> None:
         if _probes is not None:
@@ -1039,10 +1040,16 @@ class Session:
         key = id(instance)
         if key in self._new_ids:
             return
-        self._new_ids.add(key)
+        identifiers = self._new_ids
+        if isinstance(identifiers, frozenset):
+            identifiers = self._new_ids = set()
+        identifiers.add(key)
+        items = self._new_items
+        if isinstance(items, tuple):
+            items = self._new_items = []
         # Appending past tombstones is safe: they only ever precede the new
         # entry, and `_new` compacts before anyone reads the order.
-        self._new_items.append(instance)
+        items.append(instance)
         instance._orm_owner = self
 
     def _unschedule_new(self, instance: Any) -> bool:
@@ -1051,7 +1058,10 @@ class Session:
         key = id(instance)
         if key not in self._new_ids:
             return False
-        self._new_ids.remove(key)
+        identifiers = self._new_ids
+        if not isinstance(identifiers, set):
+            raise RuntimeError("scheduled identity set is immutable")
+        identifiers.remove(key)
         self._new_stale = True
         return True
 
@@ -1061,16 +1071,26 @@ class Session:
         key = id(instance)
         if key in self._deleted_ids:
             return
-        self._deleted_ids.add(key)
+        identifiers = self._deleted_ids
+        if isinstance(identifiers, frozenset):
+            identifiers = self._deleted_ids = set()
+        identifiers.add(key)
         self._deleted.append(instance)
 
     def _clear_pending(self) -> None:
-        self._new_items = []
+        if (
+            not self._new_ids
+            and not self._deleted
+            and not self._dirty_items
+            and not self._new_stale
+        ):
+            return
+        self._new_items = _EMPTY_ITEMS
         self._new_stale = False
-        self._new_ids.clear()
+        self._new_ids = _EMPTY_IDS
         self._deleted.clear()
-        self._deleted_ids.clear()
-        self._dirty_items = []
+        self._deleted_ids = _EMPTY_IDS
+        self._dirty_items = _EMPTY_ITEMS
 
     async def create(self, model: type, **values: Any) -> Any:
         """Construct, insert, and return one mapped model.
@@ -1204,7 +1224,10 @@ class Session:
         async with self.begin():
             result = await self._flush_inner()
             undo = self._snapshot_flush(result)
-            self._rollback_state[-1].append(undo)
+            rollback_state = self._rollback_state
+            if rollback_state is None:
+                raise RuntimeError("flush completed without a rollback frame")
+            rollback_state[-1].append(undo)
             self._finish_flush(result)
         self._clear_pending()
         if self._depth:
@@ -1236,6 +1259,8 @@ class Session:
         ]
 
     def _mark_dirty(self, instance: Any) -> None:
+        if isinstance(self._dirty_items, tuple):
+            self._dirty_items = []
         self._dirty_items.append(instance)
 
     def _order(self, model: type) -> int:
@@ -1257,7 +1282,7 @@ class Session:
         written = (
             self._collect_written(dirty)
             if (_has_write_subscribers() or self._depth)
-            else frozenset()
+            else _EMPTY_WRITTEN
         )
         inserts: list[_InsertResult] = []
         updates: list[tuple[list[Any], ModelSpec, int]] = []
@@ -1308,7 +1333,7 @@ class Session:
                 await self._drain_audit()
         except BaseException:
             # Failed writes must not survive into the next audit batch.
-            self._audit_pending = []
+            self._audit_pending = None
             raise
         return _FlushResult(written, inserts, updates, deletes)
 
@@ -1362,10 +1387,12 @@ class Session:
             return
         touched = earliest.keys()
         self._new_items = [instance for instance in self._new_items if id(instance) not in touched]
-        self._new_ids.difference_update(touched)
+        if isinstance(self._new_ids, set):
+            self._new_ids.difference_update(touched)
         self._new_stale = False
         self._deleted = [instance for instance in self._deleted if id(instance) not in touched]
-        self._deleted_ids.difference_update(touched)
+        if isinstance(self._deleted_ids, set):
+            self._deleted_ids.difference_update(touched)
         self._dirty_items = [
             instance for instance in self._dirty_items if id(instance) not in touched
         ]
@@ -1420,7 +1447,10 @@ class Session:
         for column, value in returned:
             if column.python_name not in redact:
                 fields[column.python_name] = value
-        self._audit_pending.append(
+        pending = self._audit_pending
+        if pending is None:
+            pending = self._audit_pending = []
+        pending.append(
             Change(
                 table=spec.qualified_name,
                 key="" if key is None else ":".join(str(part) for part in key),
@@ -1443,7 +1473,9 @@ class Session:
         a transaction that has already rolled back.
         """
         pending = self._audit_pending
-        self._audit_pending = []
+        if pending is None:
+            raise RuntimeError("audit drain started without pending records")
+        self._audit_pending = None
         await self._audit.record_many(pending, connection=await self._acquire())
 
     def _audit_attribute(self, instance: Any) -> None:
@@ -1698,12 +1730,17 @@ class Session:
             for statement in self._tenant._bind_statements():
                 await connection.execute(statement)
         self._depth = depth + 1
-        self._rollback_state.append([])
+        rollback_state = self._rollback_state
+        if rollback_state is None:
+            rollback_state = self._rollback_state = []
+        rollback_state.append([])
         try:
             yield self
         except BaseException:
             self._depth = depth
-            frame = self._rollback_state.pop()
+            frame = rollback_state.pop()
+            if not rollback_state:
+                self._rollback_state = None
             try:
                 await self._unwind(connection, depth, savepoint, commit=False)
             finally:
@@ -1712,17 +1749,19 @@ class Session:
             raise
         else:
             self._depth = depth
-            frame = self._rollback_state.pop()
+            frame = rollback_state.pop()
             try:
                 await self._unwind(connection, depth, savepoint, commit=True)
             except BaseException:
                 self._invalidate_undo_frame(frame)
                 raise
             if depth:
-                self._rollback_state[-1] += frame
+                rollback_state[-1] += frame
+            else:
+                self._rollback_state = None
             if depth == 0 and self._written:
                 # Publish only after the outermost commit is durable.
-                written, self._written = self._written, frozenset()
+                written, self._written = self._written, _EMPTY_WRITTEN
                 _publish_write(written)
 
     async def _unwind(self, connection: Any, depth: int, savepoint: str, *, commit: bool) -> None:

@@ -146,6 +146,16 @@ def test_a_nested_statement_splices_and_renumbers() -> None:
     assert statement.args == (4, "booked")
 
 
+def test_a_long_nested_statement_splices_and_renumbers() -> None:
+    org = 4
+    status = "booked"
+    column = Fragment("x" * 80)
+    clause = Statement(t"{column} = {status}")
+    statement = Statement(t"SELECT id FROM s WHERE org_id = {org} AND {clause}")
+    assert statement.text == f"SELECT id FROM s WHERE org_id = $1 AND {'x' * 80} = $2"
+    assert statement.args == (4, "booked")
+
+
 def test_fragment_splices_verbatim() -> None:
     statement = Statement(t"SELECT id FROM s ORDER BY id {Fragment('DESC')}")
     assert statement.text == "SELECT id FROM s ORDER BY id DESC"

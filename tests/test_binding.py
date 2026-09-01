@@ -294,6 +294,96 @@ async def test_invalid_path_param_is_422() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("42", 42),
+        ("-42", -42),
+        ("+42", 42),
+        ("١٢", 12),
+        ("18446744073709551616", 18446744073709551616),
+    ],
+)
+async def test_native_path_int_keeps_python_integer_semantics(
+    text: str, expected: int
+) -> None:
+    app = Wreath()
+
+    @app.get("/{item_id}")
+    async def handler(request: Any, item_id: int) -> int:
+        return item_id
+
+    status, body = await call(app, scope_for(f"/{text}"))
+    assert status == 200
+    assert json.loads(body) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("12.5", 12.5),
+        ("-0.25", -0.25),
+        ("1e20", 1e20),
+        ("1_000.5", 1000.5),
+        ("١٢.٥", 12.5),
+    ],
+)
+async def test_native_path_float_keeps_python_number_semantics(
+    text: str, expected: float
+) -> None:
+    app = Wreath()
+
+    @app.get("/{amount}")
+    async def handler(request: Any, amount: float) -> float:
+        return amount
+
+    status, body = await call(app, scope_for(f"/{text}"))
+    assert status == 200
+    assert json.loads(body) == expected
+
+
+@pytest.mark.asyncio
+async def test_native_path_bool_keeps_case_and_non_ascii_semantics() -> None:
+    from wreath.request import Request
+
+    async def handler(request: Any, enabled: bool) -> bool:
+        return enabled
+
+    bound = compile_binder(handler, "/{enabled}")
+    assert await bound(Request(scope_for("/TRUE"), None, {"enabled": "TRUE"})) is True
+    assert await bound(Request(scope_for("/Off"), None, {"enabled": "Off"})) is False
+    with pytest.raises(ValidationError) as caught:
+        await bound(Request(scope_for("/invalid"), None, {"enabled": "\udcff"}))
+    assert caught.value.errors[0]["type"] == "bool"
+
+    class RequestProxy:
+        path_params = {"enabled": "yes"}
+
+    assert await bound(RequestProxy()) is True
+
+
+@pytest.mark.asyncio
+async def test_native_path_bool_honours_materialized_path_param_changes() -> None:
+    from wreath.middleware import MiddlewareHooks
+
+    app = Wreath()
+
+    def rewrite_path(request: Any) -> None:
+        request.path_params.update({"enabled": "false"})
+
+    app.add_middleware(MiddlewareHooks(before_sync=rewrite_path))
+
+    @app.get("/{enabled}")
+    async def handler(request: Any, enabled: bool) -> bool:
+        return enabled
+
+    status, body = await call(app, scope_for("/true"))
+    assert status == 200
+    assert json.loads(body) is False
+
+
+@pytest.mark.asyncio
 async def test_body_dataclass_binding() -> None:
     app = Wreath()
     seen: list[Item] = []

@@ -304,6 +304,7 @@ def test_worker_start_failure_reaps_child_and_closes_every_pipe(
         assert closed == [12, 11]
         assert run.children == {}
     finally:
+        monkeypatch.undo()
         run.temporary.cleanup()
 
 

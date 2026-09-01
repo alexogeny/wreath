@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -29,6 +30,41 @@ def _decode_response(d):
         elif f.type == support.DATA:
             s["body"] += f.payload
     return streams
+
+
+async def test_generic_application_awaitable(make_driver) -> None:
+    class ApplicationAwaitable:
+        def __init__(self, coroutine: Any) -> None:
+            self.coroutine = coroutine
+
+        def __await__(self) -> Any:
+            return self.coroutine.__await__()
+
+    def app(scope: dict, receive: Any, send: Any) -> Any:
+        async def respond() -> None:
+            await asyncio.sleep(0)
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"generic"})
+
+        return ApplicationAwaitable(respond())
+
+    driver = make_driver(app)
+    await driver.preface()
+    await driver.feed_and_settle(support.build_headers_frame(1, support.request_headers()))
+
+    assert _decode_response(driver)[1]["body"] == b"generic"
+
+
+async def test_non_awaitable_application_result_is_a_500(make_driver) -> None:
+    def app(scope: dict, receive: Any, send: Any) -> object:
+        return object()
+
+    driver = make_driver(app)
+    await driver.preface()
+    await driver.feed_and_settle(support.build_headers_frame(1, support.request_headers()))
+
+    headers = dict(_decode_response(driver)[1]["headers"])
+    assert headers[b":status"] == b"500"
 
 
 async def test_scope_shape(make_driver):

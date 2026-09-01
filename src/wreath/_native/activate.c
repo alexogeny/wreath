@@ -1,5 +1,5 @@
 /* Execute a startup-compiled path-only scalar activation plan in one C call. */
-#include "activate.h"
+#include "wreathcore.h"
 
 /* The framework materializes its public Request at the handler-activation
  * boundary.  Its lazy fields intentionally remain unassigned; everything
@@ -15,7 +15,6 @@ typedef struct {
     Py_ssize_t client_source_slot;
     Py_ssize_t app;
     Py_ssize_t header_map;
-    Py_ssize_t header_scanned;
     Py_ssize_t path_params;
     Py_ssize_t policy_mask;
     Py_ssize_t identity;
@@ -80,7 +79,6 @@ wreath_request_layout(PyObject *Py_UNUSED(module), PyObject *type_object)
         REQUEST_OFFSET(client_source_slot, "_client_source") ||
         REQUEST_OFFSET(app, "_app") ||
         REQUEST_OFFSET(header_map, "_header_map") ||
-        REQUEST_OFFSET(header_scanned, "_header_scanned") ||
         REQUEST_OFFSET(path_params, "_path_params") ||
         REQUEST_OFFSET(policy_mask, "_policy_mask") ||
         REQUEST_OFFSET(identity, "_identity") ||
@@ -130,7 +128,6 @@ wreath_request_new(PyObject *Py_UNUSED(module), PyObject *const *args,
                       layout->client_source);
     request_slot_init(request, layout->app, args[5]);
     request_slot_init(request, layout->header_map, Py_None);
-    request_slot_init(request, layout->header_scanned, Py_False);
     request_slot_init(request, layout->path_params, args[3]);
     request_slot_init(
         request, layout->policy_mask,
@@ -144,6 +141,25 @@ wreath_request_new(PyObject *Py_UNUSED(module), PyObject *const *args,
 }
 
 enum { ACTIVATE_STR = 0, ACTIVATE_INT = 1, ACTIVATE_FLOAT = 2, ACTIVATE_BOOL = 3 };
+
+static int
+path_float_from_ascii(const char *text, Py_ssize_t length, PyObject **value_out)
+{
+    *value_out = NULL;
+    if (length > 64) return 0;
+    char buffer[65];
+    memcpy(buffer, text, (size_t)length);
+    buffer[length] = '\0';
+    char *end;
+    double value = PyOS_string_to_double(buffer, &end, NULL);
+    if (PyErr_Occurred()) {
+        PyErr_Clear();
+        return 0;
+    }
+    if (end != buffer + length) return 0;
+    *value_out = PyFloat_FromDouble(value);
+    return *value_out == NULL ? -1 : 1;
+}
 
 static int
 append_error(PyObject *errors, PyObject *alias, PyObject *raw,
@@ -189,25 +205,6 @@ append_activation_error(PyObject **errors, PyObject *alias, PyObject *raw,
     return append_error(*errors, alias, raw, message, kind);
 }
 
-static PyObject *
-convert_bool(PyObject *raw)
-{
-    PyObject *lower = PyObject_CallMethod(raw, "lower", NULL);
-    if (lower == NULL) return NULL;
-    int truth = PyUnicode_EqualToUTF8(lower, "1") ||
-                PyUnicode_EqualToUTF8(lower, "true") ||
-                PyUnicode_EqualToUTF8(lower, "yes") ||
-                PyUnicode_EqualToUTF8(lower, "on");
-    int falsehood = PyUnicode_EqualToUTF8(lower, "0") ||
-                    PyUnicode_EqualToUTF8(lower, "false") ||
-                    PyUnicode_EqualToUTF8(lower, "no") ||
-                    PyUnicode_EqualToUTF8(lower, "off");
-    Py_DECREF(lower);
-    if (truth) return Py_NewRef(Py_True);
-    if (falsehood) return Py_NewRef(Py_False);
-    return NULL;
-}
-
 static int
 activate_path_value(PyObject *params, PyObject *entry,
                     PyObject **errors, PyObject **value_out)
@@ -215,6 +212,44 @@ activate_path_value(PyObject *params, PyObject *entry,
     PyObject *alias = PyTuple_GET_ITEM(entry, 1);
     int opcode = (int)PyLong_AsLong(PyTuple_GET_ITEM(entry, 2));
     if (opcode == -1 && PyErr_Occurred()) return -1;
+    if (opcode == ACTIVATE_BOOL || opcode == ACTIVATE_INT ||
+        opcode == ACTIVATE_FLOAT) {
+        const char *text;
+        Py_ssize_t length;
+        int direct = wreath_path_param_utf8(
+            params, alias, &text, &length);
+        if (direct < 0) return -1;
+        if (direct > 0 && opcode == ACTIVATE_BOOL) {
+            PyObject *value = wreath_bool_from_ascii(text, length);
+            if (value != NULL) {
+                *value_out = value;
+                return 0;
+            }
+        }
+        else if (direct > 0 && opcode == ACTIVATE_INT && length > 0) {
+            uint64_t integer = 0;
+            Py_ssize_t i = 0;
+            for (; i < length; i++) {
+                unsigned char digit = (unsigned char)text[i] - '0';
+                if (digit > 9 ||
+                    integer > (UINT64_MAX - digit) / 10) break;
+                integer = integer * 10 + digit;
+            }
+            if (i == length) {
+                *value_out = PyLong_FromUnsignedLongLong(integer);
+                return *value_out == NULL ? -1 : 0;
+            }
+        }
+        else if (direct > 0 && opcode == ACTIVATE_FLOAT) {
+            PyObject *value;
+            int parsed = path_float_from_ascii(text, length, &value);
+            if (parsed < 0) return -1;
+            if (parsed > 0) {
+                *value_out = value;
+                return 0;
+            }
+        }
+    }
     PyObject *raw = PyObject_GetItem(params, alias);
     if (raw == NULL) return -1;
     PyObject *value = NULL;
@@ -248,7 +283,7 @@ activate_path_value(PyObject *params, PyObject *entry,
         }
     }
     else if (opcode == ACTIVATE_BOOL) {
-        value = convert_bool(raw);
+        value = wreath_bool_from_text(raw);
         if (value == NULL && !PyErr_Occurred()) {
             if (append_activation_error(errors, alias, raw,
                                         "%R is not a boolean", "bool") < 0) {
@@ -361,7 +396,12 @@ wreath_activate_path_call(PyObject *Py_UNUSED(module), PyObject *const *args,
     PyObject *error_type = args[3];
     PyObject *plan = PyTuple_GET_ITEM(compiled, 0);
     PyObject *keyword_names = PyTuple_GET_ITEM(compiled, 1);
-    PyObject *params = PyObject_GetAttrString(request, "path_params");
+    RequestLayout *layout = PyCapsule_GetPointer(
+        PyTuple_GET_ITEM(compiled, 3), REQUEST_LAYOUT_CAPSULE);
+    if (layout == NULL) return NULL;
+    PyObject *params = Py_IS_TYPE(request, layout->type)
+        ? Py_NewRef(REQUEST_SLOT(request, layout->path_params))
+        : PyObject_GetAttr(request, PyTuple_GET_ITEM(compiled, 2));
     if (params == NULL) return NULL;
     Py_ssize_t count = PyTuple_GET_SIZE(plan);
     PyObject *local_stack[9] = {NULL};

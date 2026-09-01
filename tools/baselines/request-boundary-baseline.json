@@ -4,16 +4,16 @@
     "realistic": {
       "status": 200,
       "totals": {
-        "c": 100,
+        "c": 94,
         "python": 2
       },
       "pre_activation": {
-        "c": 39,
+        "c": 36,
         "python": 1
       },
       "phases": {
         "ingress": {
-          "c": 35,
+          "c": 32,
           "python": 1
         },
         "routing": {
@@ -21,7 +21,7 @@
           "python": 0
         },
         "handler": {
-          "c": 31,
+          "c": 28,
           "python": 1
         },
         "egress": {
@@ -35,23 +35,20 @@
         "str.encode": 6,
         "builtins.getattr": 6,
         "builtins.len": 4,
-        "bytes.decode": 3,
         "bytes.lower": 3,
+        "bytes.decode": 2,
         "time.perf_counter": 2,
         "lock.__enter__": 2,
         "KV.get": 2,
         "lock.__exit__": 2,
         "str.rpartition": 2,
         "list.append": 2,
-        "set.clear": 2,
         "wreath._native._core.replace_response_header": 2,
         "wreath._native._core.request_new": 1,
         "TrustedNetworks.contains": 1,
         "wreath._native._core.build_header_map": 1,
         "TrustedNetworks.forwarded_client": 1,
-        "bytes.split": 1,
-        "bytes.strip": 1,
-        "str.lower": 1,
+        "wreath._native._core.forwarded_proto": 1,
         "UserAgentDB.blocked": 1,
         "time.monotonic": 1,
         "TokenBucket.acquire": 1,
@@ -66,7 +63,6 @@
         "wreath._native._core.orm_hydrate_records": 1,
         "dict.values": 1,
         "dict.clear": 1,
-        "list.clear": 1,
         "wreath._native._core.json_dumps": 1,
         "object.__new__": 1,
         "wreath._native._core.append_missing_headers": 1,

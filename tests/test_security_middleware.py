@@ -354,3 +354,11 @@ def test_normalize_host_is_the_gate_that_makes_the_shape_check_dead() -> None:
         assert _normalize_host(bad, pattern=True) is None, bad
     for good in ("*", "*.example.com"):
         assert _normalize_host(good, pattern=True) == good
+
+
+def test_normalize_host_keeps_unicode_trim_and_large_ascii_paths() -> None:
+    from wreath.policy.security import _normalize_host
+
+    assert _normalize_host("\u2003EXAMPLE.COM\u2003") == "example.com"
+    host = "a" * 256
+    assert _normalize_host(host) == host

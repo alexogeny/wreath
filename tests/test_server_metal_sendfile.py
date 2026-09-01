@@ -76,7 +76,9 @@ def sample(tmp_path):
 
 
 def test_file_response_over_metal(sample):
-    response = _run_on(_metal_loop_or_skip(), sample, "/file")
+    loop = _metal_loop_or_skip()
+    loop.set_debug(True)
+    response = _run_on(loop, sample, "/file")
     head, _, body = response.partition(b"\r\n\r\n")
     assert head.startswith(b"HTTP/1.1 200 OK"), response[:200]
     assert f"content-length: {len(BODY)}".encode() in head.lower()

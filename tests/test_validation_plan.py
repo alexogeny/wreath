@@ -44,6 +44,19 @@ class KeywordPayload:
     label: str = "default"
 
 
+@dataclass
+class WidePayload:
+    a: int
+    b: int
+    c: int
+    d: int
+    e: int
+    f: int
+    g: int
+    h: int
+    i: int
+
+
 def _native_plan(annotation: Any) -> object:
     return _core.compile_validation_plan(_compile_plan(annotation, frozenset()))
 
@@ -135,6 +148,22 @@ def test_fused_json_dataclass_preserves_keyword_only_defaults(
         value=7,
         label="named" if isinstance(data, bytearray) else "default",
     )
+
+
+def test_wide_dataclass_keeps_the_heap_validation_path() -> None:
+    plan = _native_plan(WidePayload)
+    payload = {name: index for index, name in enumerate("abcdefghi")}
+    expected = WidePayload(*range(9))
+
+    result, errors = _core.run_validation(plan, payload, ("body",))
+    fused, fused_errors = _core.decode_json_validation_tape(
+        b'{"a":0,"b":1,"c":2,"d":3,"e":4,"f":5,"g":6,"h":7,"i":8}',
+        plan,
+        ("body",),
+    )
+
+    assert errors == fused_errors == []
+    assert result == fused == expected
 
 
 @pytest.mark.parametrize(

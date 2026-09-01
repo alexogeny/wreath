@@ -1422,38 +1422,62 @@ start_stream_app(Http2Protocol *proto, Http2Stream *stream)
         stream->scope, stream->receive_callable, stream->send_callable
     };
     PyObject *target = proto->native_app != NULL ? proto->native_app : proto->app;
-    PyObject *coro = PyObject_Vectorcall(target, app_args, 3, NULL);
+    PyObject *awaitable = PyObject_Vectorcall(target, app_args, 3, NULL);
+    PyObject *driver = NULL;
     PyObject *yielded = NULL;
     PyObject *continuation = NULL;
     PyObject *task = NULL;
-    if (coro == NULL) {
+    if (awaitable == NULL) {
         return -1;
     }
 
-    PySendResult state = PyIter_Send(coro, Py_None, &yielded);
+    if (PyCoro_CheckExact(awaitable) ||
+        Py_IS_TYPE(awaitable, &ImmediateAwaitableType) ||
+        Py_IS_TYPE(awaitable, &ValueAwaitableType)) {
+        driver = awaitable;
+        awaitable = NULL;
+    }
+    else {
+        driver = wreath_awaitable_iter(awaitable);
+        if (driver == NULL) {
+            PyObject *error = PyErr_GetRaisedException();
+            if (error != NULL) {
+                stream_finish(stream, error, awaitable, WREATH_NFR_TERM_ERROR);
+                Py_DECREF(error);
+            }
+            Py_DECREF(awaitable);
+            return error == NULL ? -1 : 0;
+        }
+    }
+
+    PySendResult state = PyIter_Send(driver, Py_None, &yielded);
     if (state == PYGEN_RETURN) {
         stream_finish(stream, Py_None, (PyObject *)stream, WREATH_NFR_TERM_OK);
-        Py_DECREF(coro);
+        Py_XDECREF(awaitable);
+        Py_DECREF(driver);
         Py_XDECREF(yielded);
         return 0;
     }
     if (state == PYGEN_ERROR) {
         PyObject *error = PyErr_GetRaisedException();
         if (error == NULL) {
-            Py_DECREF(coro);
+            Py_XDECREF(awaitable);
+            Py_DECREF(driver);
             return -1;
         }
-        stream_finish(stream, error, coro, WREATH_NFR_TERM_ERROR);
+        stream_finish(stream, error, driver, WREATH_NFR_TERM_ERROR);
         Py_DECREF(error);
-        Py_DECREF(coro);
+        Py_XDECREF(awaitable);
+        Py_DECREF(driver);
         return 0;
     }
 
-    continuation = wreath_started_coroutine(coro, yielded);
+    continuation = wreath_started_coroutine(driver, yielded);
     if (continuation != NULL) {
         task = PyObject_CallOneArg(proto->loop_create_task, continuation);
     }
-    Py_DECREF(coro);
+    Py_XDECREF(awaitable);
+    Py_DECREF(driver);
     Py_XDECREF(yielded);
     Py_XDECREF(continuation);
     if (task == NULL) {

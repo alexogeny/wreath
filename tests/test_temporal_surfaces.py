@@ -219,6 +219,24 @@ def test_the_request_reports_the_callers_preferred_locale() -> None:
     assert Request(scope, receive).locale == "fr-CA"
 
 
+def test_the_request_keeps_the_large_locale_header_path() -> None:
+    from wreath.request import Request
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    locale = "x-" + "a" * 300
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/",
+        "raw_path": b"/",
+        "query_string": b"",
+        "headers": [(b"accept-language", locale.encode())],
+    }
+    assert Request(scope, receive).locale == locale
+
+
 def test_a_caller_with_no_preference_gets_the_default() -> None:
     from wreath.request import Request
 

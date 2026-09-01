@@ -30,6 +30,8 @@
  */
 #include "wreathcore.h"
 
+#include <stddef.h>
+
 #if defined(_MSC_VER)
 #include <intrin.h>
 #endif
@@ -146,7 +148,6 @@ typedef struct {
     Py_ssize_t nroutes;
     Py_ssize_t nwords;
     int nseg;
-    BRoute **routes;   /* priority order; bit i is routes[i] */
     BRoute *owned_routes; /* compact immutable records owned by this group */
     MaskMap *literal;  /* [nseg] */
     uint64_t *pool;    /* literal mask words, nwords each */
@@ -231,20 +232,34 @@ typedef struct {
 } BParamSlice;
 
 typedef struct {
-    PyObject_HEAD
+    PyObject_VAR_HEAD
     PyObject *names;        /* owned tuple[str, ...] */
     PyObject *path;         /* owned Unicode object backing every slice */
-    PyObject *materialized; /* dict, created only on first Python operation */
-    BParamSlice *slices;
-    Py_ssize_t count;
+    PyObject *cached;       /* one decoded value, or the materialized dict */
+    Py_ssize_t cached_index; /* -1 empty; -2 means cached is the dict */
+    BParamSlice slices[1];
 } BPathParams;
 
 static PyTypeObject BPathParamsType;
 
+static PyObject *
+path_params_decode(BPathParams *self, Py_ssize_t index,
+                   const char *path, Py_ssize_t path_len)
+{
+    BParamSlice slice = self->slices[index];
+    if (slice.offset < 0 || slice.length < 0 ||
+        slice.offset > path_len - slice.length) {
+        PyErr_SetString(PyExc_RuntimeError, "invalid lazy path-parameter slice");
+        return NULL;
+    }
+    return PyUnicode_DecodeUTF8(
+        path + slice.offset, slice.length, "surrogateescape");
+}
+
 static int
 path_params_materialize(BPathParams *self)
 {
-    if (self->materialized != NULL) return 0;
+    if (self->cached_index == -2) return 0;
     PyObject *result = PyDict_New();
     if (result == NULL) return -1;
     Py_ssize_t path_len;
@@ -253,16 +268,10 @@ path_params_materialize(BPathParams *self)
         Py_DECREF(result);
         return -1;
     }
-    for (Py_ssize_t i = 0; i < self->count; i++) {
-        BParamSlice slice = self->slices[i];
-        if (slice.offset < 0 || slice.length < 0 ||
-            slice.offset > path_len - slice.length) {
-            Py_DECREF(result);
-            PyErr_SetString(PyExc_RuntimeError, "invalid lazy path-parameter slice");
-            return -1;
-        }
-        PyObject *value = PyUnicode_DecodeUTF8(
-            path + slice.offset, slice.length, "surrogateescape");
+    for (Py_ssize_t i = 0; i < Py_SIZE(self); i++) {
+        PyObject *value = i == self->cached_index
+            ? Py_NewRef(self->cached)
+            : path_params_decode(self, i, path, path_len);
         if (value == NULL ||
             PyDict_SetItem(result, PyTuple_GET_ITEM(self->names, i), value) < 0) {
             Py_XDECREF(value);
@@ -271,22 +280,89 @@ path_params_materialize(BPathParams *self)
         }
         Py_DECREF(value);
     }
-    self->materialized = result;
+    Py_XSETREF(self->cached, result);
+    self->cached_index = -2;
     return 0;
 }
 
 static Py_ssize_t
 path_params_length(PyObject *op)
 {
-    return ((BPathParams *)op)->count;
+    return Py_SIZE((BPathParams *)op);
+}
+
+static Py_ssize_t
+path_params_find(BPathParams *self, PyObject *key)
+{
+    Py_hash_t key_hash = PyObject_Hash(key);
+    if (key_hash == -1) return -1;
+    for (Py_ssize_t i = 0; i < Py_SIZE(self); i++) {
+        PyObject *name = PyTuple_GET_ITEM(self->names, i);
+        Py_hash_t name_hash = PyObject_Hash(name);
+        if (name_hash == -1) return -1;
+        if (name_hash != key_hash) continue;
+        int equal = PyObject_RichCompareBool(name, key, Py_EQ);
+        if (equal < 0) return -1;
+        if (equal) return i;
+    }
+    return -2;
+}
+
+static PyObject *
+path_params_at(BPathParams *self, Py_ssize_t index)
+{
+    if (self->cached_index == index) return Py_NewRef(self->cached);
+    Py_ssize_t path_len;
+    const char *path = PyUnicode_AsUTF8AndSize(self->path, &path_len);
+    if (path == NULL) return NULL;
+    PyObject *value = path_params_decode(self, index, path, path_len);
+    if (value == NULL) return NULL;
+    Py_XSETREF(self->cached, Py_NewRef(value));
+    self->cached_index = index;
+    return value;
 }
 
 static PyObject *
 path_params_subscript(PyObject *op, PyObject *key)
 {
     BPathParams *self = (BPathParams *)op;
-    if (path_params_materialize(self) < 0) return NULL;
-    return PyObject_GetItem(self->materialized, key);
+    if (self->cached_index == -2) {
+        return PyObject_GetItem(self->cached, key);
+    }
+    Py_ssize_t index = path_params_find(self, key);
+    if (index == -1) return NULL;
+    if (index == -2) {
+        PyErr_SetObject(PyExc_KeyError, key);
+        return NULL;
+    }
+    return path_params_at(self, index);
+}
+
+int
+wreath_path_param_utf8(PyObject *params, PyObject *key,
+                       const char **text, Py_ssize_t *length)
+{
+    if (!Py_IS_TYPE(params, &BPathParamsType)) return 0;
+    BPathParams *self = (BPathParams *)params;
+    if (self->cached_index == -2) return 0;
+    Py_ssize_t index = path_params_find(self, key);
+    if (index == -1) return -1;
+    if (index == -2) {
+        PyErr_SetObject(PyExc_KeyError, key);
+        return -1;
+    }
+    Py_ssize_t path_length;
+    const char *path = PyUnicode_AsUTF8AndSize(self->path, &path_length);
+    if (path == NULL) return -1;
+    BParamSlice slice = self->slices[index];
+    if (slice.offset < 0 || slice.length < 0 ||
+        slice.offset > path_length - slice.length) {
+        PyErr_SetString(PyExc_RuntimeError, "invalid lazy path-parameter slice");
+        return -1;
+    }
+    *text = path + slice.offset;
+    *length = slice.length;
+    return 1;
 }
 
 static PyObject *
@@ -294,7 +370,7 @@ path_params_iter(PyObject *op)
 {
     BPathParams *self = (BPathParams *)op;
     if (path_params_materialize(self) < 0) return NULL;
-    return PyObject_GetIter(self->materialized);
+    return PyObject_GetIter(self->cached);
 }
 
 static PyObject *
@@ -305,17 +381,42 @@ path_params_richcompare(PyObject *left, PyObject *right, int operation)
     if (Py_IS_TYPE(right, &BPathParamsType)) {
         BPathParams *other = (BPathParams *)right;
         if (path_params_materialize(other) < 0) return NULL;
-        right = other->materialized;
+        right = other->cached;
     }
-    return PyObject_RichCompare(self->materialized, right, operation);
+    return PyObject_RichCompare(self->cached, right, operation);
 }
 
 static PyObject *
 path_params_getattro(PyObject *op, PyObject *name)
 {
     BPathParams *self = (BPathParams *)op;
+    if (PyUnicode_Check(name) && PyUnicode_GetLength(name) == 3 &&
+        PyUnicode_CompareWithASCIIString(name, "get") == 0) {
+        return PyObject_GenericGetAttr(op, name);
+    }
     if (path_params_materialize(self) < 0) return NULL;
-    return PyObject_GetAttr(self->materialized, name);
+    return PyObject_GetAttr(self->cached, name);
+}
+
+static PyObject *
+path_params_get(BPathParams *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    if (nargs < 1 || nargs > 2) {
+        PyErr_Format(PyExc_TypeError,
+                     "get expected one or two arguments, got %zd", nargs);
+        return NULL;
+    }
+    if (self->cached_index == -2) {
+        PyObject *value;
+        int found = PyDict_GetItemRef(self->cached, args[0], &value);
+        if (found < 0) return NULL;
+        return found ? value : Py_NewRef(nargs == 2 ? args[1] : Py_None);
+    }
+    Py_ssize_t index = path_params_find(self, args[0]);
+    if (index == -1) return NULL;
+    return index == -2
+        ? Py_NewRef(nargs == 2 ? args[1] : Py_None)
+        : path_params_at(self, index);
 }
 
 static PyObject *
@@ -323,7 +424,7 @@ path_params_repr(PyObject *op)
 {
     BPathParams *self = (BPathParams *)op;
     if (path_params_materialize(self) < 0) return NULL;
-    return PyObject_Repr(self->materialized);
+    return PyObject_Repr(self->cached);
 }
 
 static void
@@ -331,8 +432,7 @@ path_params_dealloc(BPathParams *self)
 {
     Py_XDECREF(self->names);
     Py_XDECREF(self->path);
-    Py_XDECREF(self->materialized);
-    PyMem_Free(self->slices);
+    Py_XDECREF(self->cached);
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
@@ -341,10 +441,17 @@ static PyMappingMethods path_params_mapping = {
     .mp_subscript = path_params_subscript,
 };
 
+static PyMethodDef path_params_methods[] = {
+    {"get", (PyCFunction)(void (*)(void))path_params_get, METH_FASTCALL,
+     "Return the value for key, or default when it is absent."},
+    {NULL, NULL, 0, NULL},
+};
+
 static PyTypeObject BPathParamsType = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name = "wreath._native._core._PathParams",
-    .tp_basicsize = sizeof(BPathParams),
+    .tp_basicsize = offsetof(BPathParams, slices),
+    .tp_itemsize = sizeof(BParamSlice),
     .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_DISALLOW_INSTANTIATION,
     .tp_doc = "Lazy read-only path-parameter mapping.",
     .tp_dealloc = (destructor)path_params_dealloc,
@@ -352,6 +459,7 @@ static PyTypeObject BPathParamsType = {
     .tp_iter = path_params_iter,
     .tp_richcompare = path_params_richcompare,
     .tp_getattro = path_params_getattro,
+    .tp_methods = path_params_methods,
     .tp_repr = path_params_repr,
     .tp_hash = PyObject_HashNotImplemented,
 };
@@ -773,7 +881,6 @@ bgroup_free(BGroup *g)
         for (Py_ssize_t i = 0; i < g->nroutes; i++) broute_clear(&g->owned_routes[i]);
         PyMem_Free(g->owned_routes);
     }
-    PyMem_Free(g->routes);
     PyMem_Free(g);
 }
 
@@ -896,14 +1003,11 @@ bgroup_build(BRoute **cands, Py_ssize_t ncand, int nseg)
     g->nroutes = ncand;
     g->nwords = (ncand + 63) / 64;
 
-    g->routes = PyMem_Malloc((size_t)ncand * sizeof(BRoute *));
     g->owned_routes = PyMem_Calloc((size_t)ncand, sizeof(BRoute));
-    if (g->routes == NULL || g->owned_routes == NULL) goto fail;
-    memcpy(g->routes, cands, (size_t)ncand * sizeof(BRoute *));
-    qsort(g->routes, (size_t)ncand, sizeof(BRoute *), route_priority_cmp);
+    if (g->owned_routes == NULL) goto fail;
+    qsort(cands, (size_t)ncand, sizeof(BRoute *), route_priority_cmp);
     for (Py_ssize_t i = 0; i < ncand; i++) {
-        if (broute_clone(&g->owned_routes[i], g->routes[i]) < 0) goto fail;
-        g->routes[i] = &g->owned_routes[i];
+        if (broute_clone(&g->owned_routes[i], cands[i]) < 0) goto fail;
     }
 
     g->literal = PyMem_Calloc((size_t)nseg, sizeof(MaskMap));
@@ -915,7 +1019,7 @@ bgroup_build(BRoute **cands, Py_ssize_t ncand, int nseg)
     }
 
     for (Py_ssize_t i = 0; i < ncand; i++) {
-        BRoute *r = g->routes[i];
+        BRoute *r = &g->owned_routes[i];
         Py_ssize_t word = i / 64;
         uint64_t bit = 1ULL << (i % 64);
         for (int p = 0; p < nseg; p++) {
@@ -1910,17 +2014,13 @@ path_params_new(BRoute *route, BSeg *segments, PyObject *path)
 {
     Py_ssize_t count = PyTuple_GET_SIZE(route->param_names);
     if (count == 0) return Py_NewRef(Py_None);
-    BPathParams *params = PyObject_New(BPathParams, &BPathParamsType);
+    BPathParams *params = PyObject_NewVar(
+        BPathParams, &BPathParamsType, count);
     if (params == NULL) return NULL;
     params->names = Py_NewRef(route->param_names);
     params->path = Py_NewRef(path);
-    params->materialized = NULL;
-    params->count = count;
-    params->slices = PyMem_Malloc((size_t)count * sizeof(BParamSlice));
-    if (params->slices == NULL) {
-        Py_DECREF(params);
-        return PyErr_NoMemory();
-    }
+    params->cached = NULL;
+    params->cached_index = -1;
     Py_ssize_t path_len;
     const char *base = PyUnicode_AsUTF8AndSize(path, &path_len);
     if (base == NULL) {
@@ -2050,7 +2150,7 @@ brt_match_impl(PolicyRouteTable *self, PyObject *method_obj,
         while (bits) {
             Py_ssize_t i = w * 64 + route_ctz64(bits);
             bits &= bits - 1;
-            BRoute *r = g->routes[i];
+            BRoute *r = &g->owned_routes[i];
             int matches = 1;
             BRT_PROBE(self->probe_stats.verify_routes++);
             for (int p = 0; p < r->nseg; p++) {

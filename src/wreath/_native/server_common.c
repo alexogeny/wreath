@@ -577,6 +577,29 @@ wreath_started_coroutine(PyObject *coroutine, PyObject *pending)
 }
 
 
+PyObject *
+wreath_awaitable_iter(PyObject *awaitable)
+{
+    PyAsyncMethods *async = Py_TYPE(awaitable)->tp_as_async;
+    if (async == NULL || async->am_await == NULL) {
+        PyErr_Format(PyExc_TypeError,
+                     "object %.100s cannot be used in 'await' expression",
+                     Py_TYPE(awaitable)->tp_name);
+        return NULL;
+    }
+    PyObject *iterator = async->am_await(awaitable);
+    if (iterator == NULL) return NULL;
+    if (!PyIter_Check(iterator)) {
+        PyErr_Format(PyExc_TypeError,
+                     "__await__() returned non-iterator of type '%.100s'",
+                     Py_TYPE(iterator)->tp_name);
+        Py_DECREF(iterator);
+        return NULL;
+    }
+    return iterator;
+}
+
+
 /* --- small helpers ------------------------------------------------------- */
 
 Py_ssize_t

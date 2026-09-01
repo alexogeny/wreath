@@ -39,6 +39,7 @@ typedef struct {
     Py_ssize_t len;
     Py_ssize_t cap;
     int first;
+    char inline_data[256];
 } Buf;
 
 static int
@@ -47,11 +48,18 @@ buf_ensure(Buf *b, Py_ssize_t extra)
     if (b->len + extra <= b->cap) {
         return 0;
     }
-    Py_ssize_t newcap = b->cap ? b->cap : 256;
+    Py_ssize_t newcap = b->cap;
     while (newcap < b->len + extra) {
         newcap *= 2;
     }
-    char *grown = PyMem_Realloc(b->data, (size_t)newcap);
+    char *grown;
+    if (b->data == b->inline_data) {
+        grown = PyMem_Malloc((size_t)newcap);
+        if (grown != NULL) memcpy(grown, b->data, (size_t)b->len);
+    }
+    else {
+        grown = PyMem_Realloc(b->data, (size_t)newcap);
+    }
     if (grown == NULL) {
         PyErr_NoMemory();
         return -1;
@@ -582,7 +590,8 @@ wreath_orm_shape(PyObject *self, PyObject *args)
     if (!PyArg_ParseTuple(args, "OO", &registry, &select)) {
         return NULL;
     }
-    Buf b = {NULL, 0, 0, 1};
+    Buf b = {.len = 0, .cap = sizeof(b.inline_data), .first = 1};
+    b.data = b.inline_data;
     PyObject *result = NULL;
 
     /* fingerprint, model qualname */
@@ -730,7 +739,7 @@ wreath_orm_shape(PyObject *self, PyObject *args)
     result = PyBytes_FromStringAndSize(b.data, b.len);
 
 done:
-    PyMem_Free(b.data);
+    if (b.data != b.inline_data) PyMem_Free(b.data);
     return result;
 }
 
