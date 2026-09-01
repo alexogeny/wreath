@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -81,6 +82,14 @@ async def test_repeated_rows_for_one_key_produce_one_object(
     database.connection.script("users", [user_row(1), user_row(1), user_row(1)])
     users = await session.fetch(User.select())
     assert len(users) == 1
+
+
+async def test_record_hydration_keeps_the_large_batch_path(
+    database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script("users", [user_row(index) for index in range(17)])
+    users = await session.fetch(User.select())
+    assert [user.id for user in users] == list(range(17))
 
 
 async def test_one_identity_is_reused_across_queries(
@@ -433,6 +442,22 @@ async def test_an_inner_failure_rolls_back_to_its_savepoint(
         "RELEASE SAVEPOINT wreath_sp_1",
         "COMMIT",
     ]
+
+
+async def test_work_continues_in_outer_transaction_after_inner_rollback(
+    database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script("INSERT", [[7, None]])
+    user = User(email="a@b.c", name="A")
+
+    async with session.begin():
+        with pytest.raises(RuntimeError):
+            async with session.begin():
+                raise RuntimeError("inner")
+        session.add(user)
+        await session.flush()
+
+    assert user.id == 7
 
 
 async def test_a_failed_rollback_discards_the_connection(
@@ -848,6 +873,34 @@ async def test_a_staged_generated_key_is_present_in_the_insert_audit(
 
     assert audit.changes[0].key == "7"
     assert audit.changes[0].fields["id"] == 7
+
+
+async def test_one_flush_keeps_every_pending_audit_record(
+    monkeypatch: pytest.MonkeyPatch, registry: Registry, database: FakeDatabase
+) -> None:
+    class Facet:
+        redact = frozenset()
+
+    class Audit:
+        def __init__(self) -> None:
+            self.changes: list[Any] = []
+
+        def attribute(self) -> str:
+            return "test:actor"
+
+        async def record_many(self, changes: list[Any], *, connection: Any) -> None:
+            self.changes += changes
+
+    monkeypatch.setattr(User, "__wreath_facets__", {"audit": Facet()})
+    audit = Audit()
+    audited = Session(registry, "write", audit=audit)
+    database.connection.script("INSERT", [[7, None], [8, None]])
+    audited.add(User(email="a@b.c", name="A"))
+    audited.add(User(email="b@b.c", name="B"))
+
+    await audited.flush()
+
+    assert [change.key for change in audit.changes] == ["7", "8"]
 
 
 async def test_update_writes_only_dirty_columns(database: FakeDatabase, session: Session) -> None:
@@ -1419,6 +1472,56 @@ async def test_deleting_a_transient_object_just_unschedules_it(session: Session)
     session.add(user)
     session.delete(user)
     assert user not in session._new
+
+
+async def test_interleaved_repeated_deletes_remain_unique(
+    database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script(
+        "SELECT",
+        [user_row(1, "a@b.c", "A"), user_row(2, "b@c.d", "B")],
+    )
+    first, second = await session.fetch(User.select())
+
+    session.delete(first)
+    session.delete(second)
+    session.delete(first)
+
+    assert session._deleted == [first, second]
+    assert session._deleted_ids == {id(first), id(second)}
+
+
+async def test_clear_pending_resets_each_lazy_state_branch(session: Session) -> None:
+    marker = object()
+
+    session._deleted = [marker]
+    session._deleted_ids = {id(marker)}
+    session._clear_pending()
+    assert session._deleted == []
+    assert not session._deleted_ids
+
+    session._dirty_items = [marker]
+    session._clear_pending()
+    assert not session._dirty_items
+
+    session._new_items = [marker]
+    session._new_stale = True
+    session._clear_pending()
+    assert not session._new_items
+    assert session._new_stale is False
+
+
+async def test_invalidating_undo_removes_mutable_pending_identity_sets(
+    session: Session,
+) -> None:
+    user = User(email="a@b.c", name="A")
+    session._schedule_new(user)
+    session._schedule_deleted(user)
+
+    session._invalidate_undo_frame([SimpleNamespace(instances=(user,))])
+
+    assert id(user) not in session._new_ids
+    assert id(user) not in session._deleted_ids
 
 
 async def test_interleaved_models_flush_in_model_then_insertion_order(

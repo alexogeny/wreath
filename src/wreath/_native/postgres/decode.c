@@ -554,19 +554,21 @@ wreath_pg_decode_fetchval(PyObject *plan_object, PyObject *tape_object)
     }
     if (tape->row_count == 0) return Py_NewRef(Py_None);
     Py_ssize_t owner_limit = 0;
+    Py_buffer inline_buffers[4];
     Py_buffer *buffers = wreath_pg_acquire_owner_buffers(
-        tape, 1, &owner_limit);
+        tape, 1, &owner_limit, inline_buffers, 4);
     if (buffers == NULL) return NULL;
     PyObject *result = decode_ref(plan, tape, 0, 0, buffers);
-    wreath_pg_release_owner_buffers(buffers, owner_limit);
+    wreath_pg_release_owner_buffers(buffers, owner_limit, inline_buffers);
     if (result != NULL && wreath_pg_tape_consume(tape, tape->row_count) < 0)
         Py_CLEAR(result);
     return result;
 }
 
 Py_buffer *
-wreath_pg_acquire_owner_buffers(WreathPgFieldTape *tape, Py_ssize_t rows,
-                             Py_ssize_t *owner_limit_out)
+wreath_pg_acquire_owner_buffers(
+    WreathPgFieldTape *tape, Py_ssize_t rows, Py_ssize_t *owner_limit_out,
+    Py_buffer *inline_buffers, Py_ssize_t inline_capacity)
 {
     Py_ssize_t refs_span = rows * tape->stored_columns;
     /* Owner indexes are monotonic, so the last field of the last row names the
@@ -582,7 +584,8 @@ wreath_pg_acquire_owner_buffers(WreathPgFieldTape *tape, Py_ssize_t rows,
         PyErr_SetString(PyExc_RuntimeError, "field tape owner index is invalid");
         return NULL;
     }
-    buffers = PyMem_Calloc((size_t)(count > 0 ? count : 1), sizeof(Py_buffer));
+    buffers = count <= inline_capacity ? inline_buffers :
+        PyMem_Malloc((size_t)count * sizeof(Py_buffer));
     if (buffers == NULL) {
         PyErr_NoMemory();
         return NULL;
@@ -592,7 +595,7 @@ wreath_pg_acquire_owner_buffers(WreathPgFieldTape *tape, Py_ssize_t rows,
                 PyList_GET_ITEM(tape->owners, tape->owner_head + i), &buffers[i],
                 PyBUF_CONTIG_RO) < 0) {
             for (Py_ssize_t j = 0; j < i; j++) PyBuffer_Release(&buffers[j]);
-            PyMem_Free(buffers);
+            if (buffers != inline_buffers) PyMem_Free(buffers);
             return NULL;
         }
     }
@@ -601,12 +604,13 @@ wreath_pg_acquire_owner_buffers(WreathPgFieldTape *tape, Py_ssize_t rows,
 }
 
 void
-wreath_pg_release_owner_buffers(Py_buffer *buffers, Py_ssize_t owner_limit)
+wreath_pg_release_owner_buffers(
+    Py_buffer *buffers, Py_ssize_t owner_limit, Py_buffer *inline_buffers)
 {
     for (Py_ssize_t i = 0; i < owner_limit; i++) {
         if (buffers[i].obj != NULL) PyBuffer_Release(&buffers[i]);
     }
-    PyMem_Free(buffers);
+    if (buffers != inline_buffers) PyMem_Free(buffers);
 }
 
 /* Decode `rows` rows into private records, then append them to `dest`.
@@ -618,7 +622,8 @@ fetch_into(WreathPgDecoderPlan *plan, WreathPgFieldTape *tape, Py_ssize_t rows,
            Py_buffer *buffers, PyObject *dest)
 {
     Py_ssize_t columns = tape->stored_columns;
-    PyObject **records;
+    PyObject *inline_records[16] = {NULL};
+    PyObject **records = inline_records;
     int failed = -1;
     int batch = wreath_pg_record_batch_check(dest);
     Py_ssize_t original_size = batch
@@ -696,10 +701,12 @@ fetch_into(WreathPgDecoderPlan *plan, WreathPgFieldTape *tape, Py_ssize_t rows,
         return 0;
     }
 
-    records = PyMem_Calloc((size_t)(rows > 0 ? rows : 1), sizeof(PyObject *));
-    if (records == NULL) {
-        PyErr_NoMemory();
-        return -1;
+    if (rows > 16) {
+        records = PyMem_Calloc((size_t)rows, sizeof(PyObject *));
+        if (records == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
     }
     for (Py_ssize_t row = 0; row < rows; row++) {
         records[row] = wreath_pg_record_alloc(plan->record_descriptor, columns);
@@ -760,7 +767,7 @@ fetch_into(WreathPgDecoderPlan *plan, WreathPgFieldTape *tape, Py_ssize_t rows,
 
 done:
     for (Py_ssize_t row = 0; row < rows; row++) Py_XDECREF(records[row]);
-    PyMem_Free(records);
+    if (records != inline_records) PyMem_Free(records);
     return failed;
 }
 
@@ -929,6 +936,7 @@ wreath_pg_decode_fetch_extend(PyObject *plan_object, PyObject *tape_object,
     WreathPgFieldTape *tape = (WreathPgFieldTape *)tape_object;
     Py_ssize_t rows;
     Py_ssize_t owner_limit = 0;
+    Py_buffer inline_buffers[4];
     Py_buffer *buffers;
     int result;
 
@@ -941,10 +949,11 @@ wreath_pg_decode_fetch_extend(PyObject *plan_object, PyObject *tape_object,
     }
     rows = tape->row_count < limit ? tape->row_count : limit;
     if (rows == 0) return 0;
-    buffers = wreath_pg_acquire_owner_buffers(tape, rows, &owner_limit);
+    buffers = wreath_pg_acquire_owner_buffers(
+        tape, rows, &owner_limit, inline_buffers, 4);
     if (buffers == NULL) return -1;
     result = fetch_into(plan, tape, rows, buffers, dest);
-    wreath_pg_release_owner_buffers(buffers, owner_limit);
+    wreath_pg_release_owner_buffers(buffers, owner_limit, inline_buffers);
     return result;
 }
 
@@ -957,6 +966,7 @@ decode_field_tape(PyObject *module, PyObject *args)
     Py_ssize_t limit;
     Py_ssize_t rows;
     Py_ssize_t owner_limit = 0;
+    Py_buffer inline_buffers[4];
     Py_buffer *buffers = NULL;
     PyObject *result = NULL;
     (void)module;
@@ -971,7 +981,8 @@ decode_field_tape(PyObject *module, PyObject *args)
         return NULL;
     }
     rows = tape->row_count < limit ? tape->row_count : limit;
-    buffers = wreath_pg_acquire_owner_buffers(tape, rows, &owner_limit);
+    buffers = wreath_pg_acquire_owner_buffers(
+        tape, rows, &owner_limit, inline_buffers, 4);
     if (buffers == NULL) return NULL;
 
     if (strcmp(mode, "fetchval") == 0) {
@@ -1011,7 +1022,7 @@ decode_field_tape(PyObject *module, PyObject *args)
         Py_CLEAR(result);
 
 done:
-    wreath_pg_release_owner_buffers(buffers, owner_limit);
+    wreath_pg_release_owner_buffers(buffers, owner_limit, inline_buffers);
     return result;
 }
 

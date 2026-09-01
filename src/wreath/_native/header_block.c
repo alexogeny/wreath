@@ -54,11 +54,33 @@ static int header_block_freelist_enabled = 0;
 static void
 header_block_free_storage(WreathHeaderBlock *self)
 {
-    PyMem_Free(self->spans);
     PyMem_Free(self->names);
-    PyMem_Free(self->values);
     PyMem_Free(self->index);
     PyObject_Free(self);
+}
+
+static int
+header_block_storage_size(Py_ssize_t capacity, int object_mode,
+                          size_t *size_out)
+{
+    size_t item_size = 2 * sizeof(PyObject *) +
+        (object_mode ? 0 : sizeof(WreathHeaderSpan));
+    if ((size_t)capacity > SIZE_MAX / item_size) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    *size_out = (size_t)capacity * item_size;
+    return 0;
+}
+
+static void
+header_block_layout(WreathHeaderBlock *self, void *storage,
+                    Py_ssize_t capacity)
+{
+    self->names = storage;
+    self->values = self->names + capacity;
+    self->spans = self->object_mode ? NULL :
+        (WreathHeaderSpan *)(self->values + capacity);
 }
 
 static void
@@ -152,13 +174,14 @@ new_block(Py_ssize_t capacity, int object_mode)
     self->unique_count = 0;
     self->object_mode = (unsigned char)object_mode;
     self->index_ready = 0;
-    self->names = PyMem_Calloc((size_t)capacity, sizeof(PyObject *));
-    self->values = PyMem_Calloc((size_t)capacity, sizeof(PyObject *));
-    if (self->names == NULL || self->values == NULL) goto memory_error;
-    if (!object_mode) {
-        self->spans = PyMem_Malloc((size_t)capacity * sizeof(WreathHeaderSpan));
-        if (self->spans == NULL) goto memory_error;
-    }
+    size_t storage_size;
+    if (header_block_storage_size(capacity, object_mode, &storage_size) < 0)
+        goto memory_error;
+    void *storage = PyMem_Malloc(storage_size);
+    if (storage == NULL) goto memory_error;
+    header_block_layout(self, storage, capacity);
+    memset(self->names, 0, (size_t)capacity * sizeof(PyObject *));
+    memset(self->values, 0, (size_t)capacity * sizeof(PyObject *));
     return self;
 
 memory_error:
@@ -206,33 +229,32 @@ grow(WreathHeaderBlock *self)
         PyErr_NoMemory();
         return -1;
     }
-    PyObject **names = PyMem_Realloc(
-        self->names, (size_t)next * sizeof(PyObject *));
-    if (names == NULL) {
+    size_t storage_size;
+    if (header_block_storage_size(next, self->object_mode, &storage_size) < 0)
+        return -1;
+    void *storage = PyMem_Malloc(storage_size);
+    if (storage == NULL) {
         PyErr_NoMemory();
         return -1;
     }
-    self->names = names;
-    PyObject **values = PyMem_Realloc(
-        self->values, (size_t)next * sizeof(PyObject *));
-    if (values == NULL) {
-        PyErr_NoMemory();
-        return -1;
-    }
-    self->values = values;
-    memset(self->names + self->capacity, 0,
+    WreathHeaderBlock grown = {.object_mode = self->object_mode};
+    header_block_layout(&grown, storage, next);
+    memcpy(grown.names, self->names,
+           (size_t)self->capacity * sizeof(PyObject *));
+    memcpy(grown.values, self->values,
+           (size_t)self->capacity * sizeof(PyObject *));
+    memset(grown.names + self->capacity, 0,
            (size_t)(next - self->capacity) * sizeof(PyObject *));
-    memset(self->values + self->capacity, 0,
+    memset(grown.values + self->capacity, 0,
            (size_t)(next - self->capacity) * sizeof(PyObject *));
     if (!self->object_mode) {
-        WreathHeaderSpan *spans = PyMem_Realloc(
-            self->spans, (size_t)next * sizeof(WreathHeaderSpan));
-        if (spans == NULL) {
-            PyErr_NoMemory();
-            return -1;
-        }
-        self->spans = spans;
+        memcpy(grown.spans, self->spans,
+               (size_t)self->capacity * sizeof(WreathHeaderSpan));
     }
+    PyMem_Free(self->names);
+    self->names = grown.names;
+    self->values = grown.values;
+    self->spans = grown.spans;
     self->capacity = next;
     return 0;
 }

@@ -63,6 +63,12 @@ def test_select_language_requires_an_offer() -> None:
         select_language("en", [])
 
 
+def test_select_language_keeps_large_offer_tables_and_text() -> None:
+    offered = [f"x-{index}" for index in range(8)]
+    offered.append("X-" + "a" * 300)
+    assert select_language("x-" + "a" * 300, offered) == offered[8]
+
+
 def test_a_catalogue_falls_back_across_languages_then_to_the_validator() -> None:
     catalogue = MessageCatalogue(
         {

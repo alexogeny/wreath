@@ -1025,8 +1025,11 @@ class EventLoop(_LoopBase):
         sock = transport.get_extra_info("socket")
         if sock is None:
             raise RuntimeError("transport has no socket to send on")
-        # `sock_sendfile` validates mode, offset and count itself, so there is
-        # nothing to add here beyond having a socket to send on.
+        # accept4 set O_NONBLOCK, but socket(fileno=fd) cannot recover that into
+        # its timeout field and asyncio's debug check reads the field. Pay the
+        # redundant fcntl only for sendfile, not for every accepted connection.
+        if sock.gettimeout() != 0.0:
+            sock.setblocking(False)
         resume_reading = transport.is_reading()
         transport.pause_reading()
         try:

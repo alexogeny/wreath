@@ -489,13 +489,14 @@ validate_union(ValidationNode *compiled, PyObject *value, PyObject *loc,
 }
 
 static void
-dataclass_values_clear(PyObject **values, Py_ssize_t count, PyObject *kwargs)
+dataclass_values_clear(PyObject **values, PyObject **inline_values,
+                       Py_ssize_t count, PyObject *kwargs)
 {
     if (values != NULL) {
         for (Py_ssize_t index = 0; index < count; index++) {
             Py_XDECREF(values[index]);
         }
-        PyMem_Free(values);
+        if (values != inline_values) PyMem_Free(values);
     }
     Py_XDECREF(kwargs);
 }
@@ -518,11 +519,15 @@ validate_dataclass(ValidationNode *compiled, PyObject *value, PyObject *loc,
     Py_ssize_t field_count = compiled->field_count;
     int positional = PyObject_IsTrue(PyTuple_GET_ITEM(plan, 4));
     if (positional < 0) return NULL;
+    PyObject *inline_values[8] = {NULL};
     PyObject **values = NULL;
     PyObject *kwargs = NULL;
     if (positional && field_count != 0) {
-        values = PyMem_Calloc((size_t)field_count, sizeof(*values));
-        if (values == NULL) return PyErr_NoMemory();
+        values = inline_values;
+        if (field_count > 8) {
+            values = PyMem_Calloc((size_t)field_count, sizeof(*values));
+            if (values == NULL) return PyErr_NoMemory();
+        }
     }
     else if (!positional) {
         kwargs = PyDict_New();
@@ -573,7 +578,7 @@ validate_dataclass(ValidationNode *compiled, PyObject *value, PyObject *loc,
         }
     }
     if (PyList_GET_SIZE(errors) > 0 || *steps < 0) {
-        dataclass_values_clear(values, field_count, kwargs);
+        dataclass_values_clear(values, inline_values, field_count, kwargs);
         return Py_NewRef(value);
     }
     PyObject *instance;
@@ -593,11 +598,11 @@ validate_dataclass(ValidationNode *compiled, PyObject *value, PyObject *loc,
         }
         instance = PyObject_VectorcallDict(cls, NULL, 0, kwargs);
     }
-    dataclass_values_clear(values, field_count, kwargs);
+    dataclass_values_clear(values, inline_values, field_count, kwargs);
     return instance;
 
 error:
-    dataclass_values_clear(values, field_count, kwargs);
+    dataclass_values_clear(values, inline_values, field_count, kwargs);
     return NULL;
 }
 

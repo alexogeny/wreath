@@ -138,15 +138,18 @@ wreath_minimal_prefixes(PyObject *Py_UNUSED(self), PyObject *source)
 {
     PyObject *sequence = PySequence_Tuple(source);
     PyObject *result = NULL;
-    PyObject **items = NULL, **scratch = NULL;
+    PyObject *inline_items[16], *inline_scratch[16];
+    PyObject **items = inline_items, **scratch = inline_scratch;
     if (sequence == NULL) return NULL;
     Py_ssize_t count = PyTuple_GET_SIZE(sequence);
     if ((size_t)count > SIZE_MAX / sizeof(*items)) {
         PyErr_NoMemory();
         goto done;
     }
-    items = PyMem_Malloc((size_t)(count > 0 ? count : 1) * sizeof(*items));
-    scratch = PyMem_Malloc((size_t)(count > 0 ? count : 1) * sizeof(*scratch));
+    if (count > 16) {
+        items = PyMem_Malloc((size_t)count * sizeof(*items));
+        scratch = PyMem_Malloc((size_t)count * sizeof(*scratch));
+    }
     if (items == NULL || scratch == NULL) {
         PyErr_NoMemory();
         goto done;
@@ -180,8 +183,8 @@ wreath_minimal_prefixes(PyObject *Py_UNUSED(self), PyObject *source)
     }
 
 done:
-    PyMem_Free(items);
-    PyMem_Free(scratch);
+    if (items != inline_items) PyMem_Free(items);
+    if (scratch != inline_scratch) PyMem_Free(scratch);
     Py_DECREF(sequence);
     return result;
 }
@@ -301,8 +304,10 @@ wreath_rank_indices(PyObject *Py_UNUSED(self), PyObject *args)
         if (score_buffer.obj != NULL) PyBuffer_Release(&score_buffer);
         return PyErr_NoMemory();
     }
-    NumericRank *ranks = workspace_count != 0
-        ? PyMem_Malloc((size_t)workspace_count * sizeof(*ranks)) : NULL;
+    NumericRank inline_ranks[32];
+    NumericRank *ranks = workspace_count <= 32
+        ? inline_ranks
+        : PyMem_Malloc((size_t)workspace_count * sizeof(*ranks));
     if (workspace_count != 0 && ranks == NULL) {
         Py_XDECREF(scores);
         if (score_buffer.obj != NULL) PyBuffer_Release(&score_buffer);
@@ -362,14 +367,14 @@ wreath_rank_indices(PyObject *Py_UNUSED(self), PyObject *args)
         PyTuple_SET_ITEM(result, index, position);
         if (include_scores) PyList_SET_ITEM(projected_scores, index, projected);
     }
-    PyMem_Free(ranks);
+    if (ranks != inline_ranks) PyMem_Free(ranks);
     Py_XDECREF(scores);
     if (score_buffer.obj != NULL) PyBuffer_Release(&score_buffer);
     return include_scores
         ? wreath_tuple2_from_owned(result, projected_scores) : result;
 
 rank_error:
-    PyMem_Free(ranks);
+    if (ranks != inline_ranks) PyMem_Free(ranks);
     Py_XDECREF(scores);
     if (score_buffer.obj != NULL) PyBuffer_Release(&score_buffer);
     return NULL;
@@ -381,7 +386,6 @@ fusion_slots_clear(FusionSlot *slots, size_t capacity)
     if (slots == NULL) return;
     for (size_t index = 0; index < capacity; index++)
         Py_XDECREF(slots[index].key);
-    PyMem_Free(slots);
 }
 
 static int
@@ -445,7 +449,14 @@ wreath_fused_order(PyObject *Py_UNUSED(self), PyObject *args)
         goto error_rankings;
     }
     capacity *= 2;
-    FusionSlot *slots = PyMem_Calloc(capacity, sizeof(FusionSlot));
+    FusionSlot inline_slots[32];
+    FusionSlot *slots;
+    if (capacity <= 32) {
+        slots = inline_slots;
+        memset(slots, 0, capacity * sizeof(*slots));
+    } else {
+        slots = PyMem_Calloc(capacity, sizeof(*slots));
+    }
     if (slots == NULL) {
         PyErr_NoMemory();
         goto error_rankings;
@@ -487,10 +498,16 @@ wreath_fused_order(PyObject *Py_UNUSED(self), PyObject *args)
         }
         Py_DECREF(ranking);
     }
-    FusionRank *ordered = PyMem_Malloc((used > 0 ? used : 1) * sizeof(FusionRank));
-    FusionRank *scratch = PyMem_Malloc((used > 0 ? used : 1) * sizeof(FusionRank));
+    FusionRank inline_ordered[16], inline_scratch[16];
+    FusionRank *ordered = inline_ordered, *scratch = inline_scratch;
+    if (used > 16) {
+        ordered = PyMem_Malloc(used * sizeof(*ordered));
+        scratch = PyMem_Malloc(used * sizeof(*scratch));
+    }
     if (ordered == NULL || scratch == NULL) {
-        PyMem_Free(ordered); PyMem_Free(scratch); PyErr_NoMemory(); goto error;
+        if (ordered != inline_ordered) PyMem_Free(ordered);
+        if (scratch != inline_scratch) PyMem_Free(scratch);
+        PyErr_NoMemory(); goto error;
     }
     size_t position = 0;
     for (size_t index = 0; index < capacity; index++) {
@@ -498,20 +515,27 @@ wreath_fused_order(PyObject *Py_UNUSED(self), PyObject *args)
             ordered[position++] = (FusionRank){slots[index].key, slots[index].score};
     }
     if (fusion_sort(ordered, scratch, used) < 0) {
-        PyMem_Free(ordered); PyMem_Free(scratch); goto error;
+        if (ordered != inline_ordered) PyMem_Free(ordered);
+        if (scratch != inline_scratch) PyMem_Free(scratch);
+        goto error;
     }
     PyObject *result = PyList_New((Py_ssize_t)used);
     if (result == NULL) {
-        PyMem_Free(ordered); PyMem_Free(scratch); goto error;
+        if (ordered != inline_ordered) PyMem_Free(ordered);
+        if (scratch != inline_scratch) PyMem_Free(scratch);
+        goto error;
     }
     for (size_t index = 0; index < used; index++)
         PyList_SET_ITEM(result, (Py_ssize_t)index, Py_NewRef(ordered[index].key));
-    PyMem_Free(ordered); PyMem_Free(scratch);
+    if (ordered != inline_ordered) PyMem_Free(ordered);
+    if (scratch != inline_scratch) PyMem_Free(scratch);
     fusion_slots_clear(slots, capacity);
+    if (slots != inline_slots) PyMem_Free(slots);
     Py_DECREF(rankings);
     return result;
 error:
     fusion_slots_clear(slots, capacity);
+    if (slots != inline_slots) PyMem_Free(slots);
 error_rankings:
     Py_DECREF(rankings);
     return NULL;
@@ -694,20 +718,27 @@ wreath_normalise_argument(PyObject *Py_UNUSED(self), PyObject *args)
         }
         active_capacity *= 2;
     }
-    ArgumentActiveSlot *active = PyMem_Calloc(active_capacity, sizeof(*active));
+    ArgumentActiveSlot inline_active[8];
+    ArgumentActiveSlot *active;
+    if (active_capacity <= 8) {
+        active = inline_active;
+        memset(active, 0, active_capacity * sizeof(*active));
+    } else {
+        active = PyMem_Calloc(active_capacity, sizeof(*active));
+    }
     if (active == NULL) return PyErr_NoMemory();
     ArgumentWriter state = {
         max_fields, max_depth, active, active_capacity, NULL,
         {NULL, NULL, 0, 0},
     };
     if (wreath_writer_init(&state.writer, 256) < 0) {
-        PyMem_Free(active);
+        if (active != inline_active) PyMem_Free(active);
         return NULL;
     }
     int result = wreath_writer_write(&state.writer, "{\"value\":", 9);
     if (result == 0) result = argument_write_value(&state, value, 0);
     if (result == 0) result = wreath_writer_byte(&state.writer, '}');
-    PyMem_Free(active);
+    if (active != inline_active) PyMem_Free(active);
     if (result < 0) {
         Py_XDECREF(state.reason);
         Py_XDECREF(state.writer.bytes);
@@ -2834,8 +2865,17 @@ wreath_locale_preference(PyObject *Py_UNUSED(self), PyObject *header)
         return NULL;
     }
     Py_ssize_t length = PyUnicode_GetLength(header);
-    Py_UCS4 *text = PyUnicode_AsUCS4Copy(header);
-    if (text == NULL) return NULL;
+    Py_UCS4 inline_text[256];
+    Py_UCS4 *text = inline_text;
+    if (length > 256) {
+        if ((size_t)length > SIZE_MAX / sizeof(Py_UCS4)) return PyErr_NoMemory();
+        text = PyMem_Malloc((size_t)length * sizeof(Py_UCS4));
+        if (text == NULL) return PyErr_NoMemory();
+    }
+    int kind = PyUnicode_KIND(header);
+    const void *data = PyUnicode_DATA(header);
+    for (Py_ssize_t index = 0; index < length; index++)
+        text[index] = PyUnicode_READ(kind, data, index);
     int found = 0;
     double best_quality = 0.0;
     Py_ssize_t best_start = 0, best_end = 0;
@@ -2866,7 +2906,7 @@ wreath_locale_preference(PyObject *Py_UNUSED(self), PyObject *header)
         if (part_end == length) break;
         part_start = part_end + 1;
     }
-    PyMem_Free(text);
+    if (text != inline_text) PyMem_Free(text);
     return found ? PyUnicode_Substring(header, best_start, best_end)
                  : PyUnicode_FromString("en");
 }
@@ -2924,11 +2964,21 @@ wreath_select_language(PyObject *Py_UNUSED(self), PyObject *args)
                         "offered must contain at least one language");
         return NULL;
     }
-    LocaleOffer *offers = PyMem_Calloc((size_t)count, sizeof(LocaleOffer));
+    LocaleOffer inline_offers[8];
+    LocaleOffer *offers;
+    if (count <= 8) {
+        offers = inline_offers;
+        memset(offers, 0, (size_t)count * sizeof(*offers));
+    } else {
+        offers = PyMem_Calloc((size_t)count, sizeof(*offers));
+    }
     if (offers == NULL) {
         Py_DECREF(offered);
         return PyErr_NoMemory();
     }
+    Py_UCS4 inline_offer_storage[128];
+    Py_UCS4 *offer_storage = inline_offer_storage;
+    size_t offer_cell_count = 0;
     for (Py_ssize_t index = 0; index < count; index++) {
         PyObject *item = PySequence_Fast_GET_ITEM(offered, index);
         if (!PyUnicode_Check(item)) {
@@ -2938,12 +2988,51 @@ wreath_select_language(PyObject *Py_UNUSED(self), PyObject *args)
         }
         offers[index].original = item;
         offers[index].length = PyUnicode_GetLength(item);
-        offers[index].text = PyUnicode_AsUCS4Copy(item);
-        if (offers[index].text == NULL) goto language_error;
+        if ((size_t)offers[index].length > SIZE_MAX - offer_cell_count) {
+            PyErr_NoMemory();
+            goto language_error;
+        }
+        offer_cell_count += (size_t)offers[index].length;
+    }
+    if (offer_cell_count > 128) {
+        if (offer_cell_count > SIZE_MAX / sizeof(Py_UCS4)) {
+            PyErr_NoMemory();
+            goto language_error;
+        }
+        offer_storage = PyMem_Malloc(offer_cell_count * sizeof(Py_UCS4));
+        if (offer_storage == NULL) {
+            PyErr_NoMemory();
+            goto language_error;
+        }
+    }
+    size_t offer_offset = 0;
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyObject *item = offers[index].original;
+        int kind = PyUnicode_KIND(item);
+        const void *data = PyUnicode_DATA(item);
+        offers[index].text = offer_storage + offer_offset;
+        for (Py_ssize_t cell = 0; cell < offers[index].length; cell++)
+            offers[index].text[cell] = PyUnicode_READ(kind, data, cell);
+        offer_offset += (size_t)offers[index].length;
     }
     Py_ssize_t length = PyUnicode_GetLength(header);
-    Py_UCS4 *text = PyUnicode_AsUCS4Copy(header);
-    if (text == NULL) goto language_error;
+    Py_UCS4 inline_text[256];
+    Py_UCS4 *text = inline_text;
+    if (length > 256) {
+        if ((size_t)length > SIZE_MAX / sizeof(Py_UCS4)) {
+            PyErr_NoMemory();
+            goto language_error;
+        }
+        text = PyMem_Malloc((size_t)length * sizeof(Py_UCS4));
+        if (text == NULL) {
+            PyErr_NoMemory();
+            goto language_error;
+        }
+    }
+    int header_kind = PyUnicode_KIND(header);
+    const void *header_data = PyUnicode_DATA(header);
+    for (Py_ssize_t index = 0; index < length; index++)
+        text[index] = PyUnicode_READ(header_kind, header_data, index);
     Py_ssize_t best = -1;
     double best_quality = 0.0, wildcard_quality = 0.0;
     Py_ssize_t part_start = 0;
@@ -2990,7 +3079,7 @@ wreath_select_language(PyObject *Py_UNUSED(self), PyObject *args)
         if (part_end == length) break;
         part_start = part_end + 1;
     }
-    PyMem_Free(text);
+    if (text != inline_text) PyMem_Free(text);
     Py_ssize_t selected = best;
     if (selected < 0 && wildcard_quality > 0.0) {
         for (Py_ssize_t index = 0; index < count; index++) {
@@ -3003,13 +3092,13 @@ wreath_select_language(PyObject *Py_UNUSED(self), PyObject *args)
     if (selected < 0) selected = 0;
     PyObject *result = offers[selected].original;
     Py_INCREF(result);
-    for (Py_ssize_t index = 0; index < count; index++) PyMem_Free(offers[index].text);
-    PyMem_Free(offers);
+    if (offer_storage != inline_offer_storage) PyMem_Free(offer_storage);
+    if (offers != inline_offers) PyMem_Free(offers);
     Py_DECREF(offered);
     return result;
 language_error:
-    for (Py_ssize_t index = 0; index < count; index++) PyMem_Free(offers[index].text);
-    PyMem_Free(offers);
+    if (offer_storage != inline_offer_storage) PyMem_Free(offer_storage);
+    if (offers != inline_offers) PyMem_Free(offers);
     Py_DECREF(offered);
     return NULL;
 }
@@ -3186,25 +3275,30 @@ wreath_normalize_host(PyObject *Py_UNUSED(self), PyObject *args)
     int pattern;
     if (!PyArg_ParseTuple(args, "Up:normalize_host", &value, &pattern)) return NULL;
     Py_ssize_t unicode_length = PyUnicode_GetLength(value);
-    Py_UCS4 *unicode = PyUnicode_AsUCS4Copy(value);
-    if (unicode == NULL) return NULL;
+    int kind = PyUnicode_KIND(value);
+    const void *data = PyUnicode_DATA(value);
     Py_ssize_t start = 0, end = unicode_length;
-    locale_trim(unicode, &start, &end);
-    if (start == end) { PyMem_Free(unicode); Py_RETURN_NONE; }
+    while (start < end && Py_UNICODE_ISSPACE(PyUnicode_READ(kind, data, start)))
+        start++;
+    while (end > start && Py_UNICODE_ISSPACE(PyUnicode_READ(kind, data, end - 1)))
+        end--;
+    if (start == end) Py_RETURN_NONE;
     size_t length = (size_t)(end - start);
-    char *text = PyMem_Malloc(length + 1);
+    char inline_text[256];
+    char *text = length < sizeof(inline_text)
+        ? inline_text : PyMem_Malloc(length + 1);
     if (text == NULL) {
-        PyMem_Free(unicode); PyErr_NoMemory(); return NULL;
+        PyErr_NoMemory(); return NULL;
     }
     for (size_t index = 0; index < length; index++) {
-        Py_UCS4 cell = unicode[start + (Py_ssize_t)index];
+        Py_UCS4 cell = PyUnicode_READ(kind, data, start + (Py_ssize_t)index);
         if (cell > 0x7fU) {
-            PyMem_Free(unicode); PyMem_Free(text); Py_RETURN_NONE;
+            if (text != inline_text) PyMem_Free(text);
+            Py_RETURN_NONE;
         }
         if (cell >= 'A' && cell <= 'Z') cell += 'a' - 'A';
         text[index] = (char)cell;
     }
-    PyMem_Free(unicode);
     text[length] = '\0';
     if (text[0] == '[') {
         size_t close = 1;
@@ -3213,12 +3307,14 @@ wreath_normalize_host(PyObject *Py_UNUSED(self), PyObject *args)
             (close + 1 < length &&
              (text[close + 1] != ':' ||
               !host_port_valid(text + close + 2, length - close - 2)))) {
-            PyMem_Free(text); Py_RETURN_NONE;
+            if (text != inline_text) PyMem_Free(text);
+            Py_RETURN_NONE;
         }
         uint16_t words[8] = {0};
         size_t scope_at;
         if (!host_ipv6_parse(text + 1, close - 1, words, &scope_at)) {
-            PyMem_Free(text); Py_RETURN_NONE;
+            if (text != inline_text) PyMem_Free(text);
+            Py_RETURN_NONE;
         }
         char rendered[192];
         size_t used = 0;
@@ -3230,38 +3326,43 @@ wreath_normalize_host(PyObject *Py_UNUSED(self), PyObject *args)
             used += scope_length;
         }
         rendered[used++] = ']';
-        PyMem_Free(text);
+        if (text != inline_text) PyMem_Free(text);
         return PyUnicode_DecodeASCII(rendered, (Py_ssize_t)used, "strict");
     }
     size_t host_length = 0;
     while (host_length < length && text[host_length] != ':') {
         if (text[host_length] == '[' || text[host_length] == ']') {
-            PyMem_Free(text); Py_RETURN_NONE;
+            if (text != inline_text) PyMem_Free(text);
+            Py_RETURN_NONE;
         }
         host_length++;
     }
     if (host_length < length &&
         !host_port_valid(text + host_length + 1, length - host_length - 1)) {
-        PyMem_Free(text); Py_RETURN_NONE;
+        if (text != inline_text) PyMem_Free(text);
+        Py_RETURN_NONE;
     }
     if (pattern && host_length == 1 && text[0] == '*') {
         PyObject *result = PyUnicode_FromString("*");
-        PyMem_Free(text); return result;
+        if (text != inline_text) PyMem_Free(text);
+        return result;
     }
     size_t candidate = pattern && host_length >= 2 && text[0] == '*' && text[1] == '.'
         ? 2 : 0;
     if (candidate == host_length || text[candidate] == '.') {
-        PyMem_Free(text); Py_RETURN_NONE;
+        if (text != inline_text) PyMem_Free(text);
+        Py_RETURN_NONE;
     }
     for (size_t index = candidate; index < host_length; index++) {
         char cell = text[index];
         if (!((cell >= 'a' && cell <= 'z') || (cell >= '0' && cell <= '9') ||
               cell == '.' || cell == '_' || cell == '-')) {
-            PyMem_Free(text); Py_RETURN_NONE;
+            if (text != inline_text) PyMem_Free(text);
+            Py_RETURN_NONE;
         }
     }
     PyObject *result = PyUnicode_DecodeASCII(text, (Py_ssize_t)host_length, "strict");
-    PyMem_Free(text);
+    if (text != inline_text) PyMem_Free(text);
     return result;
 }
 
@@ -3293,7 +3394,8 @@ accept_compare(const void *left_pointer, const void *right_pointer)
 
 static int
 accept_parse(PyObject *header, Py_UCS4 **text_out, AcceptRange **ranges_out,
-             size_t *count_out)
+             size_t *count_out, Py_UCS4 *inline_text, size_t inline_text_capacity,
+             AcceptRange *inline_ranges, size_t inline_capacity)
 {
     *text_out = NULL; *ranges_out = NULL; *count_out = 0;
     if (header == Py_None) return 0;
@@ -3304,15 +3406,24 @@ accept_parse(PyObject *header, Py_UCS4 **text_out, AcceptRange **ranges_out,
     }
     Py_ssize_t length = PyUnicode_GetLength(header);
     if (length == 0) return 0;
-    Py_UCS4 *text = PyUnicode_AsUCS4Copy(header);
-    if (text == NULL) return -1;
-    AcceptRange *ranges = PyMem_Malloc(
-        ((size_t)length + 1) * sizeof(AcceptRange));
-    if (ranges == NULL) {
-        PyMem_Free(text); PyErr_NoMemory(); return -1;
+    Py_UCS4 *text = inline_text;
+    if ((size_t)length > inline_text_capacity) {
+        if ((size_t)length > SIZE_MAX / sizeof(Py_UCS4)) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        text = PyMem_Malloc((size_t)length * sizeof(Py_UCS4));
+        if (text == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
     }
+    int kind = PyUnicode_KIND(header);
+    const void *data = PyUnicode_DATA(header);
     for (Py_ssize_t index = 0; index < length; index++)
-        text[index] = Py_UNICODE_TOLOWER(text[index]);
+        text[index] = Py_UNICODE_TOLOWER(PyUnicode_READ(kind, data, index));
+    size_t range_capacity = inline_capacity;
+    AcceptRange *ranges = inline_ranges;
     size_t count = 0;
     Py_ssize_t part_start = 0, part_index = 0;
     while (part_start <= length) {
@@ -3325,6 +3436,21 @@ accept_parse(PyObject *header, Py_UCS4 **text_out, AcceptRange **ranges_out,
         Py_ssize_t media_start = start, media_end = separator;
         locale_trim(text, &media_start, &media_end);
         if (media_start < media_end) {
+            if (count == range_capacity) {
+                size_t grown_capacity = (size_t)length + 1;
+                AcceptRange *grown = PyMem_Malloc(
+                    grown_capacity * sizeof(AcceptRange));
+                if (grown == NULL) {
+                    if (ranges != inline_ranges) PyMem_Free(ranges);
+                    if (text != inline_text) PyMem_Free(text);
+                    PyErr_NoMemory();
+                    return -1;
+                }
+                memcpy(grown, ranges, count * sizeof(AcceptRange));
+                if (ranges != inline_ranges) PyMem_Free(ranges);
+                ranges = grown;
+                range_capacity = grown_capacity;
+            }
             double quality = accept_quality(text, separator, end);
             int has_star = 0;
             for (Py_ssize_t index = media_start; index < media_end; index++)
@@ -3367,7 +3493,8 @@ accept_text_hash(const Py_UCS4 *text, Py_ssize_t length)
 }
 
 static AcceptTextSlot *
-accept_table_new(size_t expected, size_t *capacity_out)
+accept_table_new(size_t expected, size_t *capacity_out,
+                 AcceptTextSlot *inline_table, size_t inline_capacity)
 {
     size_t capacity = 8;
     if (expected > SIZE_MAX / 2) {
@@ -3386,7 +3513,13 @@ accept_table_new(size_t expected, size_t *capacity_out)
         PyErr_NoMemory();
         return NULL;
     }
-    AcceptTextSlot *table = PyMem_Calloc(capacity, sizeof(*table));
+    AcceptTextSlot *table;
+    if (capacity <= inline_capacity) {
+        table = inline_table;
+        memset(table, 0, capacity * sizeof(*table));
+    } else {
+        table = PyMem_Calloc(capacity, sizeof(*table));
+    }
     if (table == NULL) {
         PyErr_NoMemory();
         return NULL;
@@ -3444,9 +3577,13 @@ PyObject *
 wreath_parse_accept(PyObject *Py_UNUSED(self), PyObject *header)
 {
     Py_UCS4 *text;
+    Py_UCS4 inline_text[256];
+    AcceptRange inline_ranges[8];
     AcceptRange *ranges;
     size_t count;
-    if (accept_parse(header, &text, &ranges, &count) < 0) return NULL;
+    if (accept_parse(
+            header, &text, &ranges, &count, inline_text, 256,
+            inline_ranges, 8) < 0) return NULL;
     PyObject *result = PyList_New((Py_ssize_t)count);
     if (result == NULL) goto accept_result_error;
     for (size_t index = 0; index < count; index++) {
@@ -3461,7 +3598,8 @@ wreath_parse_accept(PyObject *Py_UNUSED(self), PyObject *header)
         PyList_SET_ITEM(result, (Py_ssize_t)index, pair);
     }
 accept_result_error:
-    PyMem_Free(text); PyMem_Free(ranges);
+    if (text != inline_text) PyMem_Free(text);
+    if (ranges != inline_ranges) PyMem_Free(ranges);
     return result;
 }
 
@@ -3476,47 +3614,96 @@ wreath_negotiate_media(PyObject *Py_UNUSED(self), PyObject *args)
     Py_ssize_t offer_count = PySequence_Fast_GET_SIZE(offers);
     if (offer_count == 0) { Py_DECREF(offers); Py_RETURN_NONE; }
     Py_UCS4 *text;
+    Py_UCS4 inline_text[256];
+    AcceptRange inline_ranges[8];
     AcceptRange *ranges;
     size_t count;
-    if (accept_parse(header, &text, &ranges, &count) < 0) {
+    if (accept_parse(
+            header, &text, &ranges, &count, inline_text, 256,
+            inline_ranges, 8) < 0) {
         Py_DECREF(offers); return NULL;
     }
     if (count == 0) {
-        PyMem_Free(text); PyMem_Free(ranges); Py_DECREF(offers);
+        if (text != inline_text) PyMem_Free(text);
+        if (ranges != inline_ranges) PyMem_Free(ranges);
+        Py_DECREF(offers);
         return PyLong_FromLong(0);
     }
-    Py_UCS4 **offer_text = PyMem_Calloc((size_t)offer_count, sizeof(Py_UCS4 *));
-    Py_ssize_t *offer_lengths = PyMem_Malloc((size_t)offer_count * sizeof(Py_ssize_t));
+    Py_UCS4 *inline_offer_text[8] = {NULL};
+    Py_ssize_t inline_offer_lengths[8];
+    Py_UCS4 **offer_text = inline_offer_text;
+    Py_ssize_t *offer_lengths = inline_offer_lengths;
+    if (offer_count > 8) {
+        offer_text = PyMem_Malloc((size_t)offer_count * sizeof(Py_UCS4 *));
+        offer_lengths = PyMem_Malloc(
+            (size_t)offer_count * sizeof(Py_ssize_t));
+    }
     if (offer_text == NULL || offer_lengths == NULL) {
-        PyMem_Free(offer_text); PyMem_Free(offer_lengths);
-        PyMem_Free(text); PyMem_Free(ranges); Py_DECREF(offers);
+        if (offer_text != inline_offer_text) PyMem_Free(offer_text);
+        if (offer_lengths != inline_offer_lengths) PyMem_Free(offer_lengths);
+        if (text != inline_text) PyMem_Free(text);
+        if (ranges != inline_ranges) PyMem_Free(ranges);
+        Py_DECREF(offers);
         PyErr_NoMemory(); return NULL;
     }
     PyObject **items = PySequence_Fast_ITEMS(offers);
+    Py_UCS4 inline_offer_storage[128];
+    Py_UCS4 *offer_storage = inline_offer_storage;
+    size_t offer_cell_count = 0;
     for (Py_ssize_t index = 0; index < offer_count; index++) {
         if (!PyUnicode_Check(items[index])) {
             PyErr_SetString(PyExc_TypeError, "media offers must be strings");
             goto negotiate_error;
         }
         offer_lengths[index] = PyUnicode_GetLength(items[index]);
-        offer_text[index] = PyUnicode_AsUCS4Copy(items[index]);
-        if (offer_text[index] == NULL) goto negotiate_error;
-        for (Py_ssize_t cell = 0; cell < offer_lengths[index]; cell++)
-            offer_text[index][cell] = Py_UNICODE_TOLOWER(offer_text[index][cell]);
+        if ((size_t)offer_lengths[index] > SIZE_MAX - offer_cell_count) {
+            PyErr_NoMemory();
+            goto negotiate_error;
+        }
+        offer_cell_count += (size_t)offer_lengths[index];
+    }
+    if (offer_cell_count > 128) {
+        if (offer_cell_count > SIZE_MAX / sizeof(Py_UCS4)) {
+            PyErr_NoMemory();
+            goto negotiate_error;
+        }
+        offer_storage = PyMem_Malloc(offer_cell_count * sizeof(Py_UCS4));
+        if (offer_storage == NULL) {
+            PyErr_NoMemory();
+            goto negotiate_error;
+        }
+    }
+    size_t offer_offset = 0;
+    for (Py_ssize_t index = 0; index < offer_count; index++) {
+        PyObject *item = items[index];
+        int kind = PyUnicode_KIND(item);
+        const void *data = PyUnicode_DATA(item);
+        offer_text[index] = offer_storage + offer_offset;
+        for (Py_ssize_t cell = 0; cell < offer_lengths[index]; cell++) {
+            offer_text[index][cell] = Py_UNICODE_TOLOWER(
+                PyUnicode_READ(kind, data, cell));
+        }
+        offer_offset += (size_t)offer_lengths[index];
     }
 
     size_t denied_exact_capacity = 0, denied_type_capacity = 0;
     size_t offered_exact_capacity = 0, offered_type_capacity = 0;
-    AcceptTextSlot *denied_exact = accept_table_new(count, &denied_exact_capacity);
-    AcceptTextSlot *denied_type = accept_table_new(count, &denied_type_capacity);
+    AcceptTextSlot inline_denied_exact[8], inline_denied_type[8];
+    AcceptTextSlot inline_offered_exact[8], inline_offered_type[8];
+    AcceptTextSlot *denied_exact = accept_table_new(
+        count, &denied_exact_capacity, inline_denied_exact, 8);
+    AcceptTextSlot *denied_type = accept_table_new(
+        count, &denied_type_capacity, inline_denied_type, 8);
     AcceptTextSlot *offered_exact = accept_table_new(
-        (size_t)offer_count, &offered_exact_capacity);
+        (size_t)offer_count, &offered_exact_capacity, inline_offered_exact, 8);
     AcceptTextSlot *offered_type = accept_table_new(
-        (size_t)offer_count, &offered_type_capacity);
+        (size_t)offer_count, &offered_type_capacity, inline_offered_type, 8);
     if (denied_exact == NULL || denied_type == NULL ||
         offered_exact == NULL || offered_type == NULL) {
-        PyMem_Free(denied_exact); PyMem_Free(denied_type);
-        PyMem_Free(offered_exact); PyMem_Free(offered_type);
+        if (denied_exact != inline_denied_exact) PyMem_Free(denied_exact);
+        if (denied_type != inline_denied_type) PyMem_Free(denied_type);
+        if (offered_exact != inline_offered_exact) PyMem_Free(offered_exact);
+        if (offered_type != inline_offered_type) PyMem_Free(offered_type);
         goto negotiate_error;
     }
     int deny_all = 0;
@@ -3568,16 +3755,24 @@ wreath_negotiate_media(PyObject *Py_UNUSED(self), PyObject *args)
             selected = accept_table_lookup(offered_exact, offered_exact_capacity,
                                            range_text, range_length);
     }
-    PyMem_Free(denied_exact); PyMem_Free(denied_type);
-    PyMem_Free(offered_exact); PyMem_Free(offered_type);
-    for (Py_ssize_t index = 0; index < offer_count; index++) PyMem_Free(offer_text[index]);
-    PyMem_Free(offer_text); PyMem_Free(offer_lengths);
-    PyMem_Free(text); PyMem_Free(ranges); Py_DECREF(offers);
+    if (denied_exact != inline_denied_exact) PyMem_Free(denied_exact);
+    if (denied_type != inline_denied_type) PyMem_Free(denied_type);
+    if (offered_exact != inline_offered_exact) PyMem_Free(offered_exact);
+    if (offered_type != inline_offered_type) PyMem_Free(offered_type);
+    if (offer_storage != inline_offer_storage) PyMem_Free(offer_storage);
+    if (offer_text != inline_offer_text) PyMem_Free(offer_text);
+    if (offer_lengths != inline_offer_lengths) PyMem_Free(offer_lengths);
+    if (text != inline_text) PyMem_Free(text);
+    if (ranges != inline_ranges) PyMem_Free(ranges);
+    Py_DECREF(offers);
     return selected < 0 ? Py_NewRef(Py_None) : PyLong_FromSsize_t(selected);
 negotiate_error:
-    for (Py_ssize_t index = 0; index < offer_count; index++) PyMem_Free(offer_text[index]);
-    PyMem_Free(offer_text); PyMem_Free(offer_lengths);
-    PyMem_Free(text); PyMem_Free(ranges); Py_DECREF(offers);
+    if (offer_storage != inline_offer_storage) PyMem_Free(offer_storage);
+    if (offer_text != inline_offer_text) PyMem_Free(offer_text);
+    if (offer_lengths != inline_offer_lengths) PyMem_Free(offer_lengths);
+    if (text != inline_text) PyMem_Free(text);
+    if (ranges != inline_ranges) PyMem_Free(ranges);
+    Py_DECREF(offers);
     return NULL;
 }
 

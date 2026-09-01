@@ -57,8 +57,10 @@ WreathPgRawDecoder wreath_pg_select_decoder(uint32_t oid, int format);
 
 /* Acquire buffers for the slabs the first `rows` rows reference. Owner entries
    are deduplicated by the tape, so each slab is acquired exactly once. */
-Py_buffer *wreath_pg_acquire_owner_buffers(WreathPgFieldTape *tape, Py_ssize_t rows,
-                                        Py_ssize_t *owner_limit_out);
-void wreath_pg_release_owner_buffers(Py_buffer *buffers, Py_ssize_t owner_limit);
+Py_buffer *wreath_pg_acquire_owner_buffers(
+    WreathPgFieldTape *tape, Py_ssize_t rows, Py_ssize_t *owner_limit_out,
+    Py_buffer *inline_buffers, Py_ssize_t inline_capacity);
+void wreath_pg_release_owner_buffers(
+    Py_buffer *buffers, Py_ssize_t owner_limit, Py_buffer *inline_buffers);
 
 #endif

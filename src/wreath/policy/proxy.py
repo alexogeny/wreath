@@ -31,9 +31,6 @@ from ..request import Request
 
 TrustedNetworks: Any = _core.TrustedNetworks
 
-_SCHEMES = frozenset({"http", "https"})
-
-
 class ProxyPolicy:
     """Apply X-Forwarded-* headers, but only from configured proxy networks.
 
@@ -122,18 +119,15 @@ class ProxyPolicy:
         if self._trust_proto:
             proto = headers.get(b"x-forwarded-proto")
             if proto is not None:
-                # A proxy chain may append: the first entry is the client's.
-                value = proto.split(b",", 1)[0].strip().decode("latin-1").lower()
-                if value in _SCHEMES:
+                value = _core.forwarded_proto(proto)
+                if value is not None:
                     request._set_scheme(value)
 
         if self._trust_host:
             host = headers.get(b"x-forwarded-host")
             if host is not None:
-                value = host.split(b",", 1)[0].strip()
-                # TrustedHostPolicy and CsrfPolicy read the Host header
-                # rather than the scope, so the override has to land there.
-                if value:
+                value = _core.forwarded_host(host)
+                if value is not None:
                     request._set_header(b"host", value)
         return None
 

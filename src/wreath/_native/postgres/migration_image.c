@@ -549,6 +549,7 @@ wreath_pg_migration_catalog_decode(
     WreathMigrationCatalog *catalog = (WreathMigrationCatalog *)destination;
     Py_ssize_t rows;
     Py_ssize_t owner_limit = 0;
+    Py_buffer inline_buffers[4];
     Py_ssize_t original_count;
     Py_ssize_t original_descriptor_length;
     Py_buffer *buffers;
@@ -589,7 +590,8 @@ wreath_pg_migration_catalog_decode(
     if (rows == 0) return 0;
     if (rows > PY_SSIZE_T_MAX - catalog->count ||
         migration_catalog_reserve(catalog, catalog->count + rows) < 0) return -1;
-    buffers = wreath_pg_acquire_owner_buffers(tape, rows, &owner_limit);
+    buffers = wreath_pg_acquire_owner_buffers(
+        tape, rows, &owner_limit, inline_buffers, 4);
     if (buffers == NULL) return -1;
     original_count = catalog->count;
     original_descriptor_length = catalog->descriptor_length;
@@ -610,7 +612,7 @@ done:
         catalog->count = original_count;
         catalog->descriptor_length = original_descriptor_length;
     }
-    wreath_pg_release_owner_buffers(buffers, owner_limit);
+    wreath_pg_release_owner_buffers(buffers, owner_limit, inline_buffers);
     return result;
 }
 

@@ -529,25 +529,28 @@ sparsevector_data_from_sequence(PyObject *dim_obj, PyObject *elements,
         Py_DECREF(sequence);
         return PyErr_NoMemory();
     }
-    SparseVectorPair *pairs = count != 0
-        ? PyMem_Malloc((size_t)count * sizeof(*pairs)) : NULL;
-    if (count != 0 && pairs == NULL) {
-        Py_DECREF(sequence);
-        return PyErr_NoMemory();
+    SparseVectorPair inline_pairs[16];
+    SparseVectorPair *pairs = inline_pairs;
+    if (count > 16) {
+        pairs = PyMem_Malloc((size_t)count * sizeof(*pairs));
+        if (pairs == NULL) {
+            Py_DECREF(sequence);
+            return PyErr_NoMemory();
+        }
     }
     PyObject **items = PySequence_Fast_ITEMS(sequence);
     for (Py_ssize_t index = 0; index < count; index++) {
         if (sparsevector_pair_from_entry(
                 items[index], dim, index, &pairs[index]) < 0) {
             PyErr_Clear();
-            PyMem_Free(pairs);
+            if (pairs != inline_pairs) PyMem_Free(pairs);
             Py_DECREF(sequence);
             return NULL;
         }
     }
     PyObject *result = sparsevector_data_from_pairs(
         dim, pairs, count, max_nnz);
-    PyMem_Free(pairs);
+    if (pairs != inline_pairs) PyMem_Free(pairs);
     Py_DECREF(sequence);
     return result;
 }
@@ -623,11 +626,14 @@ wreath_sparsevector_data(PyObject *Py_UNUSED(self), PyObject *args)
         Py_DECREF(mapping);
         return PyErr_NoMemory();
     }
-    SparseVectorPair *pairs = source_count != 0
-        ? PyMem_Malloc((size_t)source_count * sizeof(*pairs)) : NULL;
-    if (source_count != 0 && pairs == NULL) {
-        Py_DECREF(mapping);
-        return PyErr_NoMemory();
+    SparseVectorPair inline_pairs[16];
+    SparseVectorPair *pairs = inline_pairs;
+    if (source_count > 16) {
+        pairs = PyMem_Malloc((size_t)source_count * sizeof(*pairs));
+        if (pairs == NULL) {
+            Py_DECREF(mapping);
+            return PyErr_NoMemory();
+        }
     }
     Py_ssize_t count = 0;
     Py_ssize_t position = 0;
@@ -650,12 +656,12 @@ wreath_sparsevector_data(PyObject *Py_UNUSED(self), PyObject *args)
         count++;
     }
     PyObject *capsule = sparsevector_data_from_pairs(dim, pairs, count, max_nnz);
-    PyMem_Free(pairs);
+    if (pairs != inline_pairs) PyMem_Free(pairs);
     Py_DECREF(mapping);
     return capsule;
 
 sparse_data_error:
-    PyMem_Free(pairs);
+    if (pairs != inline_pairs) PyMem_Free(pairs);
     Py_DECREF(mapping);
     return NULL;
 }
@@ -850,13 +856,15 @@ component_to_str(const uint8_t *src, Py_ssize_t len)
     if (memchr(src, '%', (size_t)len) == NULL && memchr(src, '+', (size_t)len) == NULL) {
         return PyUnicode_DecodeUTF8((const char *)src, len, "replace");
     }
-    uint8_t *scratch = PyMem_Malloc((size_t)len);
-    if (scratch == NULL) {
-        return PyErr_NoMemory();
+    uint8_t inline_scratch[256];
+    uint8_t *scratch = inline_scratch;
+    if (len > (Py_ssize_t)sizeof(inline_scratch)) {
+        scratch = PyMem_Malloc((size_t)len);
+        if (scratch == NULL) return PyErr_NoMemory();
     }
     Py_ssize_t out = decode_into(scratch, src, len, 1);
     PyObject *text = PyUnicode_DecodeUTF8((const char *)scratch, out, "replace");
-    PyMem_Free(scratch);
+    if (scratch != inline_scratch) PyMem_Free(scratch);
     return text;
 }
 
@@ -959,25 +967,6 @@ query_append_raw_error(PyObject **errors, PyObject *alias, PyObject *raw,
 {
     return query_append_error(
         errors, alias, PyUnicode_FromFormat(format, raw), kind);
-}
-
-static PyObject *
-query_convert_bool(PyObject *raw)
-{
-    PyObject *lower = PyObject_CallMethod(raw, "lower", NULL);
-    if (lower == NULL) return NULL;
-    int truth = PyUnicode_EqualToUTF8(lower, "1") ||
-                PyUnicode_EqualToUTF8(lower, "true") ||
-                PyUnicode_EqualToUTF8(lower, "yes") ||
-                PyUnicode_EqualToUTF8(lower, "on");
-    int falsehood = PyUnicode_EqualToUTF8(lower, "0") ||
-                    PyUnicode_EqualToUTF8(lower, "false") ||
-                    PyUnicode_EqualToUTF8(lower, "no") ||
-                    PyUnicode_EqualToUTF8(lower, "off");
-    Py_DECREF(lower);
-    if (truth) return Py_NewRef(Py_True);
-    if (falsehood) return Py_NewRef(Py_False);
-    return NULL;
 }
 
 static int
@@ -1088,7 +1077,7 @@ query_bind_entry(PyObject *entry, PyObject *raw, PyObject *kwargs,
         }
     }
     else if (opcode == QUERY_BOOL) {
-        value = query_convert_bool(raw);
+        value = wreath_bool_from_text(raw);
         if (value == NULL && !PyErr_Occurred()) {
             return query_append_raw_error(
                 errors, alias, raw, "%R is not a boolean", "bool");

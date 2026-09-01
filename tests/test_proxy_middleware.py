@@ -21,6 +21,17 @@ _IMPLEMENTATIONS = [_core.TrustedNetworks]
 _SECRET = "x" * 32
 
 
+@pytest.mark.parametrize("whitespace", [b"\n", b"\v", b"\f", b"\r"])
+def test_native_forwarded_values_preserve_bytes_strip_semantics(
+    whitespace: bytes,
+) -> None:
+    assert _core.forwarded_proto(whitespace + b"HTTPS" + whitespace) == "https"
+    assert (
+        _core.forwarded_host(whitespace + b"front.example" + whitespace)
+        == b"front.example"
+    )
+
+
 async def _call(app: Any, scope_extra: dict[str, Any], **kwargs: Any) -> tuple[int, dict]:
     """Drive the app over ASGI directly: TestClient cannot set scope["client"]."""
     scope = {

@@ -69,6 +69,19 @@ def test_nothing_in_produces_nothing_out() -> None:
     assert fused_order(((), ()), 60) == []
 
 
+def test_fusion_keeps_large_workspace_paths() -> None:
+    rankings = (
+        tuple(f"item-{index}" for index in range(20)),
+        tuple(f"item-{index}" for index in range(10, 30)),
+    )
+    scores: dict[str, float] = {}
+    for ranking in rankings:
+        for index, key in enumerate(ranking):
+            scores[key] = scores.get(key, 0.0) + 1.0 / (61 + index)
+    expected = sorted(scores, key=lambda key: (-scores[key], key))
+    assert fused_order(rankings, 60) == expected
+
+
 def test_a_fusion_takes_the_union_of_its_searches_parameters() -> None:
     assert Documents.hybrid.parameters == ("q", "terms")
 

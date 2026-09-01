@@ -208,6 +208,8 @@ def test_eager_http1_completion_only_allocates_a_task_after_suspension() -> None
     source = (_NATIVE / "server_http1.c").read_text()
     spawn = _function(source, "spawn_app_task", "send_policy_reply")
 
+    assert "PyCoro_CheckExact(" in spawn
     assert "PyIter_Send(" in spawn
+    assert "wreath_awaitable_iter(" in spawn
     assert "loop_create_task" in spawn
     assert "task_class" not in spawn

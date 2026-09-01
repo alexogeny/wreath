@@ -112,6 +112,38 @@ def test_parameter_capture(name: str) -> None:
     assert params == {"uid": "7", "pid": "9"}
 
 
+def test_native_parameter_subscript_keeps_mapping_key_semantics() -> None:
+    table = IMPLS["c-policy"]()
+    table.add("/users/{uid}", "GET", "h")
+    _handler, params = table.match("GET", "/users/7")
+
+    class EqualString(str):
+        pass
+
+    assert params[EqualString("uid")] == "7"
+    assert params["uid"] == "7"
+    assert params.get(EqualString("uid")) == "7"
+    default = object()
+    assert params.get("other", default) is default
+    with pytest.raises(KeyError) as missing:
+        params["other"]
+    assert missing.value.args == ("other",)
+    with pytest.raises(TypeError, match="unhashable type"):
+        params[[]]
+    with pytest.raises(TypeError, match="unhashable type"):
+        params.get([])
+
+    class ExplodingKey:
+        def __hash__(self) -> int:
+            return hash("uid")
+
+        def __eq__(self, other: object) -> bool:
+            raise KeyError("comparison failed")
+
+    with pytest.raises(KeyError, match="comparison failed"):
+        params.get(ExplodingKey())
+
+
 @pytest.mark.parametrize("name", list(IMPLS))
 def test_literal_beats_parameter(name: str) -> None:
     table = IMPLS[name]()

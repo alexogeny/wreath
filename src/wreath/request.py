@@ -45,6 +45,8 @@ if TYPE_CHECKING:
     # this is the single edge that closed the loop.
     from ._auth.models import Identity
 
+_HEADER_SCANNED = object()
+
 
 @dataclass(frozen=True, slots=True)
 class RequestLimits:
@@ -552,7 +554,6 @@ class Request:
         "_client_source",
         "_form",
         "_header_map",
-        "_header_scanned",
         "_identity",
         "_json",
         "_limits",
@@ -595,7 +596,6 @@ class Request:
         # policy lookups do not first materialize the ASGI list and a second
         # Python container containing the same objects.
         self._header_map: Any | None = None
-        self._header_scanned = False
         self._path_params = path_params
         # Completed first-class policy stages. The reference executor updates
         # this bitset; the native server keeps the equivalent C-owned state and
@@ -1006,7 +1006,7 @@ class Request:
         # just built the index, so discarding it here would make the next
         # consumer rebuild the whole thing.
         header_map = self._header_map
-        if header_map is not None:
+        if header_map is not None and header_map is not _HEADER_SCANNED:
             header_map[name] = value
 
     def _remove_headers(self, *names: bytes) -> None:
@@ -1020,7 +1020,11 @@ class Request:
             headers = self.headers
             headers[:] = [pair for pair in headers if pair[0] not in wanted]
         header_map = self._header_map
-        if header_map is not None and header_map is not context:
+        if (
+            header_map is not None
+            and header_map is not _HEADER_SCANNED
+            and header_map is not context
+        ):
             for name in names:
                 header_map.pop(name, None)
 
@@ -1042,12 +1046,11 @@ class Request:
     def _index_headers(self) -> Any:
         """Return the first-value header index for multi-header consumers."""
         header_map = self._header_map
-        if header_map is None:
+        if header_map is None or header_map is _HEADER_SCANNED:
             context = self._context
             native_index = None if context is None else getattr(context, "_header_index", None)
             header_map = build_header_map(self.headers) if native_index is None else native_index()
             self._header_map = header_map
-            self._header_scanned = True
         return header_map
 
     def header(self, name: str | bytes, default: str | None = None) -> str | None:
@@ -1080,12 +1083,10 @@ class Request:
         target = target.lower()
         header_map = self._header_map
         if header_map is None:
-            if not self._header_scanned:
-                # A lone lookup is cheaper as a single scan than as a dict
-                # build; the map is only materialized on the second lookup.
-                self._header_scanned = True
-                value = find_header(self.headers, target)
-                return value.decode("latin-1") if value is not None else default
+            self._header_map = _HEADER_SCANNED
+            value = find_header(self.headers, target)
+            return value.decode("latin-1") if value is not None else default
+        if header_map is _HEADER_SCANNED:
             header_map = self._index_headers()
         value = header_map.get(target)
         if value is None:

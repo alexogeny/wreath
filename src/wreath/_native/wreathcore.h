@@ -25,6 +25,33 @@
 /* ASCII folding and case-insensitive compare, shared for the same reason. */
 #include "ascii.h"
 
+static inline PyObject *
+wreath_bool_from_ascii(const char *text, Py_ssize_t length)
+{
+    if (wreath_ascii_equal_ci_str(text, length, "1") ||
+        wreath_ascii_equal_ci_str(text, length, "true") ||
+        wreath_ascii_equal_ci_str(text, length, "yes") ||
+        wreath_ascii_equal_ci_str(text, length, "on")) {
+        return Py_NewRef(Py_True);
+    }
+    if (wreath_ascii_equal_ci_str(text, length, "0") ||
+        wreath_ascii_equal_ci_str(text, length, "false") ||
+        wreath_ascii_equal_ci_str(text, length, "no") ||
+        wreath_ascii_equal_ci_str(text, length, "off")) {
+        return Py_NewRef(Py_False);
+    }
+    return NULL;
+}
+
+static inline PyObject *
+wreath_bool_from_text(PyObject *value)
+{
+    if (!PyUnicode_Check(value) || !PyUnicode_IS_ASCII(value)) return NULL;
+    return wreath_bool_from_ascii(
+        (const char *)PyUnicode_1BYTE_DATA(value),
+        PyUnicode_GET_LENGTH(value));
+}
+
 /* Read one integer configuration attribute with the CPython error protocol
  * preserved. HTTP/2 and HTTP/3 consume the same ServerConfig surface; keeping
  * this here prevents the protocol modules from growing independent decoders. */
@@ -334,6 +361,8 @@ PyObject *wreath_dcz_compress_with(PyObject *self, PyObject *args);
 PyObject *wreath_dcz_compress_fragments_with(PyObject *self, PyObject *args);
 
 /* proxy.c: adds the TrustedNetworks type; returns -1 on failure. */
+PyObject *wreath_forwarded_proto(PyObject *self, PyObject *value);
+PyObject *wreath_forwarded_host(PyObject *self, PyObject *value);
 int wreath_register_proxy(PyObject *module);
 
 /* ratelimit.c: adds the TokenBucket type; returns -1 on failure. */
@@ -602,6 +631,8 @@ int wreath_register_webpolicy(PyObject *module);
 
 /* policy_router.c: adds the canonical PolicyRouteTable; returns -1 on failure. */
 int wreath_register_policy_router(PyObject *module);
+int wreath_path_param_utf8(PyObject *params, PyObject *key,
+                           const char **text, Py_ssize_t *length);
 
 /* Substring search.
  *

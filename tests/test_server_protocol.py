@@ -224,6 +224,41 @@ GET = b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"
 
 @pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
 @pytest.mark.asyncio
+async def test_native_server_drives_a_generic_application_awaitable() -> None:
+    class ApplicationAwaitable:
+        def __init__(self, coroutine: Any) -> None:
+            self.coroutine = coroutine
+
+        def __await__(self) -> Any:
+            return self.coroutine.__await__()
+
+    def app(scope: dict, receive: Any, send: Any) -> Any:
+        async def respond() -> None:
+            await asyncio.sleep(0)
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"generic"})
+
+        return ApplicationAwaitable(respond())
+
+    transport = await drive(_NativeHttpProtocol, app, [GET])
+
+    assert b"HTTP/1.1 200" in transport.buffer
+    assert transport.buffer.endswith(b"generic")
+
+
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
+async def test_native_server_reports_a_non_awaitable_application_result() -> None:
+    def app(scope: dict, receive: Any, send: Any) -> object:
+        return object()
+
+    transport = await drive(_NativeHttpProtocol, app, [GET])
+
+    assert b"HTTP/1.1 500" in transport.buffer
+
+
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
 async def test_native_request_shells_reuse_bounded_storage() -> None:
     await drive(_NativeHttpProtocol, echo_ok, [GET])
     gc.collect()
@@ -660,6 +695,28 @@ async def test_wreath_native_request_headers_stay_native_until_public_read() -> 
             b"X-Value: second\r\n"
             b"Cookie: a=1; b=2\r\n\r\n"
         ],
+    )
+    assert b"200 OK" in transport.buffer
+
+
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
+async def test_wreath_native_request_header_storage_grows_past_initial_capacity() -> None:
+    app = Wreath()
+
+    @app.get("/headers")
+    async def header_handler(request: Any) -> Response:
+        assert len(request.headers) == 21
+        assert request.header("x-19") == "value-19"
+        return Response(b"ok")
+
+    fields = b"".join(
+        f"X-{index}: value-{index}\r\n".encode() for index in range(20)
+    )
+    transport = await drive(
+        _NativeHttpProtocol,
+        app,
+        [b"GET /headers HTTP/1.1\r\nHost: example.test\r\n" + fields + b"\r\n"],
     )
     assert b"200 OK" in transport.buffer
 

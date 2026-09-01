@@ -998,11 +998,11 @@ parse_dataclass_document(const char *data, Py_ssize_t len, PyObject *plan,
         return Py_NewRef(Py_NotImplemented);
     }
     Py_ssize_t field_count = PyTuple_GET_SIZE(fields);
-    PyObject **values = field_count == 0 ? NULL
-        : PyMem_Calloc((size_t)field_count, sizeof(*values));
-    if (field_count != 0 && values == NULL) {
-        PyMem_Free(values);
-        return PyErr_NoMemory();
+    PyObject *inline_values[8] = {NULL};
+    PyObject **values = inline_values;
+    if (field_count > 8) {
+        values = PyMem_Calloc((size_t)field_count, sizeof(*values));
+        if (values == NULL) return PyErr_NoMemory();
     }
 
     Parser p = {0};
@@ -1010,7 +1010,7 @@ parse_dataclass_document(const char *data, Py_ssize_t len, PyObject *plan,
     p.cur = data;
     p.end = data + len;
     if (++p.tokens % json_token_tape == 0 && PyErr_CheckSignals() < 0) {
-        PyMem_Free(values);
+        if (values != inline_values) PyMem_Free(values);
         return NULL;
     }
     PyObject *loc = NULL;
@@ -1161,7 +1161,7 @@ done:
     for (Py_ssize_t index = 0; index < field_count; index++) {
         Py_XDECREF(values[index]);
     }
-    PyMem_Free(values);
+    if (values != inline_values) PyMem_Free(values);
     Py_XDECREF(loc);
     if (fallback) {
         Py_XDECREF(errors);

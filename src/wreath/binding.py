@@ -86,7 +86,7 @@ from .negotiation import PROTOBUF_MEDIA_TYPES as _PROTOBUF_MEDIA_TYPES
 from .protobuf import ProtobufDecodeError as _ProtobufDecodeError
 from .protobuf import decode as _protobuf_decode
 from .protobuf import is_message as _is_message
-from .request import Request
+from .request import _REQUEST_LAYOUT, Request
 from .temporal import Instant, TemporalError
 
 #: Mirrors `_routing.Handler`: a route handler may be `def` as well as
@@ -2678,7 +2678,12 @@ def _compile_path_plans(
         else None
     )
     compiled_plan = (
-        (compiled_entries, tuple(name for name, _alias, _opcode in compiled_entries))
+        (
+            compiled_entries,
+            tuple(name for name, _alias, _opcode in compiled_entries),
+            "path_params",
+            _REQUEST_LAYOUT,
+        )
         if compiled_entries
         else None
     )

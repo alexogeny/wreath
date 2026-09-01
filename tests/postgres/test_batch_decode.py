@@ -118,6 +118,18 @@ def test_fetchrow_decodes_directly_without_result_list() -> None:
     assert not isinstance(row, list)
 
 
+@requires_native
+def test_inline_owner_buffer_cleanup_survives_acquisition_failure() -> None:
+    tape = native._FieldTape(1)
+    row = _data_row((b"value",))
+    tape.append(row, 1)
+    row.release()
+    plan = native._compile_decoder_plan((25,), (1,), ("value",))
+
+    with pytest.raises(ValueError, match="released memoryview"):
+        native._decode_field_tape(plan, tape, "fetch", 1)
+
+
 def test_fetch_batch_owns_decoded_cells_until_python_observes_a_row() -> None:
     tape = native._FieldTape(2)
     for value in range(12):

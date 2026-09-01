@@ -68,6 +68,15 @@ def test_native_keys_are_distinct_across_shapes(registry: Any) -> None:
     assert len(set(keys)) == len(keys)
 
 
+@native_only
+def test_native_shape_growth_matches_the_reference(registry: Any) -> None:
+    query = User.select().where(and_(*(User.id == value for value in range(64))))
+
+    native = _core.orm_shape(registry, query)
+    assert len(native) > 256
+    assert native == _shape_of_walk(registry, query)
+
+
 def test_facade_selects_native_when_available(registry: Any) -> None:
     from wreath.orm import compiler
 

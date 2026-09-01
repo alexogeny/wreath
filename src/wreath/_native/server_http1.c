@@ -2184,23 +2184,41 @@ build_scope(WreathHttpProtocol *self, PyObject *method, PyObject *path, PyObject
 static int
 spawn_app_task(WreathHttpProtocol *self, PyObject *scope)
 {
-    PyObject *coro = NULL;
+    PyObject *awaitable = NULL;
+    PyObject *driver = NULL;
     PyObject *yielded = NULL;
     PyObject *continuation = NULL;
     PyObject *task = NULL;
     int result = -1;
 
     PyObject *app_args[3] = {scope, self->receive_callable, self->send_callable};
-    coro = PyObject_Vectorcall(
+    awaitable = PyObject_Vectorcall(
         self->native_app != NULL && wreath_request_context_check(scope)
             ? self->native_app : self->app,
         app_args, 3, NULL
     );
-    if (coro == NULL) goto done;
+    if (awaitable == NULL) goto done;
+
+    if (PyCoro_CheckExact(awaitable) ||
+        Py_IS_TYPE(awaitable, &ImmediateAwaitableType) ||
+        Py_IS_TYPE(awaitable, &ValueAwaitableType)) {
+        driver = awaitable;
+        awaitable = NULL;
+    }
+    else {
+        driver = wreath_awaitable_iter(awaitable);
+        if (driver == NULL) {
+            PyObject *error = PyErr_GetRaisedException();
+            if (error == NULL) goto done;
+            if (apply_app_outcome(self, error, 0) < 0) goto done;
+            result = 0;
+            goto done;
+        }
+    }
 
     /* Most Wreath handlers only await completed receive/send objects. Step the
      * coroutine directly so that path owns no asyncio Task at all. */
-    PySendResult state = PyIter_Send(coro, Py_None, &yielded);
+    PySendResult state = PyIter_Send(driver, Py_None, &yielded);
     if (state == PYGEN_RETURN) {
         if (apply_app_outcome(self, Py_NewRef(Py_None), 0) < 0) goto done;
         result = 0;
@@ -2217,7 +2235,7 @@ spawn_app_task(WreathHttpProtocol *self, PyObject *scope)
     /* A real suspension needs loop ownership. The trampoline adopts the value
      * already yielded by the first step and forwards results, errors and
      * cancellation into the original coroutine. */
-    continuation = wreath_started_coroutine(coro, yielded);
+    continuation = wreath_started_coroutine(driver, yielded);
     if (continuation == NULL) goto done;
     task = PyObject_CallOneArg(self->loop_create_task, continuation);
     if (task == NULL) goto done;
@@ -2226,7 +2244,8 @@ spawn_app_task(WreathHttpProtocol *self, PyObject *scope)
     task = NULL;
     result = 0;
 done:
-    Py_XDECREF(coro);
+    Py_XDECREF(awaitable);
+    Py_XDECREF(driver);
     Py_XDECREF(yielded);
     Py_XDECREF(continuation);
     Py_XDECREF(task);

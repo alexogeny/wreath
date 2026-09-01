@@ -6,6 +6,7 @@ typedef struct {
     Py_UCS4 *data;
     Py_ssize_t length;
     Py_ssize_t capacity;
+    Py_UCS4 inline_data[64];
 } UnicodeBuffer;
 
 
@@ -30,7 +31,15 @@ unicode_reserve(UnicodeBuffer *buffer, Py_ssize_t extra)
         }
         capacity *= 2;
     }
-    grown = PyMem_Realloc(buffer->data, (size_t)capacity * sizeof(*grown));
+    if (buffer->data == buffer->inline_data) {
+        grown = PyMem_Malloc((size_t)capacity * sizeof(*grown));
+        if (grown != NULL) {
+            memcpy(grown, buffer->data, (size_t)buffer->length * sizeof(*grown));
+        }
+    }
+    else {
+        grown = PyMem_Realloc(buffer->data, (size_t)capacity * sizeof(*grown));
+    }
     if (grown == NULL) {
         PyErr_NoMemory();
         return -1;
@@ -146,7 +155,8 @@ wreath_sql_renumber(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject *text;
     Py_ssize_t offset;
     Py_ssize_t length;
-    UnicodeBuffer output = {NULL, 0, 0};
+    UnicodeBuffer output = {.length = 0, .capacity = 64};
+    output.data = output.inline_data;
 
     if (!PyArg_ParseTuple(args, "Un:sql_renumber", &text, &offset)) return NULL;
     if (offset == 0) return Py_NewRef(text);
@@ -177,10 +187,10 @@ wreath_sql_renumber(PyObject *Py_UNUSED(self), PyObject *args)
     }
 
     text = PyUnicode_FromKindAndData(PyUnicode_4BYTE_KIND, output.data, output.length);
-    PyMem_Free(output.data);
+    if (output.data != output.inline_data) PyMem_Free(output.data);
     return text;
 
 error:
-    PyMem_Free(output.data);
+    if (output.data != output.inline_data) PyMem_Free(output.data);
     return NULL;
 }

@@ -124,6 +124,17 @@ def test_status_without_body_omits_content_length() -> None:
         assert not any(key == b"content-length" for key, _ in response.headers)
 
 
+def test_encoded_response_fast_shapes_preserve_non_default_status_semantics() -> None:
+    for response in (TextResponse("created", status=201), JSONResponse({"ok": True}, status=201)):
+        assert response.status == 201
+        assert response.body
+        assert (b"content-length", str(len(response.body)).encode()) in response.headers
+    bodyless = TextResponse("ignored", status=204), JSONResponse({"ignored": True}, status=304)
+    for response in bodyless:
+        assert response.body == b""
+        assert not any(key == b"content-length" for key, _ in response.headers)
+
+
 def test_html_response_fast_shape_preserves_general_status_semantics() -> None:
     response = HTMLResponse("ignored", status=204)
     assert response.body == b""
