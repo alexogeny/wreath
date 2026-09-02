@@ -65,7 +65,7 @@ import re
 import sys as _sys
 import types
 import typing
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from time import monotonic_ns as _monotonic_ns
 from typing import Any
@@ -3063,51 +3063,59 @@ def _compile_resource_handler_wrapper(
         extract_scalars(request, kwargs)
         if needs_body:
             await decode_body(request, kwargs)
-        cache: dict[Any, Any] = {}
-        cleanups: list[Any] = []
-        borrowed: list[tuple[Any, Any, str]] = []
-        opened: list[Any] = []
+        cleanups: Sequence[Any] = ()
+        borrowed: Sequence[tuple[Any, Any, str]] = ()
+        opened: Sequence[Any] = ()
         try:
-            for name, database, workload in connections:
-                connection = await database.acquire(workload)
-                borrowed.append((database, connection, workload))
-                kwargs[name] = connection
-            by_key: dict[tuple[str, str], Any] = {}
-            for name, key, registry, workload, tenant_marker in sessions:
-                session = by_key.get(key)
-                if session is None:
-                    # Connections stay lazy, but tenant context must exist
-                    # before the session can escape into handler code.
-                    context = None if tenant_marker is None else tenant_marker.resolve(request)
-                    session = session_type(registry, workload, tenant=context)
-                    by_key[key] = session
-                    opened.append(session)
-                kwargs[name] = session
-            for name, key, use_cache, resolver in resolver_plan:
-                value = cache.get(key, _CACHE_MISSING) if use_cache else _CACHE_MISSING
-                if value is _CACHE_MISSING:
-                    value = await resolver(request, cache, cleanups)
-                    if use_cache:
-                        cache[key] = value
-                if name is not None:
-                    kwargs[name] = value
+            if connections:
+                borrowed_list: list[tuple[Any, Any, str]] = []
+                borrowed = borrowed_list
+                for name, database, workload in connections:
+                    connection = await database.acquire(workload)
+                    borrowed_list.append((database, connection, workload))
+                    kwargs[name] = connection
+            if sessions:
+                opened_list: list[Any] = []
+                opened = opened_list
+                by_key: dict[tuple[str, str], Any] = {}
+                for name, key, registry, workload, tenant_marker in sessions:
+                    session = by_key.get(key)
+                    if session is None:
+                        # Connections stay lazy, but tenant context must exist
+                        # before the session can escape into handler code.
+                        context = (
+                            None if tenant_marker is None else tenant_marker.resolve(request)
+                        )
+                        session = session_type(registry, workload, tenant=context)
+                        by_key[key] = session
+                        opened_list.append(session)
+                    kwargs[name] = session
+            if resolver_plan:
+                cache: dict[Any, Any] = {}
+                cleanup_list: list[Any] = []
+                cleanups = cleanup_list
+                for name, key, use_cache, resolver in resolver_plan:
+                    value = cache.get(key, _CACHE_MISSING) if use_cache else _CACHE_MISSING
+                    if value is _CACHE_MISSING:
+                        value = await resolver(request, cache, cleanup_list)
+                        if use_cache:
+                            cache[key] = value
+                    if name is not None:
+                        kwargs[name] = value
             result = handler(request, **kwargs)
             if result.__class__ is _COROUTINE_TYPE:
                 result = await result
             if isinstance(result, streaming_type):
-                empty_borrowed: list[tuple[Any, Any, str]] = []
-                empty_opened: list[Any] = []
-
                 async def release_after_stream(
-                    borrowed_resources: list = borrowed,
-                    opened_sessions: list = opened,
+                    borrowed_resources: Sequence[Any] = borrowed,
+                    opened_sessions: Sequence[Any] = opened,
                 ) -> None:
                     # Emission owns these resources until its finally block.
                     await _release(borrowed_resources, opened_sessions)
 
                 result._cleanup = release_after_stream
-                borrowed = empty_borrowed
-                opened = empty_opened
+                borrowed = ()
+                opened = ()
             return result
         finally:
             await _release(borrowed, opened)
@@ -3203,7 +3211,7 @@ def compile_binder(
     return _name_binder(selected, handler)
 
 
-async def _release(borrowed: list, opened: list) -> None:
+async def _release(borrowed: Sequence[Any], opened: Sequence[Any]) -> None:
     """Close sessions and return connections, in reverse acquisition order.
 
     Every leg runs even when an earlier one fails, so one broken rollback

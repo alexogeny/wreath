@@ -1497,7 +1497,7 @@ async def test_clear_pending_resets_each_lazy_state_branch(session: Session) -> 
     session._deleted = [marker]
     session._deleted_ids = {id(marker)}
     session._clear_pending()
-    assert session._deleted == []
+    assert session._deleted == ()
     assert not session._deleted_ids
 
     session._dirty_items = [marker]
@@ -1605,7 +1605,7 @@ async def test_flush_and_close_leave_no_stale_bookkeeping(
     await session.flush()
     assert session._new == []
     assert session._new_ids == set()
-    assert session._deleted == []
+    assert session._deleted == ()
     assert session._deleted_ids == set()
     await session.close()
     assert session._new_ids == set()
@@ -1700,7 +1700,7 @@ async def test_deleting_through_a_closed_session_is_rejected(
     await session.close()
     with pytest.raises(SessionClosedError):
         session.delete(doomed)
-    assert session._deleted == []
+    assert session._deleted == ()
 
 
 async def test_adding_through_a_closed_session_is_rejected(

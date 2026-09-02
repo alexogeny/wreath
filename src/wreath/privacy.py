@@ -80,49 +80,41 @@ the `search_path`, or use a logical schema.
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, cast
 
-from ._privacy import (
-    Classification,
-    Classified,
-    ColumnAction,
-    CycleFinding,
-    Disposal,
-    Edge,
-    Erase,
-    ErasureBlocked,
-    ErasureIncomplete,
-    ErasurePlan,
-    ExportPlan,
-    OrphanRisk,
-    Personal,
-    PlanMoved,
-    PreparedErasure,
-    PrivacyDeclarationError,
-    PrivacyRegistry,
-    Pseudonymise,
-    Reach,
-    Retained,
-    Retention,
-    Subject,
-    SurvivingReference,
-    TableAction,
-    Unreachable,
-    as_dict,
-    build_export_plan,
-    build_plan,
-    classified,
-    declare_model,
-    declare_registry,
-    describe_retention,
-    record_erasure,
-    render_export_text,
-    render_json,
-    render_text,
-    retention_passes,
-    schema_sql,
-)
-from ._privacy.graph import CATALOG_EDGES, build_graph, catalog_edge_rows, missing_edges
+if TYPE_CHECKING:
+    from ._privacy.declare import Classified, Personal, Subject, classified
+    from ._privacy.execute import (
+        ErasureBlocked,
+        ErasureIncomplete,
+        PlanMoved,
+        PreparedErasure,
+    )
+    from ._privacy.model import (
+        ColumnAction,
+        CycleFinding,
+        Disposal,
+        Edge,
+        Erase,
+        ErasurePlan,
+        ExportPlan,
+        OrphanRisk,
+        Pseudonymise,
+        Reach,
+        Retained,
+        SurvivingReference,
+        TableAction,
+        Unreachable,
+        as_dict,
+    )
+    from ._privacy.registry import (
+        Classification,
+        PrivacyDeclarationError,
+        Retention,
+    )
+    from ._privacy.render import render_export_text, render_json, render_text
+    from ._privacy.retention import schema_sql
 
 __all__ = [
     "Classification",
@@ -177,6 +169,8 @@ class Privacy:
     __slots__ = ("_erasure_record_retain", "_registry", "_orm")
 
     def __init__(self, registry: Any = None, *, erasure_record_retain: float | None = None) -> None:
+        from ._privacy.registry import PrivacyRegistry
+
         self._orm = registry
         self._registry = PrivacyRegistry()
         self._erasure_record_retain = erasure_record_retain
@@ -186,6 +180,8 @@ class Privacy:
             # log-site layer and a log site is built at import; and loudly
             # rather than best-effort, because a marker nobody read is the
             # silent gap this module exists to make visible.
+            from ._privacy.declare import declare_registry
+
             declare_registry(self._registry, registry)
             self._publish()
 
@@ -228,6 +224,8 @@ class Privacy:
         Returns:
             Whether the model declared anything.
         """
+        from ._privacy.declare import declare_model
+
         found = declare_model(self._registry, model)
         if found:
             self._publish()
@@ -239,14 +237,21 @@ class Privacy:
 
     def plan(self, subject_id: str, *, registry: Any = None) -> ErasurePlan:
         """What erasing one subject would do. Opens nothing, writes nothing."""
+        from ._privacy.planner import build_plan
+
         return build_plan(self._registry, self._resolve(registry), str(subject_id))
 
     def access(self, subject_id: str, *, registry: Any = None) -> ExportPlan:
         """The read-mode traversal behind a subject-access request."""
+        from ._privacy.planner import build_export_plan
+
         return build_export_plan(self._registry, self._resolve(registry), str(subject_id))
 
     def render(self, plan: ErasurePlan | ExportPlan, *, format: str = "text") -> str:
         """A plan as text to read, or JSON to diff."""
+        from ._privacy.model import ExportPlan
+        from ._privacy.render import render_export_text, render_json, render_text
+
         if format == "json":
             return render_json(plan)
         if isinstance(plan, ExportPlan):
@@ -255,14 +260,20 @@ class Privacy:
 
     def retention(self) -> tuple[str, ...]:
         """Every declared retention window, and every table that lacks one."""
+        from ._privacy.retention import describe_retention
+
         return describe_retention(self._registry, erasure_record_retain=self._erasure_record_retain)
 
     def retention_passes(self, **kwargs: Any) -> tuple[tuple[Retention, Any], ...]:
         """One `ChunkedPass` per declared window, for `jobs.drive` to schedule."""
+        from ._privacy.retention import retention_passes
+
         return retention_passes(self._registry, **kwargs)
 
     def graph(self, *, registry: Any = None) -> Any:
         """The foreign-key graph this application declares."""
+        from ._privacy.graph import build_graph
+
         return build_graph(self._resolve(registry))
 
     async def unmodelled_edges(
@@ -280,6 +291,8 @@ class Privacy:
         not walk. Run it in CI against a real schema and treat a non-empty
         result as a finding.
         """
+        from ._privacy.graph import CATALOG_EDGES, build_graph, catalog_edge_rows, missing_edges
+
         graph = build_graph(self._resolve(registry))
         connection = await database.acquire(workload)
         try:
@@ -303,6 +316,8 @@ class Privacy:
             ErasureBlocked: the plan would leave personal data behind.
         """
         orm = self._resolve(registry)
+        from ._privacy.planner import build_plan
+
         plan = build_plan(self._registry, orm, str(subject_id))
         from ._privacy.execute import prepare as _prepare
 
@@ -346,6 +361,8 @@ class Privacy:
         for _action, walk in prepared.steps:
             if walk is not None:
                 await walk.run(database)
+        from ._privacy.execute import record_erasure
+
         await record_erasure(prepared, database)
         return prepared
 
@@ -378,3 +395,141 @@ class Privacy:
         from ._logsite import declare_personal
 
         declare_personal(self._registry.personal_names())
+
+
+_EXPORTS = {
+    "Classification": "_privacy.registry",
+    "Classified": "_privacy.declare",
+    "ColumnAction": "_privacy.model",
+    "CycleFinding": "_privacy.model",
+    "Disposal": "_privacy.model",
+    "Edge": "_privacy.model",
+    "Erase": "_privacy.model",
+    "ErasureBlocked": "_privacy.execute",
+    "ErasureIncomplete": "_privacy.execute",
+    "ErasurePlan": "_privacy.model",
+    "ExportPlan": "_privacy.model",
+    "OrphanRisk": "_privacy.model",
+    "Personal": "_privacy.declare",
+    "PlanMoved": "_privacy.execute",
+    "PreparedErasure": "_privacy.execute",
+    "PrivacyDeclarationError": "_privacy.registry",
+    "PrivacyRegistry": "_privacy.registry",
+    "Pseudonymise": "_privacy.model",
+    "Reach": "_privacy.model",
+    "Retained": "_privacy.model",
+    "Retention": "_privacy.registry",
+    "Subject": "_privacy.declare",
+    "SurvivingReference": "_privacy.model",
+    "TableAction": "_privacy.model",
+    "Unreachable": "_privacy.model",
+    "as_dict": "_privacy.model",
+    "classified": "_privacy.declare",
+    "declare_model": "_privacy.declare",
+    "declare_registry": "_privacy.declare",
+    "build_export_plan": "_privacy.planner",
+    "build_plan": "_privacy.planner",
+    "CATALOG_EDGES": "_privacy.graph",
+    "build_graph": "_privacy.graph",
+    "catalog_edge_rows": "_privacy.graph",
+    "missing_edges": "_privacy.graph",
+    "describe_retention": "_privacy.retention",
+    "record_erasure": "_privacy.execute",
+    "render_export_text": "_privacy.render",
+    "render_json": "_privacy.render",
+    "render_text": "_privacy.render",
+    "schema_sql": "_privacy.retention",
+    "retention_passes": "_privacy.retention",
+}
+
+_MODULE_EXPORTS = {
+    "_privacy.registry": (
+        "Classification",
+        "PrivacyDeclarationError",
+        "PrivacyRegistry",
+        "Retention",
+    ),
+    "_privacy.declare": (
+        "Classified",
+        "Personal",
+        "Subject",
+        "classified",
+        "declare_model",
+        "declare_registry",
+    ),
+    "_privacy.model": (
+        "ColumnAction",
+        "CycleFinding",
+        "Disposal",
+        "Edge",
+        "Erase",
+        "ErasurePlan",
+        "ExportPlan",
+        "OrphanRisk",
+        "Pseudonymise",
+        "Reach",
+        "Retained",
+        "SurvivingReference",
+        "TableAction",
+        "Unreachable",
+        "as_dict",
+    ),
+    "_privacy.execute": (
+        "ErasureBlocked",
+        "ErasureIncomplete",
+        "PlanMoved",
+        "PreparedErasure",
+        "record_erasure",
+    ),
+    "_privacy.planner": ("build_export_plan", "build_plan"),
+    "_privacy.graph": (
+        "CATALOG_EDGES",
+        "build_graph",
+        "catalog_edge_rows",
+        "missing_edges",
+    ),
+    "_privacy.render": ("render_export_text", "render_json", "render_text"),
+    "_privacy.retention": ("describe_retention", "retention_passes", "schema_sql"),
+}
+
+
+def _privacy_module(module: str) -> Any:
+    from importlib import import_module
+
+    return import_module(f".{module}", __package__)
+
+
+def __getattr__(name: str) -> Any:
+    module = _EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    loaded = _privacy_module(module)
+    namespace = globals()
+    for export in _MODULE_EXPORTS[module]:
+        namespace[export] = getattr(loaded, export)
+    return namespace[name]
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *__all__, *_EXPORTS})
+
+
+def _annotation_loader(
+    annotate: Callable[[Any], dict[str, Any]],
+) -> Callable[[Any], dict[str, Any]]:
+    def load(format: Any) -> dict[str, Any]:
+        namespace = globals()
+        for module in ("_privacy.model", "_privacy.registry", "_privacy.execute"):
+            loaded = _privacy_module(module)
+            for export in _MODULE_EXPORTS[module]:
+                namespace[export] = getattr(loaded, export)
+        return annotate(format)
+
+    return load
+
+
+for _method_name in ("plan", "access", "render", "retention_passes", "prepare", "erase"):
+    _method = getattr(Privacy, _method_name)
+    _method.__annotate__ = _annotation_loader(
+        cast(Callable[[Any], dict[str, Any]], _method.__annotate__)
+    )

@@ -113,16 +113,19 @@ Reference: [MCP](../reference/mcp.md). Guide: [Serving MCP tools](../guides/mcp.
 
 from __future__ import annotations
 
-from ._mcp.auth import MCPAuth
-from ._mcp.limits import MCPLimits, ToolRateLimit
-from ._mcp.outbound import ClientRequestError
-from ._mcp.prompts import Prompt
-from ._mcp.protocol import PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, JsonRpcError
-from ._mcp.registry import Tool, ToolSignatureError
-from ._mcp.resources import Resource
-from ._mcp.routes import expose_routes
-from ._mcp.server import MCP, ToolError
-from ._mcp.session import ToolContext
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ._mcp.auth import MCPAuth
+    from ._mcp.limits import MCPLimits, ToolRateLimit
+    from ._mcp.outbound import ClientRequestError
+    from ._mcp.prompts import Prompt
+    from ._mcp.protocol import PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, JsonRpcError
+    from ._mcp.registry import Tool, ToolSignatureError
+    from ._mcp.resources import Resource
+    from ._mcp.routes import expose_routes
+    from ._mcp.server import MCP, ToolError
+    from ._mcp.session import ToolContext
 
 __all__ = [
     "PROTOCOL_VERSION",
@@ -141,3 +144,51 @@ __all__ = [
     "ToolSignatureError",
     "expose_routes",
 ]
+
+_EXPORTS = {
+    "PROTOCOL_VERSION": "protocol",
+    "SUPPORTED_PROTOCOL_VERSIONS": "protocol",
+    "MCP": "server",
+    "ClientRequestError": "outbound",
+    "JsonRpcError": "protocol",
+    "MCPAuth": "auth",
+    "MCPLimits": "limits",
+    "Prompt": "prompts",
+    "Resource": "resources",
+    "Tool": "registry",
+    "ToolContext": "session",
+    "ToolError": "server",
+    "ToolRateLimit": "limits",
+    "ToolSignatureError": "registry",
+    "expose_routes": "routes",
+}
+
+_MODULE_EXPORTS = {
+    "auth": ("MCPAuth",),
+    "limits": ("MCPLimits", "ToolRateLimit"),
+    "outbound": ("ClientRequestError",),
+    "prompts": ("Prompt",),
+    "protocol": ("PROTOCOL_VERSION", "SUPPORTED_PROTOCOL_VERSIONS", "JsonRpcError"),
+    "registry": ("Tool", "ToolSignatureError"),
+    "resources": ("Resource",),
+    "routes": ("expose_routes",),
+    "server": ("MCP", "ToolError"),
+    "session": ("ToolContext",),
+}
+
+
+def __getattr__(name: str) -> Any:
+    module = _EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    loaded = import_module(f"._mcp.{module}", __package__)
+    namespace = globals()
+    for export in _MODULE_EXPORTS[module]:
+        namespace[export] = getattr(loaded, export)
+    return namespace[name]
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *__all__})

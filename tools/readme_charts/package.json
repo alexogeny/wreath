@@ -1,0 +1,12 @@
+{
+  "name": "wreath-readme-charts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "bun run generate.mjs --check",
+    "generate": "bun run generate.mjs"
+  },
+  "devDependencies": {
+    "animejs": "4.5.0"
+  }
+}

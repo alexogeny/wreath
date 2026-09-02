@@ -36,6 +36,7 @@ typed ecosystem business kernel on their fastest retained server configurations.
 uv sync --inexact --group benchmark
 uv run python -m benchmarks.bench_holistic_stack_instructions \
   --requests 30 --trials 5 --connections 8 --warmup 16 \
+  --counter-profile instructions \
   --output benchmarks/baselines/e2e-holistic-stack-instructions.json
 ```
 
@@ -45,11 +46,18 @@ HTTP/1.1. Every response is checked for the common business and policy facts
 before its counter is accepted; the DCZ arm additionally verifies its framing,
 dictionary, decoding and cache key, and its gzip fallback is exercised before
 measurement. An unchanged `holistic-aa` rebuild records the resolution floor.
-The harness records retired instructions plus L1 data, L1 instruction and all
-L2 cache hits and misses. Instructions and the four L1 events share one perf
-pass; the five AMD L2 component events share another. Neither pass multiplexes
-hardware counters, and both use the same alternating N/N2 slope method. L1 hits
-are accesses minus misses; L2 figures include demand and prefetch traffic.
+The portable profile records retired instructions. On supported AMD machines,
+`--counter-profile amd-cache` additionally records L1 data, L1 instruction and
+component L2 events in separate non-multiplexed passes. Both profiles use the
+same alternating N/N2 slope method.
+
+PSS and RSS use separate fresh-process trials so reading procfs cannot perturb
+the hardware-counter sample. The harness sums `/proc/<pid>/smaps_rollup` over
+the server root and every descendant at ready, verified, warmed, retained, and
+observed-peak phases. PSS apportions shared mappings; summed RSS counts a shared
+mapping in each process. The collector waits 2 ms between complete process-tree
+scans, so it can miss a shorter-lived peak. Every memory trial passes the same
+exact response verifier before its values are accepted.
 
 `bench_e2e_instructions.py` compares four complete service stacks people
 actually assemble, then decomposes them cumulatively. The Wreath arm uses

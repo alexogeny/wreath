@@ -49,10 +49,13 @@ kind:
 
 from __future__ import annotations
 
-from .headers import HOP_BY_HOP, forwardable
-from .proxy import DEFAULT_ATTEMPTS, DEFAULT_MAX_BODY, IDEMPOTENT, ReverseProxy
-from .serve import DEFAULT_CONNECTIONS, EdgeHandle, serve
-from .upstream import Ejection, Upstream, UpstreamPool
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .headers import HOP_BY_HOP, forwardable
+    from .proxy import DEFAULT_ATTEMPTS, DEFAULT_MAX_BODY, IDEMPOTENT, ReverseProxy
+    from .serve import DEFAULT_CONNECTIONS, EdgeHandle, serve
+    from .upstream import Ejection, Upstream, UpstreamPool
 
 __all__ = [
     "DEFAULT_ATTEMPTS",
@@ -68,3 +71,42 @@ __all__ = [
     "forwardable",
     "serve",
 ]
+
+_EXPORTS = {
+    "DEFAULT_ATTEMPTS": "proxy",
+    "DEFAULT_CONNECTIONS": "serve",
+    "DEFAULT_MAX_BODY": "proxy",
+    "HOP_BY_HOP": "headers",
+    "IDEMPOTENT": "proxy",
+    "EdgeHandle": "serve",
+    "Ejection": "upstream",
+    "ReverseProxy": "proxy",
+    "Upstream": "upstream",
+    "UpstreamPool": "upstream",
+    "forwardable": "headers",
+    "serve": "serve",
+}
+
+_MODULE_EXPORTS = {
+    "headers": ("HOP_BY_HOP", "forwardable"),
+    "proxy": ("DEFAULT_ATTEMPTS", "DEFAULT_MAX_BODY", "IDEMPOTENT", "ReverseProxy"),
+    "serve": ("DEFAULT_CONNECTIONS", "EdgeHandle", "serve"),
+    "upstream": ("Ejection", "Upstream", "UpstreamPool"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    module = _EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    loaded = import_module(f".{module}", __name__)
+    namespace = globals()
+    for export in _MODULE_EXPORTS[module]:
+        namespace[export] = getattr(loaded, export)
+    return namespace[name]
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *__all__})

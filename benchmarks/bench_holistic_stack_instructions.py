@@ -1,10 +1,13 @@
 """Hardware-counter account for equivalent holistic service applications.
 
-Instructions and L1D/L1I/L2 hits and misses are collected in two
-non-multiplexed perf passes. Each sample is an alternating N/N/2 process slope,
-so fixed imports, startup, dependency construction, warm-up and perf attachment
-cancel. ``holistic-aa`` rebuilds the unchanged application as a resolution
-control. The server and generator run on separate physical cores.
+Retired instructions and supported cache events are collected in
+non-multiplexed perf passes. PSS and RSS are sampled separately over the full
+server process tree at ready, verified, warmed, retained, and observed-peak phases,
+so procfs reads cannot perturb hardware-counter samples. Each counter sample is
+an alternating N/N/2 process slope, so fixed imports, startup, dependency
+construction, warm-up and perf attachment cancel. ``holistic-aa`` rebuilds the
+unchanged application as a resolution control. The server and generator run on
+separate physical cores.
 
 Run after installing the benchmark group::
 
@@ -84,6 +87,7 @@ COUNTER_GROUPS = (
         },
     ),
 )
+INSTRUCTION_COUNTER_GROUPS = (("instructions", {"instructions": "instructions:u"}),)
 STACK_PACKAGES = (
     "wreath",
     "fastapi",
@@ -371,24 +375,25 @@ def _verify(port: int, framework: str) -> None:
             raise RuntimeError("dictionary-mismatch fallback changed the response bytes")
 
 
+def _event_name(value: str) -> str:
+    value = value.removeprefix("cpu_core/").removeprefix("cpu_atom/")
+    return value.removesuffix(":u").removesuffix("/u")
+
+
 def _parse_counters(stderr: str, events: dict[str, str]) -> dict[str, int]:
-    by_event = {event.removesuffix(":u"): name for name, event in events.items()}
+    by_event = {_event_name(event): name for name, event in events.items()}
     counters: dict[str, int] = {}
     for line in stderr.splitlines():
         fields = line.split(";")
         if len(fields) <= 2:
             continue
-        event = fields[2].removesuffix(":u")
+        event = _event_name(fields[2])
         name = by_event.get(event)
         if name is None:
             continue
         value = fields[0].strip()
-        if not value.isdigit():
-            raise RuntimeError(
-                f"perf could not count {events[name]!r}; this benchmark requires "
-                f"that userspace hardware event on the selected CPU:\n{stderr}"
-            )
-        counters[name] = int(value)
+        if value.isdigit():
+            counters[name] = counters.get(name, 0) + int(value)
     missing = [events[name] for name in events.keys() - counters.keys()]
     if missing:
         raise RuntimeError(
@@ -398,7 +403,60 @@ def _parse_counters(stderr: str, events: dict[str, str]) -> dict[str, int]:
     return counters
 
 
+def _parse_smaps_rollup(contents: str) -> dict[str, int]:
+    values: dict[str, int] = {}
+    for line in contents.splitlines():
+        name, separator, rest = line.partition(":")
+        if separator and name in {"Pss", "Rss"}:
+            amount, unit, *_unused = rest.split()
+            if unit != "kB" or not amount.isdigit():
+                raise RuntimeError(f"unexpected smaps_rollup field: {line!r}")
+            values[f"{name.lower()}_bytes"] = int(amount) * 1024
+    missing = {"pss_bytes", "rss_bytes"} - values.keys()
+    if missing:
+        raise RuntimeError(f"smaps_rollup omitted {', '.join(sorted(missing))}")
+    return values
+
+
+def _process_tree_pids(root_pid: int) -> tuple[int, ...]:
+    pending = [root_pid]
+    found: set[int] = set()
+    while pending:
+        pid = pending.pop()
+        if pid in found:
+            continue
+        found.add(pid)
+        try:
+            children = Path(f"/proc/{pid}/task/{pid}/children").read_text(
+                encoding="ascii"
+            )
+        except OSError:
+            continue
+        pending.extend(int(child) for child in children.split())
+    return tuple(sorted(found))
+
+
+def _process_tree_memory(root_pid: int) -> dict[str, int]:
+    totals = {"pss_bytes": 0, "rss_bytes": 0}
+    measured = 0
+    for pid in _process_tree_pids(root_pid):
+        try:
+            values = _parse_smaps_rollup(
+                Path(f"/proc/{pid}/smaps_rollup").read_text(encoding="ascii")
+            )
+        except OSError:
+            continue
+        measured += 1
+        for name in totals:
+            totals[name] += values[name]
+    if measured == 0:
+        raise RuntimeError(f"server process tree rooted at {root_pid} disappeared")
+    return totals
+
+
 def _derive_metrics(counters: dict[str, float]) -> dict[str, float]:
+    if counters.keys() == {"instructions"}:
+        return counters
     prefetch_misses = counters["l2_prefetch_hits_l3"] + counters["l2_prefetch_misses_l3"]
     return {
         "instructions": counters["instructions"],
@@ -446,8 +504,10 @@ def _perf_pid(framework: str, server_pid: int) -> int:
 
 
 def _summary(samples: list[float]) -> dict[str, float | list[float]]:
+    median = statistics.median(samples)
     return {
-        "median": statistics.median(samples),
+        "median": median,
+        "mad": statistics.median(abs(sample - median) for sample in samples),
         "range": [min(samples), max(samples)],
         "samples": samples,
     }
@@ -518,17 +578,88 @@ def _one_count(
         _stdout, stderr = perf.communicate(timeout=10)
         return _parse_counters(stderr, events)
     finally:
-        server.terminate()
-        try:
-            # The ecosystem peers' synthetic asyncpg server deliberately does
-            # not implement PostgreSQL's terminate exchange. Their graceful
-            # pool close therefore cannot complete; the process is disposable
-            # once its counters have been read.
-            timeout = 1 if framework in {"fastapi", "sanic", "blacksheep"} else 10
-            server.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            server.kill()
-            server.wait(timeout=5)
+        _stop_server(server, framework)
+
+
+def _stop_server(server: subprocess.Popen[bytes], framework: str) -> None:
+    server.terminate()
+    try:
+        timeout = 1 if framework in {"fastapi", "sanic", "blacksheep"} else 10
+        server.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        server.kill()
+        server.wait(timeout=5)
+
+
+def _memory_lifecycle(
+    framework: str,
+    requests: int,
+    connections: int,
+    warmup: int,
+    server_cpu: int,
+    generator_cpu: int,
+    certificate: Path,
+    key: Path,
+    sample_interval: float,
+) -> dict[str, dict[str, int]]:
+    port = _available_port()
+    env = _environment(framework)
+    server = subprocess.Popen(
+        _server_command(framework, port, server_cpu, certificate, key),
+        cwd=ROOT,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        _wait_ready(server, port)
+        stages = {"ready": _process_tree_memory(server.pid)}
+        _verify(port, framework)
+        stages["verified"] = _process_tree_memory(server.pid)
+        generator_command = ["taskset", "-c", str(generator_cpu), str(PYTHON), "-c"]
+        warmup_code = (
+            "from benchmarks.bench_holistic_stack_instructions import _drive;"
+            f"_drive({framework!r},{port},{warmup},{connections})"
+        )
+        subprocess.run(
+            [*generator_command, warmup_code],
+            cwd=ROOT,
+            env=env,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        stages["warmed"] = _process_tree_memory(server.pid)
+        peak = dict(stages["warmed"])
+        measured_code = (
+            "from benchmarks.bench_holistic_stack_instructions import _drive;"
+            f"_drive({framework!r},{port},{requests},{connections})"
+        )
+        generator = subprocess.Popen(
+            [*generator_command, measured_code],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        while generator.poll() is None:
+            current = _process_tree_memory(server.pid)
+            for name, value in current.items():
+                peak[name] = max(peak[name], value)
+            time.sleep(sample_interval)
+        _stdout, generator_error = generator.communicate()
+        if generator.returncode:
+            raise RuntimeError(
+                f"memory load generator exited {generator.returncode}: "
+                f"{generator_error.decode(errors='replace')}"
+            )
+        stages["retained"] = _process_tree_memory(server.pid)
+        for name, value in stages["retained"].items():
+            peak[name] = max(peak[name], value)
+        stages["observed_peak"] = peak
+        return stages
+    finally:
+        _stop_server(server, framework)
 
 
 def _versions() -> dict[str, str]:
@@ -550,6 +681,18 @@ def _cpu_model() -> str:
     except OSError:
         pass
     return platform.processor() or "unknown"
+
+
+def _counter_groups(profile: str) -> tuple[tuple[str, dict[str, str]], ...]:
+    if profile == "instructions":
+        return INSTRUCTION_COUNTER_GROUPS
+    if profile == "amd-cache":
+        return COUNTER_GROUPS
+    try:
+        cpuinfo = Path("/proc/cpuinfo").read_text(encoding="utf-8")
+    except OSError:
+        cpuinfo = ""
+    return COUNTER_GROUPS if "AuthenticAMD" in cpuinfo else INSTRUCTION_COUNTER_GROUPS
 
 
 def _self_signed_certificate(directory: Path) -> tuple[Path, Path]:
@@ -596,6 +739,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--warmup", type=int, default=16)
     parser.add_argument("--server-cpu", type=int, default=8)
     parser.add_argument("--generator-cpu", type=int, default=0)
+    parser.add_argument(
+        "--counter-profile",
+        choices=("auto", "instructions", "amd-cache"),
+        default="auto",
+    )
+    parser.add_argument(
+        "--memory",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="measure the server process-tree PSS and RSS in separate lifecycle runs",
+    )
+    parser.add_argument("--memory-sample-ms", type=float, default=2.0)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--merge",
@@ -607,31 +762,56 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("requests >= 2, trials >= 3, connections >= 1 and warmup >= 1 required")
     if args.server_cpu == args.generator_cpu:
         parser.error("server and generator must use different logical CPUs")
+    if args.memory_sample_ms <= 0:
+        parser.error("memory sample interval must be positive")
 
     selected_frameworks = args.framework or list(FRAMEWORKS)
     selected_arms = args.arm or list(ARMS)
+    counter_groups = _counter_groups(args.counter_profile)
+    counter_names = {name for _group, events in counter_groups for name in events}
+    metric_descriptions = {
+        "instructions": "retired userspace instructions per successful request",
+        "l1d_hits": "L1 data-cache load hits per successful request",
+        "l1d_misses": "L1 data-cache load misses per successful request",
+        "l1i_hits": "L1 instruction-cache load hits per successful request",
+        "l1i_misses": "L1 instruction-cache load misses per successful request",
+        "l2_demand_hits": "demand instruction/data requests hitting L2 per successful request",
+        "l2_demand_misses": (
+            "demand instruction/data requests missing L2 per successful request"
+        ),
+        "l2_prefetch_hits": "L2 prefetch requests hitting L2 per successful request",
+        "l2_prefetch_misses": "L2 prefetch requests missing L2 per successful request",
+        "l2_all_hits": "demand plus prefetch L2 hits per successful request",
+        "l2_all_misses": "demand plus prefetch L2 misses per successful request",
+    }
+    derived_names = (
+        {"instructions"}
+        if counter_names == {"instructions"}
+        else set(metric_descriptions)
+    )
     document: dict[str, Any] = {
-        "schema": "wreath/e2e-holistic-stack-counters/4",
+        "schema": "wreath/e2e-holistic-stack-counters/5",
         "recorded": time.strftime("%Y-%m-%d"),
         "python": platform.python_version(),
         "platform": platform.platform(),
         "cpu": _cpu_model(),
         "metric": "retired userspace instructions per successful request",
         "metrics": {
-            "instructions": "retired userspace instructions per successful request",
-            "l1d_hits": "L1 data-cache load hits per successful request",
-            "l1d_misses": "L1 data-cache load misses per successful request",
-            "l1i_hits": "L1 instruction-cache load hits per successful request",
-            "l1i_misses": "L1 instruction-cache load misses per successful request",
-            "l2_demand_hits": "demand instruction/data requests hitting L2 per successful request",
-            "l2_demand_misses": (
-                "demand instruction/data requests missing L2 per successful request"
-            ),
-            "l2_prefetch_hits": "L2 prefetch requests hitting L2 per successful request",
-            "l2_prefetch_misses": "L2 prefetch requests missing L2 per successful request",
-            "l2_all_hits": "demand plus prefetch L2 hits per successful request",
-            "l2_all_misses": "demand plus prefetch L2 misses per successful request",
+            name: metric_descriptions[name]
+            for name in metric_descriptions
+            if name in derived_names
         },
+        "memory_metrics": {
+            "pss_bytes": "summed process-tree proportional set size in bytes",
+            "rss_bytes": (
+                "summed process-tree resident set size in bytes; shared mappings count "
+                "once in every process"
+            ),
+        },
+        "memory_limitations": (
+            "Observed peaks use repeated procfs snapshots with the configured sleep "
+            "between complete process-tree scans; a shorter-lived peak may be missed."
+        ),
         "transport": "TLS 1.3 over HTTP/1.1 for every arm",
         "method": (
             "median of alternating N/N2 process slopes; fixed startup, imports, "
@@ -666,11 +846,24 @@ def main(argv: list[str] | None = None) -> int:
             "server_cpu": args.server_cpu,
             "generator_cpu": args.generator_cpu,
             "pythonhashseed": 0,
-            "counter_groups": {name: list(events.values()) for name, events in COUNTER_GROUPS},
+            "counter_profile": (
+                "amd-cache" if counter_groups == COUNTER_GROUPS else "instructions"
+            ),
+            "counter_groups": {name: list(events.values()) for name, events in counter_groups},
             "multiplexed": False,
+            "memory": {
+                "enabled": args.memory,
+                "trials": args.trials if args.memory else 0,
+                "requests": args.requests,
+                "sample_interval_ms": args.memory_sample_ms,
+                "process_scope": "server root and every descendant",
+                "collector": "/proc/<pid>/smaps_rollup",
+                "counter_pass_separate": True,
+            },
         },
         "packages": _versions(),
         "arms": {},
+        "memory": {},
     }
     if args.merge and args.output.exists():
         previous = json.loads(args.output.read_text(encoding="utf-8"))
@@ -681,6 +874,7 @@ def main(argv: list[str] | None = None) -> int:
         if previous.get("measurement") != document["measurement"]:
             parser.error("cannot merge an artifact recorded with different measurement options")
         document["arms"].update(previous.get("arms", {}))
+        document["memory"].update(previous.get("memory", {}))
     with tempfile.TemporaryDirectory(prefix="wreath-holistic-") as directory:
         certificate, key = _self_signed_certificate(Path(directory))
         for framework in selected_frameworks:
@@ -690,10 +884,12 @@ def main(argv: list[str] | None = None) -> int:
                 for trial in range(args.trials):
                     order = ("high", "low") if trial % 2 == 0 else ("low", "high")
                     slopes: dict[str, float] = {}
-                    counter_groups = (
-                        COUNTER_GROUPS if trial % 2 == 0 else tuple(reversed(COUNTER_GROUPS))
+                    trial_counter_groups = (
+                        counter_groups
+                        if trial % 2 == 0
+                        else tuple(reversed(counter_groups))
                     )
-                    for _group_name, events in counter_groups:
+                    for _group_name, events in trial_counter_groups:
                         totals: dict[str, dict[str, int]] = {}
                         for size_name in order:
                             count = args.requests if size_name == "high" else args.requests // 2
@@ -718,17 +914,20 @@ def main(argv: list[str] | None = None) -> int:
                     metrics = _derive_metrics(slopes)
                     for name, value in metrics.items():
                         samples.setdefault(name, []).append(value)
-                    print(
+                    message = (
                         f"{framework:14s} {arm:11s} {trial + 1}/{args.trials}: "
-                        f"{metrics['instructions']:,.1f} instructions, "
-                        f"L1D {metrics['l1d_hits']:,.1f}/{metrics['l1d_misses']:,.1f}, "
-                        f"L1I {metrics['l1i_hits']:,.1f}/{metrics['l1i_misses']:,.1f}, "
-                        f"L2 demand {metrics['l2_demand_hits']:,.1f}/"
-                        f"{metrics['l2_demand_misses']:,.1f}, prefetch "
-                        f"{metrics['l2_prefetch_hits']:,.1f}/"
-                        f"{metrics['l2_prefetch_misses']:,.1f} hits/misses per request",
-                        flush=True,
+                        f"{metrics['instructions']:,.1f} instructions/request"
                     )
+                    if "l1d_hits" in metrics:
+                        message += (
+                            f", L1D {metrics['l1d_hits']:,.1f}/{metrics['l1d_misses']:,.1f}, "
+                            f"L1I {metrics['l1i_hits']:,.1f}/{metrics['l1i_misses']:,.1f}, "
+                            f"L2 demand {metrics['l2_demand_hits']:,.1f}/"
+                            f"{metrics['l2_demand_misses']:,.1f}, prefetch "
+                            f"{metrics['l2_prefetch_hits']:,.1f}/"
+                            f"{metrics['l2_prefetch_misses']:,.1f} hits/misses per request"
+                        )
+                    print(message, flush=True)
                 counters = {name: _summary(values) for name, values in samples.items()}
                 rows[arm] = {**counters["instructions"], "counters": counters}
             if "holistic" in rows and "holistic-aa" in rows:
@@ -736,6 +935,48 @@ def main(argv: list[str] | None = None) -> int:
                     rows["holistic-aa"]["median"] - rows["holistic"]["median"]
                 )
             document["arms"][framework] = rows
+
+        if args.memory:
+            samples: dict[str, dict[str, dict[str, list[float]]]] = {}
+            for trial in range(args.trials):
+                frameworks = (
+                    selected_frameworks
+                    if trial % 2 == 0
+                    else list(reversed(selected_frameworks))
+                )
+                for framework in frameworks:
+                    stages = _memory_lifecycle(
+                        framework,
+                        args.requests,
+                        args.connections,
+                        args.warmup,
+                        args.server_cpu,
+                        args.generator_cpu,
+                        certificate,
+                        key,
+                        args.memory_sample_ms / 1_000,
+                    )
+                    framework_samples = samples.setdefault(framework, {})
+                    for stage, values in stages.items():
+                        stage_samples = framework_samples.setdefault(stage, {})
+                        for name, value in values.items():
+                            stage_samples.setdefault(name, []).append(float(value))
+                    peak = stages["observed_peak"]
+                    print(
+                        f"{framework:14s} memory {trial + 1}/{args.trials}: "
+                        f"peak PSS {peak['pss_bytes'] / (1024 * 1024):.2f} MiB, "
+                        f"RSS {peak['rss_bytes'] / (1024 * 1024):.2f} MiB",
+                        flush=True,
+                    )
+            document["memory"].update({
+                framework: {
+                    stage: {
+                        name: _summary(values) for name, values in stage_samples.items()
+                    }
+                    for stage, stage_samples in framework_samples.items()
+                }
+                for framework, framework_samples in samples.items()
+            })
 
     document["historical_control"] = {
         "previous_wreath_gzip_backend": "zlib",
@@ -763,8 +1004,9 @@ def main(argv: list[str] | None = None) -> int:
         "projection and its paths in every arm; no arm reuses a final projection result. "
         "Real driver protocols terminate at the "
         "same deterministic in-process peers. No external database, network, DNS, disk, "
-        "wall clock, cycles or IPC enters the result. Cache events are collected in a "
-        "second non-multiplexed pass so counter scarcity cannot time-share them. The "
+        "wall clock, cycles or IPC enters the result. Hardware counters are never "
+        "multiplexed. PSS and RSS are collected from separate fresh processes over the "
+        "whole server process tree, so procfs reads cannot perturb those counters. The "
         "Wreath optimal arm serves RFC "
         "9842 dcz only after an exact Available-Dictionary hash match and retains a "
         "standards-compatible prepared fragment-gzip fallback for ordinary clients."

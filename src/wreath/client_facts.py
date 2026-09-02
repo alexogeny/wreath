@@ -14,7 +14,6 @@ import json
 import re
 import threading
 from dataclasses import dataclass
-from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -56,7 +55,7 @@ _COUNT_NAMES = (
 
 
 def _builtin_database(name: str) -> bytes:
-    return files("wreath").joinpath("_data", name).read_bytes()
+    return Path(__file__).with_name("_data").joinpath(name).read_bytes()
 
 
 @dataclass(frozen=True, slots=True)

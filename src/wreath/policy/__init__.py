@@ -7,54 +7,90 @@ and their ordering is fixed by `HttpPolicy` rather than by priorities.
 
 from __future__ import annotations
 
-from os import urandom as _urandom
-from typing import Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, cast
 
-from .._compression import _dcz_compress, require_zstd
-from .._webpolicy import origin_matches as _native_origin_matches
-from .._webpolicy import replace_cookie as _native_replace_cookie
-from .admission import AdmissionStats, ConcurrencyPolicy
-from .cache import CachePolicy
-from .compression import CompressionPolicy
-from .cors import CorsPolicy
-from .csrf import CsrfPolicy, csrf_token
-from .csrf import _csrf_new_token as _native_csrf_new_token
-from .csrf import _csrf_validate as _native_csrf_validate
-from .deadline import DeadlinePolicy
-from .idempotency import (
-    IdempotencyPolicy,
-    IdempotencyStore,
-    MemoryIdempotencyStore,
-    PostgresIdempotencyStore,
-)
-from .maintenance import MaintenancePolicy
-from .proxy import ProxyPolicy
-from .ratelimit import (
-    MemoryRateLimitStore,
-    PostgresRateLimitStore,
-    RateLimitPolicy,
-    RateLimitStore,
-    TieredRateLimitPolicy,
-    principal_key,
-)
-from .request_decompression import RequestDecompressionPolicy
-from .request_id import RequestIdPolicy, request_id
-from .security import (
-    SecurityHeadersPolicy,
-    TrustedHostPolicy,
-    WebSocketOriginPolicy,
-    csp_nonce,
-)
-from .sessions import SessionPolicy, rotate_session
-from .signed_routes import SignedRoutePolicy
-from .timing import ServerTimingPolicy, elapsed
-from .traffic import (
-    AI_SCRAPERS,
-    AIScrapingPolicy,
-    TrafficClass,
-    TrafficPolicy,
-    traffic_class,
-)
+if TYPE_CHECKING:
+    from .admission import AdmissionStats, ConcurrencyPolicy
+    from .cache import CachePolicy
+    from .compression import CompressionPolicy
+    from .cors import CorsPolicy
+    from .csrf import CsrfPolicy, csrf_token
+    from .deadline import DeadlinePolicy
+    from .idempotency import (
+        IdempotencyPolicy,
+        IdempotencyStore,
+        MemoryIdempotencyStore,
+        PostgresIdempotencyStore,
+    )
+    from .maintenance import MaintenancePolicy
+    from .proxy import ProxyPolicy
+    from .ratelimit import (
+        MemoryRateLimitStore,
+        PostgresRateLimitStore,
+        RateLimitPolicy,
+        RateLimitStore,
+        TieredRateLimitPolicy,
+        principal_key,
+    )
+    from .request_decompression import RequestDecompressionPolicy
+    from .request_id import RequestIdPolicy, request_id
+    from .security import (
+        SecurityHeadersPolicy,
+        TrustedHostPolicy,
+        WebSocketOriginPolicy,
+        csp_nonce,
+    )
+    from .sessions import SessionPolicy, rotate_session
+    from .signed_routes import SignedRoutePolicy
+    from .timing import ServerTimingPolicy, elapsed
+    from .traffic import (
+        AI_SCRAPERS,
+        AIScrapingPolicy,
+        TrafficClass,
+        TrafficPolicy,
+        traffic_class,
+    )
+
+
+def _policy_module(module: str) -> Any:
+    from importlib import import_module
+
+    return import_module(f".{module}", __name__)
+
+
+def _policy_export(module: str, name: str) -> Any:
+    return getattr(_policy_module(module), name)
+
+
+_EXPECTED_TYPES = {
+    "proxy": (("proxy", "ProxyPolicy"),),
+    "trusted_host": (("security", "TrustedHostPolicy"),),
+    "maintenance": (("maintenance", "MaintenancePolicy"),),
+    "ai_scraping": (("traffic", "AIScrapingPolicy"),),
+    "traffic": (("traffic", "TrafficPolicy"),),
+    "rate_limit": (("ratelimit", "RateLimitPolicy"),),
+    "principal_rate_limit": (
+        ("ratelimit", "RateLimitPolicy"),
+        ("ratelimit", "TieredRateLimitPolicy"),
+    ),
+    "signed_routes": (("signed_routes", "SignedRoutePolicy"),),
+    "request_decompression": (
+        ("request_decompression", "RequestDecompressionPolicy"),
+    ),
+    "request_id": (("request_id", "RequestIdPolicy"),),
+    "server_timing": (("timing", "ServerTimingPolicy"),),
+    "cors": (("cors", "CorsPolicy"),),
+    "csrf": (("csrf", "CsrfPolicy"),),
+    "security_headers": (("security", "SecurityHeadersPolicy"),),
+    "websocket_origin": (("security", "WebSocketOriginPolicy"),),
+    "session": (("sessions", "SessionPolicy"),),
+    "idempotency": (("idempotency", "IdempotencyPolicy"),),
+    "cache_control": (("cache", "CachePolicy"),),
+    "compression": (("compression", "CompressionPolicy"),),
+    "concurrency": (("admission", "ConcurrencyPolicy"),),
+    "deadline": (("deadline", "DeadlinePolicy"),),
+}
 
 _PROXY = 1 << 0
 _TRUSTED_HOST = 1 << 1
@@ -133,39 +169,36 @@ class HttpPolicy:
         maintenance: MaintenancePolicy | None = None,
     ) -> None:
         values = (
-            ("proxy", proxy, ProxyPolicy),
-            ("trusted_host", trusted_host, TrustedHostPolicy),
-            ("maintenance", maintenance, MaintenancePolicy),
-            ("ai_scraping", ai_scraping, AIScrapingPolicy),
-            ("traffic", traffic, TrafficPolicy),
-            ("rate_limit", rate_limit, RateLimitPolicy),
-            (
-                "principal_rate_limit",
-                principal_rate_limit,
-                (RateLimitPolicy, TieredRateLimitPolicy),
-            ),
-            ("signed_routes", signed_routes, SignedRoutePolicy),
-            (
-                "request_decompression",
-                request_decompression,
-                RequestDecompressionPolicy,
-            ),
-            ("request_id", request_id, RequestIdPolicy),
-            ("server_timing", server_timing, ServerTimingPolicy),
-            ("cors", cors, CorsPolicy),
-            ("csrf", csrf, CsrfPolicy),
-            ("security_headers", security_headers, SecurityHeadersPolicy),
-            ("websocket_origin", websocket_origin, WebSocketOriginPolicy),
-            ("session", session, SessionPolicy),
-            ("idempotency", idempotency, IdempotencyPolicy),
-            ("cache_control", cache_control, CachePolicy),
-            ("compression", compression, CompressionPolicy),
-            ("concurrency", concurrency, ConcurrencyPolicy),
-            ("deadline", deadline, DeadlinePolicy),
+            ("proxy", proxy),
+            ("trusted_host", trusted_host),
+            ("maintenance", maintenance),
+            ("ai_scraping", ai_scraping),
+            ("traffic", traffic),
+            ("rate_limit", rate_limit),
+            ("principal_rate_limit", principal_rate_limit),
+            ("signed_routes", signed_routes),
+            ("request_decompression", request_decompression),
+            ("request_id", request_id),
+            ("server_timing", server_timing),
+            ("cors", cors),
+            ("csrf", csrf),
+            ("security_headers", security_headers),
+            ("websocket_origin", websocket_origin),
+            ("session", session),
+            ("idempotency", idempotency),
+            ("cache_control", cache_control),
+            ("compression", compression),
+            ("concurrency", concurrency),
+            ("deadline", deadline),
         )
-        for name, value, expected in values:
-            expected_types = expected if isinstance(expected, tuple) else (expected,)
-            if value is not None and type(value) not in expected_types:
+        for name, value in values:
+            if value is not None:
+                expected_types = tuple(
+                    _policy_export(module, export)
+                    for module, export in _EXPECTED_TYPES[name]
+                )
+                if type(value) in expected_types:
+                    continue
                 expected_name = " or ".join(item.__name__ for item in expected_types)
                 raise TypeError(
                     f"{name} must be an exact {expected_name}; "
@@ -200,12 +233,12 @@ class HttpPolicy:
             or idempotency is not None
             or (cache_control is not None and cache_control.policy is not None)
         )
-        self._components = tuple(value for _name, value, _expected in values if value is not None)
+        self._components = tuple(value for _name, value in values if value is not None)
         self._native_descriptor = self._freeze_native()
         self._native_ingress_only = (
             ai_scraping is not None
             and self._native_descriptor is not None
-            and all(value is None for name, value, _expected in values if name != "ai_scraping")
+            and all(value is None for name, value in values if name != "ai_scraping")
         )
 
     @property
@@ -349,17 +382,19 @@ class HttpPolicy:
         """Apply the principal-aware limiter after identity is available."""
         limiter = self.principal_rate_limit
         if limiter is not None:
-            if isinstance(limiter, RateLimitPolicy):
-                sync_ingress = limiter._ingress_sync
+            if type(limiter) is _policy_export("ratelimit", "RateLimitPolicy"):
+                rate_limiter = cast("RateLimitPolicy", limiter)
+                sync_ingress = rate_limiter._ingress_sync
                 if sync_ingress is not None:
                     candidate = sync_ingress(request)
                 else:
-                    ingress = limiter._ingress
+                    ingress = rate_limiter._ingress
                     if ingress is None:
                         raise RuntimeError("principal rate-limit policy has no ingress stage")
                     candidate = await ingress(request)
             else:
-                candidate = await limiter._ingress(request)
+                tiered_limiter = cast("TieredRateLimitPolicy", limiter)
+                candidate = await tiered_limiter._ingress(request)
             if candidate is not None:
                 return candidate
         idempotency = self.idempotency
@@ -492,12 +527,14 @@ class HttpPolicy:
 
         request_id = self.request_id
         if request_id is not None:
+            from os import urandom
+
             request_id = (
                 request_id._header_bytes,
                 request_id._trust_inbound,
                 request_id._echo,
                 request_id._max_length,
-                _urandom,
+                urandom,
             )
 
         timing = self.server_timing
@@ -518,6 +555,9 @@ class HttpPolicy:
         if csrf is not None:
             if csrf._exempt is not None or csrf._form_field is not None:
                 return None
+            from .._webpolicy import origin_matches, replace_cookie
+            from .csrf import _csrf_new_token, _csrf_validate
+
             csrf = (
                 csrf._secret,
                 csrf._cookie_name.encode("ascii"),
@@ -530,10 +570,10 @@ class HttpPolicy:
                 tuple(value.encode("ascii") for value in csrf._trusted_hosts),
                 csrf._allow_missing_origin,
                 csrf,
-                _native_csrf_new_token,
-                _native_csrf_validate,
-                _native_origin_matches,
-                _native_replace_cookie,
+                _csrf_new_token,
+                _csrf_validate,
+                origin_matches,
+                replace_cookie,
             )
 
         security = self.security_headers
@@ -544,9 +584,11 @@ class HttpPolicy:
 
         websocket_origin = self.websocket_origin
         if websocket_origin is not None:
+            from .._webpolicy import origin_matches
+
             websocket_origin = (
                 websocket_origin.allowed_origins,
-                _native_origin_matches,
+                origin_matches,
             )
 
         cache = self.cache_control
@@ -559,6 +601,8 @@ class HttpPolicy:
 
         compression = self.compression
         if compression is not None:
+            from .._compression import _dcz_compress, require_zstd
+
             native_dcz = tuple(compression._dcz_dictionaries)
             compression = (
                 compression.minimum_size,
@@ -594,37 +638,53 @@ class HttpPolicy:
         )
 
 
-_POLICY_TYPES = frozenset(
-    {
-        CorsPolicy,
-        AIScrapingPolicy,
-        CachePolicy,
-        CompressionPolicy,
-        ConcurrencyPolicy,
-        CsrfPolicy,
-        DeadlinePolicy,
-        HttpPolicy,
-        IdempotencyPolicy,
-        MaintenancePolicy,
-        ProxyPolicy,
-        RateLimitPolicy,
-        RequestDecompressionPolicy,
-        RequestIdPolicy,
-        SecurityHeadersPolicy,
-        ServerTimingPolicy,
-        SessionPolicy,
-        SignedRoutePolicy,
-        TieredRateLimitPolicy,
-        TrafficPolicy,
-        TrustedHostPolicy,
-        WebSocketOriginPolicy,
-    }
-)
+_POLICY_TYPES = {
+    f"{__name__}.admission": ("admission", frozenset({"ConcurrencyPolicy"})),
+    f"{__name__}.cache": ("cache", frozenset({"CachePolicy"})),
+    f"{__name__}.compression": ("compression", frozenset({"CompressionPolicy"})),
+    f"{__name__}.cors": ("cors", frozenset({"CorsPolicy"})),
+    f"{__name__}.csrf": ("csrf", frozenset({"CsrfPolicy"})),
+    f"{__name__}.deadline": ("deadline", frozenset({"DeadlinePolicy"})),
+    f"{__name__}.idempotency": ("idempotency", frozenset({"IdempotencyPolicy"})),
+    f"{__name__}.maintenance": ("maintenance", frozenset({"MaintenancePolicy"})),
+    f"{__name__}.proxy": ("proxy", frozenset({"ProxyPolicy"})),
+    f"{__name__}.ratelimit": (
+        "ratelimit",
+        frozenset({"RateLimitPolicy", "TieredRateLimitPolicy"}),
+    ),
+    f"{__name__}.request_decompression": (
+        "request_decompression",
+        frozenset({"RequestDecompressionPolicy"}),
+    ),
+    f"{__name__}.request_id": ("request_id", frozenset({"RequestIdPolicy"})),
+    f"{__name__}.security": (
+        "security",
+        frozenset(
+            {"SecurityHeadersPolicy", "TrustedHostPolicy", "WebSocketOriginPolicy"}
+        ),
+    ),
+    f"{__name__}.sessions": ("sessions", frozenset({"SessionPolicy"})),
+    f"{__name__}.signed_routes": (
+        "signed_routes",
+        frozenset({"SignedRoutePolicy"}),
+    ),
+    f"{__name__}.timing": ("timing", frozenset({"ServerTimingPolicy"})),
+    f"{__name__}.traffic": (
+        "traffic",
+        frozenset({"AIScrapingPolicy", "TrafficPolicy"}),
+    ),
+}
 
 
 def is_policy_component(value: Any) -> bool:
     """Whether a value belongs in ``HttpPolicy``, never on a custom tape."""
-    return type(value) in _POLICY_TYPES
+    value_type = type(value)
+    if value_type is HttpPolicy:
+        return True
+    policy_type = _POLICY_TYPES.get(value_type.__module__)
+    if policy_type is None or value_type.__name__ not in policy_type[1]:
+        return False
+    return value_type is _policy_export(policy_type[0], value_type.__name__)
 
 
 __all__ = [
@@ -667,3 +727,118 @@ __all__ = [
     "request_id",
     "traffic_class",
 ]
+
+_EXPORTS = {
+    "AI_SCRAPERS": "traffic",
+    "AIScrapingPolicy": "traffic",
+    "AdmissionStats": "admission",
+    "CachePolicy": "cache",
+    "CompressionPolicy": "compression",
+    "ConcurrencyPolicy": "admission",
+    "CorsPolicy": "cors",
+    "CsrfPolicy": "csrf",
+    "DeadlinePolicy": "deadline",
+    "IdempotencyPolicy": "idempotency",
+    "IdempotencyStore": "idempotency",
+    "MaintenancePolicy": "maintenance",
+    "MemoryIdempotencyStore": "idempotency",
+    "MemoryRateLimitStore": "ratelimit",
+    "PostgresIdempotencyStore": "idempotency",
+    "PostgresRateLimitStore": "ratelimit",
+    "ProxyPolicy": "proxy",
+    "RateLimitPolicy": "ratelimit",
+    "RateLimitStore": "ratelimit",
+    "RequestDecompressionPolicy": "request_decompression",
+    "RequestIdPolicy": "request_id",
+    "SecurityHeadersPolicy": "security",
+    "ServerTimingPolicy": "timing",
+    "SessionPolicy": "sessions",
+    "SignedRoutePolicy": "signed_routes",
+    "TieredRateLimitPolicy": "ratelimit",
+    "TrafficClass": "traffic",
+    "TrafficPolicy": "traffic",
+    "TrustedHostPolicy": "security",
+    "WebSocketOriginPolicy": "security",
+    "csrf_token": "csrf",
+    "csp_nonce": "security",
+    "elapsed": "timing",
+    "principal_key": "ratelimit",
+    "request_id": "request_id",
+    "rotate_session": "sessions",
+    "traffic_class": "traffic",
+}
+
+_MODULE_EXPORTS = {
+    "traffic": (
+        "AI_SCRAPERS",
+        "AIScrapingPolicy",
+        "TrafficClass",
+        "TrafficPolicy",
+        "traffic_class",
+    ),
+    "admission": ("AdmissionStats", "ConcurrencyPolicy"),
+    "cache": ("CachePolicy",),
+    "compression": ("CompressionPolicy",),
+    "cors": ("CorsPolicy",),
+    "csrf": ("CsrfPolicy", "csrf_token"),
+    "deadline": ("DeadlinePolicy",),
+    "idempotency": (
+        "IdempotencyPolicy",
+        "IdempotencyStore",
+        "MemoryIdempotencyStore",
+        "PostgresIdempotencyStore",
+    ),
+    "maintenance": ("MaintenancePolicy",),
+    "proxy": ("ProxyPolicy",),
+    "ratelimit": (
+        "MemoryRateLimitStore",
+        "PostgresRateLimitStore",
+        "RateLimitPolicy",
+        "RateLimitStore",
+        "TieredRateLimitPolicy",
+        "principal_key",
+    ),
+    "request_decompression": ("RequestDecompressionPolicy",),
+    "request_id": ("RequestIdPolicy", "request_id"),
+    "security": (
+        "SecurityHeadersPolicy",
+        "TrustedHostPolicy",
+        "WebSocketOriginPolicy",
+        "csp_nonce",
+    ),
+    "sessions": ("SessionPolicy", "rotate_session"),
+    "signed_routes": ("SignedRoutePolicy",),
+    "timing": ("ServerTimingPolicy", "elapsed"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    module = _EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    loaded = _policy_module(module)
+    namespace = globals()
+    for export in _MODULE_EXPORTS[module]:
+        namespace[export] = getattr(loaded, export)
+    return namespace[name]
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *__all__})
+
+
+_http_policy_annotate = cast(
+    Callable[[Any], dict[str, Any]], HttpPolicy.__init__.__annotate__
+)
+
+
+def _annotate_http_policy(format: Any) -> dict[str, Any]:
+    namespace = globals()
+    for module, exports in _MODULE_EXPORTS.items():
+        loaded = _policy_module(module)
+        for export in exports:
+            namespace[export] = getattr(loaded, export)
+    return _http_policy_annotate(format)
+
+
+HttpPolicy.__init__.__annotate__ = _annotate_http_policy
