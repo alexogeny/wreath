@@ -539,6 +539,14 @@ class StreamWriter:
         await self._offer(kind, body=None, detail=detail[:2000])
         await self.flush()
 
+    async def finish(self) -> None:
+        """Close a successfully completed stream."""
+        await self._terminate(KIND_END)
+
+    async def fail(self, detail: str) -> None:
+        """Close a failed stream with a bounded diagnostic."""
+        await self._terminate(KIND_ERROR, detail)
+
     def abandon(self) -> int:
         """Give up on what is buffered, counting it as dropped.
 
@@ -713,6 +721,20 @@ class Streams:
         """Whether `kind` has a producer in *this* process."""
         return kind in self._producers
 
+    async def writer(self, key: str, *, fence: int, attempt: int = 1) -> StreamWriter:
+        """Join a job owned by another subsystem to this stream log."""
+        _check_key(key)
+        if isinstance(fence, bool) or not isinstance(fence, int) or fence < 1:
+            raise ValueError("a stream writer fence must be a positive integer")
+        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+            raise ValueError("a stream writer attempt must be a positive integer")
+        if attempt > 1 and self._on_retry == "truncate":
+            await self._truncate_below(key, fence)
+        if key not in self._started_keys:
+            self.started += 1
+            self._started_keys.set(key, True)
+        return StreamWriter(self._log, key, fence=fence, resume_from=0)
+
     async def start(
         self,
         kind: str,
@@ -819,11 +841,11 @@ class Streams:
             # are retried, and a terminal row written on attempt 1 of 3 would
             # close every reader on a stream that is about to resume.
             if context.attempt >= entry.max_attempts:
-                await writer._terminate(KIND_ERROR, f"{type(error).__name__}: {error}")
+                await writer.fail(f"{type(error).__name__}: {error}")
             else:
                 writer.abandon()
             raise
-        await writer._terminate(KIND_END)
+        await writer.finish()
 
     async def _truncate_below(self, key: str, fence: int) -> None:
         """Delete `key`'s rows from attempts before `fence`.

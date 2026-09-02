@@ -179,6 +179,37 @@ def _streams(**options) -> tuple[Streams, _Log, _Runner]:
     return Streams(jobs=runner, log=log, idle=0.05, poll=0.005, **options), log, runner
 
 
+async def test_an_existing_durable_owner_can_write_one_fenced_stream() -> None:
+    streams, log, _runner = _streams()
+
+    writer = await streams.writer("chat-delivery", fence=7, attempt=1)
+    await writer.write("hello")
+    await writer.finish()
+
+    rows = log.rows_for("chat-delivery")
+    assert [(row.values["fence"], row.values["kind"]) for row in rows] == [
+        (7, KIND_CHUNK),
+        (7, KIND_END),
+    ]
+    assert streams.started == 1
+
+
+async def test_an_external_retry_uses_the_declared_stream_retry_policy() -> None:
+    streams, log, _runner = _streams(on_retry="truncate")
+    first = await streams.writer("chat-delivery", fence=3, attempt=1)
+    await first.write("stale")
+    await first.flush()
+
+    second = await streams.writer("chat-delivery", fence=4, attempt=2)
+    await second.write("fresh")
+    await second.fail("provider failed")
+
+    rows = log.rows_for("chat-delivery")
+    assert [row.values["fence"] for row in rows] == [4, 4]
+    assert [row.values["kind"] for row in rows] == [KIND_CHUNK, KIND_ERROR]
+    assert streams.started == 1
+
+
 #: How long past its own idle window a reader may take before this suite calls
 #: it a failure. Without this the two controls that make `follow` never stop --
 #: resetting the deadline every iteration, and never checking it -- **hang**

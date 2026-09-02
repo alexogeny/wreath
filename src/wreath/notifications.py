@@ -48,7 +48,9 @@ Reference: `wreath.users` for the sending side of account mail, and
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import heapq
+import inspect
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Sequence
@@ -72,6 +74,7 @@ _DELIVERY_CONCURRENCY = 8
 
 __all__ = [
     "Channel",
+    "Chat",
     "Email",
     "InApp",
     "Notifications",
@@ -595,6 +598,50 @@ class InApp:
         await self.rooms.broadcast(
             f"notifications:{recipient.key}",
             _text(note, "body") or _text(note, "title") or repr(note),
+        )
+
+
+@dataclass(slots=True)
+class Chat:
+    """Deliver a notification through a tenant-bound Wreath ChatOps destination."""
+
+    chat: Any
+    destination: Callable[[Recipient], Any]
+    render: Callable[[Any], str] | None = None
+    name: str = "chat"
+
+    def __post_init__(self) -> None:
+        if not callable(getattr(self.chat, "send", None)):
+            raise TypeError("chat notification channel requires ChatOps.send")
+        if not callable(self.destination):
+            raise TypeError("chat notification destination must be callable")
+        if self.render is not None and not callable(self.render):
+            raise TypeError("chat notification render must be callable")
+
+    async def deliver(self, recipient: Recipient, note: Any, kind: KindSpec) -> None:
+        destination = self.destination(recipient)
+        if inspect.isawaitable(destination):
+            destination = await destination
+        tenant = getattr(destination, "tenant", None)
+        if not isinstance(tenant, str) or not tenant:
+            raise ValueError("chat notification destination requires a non-empty tenant")
+        content = (
+            self.render(note)
+            if self.render is not None
+            else _text(note, "body") or _text(note, "title") or repr(note)
+        )
+        if not isinstance(content, str) or not content:
+            raise ValueError("chat notification content must be non-empty text")
+        digest = hashlib.sha256()
+        for part in (kind.name, recipient.key, tenant, content):
+            encoded = part.encode()
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+        await self.chat.send(
+            tenant=tenant,
+            destination=destination,
+            content=content,
+            idempotency_key=digest.hexdigest(),
         )
 
 

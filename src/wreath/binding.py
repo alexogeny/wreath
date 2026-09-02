@@ -1477,6 +1477,78 @@ def _convert_scalar(annotation: Any, raw: str, loc: tuple[Any, ...]) -> Any:
 ScalarConstraint = tuple[Any, Any, str]  # (minimum, maximum, overflow)
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class HandlerParameter:
+    """One resolved callable parameter shared by non-HTTP protocol adapters."""
+
+    name: str
+    annotation: Any
+    default: Any
+
+
+def inspect_parameters(handler: Handler) -> tuple[HandlerParameter, ...]:
+    """Resolve a callable signature once without assigning HTTP wire sources."""
+    try:
+        signature = inspect.signature(handler)
+    except TypeError, ValueError:
+        raise TypeError(f"handler {handler!r} has no inspectable signature") from None
+    hints = _resolve_hints(handler, f"handler {getattr(handler, '__qualname__', handler)!s}")
+    compiled: list[HandlerParameter] = []
+    for parameter in signature.parameters.values():
+        if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
+            raise TypeError(
+                "positional-only handler parameters are unsupported; declare named parameters"
+            )
+        if parameter.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            raise TypeError(
+                "variadic handler parameters are unsupported; declare named parameters"
+            )
+        annotation, _field = _field_annotation(
+            hints.get(parameter.name, parameter.annotation)
+        )
+        compiled.append(HandlerParameter(parameter.name, annotation, parameter.default))
+    return tuple(compiled)
+
+
+def convert_parameter(annotation: Any, value: Any, *, loc: tuple[Any, ...]) -> Any:
+    """Convert one protocol string with the same scalar rules as HTTP binding."""
+    origin = typing.get_origin(annotation)
+    if value is None:
+        if annotation is None or annotation is type(None):
+            return None
+        if origin in (typing.Union, types.UnionType) and type(None) in typing.get_args(
+            annotation
+        ):
+            return None
+        return value
+    if not isinstance(value, str):
+        return value
+    if annotation in (Any, str, inspect.Parameter.empty):
+        return value
+    if origin in (typing.Union, types.UnionType):
+        for member in typing.get_args(annotation):
+            if member is type(None):
+                continue
+            try:
+                return convert_parameter(member, value, loc=loc)
+            except ValidationError:
+                continue
+        raise ValidationError([_error(loc, "invalid value", "union")])
+    if origin is typing.Literal:
+        choices = typing.get_args(annotation)
+        for choice in choices:
+            try:
+                converted = _convert_scalar(type(choice), str(value), loc)
+            except ValidationError:
+                continue
+            if converted == choice:
+                return choice
+        raise ValidationError(
+            [_error(loc, f"value must be one of {', '.join(map(str, choices))}", "literal")]
+        )
+    return _convert_scalar(annotation, value, loc)
+
+
 def _apply_constraint(value: Any, constraint: ScalarConstraint, loc: tuple[Any, ...]) -> Any:
     """Clamp or reject a converted numeric `value` against a range.
 
@@ -3243,6 +3315,7 @@ __all__ = [
     "File",
     "Form",
     "Header",
+    "HandlerParameter",
     "Path",
     "Query",
     "ResponseValidationError",
@@ -3250,6 +3323,8 @@ __all__ = [
     "compile_binder",
     "compile_message_negotiation",
     "compile_response_validator",
+    "convert_parameter",
     "inspect_handler",
+    "inspect_parameters",
     "validate",
 ]

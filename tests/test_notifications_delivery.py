@@ -18,6 +18,7 @@ from wreath._userkit import (
 )
 from wreath._webpush import PushError, PushResult, PushSubscription, VapidKeys
 from wreath.notifications import (
+    Chat,
     Email,
     InApp,
     InMemoryPushSubscriptions,
@@ -55,6 +56,33 @@ async def test_in_app_delivery_uses_the_room_broadcast_contract() -> None:
     rooms = Rooms()
     await InApp(rooms).deliver(Recipient("u1"), PhotoShared("Ada"), object())
     assert rooms.calls == [("notifications:u1", "Ada shared a photo")]
+
+
+async def test_chat_delivery_reuses_chatops_tenant_and_idempotency_contract() -> None:
+    class ChatOps:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def send(self, **values: object) -> None:
+            self.calls.append(values)
+
+    @dataclass(frozen=True)
+    class Destination:
+        tenant: str
+
+    chat = ChatOps()
+    channel = Chat(
+        chat,
+        destination=lambda recipient: Destination(f"slack:{recipient.key}"),
+    )
+    note = PhotoShared("Ada")
+
+    await channel.deliver(Recipient("T123"), note, type("Kind", (), {"name": "shared"})())
+
+    assert chat.calls[0]["tenant"] == "slack:T123"
+    assert chat.calls[0]["content"] == "Ada shared a photo"
+    assert isinstance(chat.calls[0]["idempotency_key"], str)
+    assert len(chat.calls[0]["idempotency_key"]) == 64
 
 
 async def test_a_suppressed_address_still_receives_a_password_reset() -> None:

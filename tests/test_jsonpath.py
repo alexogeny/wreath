@@ -95,6 +95,7 @@ def test_string_names_and_normalized_paths_escape_special_characters() -> None:
 def test_string_literals_follow_rfc_9535_quoting_and_normalization() -> None:
     document = {'a"b': 1, "\b\t\n\f\r\v": 2, "🁁": 3}
     assert jsonpath("$['a\"b']", document) == [1]
+    assert jsonpath('$["a\\"b"]', document) == [1]
     control = compile_jsonpath('$["\\b\\t\\n\\f\\r\\u000b"]').find(document)[0]
     assert control.path == "$['\\b\\t\\n\\f\\r\\u000b']"
     assert jsonpath("$['\\uD83C\\uDC41']", document) == [3]
@@ -109,12 +110,31 @@ def test_whitespace_may_precede_each_segment() -> None:
 
 
 def test_match_and_search_use_rfc_9485_iregexp_semantics() -> None:
-    values = ["ж", "Ж", "жЖ", "\r", "\n", "\u2028", "abc", "abcx"]
+    values = ["ж", "Ж", "жЖ", "\r", "\n", "\u2028", "abc", "abcx", "ABC", "123"]
     assert jsonpath("$[?match(@, '\\\\p{Lu}') ]", values) == ["Ж"]
-    assert jsonpath("$[?search(@, '\\\\p{Lu}') ]", values) == ["Ж", "жЖ"]
+    assert jsonpath("$[?search(@, '\\\\p{Lu}') ]", values) == ["Ж", "жЖ", "ABC"]
+    assert jsonpath("$[?match(@, '(ab)c') ]", values) == ["abc"]
+    assert jsonpath("$[?match(@, '[A-Z]+') ]", values) == ["ABC"]
+    assert jsonpath("$[?match(@, '\\\\p{L}+') ]", values) == ["ж", "Ж", "жЖ", "abc", "abcx", "ABC"]
+    assert jsonpath("$[?match(@, '\\\\P{L}+') ]", values) == ["\r", "\n", "\u2028", "123"]
+    assert jsonpath("$[?match(@, '[\\\\p{Lu}]') ]", values) == ["Ж"]
     assert jsonpath("$[?match(@, '.') ]", values) == ["ж", "Ж", "\u2028"]
     assert jsonpath("$[?match(@, '^ab.*') ]", values) == ["abc", "abcx"]
     assert jsonpath("$[?match(@, '.*bc$') ]", values) == ["abc"]
+
+
+@pytest.mark.parametrize("literal", [",", "0", "A", "~", "💡"])
+def test_iregexp_literal_ranges_are_accepted(literal: str) -> None:
+    assert jsonpath(f"$[?match(@, '{literal}') ]", [literal]) == [literal]
+
+
+def test_iregexp_refuses_invalid_atoms_and_escapes_without_raising() -> None:
+    assert jsonpath("$[?match(@, ']') ]", ["]"]) == []
+    assert jsonpath("$[?match(@, '\\\\') ]", ["x"]) == []
+    assert jsonpath("$[?match(@, '\\\\p{Lu') ]", ["A"]) == []
+    assert jsonpath("$[?match(@, '\\\\.') ]", ["."]) == ["."]
+
+
 def test_comparison_operators_are_derived_from_equality_and_less_than() -> None:
     document = {"values": [0], "obj": {"x": "y"}, "arr": [2, 3]}
     assert jsonpath("$.values[?$.absent1 <= $.absent2]", document) == [0]
@@ -137,6 +157,10 @@ def test_comparison_operators_are_derived_from_equality_and_less_than() -> None:
         "$.items[?!!@.name]",
         "$['\\uD800']",
         "$['\\uDC00']",
+        "$['\\u12xz']",
+        "$['\\uD800\\u12xz']",
+        "$['\\uD800\\u0041']",
+        "$['unterminated",
         "$['\\x20']",
         '$["\\\'"]',
     ],
@@ -146,10 +170,51 @@ def test_invalid_or_ill_typed_jsonpath_is_refused_when_compiled(expression) -> N
         compile_jsonpath(expression)
 
 
+def test_literal_control_and_surrogate_characters_are_refused() -> None:
+    for character in (chr(0x1F), chr(0xD800)):
+        with pytest.raises(JSONPathError, match="non-scalar character"):
+            compile_jsonpath("$['" + character + "']")
+
+
+@pytest.mark.parametrize(
+    ("expression", "message"),
+    [
+        ("$['\\u12", "Unicode escape needs four hexadecimal digits"),
+        ("$['\\uD800']", "high surrogate must be followed"),
+        ("$['\\uD800\\u12", "low surrogate needs four hexadecimal digits"),
+    ],
+)
+def test_invalid_unicode_escapes_name_the_required_form(expression: str, message: str) -> None:
+    with pytest.raises(JSONPathError, match=message):
+        compile_jsonpath(expression)
+
+
+@pytest.mark.parametrize(
+    ("expression", "message"),
+    [
+        ("$.items[?unknown(@)]", "unknown JSONPath function"),
+        ("$.items[?length()]", "needs 1 argument"),
+        ("$.items[?length(@.*)]", "singular query"),
+        ("$.items[?match(@.*, 'x')]", "value or singular-query arguments"),
+        ("$.items[?count(1)]", "needs a query argument"),
+    ],
+)
+def test_ill_typed_functions_name_the_required_form(expression: str, message: str) -> None:
+    with pytest.raises(JSONPathError, match=message):
+        compile_jsonpath(expression)
+
+
+def test_value_functions_accept_literal_arguments() -> None:
+    assert jsonpath("$[?length(1) == 1]", [1]) == []
+    assert jsonpath("$[?match('a', 'a')]", [1]) == [1]
+
+
 def test_query_evaluation_has_a_configurable_node_visit_ceiling() -> None:
     compiled = compile_jsonpath("$..*", max_visits=3)
     with pytest.raises(JSONPathError, match="visit limit"):
         compiled.find({"a": {"b": 1}, "c": 2})
+    with pytest.raises(JSONPathError, match="visit limit"):
+        compiled._find_reference({"a": {"b": 1}, "c": 2})
 
 
 @pytest.mark.parametrize(
@@ -160,6 +225,12 @@ def test_query_evaluation_has_a_configurable_node_visit_ceiling() -> None:
         "$.store.book[0,2,-1].author",
         "$.store.book[1:4:2].author",
         "$.store.book[::-1].author",
+        "$.store.book[99]",
+        "$.store[0]",
+        "$.store[0:1]",
+        "$.store.book[0:2:0]",
+        "$.store.book[*].author",
+        "$..*",
         "$.store.book[?@.isbn].author",
         "$.store.book[?@.price < 10 && !(@.category == 'fiction')].author",
         "$.store.book[?match(@.author, '.*Waugh')].author",

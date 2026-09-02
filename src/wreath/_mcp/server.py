@@ -516,6 +516,11 @@ class MCP:
 
         return Counters(subsystem="mcp", instance=self._name, values=self.stats())
 
+    def executor(self, *names: str, max_tools: int = 32) -> Any:
+        from .executor import ToolExecutor
+
+        return ToolExecutor(self, self._registry, names, max_tools=max_tools)
+
     @property
     def tools(self) -> tuple[Tool, ...]:
         """Every declared tool, in the order `tools/list` renders them."""

@@ -7,9 +7,36 @@ from wreath.organizations import (
     Invitation,
     Membership,
     Organization,
+    OrganizationFederation,
+    OrganizationFederationError,
     OrganizationStore,
     PostgresOrganizationStore,
 )
+
+
+class _InstallationOrganizations:
+    async def organization_for(self, provider: str, installation: str) -> str | None:
+        if (provider, installation) == ("slack", "T1"):
+            return "acme"
+        return None
+
+
+async def test_chat_federation_reads_the_scim_owned_membership_each_time() -> None:
+    from wreath.auth import Identity
+    from wreath.chat import ExternalIdentityKey, PrincipalBinding
+
+    store = _store()
+    await store.add_member("acme", "alice", roles={"member"})
+    external = ExternalIdentityKey(provider="slack", installation="T1", subject="U1")
+    binding = PrincipalBinding(identity=Identity("alice"), external=external)
+    federation = OrganizationFederation(store, _InstallationOrganizations())
+
+    resolved = await federation.resolve(external, binding)
+    assert resolved.tenant == "acme"
+
+    await store.remove_member("acme", "alice")
+    with pytest.raises(OrganizationFederationError, match="not.*member"):
+        await federation.resolve(external, binding)
 
 ROLES = frozenset({"admin", "member", "billing"})
 

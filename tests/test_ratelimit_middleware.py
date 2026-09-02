@@ -361,6 +361,17 @@ def test_middleware_binds_the_sync_path_for_the_memory_store() -> None:
     assert middleware._ingress_sync.__name__ == "_before_local_sync"
 
 
+async def test_non_http_work_can_share_the_same_keyed_bucket() -> None:
+    policy = RateLimitPolicy(limit=1, window=60.0)
+
+    assert await policy.admit_key("chat:acme:alice:deploy") is None
+    refusal = await policy.admit_key("chat:acme:alice:deploy")
+
+    assert refusal is not None
+    assert refusal.status == 429
+    assert policy.throttled == 1
+
+
 # `wreath mutant` survived three controls here. Two are the same scenario from
 # both ends: a request the key function cannot name. `principal_key` returns
 # None for one with no identity and no client address, and `_identify` turns

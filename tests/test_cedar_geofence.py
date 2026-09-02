@@ -5,9 +5,11 @@ from typing import Any
 import pytest
 
 from wreath import Wreath
+from wreath._auth.geofence import resolve_precision
 from wreath.auth import BearerTokenBackend, Identity
-from wreath.authorization import CedarAuthorizer, CedarPolicies, Regions, authorize
+from wreath.authorization import CedarAuthorizer, CedarPolicies, PrecisionLadder, Regions, authorize
 from wreath.geospatial import BoundingBox, Coordinate
+from wreath.state import State
 
 # Alice Springs, and a depot 2 km north of it.
 TOWN = Coordinate(lat=-23.700, lon=133.880)
@@ -373,7 +375,7 @@ def test_a_centre_must_be_a_coordinate():
 
 def test_a_region_must_be_a_box_or_a_circle_pair():
     with pytest.raises(ValueError, match="BoundingBox or a"):
-        Regions(depot="somewhere")
+        Regions(depot={"centre": DEPOT, "radius": 1_000.0})
 
 
 def test_names_enumerates_every_declared_region():
@@ -396,8 +398,9 @@ def test_a_three_element_region_is_refused():
 
 
 def test_a_non_string_region_name_is_refused():
+    invalid: Any = {7: (DEPOT, 1_000.0)}
     with pytest.raises(ValueError, match="non-empty strings"):
-        Regions({7: (DEPOT, 1_000.0)})
+        Regions(invalid)
 
 
 def test_a_box_region_is_kept_apart_from_a_circle_one():
@@ -412,3 +415,57 @@ def test_a_box_region_is_kept_apart_from_a_circle_one():
 def test_containing_resolves_only_the_names_it_is_given():
     assert REGIONS.containing(TOWN, ["reserve"]) == frozenset({"reserve"})
     assert REGIONS.containing(TOWN, []) == frozenset()
+
+
+def test_a_precision_rung_must_be_a_two_element_sequence():
+    invalid: tuple[Any, ...] = (
+        {"action": "read", "metres": 1_000},
+        ("read", 1_000, "extra"),
+    )
+    for rung in invalid:
+        with pytest.raises(ValueError, match="an \\(action, metres\\) pair"):
+            PrecisionLadder(rung)
+    assert PrecisionLadder(("read", 1_000)).rungs == (("read", 1_000.0),)
+
+
+def test_a_precision_rung_needs_a_non_empty_string_action():
+    invalid: tuple[Any, ...] = ("", 7)
+    for action in invalid:
+        with pytest.raises(ValueError, match="non-empty action"):
+            PrecisionLadder((action, 1_000))
+    assert PrecisionLadder(("read", 1_000)).actions() == ("read",)
+
+
+def test_a_precision_rung_distinguishes_exact_from_invalid_resolutions():
+    assert PrecisionLadder(("exact", None)).rungs == (("exact", None),)
+    invalid: tuple[Any, ...] = ("1km", True)
+    for metres in invalid:
+        with pytest.raises(ValueError, match="numeric metres"):
+            PrecisionLadder(("read", metres))
+
+
+def test_a_precision_rung_needs_a_positive_finite_resolution():
+    for metres in (0, float("inf")):
+        with pytest.raises(ValueError, match="positive finite resolution"):
+            PrecisionLadder(("read", metres))
+    assert PrecisionLadder(("read", 1_000)).rungs == (("read", 1_000.0),)
+
+
+@pytest.mark.asyncio
+async def test_precision_resolution_returns_the_first_permitted_rung():
+    class Request:
+        state = State()
+
+    class Authorizer:
+        def __init__(self):
+            self.actions = []
+
+        async def authorize(self, request, requirement):
+            self.actions.append(requirement.action)
+            return type("Decision", (), {"allowed": requirement.action == "coarse"})()
+
+    authorizer = Authorizer()
+    ladder = PrecisionLadder(("exact", None), ("coarse", 1_000))
+
+    assert await resolve_precision(Request(), authorizer, ladder, "Site::*") == 1_000.0
+    assert authorizer.actions == ["exact", "coarse"]

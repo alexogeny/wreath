@@ -63,23 +63,20 @@ async def test_a_get_carrying_the_preflight_header_is_not_a_preflight() -> None:
     assert response.json() == {"ok": True}  # the route ran
 
 
-@pytest.mark.parametrize(
-    "headers",
-    [
-        {"origin": ALLOWED},  # no requested method
-        {"access-control-request-method": "GET"},  # no origin
-        {},  # neither
-    ],
-)
-async def test_an_options_request_missing_either_header_falls_through(
-    headers: dict[str, str],
-) -> None:
+async def test_an_options_request_missing_either_header_falls_through() -> None:
     app = _app(CorsPolicy(allow_origins=[ALLOWED]))
     async with TestClient(app) as client:
-        response = await client.options("/thing", headers=headers)
-    assert response.status == 405  # the route has no OPTIONS
-    assert _header(response, "allow") == "GET, HEAD"
-    assert _header(response, "access-control-max-age") is None
+        responses = [
+            await client.options("/thing", headers={"origin": ALLOWED}),
+            await client.options(
+                "/thing", headers={"access-control-request-method": "GET"}
+            ),
+            await client.options("/thing"),
+        ]
+    for response in responses:
+        assert response.status == 405  # the route has no OPTIONS
+        assert _header(response, "allow") == "GET, HEAD"
+        assert _header(response, "access-control-max-age") is None
 
 
 async def test_a_disallowed_origin_is_refused_at_the_preflight() -> None:
@@ -121,6 +118,20 @@ async def test_an_origin_matches_case_insensitively_on_scheme_and_host() -> None
     assert _header(response, "access-control-allow-origin") == "HTTPS://App.Example"
 
 
+async def test_an_exact_origin_match_avoids_normalization(monkeypatch: pytest.MonkeyPatch) -> None:
+    policy = CorsPolicy(allow_origins=[ALLOWED])
+
+    def fail_normalization(value: str) -> str:
+        pytest.fail(f"normalized exact origin {value}")
+
+    monkeypatch.setattr("wreath.policy.cors._normalize_origin", fail_normalization)
+
+    assert policy._origin_header(ALLOWED) == (
+        b"access-control-allow-origin",
+        ALLOWED.encode("ascii"),
+    )
+
+
 async def test_a_disallowed_origin_gets_vary_and_nothing_else_on_a_simple_request() -> None:
     app = _app(CorsPolicy(allow_origins=[ALLOWED]))
     async with TestClient(app) as client:
@@ -141,6 +152,10 @@ async def test_a_request_with_no_origin_is_left_exactly_as_it_was() -> None:
 @pytest.mark.parametrize("origin", [ALLOWED, "https://evil.example"])
 async def test_a_headerless_response_is_left_alone_for_any_origin(origin: str) -> None:
     middleware = CorsPolicy(allow_origins=[ALLOWED])
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.disconnect"}
+
     request = Request(
         {
             "type": "http",
@@ -149,7 +164,7 @@ async def test_a_headerless_response_is_left_alone_for_any_origin(origin: str) -
             "query_string": b"",
             "headers": [(b"origin", origin.encode("ascii"))],
         },
-        None,
+        receive,
         None,
     )
 

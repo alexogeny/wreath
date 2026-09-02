@@ -98,6 +98,38 @@ def test_the_report_names_what_it_could_not_check() -> None:
     assert "wreath migrations detect" in joined
 
 
+def test_preflight_reports_incomplete_chatops_wiring_before_startup() -> None:
+    from wreath.chat import ChatOps
+
+    app = build()
+    chat = ChatOps(app, name="ops")
+
+    @chat.command("deploy", execution="durable", streams=object())
+    async def deploy() -> None:
+        pass
+
+    findings = [item for item in preflight(app).findings if item.source == "chatops"]
+    assert {item.subject for item in findings if item.severity == "blocking"} == {
+        "ops command 'deploy' durable execution",
+        "ops command 'deploy' resumable stream",
+    }
+    assert any(item.severity == "advisory" and "provider" in item.detail for item in findings)
+
+
+def test_preflight_integrates_an_application_defined_chatops_subclass() -> None:
+    from wreath.chat import ChatOps
+
+    class DeploymentChatOps(ChatOps):
+        pass
+
+    app = build()
+    DeploymentChatOps(app, name="ops")
+
+    findings = [item for item in preflight(app).findings if item.source == "chatops"]
+
+    assert any(item.subject == "ops providers" for item in findings)
+
+
 def test_the_rendered_report_prints_the_unchecked_section_even_when_clean() -> None:
     rendered = render_preflight(preflight(build()))
     assert "not checked" in rendered

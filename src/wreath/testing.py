@@ -24,7 +24,8 @@ Two differences from httpx and requests catch people out. The status is
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -695,5 +696,159 @@ class TestClient:
         }
         return WebSocketTestSession(self.app, scope)
 
+    def chat(
+        self,
+        name: str,
+        *,
+        provider: str,
+        installation: str,
+        tenant: str,
+        actor: str,
+        conversation: str,
+        external_identity: Any = None,
+        native: Any = None,
+    ) -> ChatTranscript:
+        """Open a provider-neutral ChatOps transcript against this application."""
+        from .chat import ChatOps
 
-__all__ = ["TestClient", "TestResponse", "WebSocketTestSession"]
+        matches: list[Any] = []
+        for startup in getattr(self.app, "_startup_handlers", ()):
+            owner = getattr(startup, "__self__", None)
+            if isinstance(owner, ChatOps) and getattr(owner, "name", None) == name:
+                matches.append(owner)
+        if not matches:
+            raise LookupError(f"application has no ChatOps runtime named {name!r}")
+        if len(matches) != 1:
+            raise LookupError(f"application has multiple ChatOps runtimes named {name!r}")
+        return ChatTranscript(
+            matches[0],
+            provider=provider,
+            installation=installation,
+            tenant=tenant,
+            actor=actor,
+            conversation=conversation,
+            external_identity=external_identity,
+            native={} if native is None else native,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ChatTurn:
+    kind: str
+    name: str
+    arguments: Mapping[str, Any]
+    reply: Any
+    events: tuple[Any, ...]
+    context: Any
+
+
+@dataclass(frozen=True, slots=True)
+class _TranscriptJob:
+    job_id: str
+    key: str
+    tenant: str
+    fence: int = 1
+    attempt: int = 1
+    trace_context: str | None = None
+
+
+class ChatTranscript:
+    __slots__ = (
+        "_actor",
+        "_chat",
+        "_conversation",
+        "_external_identity",
+        "_installation",
+        "_native",
+        "_provider",
+        "_tenant",
+        "_turns",
+    )
+
+    def __init__(
+        self,
+        chat: Any,
+        *,
+        provider: str,
+        installation: str,
+        tenant: str,
+        actor: str,
+        conversation: str,
+        external_identity: Any,
+        native: Any,
+    ) -> None:
+        self._chat = chat
+        self._provider = provider
+        self._installation = installation
+        self._tenant = tenant
+        self._actor = actor
+        self._conversation = conversation
+        self._external_identity = external_identity
+        self._native = native
+        self._turns: list[ChatTurn] = []
+
+    @property
+    def turns(self) -> tuple[ChatTurn, ...]:
+        return tuple(self._turns)
+
+    async def command(self, name: str, **arguments: Any) -> ChatTurn:
+        return await self._dispatch("command", name, arguments)
+
+    async def event(self, name: str, **arguments: Any) -> ChatTurn:
+        return await self._dispatch("event", name, arguments)
+
+    async def action(self, name: str, **arguments: Any) -> ChatTurn:
+        return await self._dispatch("action", name, arguments)
+
+    async def _dispatch(self, kind: str, name: str, arguments: Mapping[str, Any]) -> ChatTurn:
+        from .chat import ChatContext
+
+        sequence = len(self._turns) + 1
+        context = ChatContext(
+            provider=self._provider,
+            installation=self._installation,
+            tenant=self._tenant,
+            actor=self._actor,
+            conversation=self._conversation,
+            delivery_id=f"transcript-{sequence}",
+            native=self._native,
+            external_identity=self._external_identity,
+            command=name if kind == "command" else None,
+            action=name if kind == "action" else None,
+        )
+        events: list[Any] = []
+
+        async def emit(event: Any) -> None:
+            events.append(event)
+
+        declaration = self._chat._declaration(kind, name)
+        if declaration is not None and declaration.execution == "durable":
+            job = _TranscriptJob(
+                job_id=f"transcript-{sequence}",
+                key=context.delivery_id,
+                tenant=context.tenant,
+            )
+            self._chat._durable_context(
+                context,
+                job_context=job,
+                arguments=arguments,
+                emit=emit,
+            )
+        reply = await self._chat._dispatch(
+            kind=kind,
+            name=name,
+            context=context,
+            arguments=arguments,
+        )
+        turn = ChatTurn(kind, name, dict(arguments), reply, tuple(events), context)
+        self._turns.append(turn)
+        return turn
+
+
+__all__ = [
+    "ChatTranscript",
+    "ChatTurn",
+    "TestClient",
+    "TestResponse",
+    "WebSocketTestSession",
+]
