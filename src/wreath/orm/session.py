@@ -476,7 +476,7 @@ class Session:
         self._new_items: list[Any] | tuple[Any, ...] = _EMPTY_ITEMS
         self._new_stale = False
         self._new_ids: set[int] | frozenset[int] = _EMPTY_IDS
-        self._deleted: list[Any] = []
+        self._deleted: list[Any] | tuple[Any, ...] = _EMPTY_ITEMS
         self._deleted_ids: set[int] | frozenset[int] = _EMPTY_IDS
         self._dirty_items: list[Any] | tuple[Any, ...] = _EMPTY_ITEMS
         self._depth = 0
@@ -1075,7 +1075,10 @@ class Session:
         if isinstance(identifiers, frozenset):
             identifiers = self._deleted_ids = set()
         identifiers.add(key)
-        self._deleted.append(instance)
+        items = self._deleted
+        if isinstance(items, tuple):
+            items = self._deleted = []
+        items.append(instance)
 
     def _clear_pending(self) -> None:
         if (
@@ -1088,7 +1091,7 @@ class Session:
         self._new_items = _EMPTY_ITEMS
         self._new_stale = False
         self._new_ids = _EMPTY_IDS
-        self._deleted.clear()
+        self._deleted = _EMPTY_ITEMS
         self._deleted_ids = _EMPTY_IDS
         self._dirty_items = _EMPTY_ITEMS
 

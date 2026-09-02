@@ -33,10 +33,13 @@ want a test to catch this?* -- and sometimes the answer is no.
 
 from __future__ import annotations
 
-from ._mutant.model import FINDINGS, Mutation, Outcome, Report, Site, Verdict
-from ._mutant.operators import CONTROL_KEYWORDS, CONTROL_TOKENS, OPERATORS
-from ._mutant.report import render, render_json
-from ._mutant.runner import Plan, build_plan, execute
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ._mutant.model import FINDINGS, Mutation, Outcome, Report, Site, Verdict
+    from ._mutant.operators import CONTROL_KEYWORDS, CONTROL_TOKENS, OPERATORS
+    from ._mutant.report import render, render_json
+    from ._mutant.runner import Plan, build_plan, execute
 
 __all__ = [
     "CONTROL_KEYWORDS",
@@ -54,3 +57,44 @@ __all__ = [
     "render",
     "render_json",
 ]
+
+_EXPORTS = {
+    "CONTROL_KEYWORDS": "operators",
+    "CONTROL_TOKENS": "operators",
+    "FINDINGS": "model",
+    "Mutation": "model",
+    "OPERATORS": "operators",
+    "Outcome": "model",
+    "Plan": "runner",
+    "Report": "model",
+    "Site": "model",
+    "Verdict": "model",
+    "build_plan": "runner",
+    "execute": "runner",
+    "render": "report",
+    "render_json": "report",
+}
+
+_MODULE_EXPORTS = {
+    "model": ("FINDINGS", "Mutation", "Outcome", "Report", "Site", "Verdict"),
+    "operators": ("CONTROL_KEYWORDS", "CONTROL_TOKENS", "OPERATORS"),
+    "report": ("render", "render_json"),
+    "runner": ("Plan", "build_plan", "execute"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    module = _EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    loaded = import_module(f"._mutant.{module}", __package__)
+    namespace = globals()
+    for export in _MODULE_EXPORTS[module]:
+        namespace[export] = getattr(loaded, export)
+    return namespace[name]
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *__all__})

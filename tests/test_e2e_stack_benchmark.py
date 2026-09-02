@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -11,6 +12,9 @@ import pytest
 from benchmarks.bench_holistic_stack_instructions import (
     _derive_metrics,
     _parse_counters,
+    _parse_smaps_rollup,
+    _server_command,
+    _summary,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,29 +94,21 @@ def test_retained_instruction_account_has_repeated_slopes_and_aa_controls() -> N
     assert "rather than equivalent framework feature costs" in limitation
 
 
-def test_readme_marks_non_equivalent_sanic_and_blacksheep_steps() -> None:
+def test_benchmark_guide_marks_non_equivalent_sanic_and_blacksheep_steps() -> None:
     artifact = json.loads((ROOT / "benchmarks/baselines/e2e-stack-instructions.json").read_text())
-    pages = ((ROOT / "README.md").read_text(),)
-    for page in pages:
-        prose = " ".join(page.split())
-        for framework in ("sanic", "blacksheep"):
-            for arm in ("binding", "auth"):
-                value = round(artifact["arms"][framework][arm]["median"])
-                assert f"{value:,}<sup>*</sup>" in page
-        assert "not like-for-like framework feature costs" in prose
-        assert "Every later cumulative BlackSheep and Sanic cell inherits" in prose
+    guide = " ".join((ROOT / "benchmarks/README.md").read_text().split())
+    assert "hand-written msgspec success-path adapter" in guide
+    assert "not either framework's full validation/authentication surface" in guide
+    assert "every later cumulative cell inherits the limitation" in guide
+    assert "hand-written msgspec success-path adapter" in artifact["limitations"]
 
 
-def test_readme_histogram_matches_the_retained_complete_medians() -> None:
-    artifact = json.loads((ROOT / "benchmarks/baselines/e2e-stack-instructions.json").read_text())
-    readme = (ROOT / "README.md").read_text()
-    wreath = round(artifact["arms"]["wreath"]["complete"]["median"])
-    assert f"{wreath:,}" in readme
-    for framework in ("fastapi", "sanic", "blacksheep"):
-        complete = round(artifact["arms"][framework]["complete"]["median"])
-        ratio = complete / wreath
-        assert f"{complete:,}" in readme
-        assert f"{ratio:.2f}× fewer" in readme
+def test_readme_animation_dependency_stays_out_of_the_runtime() -> None:
+    package = json.loads((ROOT / "tools/readme_charts/package.json").read_text())
+    assert package["private"] is True
+    assert package["devDependencies"] == {"animejs": "4.5.0"}
+    assert "animejs" not in (ROOT / "pyproject.toml").read_text()
+    assert 'name = "animejs"' not in (ROOT / "uv.lock").read_text()
 
 
 def test_retained_holistic_account_drives_the_readme_hero() -> None:
@@ -120,10 +116,22 @@ def test_retained_holistic_account_drives_the_readme_hero() -> None:
         (ROOT / "benchmarks/baselines/e2e-holistic-stack-instructions.json").read_text()
     )
     assert artifact["metric"] == "retired userspace instructions per successful request"
-    assert artifact["schema"] == "wreath/e2e-holistic-stack-counters/4"
+    assert artifact["schema"] == "wreath/e2e-holistic-stack-counters/5"
     assert artifact["measurement"]["trials"] == 5
     assert artifact["measurement"]["requests_high"] == 30
     assert artifact["measurement"]["requests_low"] == 15
+    assert artifact["measurement"]["counter_profile"] == "instructions"
+    assert artifact["measurement"]["memory"] == {
+        "enabled": True,
+        "trials": 5,
+        "requests": 30,
+        "sample_interval_ms": 2.0,
+        "process_scope": "server root and every descendant",
+        "collector": "/proc/<pid>/smaps_rollup",
+        "counter_pass_separate": True,
+    }
+    assert "shorter-lived peak may be missed" in artifact["memory_limitations"]
+    assert "procfs reads cannot perturb" in artifact["fairness"]
 
     assert artifact["transport"] == "TLS 1.3 over HTTP/1.1 for every arm"
     assert tuple(artifact["arms"]) == (
@@ -137,47 +145,57 @@ def test_retained_holistic_account_drives_the_readme_hero() -> None:
         rows = artifact["arms"][framework]
         assert tuple(rows) == ("holistic", "holistic-aa")
         assert all(len(row["samples"]) == 5 for row in rows.values())
-        assert all(
-            tuple(row["counters"])
-            == (
-                "instructions",
-                "l1d_hits",
-                "l1d_misses",
-                "l1i_hits",
-                "l1i_misses",
-                "l2_demand_hits",
-                "l2_demand_misses",
-                "l2_prefetch_hits",
-                "l2_prefetch_misses",
-                "l2_all_hits",
-                "l2_all_misses",
-            )
-            for row in rows.values()
-        )
+        assert all(tuple(row["counters"]) == ("instructions",) for row in rows.values())
         assert all(
             len(counter["samples"]) == 5
             for row in rows.values()
             for counter in row["counters"].values()
         )
         assert rows["holistic-aa"]["absolute_delta_from_holistic"] >= 0
+        memory = artifact["memory"][framework]
+        assert tuple(memory) == (
+            "ready",
+            "verified",
+            "warmed",
+            "retained",
+            "observed_peak",
+        )
+        assert all(tuple(stage) == ("pss_bytes", "rss_bytes") for stage in memory.values())
+        assert all(
+            len(metric["samples"]) == 5
+            and metric["median"] > 0
+            and metric["mad"] >= 0
+            for stage in memory.values()
+            for metric in stage.values()
+        )
 
+    source = (ROOT / "benchmarks/baselines/e2e-holistic-stack-instructions.json").read_bytes()
+    source_hash = hashlib.sha256(source).hexdigest()
     readme = (ROOT / "README.md").read_text()
-    wreath = round(artifact["arms"]["wreath"]["holistic"]["median"])
-    optimal = round(artifact["arms"]["wreath-optimal"]["holistic"]["median"])
-    fastapi = round(artifact["arms"]["fastapi"]["holistic"]["median"])
-    ratio = fastapi / wreath
-    optimal_ratio = fastapi / optimal
-    assert f"{wreath:,}" in readme
-    assert f"{optimal:,}" in readme
-    assert f"{fastapi:,}" in readme
-    assert f"{ratio:.2f}× fewer instructions" in readme
-    assert f"{optimal_ratio:.2f}× fewer instructions" in readme
+    instruction_chart = (ROOT / "docs/assets/readme/holistic-instructions.svg").read_text()
+    memory_chart = (ROOT / "docs/assets/readme/holistic-memory.svg").read_text()
+    assert 'src="docs/assets/readme/holistic-instructions.svg"' in readme
+    assert 'src="docs/assets/readme/holistic-memory.svg"' in readme
+    for chart in (instruction_chart, memory_chart):
+        assert f'data-source-sha256="{source_hash}"' in chart
+        assert 'data-generator="animejs-4.5.0"' in chart
+        assert "<animate " in chart
     for framework in ("wreath", "wreath-optimal", "fastapi", "sanic", "blacksheep"):
         holistic = artifact["arms"][framework]["holistic"]
-        counters = holistic["counters"]
-        assert f"{holistic['range'][0] / 1_000_000:.3f}M" in readme
-        assert f"{holistic['range'][1] / 1_000_000:.3f}M" in readme
-        assert f"{round(counters['l2_all_misses']['median']):,}" in readme
+        assert (
+            f'data-stack="{framework}" '
+            f'data-median-instructions="{holistic["median"]:.3f}"'
+        ) in instruction_chart
+        pss = ",".join(
+            f'{artifact["memory"][framework][stage]["pss_bytes"]["median"] / (1024 * 1024):.3f}'
+            for stage in ("ready", "verified", "warmed", "retained")
+        )
+        peak_rss = (
+            artifact["memory"][framework]["observed_peak"]["rss_bytes"]["median"]
+            / (1024 * 1024)
+        )
+        assert f'data-stack="{framework}" data-pss-mib="{pss}"' in memory_chart
+        assert f'data-peak-rss-mib="{peak_rss:.3f}"' in memory_chart
 
 
 def test_holistic_counter_parser_names_every_required_event() -> None:
@@ -190,6 +208,38 @@ def test_holistic_counter_parser_names_every_required_event() -> None:
         "instructions": 12_345,
         "l1d_misses": 678,
     }
+
+
+def test_holistic_counter_parser_sums_supported_hybrid_pmus() -> None:
+    stderr = (
+        "<not counted>;;cpu_atom/instructions/u;0;0.00;;\n"
+        "12345;;cpu_core/instructions/u;99;100.00;;\n"
+    )
+    assert _parse_counters(stderr, {"instructions": "instructions:u"}) == {
+        "instructions": 12_345
+    }
+
+
+def test_holistic_memory_parser_reads_pss_and_rss_as_bytes() -> None:
+    assert _parse_smaps_rollup("Rss: 123 kB\nPss: 45 kB\n") == {
+        "pss_bytes": 45 * 1024,
+        "rss_bytes": 123 * 1024,
+    }
+
+
+def test_holistic_summary_retains_median_absolute_deviation() -> None:
+    assert _summary([10.0, 12.0, 14.0, 100.0]) == {
+        "median": 13.0,
+        "mad": 2.0,
+        "range": [10.0, 100.0],
+        "samples": [10.0, 12.0, 14.0, 100.0],
+    }
+
+
+def test_holistic_fastapi_server_command_has_one_port_option(tmp_path: Path) -> None:
+    command = _server_command("fastapi", 8123, 8, tmp_path / "cert", tmp_path / "key")
+    assert command.count("--port") == 1
+    assert command[command.index("--port") + 1] == "8123"
 
 
 def test_holistic_wreath_reuses_compact_chart_data_without_caching_the_projection() -> None:

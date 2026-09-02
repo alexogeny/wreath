@@ -60,9 +60,12 @@ Three properties worth knowing before mounting it:
 
 from __future__ import annotations
 
-from ._admin.fields import FieldAccess
-from ._admin.pages import CONTENT_SECURITY_POLICY
-from ._admin.registry import WITHHELD_MARKER, Admin, AdminError, ModelAdmin
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ._admin.fields import FieldAccess
+    from ._admin.pages import CONTENT_SECURITY_POLICY
+    from ._admin.registry import WITHHELD_MARKER, Admin, AdminError, ModelAdmin
 
 __all__ = [
     "CONTENT_SECURITY_POLICY",
@@ -72,3 +75,35 @@ __all__ = [
     "FieldAccess",
     "ModelAdmin",
 ]
+
+_EXPORTS = {
+    "CONTENT_SECURITY_POLICY": "_admin.pages",
+    "WITHHELD_MARKER": "_admin.registry",
+    "Admin": "_admin.registry",
+    "AdminError": "_admin.registry",
+    "FieldAccess": "_admin.fields",
+    "ModelAdmin": "_admin.registry",
+}
+
+_MODULE_EXPORTS = {
+    "_admin.pages": ("CONTENT_SECURITY_POLICY",),
+    "_admin.registry": ("WITHHELD_MARKER", "Admin", "AdminError", "ModelAdmin"),
+    "_admin.fields": ("FieldAccess",),
+}
+
+
+def __getattr__(name: str) -> Any:
+    module = _EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    loaded = import_module(f".{module}", __package__)
+    namespace = globals()
+    for export in _MODULE_EXPORTS[module]:
+        namespace[export] = getattr(loaded, export)
+    return namespace[name]
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *__all__})

@@ -48,6 +48,7 @@ compile_commands.json
 
 # Generated documentation
 /site/
+/tools/readme_charts/node_modules/
 
 # `docs/plans/` and `docs/decisions/` are tracked. They are excluded from the
 # published site by `wreath_docs.py`'s `exclude` tuple, not by being absent from

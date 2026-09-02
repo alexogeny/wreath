@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import tracemalloc
 
 import pytest
 
@@ -112,6 +113,32 @@ def test_native_and_pure_slabs_are_byte_identical() -> None:
     assert n.capture_high_water == p.capture_high_water
     for reason in fs.LossReason:
         assert n.loss(int(reason)) == p.loss(int(reason)), reason.name
+
+
+def test_capture_drain_does_not_stage_a_second_full_batch() -> None:
+    count = 64
+    slab_bytes = 65_536
+    rec = _native(
+        capture_slabs=count,
+        slab_bytes=slab_bytes,
+        active_requests=count,
+    )
+    payload = bytes(range(251)) * 258
+    for index in range(count):
+        request = rec.begin(connection_id=index, start_ns=index)
+        request.capture(int(FC.REQUEST_BODY), 0, _flight.CAP_RAW, payload)
+        request.finish(now_ns=index + 1, status=200)
+
+    tracemalloc.start()
+    try:
+        slabs = rec.drain_captures(count)
+        current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert len(slabs) == count
+    assert sum(map(len, slabs)) > count * (slab_bytes - 1024)
+    assert peak - current < slab_bytes * 4
 
 
 def test_random_differential_parity() -> None:

@@ -769,34 +769,35 @@ recorder_drain_captures(RecorderObject *self, PyObject *args)
         max_slabs = (Py_ssize_t)capacity;  /* at most `capacity` are ever committed */
     }
     uint64_t slab_bytes = wreath_nfr_capture_slab_bytes(self->worker);
-    uint8_t *buffer = PyMem_Malloc((size_t)max_slabs * (size_t)slab_bytes);
-    uint32_t *lengths = PyMem_Malloc((size_t)max_slabs * sizeof(uint32_t));
-    if (buffer == NULL || lengths == NULL) {
-        PyMem_Free(buffer);
-        PyMem_Free(lengths);
+    if (slab_bytes > (uint64_t)PY_SSIZE_T_MAX) {
         return PyErr_NoMemory();
     }
-    Py_ssize_t drained =
-        wreath_nfr_capture_drain(self->worker, buffer, lengths, max_slabs);
-    PyObject *result = PyList_New(drained);
+    PyObject *result = PyList_New(max_slabs);
     if (result == NULL) {
-        PyMem_Free(buffer);
-        PyMem_Free(lengths);
         return NULL;
     }
-    for (Py_ssize_t i = 0; i < drained; i++) {
-        PyObject *slab = PyBytes_FromStringAndSize(
-            (const char *)(buffer + (size_t)i * (size_t)slab_bytes), lengths[i]);
+    Py_ssize_t drained = 0;
+    for (; drained < max_slabs; drained++) {
+        PyObject *slab = PyBytes_FromStringAndSize(NULL, (Py_ssize_t)slab_bytes);
         if (slab == NULL) {
+            Py_SET_SIZE(result, drained);
             Py_DECREF(result);
-            PyMem_Free(buffer);
-            PyMem_Free(lengths);
             return NULL;
         }
-        PyList_SET_ITEM(result, i, slab);
+        uint32_t length = 0;
+        if (wreath_nfr_capture_drain(
+                self->worker, (uint8_t *)PyBytes_AS_STRING(slab), &length, 1) == 0) {
+            Py_DECREF(slab);
+            break;
+        }
+        if (_PyBytes_Resize(&slab, length) < 0) {
+            Py_SET_SIZE(result, drained);
+            Py_DECREF(result);
+            return NULL;
+        }
+        PyList_SET_ITEM(result, drained, slab);
     }
-    PyMem_Free(buffer);
-    PyMem_Free(lengths);
+    Py_SET_SIZE(result, drained);
     return result;
 }
 

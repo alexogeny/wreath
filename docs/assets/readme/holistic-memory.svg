@@ -1,0 +1,124 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="530" viewBox="0 0 1120 530" role="img" aria-labelledby="title desc" data-source-sha256="2320a2ec0c221f476319145b88cc9d92f581a1dd326783942b7b7935a0b630b2" data-generator="animejs-4.5.0">
+  <title id="title">Process-tree memory through the request lifecycle</title>
+  <desc id="desc">PSS apportions shared mappings; side labels retain summed peak RSS · five fresh-process medians · lower is better</desc>
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fff7ff"/>
+      <stop offset="0.52" stop-color="#f5f3ff"/>
+      <stop offset="1" stop-color="#eff6ff"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-20%" width="120%" height="150%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#6d28d9" flood-opacity=".10"/>
+    </filter>
+  </defs>
+  <rect x="12" y="12" width="1096" height="506" rx="28" fill="url(#paper)" stroke="#ddd6fe" filter="url(#shadow)"/>
+  <text x="58" y="70" fill="#2e1065" font-family="ui-sans-serif, system-ui, sans-serif" font-size="28" font-weight="750">Process-tree memory through the request lifecycle</text>
+  <text x="58" y="101" fill="#6b7280" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15">PSS apportions shared mappings; side labels retain summed peak RSS · five fresh-process medians · lower is better</text>
+  <line x1="114" y1="451" x2="804" y2="451" stroke="#c4b5fd" stroke-opacity=".42"/>
+  <text x="94" y="455" text-anchor="end" fill="#6b7280" font-family="ui-monospace, monospace" font-size="12">60 MiB</text>
+  <line x1="114" y1="392.346" x2="804" y2="392.346" stroke="#c4b5fd" stroke-opacity=".42"/>
+  <text x="94" y="396.346" text-anchor="end" fill="#6b7280" font-family="ui-monospace, monospace" font-size="12">70 MiB</text>
+  <line x1="114" y1="333.692" x2="804" y2="333.692" stroke="#c4b5fd" stroke-opacity=".42"/>
+  <text x="94" y="337.692" text-anchor="end" fill="#6b7280" font-family="ui-monospace, monospace" font-size="12">80 MiB</text>
+  <line x1="114" y1="275.038" x2="804" y2="275.038" stroke="#c4b5fd" stroke-opacity=".42"/>
+  <text x="94" y="279.038" text-anchor="end" fill="#6b7280" font-family="ui-monospace, monospace" font-size="12">90 MiB</text>
+  <line x1="114" y1="216.385" x2="804" y2="216.385" stroke="#c4b5fd" stroke-opacity=".42"/>
+  <text x="94" y="220.385" text-anchor="end" fill="#6b7280" font-family="ui-monospace, monospace" font-size="12">100 MiB</text>
+  <line x1="114" y1="157.731" x2="804" y2="157.731" stroke="#c4b5fd" stroke-opacity=".42"/>
+  <text x="94" y="161.731" text-anchor="end" fill="#6b7280" font-family="ui-monospace, monospace" font-size="12">110 MiB</text>
+  <text x="114" y="480" text-anchor="middle" fill="#6b7280" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12">ready</text>
+  <text x="344" y="480" text-anchor="middle" fill="#6b7280" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12">verified</text>
+  <text x="574" y="480" text-anchor="middle" fill="#6b7280" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12">warmed</text>
+  <text x="804" y="480" text-anchor="middle" fill="#6b7280" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12">retained</text>
+  <path d="M114 385.215 L344 359.749 L574 343.831 L804 331.453" pathLength="1" fill="none" stroke="#7c3aed" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="1" stroke-dashoffset="0" data-stack="wreath-optimal" data-pss-mib="71.216,75.558,78.271,80.382" data-peak-rss-mib="96.105">
+    <animate attributeName="stroke-dashoffset" values="1;0.772;0.586;0.436;0.316;0.223;0.153;0.1;0.063;0.037;0.02;0.01;0.004;0.001;0;0;0" keyTimes="0;.0625;.125;.1875;.25;.3125;.375;.4375;.5;.5625;.625;.6875;.75;.8125;.875;.9375;1" dur="1.2s" fill="freeze"/>
+  </path>
+  <circle cx="114" cy="385.215" r="5" fill="#fff" stroke="#7c3aed" stroke-width="3">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.35;.75;1" dur="1.1s" fill="freeze"/>
+  </circle>
+  <circle cx="344" cy="359.749" r="5" fill="#fff" stroke="#7c3aed" stroke-width="3">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.35;.75;1" dur="1.1s" fill="freeze"/>
+  </circle>
+  <circle cx="574" cy="343.831" r="5" fill="#fff" stroke="#7c3aed" stroke-width="3">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.35;.75;1" dur="1.1s" fill="freeze"/>
+  </circle>
+  <circle cx="804" cy="331.453" r="5" fill="#fff" stroke="#7c3aed" stroke-width="3">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.35;.75;1" dur="1.1s" fill="freeze"/>
+  </circle>
+  <circle cx="846" cy="158" r="6" fill="#7c3aed"/>
+  <text x="865" y="163" fill="#312e81" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="650">Wreath · DCZ</text>
+  <text x="865" y="182" fill="#6b7280" font-family="ui-monospace, monospace" font-size="11">peak RSS 96.11 MiB</text>
+  <path d="M114 386.578 L344 366.788 L574 349.181 L804 348.551" pathLength="1" fill="none" stroke="#d946ef" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="1" stroke-dashoffset="0" data-stack="wreath" data-pss-mib="70.983,74.357,77.359,77.467" data-peak-rss-mib="93.090">
+    <animate attributeName="stroke-dashoffset" values="1;0.75;0.55;0.393;0.272;0.182;0.116;0.07;0.039;0.02;0.009;0.003;0.001;0;0;0;0" keyTimes="0;.0625;.125;.1875;.25;.3125;.375;.4375;.5;.5625;.625;.6875;.75;.8125;.875;.9375;1" dur="1.3s" fill="freeze"/>
+  </path>
+  <circle cx="114" cy="386.578" r="5" fill="#fff" stroke="#d946ef" stroke-width="3">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.35;.75;1" dur="1.21s" fill="freeze"/>
+  </circle>
+  <circle cx="344" cy="366.788" r="5" fill="#fff" stroke="#d946ef" stroke-width="3">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.35;.75;1" dur="1.21s" fill="freeze"/>
+  </circle>
+  <circle cx="574" cy="349.181" r="5" fill="#fff" stroke="#d946ef" stroke-width="3">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.35;.75;1" dur="1.21s" fill="freeze"/>
+  </circle>
+  <circle cx="804" cy="348.551" r="5" fill="#fff" stroke="#d946ef" stroke-width="3">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.35;.75;1" dur="1.21s" fill="freeze"/>
+  </circle>
+  <circle cx="846" cy="215" r="6" fill="#d946ef"/>
+  <text x="865" y="220" fill="#312e81" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="650">Wreath · gzip</text>
+  <text x="865" y="239" fill="#6b7280" font-family="ui-monospace, monospace" font-size="11">peak RSS 93.09 MiB</text>
+  <path d="M114 205.622 L344 192.098 L574 190.724 L804 190.701" pathLength="1" fill="none" stroke="#2563eb" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="1" stroke-dashoffset="0" data-stack="blacksheep" data-pss-mib="101.835,104.141,104.375,104.379" data-peak-rss-mib="174.980">
+    <animate attributeName="stroke-dashoffset" values="1;0.728;0.516;0.354;0.233;0.147;0.087;0.047;0.023;0.01;0.003;0.001;0;0;0;0;0" keyTimes="0;.0625;.125;.1875;.25;.3125;.375;.4375;.5;.5625;.625;.6875;.75;.8125;.875;.9375;1" dur="1.4s" fill="freeze"/>
+  </path>
+  <circle cx="114" cy="205.622" r="5" fill="#fff" stroke="#2563eb" stroke-width="3">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.35;.75;1" dur="1.32s" fill="freeze"/>
+  </circle>
+  <circle cx="344" cy="192.098" r="5" fill="#fff" stroke="#2563eb" stroke-width="3">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.35;.75;1" dur="1.32s" fill="freeze"/>
+  </circle>
+  <circle cx="574" cy="190.724" r="5" fill="#fff" stroke="#2563eb" stroke-width="3">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.35;.75;1" dur="1.32s" fill="freeze"/>
+  </circle>
+  <circle cx="804" cy="190.701" r="5" fill="#fff" stroke="#2563eb" stroke-width="3">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.35;.75;1" dur="1.32s" fill="freeze"/>
+  </circle>
+  <circle cx="846" cy="272" r="6" fill="#2563eb"/>
+  <text x="865" y="277" fill="#312e81" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="650">BlackSheep</text>
+  <text x="865" y="296" fill="#6b7280" font-family="ui-monospace, monospace" font-size="11">peak RSS 174.98 MiB</text>
+  <path d="M114 420.82 L344 401.654 L574 371.657 L804 360.505" pathLength="1" fill="none" stroke="#0891b2" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="1" stroke-dashoffset="0" data-stack="fastapi" data-pss-mib="65.146,68.413,73.527,75.429" data-peak-rss-mib="114.250">
+    <animate attributeName="stroke-dashoffset" values="1;0.707;0.483;0.317;0.199;0.117;0.063;0.031;0.013;0.004;0.001;0;0;0;0;0;0" keyTimes="0;.0625;.125;.1875;.25;.3125;.375;.4375;.5;.5625;.625;.6875;.75;.8125;.875;.9375;1" dur="1.5s" fill="freeze"/>
+  </path>
+  <circle cx="114" cy="420.82" r="5" fill="#fff" stroke="#0891b2" stroke-width="3">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.35;.75;1" dur="1.43s" fill="freeze"/>
+  </circle>
+  <circle cx="344" cy="401.654" r="5" fill="#fff" stroke="#0891b2" stroke-width="3">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.35;.75;1" dur="1.43s" fill="freeze"/>
+  </circle>
+  <circle cx="574" cy="371.657" r="5" fill="#fff" stroke="#0891b2" stroke-width="3">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.35;.75;1" dur="1.43s" fill="freeze"/>
+  </circle>
+  <circle cx="804" cy="360.505" r="5" fill="#fff" stroke="#0891b2" stroke-width="3">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.35;.75;1" dur="1.43s" fill="freeze"/>
+  </circle>
+  <circle cx="846" cy="329" r="6" fill="#0891b2"/>
+  <text x="865" y="334" fill="#312e81" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="650">FastAPI</text>
+  <text x="865" y="353" fill="#6b7280" font-family="ui-monospace, monospace" font-size="11">peak RSS 114.25 MiB</text>
+  <path d="M114 333.44 L344 319.619 L574 312.929 L804 306.301" pathLength="1" fill="none" stroke="#059669" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="1" stroke-dashoffset="0" data-stack="sanic" data-pss-mib="80.043,82.399,83.540,84.670" data-peak-rss-mib="125.617">
+    <animate attributeName="stroke-dashoffset" values="1;0.686;0.452;0.284;0.168;0.092;0.045;0.019;0.006;0.001;0;0;0;0;0;0;0" keyTimes="0;.0625;.125;.1875;.25;.3125;.375;.4375;.5;.5625;.625;.6875;.75;.8125;.875;.9375;1" dur="1.6s" fill="freeze"/>
+  </path>
+  <circle cx="114" cy="333.44" r="5" fill="#fff" stroke="#059669" stroke-width="3">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.35;.75;1" dur="1.54s" fill="freeze"/>
+  </circle>
+  <circle cx="344" cy="319.619" r="5" fill="#fff" stroke="#059669" stroke-width="3">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.35;.75;1" dur="1.54s" fill="freeze"/>
+  </circle>
+  <circle cx="574" cy="312.929" r="5" fill="#fff" stroke="#059669" stroke-width="3">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.35;.75;1" dur="1.54s" fill="freeze"/>
+  </circle>
+  <circle cx="804" cy="306.301" r="5" fill="#fff" stroke="#059669" stroke-width="3">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.35;.75;1" dur="1.54s" fill="freeze"/>
+  </circle>
+  <circle cx="846" cy="386" r="6" fill="#059669"/>
+  <text x="865" y="391" fill="#312e81" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="650">Sanic</text>
+  <text x="865" y="410" fill="#6b7280" font-family="ui-monospace, monospace" font-size="11">peak RSS 125.62 MiB</text>
+  <text x="1062" y="495" text-anchor="end" fill="#8b5cf6" font-family="ui-monospace, monospace" font-size="11">retained · 2026-09-02</text>
+</svg>

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import subprocess
+import sys
 from importlib.resources import files
 from types import SimpleNamespace
 
@@ -23,6 +25,15 @@ from wreath.metrics import collect
 from wreath.policy import AIScrapingPolicy, HttpPolicy
 from wreath.policy.proxy import ProxyPolicy
 from wreath.request import Request
+
+
+def test_default_client_facts_does_not_import_the_resource_reader() -> None:
+    code = (
+        "import sys; from wreath import Wreath; app = Wreath(); "
+        "assert app._user_agent_database.lookup('curl/8.10'); "
+        "assert 'importlib.resources' not in sys.modules"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
 
 
 async def receive() -> dict[str, object]:

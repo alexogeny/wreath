@@ -55,27 +55,30 @@ touches an account.
 
 from __future__ import annotations
 
-from .deploy import DeploymentArtifact, DeploymentBundle, deployment_bundle
-from .inference import infer
-from .model import (
-    ConnectionBudget,
-    DatabaseRequirement,
-    EgressRequirement,
-    Gap,
-    GapKind,
-    InfrastructurePlan,
-    ListenerRequirement,
-    ObjectStoreRequirement,
-    Presence,
-    SchemaComponent,
-    SettingsContract,
-    SettingsKey,
-    SharedSubsystem,
-    WorkloadPool,
-    as_dict,
-)
-from .render import render_json, render_text
-from .settings import settings_keys
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .deploy import DeploymentArtifact, DeploymentBundle, deployment_bundle
+    from .inference import infer
+    from .model import (
+        ConnectionBudget,
+        DatabaseRequirement,
+        EgressRequirement,
+        Gap,
+        GapKind,
+        InfrastructurePlan,
+        ListenerRequirement,
+        ObjectStoreRequirement,
+        Presence,
+        SchemaComponent,
+        SettingsContract,
+        SettingsKey,
+        SharedSubsystem,
+        WorkloadPool,
+        as_dict,
+    )
+    from .render import render_json, render_text
+    from .settings import settings_keys
 
 __all__ = [
     "ConnectionBudget",
@@ -101,3 +104,69 @@ __all__ = [
     "render_text",
     "settings_keys",
 ]
+
+_EXPORTS = {
+    "ConnectionBudget": "model",
+    "DatabaseRequirement": "model",
+    "DeploymentArtifact": "deploy",
+    "DeploymentBundle": "deploy",
+    "EgressRequirement": "model",
+    "Gap": "model",
+    "GapKind": "model",
+    "InfrastructurePlan": "model",
+    "ListenerRequirement": "model",
+    "ObjectStoreRequirement": "model",
+    "Presence": "model",
+    "SchemaComponent": "model",
+    "SettingsContract": "model",
+    "SettingsKey": "model",
+    "SharedSubsystem": "model",
+    "WorkloadPool": "model",
+    "as_dict": "model",
+    "deployment_bundle": "deploy",
+    "infer": "inference",
+    "render_json": "render",
+    "render_text": "render",
+    "settings_keys": "settings",
+}
+
+_MODULE_EXPORTS = {
+    "model": (
+        "ConnectionBudget",
+        "DatabaseRequirement",
+        "EgressRequirement",
+        "Gap",
+        "GapKind",
+        "InfrastructurePlan",
+        "ListenerRequirement",
+        "ObjectStoreRequirement",
+        "Presence",
+        "SchemaComponent",
+        "SettingsContract",
+        "SettingsKey",
+        "SharedSubsystem",
+        "WorkloadPool",
+        "as_dict",
+    ),
+    "deploy": ("DeploymentArtifact", "DeploymentBundle", "deployment_bundle"),
+    "inference": ("infer",),
+    "render": ("render_json", "render_text"),
+    "settings": ("settings_keys",),
+}
+
+
+def __getattr__(name: str) -> Any:
+    module = _EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    loaded = import_module(f".{module}", __name__)
+    namespace = globals()
+    for export in _MODULE_EXPORTS[module]:
+        namespace[export] = getattr(loaded, export)
+    return namespace[name]
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *__all__})
