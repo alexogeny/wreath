@@ -337,6 +337,24 @@ async def test_a_full_nonce_ledger_refuses_rather_than_evicting():
     assert ledger.replays == 1
 
 
+async def test_a_full_nonce_ledger_cannot_verify_a_fresh_signed_request():
+    now = 1_700_000_000.0
+    ledger = NonceLedger(max_entries=1, ttl=300.0)
+    assert ledger.claim("occupied") is True
+    signatures = build(nonces=ledger, clock=lambda: now)
+
+    async with TestClient(app_with(signatures)) as client:
+        body = (
+            await client.get(
+                "/probe", headers=signed_headers(clock=now, nonce="fresh-nonce")
+            )
+        ).json()
+
+    assert body["verified"] is False
+    assert body["reason"] == "signature nonce was already used"
+    assert ledger.refusals == 1
+
+
 async def test_a_nonce_is_forgotten_after_its_ttl():
     ledger = NonceLedger(max_entries=4, ttl=10.0)
     assert ledger.claim("a", now=0.0) is True

@@ -43,7 +43,8 @@ import warnings
 from collections.abc import Callable
 from typing import Any
 
-from .._reqcache import resolve_once
+from .._awaitable import is_awaitable
+from .._reqcache import resolve_once, resolve_once_async
 
 #: The answer for a fact nobody provides, and for one no policy reads. Shared
 #: rather than rebuilt, and *always supplied* -- an absent set key is not a
@@ -247,7 +248,15 @@ class SetFact:
             `require_provider`.
     """
 
-    __slots__ = ("_provider", "_resolve", "_slot", "attribute", "vocabulary")
+    __slots__ = (
+        "_async_resolve",
+        "_may_await",
+        "_provider",
+        "_resolve",
+        "_slot",
+        "attribute",
+        "vocabulary",
+    )
 
     def __init__(
         self,
@@ -260,11 +269,15 @@ class SetFact:
         singular: str,
         validate: bool = True,
         refusal: bool = False,
+        async_resolve: bool = False,
+        may_await: bool = False,
     ) -> None:
         self.attribute = attribute
         self._slot = f"_cedar_fact_{attribute}"
         self._provider = provider
         self._resolve = resolve
+        self._async_resolve = async_resolve
+        self._may_await = may_await
         self.vocabulary = referenced_names(engine, f"referenced_{attribute}")
         if refusal:
             require_provider(
@@ -302,4 +315,43 @@ class SetFact:
             # Returning here is what keeps a store-backed fact off the request
             # path entirely for the applications that do not use it.
             return EMPTY
-        return resolve_once(request, self._slot, lambda: self._resolve(request, vocabulary))
+        if self._async_resolve:
+
+            def unresolved() -> frozenset[str]:
+                raise TypeError(
+                    f"Cedar context.{self.attribute} has an async provider; "
+                    "resolve it through authorize() before reading facts_for()"
+                )
+
+            return resolve_once(request, self._slot, unresolved)
+
+        def resolve() -> frozenset[str]:
+            value = self._resolve(request, vocabulary)
+            if is_awaitable(value):
+                close = getattr(value, "close", None)
+                if callable(close):
+                    close()
+                raise TypeError(
+                    f"Cedar context.{self.attribute} returned an awaitable; "
+                    "resolve it through authorize() before reading facts_for()"
+                )
+            return value
+
+        return resolve_once(request, self._slot, resolve)
+
+    def for_authorization(self, request: Any) -> Any:
+        if not self._async_resolve and not self._may_await:
+            return self.for_request(request)
+        if self._provider is None:
+            return EMPTY
+        vocabulary = self.vocabulary
+        if vocabulary is not None and not vocabulary:
+            return EMPTY
+
+        async def resolve() -> frozenset[str]:
+            value: Any = self._resolve(request, vocabulary)
+            if is_awaitable(value):
+                value = await value
+            return value
+
+        return resolve_once_async(request, self._slot, resolve)

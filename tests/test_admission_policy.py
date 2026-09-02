@@ -177,6 +177,15 @@ def test_concurrency_policy_refuses_invalid_detail(detail) -> None:
         ConcurrencyPolicy(1, detail=detail)
 
 
+def test_non_http_work_can_share_the_same_concurrency_gate() -> None:
+    policy = ConcurrencyPolicy(1)
+
+    assert policy.try_acquire() is True
+    assert policy.try_acquire() is False
+    policy.release()
+    assert policy.stats().active == 0
+
+
 @pytest.mark.parametrize(
     ("retry_after", "expected_header"),
     [(None, None), (0, b"0")],

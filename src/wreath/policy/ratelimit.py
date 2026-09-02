@@ -625,6 +625,17 @@ class RateLimitPolicy:
         self.throttled += 1
         return response
 
+    async def admit_key(self, key: str) -> ProblemResponse | None:
+        """Charge non-HTTP work against this policy's existing keyed bucket."""
+        if not isinstance(key, str) or not key:
+            raise ValueError("rate-limit key must be a non-empty string")
+        retry_after = (
+            self._try_acquire(key, self._cost, monotonic())
+            if self._try_acquire is not None
+            else await self._store.acquire(key, self._cost, monotonic())
+        )
+        return self._limited(retry_after) if retry_after > 0.0 else None
+
     # The rate limit is decided *before* the quota, deliberately. A throttled
     # request did no work, so charging its cost against a monthly allowance
     # would bill a caller for requests the server refused -- and the meter is the

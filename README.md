@@ -102,6 +102,26 @@ outbox patterns use the same startup and shutdown boundary. The
 the [migration workflow](https://alexogeny.github.io/wreath/guides/migration-workflow.html)
 covers production changes.
 
+### Billing and subscriptions
+
+Hosted checkout, subscriptions, portals, refunds, Stripe Connect and Managed
+Payments share one provider-neutral control plane. Wreath maps application plans
+to provider prices, projects verified webhooks into its owned ledger, derives
+atomic Cedar entitlements, and reconciles remote state without holding a database
+transaction across network I/O. Direct card capture is deliberately outside the
+API; deployment-owned compliance decisions remain visible instead of becoming a
+framework promise. See [billing and subscriptions](https://alexogeny.github.io/wreath/reference/billing.html).
+
+### ChatOps
+
+One typed command declaration can serve Slack, Microsoft Teams and Discord with
+no provider SDK dependency. Wreath owns ingress verification, manifests,
+acknowledgements and bounded delivery, then reuses the application's identity,
+organization, Cedar, rate-limit, durable-job, stream, notification and agent
+infrastructure. Existing Entra or Google-backed users can resolve through the
+same application identity and permission stores; profile fields never silently
+provision or merge accounts. See the [ChatOps runtime](https://alexogeny.github.io/wreath/reference/chat.html).
+
 ### Identity and operations
 
 Bearer and cookie identity, OAuth BFF sessions, step-up authentication, SAML,

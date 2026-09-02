@@ -625,6 +625,7 @@ class Wreath:
         "_auth_backend",
         "_bearer_verifier",
         "_bearer_verifier_is_async",
+        "_billing_control_planes",
         "_app_scope",
         "_authorizer",
         "_route_authorize",
@@ -903,6 +904,7 @@ class Wreath:
         self.metrics_collection_errors = 0
         self.metrics_invalid_sources = 0
         self._databases: dict[str, Any] = {}
+        self._billing_control_planes: dict[str, Any] = {}
         #: `id(holder) -> (holder, database)` for every subsystem whose
         #: declaration named a database: `app.jobs(database=)`,
         #: `app.messaging(database=)`. That argument *is* the schema
@@ -991,6 +993,7 @@ class Wreath:
             *self._series_stores.values(),
             *self._entity_registries.values(),
             *self._services.values(),
+            *self._billing_control_planes.values(),
             # The middleware registries hold `(priority, order, middleware)`.
             # Walking the tuples asked a tuple for `component()`, so every
             # middleware-owned table was silently never collected.
@@ -1126,6 +1129,66 @@ class Wreath:
             for holder, candidate, found in walk_claims(self.schema_holders())
             if wanted.pop(found.name, None) is not None
         ]
+
+    def billing(
+        self,
+        name: str,
+        *,
+        backend: Any,
+        catalog: Any,
+        merchant: Any,
+        capture: Any,
+        topology: Any = None,
+        customer_for: Any = None,
+        payment_for: Any = None,
+        ledger: Any = None,
+        database: str | None = None,
+    ) -> Any:
+        """Register one named billing control plane."""
+        from .billing import Billing
+
+        if name in self._billing_control_planes:
+            raise ValueError(f"duplicate billing control plane: {name}")
+        options = {} if topology is None else {"topology": topology}
+        if customer_for is not None:
+            options["customer_for"] = customer_for
+        if payment_for is not None:
+            options["payment_for"] = payment_for
+        if ledger is not None:
+            options["ledger"] = ledger
+        if database is not None and ledger is None:
+            raise ValueError("billing database requires a durable ledger")
+        if database is not None and database not in self._databases:
+            raise ValueError(f"unknown PostgreSQL database: {database}")
+        component = None if ledger is None else getattr(ledger, "component", None)
+        if callable(component):
+            component_name = component().name
+            for registered in self._billing_control_planes.values():
+                existing_ledger = getattr(registered, "ledger", None)
+                if existing_ledger is ledger:
+                    continue
+                existing_component = getattr(existing_ledger, "component", None)
+                if callable(existing_component) and existing_component().name == component_name:
+                    suggested = f"{name}-billing-ledger"
+                    raise ValueError(
+                        f"billing ledger component {component_name!r} is already registered; "
+                        "construct this ledger with "
+                        f"PostgresBillingLedger(component_name={suggested!r})"
+                    )
+        billing = Billing(
+            name,
+            backend=backend,
+            catalog=catalog,
+            merchant=merchant,
+            capture=capture,
+            **options,
+        )
+        if database is not None:
+            self._declared_databases[id(billing)] = (billing, self._databases[database])
+        self._billing_control_planes[name] = billing
+        self.state.__setattr__(f"billing_{name}", billing)
+        self._dirty = True
+        return billing
 
     def webhooks(self, name: str) -> Any:
         """Register one named inbound/outbound webhook hub."""
@@ -3255,14 +3318,10 @@ class Wreath:
         if identity is None and requirement.access_level > 0:
             try:
                 challenge = None if backend is None else backend.challenge(request)
-                response = await self._handle_exception(
-                    request, Unauthorized(challenge=challenge)
-                )
+                response = await self._handle_exception(request, Unauthorized(challenge=challenge))
             except Exception as error:  # noqa: BLE001 -- see _handle_exception
                 response = await self._handle_exception(request, error)
-            await self._finish_http(
-                request, response, send, method, scope, native_response, 0
-            )
+            await self._finish_http(request, response, send, method, scope, native_response, 0)
             return True
         if not (
             requirement.second_factor is not None
@@ -3281,9 +3340,7 @@ class Wreath:
             response = await self._handle_exception(request, error)
         if response is None:
             return False
-        await self._finish_http(
-            request, response, send, method, scope, native_response, 0
-        )
+        await self._finish_http(request, response, send, method, scope, native_response, 0)
         return True
 
     async def _handle_http_plain_auth(
@@ -3343,9 +3400,7 @@ class Wreath:
                         _REQUEST_LAYOUT, scope, receive, None, self._limits, self
                     )
                 response = await self._handle_exception(request, error)
-                await self._finish_http(
-                    request, response, send, method, scope, native_response, 0
-                )
+                await self._finish_http(request, response, send, method, scope, native_response, 0)
                 return
 
         if classification == 2:
@@ -3620,9 +3675,7 @@ class Wreath:
             )
             return _HTTP_FINISHED, request, policy_activated
         stage_response = (
-            await self._run_stage("pre_auth", request)
-            if "pre_auth" in self._stage_hooks
-            else None
+            await self._run_stage("pre_auth", request) if "pre_auth" in self._stage_hooks else None
         )
         if stage_response is not None:
             await self._finish_http(
@@ -3654,9 +3707,7 @@ class Wreath:
             scope._flight_phase(_PH_AUTH, 0, _COV_PYTHON, _monotonic_ns() - auth_start)
         request._set_identity(identity)
         stage_response = (
-            await self._run_stage("identity", request)
-            if "identity" in self._stage_hooks
-            else None
+            await self._run_stage("identity", request) if "identity" in self._stage_hooks else None
         )
         if stage_response is not None:
             await self._finish_http(
@@ -3724,9 +3775,7 @@ class Wreath:
         if global_hooks:
             request._set_route_outcome("miss")
         stage_response = (
-            await self._run_stage("miss", request)
-            if "miss" in self._stage_hooks
-            else None
+            await self._run_stage("miss", request) if "miss" in self._stage_hooks else None
         )
         if stage_response is not None:
             await self._finish_http(
@@ -3757,9 +3806,7 @@ class Wreath:
             if global_hooks:
                 request._set_route_outcome("static")
             return matched
-        allow = self._allowed_methods(
-            method, path, _host_name(request.header("host", "") or "")
-        )
+        allow = self._allowed_methods(method, path, _host_name(request.header("host", "") or ""))
         if allow:
             response = await self._handle_exception(request, MethodNotAllowed(allow=allow))
         else:
@@ -3952,9 +3999,7 @@ class Wreath:
         active_global = len(after_hooks)
         if global_hooks:
             if request is None:
-                request = _request_new(
-                    _REQUEST_LAYOUT, scope, receive, None, self._limits, self
-                )
+                request = _request_new(_REQUEST_LAYOUT, scope, receive, None, self._limits, self)
                 request._route_outcome = "ingress"
             if _telemetry.PROPAGATING and request._policy_mask == 0:
                 _telemetry.bind_propagation(request)
@@ -4102,10 +4147,7 @@ class Wreath:
             or "action" in self._stage_hooks
             or (
                 policy is not None
-                and (
-                    policy._has_post_auth
-                    or (policy._has_activation and not policy_activated)
-                )
+                and (policy._has_post_auth or (policy._has_activation and not policy_activated))
             )
         )
         if needs_route_policy and await self._run_http_route_policy(

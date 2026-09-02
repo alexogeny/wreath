@@ -17,6 +17,7 @@ can insist on a *recent* one. Every one of them can be overridden individually.
 
 from __future__ import annotations
 
+import inspect
 import math
 import time
 import warnings
@@ -329,7 +330,7 @@ def _resolve_org_roles(
 
 def _resolve_entitlements(
     request: Request, provider: Any, vocabulary: frozenset[str] | None
-) -> frozenset[str]:
+) -> Any:
     """What this caller's plan entitles them to, bounded by any claimed limit.
 
     A claimed plan the provider disagrees with yields **nothing**, rather than
@@ -342,11 +343,37 @@ def _resolve_entitlements(
     if identity is None:
         return EMPTY
     limits = _limits_of(request)
-    if limits.plan is not None:
-        plan_of = getattr(provider, "plan_for", None)
-        if not callable(plan_of) or plan_of(identity) != limits.plan:
+    resolve_request = getattr(provider, "resolve_request", None)
+    resolve = getattr(provider, "resolve", None)
+    if callable(resolve_request) or callable(resolve):
+        if callable(resolve_request):
+            resolution = resolve_request(request)
+        elif callable(resolve):
+            resolution = resolve(identity)
+        else:
+            raise RuntimeError("entitlement resolution method disappeared")
+        if is_awaitable(resolution):
+
+            async def await_resolution() -> frozenset[str]:
+                return _bound_entitlement_resolution(await resolution, limits)
+
+            return await_resolution()
+        return _bound_entitlement_resolution(resolution, limits)
+    else:
+        if limits.plan is not None:
             return EMPTY
-    resolved = frozenset(str(name) for name in provider.entitlements(identity))
+        for_request = getattr(provider, "for_request", None)
+        held = for_request(request) if callable(for_request) else provider.entitlements(identity)
+    resolved = frozenset(str(name) for name in held)
+    return limits.bound("entitlements", resolved)
+
+
+def _bound_entitlement_resolution(resolution: Any, limits: Limits) -> frozenset[str]:
+    plan = getattr(resolution, "plan", None)
+    if limits.plan is not None and plan != limits.plan:
+        return EMPTY
+    held = getattr(resolution, "entitlements", EMPTY)
+    resolved = frozenset(str(name) for name in held)
     return limits.bound("entitlements", resolved)
 
 
@@ -616,6 +643,11 @@ class CedarAuthorizer:
                 ),
                 noun="entitlements",
                 singular="entitlement",
+                async_resolve=any(
+                    inspect.iscoroutinefunction(getattr(entitlements, name, None))
+                    for name in ("resolve_request", "resolve")
+                ),
+                may_await=True,
             ),
             SetFact(
                 "quota",
@@ -785,7 +817,8 @@ class CedarAuthorizer:
             context["now"] = _request_now(request, self._clock)
         for fact in self._facts:
             if needed is None or fact.attribute in needed:
-                context[fact.attribute] = fact.for_request(request)
+                value = fact.for_authorization(request)
+                context[fact.attribute] = await value if is_awaitable(value) else value
         if compiled is None or needed is None or "delegated" in needed:
             context["delegated"] = False
         return principal, action, entities, context

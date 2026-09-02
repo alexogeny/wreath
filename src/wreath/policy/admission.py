@@ -65,6 +65,18 @@ class ConcurrencyPolicy:
     def _release(self) -> None:
         self._gate.release()
 
+    def try_acquire(self) -> bool:
+        """Acquire a permit for non-HTTP work without creating a wait queue."""
+        return self._acquire()
+
+    def release(self) -> None:
+        """Release a permit acquired by `try_acquire`."""
+        self._release()
+
+    def refusal(self) -> ProblemResponse:
+        """Build this policy's ordinary overload problem response."""
+        return self._refusal()
+
     def _refusal(self) -> ProblemResponse:
         headers = (
             None

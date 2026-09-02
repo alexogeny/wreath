@@ -16,6 +16,7 @@ from wreath.organizations import (
     Memberships,
     load_into,
 )
+from wreath.subscriptions import SubscriptionAccess
 from wreath.testing import TestClient
 
 ROLES = frozenset({"admin", "member"})
@@ -165,10 +166,54 @@ async def test_a_claimed_plan_the_provider_disagrees_with_yields_nothing() -> No
 
 
 @pytest.mark.asyncio
-async def test_a_matching_plan_keeps_the_entitlements() -> None:
+async def test_a_plan_limit_requires_an_atomic_entitlement_provider() -> None:
     provider = Entitlements({"alice": {"export"}}, plans={"alice": "pro"})
     identity = (human(Identity("alice")) | on_plan("pro")).bind()
+    assert await _status(ENTITLEMENT_POLICY, identity=identity, entitlements=provider) == 403
+    assert provider.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_an_async_atomic_entitlement_provider_is_awaited_once() -> None:
+    class AsyncEntitlements:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def resolve(self, identity: Identity) -> SubscriptionAccess:
+            self.calls += 1
+            return SubscriptionAccess("pro", frozenset({"export"}))
+
+        def names(self) -> frozenset[str]:
+            return frozenset({"export"})
+
+    provider = AsyncEntitlements()
+    identity = (human(Identity("alice")) | on_plan("pro")).bind()
+
     assert await _status(ENTITLEMENT_POLICY, identity=identity, entitlements=provider) == 200
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_sync_entitlement_method_returning_an_awaitable_is_awaited_once() -> None:
+    class AwaitableEntitlements:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def resolve(self, identity: Identity) -> Any:
+            async def resolved() -> SubscriptionAccess:
+                self.calls += 1
+                return SubscriptionAccess("pro", frozenset({"export"}))
+
+            return resolved()
+
+        def names(self) -> frozenset[str]:
+            return frozenset({"export"})
+
+    provider = AwaitableEntitlements()
+    identity = (human(Identity("alice")) | on_plan("pro")).bind()
+
+    assert await _status(ENTITLEMENT_POLICY, identity=identity, entitlements=provider) == 200
+    assert provider.calls == 1
 
 
 @pytest.mark.asyncio

@@ -75,6 +75,8 @@ action: Choose a story -> ../stories/index.md
 | Need | Module |
 |---|---|
 | MCP tools, resources and prompts | `wreath.mcp` |
+| governed model agents, backplanes and tool execution | `wreath.agents` |
+| Slack, Teams and Discord ChatOps | `wreath.chat` |
 | GraphQL | `wreath.graphql` |
 | gRPC | `wreath.grpc` |
 | Protocol Buffers | `wreath.protobuf` |
@@ -86,6 +88,7 @@ action: Choose a story -> ../stories/index.md
 | Need | Module |
 |---|---|
 | outbound HTTP | `wreath.http_client` |
+| hosted payments, subscriptions and Stripe | `wreath.billing`, `wreath.payments` |
 | service-to-service calls | `wreath.service_client` |
 | verified inbound and durable outbound webhooks | `wreath.webhooks` |
 | native reverse proxy | `wreath.edge` |
@@ -117,6 +120,9 @@ quietly publishing fictional API documentation.
 - [Realtime and durable work](realtime.md)
 - [Protocols and delivery](protocols.md)
 - [MCP](mcp.md)
+- [Agents](agents.md)
+- [ChatOps](chat.md)
+- [Billing and subscriptions](billing.md)
 - [Operations](operations.md)
 - [Tooling](tooling.md)
 

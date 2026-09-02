@@ -86,7 +86,7 @@ import hashlib
 import secrets
 import time
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, cast, runtime_checkable
 
 from ._scim import scim_router
@@ -103,6 +103,8 @@ __all__ = [
     "MemberDirectory",
     "Memberships",
     "Organization",
+    "OrganizationFederation",
+    "OrganizationFederationError",
     "OrganizationStore",
     "PostgresOrganizationStore",
     "active_organization",
@@ -165,6 +167,52 @@ class Membership:
     def qualified_roles(self) -> frozenset[str]:
         """This membership's roles, namespaced by organisation."""
         return frozenset(f"{self.organization}:{role}" for role in self.roles)
+
+
+class OrganizationFederationError(LookupError):
+    pass
+
+
+class OrganizationFederation:
+    __slots__ = ("installations", "organizations")
+
+    def __init__(self, organizations: OrganizationStore, installations: Any) -> None:
+        if not isinstance(organizations, OrganizationStore):
+            raise TypeError("organization federation requires an OrganizationStore")
+        if not callable(getattr(installations, "organization_for", None)):
+            raise TypeError(
+                "organization federation installation map must provide "
+                "organization_for(provider, installation)"
+            )
+        self.organizations = organizations
+        self.installations = installations
+
+    async def resolve(self, external: Any, binding: Any) -> Any:
+        provider = getattr(external, "provider", None)
+        installation = getattr(external, "installation", None)
+        if not provider or not installation:
+            raise OrganizationFederationError(
+                "organization federation requires provider and installation"
+            )
+        organization = await self.installations.organization_for(provider, installation)
+        if not organization:
+            raise OrganizationFederationError("chat installation has no organization mapping")
+        user_id = getattr(getattr(binding, "identity", None), "id", None)
+        if not isinstance(user_id, str) or not user_id:
+            raise OrganizationFederationError(
+                "organization federation requires a non-empty Wreath identity id"
+            )
+        memberships = await self.organizations.memberships(user_id)
+        if not any(item.organization == organization for item in memberships):
+            raise OrganizationFederationError(
+                f"user {user_id!r} is not a member of organization {organization!r}"
+            )
+        tenant = getattr(binding, "tenant", None)
+        if tenant is not None and tenant != organization:
+            raise OrganizationFederationError(
+                f"identity tenant {tenant!r} does not match organization {organization!r}"
+            )
+        return replace(binding, tenant=organization)
 
 
 @dataclass(frozen=True, slots=True)

@@ -857,6 +857,7 @@ def preflight(
         )
 
     findings.extend(_tenancy_findings(app))
+    findings.extend(_chatops_findings(app))
 
     public = _public_routes(app)
     if public:
@@ -922,6 +923,65 @@ def _tenancy_findings(app: Any) -> list[PreflightFinding]:
         )
         for name in isolated
     ]
+
+
+def _chatops_findings(app: Any) -> list[PreflightFinding]:
+    from .chat import ChatOps
+
+    runtimes: list[Any] = []
+    seen: set[int] = set()
+    for startup in getattr(app, "_startup_handlers", ()):
+        owner = getattr(startup, "__self__", None)
+        identity = id(owner)
+        if isinstance(owner, ChatOps) and identity not in seen:
+            seen.add(identity)
+            runtimes.append(owner)
+    findings: list[PreflightFinding] = []
+    for chat in runtimes:
+        name = str(getattr(chat, "name", "chat"))
+        if not getattr(chat, "providers", None):
+            findings.append(
+                PreflightFinding(
+                    source="chatops",
+                    severity="advisory",
+                    subject=f"{name} providers",
+                    detail=f"ChatOps runtime {name!r} has no provider configured",
+                )
+            )
+        for declaration in getattr(chat, "commands", {}).values():
+            if declaration.execution == "durable" and (
+                getattr(chat, "jobs", None) is None
+                or not callable(getattr(getattr(chat, "inbox", None), "claim_and_enqueue", None))
+            ):
+                findings.append(
+                    PreflightFinding(
+                        source="chatops",
+                        severity="blocking",
+                        subject=f"{name} command {declaration.name!r} durable execution",
+                        detail="durable chat commands require jobs and a transactional inbox",
+                    )
+                )
+            if declaration.streams is not None and not callable(
+                getattr(declaration.streams, "writer", None)
+            ):
+                findings.append(
+                    PreflightFinding(
+                        source="chatops",
+                        severity="blocking",
+                        subject=f"{name} command {declaration.name!r} resumable stream",
+                        detail="resumable chat output requires a Streams owner with writer(...) ",
+                    )
+                )
+            if declaration.action is not None and getattr(chat, "authorizer", None) is None:
+                findings.append(
+                    PreflightFinding(
+                        source="chatops",
+                        severity="blocking",
+                        subject=f"{name} command {declaration.name!r} authorization",
+                        detail="the command declares an action but ChatOps has no authorizer",
+                    )
+                )
+    return findings
 
 
 def _public_routes(app: Any) -> list[str]:

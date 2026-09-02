@@ -970,15 +970,54 @@ class PostgresWebhookInbox:
 
     Args:
         table: Table name. Must be a plain SQL identifier; it is interpolated, not bound.
+        session_factory: Opens the session owned by `claim_and_enqueue`.
+        lease_owner: Stable worker identity recorded by an atomic claim.
+        lease_seconds: Positive claim lease used by `claim_and_enqueue`.
 
     Raises:
-        ValueError: `table` is not a plain SQL identifier.
+        TypeError: `session_factory` is not callable.
+        ValueError: `table` is not a plain SQL identifier, or atomic configuration is invalid.
     """
 
-    __slots__ = ("table",)
+    __slots__ = ("_lease_owner", "_lease_seconds", "_session_factory", "table")
 
-    def __init__(self, table: str = "wreath_webhook_inbox") -> None:
+    def __init__(
+        self,
+        table: str = "wreath_webhook_inbox",
+        *,
+        session_factory: Callable[[], AbstractAsyncContextManager[Any]] | None = None,
+        lease_owner: str | None = None,
+        lease_seconds: float | None = None,
+    ) -> None:
+        if session_factory is None:
+            if lease_owner is not None or lease_seconds is not None:
+                raise ValueError(
+                    "atomic webhook inbox configuration requires session_factory, "
+                    "lease_owner, and lease_seconds together"
+                )
+            self._session_factory = None
+            self._lease_owner = ""
+            self._lease_seconds = 0.0
+        elif not callable(session_factory):
+            raise TypeError("webhook inbox session_factory must be callable")
+        else:
+            if not isinstance(lease_owner, str) or not lease_owner:
+                raise ValueError("webhook inbox lease_owner must be a non-empty string")
+            if (
+                isinstance(lease_seconds, bool)
+                or not isinstance(lease_seconds, int | float)
+                or lease_seconds <= 0
+            ):
+                raise ValueError("webhook inbox lease_seconds must be positive")
+            self._session_factory = session_factory
+            self._lease_owner = lease_owner
+            self._lease_seconds = float(lease_seconds)
         self.table = validate_unquoted_identifier(table, "webhook inbox table")
+
+    @property
+    def transactional(self) -> bool:
+        """Whether this inbox can own an atomic claim-and-enqueue transaction."""
+        return self._session_factory is not None
 
     def statements(self) -> tuple[str, ...]:
         """DDL creating the inbox table and its retention index. Idempotent.
@@ -1110,6 +1149,57 @@ class PostgresWebhookInbox:
         if state == "failed":
             return InboxClaim("failed", token, status)
         return InboxClaim("active", token, status)
+
+    async def claim_and_enqueue(
+        self,
+        *,
+        source: str,
+        envelope: WebhookEnvelope,
+        enqueue: Callable[..., Awaitable[Any]],
+        result_status: int = 202,
+    ) -> bool:
+        """Atomically claim one delivery, enqueue its work, and complete the claim.
+
+        The configured session owns one transaction containing all three writes.
+        `enqueue` receives that open session as `transaction=` so a compatible job
+        owner can place its row in the same commit. Existing, active, and failed
+        deliveries return `False` without invoking it. Any error or cancellation
+        propagates through the transaction context and rolls the claim back.
+        """
+        session_factory = self._session_factory
+        if session_factory is None:
+            raise RuntimeError(
+                "claim_and_enqueue requires a configured webhook inbox session_factory"
+            )
+        if not isinstance(source, str) or not source:
+            raise ValueError("atomic webhook inbox source must be a non-empty string")
+        if not isinstance(envelope, WebhookEnvelope):
+            raise TypeError("atomic webhook inbox envelope must be a WebhookEnvelope")
+        if not callable(enqueue):
+            raise TypeError("atomic webhook inbox enqueue must be callable")
+        if isinstance(result_status, bool) or not isinstance(result_status, int):
+            raise TypeError("atomic webhook inbox result_status must be an integer")
+
+        async with session_factory() as session:
+            async with session.begin():
+                claim = await self.claim(
+                    session,
+                    source=source,
+                    envelope=envelope,
+                    lease_owner=self._lease_owner,
+                    lease_seconds=self._lease_seconds,
+                )
+                if claim.outcome != "claimed":
+                    return False
+                await enqueue(transaction=session)
+                await self.complete(
+                    session,
+                    source=source,
+                    message_id=envelope.id,
+                    fencing_token=claim.fencing_token,
+                    result_status=result_status,
+                )
+        return True
 
     def purge_pass(self, *, chunk: int = 1000, **options: Any) -> Any:
         """A recurring pass that drops inbox rows past their retention.
