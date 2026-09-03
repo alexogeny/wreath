@@ -1820,6 +1820,33 @@ def test_generated_fuzz_findings_are_serialized_and_fail_the_stage(
     assert report["targets"][0]["findings"][0]["input_path"] == str(tmp_path / "input")
 
 
+def test_fuzz_worker_wall_clock_timeout_keeps_controller_grace_separate() -> None:
+    assert runner._fuzz_worker_wall_clock_timeout(0.125) == 2.125
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "timed_out", "exception_type", "stop_reason"),
+    [
+        (-signal.SIGABRT, True, "signal.SIGABRT", "signal"),
+        (-signal.SIGKILL, True, "builtins.TimeoutError", "timeout"),
+    ],
+)
+def test_definitive_worker_signal_outranks_controller_timeout(
+    exit_code: int,
+    timed_out: bool,
+    exception_type: str,
+    stop_reason: str,
+) -> None:
+    observed_type, _, observed_reason = runner._fuzz_worker_failure(
+        exit_code,
+        timed_out,
+        2.0,
+    )
+
+    assert observed_type == exception_type
+    assert observed_reason == stop_reason
+
+
 def test_fuzz_campaign_recovers_a_native_signal_with_exact_input_and_diagnostics(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1830,6 +1857,7 @@ def test_fuzz_campaign_recovers_a_native_signal_with_exact_input_and_diagnostics
     core_limit_path = tmp_path / "core-limit.json"
 
     def crash(data: bytes) -> None:
+        import faulthandler
         import resource
 
         assert data == crashing_input
@@ -1838,6 +1866,7 @@ def test_fuzz_campaign_recovers_a_native_signal_with_exact_input_and_diagnostics
             encoding="utf-8",
         )
         os.write(sys.stderr.fileno(), b"AddressSanitizer: deliberate test diagnostic\n")
+        faulthandler.disable()
         os.kill(os.getpid(), signal.SIGABRT)
 
     target = FuzzTarget("native-crash", crash, seeds=(crashing_input,))
@@ -1871,6 +1900,8 @@ def test_fuzz_campaign_recovers_a_native_signal_with_exact_input_and_diagnostics
     assert campaign["crash_case_ordinal"] == 0
     assert json.loads(core_limit_path.read_text(encoding="utf-8")) == [0, 0]
     finding = campaign["findings"][0]
+    assert finding["exception_type"] == "signal.SIGABRT"
+    assert finding["exception_message"] == "fuzz target terminated by SIGABRT"
     assert Path(finding["input_path"]).read_bytes() == crashing_input
     diagnostic = Path(finding["metadata_path"]).with_name("diagnostic.log")
     assert "AddressSanitizer" in diagnostic.read_text(encoding="utf-8")

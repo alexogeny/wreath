@@ -53,6 +53,7 @@ _MIN_SHARD_MODULES_PER_WORKER = 4
 _SHARD_HISTORY_COVERAGE = 0.8
 _LIVE_FUZZ_GOLD_RATIO = 0.05
 _FUZZ_SCHEDULE_SEED = "wreath-fuzz-v1"
+_FUZZ_WORKER_WALL_CLOCK_GRACE_SECONDS = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -2599,6 +2600,41 @@ def _fuzz_worker_diagnostic(path: Path) -> str:
     return data[-4_096:].decode(errors="replace").strip()
 
 
+def _fuzz_worker_wall_clock_timeout(max_seconds: float) -> float:
+    return max_seconds + _FUZZ_WORKER_WALL_CLOCK_GRACE_SECONDS
+
+
+def _fuzz_worker_failure(
+    exit_code: int | None,
+    timed_out: bool,
+    max_seconds: float,
+) -> tuple[str, str, str]:
+    if exit_code is not None and exit_code < 0 and (
+        not timed_out or -exit_code != signal.SIGKILL
+    ):
+        signal_number = -exit_code
+        try:
+            signal_name = signal.Signals(signal_number).name
+        except ValueError:
+            signal_name = f"SIG{signal_number}"
+        return (
+            f"signal.{signal_name}",
+            f"fuzz target terminated by {signal_name}",
+            "signal",
+        )
+    if timed_out:
+        return (
+            "builtins.TimeoutError",
+            f"fuzz target exceeded its {max_seconds:g}s deadline",
+            "timeout",
+        )
+    return (
+        "builtins.RuntimeError",
+        f"fuzz worker exited with status {exit_code}",
+        "worker-error",
+    )
+
+
 def _run_fuzz_target_isolated(target: Any, config: Any) -> tuple[dict[str, Any], int]:
     from ._fuzz import publish_crash_finding
 
@@ -2616,11 +2652,10 @@ def _run_fuzz_target_isolated(target: Any, config: Any) -> tuple[dict[str, Any],
             args=(target, child_config, result_path, diagnostic_path),
             name=f"wreath-fuzz-{target.name}",
         )
-        grace = min(0.25, max(0.025, float(config.max_seconds) * 0.1))
         timed_out = False
         process.start()
         try:
-            process.join(float(config.max_seconds) + grace)
+            process.join(_fuzz_worker_wall_clock_timeout(float(config.max_seconds)))
             if process.is_alive():
                 timed_out = True
                 process.kill()
@@ -2685,25 +2720,11 @@ def _run_fuzz_target_isolated(target: Any, config: Any) -> tuple[dict[str, Any],
         try:
             journal = json.loads(journal_path.read_text(encoding="utf-8"))
             case_ordinal = int(journal["case_ordinal"])
-            if timed_out:
-                exception_type = "builtins.TimeoutError"
-                exception_message = (
-                    f"fuzz target exceeded its {float(config.max_seconds):g}s deadline"
-                )
-                stop_reason = "timeout"
-            elif exit_code is not None and exit_code < 0:
-                signal_number = -int(exit_code)
-                try:
-                    signal_name = signal.Signals(signal_number).name
-                except ValueError:
-                    signal_name = f"SIG{signal_number}"
-                exception_type = f"signal.{signal_name}"
-                exception_message = f"fuzz target terminated by {signal_name}"
-                stop_reason = "signal"
-            else:
-                exception_type = "builtins.RuntimeError"
-                exception_message = f"fuzz worker exited with status {exit_code}"
-                stop_reason = "worker-error"
+            exception_type, exception_message, stop_reason = _fuzz_worker_failure(
+                exit_code,
+                timed_out,
+                float(config.max_seconds),
+            )
             finding = publish_crash_finding(
                 journal_path,
                 config.artifact_root,
