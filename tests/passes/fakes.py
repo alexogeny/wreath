@@ -396,8 +396,7 @@ def _ledger_statement(world: World, text: str, args: tuple[Any, ...]) -> Any:
             fresh = [
                 {"from": hole["cursor_from"], "to": hole["cursor_to"]}
                 for hole in holes
-                if {"from": hole["cursor_from"], "to": hole["cursor_to"]}
-                not in row["pending"]
+                if {"from": hole["cursor_from"], "to": hole["cursor_to"]} not in row["pending"]
             ]
             row["pending"].extend(fresh)
             if row["phase"] == "blocked":
@@ -475,6 +474,8 @@ def _ledger_statement(world: World, text: str, args: tuple[Any, ...]) -> Any:
         row["last_drive_error"] = args[2]
         return "UPDATE 1"
     if "SET phase = $3, last_error" in text:
+        if len(args) == 5 and row["phase"] != args[4]:
+            return "UPDATE 0"
         row["phase"] = args[2]
         row["last_error"] = args[3]
         return "UPDATE 1"
@@ -486,11 +487,14 @@ def _ledger_statement(world: World, text: str, args: tuple[Any, ...]) -> Any:
         row["phase"] = "walking"
         row["last_error"] = None
         return "UPDATE 1"
-    if "SET verified_at" in text:
+    if "verified_at =" in text:
+        if row["phase"] != "verifying":
+            return []
+        row["phase"] = "verified"
         row["verified_at"] = world.now
         row["verified_fact"] = args[2]
         row["last_error"] = None
-        return "UPDATE 1"
+        return [(1,)]
     if "SET phase = $4" in text:
         if row["phase"] != args[2]:
             return "UPDATE 0"
@@ -519,6 +523,8 @@ def _ledger_statement(world: World, text: str, args: tuple[Any, ...]) -> Any:
         row["pending"] = [item for item in row["pending"] if item != unit]
         return "UPDATE 1"
     if "SET last_error" in text:
+        if len(args) == 4 and row["phase"] != args[3]:
+            return "UPDATE 0"
         row["last_error"] = args[2]
         return "UPDATE 1"
     raise SqlUnsupported(text)

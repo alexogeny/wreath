@@ -224,3 +224,29 @@ async def test_challenge_dependency_refuses_a_missing_header() -> None:
     request = Request({"type": "http", "headers": []}, receive)
     with pytest.raises(ChallengeRefused, match="x-challenge"):
         await dependency(request)
+
+
+@pytest.mark.asyncio
+async def test_challenge_dependency_refuses_duplicate_token_headers() -> None:
+    seen: list[str] = []
+
+    class Challenge:
+        async def verify(self, token: str, request: Request) -> ChallengeResult:
+            seen.append(token)
+            return ChallengeResult(provider="custom")
+
+    dependency = challenge_dependency(Challenge(), header="x-challenge")
+    request = Request(
+        {
+            "type": "http",
+            "headers": [
+                (b"x-challenge", b"attacker-token"),
+                (b"x-challenge", b"victim-token"),
+            ],
+        },
+        receive,
+    )
+
+    with pytest.raises(ChallengeRefused, match="more than once"):
+        await dependency(request)
+    assert seen == []

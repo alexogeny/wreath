@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from .._http import _is_http_token
@@ -11,16 +11,26 @@ from ..response import ProblemResponse
 from ..tokens import ActionTokens
 
 
+def _tenant_scope(request: Request) -> str:
+    tenant = request.state.get("tenant")
+    if tenant is None:
+        return ""
+    return getattr(tenant, "key", tenant)
+
+
 class SignedRoutePolicy:
     """Require an `ActionTokens` capability on configured exact paths.
 
-    The signature covers the normalized method, exact decoded path, and raw
-    query bytes in their original order. Reordering or changing any ordinary
-    query parameter therefore invalidates it. The generated token is appended
-    last, and duplicate token parameters are refused.
+    The signature covers the normalized method and exact raw request target.
+    Re-encoding the path, or reordering or changing any ordinary query
+    parameter, therefore invalidates it. The generated token is appended last,
+    and duplicate token parameters are refused.
 
     `ActionTokens` supplies expiry, key rotation, and optional single-use
     replay refusal. This policy supplies the HTTP binding and fail-closed 403.
+    By default, a bound tenant is part of that binding. `scope` can replace the
+    request-side scope for another authority boundary; pass the matching value
+    to `sign` when minting outside a tenant scope.
 
     Args:
         tokens: Application-owned action-token issuer/verifier.
@@ -28,6 +38,7 @@ class SignedRoutePolicy:
         paths: Exact protected absolute paths.
         methods: Protected methods. HEAD is normalized to GET so a signed GET
             URL retains ordinary HTTP HEAD semantics.
+        scope: Request-side authority scope. Defaults to the bound tenant key.
         parameter: Query parameter carrying the capability token.
         detail: Generic 403 detail for every verification failure.
     """
@@ -38,6 +49,7 @@ class SignedRoutePolicy:
         "_parameter_bytes",
         "_paths",
         "_purpose",
+        "_scope",
         "_tokens",
         "detail",
     )
@@ -49,6 +61,7 @@ class SignedRoutePolicy:
         paths: Iterable[str],
         *,
         methods: Iterable[str] = ("GET", "HEAD"),
+        scope: Callable[[Request], str] = _tenant_scope,
         parameter: str = "signature",
         detail: str = "Signed URL is invalid or expired",
     ) -> None:
@@ -71,12 +84,15 @@ class SignedRoutePolicy:
             raise ValueError("SignedRoutePolicy methods must be valid HTTP methods")
         if not isinstance(parameter, str) or not _is_http_token(parameter):
             raise ValueError("SignedRoutePolicy parameter must be a valid HTTP token")
+        if not callable(scope):
+            raise TypeError("SignedRoutePolicy scope must be callable")
         if not isinstance(detail, str) or not detail:
             raise ValueError("SignedRoutePolicy detail must not be empty")
         self._tokens = tokens
         self._purpose = purpose
         self._paths = protected
         self._methods = normalized_methods
+        self._scope = scope
         self._parameter = parameter
         self._parameter_bytes = parameter.encode("ascii") + b"="
         self.detail = detail
@@ -91,11 +107,31 @@ class SignedRoutePolicy:
         suffix = b"?" + query if query else b""
         return (path.encode("utf-8") + suffix).decode("latin-1")
 
+    @staticmethod
+    def _request_target(request: Request, query: bytes) -> str:
+        context = request._context
+        scope = request._scope
+        if context is not None:
+            raw_path = context.raw_path
+        elif scope is not None:
+            raw_path = scope.get("raw_path")
+        else:
+            raise RuntimeError("request has neither an ASGI scope nor a native context")
+        path = raw_path if isinstance(raw_path, bytes) else request.path.encode("utf-8")
+        suffix = b"?" + query if query else b""
+        return (path + suffix).decode("latin-1")
+
+    @classmethod
+    def _bound(cls, method: str, target: str, scope: str) -> str:
+        base = cls._method(method) + "\x00" + target
+        return base if not scope else base + "\x00" + scope
+
     def sign(
         self,
         path: str,
         *,
         method: str = "GET",
+        scope: str | None = None,
         now: float | None = None,
     ) -> str:
         """Return `path` with an expiring capability appended to its query."""
@@ -108,8 +144,15 @@ class SignedRoutePolicy:
         query = query_text.encode("latin-1")
         if any(part.startswith(self._parameter_bytes) for part in query.split(b"&")):
             raise ValueError("signed path already contains the signature parameter")
+        if scope is None:
+            from ..tenancy import current_tenant_or_none
+
+            tenant = current_tenant_or_none()
+            scope = "" if tenant is None else tenant.key
+        if not isinstance(scope, str):
+            raise TypeError("signed route scope must be a string")
         target = self._target(path_only, query)
-        bound = self._method(normalized_method) + "\x00" + target
+        bound = self._bound(normalized_method, target, scope)
         token = self._tokens.issue(self._purpose, target, bound=bound, now=now)
         joiner = "&" if query else "?"
         return f"{path}{joiner}{self._parameter}={token}"
@@ -134,8 +177,11 @@ class SignedRoutePolicy:
         if token is None:
             return self._refusal()
         query = b"&".join(unsigned)
-        target = self._target(request.path, query)
-        bound = self._method(request.method) + "\x00" + target
+        target = self._request_target(request, query)
+        scope = self._scope(request)
+        if not isinstance(scope, str):
+            return self._refusal()
+        bound = self._bound(request.method, target, scope)
         claims = self._tokens.verify(self._purpose, token, bound=bound)
         if claims is None or claims.subject != target:
             return self._refusal()

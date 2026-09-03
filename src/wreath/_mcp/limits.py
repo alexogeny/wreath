@@ -18,6 +18,7 @@ already been buffered. Set it where it was always set:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,14 +114,14 @@ class MCPLimits:
             value = getattr(self, field_name)
             if value < 1:
                 raise ValueError(f"MCPLimits.{field_name} must be at least 1")
-        if self.stream_keepalive_seconds <= 0:
-            raise ValueError("MCPLimits.stream_keepalive_seconds must be positive")
-        if self.client_request_seconds <= 0:
-            raise ValueError("MCPLimits.client_request_seconds must be positive")
+        if self.stream_keepalive_seconds <= 0 or not isfinite(self.stream_keepalive_seconds):
+            raise ValueError("MCPLimits.stream_keepalive_seconds must be positive and finite")
+        if self.client_request_seconds <= 0 or not isfinite(self.client_request_seconds):
+            raise ValueError("MCPLimits.client_request_seconds must be positive and finite")
         idle = self.session_idle_seconds
-        if idle is not None and idle <= 0:
+        if idle is not None and (idle <= 0 or not isfinite(idle)):
             raise ValueError(
-                "MCPLimits.session_idle_seconds must be positive, or None to "
+                "MCPLimits.session_idle_seconds must be positive and finite, or None to "
                 "keep sessions until they are ended explicitly"
             )
 
@@ -164,8 +165,8 @@ class ToolRateLimit:
     def __post_init__(self) -> None:
         if self.limit < 1:
             raise ValueError("ToolRateLimit.limit must be at least 1")
-        if self.window <= 0:
-            raise ValueError("ToolRateLimit.window must be positive")
+        if self.window <= 0 or not isfinite(self.window):
+            raise ValueError("ToolRateLimit.window must be positive and finite")
         if self.burst is not None and self.burst < 1:
             raise ValueError("ToolRateLimit.burst must be at least 1")
 

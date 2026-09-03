@@ -57,6 +57,35 @@ def _header(response, name: str) -> str | None:
     return None
 
 
+async def _raw_request(app, method, path, headers, content=b""):
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": list(headers),
+        "server": ("test", 80),
+        "client": ("test", 1),
+        "root_path": "",
+    }
+    sent = []
+
+    async def receive():
+        nonlocal content
+        body, content = content, b""
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    await app(scope, receive, send)
+    return sent[0]["status"]
+
+
 @pytest.mark.asyncio
 async def test_single_shot_creation_stores_the_object() -> None:
     store, _, app = _mounted()
@@ -116,6 +145,35 @@ async def test_unknown_upload_is_404_not_409() -> None:
     async with TestClient(app) as client:
         response = await client.head("/uploads/deadbeef")
         assert response.status == 404
+
+
+@pytest.mark.parametrize(
+    "duplicates",
+    [
+        ((b"content-type", PARTIAL_UPLOAD.encode()), (b"content-type", b"text/plain")),
+        ((b"upload-offset", b"0"), (b"upload-offset", b"99")),
+        ((b"upload-length", b"1"), (b"upload-length", b"999")),
+        ((b"upload-complete", b"?0"), (b"upload-complete", b"?1")),
+    ],
+)
+async def test_duplicate_upload_controls_are_refused_before_append(duplicates) -> None:
+    _, _, app = _mounted()
+    async with TestClient(app) as client:
+        created = await _create(client)
+        location = _location(created)
+        baseline = (
+            (b"content-type", PARTIAL_UPLOAD.encode()),
+            (b"upload-offset", b"0"),
+            (b"upload-complete", b"?0"),
+        )
+        names = {name for name, _ in duplicates}
+        headers = tuple(item for item in baseline if item[0] not in names) + duplicates
+
+        status = await _raw_request(app, "PATCH", location, headers, b"x")
+        offset = _header(await client.head(location), "upload-offset")
+
+    assert status == 400
+    assert offset == "0"
 
 
 @pytest.mark.asyncio

@@ -418,6 +418,8 @@ release_native(WreathH3Conn *c)
         c->ssl = NULL;
     }
     Py_CLEAR(c->streams);
+    Py_CLEAR(c->client_address);
+    Py_CLEAR(c->server_address);
 }
 
 /* Free every connection struct queued for reaping. Called at the end of the
@@ -568,6 +570,12 @@ create_conn(WreathH3Endpoint *ep, const ngtcp2_pkt_hd *hd, const ngtcp2_path *pa
     c->remote_addrlen = path->remote.addrlen;
     memcpy(&c->local_addr, path->local.addr, path->local.addrlen);
     c->local_addrlen = path->local.addrlen;
+    c->client_address = sockaddr_to_py((const struct sockaddr *)&c->remote_addr);
+    c->server_address = c->client_address != NULL
+        ? sockaddr_to_py((const struct sockaddr *)&c->local_addr) : NULL;
+    if (c->client_address == NULL || c->server_address == NULL) {
+        goto fail;
+    }
 
     /* Capsule holds a borrowed pointer only (no destructor); the connection
      * struct is freed by reap_conns(). It stays alive while >=1 CID is dict-registered. */
@@ -587,6 +595,8 @@ fail:
     if (c->conn) ngtcp2_conn_del(c->conn);
     if (c->ossl_ctx) ngtcp2_crypto_ossl_ctx_del(c->ossl_ctx);
     if (c->ssl) SSL_free(c->ssl);
+    Py_XDECREF(c->client_address);
+    Py_XDECREF(c->server_address);
     Py_DECREF(c->streams);
     Py_DECREF(c->cids);
     PyMem_Free(c);

@@ -607,12 +607,19 @@ class Teams:
         @app.post(f"{base_path}/teams")
         async def teams_endpoint(request: Any) -> Response:
             try:
+                raw_authorization = request._single_header(b"authorization")
+            except ValueError:
+                return Response(b"", status=401, media_type=b"")
+            authorization = (
+                None if raw_authorization is None else raw_authorization.decode("latin-1")
+            )
+            try:
                 payload = await request.json()
                 if not isinstance(payload, Mapping):
                     raise TeamsRefusal(
                         "malformed-activity", "Teams activity must be a JSON object", status=400
                     )
-                await _maybe_await(self.verifier.verify(request.header("authorization"), payload))
+                await _maybe_await(self.verifier.verify(authorization, payload))
                 activity = TeamsActivity.parse(payload).verified()
                 _trusted_service_url(activity.service_url)
                 if activity.tenant_id not in self.config.allowed_tenants:
@@ -732,11 +739,7 @@ class Teams:
                 chat, activity, action=name, inputs=dict(inputs), request=request
             )
             try:
-                kind = (
-                    "action"
-                    if chat._declaration("action", name) is not None
-                    else "command"
-                )
+                kind = "action" if chat._declaration("action", name) is not None else "command"
                 result = await chat._dispatch(
                     kind=kind,
                     name=name,
@@ -1203,10 +1206,15 @@ def _trusted_service_url(url: str) -> None:
             status=403,
         )
     host = hostname.lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        port = -1
     if (
         parsed.scheme != "https"
         or parsed.username is not None
         or host != "smba.trafficmanager.net"
+        or port not in (None, 443)
         or parsed.query
         or parsed.fragment
     ):
@@ -1255,9 +1263,7 @@ def _handler_arguments(chat: Any, name: str, inputs: Mapping[str, Any]) -> Mappi
         and all(isinstance(item, str) for item in inputs["args"])
     ):
         return {"prompt": " ".join(inputs["args"])}
-    return (
-        inputs if external else {}
-    )
+    return inputs if external else {}
 
 
 def _job_name(chat_name: str, command_name: str) -> str:

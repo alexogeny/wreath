@@ -135,7 +135,9 @@ class StaticFiles:
             # Exactly one leading slash: `//host/path` is a network-path URL,
             # so reflecting a doubled path from an ASGI server into Location
             # would turn this canonicalisation into an open redirect.
-            canonical = "/" + request.path.lstrip("/") + "/"
+            raw_path = request.scope.get("raw_path")
+            path = raw_path.decode("ascii") if isinstance(raw_path, bytes) else request.path
+            canonical = "/" + path.lstrip("/") + "/"
             return RedirectResponse(canonical, status=308)
 
         etag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'

@@ -87,14 +87,17 @@ import secrets
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
+from math import isfinite
 from typing import Any, Protocol, cast, runtime_checkable
 
+from ._auth.models import qualified_identity_value
 from ._scim import scim_router
 from .store import _Statements, rows_affected, sql_identifier
 
 
 def _invitation_digest(token: str) -> bytes:
     return hashlib.sha256(token.encode("utf-8")).digest()
+
 
 __all__ = [
     "Invitation",
@@ -197,12 +200,19 @@ class OrganizationFederation:
         organization = await self.installations.organization_for(provider, installation)
         if not organization:
             raise OrganizationFederationError("chat installation has no organization mapping")
-        user_id = getattr(getattr(binding, "identity", None), "id", None)
+        identity = getattr(binding, "identity", None)
+        user_id = getattr(identity, "id", None)
         if not isinstance(user_id, str) or not user_id:
             raise OrganizationFederationError(
                 "organization federation requires a non-empty Wreath identity id"
             )
-        memberships = await self.organizations.memberships(user_id)
+        namespace = getattr(identity, "namespace", "")
+        if not isinstance(namespace, str):
+            raise OrganizationFederationError(
+                "organization federation requires a string Wreath identity namespace"
+            )
+        membership_id = qualified_identity_value(namespace, user_id)
+        memberships = await self.organizations.memberships(membership_id)
         if not any(item.organization == organization for item in memberships):
             raise OrganizationFederationError(
                 f"user {user_id!r} is not a member of organization {organization!r}"
@@ -241,6 +251,10 @@ class Invitation:
     roles: frozenset[str] = frozenset()
     expires_at: float | None = None
     accepted_by: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.expires_at is not None and not isfinite(self.expires_at):
+            raise ValueError("invitation expires_at must be finite or None")
 
     def expired(self, now: float) -> bool:
         return self.expires_at is not None and now >= self.expires_at
@@ -408,12 +422,19 @@ class InMemoryOrganizationStore:
         wanted = frozenset(str(role) for role in roles)
         self._check_roles(wanted)
         moment = time.time() if now is None else now
+        if not isfinite(moment):
+            raise ValueError("invitation now must be finite")
+        if ttl is not None and not isfinite(ttl):
+            raise ValueError("invitation ttl must be finite or None")
+        expires_at = None if ttl is None else moment + ttl
+        if expires_at is not None and not isfinite(expires_at):
+            raise ValueError("invitation expiry must be finite")
         invitation = Invitation(
             token=secrets.token_urlsafe(32),
             organization=org_id,
             email=email,
             roles=wanted,
-            expires_at=None if ttl is None else moment + ttl,
+            expires_at=expires_at,
         )
         self._invitations[_invitation_digest(invitation.token)] = invitation
         return invitation
@@ -428,6 +449,8 @@ class InMemoryOrganizationStore:
                 refusal here would otherwise mention the token.
         """
         moment = time.time() if now is None else now
+        if not isfinite(moment):
+            raise ValueError("invitation acceptance time must be finite")
         token_digest = _invitation_digest(token)
         invitation = self._invitations.get(token_digest)
         if invitation is None:
@@ -820,9 +843,16 @@ class PostgresOrganizationStore:
         if ttl is None:
             name = "invite_forever"
         elif now is None:
+            if not isfinite(ttl):
+                raise ValueError("invitation ttl must be finite or None")
             name, args = "invite_ttl", (*args, float(ttl))
         else:
-            name, args = "invite_at", (*args, float(now + ttl))
+            if not isfinite(ttl) or not isfinite(now):
+                raise ValueError("invitation ttl and now must be finite")
+            expiry = now + ttl
+            if not isfinite(expiry):
+                raise ValueError("invitation expiry must be finite")
+            name, args = "invite_at", (*args, float(expiry))
         row = await self._statements.statement(name).fetchrow(*args)
         if row is None:
             raise RuntimeError("PostgreSQL did not return the invitation it wrote")
@@ -839,6 +869,8 @@ class PostgresOrganizationStore:
         if now is None:
             accept_name, accept_args = "accept", (digest, user_id)
         else:
+            if not isfinite(now):
+                raise ValueError("invitation acceptance time must be finite")
             accept_name, accept_args = "accept_at", (digest, user_id, float(now))
         row = await self._statements.statement(accept_name).fetchrow(*accept_args)
         if row is not None:
@@ -940,7 +972,8 @@ class Memberships:
         source = getattr(self._store, "memberships_for", None)
         if not callable(source):
             return ()
-        return tuple(source(identity.id))
+        user_id = qualified_identity_value(identity.namespace, identity.id)
+        return tuple(source(user_id))
 
 
 def load_into(request: Any, memberships: Iterable[Membership]) -> None:

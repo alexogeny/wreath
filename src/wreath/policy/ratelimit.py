@@ -38,6 +38,7 @@ from collections.abc import Callable, Mapping
 from time import monotonic
 from typing import Any, Protocol
 
+from .._auth.models import qualified_identity_value
 from .._native import _core
 from ..request import Request
 from ..response import ProblemResponse
@@ -356,7 +357,10 @@ def principal_key(request: Request) -> str | None:
     """
     identity = request.identity
     if identity is not None:
-        return f"{identity.type}:{identity.id}"
+        identity_id = qualified_identity_value(
+            str(getattr(identity, "namespace", "")), str(identity.id)
+        )
+        return f"{identity.type}:{identity_id}"
     client = request.client
     return f"ip:{client[0]}" if client else None
 
@@ -412,7 +416,8 @@ class RateLimitPolicy:
         exempt: A request it answers True for is not limited at all.
 
     Raises:
-        ValueError: Non-positive limit, window or cost; burst below cost; `key=principal_key`.
+        ValueError: Non-positive or non-finite limit, window, cost, or burst;
+            burst below cost; `key=principal_key`.
     """
 
     _default_key = staticmethod(_client_key)
@@ -443,13 +448,15 @@ class RateLimitPolicy:
         quota: Any = None,
         _route_scoped: bool = False,
     ) -> None:
-        if limit <= 0:
-            raise ValueError("limit must be positive")
-        if window <= 0.0:
-            raise ValueError("window must be positive")
-        if cost <= 0.0:
-            raise ValueError("cost must be positive")
+        if not math.isfinite(limit) or limit <= 0:
+            raise ValueError("limit must be positive and finite")
+        if not math.isfinite(window) or window <= 0.0:
+            raise ValueError("window must be positive and finite")
+        if not math.isfinite(cost) or cost <= 0.0:
+            raise ValueError("cost must be positive and finite")
         capacity = float(limit if burst is None else burst)
+        if not math.isfinite(capacity):
+            raise ValueError("burst must be positive and finite")
         if capacity < cost:
             raise ValueError("burst must be at least the per-request cost")
         if key is principal_key and not _route_scoped:
@@ -816,7 +823,7 @@ class TieredRateLimitPolicy:
         selected = None
         selected_rate = -1.0
         rates = self._tier_rates
-        for role in identity.roles:
+        for role in identity.authority_roles:
             rate = rates.get(role)
             if rate is not None and rate > selected_rate:
                 selected = role

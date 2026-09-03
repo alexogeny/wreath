@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from enum import StrEnum
+from math import isfinite
 from typing import Any
 
 from .requirements import (
@@ -126,11 +127,12 @@ def second_factor(*, max_age: float = 300.0) -> Callable[[Any], Any]:
         A decorator that records the requirement on the endpoint.
 
     Raises:
-        ValueError: `max_age` is not positive. A window of zero or less can
-            never be satisfied, which is a mistake rather than a lockout policy.
+        ValueError: `max_age` is not positive and finite. A window of zero or
+            less can never be satisfied, while a non-finite window cannot
+            express recency.
     """
-    if max_age <= 0:
-        raise ValueError("second-factor max_age must be positive")
+    if not isfinite(max_age) or max_age <= 0:
+        raise ValueError("second-factor max_age must be a positive finite number")
 
     def decorate(endpoint: Any) -> Any:
         return add_second_factor(endpoint, float(max_age))

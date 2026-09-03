@@ -20,6 +20,7 @@ from wreath.http_client import (
     HTTPClient,
     PoolTimeout,
     ProtocolError,
+    RatePolicy,
     RedirectError,
     RedirectPolicy,
     RequestTimeout,
@@ -748,6 +749,19 @@ def test_client_configuration_rejects_invalid_limits_and_timeouts() -> None:
         ClientTimeout(total=0)
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_client_configuration_rejects_non_finite_timing_bounds(value: float) -> None:
+    factories = (
+        lambda: ClientTimeout(connect=value),
+        lambda: RetryPolicy(backoff_base=value),
+        lambda: RatePolicy(enabled=True, rate=value, capacity=1, max_wait=1),
+        lambda: RatePolicy(enabled=True, rate=1, capacity=1, max_wait=value),
+    )
+    for factory in factories:
+        with pytest.raises(ValueError, match="finite"):
+            factory()
+
+
 @pytest.mark.asyncio
 async def test_app_owns_named_client_lifespan() -> None:
     app = Wreath()
@@ -1308,9 +1322,7 @@ def test_redirect_target_cannot_escape_configured_base_path(location: bytes) -> 
         (b"https://example.com/api/final?ok=1", "/api/final?ok=1"),
     ],
 )
-def test_redirect_target_preserves_same_origin_base_path(
-    location: bytes, expected: str
-) -> None:
+def test_redirect_target_preserves_same_origin_base_path(location: bytes, expected: str) -> None:
     client = HTTPClient("redirect-base", base_url="https://example.com/api")
 
     assert client._redirect_target("/api/start", location) == expected

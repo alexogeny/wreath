@@ -31,6 +31,7 @@ from itertools import chain
 from typing import Any
 from urllib.parse import urlsplit
 
+from .._auth.models import qualified_identity_value
 from .._auth.requirements import AuthRequirement, second_factor_age
 from .._json import dumps as _json_dumps
 from .._json import loads as _json_loads
@@ -250,6 +251,22 @@ def _open_root(directory: str) -> int:
             f"the MCP server's `file_root={directory!r}` could not be opened as "
             f"a confinement root: {error}"
         ) from error
+
+
+def _identity_owner(identity: Any, request: Any) -> tuple[str, str, str, str]:
+    claims = identity.claims
+    issuer = getattr(identity, "namespace", "")
+    if not issuer and isinstance(claims, Mapping):
+        issuer = claims.get("iss", "")
+    tenant = request.state.get("tenant")
+    if tenant is None and isinstance(claims, Mapping):
+        tenant = claims.get("tenant", claims.get("tid", ""))
+    tenant = getattr(tenant, "key", tenant)
+    return (str(identity.type), str(issuer), str(tenant), str(identity.id))
+
+
+def _identity_principal(identity: Any) -> str:
+    return qualified_identity_value(str(getattr(identity, "namespace", "")), str(identity.id))
 
 
 class MCP:
@@ -855,12 +872,17 @@ class MCP:
 
     async def _post(self, request: Request) -> Any:
         """Accept one JSON-RPC message and answer it."""
+        session_id, declared, content_type, control_refusal = self._control_headers(
+            request, include_content_type=True
+        )
+        if control_refusal is not None:
+            return control_refusal
         try:
             identity = await self._authenticate(request)
         except Unauthenticated as refusal:
             return self._challenge(refusal)
 
-        media = (request.header("content-type") or "").split(";")[0].strip().lower()
+        media = (content_type or "").split(";")[0].strip().lower()
         if media != "application/json":
             return self._transport_error(
                 415,
@@ -889,12 +911,11 @@ class MCP:
             return await self._initialize(request, message, identity, stream=stream)
 
         session, refusal_response = await self._session_for(
-            request, identity, identifier=message.id
+            request, identity, session_id, identifier=message.id
         )
         if refusal_response is not None:
             return refusal_response
 
-        declared = request.header("mcp-protocol-version")
         if declared is not None and declared not in SUPPORTED_PROTOCOL_VERSIONS:
             return self._transport_error(
                 400,
@@ -939,6 +960,9 @@ class MCP:
         resource changing, a running tool's progress -- while every *reply*
         still travels on the POST that asked for it.
         """
+        session_id, _declared, _content_type, control_refusal = self._control_headers(request)
+        if control_refusal is not None:
+            return control_refusal
         try:
             identity = await self._authenticate(request)
         except Unauthenticated as refusal:
@@ -951,7 +975,7 @@ class MCP:
                 "the notification stream is Server-Sent Events; send "
                 "`Accept: text/event-stream` to open it",
             )
-        session, refusal_response = await self._session_for(request, identity)
+        session, refusal_response = await self._session_for(request, identity, session_id)
         if refusal_response is not None:
             return refusal_response
         if session.stream_open:
@@ -991,10 +1015,14 @@ class MCP:
             session.stream_open = False
 
     async def _session_for(
-        self, request: Request, identity: Any, *, identifier: Any = None
+        self,
+        request: Request,
+        identity: Any,
+        session_id: str | None,
+        *,
+        identifier: Any = None,
     ) -> tuple[Any, Response | None]:
         """The session this request names, or the refusal that says why not."""
-        session_id = request.header("mcp-session-id")
         if session_id is None:
             return None, self._transport_error(
                 400,
@@ -1021,11 +1049,13 @@ class MCP:
 
     async def _delete(self, request: Request) -> Any:
         """End the session named by `Mcp-Session-Id`."""
+        session_id, _declared, _content_type, control_refusal = self._control_headers(request)
+        if control_refusal is not None:
+            return control_refusal
         try:
             identity = await self._authenticate(request)
         except Unauthenticated as refusal:
             return self._challenge(refusal)
-        session_id = request.header("mcp-session-id")
         if session_id is None:
             return self._transport_error(
                 400, INVALID_REQUEST, "an Mcp-Session-Id header is required to end a session"
@@ -1039,6 +1069,32 @@ class MCP:
             )
         self._sessions.discard(session_id)
         return Response(b"", status=204)
+
+    def _control_headers(
+        self, request: Request, *, include_content_type: bool = False
+    ) -> tuple[str | None, str | None, str | None, Response | None]:
+        try:
+            session = request._single_header(b"mcp-session-id")
+            protocol = request._single_header(b"mcp-protocol-version")
+            content_type = request._single_header(b"content-type") if include_content_type else None
+        except ValueError:
+            return (
+                None,
+                None,
+                None,
+                self._transport_error(
+                    400,
+                    INVALID_REQUEST,
+                    "MCP-Session-Id, MCP-Protocol-Version, and Content-Type "
+                    "must not occur more than once",
+                ),
+            )
+        return (
+            session.decode("latin-1") if session is not None else None,
+            protocol.decode("latin-1") if protocol is not None else None,
+            content_type.decode("latin-1") if content_type is not None else None,
+            None,
+        )
 
     async def _authenticate(self, request: Request) -> Any:
         """Verify the caller and publish the identity, or None when unprotected.
@@ -1066,7 +1122,7 @@ class MCP:
             return True
         if identity is None:
             identity = await self._identify(request)
-        return identity is not None and identity.id == principal
+        return identity is not None and _identity_owner(identity, request) == principal
 
     def _challenge(self, refusal: Unauthenticated) -> Response:
         auth = self._auth
@@ -1123,7 +1179,7 @@ class MCP:
                 client_capabilities=(
                     client_capabilities if isinstance(client_capabilities, dict) else {}
                 ),
-                principal=None if identity is None else identity.id,
+                principal=None if identity is None else _identity_owner(identity, request),
             )
         except RuntimeError as error:
             return self._transport_error(503, INTERNAL_ERROR, str(error), identifier=message.id)
@@ -1238,7 +1294,7 @@ class MCP:
         if tool.limiter is not None or tool.requirement.access_level > 0:
             await self._identify(request)
         identity = request.identity
-        principal = None if identity is None else identity.id
+        principal = None if identity is None else _identity_principal(identity)
         # What was asked for, before anything decides whether it was allowed:
         # a refused call is exactly the one an audit needs the arguments of.
         _record.record_arguments(arguments)
@@ -1536,7 +1592,7 @@ class MCP:
         request = context._request
         started = time.perf_counter()
         identity = context.identity
-        principal = None if identity is None else identity.id
+        principal = None if identity is None else _identity_principal(identity)
 
         def marker(outcome: str) -> None:
             _record.record_call(
@@ -1568,7 +1624,7 @@ class MCP:
         # the request, so this is at most one backend call per request.
         if tool.limiter is not None or requirement.access_level > 0:
             identity = await self._identify(request)
-            principal = None if identity is None else identity.id
+            principal = None if identity is None else _identity_principal(identity)
 
         retry_after = self._throttle(tool, session, principal)
         if retry_after > 0.0:
@@ -1640,7 +1696,7 @@ class MCP:
         request = context._request
         started = time.perf_counter()
         identity = context.identity
-        principal = None if identity is None else identity.id
+        principal = None if identity is None else _identity_principal(identity)
 
         def marker(outcome: str) -> None:
             _record.record_call(
@@ -1676,7 +1732,7 @@ class MCP:
         # resolved nobody and the marker would name nobody.
         if tool.limiter is not None or requirement.access_level > 0:
             identity = await self._identify(request)
-            principal = None if identity is None else identity.id
+            principal = None if identity is None else _identity_principal(identity)
 
         retry_after = self._throttle(tool, session, principal)
         if retry_after > 0.0:
@@ -1830,10 +1886,10 @@ class MCP:
                     f"{requirement.second_factor:.0f}s, and this caller has not."
                 )
         for check in requirement.role_checks:
-            if not _holds(identity.roles, check):
+            if not _holds(identity.authority_roles, check):
                 return f"the caller does not hold the roles {noun} {name!r} requires"
         for check in requirement.permission_checks:
-            if not _holds(identity.permissions, check):
+            if not _holds(identity.authority_permissions, check):
                 return f"the caller does not hold the permissions {noun} {name!r} requires"
         if not requirement.policies:
             return None

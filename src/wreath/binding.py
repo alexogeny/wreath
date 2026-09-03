@@ -68,7 +68,7 @@ import typing
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from time import monotonic_ns as _monotonic_ns
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from ._awaitable import is_awaitable as _awaitable
@@ -1600,7 +1600,8 @@ class Query:
     ignore the bounds below and hand the `Query` object itself to the handler as
     the value. Every marker below refuses the same way.
 
-    A repeated key takes its first value. An absent parameter falls back to the
+    A repeated key is refused rather than choosing whichever value a proxy or
+    application happens to read first. An absent parameter falls back to the
     handler default before any bound is considered; with no default it fails
     with 422 and a `loc` of `["query", name]`. Invalid syntax stays an error
     whatever `overflow` says, because a range applies only to a value that
@@ -1634,10 +1635,11 @@ class Header:
     """Bind a parameter to a request header.
 
     Written in `Annotated`, never as a default — `Annotated[str, Header()]`.
-    The lookup is case-insensitive and takes the first value when a header
-    repeats. **The name is used literally.** Unlike FastAPI, wreath does not
-    rewrite `user_agent` into `user-agent`, so any header whose name is not a
-    Python identifier needs an explicit alias.
+    The lookup is case-insensitive and refuses repeated values rather than
+    choosing whichever one a proxy or application happens to read first.
+    **The name is used literally.** Unlike FastAPI, wreath does not rewrite
+    `user_agent` into `user-agent`, so any header whose name is not a Python
+    identifier needs an explicit alias.
 
     An absent header falls back to the handler default; with no default the
     request fails with 422 and a `loc` of `["header", name]`.
@@ -2280,9 +2282,13 @@ def _protobuf_requested(request: Request) -> bool:
     that emits one of them, so the request half and the response half cannot
     disagree about what protobuf is called.
     """
-    header = request.header("content-type")
-    if header is None:
+    try:
+        raw_header = request._single_header(b"content-type")
+    except ValueError:
+        raise BadRequest("request Content-Type header occurs more than once") from None
+    if raw_header is None:
         return False
+    header = raw_header.decode("latin-1")
     return header.split(";")[0].strip().lower() in _PROTOBUF_MEDIA_TYPES
 
 
@@ -2827,8 +2833,12 @@ def _compile_scalar_extractor(
     header_specs: tuple[Any, ...],
     cookie_specs: tuple[Any, ...],
 ) -> _ScalarExtractor:
-    named_specs = tuple(("header", False, *item) for item in header_specs) + tuple(
-        ("cookie", True, *item) for item in cookie_specs
+    named_specs = tuple(
+        ("header", False, alias.lower().encode("latin-1"), name, alias, annotation, default)
+        for name, alias, annotation, default in header_specs
+    ) + tuple(
+        ("cookie", True, None, name, alias, annotation, default)
+        for name, alias, annotation, default in cookie_specs
     )
 
     def extract_scalars(request: Request, kwargs: dict[str, Any]) -> None:
@@ -2851,9 +2861,22 @@ def _compile_scalar_extractor(
                 )
             else:
                 query = _core.parse_qs(request.query_string)
-                # Reversing before dict construction keeps the first wire value.
-                values: dict[str, str] = dict(reversed(query))
+                values: dict[str, str] = {}
+                duplicates: set[str] = set()
+                for key, value in query:
+                    if key in values:
+                        duplicates.add(key)
+                    else:
+                        values[key] = value
                 for name, alias, annotation, default, constraint in query_plan:
+                    if alias in duplicates:
+                        error = _error(
+                            ("query", alias),
+                            "query parameter must occur exactly once",
+                            "duplicate",
+                        )
+                        errors = _merge_missing_error(errors, error)
+                        continue
                     raw = values.get(alias)
                     if raw is None:
                         if default is inspect.Parameter.empty:
@@ -2873,8 +2896,21 @@ def _compile_scalar_extractor(
                             continue
                         kwargs[name] = converted
         cookie_values: Any = request.cookies if cookie_specs else None
-        for source, from_cookie, name, alias, annotation, default in named_specs:
-            raw = cookie_values.get(alias) if from_cookie else request.header(alias)
+        for source, from_cookie, wire_name, name, alias, annotation, default in named_specs:
+            if from_cookie:
+                raw = cookie_values.get(alias)
+            else:
+                try:
+                    raw_header = request._single_header(cast(bytes, wire_name))
+                except ValueError:
+                    error = _error(
+                        (source, alias),
+                        "header must occur exactly once",
+                        "duplicate",
+                    )
+                    errors = _merge_missing_error(errors, error)
+                    continue
+                raw = None if raw_header is None else raw_header.decode("latin-1")
             if raw is None:
                 if default is inspect.Parameter.empty:
                     error = _error((source, alias), "parameter is required", "missing")

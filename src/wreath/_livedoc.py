@@ -43,6 +43,7 @@ import asyncio
 import contextlib
 from collections.abc import AsyncGenerator, Callable, Iterable
 from dataclasses import dataclass
+from math import isfinite
 from time import monotonic
 from typing import Any
 
@@ -250,8 +251,8 @@ class LiveDocument:
             raise ValueError("max_subscribers must be non-negative")
         if max_per_principal < 0:
             raise ValueError("max_per_principal must be non-negative")
-        if keepalive <= 0:
-            raise ValueError("keepalive must be positive")
+        if not isfinite(keepalive) or keepalive <= 0:
+            raise ValueError("keepalive must be finite and positive")
         self._by_principal: dict[str, dict[Subscription, None]] = {}
         self._count = 0
         self._max_subscribers = max_subscribers
@@ -452,8 +453,8 @@ async def change_events(
     try:
         if keepalive is None:
             keepalive = document.keepalive
-        if keepalive <= 0:
-            raise ValueError("keepalive must be positive")
+        if not isfinite(keepalive) or keepalive <= 0:
+            raise ValueError("keepalive must be finite and positive")
         seen = document.fingerprint()
         while True:
             try:

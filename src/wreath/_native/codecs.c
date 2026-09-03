@@ -995,7 +995,7 @@ query_scan_values(const uint8_t *data, Py_ssize_t len, PyObject *lookup,
                     return -1;
                 }
                 Py_ssize_t count = PyTuple_GET_SIZE(positions);
-                int wanted = 0;
+                int seen = 0;
                 for (Py_ssize_t j = 0; j < count; j++) {
                     Py_ssize_t index = PyLong_AsSsize_t(PyTuple_GET_ITEM(positions, j));
                     if (index < 0 && PyErr_Occurred()) return -1;
@@ -1004,9 +1004,9 @@ query_scan_values(const uint8_t *data, Py_ssize_t len, PyObject *lookup,
                                         "query binding position is out of range");
                         return -1;
                     }
-                    if (raw_values[index] == NULL) wanted = 1;
+                    if (raw_values[index] != NULL) seen = 1;
                 }
-                if (wanted) {
+                if (!seen) {
                     PyObject *value = eq < field_len
                         ? component_to_str(field + eq + 1, field_len - eq - 1)
                         : PyUnicode_New(0, 127);
@@ -1028,6 +1028,19 @@ query_scan_values(const uint8_t *data, Py_ssize_t len, PyObject *lookup,
                         }
                     }
                     Py_DECREF(value);
+                }
+                else {
+                    for (Py_ssize_t j = 0; j < count; j++) {
+                        Py_ssize_t index = PyLong_AsSsize_t(
+                            PyTuple_GET_ITEM(positions, j));
+                        if (index < 0 && PyErr_Occurred()) return -1;
+                        if (raw_values[index] == NULL) {
+                            raw_values[index] = Py_NewRef(Py_None);
+                        }
+                        else if (raw_values[index] != Py_None) {
+                            Py_SETREF(raw_values[index], Py_NewRef(Py_None));
+                        }
+                    }
                 }
             }
         }
@@ -1177,9 +1190,22 @@ wreath_bind_query_into(PyObject *Py_UNUSED(self), PyObject *const *args,
     }
     if (query_scan_values(query.buf, query.len, lookup, raw_values, count) < 0) goto fail;
     for (Py_ssize_t i = 0; i < count; i++) {
-        if (query_bind_entry(PyTuple_GET_ITEM(entries, i),
-                             raw_values[i] == NULL ? Py_None : raw_values[i],
-                             kwargs, &errors) < 0) {
+        PyObject *entry = PyTuple_GET_ITEM(entries, i);
+        if (raw_values[i] == Py_None) {
+            if (!PyTuple_CheckExact(entry) || PyTuple_GET_SIZE(entry) != 8) {
+                PyErr_SetString(PyExc_TypeError,
+                                "invalid compiled query binding entry");
+                goto fail;
+            }
+            if (query_append_error(
+                    &errors, PyTuple_GET_ITEM(entry, 1),
+                    PyUnicode_FromString(
+                        "query parameter must occur exactly once"),
+                    "duplicate") < 0) goto fail;
+        }
+        else if (query_bind_entry(entry,
+                                  raw_values[i] == NULL ? Py_None : raw_values[i],
+                                  kwargs, &errors) < 0) {
             goto fail;
         }
     }

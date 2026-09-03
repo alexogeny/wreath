@@ -59,6 +59,16 @@ def test_response_low_watermarks_must_stay_below_high_watermarks() -> None:
         ServerConfig(response_high_water_segments=8, response_low_water_segments=9)
 
 
+@pytest.mark.parametrize(
+    "field",
+    ["keep_alive_timeout", "request_timeout", "shutdown_timeout", "ssl_shutdown_timeout"],
+)
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_server_timeouts_must_be_finite(field: str, value: float) -> None:
+    with pytest.raises(ValueError, match=field):
+        ServerConfig(**{field: value})
+
+
 class FakeTransport(asyncio.Transport):
     def __init__(self, extra: dict[str, Any] | None = None) -> None:
         super().__init__()
@@ -710,9 +720,7 @@ async def test_wreath_native_request_header_storage_grows_past_initial_capacity(
         assert request.header("x-19") == "value-19"
         return Response(b"ok")
 
-    fields = b"".join(
-        f"X-{index}: value-{index}\r\n".encode() for index in range(20)
-    )
+    fields = b"".join(f"X-{index}: value-{index}\r\n".encode() for index in range(20))
     transport = await drive(
         _NativeHttpProtocol,
         app,

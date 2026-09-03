@@ -80,10 +80,45 @@ def test_without_a_second_factor_the_session_is_authenticated() -> None:
     assert result.session_state == "authenticated"
 
 
-def test_revoking_removes_the_account_so_a_later_login_is_a_new_one() -> None:
-    provisioning = JitProvisioning(roles=("member",))
+@pytest.mark.asyncio
+async def test_revoking_removes_the_account_so_a_later_login_is_a_new_one() -> None:
+    async def revoke_sessions(_user_id: str) -> None:
+        pass
+
+    provisioning = JitProvisioning(roles=("member",), revoke_sessions=revoke_sessions)
     first = provisioning.provision(organization="acme", email="ana@acme.example")
-    assert provisioning.revoke(organization="acme", email="ana@acme.example") == 1
-    assert provisioning.revoke(organization="acme", email="ana@acme.example") == 0
+    assert await provisioning.revoke(organization="acme", email="ana@acme.example") == 1
+    assert await provisioning.revoke(organization="acme", email="ana@acme.example") == 0
     again = provisioning.provision(organization="acme", email="ana@acme.example")
     assert again.user_id != first.user_id
+
+
+@pytest.mark.asyncio
+async def test_revoking_an_account_revokes_its_live_sessions() -> None:
+    revoked: list[str] = []
+
+    async def revoke_sessions(user_id: str) -> None:
+        revoked.append(user_id)
+
+    provisioning = JitProvisioning(
+        roles=("member",),
+        revoke_sessions=revoke_sessions,
+    )
+    login = provisioning.provision(organization="acme", email="ana@acme.example")
+
+    assert await provisioning.revoke(organization="acme", email="ana@acme.example") == 1
+    assert revoked == [login.user_id]
+
+
+@pytest.mark.asyncio
+async def test_revoking_refuses_before_deprovisioning_without_a_session_revoker() -> None:
+    provisioning = JitProvisioning(roles=("member",))
+    login = provisioning.provision(organization="acme", email="ana@acme.example")
+
+    with pytest.raises(RuntimeError, match="session revoker"):
+        await provisioning.revoke(organization="acme", email="ana@acme.example")
+
+    assert (
+        provisioning.provision(organization="acme", email="ana@acme.example").user_id
+        == login.user_id
+    )

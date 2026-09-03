@@ -3271,6 +3271,14 @@ def _fuzz_confidence(
     return report, activity, max(replay_status, campaign_status)
 
 
+def _run_explicit_fuzz_replay(
+    namespace: Any,
+) -> tuple[dict[str, Any], FuzzActivity, int]:
+    report, activity = _no_gold_fuzz()
+    campaign, status = _run_fuzz_campaigns(namespace, {})
+    return report, _attach_fuzz_campaign(report, activity, campaign), status
+
+
 def _no_gold_fuzz() -> tuple[dict[str, Any], FuzzActivity]:
     selected: tuple[str, ...] = ()
     report = {"version": 1, "kind": "wreath-fuzz-run", "selected_files": []}
@@ -3562,6 +3570,13 @@ class _PytestOutcome:
 
     def finish_early(self) -> int | None:
         if self.namespace.mutant == "off":
+            if self.namespace.fuzz == "on":
+                fuzz, fuzz_activity, fuzz_status = _run_explicit_fuzz_replay(self.namespace)
+                if self.mutation.user_report is not None:
+                    _attach_fuzz_report(self.mutation.user_report, fuzz)
+                if self.plugin is not None:
+                    self.plugin.finish_pipeline(None, fuzz_activity)
+                return self.pytest_status if self.pytest_status != 0 else fuzz_status
             return self.pytest_status
         passed = self.plugin.activity.counts()["passed"] if self.plugin is not None else 0
         if not passed:
@@ -3674,8 +3689,14 @@ def _dispatch_test_engine(namespace: Any) -> int | None:
         namespace.mutant = "auto"
     if namespace.fuzz == "auto":
         namespace.fuzz = "off" if namespace.mutant == "off" else "on"
-    if namespace.fuzz == "on" and namespace.mutant == "off":
-        raise ValueError("--fuzz on requires mutation evidence; use --mutant on")
+    explicit_replay = bool(getattr(namespace, "fuzz_replay_only", False)) and bool(
+        getattr(namespace, "fuzz_target", ())
+    )
+    if namespace.fuzz == "on" and namespace.mutant == "off" and not explicit_replay:
+        raise ValueError(
+            "--fuzz on with --mutant off requires --fuzz-replay-only and at least one "
+            "--fuzz-target; use --mutant on for mutation-guided campaigns"
+        )
     if namespace.fuzz == "on" and "fork" not in multiprocessing.get_all_start_methods():
         raise ValueError("--fuzz on requires a platform with multiprocessing fork support")
     fuzz_cases = int(getattr(namespace, "fuzz_cases", 1_000))

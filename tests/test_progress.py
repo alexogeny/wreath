@@ -56,16 +56,16 @@ async def test_stream_yields_updates_until_terminal() -> None:
 async def test_status_response_200_and_404() -> None:
     reg = ProgressRegistry()
     reg.report("known", 10, "hi")
-    ok = status_response(reg, "known")
+    ok = status_response(reg, "known", public=True)
     assert ok.status == 200
     assert json.loads(ok.body)["percent"] == 10
-    assert status_response(reg, "missing").status == 404
+    assert status_response(reg, "missing", public=True).status == 404
 
 
 async def test_progress_stream_is_an_sse_response() -> None:
     reg = ProgressRegistry()
     reg.report("t", 100, state="done")
-    response = progress_stream(reg, "t")
+    response = progress_stream(reg, "t", public=True)
     assert response.media_type == b"text/event-stream"
 
 
@@ -81,7 +81,7 @@ async def test_push_progress_sends_json_frames() -> None:
             self.frames.append(text)
 
     ws = _WS()
-    await push_progress(ws, reg, "t", interval=0.005)
+    await push_progress(ws, reg, "t", interval=0.005, public=True)
     assert json.loads(ws.frames[-1])["state"] == "done"
 
 

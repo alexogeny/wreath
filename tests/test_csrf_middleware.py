@@ -447,6 +447,12 @@ def test_csrf_settings_that_cannot_work_are_refused(kwargs: dict, match: str) ->
         CsrfPolicy("s" * 32, **kwargs)
 
 
+@pytest.mark.parametrize("max_age", [float("nan"), float("inf")])
+def test_csrf_refuses_non_finite_expiry_windows(max_age: float) -> None:
+    with pytest.raises(ValueError, match="positive and finite"):
+        CsrfPolicy("s" * 32, max_age=max_age)
+
+
 async def test_trusted_hosts_constrains_the_host_the_expected_origin_is_built_from() -> None:
     middleware = CsrfPolicy("s" * 32, trusted_hosts=["example.test"])
 
@@ -467,6 +473,32 @@ async def test_trusted_hosts_constrains_the_host_the_expected_origin_is_built_fr
         host=b"ex\xffample.test",
         origin=b"https://example.test",
     )
+
+
+@pytest.mark.parametrize("duplicate", [b"host", b"origin", b"x-csrf-token", b"sec-fetch-site"])
+async def test_csrf_refuses_duplicate_security_boundary_headers(duplicate: bytes) -> None:
+    middleware = CsrfPolicy("s" * 32, trusted_hosts=["example.test"])
+    safe = _request("GET")
+    await middleware._ingress(safe)
+    token = csrf_token(safe).encode()
+    headers = [
+        (b"host", b"example.test"),
+        (b"origin", b"https://example.test"),
+        (b"cookie", b"wreath_csrf=" + token),
+        (b"x-csrf-token", token),
+    ]
+    conflicting = {
+        b"host": b"evil.test",
+        b"origin": b"https://evil.test",
+        b"x-csrf-token": b"invalid",
+        b"sec-fetch-site": b"cross-site",
+    }
+    if duplicate == b"sec-fetch-site":
+        headers.insert(0, (duplicate, b"same-origin"))
+    position = next(index for index, (name, _) in enumerate(headers) if name == duplicate)
+    headers.insert(position + 1, (duplicate, conflicting[duplicate]))
+
+    assert await middleware._ingress(_request("POST", headers)) is not None
 
 
 async def test_with_no_trusted_hosts_the_host_check_defers_to_other_middleware() -> None:
@@ -574,9 +606,10 @@ def test_a_valid_submission_renews_only_near_expiry(now: int, renew: bool) -> No
             (b"cookie", f"wreath_csrf={token}".encode()),
         ],
     )
-    assert middleware._validate_submission(
-        request, request._index_headers(), token.encode(), now
-    ) is None
+    assert (
+        middleware._validate_submission(request, request._index_headers(), token.encode(), now)
+        is None
+    )
     prepared = csrf_token(request)
     assert (prepared != token) is renew
     assert request.state.get("_wreath_csrf_issue") is renew

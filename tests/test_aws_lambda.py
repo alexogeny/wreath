@@ -151,6 +151,19 @@ def test_lambda_payload_v1_preserves_multivalue_inputs_and_binary_outputs() -> N
     assert response["multiValueHeaders"]["set-cookie"] == ["a=1", "b=2"]
 
 
+@pytest.mark.parametrize("name", ["host", "x-forwarded-proto"])
+def test_lambda_scope_refuses_ambiguous_authority_fields(name: str) -> None:
+    event = {
+        "httpMethod": "GET",
+        "path": "/",
+        "multiValueHeaders": {name: ["trusted.example", "attacker.example"]},
+        "requestContext": {},
+    }
+
+    with pytest.raises(ValueError, match=name):
+        _scope(event, None)
+
+
 def test_lambda_refuses_unknown_payload_versions_and_malformed_events() -> None:
     app = Wreath()
     adapter = LambdaAdapter(app)

@@ -42,6 +42,7 @@ import re
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from math import isfinite
 from time import monotonic
 from typing import Any, Final, NamedTuple
 
@@ -263,8 +264,11 @@ class Keyed:
         sql_identifier(self.prefix, what="prefix")
         for column in self.columns:
             sql_identifier(column.name, what="column")
-        if self.ttl is not None and self.ttl <= 0:
-            raise ValueError("ttl must be positive")
+        if self.ttl is not None:
+            if not isfinite(self.ttl):
+                raise ValueError("ttl must be finite")
+            if self.ttl <= 0:
+                raise ValueError("ttl must be positive")
         if not self.claim:
             return
         if not self.deadline:

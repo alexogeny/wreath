@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from wreath._userkit import (
     CapturingEmailSender,
     InMemoryUserStore,
@@ -90,7 +92,7 @@ class TestResetEndsSessions:
         assert sessions.deleted_for == []
         assert "sid-ann" in sessions.rows
 
-    async def test_a_store_that_cannot_enumerate_is_tolerated(self):
+    async def test_a_store_that_cannot_enumerate_is_refused(self):
         users = InMemoryUserStore()
         user = await users.create("ann@example.com", hash_password("hunter2hunter2"))
 
@@ -113,7 +115,7 @@ class TestResetEndsSessions:
             ttl=3600,
             bound=fingerprint(user.hashed_password),
         )
-        assert (
+        with pytest.raises(RuntimeError, match="delete_for"):
             await self._reset(
                 users,
                 _Minimal(),
@@ -121,10 +123,8 @@ class TestResetEndsSessions:
                 token=token,
                 new_password="a-much-better-one",
             )
-            is True
-        )
 
-    async def test_no_session_store_still_resets(self):
+    async def test_no_session_store_is_refused(self):
         users = InMemoryUserStore()
         user = await users.create("ann@example.com", hash_password("hunter2hunter2"))
         from wreath._userkit import fingerprint, sign_token
@@ -136,7 +136,7 @@ class TestResetEndsSessions:
             ttl=3600,
             bound=fingerprint(user.hashed_password),
         )
-        assert (
+        with pytest.raises(RuntimeError, match="delete_for"):
             await self._reset(
                 users,
                 None,
@@ -144,8 +144,6 @@ class TestResetEndsSessions:
                 token=token,
                 new_password="a-much-better-one",
             )
-            is True
-        )
 
 
 class TestPostgresSessionStoreEnumeration:
@@ -181,7 +179,11 @@ class TestLoginThrottling:
 
         store = InMemoryUserStore()
         return store, user_router(
-            store, secret="s" * 32, email_sender=CapturingEmailSender(), **kwargs
+            store,
+            sessions=_RecordingSessionStore(),
+            secret="s" * 32,
+            email_sender=CapturingEmailSender(),
+            **kwargs,
         )
 
     async def test_the_router_accepts_the_throttle_settings(self):

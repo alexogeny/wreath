@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
+from math import isfinite
 from typing import Any
 
 __all__ = [
@@ -285,12 +286,14 @@ class Principal:
         """
         if not actor:
             raise ValueError("narrow() requires a non-empty actor")
-        if ttl is not None and ttl <= 0:
-            raise ValueError(f"narrow() ttl must be positive, got {ttl!r}")
+        if ttl is not None and (ttl <= 0 or not isfinite(ttl)):
+            raise ValueError(f"narrow() ttl must be positive and finite, got {ttl!r}")
         if now is None:
             import time
 
             now = time.time()
+        if ttl is not None and not isfinite(now):
+            raise ValueError(f"narrow() now must be finite, got {now!r}")
         subject = getattr(self.identity, "id", "")
         fresh = Narrowing(
             actor=str(actor),

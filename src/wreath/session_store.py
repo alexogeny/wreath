@@ -112,7 +112,8 @@ class PostgresSessionStore:
             # text. `$2::text` is explicit because `jsonb -> unknown` is
             # ambiguous between the text and the integer operator, and an
             # untyped parameter would leave PostgreSQL to guess.
-            f"DELETE FROM {self._store.table} WHERE data -> $2::text ->> 'sub' = $1",
+            f"DELETE FROM {self._store.table} WHERE data -> $2::text ->> 'sub' = $1 "
+            "AND COALESCE(data -> $2::text ->> 'iss', '') = $3::text",
         )
         self._store.define(
             "save",
@@ -216,7 +217,9 @@ class PostgresSessionStore:
         )
         return bool(rows_affected(status))
 
-    async def delete_for(self, subject: str, session_key: str | None = None) -> int:
+    async def delete_for(
+        self, subject: str, session_key: str | None = None, *, namespace: str = ""
+    ) -> int:
         """Drop every session whose principal is `subject`.
 
         One statement over the payload, because the alternative -- read every
@@ -236,12 +239,14 @@ class PostgresSessionStore:
             subject: the principal's `sub`, as login wrote it.
             session_key: the session key holding the principal. Defaults to the
                 store's own `session_key=`.
+            namespace: the principal's issuer namespace. The empty default
+                matches local sessions that have no `iss` claim.
 
         Returns:
             How many rows were deleted, or 0 when the driver reported no count.
         """
         key = self._session_key if session_key is None else session_key
-        status = await self._store.statement("delete_for").execute(subject, key)
+        status = await self._store.statement("delete_for").execute(subject, key, namespace)
         # `or 0` keeps this method's `int` contract: `rows_affected` reports an
         # unreadable tag as None, which is the honest answer, and this caller
         # documented 0 for it long before that distinction existed.

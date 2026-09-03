@@ -176,6 +176,37 @@ async def test_a_directory_without_a_trailing_slash_redirects_canonically(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_a_directory_redirect_preserves_encoded_path_delimiters(tmp_path) -> None:
+    from wreath.request import Request
+
+    (tmp_path / "docs?draft").mkdir()
+    (tmp_path / "docs?draft" / "index.html").write_bytes(b"draft")
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/assets/docs?draft",
+            "raw_path": b"/assets/docs%3Fdraft",
+            "headers": [],
+        },
+        receive,
+        {"path": "docs?draft"},
+    )
+    files = StaticFiles(tmp_path)
+    try:
+        response = await files(request)
+    finally:
+        files.close()
+
+    assert response.status == 308
+    assert dict(response.headers)[b"location"] == b"/assets/docs%3Fdraft/"
+
+
+@pytest.mark.asyncio
 async def test_a_root_static_mount_cannot_emit_a_scheme_relative_redirect(tmp_path) -> None:
     from wreath import Wreath
     from wreath.testing import TestClient

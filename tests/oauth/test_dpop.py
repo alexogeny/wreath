@@ -60,7 +60,7 @@ def signer() -> Es256Signer:
 
 @pytest.fixture
 def verifier() -> DPoPVerifier:
-    return DPoPVerifier(max_entries=8, max_age=300, clock_skew=30)
+    return DPoPVerifier(local_replay=True, max_entries=8, max_age=300, clock_skew=30)
 
 
 def test_target_uri_brackets_only_ipv6_hosts() -> None:
@@ -80,6 +80,28 @@ def test_a_valid_proof_returns_the_public_key_thumbprint(verifier, signer) -> No
         now=1_000,
     )
     assert validated.jti == "proof-1"
+
+
+def test_replay_key_scopes_jti_to_the_access_token(verifier, signer) -> None:
+    first = _proof(signer, access_token="access-a", jti="shared-jti")
+    second = _proof(signer, access_token="access-b", jti="shared-jti")
+
+    verifier.verify(
+        first,
+        method="POST",
+        uri="https://server.example/token",
+        access_token="access-a",
+        now=1_000,
+    )
+    validated = verifier.verify(
+        second,
+        method="POST",
+        uri="https://server.example/token",
+        access_token="access-b",
+        now=1_000,
+    )
+
+    assert validated.jti == "shared-jti"
     assert validated.jkt
     assert validated.jwk["kty"] == "EC"
 
@@ -156,7 +178,7 @@ def test_equivalent_target_uri_forms_are_normalized(
 )
 def test_verifier_configuration_refuses_unsafe_values(options, message) -> None:
     with pytest.raises(ValueError, match=message):
-        DPoPVerifier(**options)
+        DPoPVerifier(local_replay=True, **options)
 
 
 @pytest.mark.parametrize(
@@ -267,15 +289,18 @@ def test_resource_proof_binds_the_access_token_and_key(verifier, signer) -> None
         access_token="access",
         now=1_000,
     )
-    second = DPoPVerifier(max_entries=8)
-    assert second.verify(
-        _proof(signer, access_token="access", jti="proof-2"),
-        method="POST",
-        uri="https://server.example/token",
-        access_token="access",
-        expected_jkt=validated.jkt,
-        now=1_000,
-    ).jkt == validated.jkt
+    second = DPoPVerifier(local_replay=True, max_entries=8)
+    assert (
+        second.verify(
+            _proof(signer, access_token="access", jti="proof-2"),
+            method="POST",
+            uri="https://server.example/token",
+            access_token="access",
+            expected_jkt=validated.jkt,
+            now=1_000,
+        ).jkt
+        == validated.jkt
+    )
 
 
 def test_a_wrong_access_token_is_refused(verifier, signer) -> None:
@@ -403,10 +428,8 @@ def test_expected_key_thumbprint_must_match(verifier, signer) -> None:
 
 
 def test_replay_capacity_is_distinct_from_a_replayed_proof(signer) -> None:
-    verifier = DPoPVerifier(max_entries=1)
-    verifier.verify(
-        _proof(signer), method="POST", uri="https://server.example/token", now=1_000
-    )
+    verifier = DPoPVerifier(local_replay=True, max_entries=1)
+    verifier.verify(_proof(signer), method="POST", uri="https://server.example/token", now=1_000)
     with pytest.raises(DPoPRefusal) as raised:
         verifier.verify(
             _proof(signer, jti="proof-2"),
@@ -422,7 +445,7 @@ def test_authorization_server_advertises_dpop_and_binds_an_access_token(signer) 
         issuer="https://server.example",
         signer=signer,
     )
-    proof = DPoPVerifier(max_entries=8).verify(
+    proof = DPoPVerifier(local_replay=True, max_entries=8).verify(
         _proof(signer),
         method="POST",
         uri="https://server.example/token",

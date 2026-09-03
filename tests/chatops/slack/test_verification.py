@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from wreath import Wreath
@@ -31,6 +33,85 @@ async def test_signature_covers_the_exact_raw_body() -> None:
 
     assert (accepted.status, accepted.body) == (200, b"exact")
     assert refused.status == 401
+
+
+async def test_duplicate_signature_headers_are_refused() -> None:
+    body = json_body({"type": "url_verification", "challenge": "exact"})
+    signed = signed_headers(body)
+    app = client_for().app
+    sent: list[dict[str, Any]] = []
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "scheme": "https",
+        "method": "POST",
+        "path": "/chat/slack/events",
+        "raw_path": b"/chat/slack/events",
+        "query_string": b"",
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"x-slack-signature", b"v0=" + b"0" * 64),
+            (b"x-slack-signature", signed["x-slack-signature"].encode()),
+            (b"x-slack-request-timestamp", signed["x-slack-request-timestamp"].encode()),
+        ],
+        "server": ("test", 443),
+        "client": ("127.0.0.1", 1),
+        "root_path": "",
+    }
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    await app(scope, receive, send)
+    assert sent[0]["status"] == 401
+
+
+@pytest.mark.parametrize(
+    "content_types",
+    [
+        (b"application/json", b"application/x-www-form-urlencoded"),
+        (b"application/x-www-form-urlencoded", b"application/json"),
+    ],
+)
+async def test_duplicate_content_type_cannot_select_slack_event_parser(
+    content_types: tuple[bytes, bytes],
+) -> None:
+    body = json_body({"type": "url_verification", "challenge": "exact"})
+    signed = signed_headers(body)
+    app = client_for().app
+    sent: list[dict[str, Any]] = []
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "scheme": "https",
+        "method": "POST",
+        "path": "/chat/slack/events",
+        "raw_path": b"/chat/slack/events",
+        "query_string": b"",
+        "headers": [
+            *((b"content-type", value) for value in content_types),
+            (b"x-slack-signature", signed["x-slack-signature"].encode()),
+            (b"x-slack-request-timestamp", signed["x-slack-request-timestamp"].encode()),
+        ],
+        "server": ("test", 443),
+        "client": ("127.0.0.1", 1),
+        "root_path": "",
+    }
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    await app(scope, receive, send)
+
+    assert sent[0]["status"] == 415
 
 
 @pytest.mark.parametrize("missing", ["x-slack-signature", "x-slack-request-timestamp"])

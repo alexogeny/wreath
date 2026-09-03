@@ -44,6 +44,14 @@ from wreath.users import (
     user_router,
 )
 
+
+class _Revocations:
+    async def delete_for(self, _subject: str) -> int:
+        return 0
+
+
+_REVOCATIONS = _Revocations()
+
 # RFC 6238 appendix B fixes the shared secret for SHA-1 as the ASCII string
 # "12345678901234567890" -- twenty bytes, which is also the minimum this module
 # will mint.
@@ -654,7 +662,15 @@ def _app(
 ) -> Wreath:
     app = Wreath()
     app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
-    app.include_router(user_router(users, secret="u" * 32, second_factors=factors, clock=clock))
+    app.include_router(
+        user_router(
+            users,
+            sessions=_REVOCATIONS,
+            secret="u" * 32,
+            second_factors=factors,
+            clock=clock,
+        )
+    )
     # No `pytest.warns` wrapper: building without `enrolments=` no longer warns,
     # because it no longer degrades. See `test_users_webauthn.py`.
     router = second_factor_router(users, factors, issuer="Wreath", clock=clock, **options)
@@ -1503,7 +1519,9 @@ def _unwired_app(
     """
     app = Wreath()
     app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
-    app.include_router(user_router(users, secret="u" * 32, clock=clock))
+    app.include_router(
+        user_router(users, sessions=_REVOCATIONS, secret="u" * 32, clock=clock)
+    )
     router = second_factor_router(users, factors, issuer="Wreath", clock=clock)
     app.include_router(router)
 

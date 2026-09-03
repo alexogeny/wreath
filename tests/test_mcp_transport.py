@@ -32,6 +32,135 @@ async def initialize(client: TestClient, **kwargs) -> tuple[str, TestResponse]:
     return header(response, "mcp-session-id") or "", response
 
 
+async def request_with_repeated_mcp_header(
+    client: TestClient,
+    method: str,
+    repeated: tuple[bytes, bytes, bytes],
+    *,
+    session: str | None = None,
+) -> TestResponse:
+    payload = {"jsonrpc": "2.0", "id": 2, "method": "ping"}
+    headers = {"accept": "text/event-stream"} if method == "GET" else {}
+    if session is not None:
+        headers["mcp-session-id"] = session
+    scope, body = client._scope(
+        method,
+        "/mcp",
+        headers=headers,
+        json=payload if method == "POST" else None,
+    )
+    name, first, second = repeated
+    scope["headers"].extend(((name, first), (name, second)))
+    sent: list[dict] = []
+
+    async def receive() -> dict:
+        nonlocal body
+        chunk, body = body, b""
+        return {"type": "http.request", "body": chunk, "more_body": False}
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    await client.app(scope, receive, send)
+    first_message = sent[0]
+    if first_message["type"] == "wreath.response":
+        return TestResponse(
+            first_message["status"],
+            list(first_message["headers"]),
+            first_message.get("body", b""),
+        )
+    response_body = b"".join(
+        message.get("body", b"") for message in sent if message["type"] == "http.response.body"
+    )
+    return TestResponse(first_message["status"], list(first_message["headers"]), response_body)
+
+
+@pytest.mark.parametrize(
+    ("method", "control"),
+    (
+        ("POST", "session"),
+        ("GET", "session"),
+        ("DELETE", "session"),
+        ("POST", "version"),
+        ("GET", "version"),
+        ("DELETE", "version"),
+    ),
+)
+async def test_repeated_mcp_control_headers_are_refused(method: str, control: str) -> None:
+    app = Wreath()
+    MCP(app, name="x", version="1.0.0")
+    async with TestClient(app) as client:
+        session, _ = await initialize(client)
+        if control == "session":
+            repeated = (
+                b"mcp-session-id",
+                session.encode("ascii") if method != "GET" else b"unknown",
+                b"unknown" if method != "GET" else session.encode("ascii"),
+            )
+            single_session = None
+        else:
+            repeated = (
+                b"mcp-protocol-version",
+                PROTOCOL_VERSION.encode("ascii"),
+                b"1999-01-01",
+            )
+            single_session = session if method == "POST" else "unknown"
+
+        response = await request_with_repeated_mcp_header(
+            client,
+            method,
+            repeated,
+            session=single_session,
+        )
+
+        assert response.status == 400
+        assert "more than once" in response.json()["error"]["message"]
+
+
+async def test_repeated_content_type_is_refused_before_authentication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = Wreath()
+    MCP(app, name="x", version="1.0.0")
+    authenticated = False
+
+    async def authenticate(self: MCP, request: object) -> None:
+        nonlocal authenticated
+        authenticated = True
+
+    monkeypatch.setattr(MCP, "_authenticate", authenticate)
+    async with TestClient(app) as client:
+        scope, body = client._scope(
+            "POST",
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 2, "method": "ping"},
+        )
+        scope["headers"] = [header for header in scope["headers"] if header[0] != b"content-type"]
+        scope["headers"].extend(
+            ((b"content-type", b"application/json"), (b"content-type", b"text/plain"))
+        )
+        sent: list[dict] = []
+
+        async def receive() -> dict:
+            nonlocal body
+            chunk, body = body, b""
+            return {"type": "http.request", "body": chunk, "more_body": False}
+
+        async def send(message: dict) -> None:
+            sent.append(message)
+
+        await client.app(scope, receive, send)
+
+    assert authenticated is False
+    assert sent[0]["status"] == 400
+    assert (
+        "Content-Type"
+        in b"".join(
+            message.get("body", b"") for message in sent if message["type"] == "http.response.body"
+        ).decode()
+    )
+
+
 async def test_a_message_without_a_session_is_refused_with_a_reason() -> None:
     app = Wreath()
     MCP(app, name="x", version="1.0.0")
@@ -505,3 +634,13 @@ def test_a_limit_that_is_not_a_limit_is_refused() -> None:
     with pytest.raises(ValueError, match="client_request_seconds"):
         MCPLimits(client_request_seconds=0)
     assert MCPLimits(session_idle_seconds=None).session_idle_seconds is None
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["session_idle_seconds", "stream_keepalive_seconds", "client_request_seconds"],
+)
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_mcp_lifecycle_timeouts_must_be_finite(field: str, value: float) -> None:
+    with pytest.raises(ValueError, match=field):
+        MCPLimits(**{field: value})

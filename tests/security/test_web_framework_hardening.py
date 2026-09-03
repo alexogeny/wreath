@@ -57,6 +57,9 @@ class MemorySessions:
         self.deleted.append(sid)
         self.rows.pop(sid, None)
 
+    async def delete_for(self, _subject: str) -> int:
+        return 0
+
 
 async def _asgi_http(
     app: Wreath,
@@ -187,7 +190,9 @@ async def test_builtin_login_rotates_a_server_side_session(monkeypatch) -> None:
     app.configure_http_policy(
         HttpPolicy(session=SessionPolicy(secret="s" * 32, store=sessions, secure=False))
     )
-    app.include_router(user_router(InMemoryUserStore(), secret="u" * 32))
+    app.include_router(
+        user_router(InMemoryUserStore(), sessions=sessions, secret="u" * 32)
+    )
 
     @app.get("/seed")
     async def seed(request: Any) -> dict[str, bool]:
@@ -279,7 +284,7 @@ async def test_websocket_authentication_can_load_the_global_session() -> None:
         await websocket.send_text(websocket.identity.id)
 
     async with TestClient(app) as client:
-        cookie = _cookie(await client.get("/login"))
+        cookie = _cookie(await client.get("/login", headers={"host": "app.example"}))
         async with client.websocket(
             "/ws",
             headers={
@@ -390,9 +395,11 @@ async def test_password_reset_email_issuance_is_bounded(monkeypatch) -> None:
 
     monkeypatch.setattr(users._userkit, "start_password_reset", start_reset)
     app = Wreath()
+    sessions = MemorySessions()
     app.include_router(
         user_router(
             InMemoryUserStore(),
+            sessions=sessions,
             secret="s" * 32,
             max_reset_requests=3,
             reset_window=60.0,

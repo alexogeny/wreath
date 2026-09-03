@@ -74,6 +74,20 @@ def test_narrow_refuses_a_non_positive_ttl() -> None:
         human(Identity("alice")).narrow(actor="a", scope=ANY_SCOPE, ttl=0)
 
 
+@pytest.mark.parametrize(
+    "ttl,now",
+    [
+        (float("nan"), 0.0),
+        (float("inf"), 0.0),
+        (60.0, float("nan")),
+        (60.0, float("inf")),
+    ],
+)
+def test_narrow_refuses_non_finite_expiry_inputs(ttl: float, now: float) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        human(Identity("alice")).narrow(actor="a", scope=ANY_SCOPE, ttl=ttl, now=now)
+
+
 def test_composition_intersects_limits_rather_than_unioning_them() -> None:
     composed = (
         human(Identity("alice")) | with_entitlements("export", "api") | with_entitlements("api")

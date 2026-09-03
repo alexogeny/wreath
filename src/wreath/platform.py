@@ -51,6 +51,7 @@ a decision on that.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -226,6 +227,9 @@ def impersonate(
             "impersonate() needs ttl=: a session that does not end is an account "
             "rather than an impersonation"
         )
+    resolved_ttl = float(ttl)
+    if resolved_ttl <= 0 or not math.isfinite(resolved_ttl):
+        raise PlatformError("impersonate() ttl must be positive and finite")
     if scope is None:
         raise PlatformError(
             "impersonate() needs scope=: `principal.narrow` refuses a defaulted scope "
@@ -239,8 +243,8 @@ def impersonate(
         operator=operator,
         user=user,
         scope=tuple(scope),
-        ttl=float(ttl),
-        audit_entry=AuditEntry(actor=operator, subject=user, scope=tuple(scope), ttl=float(ttl)),
+        ttl=resolved_ttl,
+        audit_entry=AuditEntry(actor=operator, subject=user, scope=tuple(scope), ttl=resolved_ttl),
         permitted=permitted,
         of_user=held,
     )

@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from ..objects import ObjectStat, ObjectStore
 from ..provenance import Provenance
-from .identity import principal_id
+from .identity import principal_scope_id
 
 ArtifactTrust = Literal["system", "user", "model", "tool", "external"]
 
@@ -62,7 +62,7 @@ class AgentArtifactManager:
     def _scope(self, context: Any) -> tuple[str, str, str]:
         tenant = context.tenant
         conversation = context.conversation
-        resolved_principal = principal_id(context.principal, label="artifact")
+        resolved_principal = principal_scope_id(context.principal, label="artifact")
         if not isinstance(tenant, str) or not tenant:
             raise ValueError("artifact tenant must be a non-empty string")
         if not isinstance(conversation, str) or not conversation:

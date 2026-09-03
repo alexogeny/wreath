@@ -70,6 +70,16 @@ async def test_default_key_has_no_dangling_query_separator() -> None:
     )
 
 
+async def test_default_key_distinguishes_raw_targets_a_proxy_forwards_differently() -> None:
+    canonical = _Req(method="GET", path="/files/report")
+    canonical.scope = {"raw_path": b"/files/report"}
+    encoded = _Req(method="GET", path="/files/report")
+    encoded.scope = {"raw_path": b"/files/%72eport"}
+
+    assert default_cache_key(canonical) != default_cache_key(encoded)
+    assert cache_key_for(("view",))(canonical) != cache_key_for(("view",))(encoded)
+
+
 async def test_second_call_is_served_from_cache() -> None:
     calls = 0
 
@@ -84,6 +94,40 @@ async def test_second_call_is_served_from_cache() -> None:
     assert r1.body == r2.body == b"body"
     assert calls == 1  # handler ran once
     assert handler.cache_store.stats.hits == 1
+
+
+async def test_duplicate_host_cannot_cross_authority_cache_entries() -> None:
+    class Request(_Req):
+        scheme = "https"
+
+        def __init__(self, routed_host: str) -> None:
+            super().__init__(path="/tenant")
+            self.headers = [
+                (b"host", b"shared-cache-key.test"),
+                (b"host", routed_host.encode()),
+            ]
+
+        def header(self, name, default=None):
+            return (
+                next(value.decode() for key, value in self.headers if key == b"host")
+                if name == "host"
+                else default
+            )
+
+    calls = 0
+
+    @cached(ttl=100)
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        return Response(request.headers[-1][1])
+
+    victim = await handler(Request("victim.test"))
+    attacker = await handler(Request("attacker.test"))
+
+    assert victim.body == b"victim.test"
+    assert attacker.body == b"attacker.test"
+    assert calls == 2
 
 
 async def test_cache_status_distinguishes_a_stored_miss_from_a_hit() -> None:
@@ -245,8 +289,8 @@ async def test_query_cache_keys_ignore_unrelated_headers() -> None:
         calls += 1
         return Response(str(calls).encode())
 
-    plain = _QueryReq(b'{}')
-    unrelated = _QueryReq(b'{}')
+    plain = _QueryReq(b"{}")
+    unrelated = _QueryReq(b"{}")
     unrelated.headers.append((b"x-request-id", b"different"))
 
     assert (await handler(plain)).body == b"1"

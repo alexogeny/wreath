@@ -274,7 +274,7 @@ async def test_a_cursor_from_another_stream_cannot_select_this_ones_chunks(parts
 
     events_a = await _collect(streams, "a")
     borrowed = events_a[0].cursor.encode()
-    refused = streams.attach("b", since=borrowed)
+    refused = streams.attach("b", since=borrowed, public=True)
     assert refused.status == 400
     assert b"belongs to a different stream" in refused.body
     # And b's own stream is intact, so the refusal is the only consequence.

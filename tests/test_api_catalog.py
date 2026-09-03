@@ -48,6 +48,33 @@ async def test_api_catalog_discovers_the_application_specification_and_docs() ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [("host", "victim.example"), ("host", "attacker.example")],
+        [("host", "attacker.example/path")],
+    ],
+)
+async def test_api_catalog_does_not_publish_an_ambiguous_authority(
+    headers: list[tuple[str, str]],
+) -> None:
+    app = Wreath()
+    app.enable_api_catalog(api_path="/", spec_path="/openapi.json", docs_path=None)
+
+    async with TestClient(app) as client:
+        response = await client.get("/.well-known/api-catalog", headers=headers)
+
+    assert response.json() == {
+        "linkset": [
+            {
+                "anchor": "/",
+                "service-desc": [{"href": "/openapi.json", "type": "application/json"}],
+            }
+        ]
+    }
+
+
+@pytest.mark.asyncio
 async def test_api_catalog_head_advertises_the_catalog_relation() -> None:
     app = Wreath()
     app.enable_api_catalog(api_path="/v2", spec_path=None, docs_path=None)

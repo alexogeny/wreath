@@ -40,6 +40,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, cast, runtime_checkable
 
+from ._auth.models import qualified_identity_value
 from .config import read_osenv
 
 FLAG_PREFIX = "WREATH_FLAG_"
@@ -402,10 +403,11 @@ class FlagView:
 def flags_dependency(provider: TypedFlagProvider | FlagProvider):
     """Build a `Depends`-able yielding a request-scoped `FlagView`.
 
-    The context is taken from `request.identity.id` when present, so percentage
-    rollouts bucket per authenticated principal. An unauthenticated request gets an
-    empty context and therefore the shared anonymous bucket described in the module
-    docstring -- a percentage flag is all-or-nothing before login.
+    The context is taken from the request identity's issuer-qualified id when
+    present, so percentage rollouts bucket per authenticated principal. An
+    unauthenticated request gets an empty context and therefore the shared anonymous
+    bucket described in the module docstring -- a percentage flag is all-or-nothing
+    before login.
 
     `provider` is captured here, once, rather than looked up per request:
     `Depends(flags_dependency(app.flags(...)))` binds the provider that
@@ -419,7 +421,8 @@ def flags_dependency(provider: TypedFlagProvider | FlagProvider):
         if identity is not None:
             subject = getattr(identity, "id", None)
             if subject is not None:
-                context["id"] = subject
+                namespace = getattr(identity, "namespace", "")
+                context["id"] = qualified_identity_value(namespace, subject)
         return FlagView(provider, context)
 
     return _dependency

@@ -140,10 +140,10 @@ class SubscriptionLedger:
     __slots__ = ("_invoices", "_owners", "_paid_through", "_snapshots")
 
     def __init__(self) -> None:
-        self._snapshots: dict[tuple[str, str, str], SubscriptionSnapshot] = {}
-        self._paid_through: dict[tuple[str, str, str], datetime] = {}
-        self._owners: dict[str, tuple[str, str, str | None]] = {}
-        self._invoices: dict[tuple[str, str], SubscriptionPayment] = {}
+        self._snapshots: dict[tuple[str, str | None, str, str], SubscriptionSnapshot] = {}
+        self._paid_through: dict[tuple[str, str | None, str, str], datetime] = {}
+        self._owners: dict[tuple[str, str | None, str], str] = {}
+        self._invoices: dict[tuple[str, str | None, str], SubscriptionPayment] = {}
 
     def apply(
         self, value: SubscriptionSnapshot | SubscriptionPayment
@@ -162,7 +162,12 @@ class SubscriptionLedger:
             value.subject,
             value.merchant_account,
         )
-        key = (value.provider, subscription, value.subject)
+        key = (
+            value.provider,
+            value.merchant_account,
+            subscription,
+            value.subject,
+        )
         if isinstance(value, SubscriptionPayment):
             self._record_payment(value, key)
             current = self._snapshots.get(key)
@@ -176,8 +181,15 @@ class SubscriptionLedger:
         self._snapshots[key] = merged
         return merged
 
-    def get(self, provider: str, subscription: str, subject: str) -> SubscriptionSnapshot | None:
-        return self._snapshots.get((provider, subscription, subject))
+    def get(
+        self,
+        provider: str,
+        subscription: str,
+        subject: str,
+        *,
+        merchant_account: str | None = None,
+    ) -> SubscriptionSnapshot | None:
+        return self._snapshots.get((provider, merchant_account, subscription, subject))
 
     def _bind_owner(
         self,
@@ -186,33 +198,22 @@ class SubscriptionLedger:
         subject: str,
         merchant_account: str | None,
     ) -> None:
-        owner = self._owners.get(subscription)
+        key = (provider, merchant_account, subscription)
+        owner = self._owners.get(key)
         if owner is None:
-            self._owners[subscription] = (provider, subject, merchant_account)
+            self._owners[key] = subject
             return
-        known_provider, known_subject, known_account = owner
-        if provider != known_provider:
+        if subject != owner:
             raise ValueError(
-                f"subscription {subscription!r} changed provider from "
-                f"{known_provider!r} to {provider!r}"
-            )
-        if subject != known_subject:
-            raise ValueError(
-                f"subscription {subscription!r} changed subject from "
-                f"{known_subject!r} to {subject!r}"
-            )
-        if merchant_account != known_account:
-            raise ValueError(
-                f"subscription {subscription!r} changed merchant account from "
-                f"{known_account!r} to {merchant_account!r}"
+                f"subscription {subscription!r} changed subject from {owner!r} to {subject!r}"
             )
 
     def _record_payment(
         self,
         payment: SubscriptionPayment,
-        key: tuple[str, str, str],
+        key: tuple[str, str | None, str, str],
     ) -> None:
-        invoice_key = (payment.provider, payment.invoice)
+        invoice_key = (payment.provider, payment.merchant_account, payment.invoice)
         existing = self._invoices.get(invoice_key)
         if existing is not None and existing != payment:
             raise ValueError(

@@ -498,6 +498,101 @@ async def test_finish_keeps_the_existing_row_when_refresh_returns_none(
 
 
 @pytest.mark.asyncio
+async def test_gate_does_not_publish_after_verification_ownership_is_lost() -> None:
+    ledger = SimpleNamespace(
+        publish=AsyncMock(return_value=False),
+        set_phase=AsyncMock(return_value=True),
+    )
+    verify = SimpleNamespace(
+        check=AsyncMock(return_value=SimpleNamespace(ok=True, transient=False, detail="ok"))
+    )
+    terminal = AsyncMock()
+    walk = SimpleNamespace(
+        ledger=ledger,
+        gate=SimpleNamespace(verify=verify, publishes="ready", then=terminal),
+    )
+
+    result = await driver._run_gate(walk, object(), row=_row(phase="verifying"))
+
+    assert result.stopped == "lost"
+    ledger.set_phase.assert_not_awaited()
+    terminal.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_negative_gate_cannot_block_after_verification_ownership_is_lost() -> None:
+    ledger = SimpleNamespace(block=AsyncMock(return_value=False))
+    verify = SimpleNamespace(
+        check=AsyncMock(return_value=SimpleNamespace(ok=False, transient=False, detail="no"))
+    )
+    walk = SimpleNamespace(
+        ledger=ledger,
+        gate=SimpleNamespace(verify=verify, publishes="ready", then=None),
+    )
+
+    result = await driver._run_gate(walk, object(), row=_row(phase="verifying"))
+
+    assert result.stopped == "lost"
+    assert ledger.block.await_args.kwargs["expected"] == "verifying"
+
+
+@pytest.mark.asyncio
+async def test_gate_error_cannot_overwrite_after_phase_ownership_is_lost() -> None:
+    ledger = SimpleNamespace(record_error=AsyncMock(return_value=False))
+    verify = SimpleNamespace(
+        check=AsyncMock(return_value=SimpleNamespace(ok=False, transient=True, detail="offline"))
+    )
+    walk = SimpleNamespace(
+        ledger=ledger,
+        gate=SimpleNamespace(verify=verify, publishes="ready", then=None),
+    )
+
+    result = await driver._run_gate(walk, object(), row=_row(phase="verifying"))
+
+    assert result.stopped == "lost"
+    assert ledger.record_error.await_args.kwargs["expected"] == "verifying"
+
+
+@pytest.mark.asyncio
+async def test_terminal_error_cannot_overwrite_after_applying_ownership_is_lost() -> None:
+    ledger = SimpleNamespace(record_error=AsyncMock(return_value=False))
+    terminal = AsyncMock(side_effect=RuntimeError("failed"))
+    walk = SimpleNamespace(
+        ledger=ledger,
+        gate=SimpleNamespace(then=terminal),
+    )
+
+    result = await driver._run_gate(walk, object(), row=_row(phase="applying"))
+
+    assert result.stopped == "lost"
+    assert ledger.record_error.await_args.kwargs["expected"] == "applying"
+
+
+@pytest.mark.asyncio
+async def test_open_holes_cannot_block_after_walking_ownership_is_lost() -> None:
+    ledger = SimpleNamespace(
+        open_holes=AsyncMock(return_value=1),
+        block=AsyncMock(return_value=False),
+    )
+    walk = SimpleNamespace(
+        ledger=ledger,
+        gate=SimpleNamespace(scope="pass"),
+    )
+
+    result = await driver._finish(
+        walk,
+        object(),
+        chunks=1,
+        rows=2,
+        holes=1,
+        row=_row(phase="walking"),
+    )
+
+    assert result.stopped == "lost"
+    assert ledger.block.await_args.kwargs["expected"] == WALKING
+
+
+@pytest.mark.asyncio
 async def test_unit_gate_distinguishes_transient_and_permanent_refusals() -> None:
     for transient, phase in ((True, BLOCKED), (False, UNVERIFIED)):
         verdict = SimpleNamespace(ok=False, transient=transient, detail="no")

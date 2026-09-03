@@ -11,7 +11,7 @@ from typing import Any
 from .._agents.approvals import ApprovalGrant
 from .._agents.chat_approvals import ChatApprovalFlow
 from .._auth.cedar_engine import EntityUid
-from .._auth.models import AuthorizationDecision, Identity
+from .._auth.models import AuthorizationDecision, Identity, qualified_identity_value
 from .._auth.requirements import PolicyRequirement
 from .._capability_map import CapabilityMap
 from ..chat import ChatContext, ChatReply
@@ -358,7 +358,8 @@ class BillingSupport:
         ) is not None:
             raise PermissionError("billing refund approval must be executed by a human")
         identity, subject = self._identity_subject(context)
-        if money.permission not in identity.permissions:
+        principal_id = qualified_identity_value(identity.namespace, identity.id)
+        if money.permission not in identity.authority_permissions:
             raise PermissionError(f"billing refund requires {money.permission} permission")
         if not isinstance(payment, str) or not payment:
             raise ValueError("billing support refund payment must not be empty")
@@ -390,7 +391,7 @@ class BillingSupport:
         intent = _RefundIntent(
             approval_id,
             context.tenant,
-            identity.id,
+            principal_id,
             subject,
             projected,
             reference,
@@ -425,6 +426,7 @@ class BillingSupport:
         ) is not None:
             raise PermissionError("billing refund approval must be executed by a human")
         identity, subject = self._identity_subject(context)
+        principal_id = qualified_identity_value(identity.namespace, identity.id)
         intent = self._intents.peek(grant.approval_id)
         if not isinstance(intent, _RefundIntent):
             intent = _intent_from_grant(grant)
@@ -437,7 +439,7 @@ class BillingSupport:
         received = (grant.tenant, grant.principal_id, grant.action, grant.resource)
         if received != expected or intent.subject != subject:
             raise PermissionError("billing refund approval does not match the exact refund intent")
-        if money.permission not in identity.permissions:
+        if money.permission not in identity.authority_permissions:
             raise PermissionError(f"billing refund requires {money.permission} permission")
         requirement = PolicyRequirement(
             money.action,
@@ -473,7 +475,7 @@ class BillingSupport:
         await money.audit(
             BillingAuditEvent(
                 action=money.action,
-                actor=identity.id,
+                actor=principal_id,
                 subject=subject,
                 resource=intent.resource,
                 approval_id=grant.approval_id,
@@ -496,7 +498,7 @@ class BillingSupport:
         if access is None:
             raise SupportAccessDisabled("billing support reads are disabled by default")
         identity, subject = self._identity_subject(context)
-        if access.permission not in identity.permissions:
+        if access.permission not in identity.authority_permissions:
             raise PermissionError(f"billing support requires {access.permission} permission")
         resource = EntityUid("BillingRecord", f"{subject}:{resource_suffix}")
         decision = await access.authorize(context, PolicyRequirement(access.action, resource))

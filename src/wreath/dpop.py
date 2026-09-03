@@ -8,7 +8,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from ._auth.jwt import (
@@ -76,12 +76,25 @@ def _target_uri(uri: str, *, proof: bool) -> str:
     return urlunsplit(normalized)
 
 
+class ReplayLedger(Protocol):
+    def claim(
+        self,
+        key: Any,
+        value: Any = True,
+        *,
+        ttl: float | None = None,
+        now: float | None = None,
+    ) -> bool: ...
+
+    def peek(self, key: Any, *, now: float | None = None) -> Any: ...
+
+
 class DPoPVerifier:
     """Verify request-bound DPoP proofs with bounded, expiring replay state.
 
-    Replay entries belong to this verifier instance. A deployment with multiple
-    workers supplies a shared verifier adapter at its boundary if it requires
-    cross-process replay detection; there is no process-global security state.
+    A replay ledger is required because a verifier-local map cannot detect a
+    proof replayed through another worker. Single-process deployments may opt
+    into local state explicitly with ``local_replay=True``.
     """
 
     __slots__ = ("_algorithms", "_clock_skew", "_max_age", "_replay")
@@ -93,6 +106,8 @@ class DPoPVerifier:
         max_age: int = 300,
         clock_skew: int = 30,
         max_entries: int = 10_000,
+        replay: ReplayLedger | None = None,
+        local_replay: bool = False,
     ) -> None:
         if max_age <= 0:
             raise ValueError("DPoP max_age must be positive")
@@ -109,11 +124,18 @@ class DPoPVerifier:
         self._algorithms = frozen
         self._max_age = int(max_age)
         self._clock_skew = int(clock_skew)
-        self._replay = CapabilityMap(
-            max_entries=max_entries,
-            ttl=float(self._max_age + self._clock_skew),
-            overflow="refuse",
-        )
+        if replay is None and not local_replay:
+            raise ValueError(
+                "DPoP requires a shared replay ledger; pass replay= for multiple workers "
+                "or local_replay=True for an explicitly single-process deployment"
+            )
+        if replay is None:
+            replay = CapabilityMap(
+                max_entries=max_entries,
+                ttl=float(self._max_age + self._clock_skew),
+                overflow="refuse",
+            )
+        self._replay = replay
 
     @property
     def algorithms(self) -> tuple[str, ...]:
@@ -133,7 +155,7 @@ class DPoPVerifier:
         """Validate one DPoP proof and atomically spend its replay identifier."""
         try:
             header, claims, signing_input, signature = _parse_compact(proof)
-        except (TypeError, ValueError, KeyError):
+        except TypeError, ValueError, KeyError:
             raise DPoPRefusal(
                 "malformed-proof", "DPoP header must contain one compact JWT"
             ) from None
@@ -158,7 +180,7 @@ class DPoPVerifier:
             key = key_from_jwk(jwk)
             jkt = jwk_thumbprint(jwk)
             valid_signature = _verify_signature(algorithm, key, signing_input, signature)
-        except (JwtError, KeyError, TypeError, ValueError, OverflowError):
+        except JwtError, KeyError, TypeError, ValueError, OverflowError:
             raise DPoPRefusal("invalid-key", "DPoP proof contains an invalid public jwk") from None
         if not valid_signature:
             raise DPoPRefusal("invalid-signature", "DPoP proof signature does not match its jwk")
@@ -191,6 +213,7 @@ class DPoPVerifier:
             )
         if nonce is not None and claims.get("nonce") != nonce:
             raise DPoPRefusal("nonce-mismatch", "DPoP proof nonce does not match the server nonce")
+        access_token_hash = ""
         if access_token is not None:
             try:
                 expected_ath = b64url_encode(hashlib.sha256(access_token.encode("ascii")).digest())
@@ -204,18 +227,40 @@ class DPoPVerifier:
                     "access-token-mismatch",
                     "DPoP proof access token hash does not match the presented token",
                 )
+            access_token_hash = expected_ath
+            try:
+                _access_header, access_claims, _access_input, _access_signature = _parse_compact(
+                    access_token
+                )
+            except TypeError, ValueError, KeyError:
+                access_claims = None
+            if access_claims is not None:
+                confirmation = access_claims.get("cnf")
+                bound_jkt = confirmation.get("jkt") if isinstance(confirmation, Mapping) else None
+                if not isinstance(bound_jkt, str) or not bound_jkt:
+                    raise DPoPRefusal(
+                        "missing-key-binding",
+                        "a JWT DPoP access token must contain a non-empty cnf.jkt binding",
+                    )
+                if not hmac.compare_digest(jkt, bound_jkt):
+                    raise DPoPRefusal(
+                        "key-mismatch",
+                        "DPoP proof public key does not match the key bound to the access token",
+                    )
         if expected_jkt is not None and not hmac.compare_digest(jkt, expected_jkt):
             raise DPoPRefusal(
                 "key-mismatch",
                 "DPoP proof public key does not match the key bound to the access token",
             )
 
-        replay_key = (jkt, jti)
-        if not self._replay.claim(replay_key, now=float(moment)):
+        replay_key = (jkt, access_token_hash, jti)
+        if not self._replay.claim(
+            replay_key,
+            ttl=float(self._max_age + self._clock_skew),
+            now=float(moment),
+        ):
             if self._replay.peek(replay_key, now=float(moment)) is not None:
-                raise DPoPRefusal(
-                    "replayed-proof", "this DPoP proof has already been used"
-                )
+                raise DPoPRefusal("replayed-proof", "this DPoP proof has already been used")
             raise DPoPRefusal(
                 "replay-capacity",
                 "DPoP replay protection is at capacity and cannot safely accept this proof",

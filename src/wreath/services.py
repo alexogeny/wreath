@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Coroutine
+from math import isfinite
 from typing import Any, Protocol
 
 
@@ -71,6 +72,8 @@ class Supervisor:
     )
 
     def __init__(self, *, drain_timeout: float = 10.0) -> None:
+        if not isfinite(drain_timeout):
+            raise ValueError("service drain_timeout must be finite")
         self._services: list[Service] = []
         self._tasks: set[asyncio.Task[Any]] = set()
         self._stopping = asyncio.Event()

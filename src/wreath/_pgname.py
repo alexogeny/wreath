@@ -12,12 +12,15 @@ MAX_IDENTIFIER_BYTES: Final = 63
 _UNQUOTED_IDENTIFIER = re.compile(r"[a-z_][a-z0-9_$]*")
 
 
-def validate_identifier(value: str, kind: str) -> str:
+def validate_identifier(value: str, kind: str, *, allow_hyphen: bool = False) -> str:
     """Validate the quoted identifier spelling used for channels and queues."""
     if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 63:
         raise ValueError(f"{kind} must be 1..63 bytes: {value!r}")
     for character in value:
-        if not (character.isascii() and (character.isalnum() or character in "_$")):
+        if not (
+            character.isascii()
+            and (character.isalnum() or character in "_$" or (allow_hyphen and character == "-"))
+        ):
             raise ValueError(f"invalid {kind} character {character!r} in {value!r}")
     return value
 

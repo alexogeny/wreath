@@ -37,10 +37,10 @@ refuses a repeated identifier rather than picking one; and the element it
 resolves to must be the very object this module then reads. There is no second
 lookup for an attacker to divert.
 
-**An assertion identifier is spent once.** Replay protection is a `claim` on a
-`wreath.store` store — `MemoryStore` in one worker, `PostgresStore` across
-several — which is one atomic insert-or-reclaim rather than a read followed by a
-write. There is no ledger in this module.
+**An assertion identifier is spent once.** Replay protection is one atomic
+insert-or-reclaim rather than a read followed by a write.
+`MemoryReplayLedger` owns that claim in one worker; `PostgresStore` owns it
+across several.
 
 ## Keys are configured, never fetched
 
@@ -53,12 +53,11 @@ aim an outbound request from your network, and the assertion has not been
 verified yet at the moment the fetch would happen.
 
 ```python
-from wreath.saml import IdentityProvider, ServiceProvider, verify_response
-from wreath.store import MemoryStore
+from wreath.saml import IdentityProvider, MemoryReplayLedger, ServiceProvider, verify_response
 
 IDP = IdentityProvider(entity_id="https://idp.example/metadata", certificates=[CERT_PEM])
 SP = ServiceProvider(entity_id="https://app.example/saml", acs_url="https://app.example/acs")
-SEEN = MemoryStore(ttl=600.0)
+SEEN = MemoryReplayLedger(ttl=600.0)
 
 assertion = await verify_response(body, idp=IDP, sp=SP, ledger=SEEN)
 context = assertion.facts()   # for a Cedar policy to read; not a decision
@@ -73,6 +72,7 @@ import hashlib
 import hmac
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from time import monotonic
 from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
 
 # The RSA half of this is `wreath._auth.jwt`'s, deliberately: it already parses a
@@ -87,16 +87,19 @@ from ._auth.jwt import (
     _verify_rs,
 )
 from ._awaitable import is_awaitable
+from ._capability_map import CapabilityMap
 from .xml import Document, Element, Limits, XMLRefusal, canonicalize_span, parse
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
 __all__ = [
     "ALLOWED_TRANSFORMS",
     "LIMITS",
     "IdentityProvider",
+    "MemoryReplayLedger",
     "ReplayLedger",
+    "ReplayLedgerCapacityError",
     "SamlRefusal",
     "ServiceProvider",
     "VerifiedAssertion",
@@ -275,9 +278,7 @@ class ServiceProvider:
 class ReplayLedger(Protocol):
     """Where an assertion identifier is spent, exactly once.
 
-    This is `wreath.store`'s `claim` and nothing more: `MemoryStore(ttl=...)`
-    and `PostgresStore(database, ledger_declaration())` both satisfy it as they
-    are. `MemoryStore.claim` is synchronous and `PostgresStore.claim` is a
+    `MemoryReplayLedger.claim` is synchronous and `PostgresStore.claim` is a
     coroutine, so a result that is awaitable is awaited.
 
     Give the store a TTL at least as long as `MAX_LIFETIME` plus your clock
@@ -288,6 +289,41 @@ class ReplayLedger(Protocol):
     def claim(self, key: str) -> Any:
         """True when this caller took `key`, False when it was already held."""
         ...
+
+
+class ReplayLedgerCapacityError(RuntimeError):
+    """The in-process replay ledger cannot safely admit another identifier."""
+
+
+class MemoryReplayLedger:
+    """A bounded, fail-closed assertion ledger for one worker."""
+
+    __slots__ = ("_claims",)
+
+    def __init__(
+        self,
+        *,
+        ttl: float,
+        max_entries: int = 4096,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        self._claims = CapabilityMap(
+            max_entries=max_entries,
+            ttl=ttl,
+            clock=clock,
+            overflow="refuse",
+        )
+
+    def claim(self, key: str) -> bool:
+        """Spend `key`, refusing duplicates and raising when full."""
+        if self._claims.claim(key):
+            return True
+        if self._claims.peek(key) is None:
+            raise ReplayLedgerCapacityError(
+                f"SAML replay ledger reached max_entries={self._claims.max_entries}; "
+                "increase the bound or use PostgresStore"
+            )
+        return False
 
 
 def ledger_declaration(

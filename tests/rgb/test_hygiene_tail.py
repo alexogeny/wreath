@@ -196,6 +196,11 @@ class TestCsrfTokenLifetime:
 
             def __init__(self):
                 self.state = state
+                self.headers = [
+                    (b"host", b"example.com"),
+                    (b"origin", b"http://example.com"),
+                    (b"x-csrf-token", token.encode("ascii")),
+                ]
 
             def header(self, name, default=None):
                 # The real `Request` has this; these doubles did not, which is
@@ -203,12 +208,11 @@ class TestCsrfTokenLifetime:
                 # token path this test exercises.
                 return default
 
+            def _single_header(self, name):
+                return next((value for candidate, value in self.headers if candidate == name), None)
+
             def _index_headers(self):
-                return {
-                    b"host": b"example.com",
-                    b"origin": b"http://example.com",
-                    b"x-csrf-token": token.encode("ascii"),
-                }
+                return dict(self.headers)
 
         request = _Request()
         assert await middleware._ingress(request) is None

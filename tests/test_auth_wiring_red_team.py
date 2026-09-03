@@ -288,7 +288,7 @@ async def test_a_store_from_before_the_second_parameter_still_works() -> None:
     _require(result["rows"] == {}, f"the session survived its own password reset: {result}")
 
 
-async def test_a_store_that_cannot_enumerate_at_all_still_resets() -> None:
+async def test_a_store_that_cannot_enumerate_at_all_is_refused() -> None:
     from wreath.users import InMemoryUserStore, hash_password, reset_password_endpoint
 
     users = InMemoryUserStore()
@@ -304,14 +304,14 @@ async def test_a_store_that_cannot_enumerate_at_all_still_resets() -> None:
         async def delete(self, sid: str) -> None:
             return None
 
-    done = await reset_password_endpoint(
-        users,
-        _Minimal(),
-        secret=SECRET,
-        token=await _reset_token(users, "ann@example.test"),
-        new_password="a-much-better-one",
-    )
-    _require(done is True, "a store with no delete_for failed the reset")
+    with pytest.raises(RuntimeError, match="delete_for"):
+        await reset_password_endpoint(
+            users,
+            _Minimal(),
+            secret=SECRET,
+            token=await _reset_token(users, "ann@example.test"),
+            new_password="a-much-better-one",
+        )
 
 
 class _FakeStatement:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import random
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -24,10 +25,40 @@ from wreath.webhooks import (
     WebhookDispatcher,
     WebhookEnvelope,
     WebhookLimits,
+    _outbox_delivery,
     _retention_purge_pass,
 )
 
 KEYS = {"current": b"a sufficiently long webhook test secret"}
+
+
+async def _raw_post(
+    app: Wreath, path: str, body: bytes, headers: list[tuple[bytes, bytes]]
+) -> list[dict[str, Any]]:
+    sent: list[dict[str, Any]] = []
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "scheme": "https",
+        "method": "POST",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": headers,
+        "server": ("test", 443),
+        "client": ("127.0.0.1", 1),
+        "root_path": "",
+    }
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    await app(scope, receive, send)
+    return sent
 
 
 def test_retention_purge_requires_a_primary_key() -> None:
@@ -168,12 +199,22 @@ def test_verifier_rejects_each_missing_required_header(missing: bytes) -> None:
 
 
 @pytest.mark.asyncio
+async def test_local_replay_store_refuses_key_spray_without_evicting_live_claims() -> None:
+    store = LocalReplayStore(max_entries=2, ttl=60)
+
+    assert await store.claim("trusted", "original", now=0)
+    assert await store.claim("attacker", "spray-1", now=1)
+    assert not await store.claim("attacker", "spray-2", now=2)
+    assert not await store.claim("trusted", "original", now=3)
+
+
+@pytest.mark.asyncio
 async def test_local_replay_store_is_bounded_and_expires() -> None:
     store = LocalReplayStore(max_entries=2, ttl=10)
     assert await store.claim("source", "one", now=0)
     assert not await store.claim("source", "one", now=1)
     assert await store.claim("source", "two", now=1)
-    assert await store.claim("source", "three", now=2)
+    assert not await store.claim("source", "three", now=2)
     assert store.size == 2
     assert await store.claim("source", "one", now=20)
 
@@ -189,11 +230,8 @@ async def test_local_replay_randomized_transition_and_expiry_model() -> None:
         now += rng.random() * 1.5
         key = (f"source-{rng.randrange(3)}", f"event-{rng.randrange(20)}")
         model = {key_: value for key_, value in model.items() if value[0] > now}
-        expected = key not in model
+        expected = key not in model and len(model) < 7
         if expected:
-            while len(model) >= 7:
-                oldest = min(model, key=lambda item: model[item])
-                del model[oldest]
             sequence += 1
             model[key] = (now + 5, sequence)
         assert await store.claim(*key, now=now) is expected
@@ -245,6 +283,33 @@ async def test_inbound_source_verifies_decodes_dispatches_and_rejects_replay() -
     assert response.status == 204
     assert duplicate.status == 409
     assert seen == [("evt-live", 7)]
+
+
+async def test_inbound_source_refuses_duplicate_signature_headers() -> None:
+    app = Wreath()
+    source = app.webhooks("partners").source(
+        "sender", path="/hooks/sender", verifier=HMACWebhookVerifier(KEYS)
+    )
+    seen: list[dict[str, Any]] = []
+
+    @source.event("widget.changed", payload=dict)
+    async def changed(_context: WebhookContext, event: dict[str, Any]) -> None:
+        seen.append(event)
+
+    envelope = WebhookEnvelope(
+        id="evt-live",
+        type="widget.changed",
+        version="1",
+        timestamp=datetime.now(UTC),
+        content_type="application/json",
+        body=b"{}",
+    )
+    headers = list(HMACWebhookSigner(KEYS, key_id="current").headers(envelope))
+    headers.append((b"wreath-webhook-signature", b"sha256=" + b"0" * 64))
+    sent = await _raw_post(app, "/hooks/sender", envelope.body, headers)
+
+    assert sent[0]["status"] == 401
+    assert seen == []
 
 
 @pytest.mark.asyncio
@@ -875,9 +940,13 @@ async def test_durable_source_rolls_back_claim_and_side_effect_when_handler_fail
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("result_status", "expected"), [(202, 202), (None, 204)])
-async def test_durable_source_replays_the_completed_result_status(
+@pytest.mark.parametrize(
+    ("result_status", "identity_matches", "expected"),
+    [(202, True, 202), (None, True, 204), (202, False, 409)],
+)
+async def test_durable_source_classifies_a_completed_delivery_identity(
     result_status: int | None,
+    identity_matches: bool,
     expected: int,
 ) -> None:
     app = Wreath()
@@ -888,6 +957,7 @@ async def test_durable_source_replays_the_completed_result_status(
                 "state": "completed",
                 "fencing_token": 3,
                 "result_status": result_status,
+                "identity_matches": identity_matches,
             },
         ]
     )
@@ -1053,17 +1123,75 @@ async def test_inbox_claims_new_and_reclaims_stale_delivery_with_fencing() -> No
     [("completed", "duplicate"), ("processing", "active"), ("failed", "failed")],
 )
 async def test_inbox_classifies_existing_delivery(state: str, expected: str) -> None:
-    session = _FakeSession(rows=[None, {"state": state, "fencing_token": 3, "result_status": 204}])
+    envelope = _envelope()
+    session = _FakeSession(
+        rows=[
+            None,
+            {
+                "state": state,
+                "fencing_token": 3,
+                "result_status": 204,
+                "identity_matches": True,
+            },
+        ]
+    )
     claim = await PostgresWebhookInbox().claim(
         session,
         source="sender",
-        envelope=_envelope(),
+        envelope=envelope,
         lease_owner="worker",
         lease_seconds=30,
     )
     assert claim.outcome == expected
     assert claim.fencing_token == 3
     assert claim.result_status == 204
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored_version", "stored_body"),
+    [("2", b'{"value":1}'), ("1", b'{"value":2}')],
+)
+async def test_inbox_refuses_message_id_reuse_for_a_different_event_identity(
+    stored_version: str,
+    stored_body: bytes,
+) -> None:
+    envelope = _envelope()
+    stored_hash = hashlib.sha256(stored_body).digest()
+    payload_hash = hashlib.sha256(envelope.body).digest()
+    session = _FakeSession(
+        rows=[
+            None,
+            {
+                "state": "completed",
+                "fencing_token": 3,
+                "result_status": 204,
+                "identity_matches": (
+                    stored_version == envelope.version and stored_hash == payload_hash
+                ),
+            },
+        ]
+    )
+    claim = await PostgresWebhookInbox().claim(
+        session,
+        source="sender",
+        envelope=envelope,
+        lease_owner="worker",
+        lease_seconds=30,
+    )
+    insert_sql = session.calls[0][0]
+    select_sql, select_args = session.calls[1]
+    assert "i.payload_version=EXCLUDED.payload_version" in insert_sql
+    assert "i.payload_hash=EXCLUDED.payload_hash" in insert_sql
+    assert "payload_version=$3 AND payload_hash=$4 AS identity_matches" in select_sql
+    assert select_args == (
+        "sender",
+        "evt-1",
+        envelope.version,
+        payload_hash,
+    )
+    assert (stored_version, stored_hash) != (envelope.version, payload_hash)
+    assert claim.outcome == "conflict"
 
 
 @pytest.mark.asyncio
@@ -1589,6 +1717,72 @@ def test_a_verifier_replay_window_that_can_never_hold_is_refused() -> None:
         HMACWebhookVerifier(KEYS, max_age=0)
     with pytest.raises(ValueError, match="max_age must be positive"):
         HMACWebhookVerifier(KEYS, max_age=-1)
+
+
+@pytest.mark.parametrize("window", [float("nan"), float("inf")])
+def test_webhook_freshness_and_local_replay_windows_must_be_finite(window: float) -> None:
+    with pytest.raises(ValueError, match="positive and finite"):
+        HMACWebhookVerifier(KEYS, max_age=window)
+    with pytest.raises(ValueError, match="positive and finite"):
+        LocalReplayStore(max_entries=8, ttl=window)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("window", [float("nan"), float("inf")])
+async def test_webhook_database_lease_windows_must_be_finite(window: float) -> None:
+    session = _FakeSession()
+    with pytest.raises(ValueError, match="positive and finite"):
+        PostgresWebhookInbox(
+            session_factory=lambda: None,
+            lease_owner="worker",
+            lease_seconds=window,
+        )
+    with pytest.raises(ValueError, match="positive and finite"):
+        await PostgresWebhookInbox().claim(
+            session,
+            source="sender",
+            envelope=_envelope(),
+            lease_owner="worker",
+            lease_seconds=window,
+        )
+    with pytest.raises(ValueError, match="positive and finite"):
+        await PostgresWebhookOutbox().claim_due(
+            session,
+            lease_owner="worker",
+            lease_seconds=window,
+        )
+    with pytest.raises(ValueError, match="positive and finite"):
+        await PostgresWebhookOutbox().renew_lease(
+            session,
+            _outbox_delivery(_delivery_row()),
+            lease_seconds=window,
+        )
+    with pytest.raises(ValueError, match="non-negative and finite"):
+        await PostgresWebhookOutbox().mark_retry(
+            session,
+            _outbox_delivery(_delivery_row()),
+            delay=window,
+            status=None,
+            failure="unavailable",
+        )
+    with pytest.raises(ValueError, match="positive and finite"):
+        await WebhookDispatcher(PostgresWebhookOutbox(), {}, worker_id="worker").run(
+            lambda: None, asyncio.Event(), idle_delay=window
+        )
+    assert session.calls == []
+
+
+@pytest.mark.parametrize("window", [float("nan"), float("inf")])
+def test_webhook_dispatcher_windows_must_be_finite(window: float) -> None:
+    outbox = PostgresWebhookOutbox()
+    with pytest.raises(ValueError, match="limits are invalid"):
+        WebhookDispatcher(outbox, {}, worker_id="w", lease_seconds=window)
+    with pytest.raises(ValueError, match="limits are invalid"):
+        WebhookDispatcher(outbox, {}, worker_id="w", retry_delay=window, retry_cap=window)
+    with pytest.raises(ValueError, match="limits are invalid"):
+        WebhookDispatcher(outbox, {}, worker_id="w", retry_cap=window)
+    with pytest.raises(ValueError, match="limits are invalid"):
+        WebhookDispatcher(outbox, {}, worker_id="w", max_attempts=window)
 
 
 def test_a_dispatcher_with_impossible_limits_is_refused() -> None:

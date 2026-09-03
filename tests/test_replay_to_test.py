@@ -122,8 +122,27 @@ async def test_the_generated_test_reproduces_the_request() -> None:
     assert "from wreath.testing import TestClient" in source
     assert "from herd.app import app" in source
     assert "'GET'" in source and "'/llamas/7?include=treks'" in source
-    assert "'accept': 'application/json'" in source
+    assert "('accept', 'application/json')" in source
     assert "assert response.status == 200" in source
+
+
+@pytest.mark.asyncio
+async def test_generated_test_preserves_duplicate_application_headers() -> None:
+    app = Wreath()
+
+    @app.get("/headers")
+    async def headers(request) -> dict[str, int]:
+        return {"seen": sum(name == b"x-probe" for name, _value in request.headers)}
+
+    recording = _recording(
+        b"GET /headers HTTP/1.1\r\nhost: example.test\r\nx-probe: first\r\nx-probe: second\r\n\r\n"
+    )
+
+    source = await generate_test(app, recording, target="headers.app:app")
+
+    assert "('x-probe', 'first')" in source
+    assert "('x-probe', 'second')" in source
+    assert "b'{\"seen\":2}'" in source
 
 
 @pytest.mark.asyncio
@@ -390,16 +409,16 @@ async def test_transport_headers_are_dropped_from_the_generated_call() -> None:
 @pytest.mark.asyncio
 async def test_every_other_header_survives_into_the_generated_call() -> None:
     source = await generate_test(_app(), _recording(HOP_BY_HOP), target="herd.app:app")
-    assert "'accept': 'application/json'" in source
-    assert "'x-request-id': '9f51'" in source
+    assert "('accept', 'application/json')" in source
+    assert "('x-request-id', '9f51')" in source
 
 
 @pytest.mark.asyncio
 async def test_a_header_named_like_a_dropped_one_is_kept() -> None:
     raw = b"GET /llamas/7 HTTP/1.1\r\nhost: x\r\nx-connection: pooled\r\nhost-region: eu\r\n\r\n"
     source = await generate_test(_app(), _recording(raw), target="herd.app:app")
-    assert "'x-connection': 'pooled'" in source
-    assert "'host-region': 'eu'" in source
+    assert "('x-connection', 'pooled')" in source
+    assert "('host-region', 'eu')" in source
 
 
 async def _run_generated(source: str, app_factory) -> None:

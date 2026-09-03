@@ -447,6 +447,12 @@ class Session:
                 "an isolated tenant registry needs a tenant context; pass "
                 "Session(registry, workload, tenant=TenantContext(schema=...))"
             )
+        isolation = getattr(getattr(registry, "schema_mode", None), "isolation", None)
+        if isolation == "role" and tenant is not None and tenant.role is None:
+            raise SessionError(
+                "role isolation needs a tenant role binding; pass "
+                "TenantContext(schema=..., role=...)"
+            )
         if tenant is not None and not isolated:
             raise SessionError(
                 "tenant context is only meaningful for an isolated registry; this "
@@ -1717,21 +1723,30 @@ class Session:
         depth = self._depth
         savepoint = f"wreath_sp_{depth}"
         written_before = self._written
-        await connection.execute("BEGIN" if depth == 0 else f"SAVEPOINT {savepoint}")
-        if depth == 0 and self._statement_timeout is not None:
-            # Transaction-local, so PostgreSQL discards it at COMMIT/ROLLBACK
-            # and the pooled connection carries no timeout into its next lease.
-            # Set on the outermost transaction only -- a savepoint inherits it,
-            # and re-setting would let a nested block quietly widen the bound.
-            milliseconds = int(self._statement_timeout * 1000)
-            await connection.execute(f"SET LOCAL statement_timeout = {milliseconds}")
-        if depth == 0 and self._tenant is not None:
-            # Bind the tenant namespace (and role) transaction-locally, before
-            # any tenant-template SQL runs. SET LOCAL is scoped to this
-            # transaction, so PostgreSQL discards it at COMMIT/ROLLBACK and the
-            # pooled connection carries no binding into its next lease.
-            for statement in self._tenant._bind_statements():
-                await connection.execute(statement)
+        started = False
+        try:
+            await connection.execute("BEGIN" if depth == 0 else f"SAVEPOINT {savepoint}")
+            started = True
+            if depth == 0 and self._statement_timeout is not None:
+                # Transaction-local, so PostgreSQL discards it at COMMIT/ROLLBACK
+                # and the pooled connection carries no timeout into its next lease.
+                # Set on the outermost transaction only -- a savepoint inherits it,
+                # and re-setting would let a nested block quietly widen the bound.
+                milliseconds = int(self._statement_timeout * 1000)
+                await connection.execute(f"SET LOCAL statement_timeout = {milliseconds}")
+            if depth == 0 and self._tenant is not None:
+                # Bind the tenant namespace (and role) transaction-locally, before
+                # any tenant-template SQL runs. SET LOCAL is scoped to this
+                # transaction, so PostgreSQL discards it at COMMIT/ROLLBACK and the
+                # pooled connection carries no binding into its next lease.
+                for statement in self._tenant._bind_statements():
+                    await connection.execute(statement)
+        except BaseException:
+            if started:
+                await self._unwind(connection, depth, savepoint, commit=False)
+            else:
+                self._broken = True
+            raise
         self._depth = depth + 1
         rollback_state = self._rollback_state
         if rollback_state is None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from wreath.crud import Access
@@ -157,6 +159,12 @@ def test_impersonating_a_user_who_holds_nothing_grants_nothing() -> None:
 def test_impersonation_has_no_default_ttl() -> None:
     with pytest.raises(PlatformError, match="ttl="):
         impersonate(operator="ops-1", user="u-9", scope=("read",))
+
+
+@pytest.mark.parametrize("ttl", (0.0, -1.0, math.nan, math.inf, -math.inf))
+def test_impersonation_ttl_must_be_positive_and_finite(ttl: float) -> None:
+    with pytest.raises(PlatformError, match="positive and finite"):
+        impersonate(operator="ops-1", user="u-9", scope=("read",), ttl=ttl)
 
 
 def test_impersonation_has_no_default_scope() -> None:

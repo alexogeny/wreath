@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import secrets
 from collections.abc import Callable
@@ -265,15 +266,25 @@ def register_oauth2_login(
     @app.get(callback_path)
     async def callback(request: Request):
         query = parse_qs(request.query_string.decode("ascii", "replace"))
-        code = query.get("code", [None])[0]
-        state = query.get("state", [None])[0]
         session = getattr(request.state, "session", None)
         if session is None:
             return JSONResponse({"error": "session_middleware_required"}, status=500)
+        codes = query.get("code", ())
+        states = query.get("state", ())
+        if len(codes) != 1 or len(states) != 1 or not codes[0] or not states[0]:
+            return JSONResponse({"error": "invalid_state"}, status=400)
+        code = codes[0]
+        state = states[0]
         expected_state = session.pop(state_key, None)
         verifier = session.pop(verifier_key, None)
         expected_nonce = session.pop(nonce_key, None)
-        if not code or not state or state != expected_state or not verifier:
+        state_matches = (
+            isinstance(state, str)
+            and bool(state)
+            and isinstance(expected_state, str)
+            and hmac.compare_digest(state, expected_state)
+        )
+        if not code or not state_matches or not verifier:
             return JSONResponse({"error": "invalid_state"}, status=400)
         if provider.token_endpoint is None:
             return JSONResponse({"error": "provider_not_discovered"}, status=503)
@@ -312,6 +323,7 @@ def register_oauth2_login(
         rotate_session(request)
         session[session_key] = {
             "sub": identity.id,
+            "iss": identity.claims.get("iss", provider.issuer),
             "type": identity.type,
             "roles": sorted(identity.roles),
             # Carried so an SSO caller and a bearer caller reach the authorizer

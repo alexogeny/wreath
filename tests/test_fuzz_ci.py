@@ -11,6 +11,7 @@ from wreath._fuzz import corpus_ci
 
 ROOT = Path(__file__).parents[1]
 WORKFLOW = ROOT / ".github/workflows/fuzz.yml"
+CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
 GUIDE = ROOT / "docs/guides/fuzzing.md"
 
 
@@ -33,34 +34,26 @@ def _commands(job: dict) -> str:
 def test_fuzz_workflow_is_least_privilege_and_bounds_concurrency() -> None:
     workflow = _workflow()
     assert workflow["permissions"] == {"contents": "read"}
-    paths = workflow[True]["pull_request"]["paths"]
-    assert "src/wreath/**" in paths
-    assert "tests/test_fuzz_*.py" in paths
-    assert "tools/fuzz_native/**" in paths
+    assert "pull_request" not in workflow[True]
     assert workflow[True]["schedule"] == [{"cron": "17 3 * * *"}]
-    assert workflow["concurrency"]["cancel-in-progress"] == (
-        "${{ github.event_name == 'pull_request' }}"
-    )
+    assert workflow["concurrency"]["cancel-in-progress"] is False
     assert workflow["jobs"]["campaign"]["strategy"]["max-parallel"] == 2
-    assert workflow["jobs"]["pr-smoke"]["timeout-minutes"] == 20
+    assert "pr-smoke" not in workflow["jobs"]
     assert workflow["jobs"]["campaign"]["timeout-minutes"] == 15
     assert workflow["jobs"]["merge-corpus"]["timeout-minutes"] == 30
 
 
-def test_pull_request_smoke_is_change_aware_and_cannot_write_the_corpus_cache() -> None:
-    workflow = _workflow()
-    smoke = workflow["jobs"]["pr-smoke"]
-    commands = _commands(smoke)
-    uses = [step.get("uses", "") for step in smoke["steps"]]
-    assert smoke["if"] == "github.event_name == 'pull_request'"
+def test_pull_request_smoke_reuses_ci_and_cannot_write_the_corpus_cache() -> None:
+    workflow = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
+    checks = workflow["jobs"]["checks"]
+    commands = _commands(checks)
+    uses = [step.get("uses", "") for step in checks["steps"]]
     assert "--mutant changed" in commands
     assert '--mutant-changed "$BASE_SHA"' in commands
-    assert "--mutant sample --mutant-samples 8" in commands
-    assert 'if [ "$status" -ne 2 ]' in commands
-    assert 'if [ "$status" -eq 0 ]; then' in commands
-    assert "grep -Fq 'matched no mutations'" in commands
+    assert "--mutant off" in commands
     assert "--fuzz-replay-only" in commands
-    assert "--fuzz-backend all" in commands
+    assert "--fuzz-backend python" in commands
+    assert "--fuzz-backend all" not in commands
     assert "actions/cache/restore@v5" in uses
     assert all("actions/cache/save@" not in use for use in uses)
 
@@ -88,6 +81,8 @@ def test_scheduled_campaigns_are_target_and_seed_sharded() -> None:
     assert '--fuzz-seed "$SEED"' in commands
     assert "--fuzz-cases 50000" in commands
     assert "--fuzz-budget 240" in commands
+    assert commands.count("uv sync --frozen") == 1
+    assert "setup.py build_ext" not in commands
 
 
 def test_merge_validates_content_addresses_and_only_prunes_exact_duplicates() -> None:
@@ -99,6 +94,8 @@ def test_merge_validates_content_addresses_and_only_prunes_exact_duplicates() ->
     assert "python -m wreath._fuzz.corpus_ci merge" in commands
     assert "python -m wreath._fuzz.corpus_ci finalize" in commands
     assert "python - <<'PY'" not in commands
+    assert commands.count("uv sync --frozen") == 1
+    assert "setup.py build_ext" not in commands
     assert "actions/cache/save@v5" in uses
     assert "actions/download-artifact@v8" in uses
 

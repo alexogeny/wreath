@@ -112,7 +112,17 @@ async def test_claim_and_enqueue_commits_claim_job_and_completion_in_one_transac
 
 @pytest.mark.parametrize("state", ["completed", "processing", "failed"])
 async def test_claim_and_enqueue_does_not_enqueue_an_existing_delivery(state: str) -> None:
-    session = _Session(rows=[None, {"state": state, "fencing_token": 3, "result_status": 202}])
+    session = _Session(
+        rows=[
+            None,
+            {
+                "state": state,
+                "fencing_token": 3,
+                "result_status": 202,
+                "identity_matches": True,
+            },
+        ]
+    )
     enqueued = False
 
     async def enqueue(*, transaction: Any) -> None:

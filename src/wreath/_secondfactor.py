@@ -1584,14 +1584,23 @@ class MemoryChallengeStore:
         from ._capability_map import CapabilityMap
 
         # `ttl=None`: the deadline is per-entry and kept in the value, because
-        # one store holds ceremonies with different lifetimes. The cache's own
-        # bound is what evicts whatever is never spent.
-        self._cache = CapabilityMap(max_entries=max_entries, clock=clock)
+        # one store holds ceremonies with different lifetimes.
+        self._cache = CapabilityMap(
+            max_entries=max_entries,
+            clock=clock,
+            overflow="refuse",
+        )
 
     async def put(
         self, handle: str, *, user_id: str, kind: str, payload: dict[str, Any], ttl: float
     ) -> None:
-        self._cache.put(handle, (user_id, kind, dict(payload)), ttl=float(ttl))
+        admitted = self._cache.put(
+            handle,
+            (user_id, kind, dict(payload)),
+            ttl=float(ttl),
+        )
+        if not admitted:
+            raise OverflowError("second-factor challenge store is at capacity")
 
     async def peek(self, handle: str) -> ChallengeRow | None:
         entry = self._cache.peek(handle)

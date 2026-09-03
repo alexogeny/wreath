@@ -185,8 +185,18 @@ class MCPAuth:
                 "invalid_token",
                 "this MCP endpoint is protected but has no token verifier configured",
             )
-        if request.header("authorization") is None:
+        try:
+            authorization = request._single_header(b"authorization")
+        except ValueError:
+            raise Unauthenticated(
+                "invalid_token", "the authorization header must occur exactly once"
+            ) from None
+        if authorization is None:
             raise Unauthenticated(None)
+        if b"," in authorization:
+            raise Unauthenticated(
+                "invalid_token", "the authorization header cannot contain multiple credentials"
+            )
         identity = await backend.authenticate(request)
         if identity is None:
             raise Unauthenticated("invalid_token", "the bearer token could not be verified")

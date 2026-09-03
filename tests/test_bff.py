@@ -22,8 +22,6 @@ from wreath.policy import HttpPolicy
 from wreath.request import Request
 from wreath.testing import TestClient
 
-pytestmark = pytest.mark.asyncio
-
 
 def _request(*, headers: list[tuple[bytes, bytes]] | None = None) -> Request:
     async def receive() -> dict[str, Any]:
@@ -293,9 +291,9 @@ def test_resource_configuration_refuses_each_invalid_origin(
         BFFResource(client)
 
 
-@pytest.mark.parametrize("request", [None, 1, "request"])
-def test_resource_configuration_requires_callable_request(request: object) -> None:
-    client = type("Client", (), {"origin": "https://api.example", "request": request})()
+@pytest.mark.parametrize("request_method", [None, 1, "request"])
+def test_resource_configuration_requires_callable_request(request_method: object) -> None:
+    client = type("Client", (), {"origin": "https://api.example", "request": request_method})()
 
     with pytest.raises(TypeError, match="async request method"):
         BFFResource(client)
@@ -422,6 +420,54 @@ async def test_logout_handler_clears_and_rotates_session_directly() -> None:
     assert response.status == 204
     assert request.state.session == {}
     assert request.state._session_rotate is True
+
+
+@pytest.mark.parametrize("name", (b"content-type", b"idempotency-key"))
+async def test_duplicate_singleton_headers_never_reach_a_credentialed_backend(
+    name: bytes,
+) -> None:
+    client = RecordingClient()
+    router = bff_router(
+        {"catalog": BFFResource(client, methods={"POST"})},
+        token=lambda _request: "access-token",
+    )
+    endpoint = next(route.endpoint for route in router.routes if route.path == "/bff/catalog")
+    request = _request(
+        headers=[
+            (b"x-wreath-bff", b"1"),
+            (name, b"first"),
+            (name, b"second"),
+        ]
+    )
+    request.scope["method"] = "POST"
+
+    with pytest.raises(BadRequest, match="more than once"):
+        await endpoint(request)
+
+    assert client.calls == []
+
+
+async def test_repeatable_accept_fields_are_forwarded_without_collapsing() -> None:
+    client = RecordingClient()
+    router = bff_router(
+        {"catalog": BFFResource(client, methods={"GET"})},
+        token=lambda _request: "access-token",
+    )
+    endpoint = next(route.endpoint for route in router.routes if route.path == "/bff/catalog")
+    request = _request(
+        headers=[
+            (b"x-wreath-bff", b"1"),
+            (b"accept", b"application/json"),
+            (b"accept", b"application/problem+json"),
+        ]
+    )
+    request.scope["method"] = "GET"
+
+    await endpoint(request)
+
+    forwarded = client.calls[0][2]
+    assert forwarded.count((b"accept", b"application/json")) == 1
+    assert forwarded.count((b"accept", b"application/problem+json")) == 1
 
 
 def test_tokens_cannot_be_put_in_or_read_from_a_client_side_session() -> None:

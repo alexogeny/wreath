@@ -2791,12 +2791,17 @@ class _NativeOutcome:
                 print(result.exception)
 
     def finish(self) -> int:
-        from ._test_runner import MutationActivity, _no_gold_fuzz
+        from ._test_runner import MutationActivity, _no_gold_fuzz, _run_explicit_fuzz_replay
 
         renderer = self.state.renderer
         if renderer is None:
             raise RuntimeError("native activity renderer was not prepared")
         if self.namespace.mutant == "off":
+            if self.namespace.fuzz == "on":
+                fuzz, fuzz_activity, fuzz_status = _run_explicit_fuzz_replay(self.namespace)
+                self._attach_fuzz(fuzz)
+                renderer.finish_pipeline(None, fuzz_activity)
+                return self.status if self.status != 0 else fuzz_status
             renderer.finish()
             return self.status
         if not self.suite.activity.counts()["passed"]:

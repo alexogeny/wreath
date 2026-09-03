@@ -86,6 +86,26 @@ def test_an_expired_oidc_state_is_refused() -> None:
     assert raised.value.reason == "expired-state"
 
 
+def test_oidc_state_lifetime_must_be_finite() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        OidcRelyingParty(
+            issuer="https://idp.example",
+            client_id="wreath-app",
+            ttl=float("inf"),
+        )
+
+
+@pytest.mark.parametrize("now", [99.0, float("nan"), float("-inf")])
+def test_oidc_state_refuses_an_invalid_or_rewound_clock(now: float) -> None:
+    party = _party()
+    flow = party.begin_login(organization="acme", session_id="s1", now=100.0)
+
+    with pytest.raises(SsoRefusal, match="clock") as raised:
+        party.consume_state(flow.state, session_id="s1", now=now)
+
+    assert raised.value.reason == "invalid-time"
+
+
 def test_oidc_pending_state_has_a_hard_capacity_limit() -> None:
     party = OidcRelyingParty(issuer="https://idp.example", client_id="wreath-app", max_pending=1)
     party.begin_login(organization="acme", session_id="s1")

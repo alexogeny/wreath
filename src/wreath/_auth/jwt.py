@@ -197,9 +197,7 @@ def jwk_thumbprint(jwk: Mapping[str, Any], *, hash_name: str = "sha-256") -> str
     for name in members:
         value = jwk.get(name)
         if not isinstance(value, str):
-            raise ValueError(
-                f"JWK thumbprint requires string member {name!r} for key type {kty!r}"
-            )
+            raise ValueError(f"JWK thumbprint requires string member {name!r} for key type {kty!r}")
         required[name] = value
     canonical = _json_dumps(required)
     return b64url_encode(hashlib.sha256(canonical).digest())
@@ -337,7 +335,7 @@ def peek_header(token: str) -> dict[str, Any] | None:
         if not first or len(first) > ((_MAX_SEGMENT_BYTES * 4 + 2) // 3):
             return None
         header = _json_loads(_b64url_decode(first))
-    except (ValueError, KeyError):
+    except ValueError, KeyError:
         return None
     return header if isinstance(header, dict) else None
 
@@ -402,13 +400,25 @@ def default_identity(claims: Mapping[str, Any]) -> Identity:
     subject = claims.get("sub")
     if not isinstance(subject, str) or not subject:
         raise ValueError("token is missing a string 'sub' claim")
+    issuer = claims.get("iss")
+    namespace = issuer if isinstance(issuer, str) else ""
     raw_roles = claims.get("roles") or claims.get("cognito:groups") or claims.get("groups") or ()
     if isinstance(raw_roles, str):
         raw_roles = raw_roles.split()
-    roles = frozenset(str(role) for role in raw_roles)
+    elif raw_roles and (
+        not isinstance(raw_roles, list) or any(not isinstance(role, str) for role in raw_roles)
+    ):
+        raise ValueError("token roles claim must be a string or an array of strings")
+    roles = frozenset(raw_roles)
     scope = claims.get("scope")
     permissions = frozenset(scope.split()) if isinstance(scope, str) else frozenset()
-    return Identity(id=subject, roles=roles, permissions=permissions, claims=dict(claims))
+    return Identity(
+        id=subject,
+        roles=roles,
+        permissions=permissions,
+        claims=dict(claims),
+        namespace=namespace,
+    )
 
 
 IdentityMapper = Callable[[Mapping[str, Any]], Identity]
@@ -538,7 +548,7 @@ def verify_jwt(
 
     try:
         header, claims, signing_input, signature = _parse_compact(token)
-    except (ValueError, KeyError):
+    except ValueError, KeyError:
         return None
 
     alg = header.get("alg")

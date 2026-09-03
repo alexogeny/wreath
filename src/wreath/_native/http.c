@@ -226,6 +226,15 @@ wreath_http_parse_request_parts(
         malformed("malformed request target");
         goto error;
     }
+    int is_options = method_len == 7 && memcmp(method_start, "OPTIONS", 7) == 0;
+    int is_connect = method_len == 7 && memcmp(method_start, "CONNECT", 7) == 0;
+    int is_asterisk = target_len == 1 && target_start[0] == '*';
+    if (is_connect || (is_asterisk && !is_options) ||
+        (!is_asterisk && target_start[0] != '/') ||
+        memchr(target_start, '#', (size_t)target_len) != NULL) {
+        malformed("unsupported request target form");
+        goto error;
+    }
     p++;
     if (end - p < 10 || memcmp(p, "HTTP/1.", 7) != 0 ||
         (p[7] != '0' && p[7] != '1') || p[8] != '\r' || p[9] != '\n') {
@@ -1161,7 +1170,7 @@ wreath_http_serialize_request(PyObject *Py_UNUSED(self), PyObject *args)
          * own scalar path below 16 bytes. Scalar by decision, not by
          * oversight. */
         for (Py_ssize_t i = 0; i < target.len; i++) {
-            if (data[i] <= 0x20 || data[i] == 0x7f) {
+            if (data[i] <= 0x20 || data[i] == '#' || data[i] == 0x7f) {
                 PyErr_SetString(PyExc_ValueError, "invalid request target");
                 goto error;
             }

@@ -134,7 +134,12 @@ async def test_duplicate_inbox_claim_preserves_absent_result_status() -> None:
     session = _Session(
         rows=[
             None,
-            {"state": "completed", "fencing_token": 2, "result_status": None},
+            {
+                "state": "completed",
+                "fencing_token": 2,
+                "result_status": None,
+                "identity_matches": True,
+            },
         ]
     )
 

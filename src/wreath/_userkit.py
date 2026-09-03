@@ -275,6 +275,12 @@ class UserStore(Protocol):
         """
         ...
 
+    async def compare_and_set_password(
+        self, user_id: str, expected: str, replacement: str
+    ) -> bool:
+        """Replace one password only while its previously-read hash still matches."""
+        ...
+
 
 def _normalize_email(email: str) -> str:
     return email.strip().lower()
@@ -336,6 +342,15 @@ class InMemoryUserStore:
         self._by_id[user.id] = user
         self._by_email[_normalize_email(user.email)] = user.id
         return user
+
+    async def compare_and_set_password(
+        self, user_id: str, expected: str, replacement: str
+    ) -> bool:
+        user = self._by_id.get(user_id)
+        if user is None or not hmac.compare_digest(user.hashed_password, expected):
+            return False
+        await self.update(replace(user, hashed_password=replacement))
+        return True
 
 
 @runtime_checkable
@@ -909,8 +924,13 @@ async def reset_password(
         hashed = await _hash_password_off_loop(new_password)
     except ValueError:
         return False
-    await store.update(replace(user, hashed_password=hashed))
-    return True
+    compare_and_set = getattr(store, "compare_and_set_password", None)
+    if compare_and_set is None:
+        raise RuntimeError(
+            "password reset requires "
+            "UserStore.compare_and_set_password(user_id, expected, replacement)"
+        )
+    return bool(await compare_and_set(user.id, user.hashed_password, hashed))
 
 
 def _token_subject(token: str) -> str | None:

@@ -75,7 +75,7 @@ class Session:
     #: `time.monotonic()` at the last session message.
     last_seen: float = 0.0
     #: Verified token subject bound to this session, when protected.
-    principal: str | None = None
+    principal: tuple[str, str, str, str] | None = None
     #: Capabilities declared by the client during initialization.
     client_capabilities: dict[str, Any] = field(default_factory=dict)
     #: Outstanding server-to-client requests after session creation.
@@ -185,7 +185,7 @@ class SessionStore:
         protocol_version: str,
         client_info: dict[str, Any],
         client_capabilities: dict[str, Any] | None = None,
-        principal: str | None = None,
+        principal: tuple[str, str, str, str] | None = None,
         now: float | None = None,
     ) -> Session:
         """Mint a session, first collecting any that have gone idle.

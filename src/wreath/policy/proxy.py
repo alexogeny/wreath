@@ -31,6 +31,7 @@ from ..request import Request
 
 TrustedNetworks: Any = _core.TrustedNetworks
 
+
 class ProxyPolicy:
     """Apply X-Forwarded-* headers, but only from configured proxy networks.
 
@@ -104,9 +105,10 @@ class ProxyPolicy:
         """
         if not self._peer_trusted(request):
             return None
-        headers = request._index_headers()
-
-        forwarded_for = headers.get(b"x-forwarded-for")
+        try:
+            forwarded_for = request._single_header(b"x-forwarded-for")
+        except ValueError:
+            forwarded_for = None
         if forwarded_for is not None:
             client = self._networks.forwarded_client(forwarded_for)
             if client is not None:
@@ -117,15 +119,21 @@ class ProxyPolicy:
                 request._set_client((client, None), source="forwarded")
 
         if self._trust_proto:
-            proto = headers.get(b"x-forwarded-proto")
-            if proto is not None:
+            try:
+                proto = request._single_header(b"x-forwarded-proto")
+            except ValueError:
+                proto = None
+            if proto is not None and b"," not in proto:
                 value = _core.forwarded_proto(proto)
                 if value is not None:
                     request._set_scheme(value)
 
         if self._trust_host:
-            host = headers.get(b"x-forwarded-host")
-            if host is not None:
+            try:
+                host = request._single_header(b"x-forwarded-host")
+            except ValueError:
+                host = None
+            if host is not None and b"," not in host:
                 value = _core.forwarded_host(host)
                 if value is not None:
                     request._set_header(b"host", value)

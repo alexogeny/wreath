@@ -56,6 +56,46 @@ class TestIdempotencyReachesAnIdentity:
         assert second.json() == {"order": 1}
         assert second.header("idempotency-replayed") == "true"
 
+    async def test_ambiguous_idempotency_key_wire_forms_are_rejected(self):
+        class State(dict):
+            __getattr__ = dict.__getitem__
+            __setattr__ = dict.__setitem__
+
+        class Request:
+            method = "POST"
+            path = "/orders"
+            query_string = b""
+            identity = Identity(id="u1")
+            state = State()
+
+            def __init__(self, headers):
+                self.headers = headers
+
+            def header(self, name, default=None):
+                target = name.encode() if isinstance(name, str) else name
+                return next(
+                    (
+                        value.decode("latin-1")
+                        for candidate, value in self.headers
+                        if candidate == target
+                    ),
+                    default,
+                )
+
+        policy = IdempotencyPolicy()
+        duplicate = await policy.action(
+            Request(
+                (
+                    (b"idempotency-key", b"first"),
+                    (b"idempotency-key", b"second"),
+                )
+            )
+        )
+        comma_joined = await policy.action(Request(((b"idempotency-key", b"first, second"),)))
+
+        assert duplicate.status == 400
+        assert comma_joined.status == 400
+
 
 class TestIdempotencyReplayPolicy:
     async def test_a_client_error_is_not_replayed_for_the_whole_ttl(self):

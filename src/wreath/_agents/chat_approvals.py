@@ -4,6 +4,7 @@ import inspect
 import re
 from collections.abc import Awaitable, Callable, Mapping
 
+from .._auth.models import qualified_identity_value
 from ..chat import ChatContext, ChatOps, ChatReply
 from .approvals import ApprovalGrant, ApprovalRequest, ApprovalStore
 
@@ -25,9 +26,7 @@ class ChatApprovalFlow:
         if not isinstance(store, ApprovalStore):
             raise TypeError("chat approval flow requires an ApprovalStore")
         self._store = store
-        self._approved: dict[
-            str, Callable[[ChatContext, ApprovalGrant], Awaitable[ChatReply]]
-        ] = {}
+        self._approved: dict[str, Callable[[ChatContext, ApprovalGrant], Awaitable[ChatReply]]] = {}
         chat.action(self.approve_prefix, prefix=True)(self._approve)
         chat.action(self.deny_prefix, prefix=True)(self._deny)
 
@@ -119,16 +118,29 @@ class ChatApprovalFlow:
         tenant = getattr(context, "tenant", None)
         identity = getattr(context, "identity", None)
         identity_id = getattr(identity, "id", None)
+        identity_key = qualified_identity_value(
+            str(getattr(identity, "namespace", "")), str(identity_id)
+        )
         principal = getattr(context, "principal", None)
         principal_identity = getattr(principal, "identity", None)
-        principal_id = getattr(principal_identity, "id", None)
-        if principal_id is None:
+        linked_identity_id = getattr(principal_identity, "id", None)
+        if linked_identity_id is None:
             principal_id = getattr(principal, "id", None)
+            principal_key = None
+        else:
+            principal_id = linked_identity_id
+            principal_key = qualified_identity_value(
+                str(getattr(principal_identity, "namespace", "")), str(principal_id)
+            )
         if not tenant or not identity_id or principal is None:
             raise LookupError("chat approval requires a linked identity")
-        if principal_id is not None and str(principal_id) != str(identity_id):
+        if principal_id is not None and (
+            principal_key != identity_key
+            if principal_key is not None
+            else str(principal_id) != str(identity_id)
+        ):
             raise LookupError("chat approval linked principal does not match its identity")
-        return str(tenant), str(identity_id)
+        return str(tenant), identity_key
 
     @staticmethod
     def _authenticated_at(context: ChatContext) -> float | None:

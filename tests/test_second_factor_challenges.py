@@ -52,6 +52,28 @@ async def test_memory_consumes_a_challenge_exactly_once() -> None:
     assert await store.consume("h1", user_id="u1", kind="webauthn-register") is None
 
 
+async def test_memory_capacity_refuses_without_evicting_a_live_challenge() -> None:
+    store = MemoryChallengeStore(max_entries=1)
+    await store.put(
+        "victim",
+        user_id="u1",
+        kind="webauthn-register",
+        payload={"c": "victim"},
+        ttl=60,
+    )
+
+    with pytest.raises(OverflowError, match="capacity"):
+        await store.put(
+            "attacker",
+            user_id="u2",
+            kind="webauthn-register",
+            payload={"c": "attacker"},
+            ttl=60,
+        )
+
+    assert await store.consume("victim", user_id="u1", kind="webauthn-register") == {"c": "victim"}
+
+
 async def test_memory_refuses_another_user_without_consuming() -> None:
     store = MemoryChallengeStore()
     await store.put("h1", user_id="u1", kind="webauthn-register", payload={"c": "x"}, ttl=60)

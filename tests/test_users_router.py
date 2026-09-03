@@ -1,8 +1,18 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from wreath.users import InMemoryUserStore, OrmUserStore, default_user_model, user_router
+
+
+class _Revocations:
+    async def delete_for(self, _subject: str) -> int:
+        return 0
+
+
+_REVOCATIONS = _Revocations()
 
 
 def _routes(router):
@@ -10,7 +20,9 @@ def _routes(router):
 
 
 def test_user_router_exposes_lifecycle_routes():
-    router = user_router(InMemoryUserStore(), secret="s" * 32, base_url="https://app")
+    router = user_router(
+        InMemoryUserStore(), sessions=_REVOCATIONS, secret="s" * 32, base_url="https://app"
+    )
     routes = _routes(router)
     assert ("/users/register", "POST") in routes
     assert ("/users/login", "POST") in routes
@@ -34,7 +46,9 @@ def test_user_router_refuses_a_short_action_token_secret() -> None:
 
 
 def test_custom_prefix():
-    router = user_router(InMemoryUserStore(), secret="s" * 32, prefix="/accounts")
+    router = user_router(
+        InMemoryUserStore(), sessions=_REVOCATIONS, secret="s" * 32, prefix="/accounts"
+    )
     assert ("/accounts/register", "POST") in _routes(router)
 
 
@@ -119,11 +133,27 @@ def test_login_limiter_refuses_a_budget_of_no_attempts(max_attempts: int) -> Non
         LoginLimiter(max_attempts=max_attempts, window=60.0)
 
 
+@pytest.mark.parametrize("max_attempts", [True, 1.5, float("nan"), float("inf")])
+def test_login_limiter_refuses_a_non_integer_attempt_budget(max_attempts: Any) -> None:
+    from wreath.users import LoginLimiter
+
+    with pytest.raises(ValueError, match="positive integer"):
+        LoginLimiter(max_attempts=max_attempts, window=60.0)
+
+
 @pytest.mark.parametrize("window", [0.0, -1.0, -0.001])
 def test_login_limiter_refuses_a_window_that_is_not_positive(window: float) -> None:
     from wreath.users import LoginLimiter
 
     with pytest.raises(ValueError, match="window must be positive"):
+        LoginLimiter(max_attempts=3, window=window)
+
+
+@pytest.mark.parametrize("window", [float("nan"), float("inf")])
+def test_login_limiter_refuses_a_non_finite_window(window: float) -> None:
+    from wreath.users import LoginLimiter
+
+    with pytest.raises(ValueError, match="positive and finite"):
         LoginLimiter(max_attempts=3, window=window)
 
 
@@ -162,7 +192,7 @@ async def test_a_bad_verification_token_is_a_400_and_says_it_was_invalid() -> No
     from wreath.testing import TestClient
 
     app = Wreath()
-    app.include_router(user_router(InMemoryUserStore(), secret="s" * 32))
+    app.include_router(user_router(InMemoryUserStore(), sessions=_REVOCATIONS, secret="s" * 32))
     async with TestClient(app) as client:
         response = await client.post("/users/verify", json={"token": "not-a-real-token"})
         assert response.status == 400
@@ -182,7 +212,7 @@ async def test_a_real_verification_token_is_a_200_and_says_verified() -> None:
     token = _userkit.sign_token("s" * 32, _userkit._VERIFY, user.id, ttl=3600)
 
     app = Wreath()
-    app.include_router(user_router(store, secret="s" * 32))
+    app.include_router(user_router(store, sessions=_REVOCATIONS, secret="s" * 32))
     async with TestClient(app) as client:
         response = await client.post("/users/verify", json={"token": token})
         assert response.status == 200
@@ -194,7 +224,7 @@ async def test_the_verification_link_refuses_a_forged_token() -> None:
     from wreath.testing import TestClient
 
     app = Wreath()
-    app.include_router(user_router(InMemoryUserStore(), secret="s" * 32))
+    app.include_router(user_router(InMemoryUserStore(), sessions=_REVOCATIONS, secret="s" * 32))
     async with TestClient(app) as client:
         response = await client.get("/users/verify/not-a-real-token")
         assert response.status == 400
@@ -212,7 +242,7 @@ async def test_the_verification_link_accepts_a_real_token() -> None:
     token = _userkit.sign_token("s" * 32, _userkit._VERIFY, user.id, ttl=3600)
 
     app = Wreath()
-    app.include_router(user_router(store, secret="s" * 32))
+    app.include_router(user_router(store, sessions=_REVOCATIONS, secret="s" * 32))
     async with TestClient(app) as client:
         response = await client.get(f"/users/verify/{token}")
         assert response.status == 200

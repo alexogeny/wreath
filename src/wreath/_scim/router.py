@@ -28,6 +28,7 @@ from .._json import loads as _json_loads
 from .._userkit import hash_password
 from ..authorization import authorize
 from ..cache import BoundedCache
+from ..policy.security import _normalize_host
 from ..response import JSONResponse, Response
 from ..router import Router
 from . import resources
@@ -199,8 +200,19 @@ def _scim_data_helpers(
         """
         mounted = prefix.format(**request.path_params) if "{" in prefix else prefix
         root = str(request.scope.get("root_path", "")).rstrip("/")
-        host = request.header("host")
-        if not host:
+        single_header = getattr(request, "_single_header", None)
+        if callable(single_header):
+            try:
+                raw_host = single_header(b"host")
+            except ValueError:
+                raw_host = None
+            try:
+                host = None if raw_host is None else raw_host.decode("ascii")
+            except UnicodeDecodeError:
+                host = None
+        else:
+            host = request.header("host")
+        if not host or _normalize_host(host) is None:
             return f"{root}{mounted}"
         return f"{request.scheme}://{host}{root}{mounted}"
 
@@ -275,7 +287,12 @@ def _scim_write_helpers(
     membership_map = data_helpers["membership_map"]
 
     async def commit_user(
-        org: str, record: Any, current: Mapping[str, Any], target: Mapping[str, Any]
+        org: str,
+        record: Any,
+        current: Mapping[str, Any],
+        target: Mapping[str, Any],
+        *,
+        adopting: bool = False,
     ) -> Any:
         """Reconcile a user document against the store, or raise `PatchError`.
 
@@ -288,6 +305,27 @@ def _scim_write_helpers(
         if not isinstance(wanted_name, str) or not wanted_name.strip():
             raise PatchError("invalidValue", "userName must be a non-empty string")
         wanted_name = wanted_name.strip()
+        password = target.get("password")
+        changes_global_credentials = (
+            wanted_name.lower() != str(current.get("userName", "")).lower() or password is not None
+        )
+        elsewhere = None
+        if changes_global_credentials:
+            memberships = await organizations.memberships(record.id)
+            elsewhere = [item for item in memberships if item.organization != org]
+            if elsewhere:
+                raise PatchError(
+                    "mutability",
+                    f"this account is also a member of {len(elsewhere)} other organization(s); "
+                    "userName and password are global credentials and cannot be changed "
+                    "through one organization's SCIM resource",
+                )
+            if adopting and record.hashed_password != UNUSABLE_PASSWORD:
+                raise PatchError(
+                    "mutability",
+                    "adopting an existing standalone account cannot change its userName "
+                    "or password",
+                )
         if wanted_name.lower() != str(current.get("userName", "")).lower():
             clash = await find_by_user_name(wanted_name)
             # No `clash.id != record.id` clause: `current` was serialized from
@@ -304,11 +342,17 @@ def _scim_write_helpers(
         if not isinstance(wanted_active, bool):
             raise PatchError("invalidValue", "active must be true or false")
         if wanted_active != bool(current.get("active")):
-            elsewhere = [
-                membership
-                for membership in await organizations.memberships(record.id)
-                if membership.organization != org
-            ]
+            if adopting and record.hashed_password != UNUSABLE_PASSWORD:
+                raise PatchError(
+                    "mutability",
+                    "adopting an existing standalone account cannot change its active state",
+                )
+            if elsewhere is None:
+                elsewhere = [
+                    membership
+                    for membership in await organizations.memberships(record.id)
+                    if membership.organization != org
+                ]
             if elsewhere:
                 # `UserRecord.is_active` is the account, not the membership, and
                 # this account is shared. Disabling it here would sign the user
@@ -323,24 +367,27 @@ def _scim_write_helpers(
                     "de-provision it from this organization alone",
                 )
             updated = _replace(updated, is_active=wanted_active)
-        password = target.get("password")
         if password is not None:
             if not isinstance(password, str) or not password:
                 raise PatchError("invalidValue", "password must be a non-empty string")
             updated = _replace(updated, hashed_password=await hashed(password))
-        if _session_revocation_required(current, target):
-            if revoke_sessions is None:
+        must_revoke = _session_revocation_required(current, target)
+        revoker = revoke_sessions if must_revoke else None
+        if must_revoke:
+            if revoker is None:
                 raise PatchError(
                     "mutability",
                     "changing active or password requires scim_router(revoke_sessions=...) "
                     "so already-issued sessions are invalidated",
                 )
-            revoked = revoke_sessions(str(record.id))
-            if inspect.isawaitable(revoked):
-                await revoked
         if updated is record:
             return record
-        return await users.update(updated)
+        stored = await users.update(updated)
+        if revoker is not None:
+            revoked = revoker(str(record.id))
+            if inspect.isawaitable(revoked):
+                await revoked
+        return stored
 
     async def commit_group(org: str, role: str, target: Mapping[str, Any]) -> None:
         """Reconcile a group document's membership against the store."""
@@ -377,9 +424,7 @@ def _scim_write_helpers(
     }
 
 
-def _session_revocation_required(
-    current: Mapping[str, Any], target: Mapping[str, Any]
-) -> bool:
+def _session_revocation_required(current: Mapping[str, Any], target: Mapping[str, Any]) -> bool:
     disabled = bool(current.get("active")) and target.get("active") is False
     return disabled or target.get("password") is not None
 
@@ -1232,7 +1277,7 @@ def _mount_scim_user_crud(context: _ScimBuildContext) -> None:
             # adopted.) Nothing above depends on the membership existing --
             # `commit_user` counts the *other* organisations either way.
             target = replace_document(current, body, shape=resources.USER)
-            record = await commit_user(org, record, current, target)
+            record = await commit_user(org, record, current, target, adopting=True)
             # An account that already exists is **adopted** rather than
             # duplicated: the same person may have signed up directly before the
             # directory ever provisioned them, and minting a second account for

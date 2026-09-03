@@ -5,6 +5,7 @@ import hmac
 import json
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -115,6 +116,89 @@ def _oidc_provider(http_client: object) -> OidcProvider:
         audience="client",
         http_client=http_client,
     )
+
+
+def _callback_with_recording_client() -> tuple[Any, Any]:
+    class Response:
+        status = 500
+        body = b""
+
+    class Client:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def post(self, *args: Any, **kwargs: Any) -> Response:
+            self.calls += 1
+            return Response()
+
+    class App:
+        def __init__(self) -> None:
+            self.routes: dict[str, Any] = {}
+
+        def get(self, path: str) -> Any:
+            def register(endpoint: Any) -> Any:
+                self.routes[path] = endpoint
+                return endpoint
+
+            return register
+
+    client = Client()
+    provider = _oidc_provider(client)
+    provider.authorization_endpoint = "https://idp.example/authorize"
+    provider.token_endpoint = "https://idp.example/token"
+    app = App()
+    register_oauth2_login(
+        app,
+        "idp",
+        provider=provider,
+        client_id="client",
+        client_secret="secret",
+        redirect_uri="https://app.example/auth/callback",
+    )
+    return app.routes["/auth/callback"], client
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        b"code=first&code=second&state=issued",
+        b"code=code&state=issued&state=other",
+    ],
+)
+async def test_callback_refuses_duplicate_security_parameters(query: bytes) -> None:
+    callback, client = _callback_with_recording_client()
+    session = {
+        "_oidc_state_idp": "issued",
+        "_oidc_verifier_idp": "verifier",
+        "_oidc_nonce_idp": "nonce",
+    }
+
+    response = await callback(
+        SimpleNamespace(query_string=query, state=SimpleNamespace(session=session))
+    )
+
+    assert response.status == 400
+    assert response.body == b'{"error":"invalid_state"}'
+    assert client.calls == 0
+
+
+@pytest.mark.parametrize("query", [b"state=issued", b"code=code"])
+async def test_incomplete_callback_does_not_consume_the_pending_flow(query: bytes) -> None:
+    callback, client = _callback_with_recording_client()
+    session = {
+        "_oidc_state_idp": "issued",
+        "_oidc_verifier_idp": "verifier",
+        "_oidc_nonce_idp": "nonce",
+    }
+    original = dict(session)
+
+    response = await callback(
+        SimpleNamespace(query_string=query, state=SimpleNamespace(session=session))
+    )
+
+    assert response.status == 400
+    assert session == original
+    assert client.calls == 0
 
 
 async def test_login_refuses_a_provider_without_an_authorization_endpoint() -> None:

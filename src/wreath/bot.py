@@ -127,11 +127,18 @@ def challenge_dependency(challenge: BotChallenge, *, header: str = "cf-turnstile
         raise TypeError("bot challenge must expose async verify(token, request)")
     if not isinstance(header, str) or not header:
         raise ValueError("bot-challenge token header must be a non-empty string")
+    header_bytes = header.encode("latin-1").lower()
 
     async def verify(request: Request) -> ChallengeResult:
-        token = request.header(header)
-        if token is None:
+        try:
+            raw_token = request._single_header(header_bytes)
+        except ValueError as exc:
+            raise ChallengeRefused(
+                f"bot-challenge token header {header!r} occurs more than once"
+            ) from exc
+        if raw_token is None:
             raise ChallengeRefused(f"bot-challenge token header {header!r} is required")
+        token = raw_token.decode("latin-1")
         return await challenge.verify(token, request)
 
     return verify

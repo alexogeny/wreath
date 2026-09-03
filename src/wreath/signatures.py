@@ -110,6 +110,7 @@ import base64
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import Any, Final
 from urllib.parse import parse_qsl, quote
 
@@ -665,8 +666,8 @@ class Signatures:
         refresh_on_startup: bool = True,
         clock: Callable[[], float] | None = None,
     ) -> None:
-        if max_age <= 0:
-            raise ValueError("signature max_age must be positive")
+        if not isfinite(max_age) or max_age <= 0:
+            raise ValueError("signature max_age must be finite and positive")
         if profile != WEB_BOT_AUTH_2026:
             raise ValueError(
                 f"unknown signature profile {profile!r}; "
@@ -774,14 +775,26 @@ class Signatures:
 
     def _verify(self, request: Any) -> SignatureFacts:
         headers = request._index_headers()
-        raw_input = headers.get(b"signature-input")
+        single = getattr(request, "_single_header", None)
+        if single is None:
+            raw_input = headers.get(b"signature-input")
+            raw_signature = headers.get(b"signature")
+            agent_header = headers.get(b"signature-agent")
+        else:
+            try:
+                raw_input = single(b"signature-input")
+                raw_signature = single(b"signature")
+                agent_header = single(b"signature-agent")
+                single(b"host")
+                single(b"content-digest")
+            except ValueError:
+                self.unverified += 1
+                return SignatureFacts(reason="signature request field occurs more than once")
         if raw_input is None:
             return _UNSIGNED
-        raw_signature = headers.get(b"signature")
         if raw_signature is None:
             self.unverified += 1
             return SignatureFacts(reason="no-signature-header")
-        agent_header = headers.get(b"signature-agent")
         agent = None if agent_header is None else agent_header.decode("latin-1").strip()
         if agent is not None and agent.startswith('"') and agent.endswith('"'):
             agent = agent[1:-1]
@@ -855,7 +868,7 @@ class Signatures:
         if nonces is not None:
             if not isinstance(nonce, str):
                 raise SignatureError("signature has no nonce")
-            ledger_key = f"{key_id}\x00{nonce}"
+            ledger_key = f"{key.public.hex()}\x00{nonce}"
             # Check before verification, but spend bounded ledger capacity only after it.
             if nonces.seen(ledger_key):
                 raise SignatureError("signature nonce was already used")

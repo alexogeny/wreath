@@ -10,6 +10,7 @@ from ..response import ProblemResponse
 
 _CONTENT_ENCODING = b"content-encoding"
 _CONTENT_LENGTH = b"content-length"
+_CONTENT_TYPE = b"content-type"
 
 
 class RequestDecompressionPolicy:
@@ -21,8 +22,9 @@ class RequestDecompressionPolicy:
     `max_output_bytes` independently bounds expansion.
 
     Unsupported, stacked, or duplicate content codings fail closed with 415.
-    The native decoder accepts exactly one complete gzip member and rejects
-    truncation and trailing bytes.
+    Format-aware decoding also refuses duplicate Content-Type fields rather
+    than choosing one representation interpretation. The native decoder accepts
+    exactly one complete gzip member and rejects truncation and trailing bytes.
 
     Args:
         max_output_bytes: Decoded byte ceiling. `None` reuses the request's
@@ -75,12 +77,23 @@ class RequestDecompressionPolicy:
                 detail="Only a single gzip Content-Encoding is supported",
             )
 
+        if self.format_aware:
+            try:
+                raw_content_type = request._single_header(_CONTENT_TYPE)
+            except ValueError:
+                return ProblemResponse(
+                    status=415,
+                    detail="Content-Type must occur at most once for gzip decoding",
+                )
+            content_type = (
+                "unknown" if raw_content_type is None else raw_content_type.decode("latin-1")
+            )
+        else:
+            content_type = "unknown"
         encoded = await request.body()
         maximum = self.max_output_bytes or request._limits.max_body_bytes
-        content_type = request.header(b"content-type", "unknown")
-        format_hint = content_type if self.format_aware else "unknown"
         try:
-            decoded = _core.gzip_decompress(encoded, maximum, format_hint)
+            decoded = _core.gzip_decompress(encoded, maximum, content_type)
         except ValueError as error:
             detail = str(error)
             if "expands past" in detail:
@@ -106,7 +119,10 @@ class RequestDecompressionPolicy:
             responses=(
                 (400, ResponseSpec(description="Malformed gzip request body.")),
                 (413, ResponseSpec(description="Decoded request body exceeds its limit.")),
-                (415, ResponseSpec(description="Unsupported or ambiguous content coding.")),
+                (
+                    415,
+                    ResponseSpec(description="Unsupported or ambiguous representation metadata."),
+                ),
             ),
         )
 

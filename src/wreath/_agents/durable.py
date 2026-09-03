@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
-from .identity import principal_id
+from .identity import principal_scope_id
 
 
 class UnknownModelOutcome(RuntimeError):
@@ -62,7 +62,7 @@ class DurableTurn:
 
     @classmethod
     def from_invocation(cls, invocation: Any, *, prompt: str, message_id: str) -> DurableTurn:
-        resolved_principal = principal_id(invocation.principal)
+        resolved_principal = principal_scope_id(invocation.principal)
         return cls(
             turn_id=stable_turn_id(
                 invocation.tenant, resolved_principal, invocation.conversation, message_id

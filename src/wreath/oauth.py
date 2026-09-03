@@ -383,6 +383,12 @@ class AuthorizationServer:
         self._clients: dict[str, ClientRegistration] = {}
         for client in clients:
             self.register(client)
+        if not math.isfinite(lifetime):
+            raise ValueError("OAuth lifetime must be finite")
+        if not math.isfinite(code_ttl):
+            raise ValueError("OAuth code_ttl must be finite")
+        if not math.isfinite(refresh_ttl):
+            raise ValueError("OAuth refresh_ttl must be finite")
         self._lifetime = lifetime
         self._lock = threading.RLock()
         self._code_ttl = code_ttl

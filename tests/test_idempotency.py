@@ -82,6 +82,15 @@ async def test_first_call_passes_through_then_replays() -> None:
     assert (b"idempotency-replayed", b"true") in replay.headers
 
 
+async def test_idempotency_scope_distinguishes_raw_targets_a_proxy_forwards_differently() -> None:
+    policy = IdempotencyPolicy()
+    canonical = _request(path="/files/report")
+    encoded = _request(path="/files/report")
+    encoded.scope["raw_path"] = b"/files/%72eport"
+
+    assert policy._key(canonical) != policy._key(encoded)
+
+
 async def test_fragment_response_replay_keeps_the_complete_body() -> None:
     mw = IdempotencyPolicy()
     prefix = b"dynamic-prefix"
@@ -106,6 +115,18 @@ async def test_concurrent_duplicate_gets_409() -> None:
     # A second identical request arrives before the first's `after` runs.
     conflict = await mw.action(_request())
     assert conflict is not None and conflict.status == 409
+
+
+async def test_capacity_refusal_returns_503_without_running_the_handler() -> None:
+    store = _StoreStub(("full", None))
+    policy = IdempotencyPolicy(store=store)
+    request = _request()
+
+    response = await policy.action(request)
+
+    assert response is not None and response.status == 503
+    assert dict(response.headers)[b"retry-after"] == b"1"
+    assert request.state.get("idempotency_key") is None
 
 
 async def test_5xx_is_not_cached_and_stays_retryable() -> None:
@@ -281,15 +302,34 @@ async def test_the_memory_store_reclaims_an_expired_key() -> None:
     assert await store.reserve("k") == ("fresh", None)
 
 
-async def test_the_memory_store_measures_the_window_from_the_first_attempt() -> None:
+async def test_the_memory_store_refuses_capacity_without_evicting_live_replays() -> None:
     from wreath.policy import MemoryIdempotencyStore
-    from wreath.store import MemoryStore
+
+    store = MemoryIdempotencyStore(max_entries=2)
+    assert await store.reserve("first") == ("fresh", None)
+    await store.store("first", (201, (), b"first"))
+    assert await store.reserve("second") == ("fresh", None)
+    await store.store("second", (201, (), b"second"))
+
+    assert await store.reserve("attacker") == ("full", None)
+    assert await store.reserve("first") == ("done", (201, (), b"first"))
+    assert await store.reserve("second") == ("done", (201, (), b"second"))
+
+
+async def test_the_memory_store_measures_the_window_from_the_first_attempt() -> None:
+    from wreath._capability_map import CapabilityMap
+    from wreath.policy import MemoryIdempotencyStore
 
     store = MemoryIdempotencyStore(ttl=10.0)
     clock = [1000.0]
     # A steerable clock, so the assertion is about the semantics and not about
     # how long the test host took to get here.
-    store._store = MemoryStore(ttl=10.0, clock=lambda: clock[0])
+    store._store = CapabilityMap(
+        ttl=10.0,
+        max_entries=4096,
+        clock=lambda: clock[0],
+        overflow="refuse",
+    )
 
     assert await store.reserve("k") == ("fresh", None)
     clock[0] += 6.0  # a slow handler
@@ -300,19 +340,19 @@ async def test_the_memory_store_measures_the_window_from_the_first_attempt() -> 
     assert await store.reserve("k") == ("fresh", None)
 
 
-async def test_the_memory_store_treats_a_lost_claim_as_fresh() -> None:
+async def test_the_memory_store_treats_a_lost_claim_as_full() -> None:
     from wreath.policy import MemoryIdempotencyStore
 
     class LostClaim:
-        def claim(self, key: str) -> bool:
+        def claim(self, key: str, value: object) -> bool:
             return False
 
-        def read(self, key: str):
+        def peek(self, key: str):
             return None
 
     store = MemoryIdempotencyStore()
     store._store = LostClaim()
-    assert await store.reserve("lost") == ("fresh", None)
+    assert await store.reserve("lost") == ("full", None)
 
 
 def test_replayable_headers_drop_names_and_values_containing_nul() -> None:

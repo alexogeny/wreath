@@ -56,6 +56,7 @@ from dataclasses import dataclass
 from time import time as _wall_time
 from typing import Any, Protocol
 
+from ._auth.models import qualified_identity_value
 from .response import ProblemResponse
 from .store import ALIAS, Column, Keyed, PostgresStore, Sql
 from .temporal import Duration
@@ -102,6 +103,8 @@ class Quota:
     def __post_init__(self) -> None:
         if not self.name:
             raise ValueError("a quota needs a name")
+        if not all(math.isfinite(value) for value in (self.limit, self.period, self.cost)):
+            raise ValueError("quota limit, period, and cost must be finite")
         if self.limit <= 0.0:
             raise ValueError("limit must be positive")
         if self.period <= 0.0:
@@ -172,18 +175,18 @@ class MemoryQuotaStore:
     index is simply part of the primary key -- and having one owner of "which
     period is this" is the point: two of them agree right up until a clock skews
     or a rounding differs, and then one grants an allowance the other already
-    spent. `QuotaMeter.key` is the owner. A counter from an elapsed period is
-    therefore unreachable rather than stale, and is evicted as room is needed.
+    spent. `QuotaMeter.key` is the owner.
 
-    `max_entries` bounds distinct keys; at the ceiling the **fullest** counter
-    is evicted, matching the rate limiter's choice, because evicting the
-    emptiest would hand a fresh allowance to the caller who has spent the most.
+    `max_entries` bounds distinct keys. At the ceiling a new key is refused
+    until the current period resets; evicting any live counter would hand its
+    caller a fresh allowance. Elapsed-period counters are reclaimed once, on
+    the first capacity miss of a new period.
 
     Args:
         max_entries: Distinct keys tracked. Default 10000.
     """
 
-    __slots__ = ("_counts", "_max_entries", "_quota")
+    __slots__ = ("_counts", "_full_period", "_max_entries", "_periods", "_quota")
 
     def __init__(self, *, max_entries: int = 10000) -> None:
         if max_entries <= 0:
@@ -191,6 +194,8 @@ class MemoryQuotaStore:
         self._max_entries = max_entries
         self._quota: Quota | None = None
         self._counts: dict[str, float] = {}
+        self._periods: dict[str, int] = {}
+        self._full_period: int | None = None
 
     def configure(self, quota: Quota) -> None:
         """Bind the allowance. Once, and only once.
@@ -223,24 +228,23 @@ class MemoryQuotaStore:
         key belongs to -- the key already said.
         """
         quota = self._quota_or_raise()
+        period, reset = quota.window(now)
         used = self._counts.get(key, 0.0)
         if used + quota.cost > quota.limit:
-            return quota.window(now)[1]
+            return reset
         if key not in self._counts and len(self._counts) >= self._max_entries:
-            self._evict()
+            if self._full_period == period:
+                return reset
+            stale = [entry for entry, seen in self._periods.items() if seen != period]
+            for entry in stale:
+                del self._counts[entry]
+                del self._periods[entry]
+            if len(self._counts) >= self._max_entries:
+                self._full_period = period
+                return reset
         self._counts[key] = used + quota.cost
+        self._periods.setdefault(key, period)
         return 0.0
-
-    def _evict(self) -> None:
-        """Drop the fullest counter to make room.
-
-        The fullest rather than the emptiest, and rather than the oldest: at the
-        ceiling something has to lose its history, and losing the history of the
-        caller who has consumed the most is the choice that grants the least.
-        It still grants *something*, which is why this store is documented as
-        the single-process one.
-        """
-        del self._counts[max(self._counts, key=self._counts.__getitem__)]
 
     async def spend(self, key: str, now: float) -> float:
         """`try_spend` behind the awaiting `QuotaStore` protocol."""
@@ -262,6 +266,8 @@ class MemoryQuotaStore:
         had spent their month is handed it back.
         """
         self._counts.clear()
+        self._periods.clear()
+        self._full_period = None
 
 
 class PostgresQuotaStore:
@@ -458,7 +464,10 @@ class QuotaMeter:
         if identity is None:
             return None
         index, _ = self.quota.window(_wall_time())
-        return f"{self.quota.name}:{identity.type}:{identity.id}:{index}"
+        identity_id = qualified_identity_value(
+            str(getattr(identity, "namespace", "")), str(identity.id)
+        )
+        return f"{self.quota.name}:{identity.type}:{identity_id}:{index}"
 
     def refusal(self, reset: float) -> ProblemResponse:
         """The 429 for an exhausted allowance.

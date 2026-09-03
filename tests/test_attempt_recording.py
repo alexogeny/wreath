@@ -253,6 +253,22 @@ def test_a_recorder_uses_the_image_it_was_given():
         assert recorder.written == 1
 
 
+def test_an_attempt_queue_cannot_escape_the_recording_directory(tmp_path):
+    from pathlib import Path
+
+    from wreath.recording import AttemptRecorder
+
+    directory = tmp_path / "captures"
+    directory.mkdir()
+    recorder = AttemptRecorder(AttemptPolicy(), directory=str(directory))
+
+    path = recorder.write(_record(queue="../outside"))
+
+    assert path is not None
+    assert Path(path).parent == directory
+    assert not list(tmp_path.glob("outside-*.wfr1"))
+
+
 def test_an_attempt_round_trips_through_the_wfr1_container():
     decoded = read_recording(_written(_record()))
     assert decoded.clean

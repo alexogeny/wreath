@@ -152,6 +152,8 @@ typedef struct {
     PyObject *default_response_headers;
     PyObject *transport;
     PyObject *transport_write_fn;
+    PyObject *idle_timeout_handle;
+    PyObject *idle_timeout_callable;
 
     PyObject *loop_create_future;
     PyObject *loop_create_task;
@@ -160,6 +162,8 @@ typedef struct {
     PyObject *scope_http_version;
     PyObject *scope_scheme;
     PyObject *scope_root_path;
+    PyObject *server_address;
+    PyObject *client_address;
 
     PyObject *streams;         /* dict {int stream_id: Http2Stream} */
     PyObject *pending_apps;    /* streams activated after the current input batch */
@@ -214,6 +218,7 @@ typedef struct {
     Py_ssize_t max_header_count;
     Py_ssize_t max_body_bytes;
     Py_ssize_t max_body_chunks;
+    double keep_alive_timeout;
     double request_timeout;
     Py_ssize_t hpack_max;
 
@@ -227,6 +232,73 @@ typedef struct {
 static PyTypeObject *Http2ProtocolType;
 
 /* --- small helpers -------------------------------------------------------- */
+
+static int
+h2_cancel_idle_timeout(Http2Protocol *self)
+{
+    PyObject *handle = self->idle_timeout_handle;
+    if (handle == NULL) {
+        return 0;
+    }
+    self->idle_timeout_handle = NULL;
+    PyObject *result = PyObject_CallMethod(handle, "cancel", NULL);
+    Py_DECREF(handle);
+    if (result == NULL) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
+static int
+h2_arm_idle_timeout(Http2Protocol *self)
+{
+    if (h2_cancel_idle_timeout(self) < 0) {
+        return -1;
+    }
+    self->idle_timeout_handle = PyObject_CallMethod(
+        self->loop, "call_later", "dO",
+        self->keep_alive_timeout, self->idle_timeout_callable
+    );
+    return self->idle_timeout_handle == NULL ? -1 : 0;
+}
+
+static PyObject *
+h2_on_idle_timeout(PyObject *op, PyObject *Py_UNUSED(ignored))
+{
+    Http2Protocol *self = (Http2Protocol *)op;
+    Py_CLEAR(self->idle_timeout_handle);
+    if (self->active_requests == 0 && self->transport != NULL) {
+        PyObject *result = PyObject_CallMethod(self->transport, "close", NULL);
+        if (result == NULL) {
+            return NULL;
+        }
+        Py_DECREF(result);
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+h2_address_tuple(PyObject *info)
+{
+    if (info == NULL || info == Py_None || !PySequence_Check(info)) {
+        Py_RETURN_NONE;
+    }
+    Py_ssize_t size = PySequence_Size(info);
+    if (size < 0) return NULL;
+    if (size < 2) Py_RETURN_NONE;
+    PyObject *host = PySequence_GetItem(info, 0);
+    PyObject *port = PySequence_GetItem(info, 1);
+    if (host == NULL || port == NULL) {
+        Py_XDECREF(host);
+        Py_XDECREF(port);
+        return NULL;
+    }
+    PyObject *address = PyTuple_Pack(2, host, port);
+    Py_DECREF(host);
+    Py_DECREF(port);
+    return address;
+}
 
 static PyObject *
 h2_make_future(Http2Protocol *self)
@@ -1350,6 +1422,10 @@ h2_maybe_close_stream(PyObject *proto, Http2Stream *st)
         PyObject *r = PyObject_CallMethod(self->transport, "close", NULL);
         Py_XDECREF(r);
     }
+    else if (removed == 1 && self->active_requests == 0 &&
+             h2_arm_idle_timeout(self) < 0) {
+        PyErr_WriteUnraisable((PyObject *)self);
+    }
 }
 
 static void
@@ -1941,10 +2017,19 @@ build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope,
     int is_connect = method && PyBytes_GET_SIZE(method) == 7 &&
                      memcmp(PyBytes_AS_STRING(method), "CONNECT", 7) == 0;
     if (is_connect) {
-        if (!authority) goto proto_err;
+        goto proto_err;
     } else {
         if (!method || !path || !scheme) goto proto_err;
-        if (PyBytes_GET_SIZE(path) == 0) goto proto_err;
+        const char *path_data = PyBytes_AS_STRING(path);
+        Py_ssize_t path_size = PyBytes_GET_SIZE(path);
+        int is_options = PyBytes_GET_SIZE(method) == 7 &&
+                         memcmp(PyBytes_AS_STRING(method), "OPTIONS", 7) == 0;
+        int is_asterisk = path_size == 1 && path_data[0] == '*';
+        if (path_size == 0 || (is_asterisk && !is_options) ||
+            (!is_asterisk && path_data[0] != '/') ||
+            memchr(path_data, '#', (size_t)path_size) != NULL) {
+            goto proto_err;
+        }
     }
     if (authority != NULL) {
         H2Authority parsed;
@@ -2033,7 +2118,8 @@ build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope,
         scope = wreath_request_context_new(
             self->scope_type, self->scope_asgi, self->scope_http_version,
             method_str, self->scope_scheme, path_str, raw_path, query,
-            scope_headers, Py_None, Py_None, self->scope_root_path
+            scope_headers, self->server_address, self->client_address,
+            self->scope_root_path
         );
         Py_DECREF(method_str);
         Py_DECREF(path_str); Py_DECREF(raw_path); Py_DECREF(query);
@@ -2050,7 +2136,7 @@ build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope,
             return -2;
         }
         scope = Py_BuildValue(
-            "{s:s,s:s,s:s,s:N,s:N,s:N,s:N,s:O}",
+            "{s:s,s:s,s:s,s:N,s:N,s:N,s:N,s:O,s:O,s:O}",
             "type", "http",
             "http_version", "2",
             "scheme", "https",
@@ -2058,7 +2144,9 @@ build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope,
             "path", path_str,
             "raw_path", raw_path,
             "query_string", query,
-            "headers", asgi_headers);
+            "headers", asgi_headers,
+            "server", self->server_address,
+            "client", self->client_address);
         Py_DECREF(asgi_headers);
         Py_DECREF(scope_headers);
     }
@@ -2136,6 +2224,10 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
         return -1;
     }
     if (rc == -1) {
+        return h2_stream_error((PyObject *)self, sid, H2_PROTOCOL_ERROR);
+    }
+    if (end_stream && content_length > 0) {
+        Py_DECREF(scope);
         return h2_stream_error((PyObject *)self, sid, H2_PROTOCOL_ERROR);
     }
 
@@ -2309,6 +2401,10 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
         return -1;
     }
 
+    if (self->active_requests == 0 && h2_cancel_idle_timeout(self) < 0) {
+        Py_DECREF(st);
+        return -1;
+    }
     PyObject *key = PyLong_FromUnsignedLong(sid);
     if (key == NULL || PyDict_SetItem(self->streams, key, (PyObject *)st) < 0) {
         Py_XDECREF(key);
@@ -2543,9 +2639,13 @@ process_headers(Http2Protocol *self, int flags, uint32_t sid,
         PyObject *key = PyLong_FromUnsignedLong(sid);
         int exists = key ? PyDict_Contains(self->streams, key) : -1;
         Py_XDECREF(key);
-        if (exists != 1) {
-            return h2_connection_error(self, H2_PROTOCOL_ERROR);
+        if (exists < 0) {
+            return -1;
         }
+        if (exists == 1) {
+            return h2_stream_error((PyObject *)self, sid, H2_PROTOCOL_ERROR);
+        }
+        return h2_connection_error(self, H2_PROTOCOL_ERROR);
     }
     /* strip padding / priority */
     Py_ssize_t off = 0;
@@ -2819,6 +2919,9 @@ static int
 process_priority_update(Http2Protocol *self, uint32_t sid,
                         const uint8_t *payload, Py_ssize_t len)
 {
+    if (h2_note_unproductive(self) < 0 || self->fatal) {
+        return self->fatal ? 0 : -1;
+    }
     if (!self->rfc9218_enabled) {
         return 0;  /* preserve stock asyncio/uvloop scheduling */
     }
@@ -2827,9 +2930,6 @@ process_priority_update(Http2Protocol *self, uint32_t sid,
     }
     if (len < 4) {
         return h2_connection_error(self, H2_FRAME_SIZE_ERROR);
-    }
-    if (h2_note_unproductive(self) < 0 || self->fatal) {
-        return self->fatal ? 0 : -1;
     }
     uint32_t stream_id = get_u32(payload) & 0x7fffffffU;
     if (stream_id == 0 || (stream_id & 1) == 0) {
@@ -3035,11 +3135,29 @@ static PyObject *
 h2_connection_made(PyObject *op, PyObject *transport)
 {
     Http2Protocol *self = (Http2Protocol *)op;
+    PyObject *sockname = PyObject_CallMethod(
+        transport, "get_extra_info", "s", "sockname");
+    PyObject *peername = sockname != NULL
+        ? PyObject_CallMethod(transport, "get_extra_info", "s", "peername") : NULL;
+    PyObject *server = sockname != NULL && peername != NULL
+        ? h2_address_tuple(sockname) : NULL;
+    PyObject *client = server != NULL ? h2_address_tuple(peername) : NULL;
+    Py_XDECREF(sockname);
+    Py_XDECREF(peername);
+    if (server == NULL || client == NULL) {
+        Py_XDECREF(server);
+        Py_XDECREF(client);
+        return NULL;
+    }
     self->transport = Py_NewRef(transport);
     self->transport_write_fn = PyObject_GetAttrString(transport, "write");
     if (self->transport_write_fn == NULL) {
+        Py_DECREF(server);
+        Py_DECREF(client);
         return NULL;
     }
+    Py_XSETREF(self->server_address, server);
+    Py_XSETREF(self->client_address, client);
     if (self->registry != NULL) {
         if (PySet_Add(self->registry, op) < 0) {
             return NULL;
@@ -3049,6 +3167,9 @@ h2_connection_made(PyObject *op, PyObject *transport)
         return NULL;
     }
     if (h2_flush(op) < 0) {
+        return NULL;
+    }
+    if (h2_arm_idle_timeout(self) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
@@ -3267,6 +3388,9 @@ h2_connection_lost(PyObject *op, PyObject *Py_UNUSED(exc))
     Http2Protocol *self = (Http2Protocol *)op;
     self->closing = 1;
     self->fatal = 1;
+    if (h2_cancel_idle_timeout(self) < 0) {
+        PyErr_Clear();
+    }
     /* deliver disconnect and cancel every live stream */
     if (self->streams != NULL) {
         PyObject *values = PyDict_Values(self->streams);
@@ -3403,6 +3527,7 @@ static PyMethodDef h2_methods[] = {
     {"pause_writing", h2_pause_writing, METH_NOARGS, NULL},
     {"resume_writing", h2_resume_writing, METH_NOARGS, NULL},
     {"_run_write_scheduler", h2_run_write_scheduler, METH_NOARGS, NULL},
+    {"_on_idle_timeout", h2_on_idle_timeout, METH_NOARGS, NULL},
     {"stop_accepting", h2_stop_accepting, METH_NOARGS, NULL},
     {"shutdown", h2_shutdown, METH_NOARGS, NULL},
     {NULL, NULL, 0, NULL},
@@ -3421,6 +3546,8 @@ h2_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(self->default_response_headers);
     Py_VISIT(self->transport);
     Py_VISIT(self->transport_write_fn);
+    Py_VISIT(self->idle_timeout_handle);
+    Py_VISIT(self->idle_timeout_callable);
     Py_VISIT(self->loop_create_future);
     Py_VISIT(self->loop_create_task);
     Py_VISIT(self->scope_type);
@@ -3428,6 +3555,8 @@ h2_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(self->scope_http_version);
     Py_VISIT(self->scope_scheme);
     Py_VISIT(self->scope_root_path);
+    Py_VISIT(self->server_address);
+    Py_VISIT(self->client_address);
     Py_VISIT(self->streams);
     Py_VISIT(self->pending_apps);
     Py_VISIT(self->pending_priorities);
@@ -3452,6 +3581,10 @@ h2_clear(PyObject *op)
     Py_CLEAR(self->default_response_headers);
     Py_CLEAR(self->transport);
     Py_CLEAR(self->transport_write_fn);
+    if (h2_cancel_idle_timeout(self) < 0) {
+        PyErr_Clear();
+    }
+    Py_CLEAR(self->idle_timeout_callable);
     Py_CLEAR(self->loop_create_future);
     Py_CLEAR(self->loop_create_task);
     Py_CLEAR(self->scope_type);
@@ -3459,6 +3592,8 @@ h2_clear(PyObject *op)
     Py_CLEAR(self->scope_http_version);
     Py_CLEAR(self->scope_scheme);
     Py_CLEAR(self->scope_root_path);
+    Py_CLEAR(self->server_address);
+    Py_CLEAR(self->client_address);
     Py_CLEAR(self->streams);
     Py_CLEAR(self->pending_apps);
     Py_CLEAR(self->pending_priorities);
@@ -3546,6 +3681,8 @@ h2_init(PyObject *op, PyObject *args, PyObject *kwargs)
     self->registry = Py_NewRef(registry);
     self->transport = NULL;
     self->transport_write_fn = NULL;
+    self->idle_timeout_handle = NULL;
+    self->idle_timeout_callable = PyObject_GetAttrString(op, "_on_idle_timeout");
     self->loop_create_future = PyObject_GetAttrString(loop, "create_future");
     self->loop_create_task = PyObject_GetAttrString(loop, "create_task");
     self->scope_type = PyUnicode_FromString("http");
@@ -3555,7 +3692,10 @@ h2_init(PyObject *op, PyObject *args, PyObject *kwargs)
     self->scope_http_version = PyUnicode_FromString("2");
     self->scope_scheme = PyUnicode_FromString("https");
     self->scope_root_path = PyUnicode_FromString("");
-    if (!self->loop_create_future || !self->loop_create_task ||
+    self->server_address = NULL;
+    self->client_address = NULL;
+    if (!self->idle_timeout_callable ||
+        !self->loop_create_future || !self->loop_create_task ||
         !self->scope_type || !self->scope_asgi || !self->scope_http_version ||
         !self->scope_scheme || !self->scope_root_path) {
         return -1;
@@ -3628,6 +3768,13 @@ h2_init(PyObject *op, PyObject *args, PyObject *kwargs)
         wreath_read_ssize_attr(config, "max_body_chunks", &self->max_body_chunks) < 0 ||
         wreath_read_ssize_attr(config, "hpack_table_bytes", &self->hpack_max) < 0) {
         return -1;
+    }
+    {
+        PyObject *timeout = PyObject_GetAttrString(config, "keep_alive_timeout");
+        if (timeout == NULL) return -1;
+        self->keep_alive_timeout = PyFloat_AsDouble(timeout);
+        Py_DECREF(timeout);
+        if (self->keep_alive_timeout == -1.0 && PyErr_Occurred()) return -1;
     }
     {
         PyObject *timeout = PyObject_GetAttrString(config, "request_timeout");

@@ -49,6 +49,14 @@ from wreath.users import (
     user_router,
 )
 
+
+class _Revocations:
+    async def delete_for(self, _subject: str) -> int:
+        return 0
+
+
+_REVOCATIONS = _Revocations()
+
 RP_ID = "example.test"
 ORIGIN = "https://example.test"
 PASSWORD = "correct horse battery staple"
@@ -984,9 +992,7 @@ class _MemorySessionStore:
     async def save(self, sid: str, data: dict[str, Any], max_age: int) -> None:
         self.rows[sid] = dict(data)
 
-    async def save_if_present(
-        self, sid: str, data: dict[str, Any], max_age: int
-    ) -> bool:
+    async def save_if_present(self, sid: str, data: dict[str, Any], max_age: int) -> bool:
         if sid not in self.rows:
             return False
         await self.save(sid, data, max_age)
@@ -1020,7 +1026,15 @@ def _app(
             )
         )
     )
-    app.include_router(user_router(users, secret="u" * 32, second_factors=factors, clock=clock))
+    app.include_router(
+        user_router(
+            users,
+            sessions=_REVOCATIONS,
+            secret="u" * 32,
+            second_factors=factors,
+            clock=clock,
+        )
+    )
     options.setdefault("rp_id", RP_ID)
     options.setdefault("origins", (ORIGIN,))
     # No `pytest.warns` wrapper any more: a router built without `enrolments=`
@@ -1115,7 +1129,6 @@ async def test_a_passkey_registers_and_then_finishes_a_pending_login() -> None:
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
     store = _MemorySessionStore()
-    policy = SessionPolicy(secret="s" * 32, secure=False, store=store)
     async with TestClient(_app(users, factors, clock, session_store=store)) as client:
         user = await _seed(users)
         cookie = await _enrolled(client, device, _cookie(await _http_login(client)))
@@ -1127,7 +1140,7 @@ async def test_a_passkey_registers_and_then_finishes_a_pending_login() -> None:
         cookie = _cookie(pending)
         begun, minted = await _http_assert(client, device, cookie, sign_count=1)
         cookie = _cookie(begun) or cookie
-        prior_sid = policy._load_sid(cookie.split("=", 1)[1])
+        prior_sid = next(iter(store.rows))
         done = await client.post(
             "/auth/2fa/webauthn/verify",
             json={"id": b64url_encode(device.credential_id), **_wire(minted)},
@@ -1137,7 +1150,7 @@ async def test_a_passkey_registers_and_then_finishes_a_pending_login() -> None:
         assert done.json()["email"] == "ann@example.test"
         rotated = _cookie(done)
         assert rotated != cookie
-        rotated_sid = policy._load_sid(rotated.split("=", 1)[1])
+        rotated_sid = next(iter(store.rows))
         assert rotated_sid is not None and rotated_sid != prior_sid
         assert prior_sid not in store.rows
         session = (await client.get("/session", headers={"cookie": rotated})).json()
@@ -1192,7 +1205,6 @@ async def test_the_user_verification_outcome_reaches_the_session() -> None:
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
     store = _MemorySessionStore()
-    policy = SessionPolicy(secret="s" * 32, secure=False, store=store)
     async with TestClient(_app(users, factors, clock, session_store=store)) as client:
         await _seed(users)
         cookie = await _enrolled(client, device, _cookie(await _http_login(client)))
@@ -1200,7 +1212,7 @@ async def test_the_user_verification_outcome_reaches_the_session() -> None:
             client, device, cookie, sign_count=1, user_verified=False
         )
         cookie = _cookie(begun) or cookie
-        prior_sid = policy._load_sid(cookie.split("=", 1)[1])
+        prior_sid = next(iter(store.rows))
         done = await client.post(
             "/auth/2fa/webauthn/verify",
             json={"id": b64url_encode(device.credential_id), **_wire(minted)},
@@ -1209,7 +1221,7 @@ async def test_the_user_verification_outcome_reaches_the_session() -> None:
         assert done.json() == {"status": "second_factor_verified"}
         rotated = _cookie(done)
         assert rotated != cookie
-        rotated_sid = policy._load_sid(rotated.split("=", 1)[1])
+        rotated_sid = next(iter(store.rows))
         assert rotated_sid is not None and rotated_sid != prior_sid
         assert prior_sid not in store.rows
         session = (await client.get("/session", headers={"cookie": rotated})).json()
@@ -1449,6 +1461,7 @@ async def test_a_registration_is_bound_to_the_user_who_began_it() -> None:
         cookie = _cookie(await _http_login(client))
         begun, _, minted = await _http_register(client, device, cookie)
         cookie = _cookie(begun) or cookie
+        rightful_cookie = cookie
 
         adopted = await client.post(f"/adopt/{bob.id}", headers={"cookie": cookie})
         cookie = _cookie(adopted) or cookie
@@ -1461,6 +1474,14 @@ async def test_a_registration_is_bound_to_the_user_who_began_it() -> None:
         assert stolen.status == 400
         assert stolen.json() == {"error": "no_ceremony_in_progress"}
         assert await factors.credentials(bob.id) == []
+        assert len(challenges.live) == 1
+
+        completed = await client.post(
+            "/auth/2fa/webauthn/confirm",
+            json=_wire(minted),
+            headers={"cookie": rightful_cookie},
+        )
+        assert completed.status == 200, completed.json()
         assert challenges.live == set()
 
 
@@ -1698,7 +1719,7 @@ async def test_without_an_rp_id_there_are_no_passkey_routes() -> None:
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     app = Wreath()
     app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
-    app.include_router(user_router(users, secret="u" * 32, clock=clock))
+    app.include_router(user_router(users, sessions=_REVOCATIONS, secret="u" * 32, clock=clock))
     app.include_router(second_factor_router(users, factors, clock=clock))
     async with TestClient(app) as client:
         assert (await client.post("/auth/2fa/webauthn/begin")).status == 404

@@ -1206,8 +1206,106 @@ def test_auto_fuzz_follows_the_mutation_switch(
 def test_fuzz_refuses_to_run_without_mutation_evidence() -> None:
     namespace = cli_parser.build_parser().parse_args(["test", "--mutant", "off", "--fuzz", "on"])
 
-    with pytest.raises(ValueError, match="--fuzz on requires mutation evidence"):
+    with pytest.raises(ValueError, match="requires --fuzz-replay-only and at least one"):
         runner.execute(namespace)
+
+
+def test_explicit_corpus_replay_can_run_without_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wreath import _native_test_runner as native_runner
+
+    received: list[Any] = []
+
+    def fake_execute(namespace: Any) -> int:
+        received.append(namespace)
+        return 0
+
+    monkeypatch.setattr(native_runner, "execute", fake_execute)
+    namespace = cli_parser.build_parser().parse_args(
+        [
+            "test",
+            "--mutant",
+            "off",
+            "--fuzz",
+            "on",
+            "--fuzz-replay-only",
+            "--fuzz-target",
+            "xml-parser",
+        ]
+    )
+
+    assert runner.execute(namespace) == 0
+    assert received == [namespace]
+
+
+def test_explicit_corpus_replay_runs_campaigns_without_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = {
+        "counts": {"targets": 1, "cases": 2, "corpus_added": 0, "findings": 0, "errors": 0},
+        "seed": 41,
+        "targets": [{"name": "xml-parser"}],
+    }
+    received: list[dict[str, Any]] = []
+
+    def fake_campaigns(namespace: Any, mutation: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        received.append(mutation)
+        return campaign, 0
+
+    monkeypatch.setattr(runner, "_run_fuzz_campaigns", fake_campaigns)
+
+    report, activity, status = runner._run_explicit_fuzz_replay(SimpleNamespace())
+
+    assert received == [{}]
+    assert status == 0
+    assert report["campaign"] == campaign
+    assert activity.campaign_targets == ("xml-parser",)
+
+
+@pytest.mark.parametrize("engine", ["pytest", "native"])
+def test_engine_finishes_explicit_replay_without_starting_mutation(
+    engine: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from wreath import _native_test_runner as native_runner
+
+    fuzz, fuzz_activity = runner._no_gold_fuzz()
+    rendered: list[tuple[Any, Any]] = []
+    monkeypatch.setattr(
+        runner,
+        "_run_explicit_fuzz_replay",
+        lambda namespace: (fuzz, fuzz_activity, 0),
+    )
+    renderer = SimpleNamespace(
+        finish_pipeline=lambda mutation, replay: rendered.append((mutation, replay)),
+        finish=lambda: pytest.fail("plain finish bypassed explicit replay"),
+    )
+    namespace = SimpleNamespace(mutant="off", fuzz="on")
+    if engine == "pytest":
+        plugin = SimpleNamespace(renderer=renderer, finish_pipeline=renderer.finish_pipeline)
+        outcome = runner._PytestOutcome(
+            namespace,
+            0,
+            plugin,
+            runner._PytestMutationState(user_report=None),
+        )
+        status = outcome.finish_early()
+    else:
+        outcome = native_runner._NativeOutcome(
+            namespace,
+            cast(Any, None),
+            SimpleNamespace(renderer=renderer),
+            cast(Any, None),
+            0,
+            tmp_path / "activity.json",
+            None,
+        )
+        status = outcome.finish()
+
+    assert status == 0
+    assert rendered == [(None, fuzz_activity)]
 
 
 @pytest.mark.parametrize(

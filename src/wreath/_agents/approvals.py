@@ -97,6 +97,10 @@ class InMemoryApprovalStore:
             overflow="refuse",
         )
 
+    @staticmethod
+    def _key(approval_id: str, tenant: str) -> tuple[str, str]:
+        return tenant, approval_id
+
     async def issue(
         self,
         *,
@@ -131,19 +135,21 @@ class InMemoryApprovalStore:
             expires_at,
             require_fresh_auth,
         )
-        if not self._records.claim(approval_id, request, ttl=expires_at - now, now=now):
-            if self._records.peek(approval_id, now=now) is not None:
+        key = self._key(approval_id, tenant)
+        if not self._records.claim(key, request, ttl=expires_at - now, now=now):
+            if self._records.peek(key, now=now) is not None:
                 raise ValueError(f"duplicate approval ID {approval_id!r}")
             raise OverflowError("approval store is at capacity")
         return request
 
     def _bound(self, approval_id: str, *, tenant: str, principal_id: str) -> ApprovalRequest:
         now = _finite_time(self._clock(), label="clock")
-        request = self._records.peek(approval_id, now=now)
+        key = self._key(approval_id, tenant)
+        request = self._records.peek(key, now=now)
         if request is None:
             raise ApprovalExpired(f"approval {approval_id!r} is unknown or expired")
         if now >= request.expires_at:
-            self._records.discard(approval_id)
+            self._records.discard(key)
             raise ApprovalExpired(f"approval {approval_id!r} expired")
         if request.tenant != tenant:
             raise ApprovalMismatch(f"approval {approval_id!r} tenant does not match {tenant!r}")
@@ -162,6 +168,7 @@ class InMemoryApprovalStore:
         authenticated_at: float | None = None,
     ) -> ApprovalGrant:
         request = self._bound(approval_id, tenant=tenant, principal_id=principal_id)
+        now = _finite_time(self._clock(), label="clock")
         if request.state == "denied":
             raise ApprovalDenied(f"approval {approval_id!r} was denied")
         if request.state == "used":
@@ -178,10 +185,14 @@ class InMemoryApprovalStore:
                 raise ApprovalMismatch(
                     f"approval {approval_id!r} requires a finite authentication time"
                 ) from error
+            if authenticated_at > now:
+                raise ApprovalMismatch(
+                    f"approval {approval_id!r} authentication time cannot be in the future"
+                )
             if authenticated_at < request.issued_at:
                 raise ApprovalMismatch(f"approval {approval_id!r} requires fresh authentication")
-        now = _finite_time(self._clock(), label="clock")
-        if not self._records.complete(approval_id, replace(request, state="used"), now=now):
+        key = self._key(approval_id, tenant)
+        if not self._records.complete(key, replace(request, state="used"), now=now):
             raise ApprovalExpired(f"approval {approval_id!r} expired while being claimed")
         return ApprovalGrant(
             approval_id,
@@ -199,7 +210,8 @@ class InMemoryApprovalStore:
         if request.state == "denied":
             raise ApprovalDenied(f"approval {approval_id!r} was already denied")
         now = _finite_time(self._clock(), label="clock")
-        if not self._records.complete(approval_id, replace(request, state="denied"), now=now):
+        key = self._key(approval_id, tenant)
+        if not self._records.complete(key, replace(request, state="denied"), now=now):
             raise ApprovalExpired(f"approval {approval_id!r} expired while being denied")
 
 
@@ -279,6 +291,14 @@ class PostgresApprovalStore:
                         "(expires_at) WHERE state='pending'",
                     ),
                 ),
+                Step(
+                    version=2,
+                    statements=(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS agent_approvals_identity_idx ON "
+                        f"{table} (tenant, approval_id)",
+                        f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS agent_approvals_pkey",
+                    ),
+                ),
             ),
         )
 
@@ -317,7 +337,7 @@ class PostgresApprovalStore:
                 "require_fresh_auth,state,decided_at) "
                 "VALUES ($1::text,$2::text,$3::text,$4::text,$5::text,$6::float8,"
                 "$7::float8,$8::boolean,'pending',NULL) "
-                "ON CONFLICT (approval_id) DO UPDATE SET "
+                "ON CONFLICT (tenant,approval_id) DO UPDATE SET "
                 "tenant=EXCLUDED.tenant,principal_id=EXCLUDED.principal_id,"
                 "action=EXCLUDED.action,resource=EXCLUDED.resource,"
                 "issued_at=EXCLUDED.issued_at,expires_at=EXCLUDED.expires_at,"
@@ -355,6 +375,10 @@ class PostgresApprovalStore:
                 raise ApprovalMismatch(
                     f"approval {approval_id!r} requires a finite authentication time"
                 ) from error
+            if authenticated > now:
+                raise ApprovalMismatch(
+                    f"approval {approval_id!r} authentication time cannot be in the future"
+                )
         async with self._session_factory() as session:
             row = await session.raw(
                 f"UPDATE {self._table} SET state='used',decided_at=$4::float8 "
@@ -371,8 +395,10 @@ class PostgresApprovalStore:
             ).fetchrow()
             if row is None:
                 stored = await session.raw(
-                    f"SELECT {_APPROVAL_COLUMNS} FROM {self._table} WHERE approval_id=$1::text",
+                    f"SELECT {_APPROVAL_COLUMNS} FROM {self._table} "
+                    "WHERE approval_id=$1::text AND tenant=$2::text",
                     approval_id,
+                    tenant,
                 ).fetchrow()
                 self._raise_refusal(
                     approval_id,
@@ -408,8 +434,10 @@ class PostgresApprovalStore:
             ).fetchrow()
             if row is None:
                 stored = await session.raw(
-                    f"SELECT {_APPROVAL_COLUMNS} FROM {self._table} WHERE approval_id=$1::text",
+                    f"SELECT {_APPROVAL_COLUMNS} FROM {self._table} "
+                    "WHERE approval_id=$1::text AND tenant=$2::text",
                     approval_id,
+                    tenant,
                 ).fetchrow()
                 self._raise_refusal(
                     approval_id,

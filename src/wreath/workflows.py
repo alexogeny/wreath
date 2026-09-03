@@ -56,23 +56,34 @@ for isolation.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Callable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
 from . import _nplusone
 from . import telemetry as _telemetry
 from ._awaitable import is_awaitable
+from ._pgname import validate_identifier
 from ._recording_format import (
     COMPENSATION_FAILED,
     COMPENSATION_NONE,
     COMPENSATION_RAN,
 )
+from .tenancy import check_enqueue_tenant
 
 #: The system schema durable workflow state lives in, matching `wreath.jobs`.
 DEFAULT_SCHEMA = "wreath_system"
 DEFAULT_TABLE = "workflow_steps"
+
+
+def _validated_relations(schema: str, table: str) -> tuple[str, str, str]:
+    schema = validate_identifier(schema, "workflow schema")
+    table = validate_identifier(table, "workflow table")
+    instances = validate_identifier(f"{table}_instances", "workflow instances table")
+    return schema, table, instances
 
 
 def _captured_trace() -> str | None:
@@ -156,10 +167,31 @@ class InMemoryWorkflowStore:
     contract exists for. Use `PostgresWorkflowStore` where that matters.
     """
 
-    __slots__ = ("_instances",)
+    __slots__ = ("_active", "_instances")
 
     def __init__(self) -> None:
         self._instances: dict[str, dict[str, Any]] = {}
+        self._active: dict[str, asyncio.Future[None]] = {}
+
+    @staticmethod
+    def _key(key: str) -> str:
+        tenant = check_enqueue_tenant(None)
+        if not tenant:
+            return key
+        return f"{len(tenant.encode('utf-8'))}:{tenant}:{key}"
+
+    @asynccontextmanager
+    async def execution(self, key: str) -> Any:
+        key = self._key(key)
+        while pending := self._active.get(key):
+            await asyncio.shield(pending)
+        finished = asyncio.get_running_loop().create_future()
+        self._active[key] = finished
+        try:
+            yield
+        finally:
+            self._active.pop(key, None)
+            finished.set_result(None)
 
     async def begin(self, key: str, workflow: str, steps: Sequence[str]) -> dict[str, Any]:
         """Record the instance and its step list, or return what is already there.
@@ -168,6 +200,7 @@ class InMemoryWorkflowStore:
         The step list is recorded here, not derived at resume time, so a later
         rename is detectable at all.
         """
+        key = self._key(key)
         record = self._instances.get(key)
         if record is None:
             record = {
@@ -181,16 +214,16 @@ class InMemoryWorkflowStore:
         return record
 
     async def load(self, key: str) -> dict[str, Any] | None:
-        return self._instances.get(key)
+        return self._instances.get(self._key(key))
 
     async def complete_step(self, key: str, name: str, result: Any) -> None:
-        self._instances[key]["results"][name] = result
+        self._instances[self._key(key)]["results"][name] = result
 
     async def uncomplete_step(self, key: str, name: str) -> None:
-        self._instances[key]["results"].pop(name, None)
+        self._instances[self._key(key)]["results"].pop(name, None)
 
     async def finish(self, key: str, state: str, compensation_errors: int = 0) -> None:
-        record = self._instances[key]
+        record = self._instances[self._key(key)]
         record["state"] = state
         record["compensation_errors"] = compensation_errors
 
@@ -216,6 +249,7 @@ class PostgresWorkflowStore:
         tenant: str = "",
         workload: str = "write",
     ) -> None:
+        schema, table, _ = _validated_relations(schema, table)
         self._database = database
         self._schema = schema
         self._table = table
@@ -225,6 +259,17 @@ class PostgresWorkflowStore:
         #: `trace_context` column. A build newer than its schema must keep
         #: working -- losing the trace is a degradation, losing the saga is not.
         self._trace_column: bool | None = None
+
+    def _tenant_key(self) -> str:
+        return check_enqueue_tenant(self._tenant)
+
+    def execution(self, key: str) -> Any:
+        tenant = self._tenant_key()
+        return self._database.lock(
+            key,
+            namespace=f"wreath.workflow:{self._schema}:{self._table}:{tenant}",
+            workload=self._workload,
+        )
 
     async def _carries_trace(self) -> bool:
         """Whether this database's instances table has `trace_context`.
@@ -265,7 +310,8 @@ class PostgresWorkflowStore:
         `search_path` assignment -- every relation here is schema-qualified at the
         point of use.
         """
-        instances = f'"{schema}"."{table}_instances"'
+        schema, table, instances_table = _validated_relations(schema, table)
+        instances = f'"{schema}"."{instances_table}"'
         steps = f'"{schema}"."{table}"'
         return ";\n".join(
             (
@@ -311,6 +357,7 @@ class PostgresWorkflowStore:
         from ._json import dumps as _dumps
 
         instances = f'"{self._schema}"."{self._table}_instances"'
+        tenant = self._tenant_key()
         parent = _captured_trace()
         # No short-circuit on `parent is None`: the `load` two statements below
         # probes unconditionally (it must, to know whether to select the column),
@@ -327,7 +374,7 @@ class PostgresWorkflowStore:
                     "VALUES ($1, $2, $3, $4::jsonb, $5) "
                     "ON CONFLICT (tenant, key) DO NOTHING",
                     key,
-                    self._tenant,
+                    tenant,
                     workflow,
                     _dumps(list(steps)).decode("utf-8"),
                     parent,
@@ -337,7 +384,7 @@ class PostgresWorkflowStore:
                     f"INSERT INTO {instances} (key, tenant, workflow, steps) "
                     "VALUES ($1, $2, $3, $4::jsonb) ON CONFLICT (tenant, key) DO NOTHING",
                     key,
-                    self._tenant,
+                    tenant,
                     workflow,
                     _dumps(list(steps)).decode("utf-8"),
                 )
@@ -358,6 +405,7 @@ class PostgresWorkflowStore:
 
         instances = f'"{self._schema}"."{self._table}_instances"'
         steps_table = f'"{self._schema}"."{self._table}"'
+        tenant = self._tenant_key()
         # Selected only where the column exists, so a build newer than its schema
         # resumes the saga untraced instead of failing on an unknown column.
         trace = ", trace_context" if await self._carries_trace() else ""
@@ -366,7 +414,7 @@ class PostgresWorkflowStore:
             rows = await connection.fetch(
                 f"SELECT workflow, steps, state, compensation_errors{trace} "
                 f"FROM {instances} WHERE tenant = $1 AND key = $2",
-                self._tenant,
+                tenant,
                 key,
             )
             if not rows:
@@ -374,7 +422,7 @@ class PostgresWorkflowStore:
             row = rows[0]
             done = await connection.fetch(
                 f"SELECT name, result FROM {steps_table} WHERE tenant = $1 AND key = $2",
-                self._tenant,
+                tenant,
                 key,
             )
         finally:
@@ -394,6 +442,7 @@ class PostgresWorkflowStore:
         from ._json import dumps as _dumps
 
         steps_table = f'"{self._schema}"."{self._table}"'
+        tenant = self._tenant_key()
         connection = await self._connection()
         try:
             await connection.execute(
@@ -401,7 +450,7 @@ class PostgresWorkflowStore:
                 "VALUES ($1, $2, $3, $4::jsonb) "
                 "ON CONFLICT (tenant, key, name) DO UPDATE SET result = EXCLUDED.result",
                 key,
-                self._tenant,
+                tenant,
                 name,
                 _dumps(result).decode("utf-8"),
             )
@@ -410,11 +459,12 @@ class PostgresWorkflowStore:
 
     async def uncomplete_step(self, key: str, name: str) -> None:
         steps_table = f'"{self._schema}"."{self._table}"'
+        tenant = self._tenant_key()
         connection = await self._connection()
         try:
             await connection.execute(
                 f"DELETE FROM {steps_table} WHERE tenant = $1 AND key = $2 AND name = $3",
-                self._tenant,
+                tenant,
                 key,
                 name,
             )
@@ -423,6 +473,7 @@ class PostgresWorkflowStore:
 
     async def finish(self, key: str, state: str, compensation_errors: int = 0) -> None:
         instances = f'"{self._schema}"."{self._table}_instances"'
+        tenant = self._tenant_key()
         connection = await self._connection()
         try:
             await connection.execute(
@@ -430,7 +481,7 @@ class PostgresWorkflowStore:
                 "updated_at = now() WHERE tenant = $3 AND key = $4",
                 state,
                 compensation_errors,
-                self._tenant,
+                tenant,
                 key,
             )
         finally:
@@ -448,6 +499,16 @@ async def _call(handler: Callable[..., Any], context: StepContext) -> Any:
     if is_awaitable(result):
         return await result
     return result
+
+
+@asynccontextmanager
+async def _execution(store: Any, key: str) -> Any:
+    execution = getattr(store, "execution", None)
+    if execution is None:
+        yield
+        return
+    async with execution(key):
+        yield
 
 
 class Workflow:
@@ -554,23 +615,25 @@ class Workflow:
                 chain has run.
         """
         instance_key = key if key is not None else f"{self.name}:{uuid.uuid4().hex}"
-        record = await store.begin(instance_key, self.name, [step.name for step in self._steps])
-        if record.get("state") == "completed":
-            return Outcome(
+        async with _execution(store, instance_key):
+            record = await store.begin(instance_key, self.name, [step.name for step in self._steps])
+            self._check_workflow(record, instance_key)
+            if record.get("state") == "completed":
+                return Outcome(
+                    key=instance_key,
+                    workflow=self.name,
+                    state="completed",
+                    results=dict(record.get("results") or {}),
+                    completed=list(record.get("results") or {}),
+                )
+            return await self._execute(
+                store=store,
                 key=instance_key,
-                workflow=self.name,
-                state="completed",
-                results=dict(record.get("results") or {}),
-                completed=list(record.get("results") or {}),
+                record=record,
+                compensate=compensate,
+                progress=progress,
+                recorder=recorder,
             )
-        return await self._execute(
-            store=store,
-            key=instance_key,
-            record=record,
-            compensate=compensate,
-            progress=progress,
-            recorder=recorder,
-        )
 
     async def status(self, *, store: Any, key: str) -> Outcome | None:
         """What the store knows about an instance, or `None` if it never started.
@@ -605,35 +668,45 @@ class Workflow:
             WorkflowDefinitionChanged: the stored step list names a step this
                 workflow no longer declares.
         """
-        record = await store.load(key)
-        if record is None:
-            raise UnknownWorkflowInstance(
-                f"no workflow instance {key!r}; `run` starts one, `resume` continues it"
-            )
-        for stored in record.get("steps") or ():
-            if stored not in self._step_names:
-                raise WorkflowDefinitionChanged(
-                    f"instance {key!r} of workflow {self.name!r} recorded a step "
-                    f"{stored!r} that the workflow no longer declares. Resuming would "
-                    "re-run completed work and report success. Finish or discard the "
-                    "instance, or restore the step name."
+        async with _execution(store, key):
+            record = await store.load(key)
+            if record is None:
+                raise UnknownWorkflowInstance(
+                    f"no workflow instance {key!r}; `run` starts one, `resume` continues it"
                 )
-        if record.get("state") == "completed":
-            return Outcome(
+            self._check_workflow(record, key)
+            for stored in record.get("steps") or ():
+                if stored not in self._step_names:
+                    raise WorkflowDefinitionChanged(
+                        f"instance {key!r} of workflow {self.name!r} recorded a step "
+                        f"{stored!r} that the workflow no longer declares. Resuming would "
+                        "re-run completed work and report success. Finish or discard the "
+                        "instance, or restore the step name."
+                    )
+            if record.get("state") == "completed":
+                return Outcome(
+                    key=key,
+                    workflow=self.name,
+                    state="completed",
+                    results=dict(record.get("results") or {}),
+                    completed=list(record.get("results") or {}),
+                )
+            return await self._execute(
+                store=store,
                 key=key,
-                workflow=self.name,
-                state="completed",
-                results=dict(record.get("results") or {}),
-                completed=list(record.get("results") or {}),
+                record=record,
+                compensate=True,
+                progress=progress,
+                recorder=recorder,
             )
-        return await self._execute(
-            store=store,
-            key=key,
-            record=record,
-            compensate=True,
-            progress=progress,
-            recorder=recorder,
-        )
+
+    def _check_workflow(self, record: dict[str, Any], key: str) -> None:
+        stored = record.get("workflow")
+        if stored != self.name:
+            raise WorkflowDefinitionChanged(
+                f"instance {key!r} belongs to workflow {stored!r}, not {self.name!r}; "
+                "workflow instance keys cannot be reused across definitions"
+            )
 
     async def _execute(
         self,

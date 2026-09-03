@@ -237,6 +237,27 @@ class TenantSource(Protocol):
     def describe(self) -> str: ...
 
 
+def _single_selector(request: Any, name: str) -> str | None:
+    single = getattr(request, "_single_header", None)
+    if single is None:
+        return request.header(name)
+    try:
+        raw_name = name.lower().encode("latin-1")
+    except UnicodeEncodeError as error:
+        raise TenancyError(
+            f"tenant selector header {name!r} must be a Latin-1 header name"
+        ) from error
+    try:
+        value = single(raw_name)
+    except ValueError as error:
+        raise TenancyError(f"tenant selector header {name!r} occurs more than once") from error
+    if value is None:
+        return None
+    if not isinstance(value, bytes):
+        raise TenancyError(f"tenant selector header {name!r} must be raw bytes")
+    return value.decode("latin-1")
+
+
 @dataclass(frozen=True, slots=True)
 class TenantHeader:
     """The tenant name arrives in a header.
@@ -257,7 +278,7 @@ class TenantHeader:
         # here first, and only an end-to-end test through a real `Request`
         # caught it -- the unit tests had a fake whose `headers` was a dict, so
         # they were testing the fake.
-        return request.header(self.header)
+        return _single_selector(request, self.header)
 
     def describe(self) -> str:
         return f"the {self.header} header"
@@ -286,7 +307,7 @@ class TenantHostLabel:
         object.__setattr__(self, "_cut", -len(self.suffix) - 1)
 
     def name_for(self, request: Any) -> str | None:
-        host = request.header("host")
+        host = _single_selector(request, "host")
         if not host:
             return None
         # One partition rather than a split: the host is short and only the
@@ -417,6 +438,7 @@ class Tenancy:
 # ContextVar lookup; there is no loop to price.
 
 _CURRENT: ContextVar[Tenant | None] = ContextVar("wreath_tenant", default=None)
+_ENQUEUE_TENANT: ContextVar[str | None] = ContextVar("wreath_enqueue_tenant", default=None)
 
 
 def current_tenant() -> Tenant:
@@ -493,15 +515,27 @@ def check_enqueue_tenant(explicit: str | None) -> str:
     tell which.
     """
     tenant = _CURRENT.get()
-    if tenant is None:
+    bound = tenant.key if tenant is not None else _ENQUEUE_TENANT.get()
+    if bound is None:
         return explicit or ""
-    if explicit and explicit != tenant.key:
+    if explicit and explicit != bound:
         raise TenancyError(
-            f"enqueued with tenant={explicit!r} inside the {tenant.key!r} tenant scope; "
+            f"enqueued with tenant={explicit!r} inside the {bound!r} tenant scope; "
             "one of the two is wrong and this cannot tell which. Drop the argument to "
             "inherit the scope."
         )
-    return tenant.key
+    return bound
+
+
+@contextmanager
+def _enqueue_tenant_scope(tenant: str) -> Iterator[None]:
+    enqueue_token = _ENQUEUE_TENANT.set(tenant or None)
+    tenant_token = _CURRENT.set(None)
+    try:
+        yield
+    finally:
+        _CURRENT.reset(tenant_token)
+        _ENQUEUE_TENANT.reset(enqueue_token)
 
 
 # The residual above -- a *deliberate* `SET ROLE other_tenant` -- exists because

@@ -29,6 +29,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any
 
 from . import _nplusone
@@ -47,6 +48,7 @@ from ._nplusone import NPlusOneDetected as _NPlusOneDetected
 from ._pgcatalog import column_exists
 from .postgres import PostgresError
 from .temporal import Duration, Instant, Recurrence
+from .tenancy import _enqueue_tenant_scope, check_enqueue_tenant
 
 JobHandler = Callable[..., Awaitable[None]]
 
@@ -395,6 +397,8 @@ class JobRunner:
         if retries < 0:
             raise ValueError("retries cannot be negative")
         if timeout is not None:
+            if not isfinite(timeout):
+                raise ValueError("timeout must be finite")
             if timeout <= 0:
                 raise ValueError("timeout must be positive")
             if timeout >= self._lease:
@@ -671,7 +675,7 @@ class JobRunner:
         Pass `tx` (an open `connection.transaction()`) to enqueue atomically
         with your business writes — the job becomes visible only if that
         transaction commits (exactly-once *enqueue*). `key` sets an idempotency
-        key: a second enqueue with the same `(queue, key)` is dropped.
+        key: a second enqueue with the same `(queue, tenant, key)` is dropped.
 
         `priority` orders the claim: ready jobs are taken `priority DESC,
         run_at`, so a higher number goes first. It is a lane, not a promise —
@@ -694,6 +698,7 @@ class JobRunner:
         """
         if task not in self._tasks:
             raise KeyError(f"unknown task: {task!r} (register with @runner.task)")
+        tenant = check_enqueue_tenant(tenant)
         if coalesce and key is None:
             raise ValueError(
                 "coalesce= needs a key: there is nothing to coalesce onto without "
@@ -742,7 +747,7 @@ class JobRunner:
                 f"dedup_key, {columns}trace_context) "
                 "VALUES ($1, $2, $3::jsonb, $4, 'ready', COALESCE($5, now()), "
                 f"$6, $7, {'$9, ' if has_priority else ''}$8) "
-                "ON CONFLICT (queue, dedup_key) WHERE dedup_key IS NOT NULL "
+                "ON CONFLICT (queue, tenant, dedup_key) WHERE dedup_key IS NOT NULL "
                 f"{conflict} RETURNING id"
             )
             params = (
@@ -763,7 +768,7 @@ class JobRunner:
             f"{', priority' if has_priority else ''}) "
             "VALUES ($1, $2, $3::jsonb, $4, 'ready', COALESCE($5, now()), $6, $7"
             f"{', $8' if has_priority else ''}) "
-            "ON CONFLICT (queue, dedup_key) WHERE dedup_key IS NOT NULL "
+            "ON CONFLICT (queue, tenant, dedup_key) WHERE dedup_key IS NOT NULL "
             f"{conflict} RETURNING id"
         )
         params = (
@@ -813,7 +818,11 @@ class JobRunner:
 
         @app.get("/herd/imports/{task_id}/stream")
         async def watch(request):
-            return progress_stream(jobs.progress, request.path_params["task_id"])
+            return progress_stream(
+                jobs.progress,
+                request.path_params["task_id"],
+                authorize=lambda task_id: request.user.owns_task(task_id),
+            )
         ```
         The **job id is the task id**, so there is one identifier rather than
         two to correlate. With a progress registry configured the task is seeded
@@ -828,49 +837,55 @@ class JobRunner:
         `JobVanished` is raised rather than a handle whose id is the
         string `"None"`.
         """
-        job_id = await self.enqueue(
-            task,
-            *args,
-            tx=tx,
-            run_at=run_at,
-            key=key,
-            tenant=tenant,
-            max_attempts=max_attempts,
-        )
-        if job_id is not None:
-            if self._progress is not None:
-                self._progress.report(str(job_id), 0, "queued", state="queued")
-            return TaskHandle(task_id=str(job_id))
-        # Deduplicated by `key`: the work is already queued or running, and the
-        # caller still needs to know which task to watch.
-        existing = await self._existing_job_id(key, tx=tx)
-        if existing is None:
-            # `str(None)` here would mint the four-character task id "None" and
-            # hand it to a client as something to poll.
-            raise JobVanished(
-                f"launch({task!r}, key={key!r}) was deduplicated but the surviving "
-                "job row was gone when it was read; there is no task to watch"
+        tenant = check_enqueue_tenant(tenant)
+        with _enqueue_tenant_scope(tenant):
+            job_id = await self.enqueue(
+                task,
+                *args,
+                tx=tx,
+                run_at=run_at,
+                key=key,
+                tenant=tenant,
+                max_attempts=max_attempts,
             )
-        task_id = str(existing)
-        # Seed only if this worker has nothing, because progress fan-out is
-        # at-most-once with no replay: a worker that started after the original
-        # `launch`, or that missed the publish, has no entry for a task that is
-        # genuinely running, and would hand back a handle that 404s on status
-        # and streams forever. Seeding *unconditionally* would be the opposite
-        # bug -- the original may be at 70% on this very worker, and every
-        # watching client would see the import start over.
-        if self._progress is not None and self._progress.get(task_id) is None:
-            self._progress.report(
-                task_id,
-                0,
-                "already in flight on another worker",
-                state="running",
-            )
-        return TaskHandle(task_id=task_id, state="running")
+            if job_id is not None:
+                if self._progress is not None:
+                    self._progress.report(str(job_id), 0, "queued", state="queued")
+                return TaskHandle(task_id=str(job_id))
+            # Deduplicated by `key`: the work is already queued or running, and the
+            # caller still needs to know which task to watch.
+            existing = await self._existing_job_id(key, tenant=tenant, tx=tx)
+            if existing is None:
+                # `str(None)` here would mint the four-character task id "None" and
+                # hand it to a client as something to poll.
+                raise JobVanished(
+                    f"launch({task!r}, key={key!r}) was deduplicated but the surviving "
+                    "job row was gone when it was read; there is no task to watch"
+                )
+            task_id = str(existing)
+            # Seed only if this worker has nothing, because progress fan-out is
+            # at-most-once with no replay: a worker that started after the original
+            # `launch`, or that missed the publish, has no entry for a task that is
+            # genuinely running, and would hand back a handle that 404s on status
+            # and streams forever. Seeding *unconditionally* would be the opposite
+            # bug -- the original may be at 70% on this very worker, and every
+            # watching client would see the import start over.
+            if self._progress is not None and self._progress.get(task_id) is None:
+                self._progress.report(
+                    task_id,
+                    0,
+                    "already in flight on another worker",
+                    state="running",
+                )
+            return TaskHandle(task_id=task_id, state="running")
 
-    async def _existing_job_id(self, key: str | None, *, tx: Any = None) -> Any:
-        sql = f"SELECT id FROM {self._table} WHERE queue=$1 AND dedup_key=$2"
-        params = (self._name, dedup_key(self._name, key) if key is not None else None)
+    async def _existing_job_id(self, key: str | None, *, tenant: str = "", tx: Any = None) -> Any:
+        sql = f"SELECT id FROM {self._table} WHERE queue=$1 AND tenant=$2 AND dedup_key=$3"
+        params = (
+            self._name,
+            tenant,
+            dedup_key(self._name, key) if key is not None else None,
+        )
         if tx is not None:
             return await tx.fetchval(sql, *params)
         connection = await self._db.acquire(self._workload)
@@ -966,6 +981,14 @@ class JobRunner:
                         "(queue, priority DESC, run_at) WHERE state = 'ready'",
                     ),
                 ),
+                Step(
+                    version=4,
+                    statements=(
+                        f"DROP INDEX IF EXISTS {self._schema}.jobs_dedup_idx",
+                        f"CREATE UNIQUE INDEX IF NOT EXISTS jobs_dedup_idx ON {t} "
+                        "(queue, tenant, dedup_key) WHERE dedup_key IS NOT NULL",
+                    ),
+                ),
             ),
         )
 
@@ -1059,7 +1082,12 @@ class JobRunner:
         )
 
     async def cancel(
-        self, job_id: int | None = None, *, key: str | None = None, reason: str = "cancelled"
+        self,
+        job_id: int | None = None,
+        *,
+        key: str | None = None,
+        reason: str = "cancelled",
+        tenant: str = "",
     ) -> bool:
         """Stop a queued or leased job. Returns whether a row moved.
 
@@ -1091,20 +1119,22 @@ class JobRunner:
                 "leave which one selects the row undecided, and naming neither "
                 "would cancel the whole queue"
             )
+        tenant = check_enqueue_tenant(tenant)
         # Branching on `key` rather than on `job_id`, so the narrowing is real:
         # the check above has already established that exactly one is given, and
         # spelling it this way means `dedup_key` is handed a `str` instead of a
         # `key or ""` fallback for a `None` that cannot arrive here.
         if key is not None:
-            selector, value = "dedup_key=$2", dedup_key(self._name, key)
+            selector, value = "dedup_key=$3", dedup_key(self._name, key)
         else:
-            selector, value = "id=$2", job_id
+            selector, value = "id=$3", job_id
         rows = await self._fetch(
             f"UPDATE {self._table} SET state='dead', fence=fence+1, "
-            "last_error=$3, owner=NULL, lease_expiry=NULL, updated_at=now() "
-            f"WHERE queue=$1 AND {selector} AND state IN ('ready', 'leased') "
+            "last_error=$4, owner=NULL, lease_expiry=NULL, updated_at=now() "
+            f"WHERE queue=$1 AND tenant=$2 AND {selector} AND state IN ('ready', 'leased') "
             "RETURNING id",
             self._name,
+            tenant,
             value,
             reason[:2000],
         )
@@ -1116,14 +1146,15 @@ class JobRunner:
             # takes a `_Claimed` this path never had: nothing was claimed, a row
             # was told to stop. A watching client would otherwise sit at
             # whatever percentage the last report left, forever.
-            for row in rows:
-                self._progress.report(
-                    str(row["id"]),
-                    self._last_percent(row["id"]),
-                    reason,
-                    state="failed",
-                    error=reason,
-                )
+            with _enqueue_tenant_scope(tenant):
+                for row in rows:
+                    self._progress.report(
+                        str(row["id"]),
+                        self._last_percent(row["id"]),
+                        reason,
+                        state="failed",
+                        error=reason,
+                    )
         return True
 
     async def _pump(self, connection: Any) -> None:
@@ -1250,7 +1281,8 @@ class JobRunner:
             (job.trace_context, "") if job.trace_context else None
         )
         try:
-            await self._run_handler(job, ctx, handler, deadline)
+            with _enqueue_tenant_scope(job.tenant):
+                await self._run_handler(job, ctx, handler, deadline)
         finally:
             _telemetry.outbound_context.reset(trace_token)
 
@@ -1480,7 +1512,7 @@ class JobRunner:
         attempts = job.attempts + 1
         max_att = handler.max_attempts if handler is not None else job.max_attempts
         if permanent or attempts >= max_att:
-            await self._exec(
+            changed = await self._exec_fenced(
                 f"UPDATE {self._table} SET state='dead', attempts=$3, last_error=$4, "
                 "updated_at=now() WHERE id=$1 AND fence=$2",
                 job.id,
@@ -1488,6 +1520,8 @@ class JobRunner:
                 attempts,
                 error[:2000],
             )
+            if not changed:
+                return
             self.dead_lettered += 1
             self._report_terminal(job, "failed", error)
             return
@@ -1518,12 +1552,13 @@ class JobRunner:
     async def _complete(self, job: _Claimed) -> None:
         # Fenced: a stale worker whose lease expired (fence bumped by the sweeper)
         # cannot mark someone else's re-claim done.
-        await self._exec(
+        changed = await self._exec_fenced(
             fenced_update_sql(self._table, "state='done', updated_at=now()"),
             job.id,
             job.fence,
         )
-        self._report_terminal(job, "done", None)
+        if changed:
+            self._report_terminal(job, "done", None)
 
     def _report_terminal(self, job: _Claimed, state: str, error: str | None) -> None:
         """Close out the task, so a handler never has to remember to.
@@ -1749,6 +1784,13 @@ class JobRunner:
         connection = await self._db.acquire(self._workload)
         try:
             await connection.execute(sql, *args)
+        finally:
+            await self._db.release(self._workload, connection)
+
+    async def _exec_fenced(self, sql: str, *args: Any) -> bool:
+        connection = await self._db.acquire(self._workload)
+        try:
+            return await connection.fetchval(f"{sql} RETURNING TRUE", *args) is not None
         finally:
             await self._db.release(self._workload, connection)
 

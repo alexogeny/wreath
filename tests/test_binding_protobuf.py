@@ -87,6 +87,22 @@ async def test_content_type_parameters_do_not_defeat_the_match() -> None:
 
 
 @pytest.mark.asyncio
+async def test_body_binding_refuses_duplicate_content_type_before_decoder_selection() -> None:
+    async with TestClient(_app()) as client:
+        response = await client.post(
+            "/sightings",
+            content=encode(Sighting(species="tapir", count=3)),
+            headers=(
+                ("content-type", PROTOBUF.media_type),
+                ("content-type", "application/json"),
+            ),
+        )
+
+    assert response.status == 400
+    assert "Content-Type" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_an_unknown_field_number_is_preserved_not_refused() -> None:
     async with TestClient(_app()) as client:
         response = await client.post(

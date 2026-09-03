@@ -33,6 +33,14 @@ from wreath.users import (
     user_router,
 )
 
+
+class _Revocations:
+    async def delete_for(self, _subject: str) -> int:
+        return 0
+
+
+_REVOCATIONS = _Revocations()
+
 PASSWORD = "correct horse battery staple"
 
 #: One scrypt for the whole file rather than one per seeded user; see the same
@@ -64,9 +72,9 @@ def test_an_identity_that_never_proved_a_factor_has_no_age() -> None:
     assert second_factor_age(_identity(), 1_700_000_000.0) is None
 
 
-def test_a_stamp_in_the_future_reads_as_age_zero_not_a_negative_age() -> None:
+def test_a_stamp_in_the_future_is_not_a_valid_authentication_time() -> None:
     age = second_factor_age(_identity(second_factor_at=1_700_000_600), 1_700_000_000.0)
-    assert age == 0
+    assert age is None
 
 
 def test_a_boolean_stamp_is_not_a_timestamp() -> None:
@@ -282,7 +290,15 @@ def _app(
 ) -> Wreath:
     app = Wreath()
     app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
-    app.include_router(user_router(users, secret="u" * 32, second_factors=factors, clock=clock))
+    app.include_router(
+        user_router(
+            users,
+            sessions=_REVOCATIONS,
+            secret="u" * 32,
+            second_factors=factors,
+            clock=clock,
+        )
+    )
     # No `pytest.warns` wrapper: building without `enrolments=` no longer warns,
     # because it no longer degrades. See `test_users_webauthn.py`.
     router = second_factor_router(users, factors, issuer="Wreath", clock=clock, **options)
@@ -293,6 +309,20 @@ def _app(
         return dict(request.state.session)
 
     return app
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["enrolment_ttl", "pending_ttl", "step_up_ttl", "verify_window", "webauthn_ttl"],
+)
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_second_factor_router_refuses_non_finite_security_windows(field: str, value: float) -> None:
+    with pytest.raises(ValueError, match=field):
+        second_factor_router(
+            InMemoryUserStore(),
+            InMemorySecondFactorStore(),
+            **{field: value},
+        )
 
 
 async def _login(client: Any, email: str = "ann@example.test") -> Any:

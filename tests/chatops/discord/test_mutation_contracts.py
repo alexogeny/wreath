@@ -53,6 +53,14 @@ def test_verifier_accepts_hex_key_and_refuses_invalid_key_forms() -> None:
         api.DiscordInteractionVerifier(bytes(31))
 
 
+@pytest.mark.parametrize("max_age", [-1.0, 0.0, float("nan"), float("inf")])
+def test_verifier_refuses_invalid_signature_windows(max_age: float) -> None:
+    api = discord()
+
+    with pytest.raises(api.DiscordConfigurationError, match="positive and finite"):
+        api.DiscordInteractionVerifier(bytes(32), max_age=max_age)
+
+
 @pytest.mark.parametrize(
     ("signature", "timestamp"),
     [(bytes(63).hex(), "1"), (bytes(64).hex(), "")],

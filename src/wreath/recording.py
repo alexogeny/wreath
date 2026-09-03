@@ -980,8 +980,15 @@ def _init_recorder(
     image: object | None,
 ) -> None:
     """Initialise the storage and accounting shared by strict recorders."""
+    from ._fsguard import ContainmentError, open_root
+
     recorder._policy = policy
     recorder._directory = directory
+    recorder._directory_fd = -1
+    try:
+        recorder._directory_fd = open_root(directory)
+    except OSError, ContainmentError:
+        pass
     recorder._image = image
     recorder.scope = scope
     recorder.written = 0
@@ -993,7 +1000,7 @@ def _write_recording(
     recorder: Any,
     record: AttemptRecord | WorkflowStepRecord,
     trace: BoundaryTrace | None,
-    path: str,
+    name: str,
 ) -> str | None:
     """Write one strict recording with the shared refusal/error accounting."""
     import os
@@ -1009,9 +1016,10 @@ def _write_recording(
         image = MetadataImage(SCHEMA_VERSION, *([()] * 11))
     try:
         descriptor = os.open(
-            path,
+            name,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
             0o600,
+            dir_fd=recorder._directory_fd,
         )
         with os.fdopen(descriptor, "wb") as handle:
             writer = WFR1Writer(handle, image)
@@ -1026,7 +1034,16 @@ def _write_recording(
         recorder.errors += 1
         return None
     recorder.written += 1
-    return path
+    return os.path.join(recorder._directory, name)
+
+
+def _close_recorder(recorder: Any) -> None:
+    import os
+
+    descriptor = recorder._directory_fd
+    if descriptor >= 0:
+        recorder._directory_fd = -1
+        os.close(descriptor)
 
 
 class AttemptRecorder:
@@ -1044,6 +1061,7 @@ class AttemptRecorder:
     __slots__ = (
         "_policy",
         "_directory",
+        "_directory_fd",
         "_image",
         "scope",
         "written",
@@ -1052,6 +1070,7 @@ class AttemptRecorder:
     )
 
     _directory: str
+    _directory_fd: int
     _image: object | None
     _policy: AttemptPolicy
     errors: int
@@ -1074,6 +1093,12 @@ class AttemptRecorder:
     @property
     def policy(self) -> AttemptPolicy:
         return self._policy
+
+    def close(self) -> None:
+        _close_recorder(self)
+
+    def __del__(self) -> None:
+        _close_recorder(self)
 
     def trace(self) -> BoundaryTrace:
         """A boundary trace bounded by this recorder's policy."""
@@ -1104,12 +1129,8 @@ class AttemptRecorder:
         recorder that can take a worker down with it is worse than no recorder,
         and the attempt it is describing has already happened.
         """
-        import os
-
-        path = os.path.join(
-            self._directory, f"{record.queue}-{record.job_id}-{record.attempt}.wfr1"
-        )
-        return _write_recording(self, record, trace, path)
+        name = f"{_slug(record.queue)}-{record.job_id}-{record.attempt}.wfr1"
+        return _write_recording(self, record, trace, name)
 
 
 # The third arming vocabulary, and the reason it is a third rather than a reuse
@@ -1247,6 +1268,7 @@ class WorkflowStepRecorder:
 
     __slots__ = (
         "_directory",
+        "_directory_fd",
         "_image",
         "_policy",
         "errors",
@@ -1256,6 +1278,7 @@ class WorkflowStepRecorder:
     )
 
     _directory: str
+    _directory_fd: int
     _image: object | None
     _policy: WorkflowStepPolicy
     errors: int
@@ -1278,6 +1301,12 @@ class WorkflowStepRecorder:
     @property
     def policy(self) -> WorkflowStepPolicy:
         return self._policy
+
+    def close(self) -> None:
+        _close_recorder(self)
+
+    def __del__(self) -> None:
+        _close_recorder(self)
 
     def trace(self) -> BoundaryTrace:
         """A boundary trace bounded by this recorder's policy."""
@@ -1302,14 +1331,11 @@ class WorkflowStepRecorder:
         it describes has already happened -- in the middle of an undo chain,
         where an exception is at its most expensive.
         """
-        import os
-
         name = (
             f"{_slug(record.workflow)}-{_slug(record.instance)}"
             f"-{record.position}-{_slug(record.step)}.wfr1"
         )
-        path = os.path.join(self._directory, name)
-        return _write_recording(self, record, trace, path)
+        return _write_recording(self, record, trace, name)
 
 
 #: Longest slug one component of a recording's filename may reach. An instance

@@ -61,6 +61,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
+from ._auth.models import qualified_identity_value
 from ._native import _core
 
 if TYPE_CHECKING:
@@ -232,6 +233,13 @@ def normalize_key(key: str) -> str:
     return "/".join(parts)
 
 
+def _local_key(key: str) -> str:
+    key = normalize_key(key)
+    if key == ".wreath-upload-locks" or key.startswith(".wreath-upload-locks/"):
+        raise ObjectError(f"object key uses the reserved local upload-lock namespace: {key!r}")
+    return key
+
+
 @dataclass(frozen=True, slots=True)
 class ObjectStat:
     """What a backend knows about one object without reading its bytes.
@@ -371,6 +379,7 @@ class _AtomicUploadObjectStore(ObjectStore, Protocol):
     ) -> ObjectStat | None: ...
 
     async def _upload_delete_versioned(self, key: str, *, expected_etag: str) -> bool: ...
+
 
 class ObjectPath:
     """An immutable handle to one key in one store, shaped like `pathlib.Path`.
@@ -950,7 +959,7 @@ class LocalObjectStore:
         Raises:
             ObjectError: when the object is absent, escapes the root, or crosses a symlink.
         """
-        key = normalize_key(key)
+        key = _local_key(key)
         from ._fsguard import ContainmentError, open_beneath
 
         try:
@@ -1024,7 +1033,7 @@ class LocalObjectStore:
             ObjectError: when the key is invalid or a path component is a symlink.
             OSError: from the filesystem -- a full disk, a permission failure.
         """
-        key = normalize_key(key)
+        key = _local_key(key)
         parts = key.split("/")
         parent_fd, opened, name = await asyncio.to_thread(self._open_parent, parts, True)
         tmp = _tmp_name(name)
@@ -1114,7 +1123,7 @@ class LocalObjectStore:
             os.close(fd)
 
     async def _upload_read_versioned(self, key: str) -> tuple[bytes, str] | None:
-        return await asyncio.to_thread(self._upload_read_versioned_sync, normalize_key(key))
+        return await asyncio.to_thread(self._upload_read_versioned_sync, _local_key(key))
 
     def _upload_read_versioned_sync(self, key: str) -> tuple[bytes, str] | None:
         lock_dir, lock_fd = self._upload_lock(key)
@@ -1141,7 +1150,7 @@ class LocalObjectStore:
     ) -> ObjectStat | None:
         return await asyncio.to_thread(
             self._upload_compare_and_swap_sync,
-            normalize_key(key),
+            _local_key(key),
             data,
             expected_etag,
             content_type,
@@ -1180,7 +1189,7 @@ class LocalObjectStore:
 
     async def _upload_delete_versioned(self, key: str, *, expected_etag: str) -> bool:
         return await asyncio.to_thread(
-            self._upload_delete_versioned_sync, normalize_key(key), expected_etag
+            self._upload_delete_versioned_sync, _local_key(key), expected_etag
         )
 
     def _upload_delete_versioned_sync(self, key: str, expected_etag: str) -> bool:
@@ -1244,7 +1253,7 @@ class LocalObjectStore:
         Raises:
             ObjectError: when the object is absent, escapes the root, or crosses a symlink.
         """
-        key = normalize_key(key)
+        key = _local_key(key)
         from ._fsguard import ContainmentError, open_beneath
 
         try:
@@ -1311,16 +1320,13 @@ class LocalObjectStore:
             return [
                 key
                 for key in _core.local_walk(self._root, os.scandir, os.path.join)
-                if key != ".wreath-upload-locks"
-                and not key.startswith(".wreath-upload-locks/")
+                if key != ".wreath-upload-locks" and not key.startswith(".wreath-upload-locks/")
             ]
         try:
             if normalize_key(parent) != parent:
                 return _core.local_walk(self._root, os.scandir, os.path.join)
-            parent_fd, opened, _name = self._open_parent(
-                [*parent.split("/"), "listing"], False
-            )
-        except (ObjectError, NotADirectoryError):
+            parent_fd, opened, _name = self._open_parent([*parent.split("/"), "listing"], False)
+        except ObjectError, NotADirectoryError:
             return []
         descriptor_path = f"/proc/self/fd/{parent_fd}"
         try:
@@ -1329,8 +1335,7 @@ class LocalObjectStore:
             return [
                 f"{parent}/{key}"
                 for key in _core.local_walk(descriptor_path, os.scandir, os.path.join)
-                if key != ".wreath-upload-locks"
-                and not key.startswith(".wreath-upload-locks/")
+                if key != ".wreath-upload-locks" and not key.startswith(".wreath-upload-locks/")
             ]
         finally:
             for fd in opened:
@@ -1350,7 +1355,7 @@ class LocalObjectStore:
             ObjectError: when the key itself is not a valid key.
             OSError: for any filesystem failure other than "not there".
         """
-        key = normalize_key(key)
+        key = _local_key(key)
         parts = key.split("/")
         try:
             parent_fd, opened, name = await asyncio.to_thread(self._open_parent, parts, False)
@@ -1399,7 +1404,7 @@ class LocalObjectStore:
             expires: lifetime in seconds from now; the URL carries the deadline.
             method: the method authorised. Case-insensitive, and part of the signature.
         """
-        key = normalize_key(key)
+        key = _local_key(key)
         deadline = int(_now()) + expires
         sig = _sign_local(self._secret, method, key, deadline)
         return f"/{key}?expires={deadline}&signature={sig}"
@@ -1434,7 +1439,13 @@ class LocalObjectStore:
         Raises:
             ObjectError: when `key` is not a valid key.
         """
-        return _verify_local(self._secret, key, method=method, expires=expires, signature=signature)
+        return _verify_local(
+            self._secret,
+            _local_key(key),
+            method=method,
+            expires=expires,
+            signature=signature,
+        )
 
     def path(self, key: str) -> ObjectPath:
         """An `ObjectPath` bound to this store and `key`."""
@@ -1995,15 +2006,11 @@ class S3ObjectStore:
     ) -> ObjectStat | None:
         key = normalize_key(key)
         condition = (
-            {"if-none-match": "*"}
-            if expected_etag is None
-            else {"if-match": f'"{expected_etag}"'}
+            {"if-none-match": "*"} if expected_etag is None else {"if-match": f'"{expected_etag}"'}
         )
         if content_type:
             condition["content-type"] = content_type
-        resp = await self._send(
-            "PUT", self._obj_path(key), body=data, extra_headers=condition
-        )
+        resp = await self._send("PUT", self._obj_path(key), body=data, extra_headers=condition)
         if resp.status in (409, 412):
             return None
         self._ok(resp, 200)
@@ -2480,6 +2487,7 @@ class UploadState:
         offset: bytes durably accepted so far.
         length: the declared total size, or None while it is unknown.
         complete: whether the final append has been accepted.
+        finalized: whether backend assembly completed and only callback enqueue remains.
         content_type: the media type, sniffed or declared.
         created: creation time, as a POSIX timestamp.
         updated: last-accepted-append time, as a POSIX timestamp.
@@ -2491,6 +2499,7 @@ class UploadState:
     offset: int = 0
     length: int | None = None
     complete: bool = False
+    finalized: bool = False
     content_type: str | None = None
     created: float = 0.0
     updated: float = 0.0
@@ -2516,6 +2525,7 @@ class UploadState:
             offset=self.offset,
             length=self.length,
             complete=self.complete,
+            finalized=self.finalized,
             content_type=self.content_type,
             created=self.created,
             updated=self.updated,
@@ -2541,6 +2551,7 @@ class UploadState:
                 "offset": self.offset,
                 "length": self.length,
                 "complete": self.complete,
+                "finalized": self.finalized,
                 "content_type": self.content_type,
                 "created": self.created,
                 "updated": self.updated,
@@ -2566,6 +2577,7 @@ class UploadState:
             offset=int(data["offset"]),
             length=None if data.get("length") is None else int(data["length"]),
             complete=bool(data.get("complete", False)),
+            finalized=bool(data.get("finalized", False)),
             content_type=data.get("content_type"),
             created=float(data.get("created", 0.0)),
             updated=float(data.get("updated", 0.0)),
@@ -2583,6 +2595,7 @@ def _adopt_upload_state(target: UploadState, source: UploadState) -> None:
     target.offset = source.offset
     target.length = source.length
     target.complete = source.complete
+    target.finalized = source.finalized
     target.content_type = source.content_type
     target.created = source.created
     target.updated = source.updated
@@ -2690,11 +2703,7 @@ class MemoryUploadStore:
 
     async def advance(self, state: UploadState, *, expected: int) -> bool:
         current = self._states.get(state.id)
-        if (
-            current is None
-            or current.offset != expected
-            or current.claim != state.claim
-        ):
+        if current is None or current.offset != expected or current.claim != state.claim:
             return False
         stored = state.copy()
         stored.claim = ""
@@ -2792,9 +2801,7 @@ class ObjectUploadStore:
             versioned = await self._store._upload_read_versioned(key)
             if versioned is None:
                 raise ObjectError(f"upload admission for {state.id!r} expired before creation")
-            removed = await self._store._upload_delete_versioned(
-                key, expected_etag=versioned[1]
-            )
+            removed = await self._store._upload_delete_versioned(key, expected_etag=versioned[1])
             if not removed:
                 raise ObjectError(
                     f"upload admission for {state.id!r} was lost and its record "
@@ -3053,9 +3060,7 @@ class ObjectUploadStore:
             }
         if not entries:
             if etag is not None:
-                await self._store._upload_delete_versioned(
-                    self._counter_key, expected_etag=etag
-                )
+                await self._store._upload_delete_versioned(self._counter_key, expected_etag=etag)
             return
         await self._store._upload_compare_and_swap(
             self._counter_key,
@@ -3296,6 +3301,29 @@ class _Refused(Exception):
         self.extra = extra or []
 
 
+_UPLOAD_SINGLETON_HEADERS = (
+    "content-type",
+    "upload-complete",
+    "upload-length",
+    "upload-offset",
+)
+
+
+def _upload_request_headers(request: Request) -> dict[str, str | None]:
+    raw_headers = getattr(request, "headers", None)
+    if not isinstance(raw_headers, (list, tuple)):
+        return {name: request.header(name) for name in _UPLOAD_SINGLETON_HEADERS}
+    values: dict[str, str | None] = dict.fromkeys(_UPLOAD_SINGLETON_HEADERS)
+    for raw_name, raw_value in raw_headers:
+        name = raw_name.decode("latin-1").lower()
+        if name not in values:
+            continue
+        if values[name] is not None:
+            raise _Refused(400, f"{name} must occur exactly once")
+        values[name] = raw_value.decode("latin-1")
+    return values
+
+
 class ResumableUploads:
     """The upload-creating resource and the upload resources beneath it.
 
@@ -3357,7 +3385,8 @@ class ResumableUploads:
             fills -- storage is the most commonly metered resource and this is
             the only moment before the bytes arrive.
         key_for: chooses the final object key from the request and the new
-            upload id. Defaults to `prefix` plus the id.
+            upload id. Defaults to `prefix` plus the id. Tenant-bound requests
+            store that key below a framework-owned tenant namespace.
         sniff: refuse an append whose leading bytes contradict a declared
             content type.
 
@@ -3485,10 +3514,11 @@ class ResumableUploads:
         finishes in one round trip and still goes through every check an append
         does.
         """
-        complete = _sf_boolean(request.header("upload-complete"))
+        headers = _upload_request_headers(request)
+        complete = _sf_boolean(headers["upload-complete"])
         if complete is None:
             raise _Refused(400, "Upload-Complete must be ?0 or ?1")
-        declared = _sf_integer(request.header("upload-length"))
+        declared = _sf_integer(headers["upload-length"])
         await self._admit(request, declared)
 
         upload_id = _upload_id()
@@ -3497,16 +3527,20 @@ class ResumableUploads:
             if self._key_for is not None
             else f"{self._prefix}{upload_id}"
         )
+        tenant = self._request_tenant(request)
+        if tenant:
+            tenant_namespace = hashlib.sha256(tenant.encode()).hexdigest()
+            key = f".wreath-tenants/{tenant_namespace}/{key}"
         now = _now()
         state = UploadState(
             id=upload_id,
             key=normalize_key(key),
             length=declared,
-            content_type=request.header("content-type"),
+            content_type=headers["content-type"],
             created=now,
             updated=now,
             principal=self._request_principal(request),
-            tenant=self._request_tenant(request),
+            tenant=tenant,
         )
         if state.content_type == PARTIAL_UPLOAD:
             # The creation body is not a partial-upload fragment; the type
@@ -3548,12 +3582,13 @@ class ResumableUploads:
         must fit inside the declared length and the advertised maximum (413
         otherwise).
         """
-        if (request.header("content-type") or "").split(";")[0].strip() != PARTIAL_UPLOAD:
+        headers = _upload_request_headers(request)
+        if (headers["content-type"] or "").split(";")[0].strip() != PARTIAL_UPLOAD:
             raise _Refused(415, f"append requires Content-Type: {PARTIAL_UPLOAD}")
-        complete = _sf_boolean(request.header("upload-complete"))
+        complete = _sf_boolean(headers["upload-complete"])
         if complete is None:
             raise _Refused(400, "Upload-Complete must be ?0 or ?1")
-        claimed = _sf_integer(request.header("upload-offset"))
+        claimed = _sf_integer(headers["upload-offset"])
         if claimed is None:
             raise _Refused(400, "Upload-Offset must be a non-negative integer")
         state = await self._require(request)
@@ -3563,7 +3598,7 @@ class ResumableUploads:
                 f"Upload-Offset {claimed} does not match {state.offset}",
                 [(b"upload-offset", str(state.offset).encode("ascii"))],
             )
-        declared = _sf_integer(request.header("upload-length"))
+        declared = _sf_integer(headers["upload-length"])
         if declared is not None and state.length is not None and declared != state.length:
             raise _Refused(400, "Upload-Length must not change")
         if declared is not None:
@@ -3602,7 +3637,10 @@ class ResumableUploads:
         identity = request.identity
         if identity is None:
             return ""
-        return f"{identity.type}:{identity.id}"
+        identity_id = qualified_identity_value(
+            str(getattr(identity, "namespace", "")), str(identity.id)
+        )
+        return f"{identity.type}:{identity_id}"
 
     @staticmethod
     def _request_tenant(request: Request) -> str:
@@ -3631,6 +3669,16 @@ class ResumableUploads:
         hole. The claim is released in every path, including a refusal.
         """
         if state.complete:
+            if complete:
+                async for chunk in request.stream():
+                    if chunk:
+                        raise _Refused(
+                            409,
+                            "upload is already complete",
+                            [(b"upload-offset", str(state.offset).encode("ascii"))],
+                        )
+                await self._finish(state, self._backend())
+                return
             raise _Refused(
                 409,
                 "upload is already complete",
@@ -3715,9 +3763,7 @@ class ResumableUploads:
             append_succeeded = True
         finally:
             if not append_succeeded:
-                reusable = (
-                    await backend.rollback_append(before_append, state) if buffered else True
-                )
+                reusable = await backend.rollback_append(before_append, state) if buffered else True
                 if reusable:
                     if not await self._uploads.release(before_append):
                         raise ObjectError(
@@ -3737,9 +3783,7 @@ class ResumableUploads:
             # check and two mutants survived on it.
             state.length = state.offset
         if not await self._uploads.advance(state, expected=expected):
-            reusable = (
-                await backend.rollback_append(before_append, state) if buffered else True
-            )
+            reusable = await backend.rollback_append(before_append, state) if buffered else True
             if reusable:
                 if not await self._uploads.release(before_append):
                     raise ObjectError(
@@ -3773,15 +3817,32 @@ class ResumableUploads:
         state.content_type = looks_like
 
     async def _finish(self, state: UploadState, backend: _UploadBackend) -> None:
-        await backend.finish(state)
-        if not await self._uploads.delete(state.id):
-            raise ObjectError(f"completed upload {state.id!r} could not remove its state")
+        if not state.finalized:
+            expected = state.offset
+            if not await self._uploads.claim(state, expected=expected):
+                raise _Refused(
+                    409,
+                    "another operation is finalizing this upload",
+                    [(b"upload-offset", str(expected).encode("ascii"))],
+                )
+            await backend.finish(state)
+            state.finalized = True
+            if not await self._uploads.advance(state, expected=expected):
+                raise ObjectError(
+                    f"completed upload {state.id!r} could not preserve its finalized state"
+                )
         if self._on_complete is not None:
             # The upload id is the idempotency key: a completion retried after
             # a lost response enqueues nothing the second time.
             await self._jobs.enqueue(
-                self._on_complete, state.id, state.key, key=f"upload:{state.id}"
+                self._on_complete,
+                state.id,
+                state.key,
+                key=f"upload:{state.id}",
+                tenant=state.tenant,
             )
+        if not await self._uploads.delete(state.id, claim=state.claim):
+            raise ObjectError(f"completed upload {state.id!r} could not remove its state")
 
     async def _discard(self, state: UploadState) -> None:
         state.claim = ""
@@ -3818,6 +3879,18 @@ class ResumableUploads:
         backend = self._backend()
         reclaimed = 0
         for state in stale:
+            if state.complete and state.finalized:
+                try:
+                    await self._finish(state, backend)
+                except BaseException as error:
+                    if not await self._uploads.release(state):
+                        raise ObjectError(
+                            f"completed upload {state.id!r} failed callback recovery and "
+                            "its state claim could not be released"
+                        ) from error
+                    raise
+                reclaimed += 1
+                continue
             try:
                 await backend.abort(state)
             except (ObjectError, OSError) as error:

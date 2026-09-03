@@ -42,6 +42,28 @@ async def test_chat_federation_reads_the_scim_owned_membership_each_time() -> No
         await federation.resolve(external, binding)
 
 
+async def test_chat_federation_membership_includes_the_identity_namespace() -> None:
+    from wreath._auth.models import qualified_identity_value
+    from wreath.auth import Identity
+    from wreath.chat import ExternalIdentityKey, PrincipalBinding
+
+    store = _store()
+    await store.add_member("acme", "alice", roles={"member"})
+    external = ExternalIdentityKey(provider="slack", installation="T1", subject="U1")
+    federation = OrganizationFederation(store, _InstallationOrganizations())
+    wrong_issuer = PrincipalBinding(
+        identity=Identity("alice", namespace="https://issuer-b.example"), external=external
+    )
+
+    with pytest.raises(OrganizationFederationError, match="not.*member"):
+        await federation.resolve(external, wrong_issuer)
+
+    issuer_a = "https://issuer-a.example"
+    await store.add_member("acme", qualified_identity_value(issuer_a, "alice"), roles={"member"})
+    matching = PrincipalBinding(identity=Identity("alice", namespace=issuer_a), external=external)
+    assert (await federation.resolve(external, matching)).tenant == "acme"
+
+
 @pytest.mark.parametrize(
     "external",
     [
@@ -86,6 +108,7 @@ async def test_chat_federation_accepts_a_matching_tenant_and_refuses_another() -
     mismatch = PrincipalBinding(identity=identity, external=key, tenant="other")
     with pytest.raises(OrganizationFederationError, match="does not match"):
         await federation.resolve(external, mismatch)
+
 
 ROLES = frozenset({"admin", "member", "billing"})
 
@@ -216,6 +239,37 @@ async def test_an_expired_invitation_is_refused_distinctly() -> None:
     with pytest.raises(ValueError) as caught:
         await store.accept(invitation.token, "alice", now=1061.0)
     assert str(caught.value) == "invitation has expired"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ttl", "now"),
+    [
+        (float("nan"), 1000.0),
+        (float("inf"), 1000.0),
+        (60.0, float("nan")),
+        (60.0, float("inf")),
+    ],
+)
+async def test_invitation_expiry_inputs_must_be_finite(ttl: float, now: float) -> None:
+    store = _store()
+
+    with pytest.raises(ValueError, match="finite"):
+        await store.invite("acme", "new@example.com", ttl=ttl, now=now)
+
+    assert await store.invitations("acme") == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("now", [float("nan"), float("inf")])
+async def test_invitation_acceptance_time_must_be_finite(now: float) -> None:
+    store = _store()
+    invitation = await store.invite("acme", "new@example.com", ttl=60, now=1000.0)
+
+    with pytest.raises(ValueError, match="finite"):
+        await store.accept(invitation.token, "alice", now=now)
+
+    assert await store.accept(invitation.token, "alice", now=1001.0) == Membership("acme", "alice")
 
 
 @pytest.mark.asyncio

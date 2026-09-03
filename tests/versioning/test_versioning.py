@@ -49,6 +49,27 @@ def test_negotiate_version_reads_a_real_request():
     assert negotiate_version(request, default="1", supported=("1", "2")) == "2"
 
 
+def test_negotiate_version_defaults_on_duplicate_singleton_header() -> None:
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/x",
+            "query_string": b"",
+            "headers": [
+                (b"accept-version", b"2"),
+                (b"accept-version", b"1"),
+            ],
+        },
+        receive,
+    )
+
+    assert negotiate_version(request, default="1", supported=("1", "2")) == "1"
+
+
 def test_versioned_router_mounts_prefixes():
     api = VersionedRouter()
 

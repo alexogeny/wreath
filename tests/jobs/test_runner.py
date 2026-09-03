@@ -149,6 +149,44 @@ async def test_deduplicated_launch_returns_the_surviving_handle():
     assert handle.state == "running"
 
 
+async def test_deduplicated_launch_reuses_the_inherited_tenant_for_lookup():
+    from wreath.tenancy import _enqueue_tenant_scope
+
+    db = FakeDatabase()
+    runner = _runner(db)
+
+    @runner.task("import_herd")
+    async def import_herd(ctx):
+        pass
+
+    db.connection.fetchval_script = [None, 17]
+    with _enqueue_tenant_scope("tenant_b"):
+        handle = await runner.launch("import_herd", key="nightly")
+
+    lookup = next(args for sql, args in db.connection.calls if sql.startswith("SELECT id FROM"))
+    assert lookup[1] == "tenant_b"
+    assert handle.task_id == "17"
+
+
+async def test_explicit_tenant_launch_seeds_only_that_tenants_progress():
+    from wreath.progress import ProgressRegistry
+    from wreath.tenancy import _enqueue_tenant_scope
+
+    registry = ProgressRegistry()
+    runner = _runner(FakeDatabase(), progress=registry)
+
+    @runner.task("import_herd")
+    async def import_herd(ctx):
+        pass
+
+    handle = await runner.launch("import_herd", tenant="tenant_b")
+
+    assert registry.get(handle.task_id) is None
+    with _enqueue_tenant_scope("tenant_b"):
+        seeded = registry.get(handle.task_id)
+    assert seeded is not None and seeded.state == "queued"
+
+
 async def test_launch_never_hands_back_a_stringified_none():
     db = FakeDatabase()
     runner = _runner(db)
@@ -621,6 +659,13 @@ def test_a_task_refuses_negative_retries_and_a_non_positive_timeout():
         runner.task("c", timeout=-5)
 
 
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf")])
+def test_a_task_timeout_must_be_finite(timeout: float):
+    runner = _runner(FakeDatabase())
+    with pytest.raises(ValueError, match="timeout must be finite"):
+        runner.task("bounded", timeout=timeout)
+
+
 def test_a_task_name_that_is_not_an_identifier_is_refused_at_declaration():
     runner = _runner(FakeDatabase())
     with pytest.raises(ValueError, match="task name"):
@@ -751,6 +796,25 @@ async def test_a_job_that_reported_nothing_is_dead_lettered_at_zero():
     assert progress.reports == [("7", 0.0, "failed", "boom")]
 
 
+async def test_a_stale_worker_cannot_dead_letter_progress_after_losing_its_fence():
+    progress = _Progress(percent=42.0)
+    runner = _runner(FakeDatabase(fetchval_result=None), progress=progress)
+
+    await runner._fail(_stale_job(), "late failure", permanent=True)
+
+    assert runner.dead_lettered == 0
+    assert progress.reports == []
+
+
+async def test_a_stale_worker_cannot_complete_progress_after_losing_its_fence():
+    progress = _Progress(percent=42.0)
+    runner = _runner(FakeDatabase(fetchval_result=None), progress=progress)
+
+    await runner._complete(_stale_job())
+
+    assert progress.reports == []
+
+
 async def test_cancelling_reports_terminal_progress_when_configured(monkeypatch):
     progress = _Progress(percent=42.0)
     runner = _runner(FakeDatabase(), progress=progress)
@@ -762,6 +826,28 @@ async def test_cancelling_reports_terminal_progress_when_configured(monkeypatch)
 
     assert await runner.cancel(7, reason="operator stopped it") is True
     assert progress.reports == [("7", 42.0, "failed", "operator stopped it")]
+
+
+async def test_explicit_tenant_cancel_reports_only_in_that_tenants_progress(monkeypatch):
+    from wreath.progress import ProgressRegistry
+    from wreath.tenancy import _enqueue_tenant_scope
+
+    registry = ProgressRegistry()
+    runner = _runner(FakeDatabase(), progress=registry)
+
+    with _enqueue_tenant_scope("tenant_b"):
+        registry.report("7", 42.0, "working", state="running")
+
+    async def cancelled_rows(*args, **kwargs):
+        return [{"id": 7}]
+
+    monkeypatch.setattr(runner, "_fetch", cancelled_rows)
+
+    assert await runner.cancel(7, tenant="tenant_b", reason="operator stopped it") is True
+    assert registry.get("7") is None
+    with _enqueue_tenant_scope("tenant_b"):
+        stopped = registry.get("7")
+    assert stopped is not None and stopped.state == "failed" and stopped.percent == 42.0
 
 
 async def test_cancelling_without_progress_still_succeeds(monkeypatch):

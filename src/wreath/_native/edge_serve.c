@@ -47,6 +47,7 @@
 #define EDGE_MAX_HEADERS 128
 #define EDGE_MAX_CHUNK_LINE 8192
 #define EDGE_MAX_BODY_CHUNKS 4096
+#define EDGE_MAX_INFORMATIONAL_RESPONSES 16
 
 static int
 edge_field_name_normalize(char *p, Py_ssize_t n)
@@ -71,6 +72,67 @@ edge_field_value_valid(const char *p, Py_ssize_t n)
         if (c == 0 || c == '\r' || c == '\n' || (c < 0x20 && c != '\t') || c == 0x7f) {
             return 0;
         }
+    }
+    return 1;
+}
+
+
+static int
+edge_method_char_valid(unsigned char c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z')
+        || (c >= 'a' && c <= 'z') || strchr("!#$%&'*+-.^_`|~", c) != NULL;
+}
+
+
+static int
+edge_target_char_valid(unsigned char c)
+{
+    return c > 0x20 && c != 0x7f && c != '#';
+}
+
+
+static int
+edge_chunk_suffix_valid(const char *p, Py_ssize_t n)
+{
+    Py_ssize_t i = 0;
+    while (i < n) {
+        while (i < n && (p[i] == ' ' || p[i] == '\t')) i++;
+        if (i == n) return 0;
+        if (p[i++] != ';') return 0;
+        while (i < n && (p[i] == ' ' || p[i] == '\t')) i++;
+        Py_ssize_t name = i;
+        while (i < n && edge_method_char_valid((unsigned char)p[i])) i++;
+        if (i == name) return 0;
+        while (i < n && (p[i] == ' ' || p[i] == '\t')) i++;
+        if (i == n || p[i] == ';') continue;
+        if (p[i++] != '=') return 0;
+        while (i < n && (p[i] == ' ' || p[i] == '\t')) i++;
+        if (i == n) return 0;
+        if (p[i] != '"') {
+            Py_ssize_t value = i;
+            while (i < n && edge_method_char_valid((unsigned char)p[i])) i++;
+            if (i == value) return 0;
+            continue;
+        }
+        i++;
+        int closed = 0;
+        while (i < n) {
+            unsigned char c = (unsigned char)p[i++];
+            if (c == '"') {
+                closed = 1;
+                break;
+            }
+            if (c == '\\') {
+                if (i == n) return 0;
+                c = (unsigned char)p[i++];
+                if (!((c >= 0x20 && c != 0x7f) || c == '\t')) return 0;
+            }
+            else if (!((c >= 0x20 && c != 0x7f) || c == '\t')) {
+                return 0;
+            }
+        }
+        if (!closed) return 0;
     }
     return 1;
 }
@@ -350,6 +412,30 @@ sink_close(EdgeSink *sink)
 }
 
 
+static int
+sink_call_optional(EdgeSink *sink, const char *method)
+{
+    if (sink->transport == NULL || sink->closing) {
+        return 0;
+    }
+    PyObject *callable = PyObject_GetAttrString(sink->transport, method);
+    if (callable == NULL) {
+        if (PyErr_ExceptionMatches(PyExc_AttributeError)) {
+            PyErr_Clear();
+            return 0;
+        }
+        return -1;
+    }
+    PyObject *result = PyObject_CallNoArgs(callable);
+    Py_DECREF(callable);
+    if (result == NULL) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
+
 static void
 sink_clear(EdgeSink *sink)
 {
@@ -432,6 +518,8 @@ struct EdgeClient {
     int close_after;        /* the client asked for `Connection: close` */
     int no_body_expected;   /* HEAD: the response carries no body */
     int keep_alive;
+    int input_paused;
+    int write_paused;
     EdgeConn *conn;         /* the upstream connection serving this request */
     EdgeClient *wait_next;
     PyObject *wait_timer;
@@ -459,6 +547,8 @@ struct EdgeConn {
     int state;
     int upstream_close;     /* the origin asked for `Connection: close` */
     int response_chunked;
+    int informational_responses;
+    int read_paused;
     double started;
     EdgeClient *client;     /* the request being served, or NULL */
     EdgeConn *free_next;
@@ -1116,7 +1206,7 @@ edge_build_request(EdgeClient *self, EdgeUpstream *up, const EdgeSlice *fields,
                    Py_ssize_t nfields, Py_ssize_t method, Py_ssize_t method_len,
                    Py_ssize_t target, Py_ssize_t target_len,
                    Py_ssize_t host, Py_ssize_t host_len,
-                   Py_ssize_t connection, Py_ssize_t connection_len,
+                   const EdgeSlice *connections, Py_ssize_t nconnections,
                    Py_ssize_t body_len, int has_body)
 {
     const char *base = self->in.data;
@@ -1155,11 +1245,16 @@ edge_build_request(EdgeClient *self, EdgeUpstream *up, const EdgeSlice *fields,
          * it cannot be filtered in the parse pass -- the header may arrive after
          * the fields it names. Both oracles get this wrong: haproxy 3.4.3 and
          * nginx 1.30.4 forward such a field. */
-        if (connection_len > 0
-            && wreath_edge_connection_names(base + connection, connection_len,
-                                            name, name_len)) {
-            continue;
+        int connection_named = 0;
+        for (Py_ssize_t j = 0; j < nconnections; j++) {
+            if (wreath_edge_connection_names(
+                    base + connections[j].value, connections[j].value_len,
+                    name, name_len)) {
+                connection_named = 1;
+                break;
+            }
         }
+        if (connection_named) continue;
         if (ebuf_add(out, name, name_len) < 0
             || EBUF_LIT(out, ": ") < 0
             || ebuf_add(out, base + fields[i].value, fields[i].value_len) < 0
@@ -1273,19 +1368,29 @@ edge_parse_request(EdgeClient *self)
         return edge_refuse(self, 400);
     }
     Py_ssize_t line_end = (Py_ssize_t)(eol - base);
-    char *sp1 = memchr(base + p, ' ', (size_t)(line_end - p));
-    if (sp1 == NULL) {
-        return edge_refuse(self, 400);
-    }
     Py_ssize_t method = p;
-    Py_ssize_t method_len = (Py_ssize_t)(sp1 - base) - p;
-    Py_ssize_t target = (Py_ssize_t)(sp1 - base) + 1;
-    char *sp2 = memchr(base + target, ' ', (size_t)(line_end - target));
-    if (sp2 == NULL || method_len == 0) {
+    while (p < line_end && base[p] != ' ') {
+        if (!edge_method_char_valid((unsigned char)base[p])) {
+            return edge_refuse(self, 400);
+        }
+        p++;
+    }
+    Py_ssize_t method_len = p - method;
+    if (p == line_end || method_len == 0) {
         return edge_refuse(self, 400);
     }
-    Py_ssize_t target_len = (Py_ssize_t)(sp2 - base) - target;
-    Py_ssize_t version = (Py_ssize_t)(sp2 - base) + 1;
+    Py_ssize_t target = ++p;
+    if (target == line_end || base[target] != '/') {
+        return edge_refuse(self, 400);
+    }
+    while (p < line_end && base[p] != ' ') {
+        if (!edge_target_char_valid((unsigned char)base[p])) {
+            return edge_refuse(self, 400);
+        }
+        p++;
+    }
+    Py_ssize_t target_len = p - target;
+    Py_ssize_t version = p + 1;
     Py_ssize_t version_len = line_end - version;
     if (target_len == 0 || version_len != 8
         || memcmp(base + version, "HTTP/1.", 7) != 0) {
@@ -1300,7 +1405,8 @@ edge_parse_request(EdgeClient *self)
     EdgeSlice fields[EDGE_MAX_HEADERS];
     Py_ssize_t nfields = 0;
     Py_ssize_t host = 0, host_len = 0, hosts = 0;
-    Py_ssize_t connection = 0, connection_len = 0;
+    EdgeSlice connections[EDGE_MAX_HEADERS];
+    Py_ssize_t nconnections = 0;
     Py_ssize_t declared = -1;
     int content_lengths = 0;
     int chunked = 0, transfer_encodings = 0;
@@ -1347,8 +1453,12 @@ edge_parse_request(EdgeClient *self)
             hosts++;
         }
         else if (edge_token_eq(base + name, name_len, "connection", 10)) {
-            connection = value;
-            connection_len = value_len;
+            if (nconnections >= EDGE_MAX_HEADERS) {
+                return edge_refuse(self, 431);
+            }
+            connections[nconnections].value = value;
+            connections[nconnections].value_len = value_len;
+            nconnections++;
         }
         else if (edge_token_eq(base + name, name_len, "content-length", 14)) {
             content_lengths++;
@@ -1409,12 +1519,16 @@ edge_parse_request(EdgeClient *self)
 
     self->no_body_expected = edge_token_eq(base + method, method_len, "HEAD", 4);
     self->keep_alive = minor == 1;
-    if (edge_connection_has(base + connection, connection_len, "close", 5)) {
-        self->keep_alive = 0;
-    }
-    else if (edge_connection_has(base + connection, connection_len,
-                                 "keep-alive", 10)) {
-        self->keep_alive = 1;
+    for (Py_ssize_t i = 0; i < nconnections; i++) {
+        const char *value = base + connections[i].value;
+        Py_ssize_t value_len = connections[i].value_len;
+        if (edge_connection_has(value, value_len, "close", 5)) {
+            self->keep_alive = 0;
+            break;
+        }
+        if (edge_connection_has(value, value_len, "keep-alive", 10)) {
+            self->keep_alive = 1;
+        }
     }
     self->close_after = !self->keep_alive;
 
@@ -1455,7 +1569,7 @@ edge_parse_request(EdgeClient *self)
 
     if (edge_build_request(self, up, fields, nfields, method, method_len,
                            target, target_len, host, host_len,
-                           connection, connection_len, body_len, has_body) < 0) {
+                           connections, nconnections, body_len, has_body) < 0) {
         return -1;
     }
     self->in.start = end + 4;
@@ -1496,7 +1610,8 @@ edge_finish_chunked(EdgeClient *self)
     EdgeSlice fields[EDGE_MAX_HEADERS];
     Py_ssize_t nfields = 0;
     Py_ssize_t host = 0, host_len = 0;
-    Py_ssize_t connection = 0, connection_len = 0;
+    EdgeSlice connections[EDGE_MAX_HEADERS];
+    Py_ssize_t nconnections = 0;
 
     p = line_end + 2;
     while (p < end && nfields < EDGE_MAX_HEADERS) {
@@ -1514,8 +1629,9 @@ edge_finish_chunked(EdgeClient *self)
             host_len = value_end - value;
         }
         else if (edge_token_eq(base + name, name_len, "connection", 10)) {
-            connection = value;
-            connection_len = value_end - value;
+            connections[nconnections].value = value;
+            connections[nconnections].value_len = value_end - value;
+            nconnections++;
         }
         fields[nfields].name = name;
         fields[nfields].name_len = name_len;
@@ -1535,7 +1651,7 @@ edge_finish_chunked(EdgeClient *self)
     self->queued_on = index;
     if (edge_build_request(self, &self->table->ups[index], fields, nfields,
                            method, method_len, target, target_len,
-                           host, host_len, connection, connection_len,
+                           host, host_len, connections, nconnections,
                            self->body.len, 1) < 0) {
         return -1;
     }
@@ -1552,6 +1668,31 @@ edge_finish_chunked(EdgeClient *self)
 
 /* --- dispatch ------------------------------------------------------------- */
 
+static int
+edge_client_set_input_paused(EdgeClient *self, int paused)
+{
+    if (self->input_paused == paused) return 0;
+    if (sink_call_optional(&self->sink,
+                           paused ? "pause_reading" : "resume_reading") < 0) {
+        return -1;
+    }
+    self->input_paused = paused;
+    return 0;
+}
+
+
+static int
+edge_conn_set_read_paused(EdgeConn *self, int paused)
+{
+    if (self->read_paused == paused) return 0;
+    if (sink_call_optional(&self->sink,
+                           paused ? "pause_reading" : "resume_reading") < 0) {
+        return -1;
+    }
+    self->read_paused = paused;
+    return 0;
+}
+
 /* Hand the staged request to an open upstream connection, or queue it.
  *
  * There is nothing to await here, which is the point: `self->out` is a byte
@@ -1562,6 +1703,9 @@ edge_finish_chunked(EdgeClient *self)
 static int
 edge_dispatch(EdgeClient *self)
 {
+    if (edge_client_set_input_paused(self, 1) < 0) {
+        return -1;
+    }
     EdgeTable *table = self->table;
     Py_ssize_t index = self->queued_on;
     EdgeUpstream *up = &table->ups[index];
@@ -1609,8 +1753,12 @@ edge_dispatch(EdgeClient *self)
     conn->state = EU_HEAD;
     conn->started = edge_now();
     conn->head_scan = conn->in.start;
+    conn->informational_responses = 0;
     conn->counted = 1;
     up->inflight++;
+    if (self->write_paused && edge_conn_set_read_paused(conn, 1) < 0) {
+        return -1;
+    }
     if (sink_write(&conn->sink, self->out.data, self->out.len) < 0) {
         return -1;
     }
@@ -1627,6 +1775,10 @@ edge_release_conn(EdgeConn *conn, int reusable)
     EdgeTable *table = conn->table;
     EdgeUpstream *up = &table->ups[conn->index];
     EdgeClient *client = conn->client;
+
+    if (conn->read_paused && edge_conn_set_read_paused(conn, 0) < 0) {
+        PyErr_WriteUnraisable((PyObject *)conn);
+    }
 
     if (conn->counted) {
         conn->counted = 0;
@@ -1658,8 +1810,12 @@ edge_release_conn(EdgeConn *conn, int reusable)
         conn->state = EU_HEAD;
         conn->started = edge_now();
         conn->head_scan = conn->in.start;
+        conn->informational_responses = 0;
         conn->counted = 1;
         up->inflight++;
+        if (waiter->write_paused && edge_conn_set_read_paused(conn, 1) < 0) {
+            PyErr_WriteUnraisable((PyObject *)conn);
+        }
         if (sink_write(&conn->sink, waiter->out.data, waiter->out.len) < 0) {
             PyErr_WriteUnraisable((PyObject *)conn);
         }
@@ -1741,7 +1897,8 @@ edge_client_drive(EdgeClient *self)
                 }
                 size = size * 16 + digit;
             }
-            if (i == 0) {
+            if (i == 0 || !edge_chunk_suffix_valid(
+                    p + i, line_len - 1 - i)) {
                 return edge_refuse(self, 400);
             }
             self->in.start += line_len + 1;
@@ -1849,6 +2006,19 @@ edge_client_unqueue(EdgeClient *self)
         prev = *link;
         link = &(*link)->wait_next;
     }
+}
+
+
+static void
+edge_client_bound_waiting_input(EdgeClient *self)
+{
+    if (self->state != EC_WAITING
+        || self->in.len - self->in.start <= EDGE_RECV_CHUNK) {
+        return;
+    }
+    self->state = EC_CLOSED;
+    edge_client_unqueue(self);
+    sink_close(&self->sink);
 }
 
 
@@ -2022,6 +2192,7 @@ edge_client_buffer_updated(EdgeClient *self, PyObject *arg)
     if (edge_client_drive(self) < 0) {
         return NULL;
     }
+    edge_client_bound_waiting_input(self);
     Py_RETURN_NONE;
 }
 
@@ -2038,6 +2209,14 @@ edge_client_data_received(EdgeClient *self, PyObject *data)
     if (PyObject_GetBuffer(data, &view, PyBUF_SIMPLE) < 0) {
         return NULL;
     }
+    if (self->state == EC_WAITING
+        && view.len > EDGE_RECV_CHUNK - (self->in.len - self->in.start)) {
+        PyBuffer_Release(&view);
+        self->state = EC_CLOSED;
+        edge_client_unqueue(self);
+        sink_close(&self->sink);
+        Py_RETURN_NONE;
+    }
     ebuf_compact(&self->in, &self->head_scan);
     if (ebuf_add(&self->in, (const char *)view.buf, view.len) < 0) {
         PyBuffer_Release(&view);
@@ -2047,6 +2226,7 @@ edge_client_data_received(EdgeClient *self, PyObject *data)
     if (edge_client_drive(self) < 0) {
         return NULL;
     }
+    edge_client_bound_waiting_input(self);
     Py_RETURN_NONE;
 }
 
@@ -2059,8 +2239,23 @@ edge_client_eof_received(EdgeClient *Py_UNUSED(self), PyObject *Py_UNUSED(a))
 
 
 static PyObject *
-edge_client_noop(EdgeClient *Py_UNUSED(self), PyObject *Py_UNUSED(a))
+edge_client_pause_writing(EdgeClient *self, PyObject *Py_UNUSED(a))
 {
+    self->write_paused = 1;
+    if (self->conn != NULL && edge_conn_set_read_paused(self->conn, 1) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+
+static PyObject *
+edge_client_resume_writing(EdgeClient *self, PyObject *Py_UNUSED(a))
+{
+    self->write_paused = 0;
+    if (self->conn != NULL && edge_conn_set_read_paused(self->conn, 0) < 0) {
+        return NULL;
+    }
     Py_RETURN_NONE;
 }
 
@@ -2135,8 +2330,8 @@ static PyMethodDef edge_client_methods[] = {
     {"get_buffer", (PyCFunction)edge_client_get_buffer, METH_O, NULL},
     {"buffer_updated", (PyCFunction)edge_client_buffer_updated, METH_O, NULL},
     {"eof_received", (PyCFunction)edge_client_eof_received, METH_NOARGS, NULL},
-    {"pause_writing", (PyCFunction)edge_client_noop, METH_NOARGS, NULL},
-    {"resume_writing", (PyCFunction)edge_client_noop, METH_NOARGS, NULL},
+    {"pause_writing", (PyCFunction)edge_client_pause_writing, METH_NOARGS, NULL},
+    {"resume_writing", (PyCFunction)edge_client_resume_writing, METH_NOARGS, NULL},
     {NULL, NULL, 0, NULL},
 };
 
@@ -2219,6 +2414,13 @@ edge_relay_response_head(EdgeConn *self)
     }
     Py_ssize_t code = 0;
     if (edge_parse_decimal(base + rest, 3, &code) < 0) {
+        return -2;
+    }
+    if (code < 100 || code > 999 || code == 101) {
+        return -2;
+    }
+    if (code < 200 &&
+        ++self->informational_responses > EDGE_MAX_INFORMATIONAL_RESPONSES) {
         return -2;
     }
 
@@ -2328,7 +2530,8 @@ edge_relay_response_head(EdgeConn *self)
      * any response to HEAD. Relaying one as though it did would leave this end
      * waiting for octets the origin will never send. */
     EdgeClient *client = self->client;
-    int bodyless = code < 200 || code == 204 || code == 304
+    int informational = code < 200;
+    int bodyless = code == 204 || code == 304
         || (client != NULL && client->no_body_expected);
 
     self->upstream_close = upstream_close;
@@ -2336,7 +2539,11 @@ edge_relay_response_head(EdgeConn *self)
     self->body_chunks = 0;
     self->trailer_bytes = 0;
     self->trailer_count = 0;
-    if (bodyless) {
+    if (informational) {
+        self->state = EU_HEAD;
+        self->body_need = 0;
+    }
+    else if (bodyless) {
         self->state = EU_DONE;
         self->body_need = 0;
     }
@@ -2406,9 +2613,14 @@ edge_conn_complete(EdgeConn *self)
         sink_close(&held->sink);
     }
     else if (held->state == EC_WAITING) {
-        held->state = EC_HEAD;
-        held->head_scan = held->in.start;
-        rc = edge_client_drive(held);
+        if (edge_client_set_input_paused(held, 0) < 0) {
+            rc = -1;
+        }
+        else {
+            held->state = EC_HEAD;
+            held->head_scan = held->in.start;
+            rc = edge_client_drive(held);
+        }
     }
     Py_DECREF(held);
     return rc < 0 ? -1 : 0;
@@ -2530,10 +2742,15 @@ edge_conn_drive(EdgeConn *self)
                 }
                 size = size * 16 + digit;
             }
-            if (i == 0) {
+            if (i == 0 || !edge_chunk_suffix_valid(
+                    p + i, line_len - 2 - i)) {
                 /* Not a chunk size. The framing is unrecoverable from here --
                  * this end no longer knows where the body ends -- so the only
                  * safe move is to stop reading it. */
+                if (client != NULL) {
+                    client->state = EC_CLOSED;
+                    sink_close(&client->sink);
+                }
                 edge_release_conn(self, 0);
                 sink_close(&self->sink);
                 return 0;

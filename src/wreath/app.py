@@ -10,6 +10,7 @@ marks the application dirty, so the next request recompiles.
 
 from __future__ import annotations
 
+import math
 import re
 import threading
 from asyncio import CancelledError as _CancelledError
@@ -151,6 +152,30 @@ def _ambiguous_request_path(scope: dict[str, Any], path: str) -> bool:
         if b"%2f" in lowered or b"%5c" in lowered:
             return True
     return "\\" in path
+
+
+def _strip_raw_path_prefix(raw_path: bytes, prefix: bytes) -> bytes | None:
+    if raw_path.startswith(prefix):
+        remainder = raw_path[len(prefix) :]
+        return remainder or b"/"
+    raw_index = 0
+    for expected in prefix:
+        if raw_index >= len(raw_path):
+            return None
+        actual = raw_path[raw_index]
+        if actual == 37 and raw_index + 2 < len(raw_path):
+            try:
+                actual = int(raw_path[raw_index + 1 : raw_index + 3], 16)
+            except ValueError:
+                raw_index += 1
+            else:
+                raw_index += 3
+        else:
+            raw_index += 1
+        if actual != expected:
+            return None
+    remainder = raw_path[raw_index:]
+    return remainder or b"/"
 
 
 # Flight-recorder phase markers, pre-resolved to plain ints so the armed request
@@ -489,6 +514,19 @@ def _host_name(value: str) -> str:
     return name if separator and port.isdigit() else value
 
 
+def _invalid_routing_host(scope: Mapping[str, Any]) -> bool:
+    found = None
+    for name, value in scope.get("headers", ()):
+        if name != b"host":
+            continue
+        if found is not None:
+            return True
+        found = value
+    if found is None:
+        return False
+    return _core.normalize_host(found.decode("latin-1"), False) is None
+
+
 def _hook_program(
     middleware: Sequence[Any],
 ) -> tuple[tuple[tuple[Any, bool, int, int], ...], tuple[tuple[Any, int], ...]]:
@@ -647,6 +685,7 @@ class Wreath:
         "metrics_invalid_sources",
         "_dirty",
         "_has_dynamic_routes",
+        "_has_host_routes",
         "_databases",
         "_declared_databases",
         "_manage_schema",
@@ -769,8 +808,10 @@ class Wreath:
         self._http_policy = http_policy
         self._ai_scraping_defaulted = ai_scraping_defaulted
         self._limits = limits
-        if background_timeout is not None and background_timeout <= 0:
-            raise ValueError("background_timeout must be positive, or None for no limit")
+        if background_timeout is not None and (
+            background_timeout <= 0 or not math.isfinite(background_timeout)
+        ):
+            raise ValueError("background_timeout must be positive and finite, or None for no limit")
         #: Seconds a response's background tasks may run before they are
         #: cancelled. They run *after* the response is sent but still inside the
         #: ASGI invocation, and a conforming server cannot read the next request
@@ -825,6 +866,7 @@ class Wreath:
         self._ws_routes: list[tuple[str, WebSocketHandler]] = []
         self._static_matcher = _StaticMatcher()
         self._has_dynamic_routes = False
+        self._has_host_routes = False
         self._mount_names: dict[str, str] = {}
         self._startup_handlers: list[LifespanHandler] = []
         self._shutdown_handlers: list[LifespanHandler] = []
@@ -1764,7 +1806,9 @@ class Wreath:
         verification and password-reset tokens, so it must be stable across
         restarts. Login writes the session principal the auth stack reads, which
         requires `SessionPolicy`: without it `/login` answers 500 and signs
-        nobody in.
+        nobody in. `options` must include the revocable store used by that
+        policy as `sessions=`; password reset refuses a configuration that
+        cannot delete every session for its subject.
         """
         from .users import user_router
 
@@ -2333,6 +2377,7 @@ class Wreath:
         if not prefix.startswith("/"):
             raise ValueError("mount prefixes must begin with '/'")
         mount_root = "/" + prefix.strip("/")
+        mount_root_bytes = mount_root.encode("utf-8")
         normalized = mount_root + "/"
         if name is not None:
             if name in self._mount_names or name in self._route_names:
@@ -2343,7 +2388,15 @@ class Wreath:
             child_scope = dict(request.scope)
             remainder = request.path_params.get("path", "")
             child_scope["path"] = "/" + remainder.lstrip("/")
-            child_scope["raw_path"] = child_scope["path"].encode("utf-8")
+            raw_path = child_scope.get("raw_path")
+            child_raw_path = (
+                _strip_raw_path_prefix(raw_path, mount_root_bytes)
+                if isinstance(raw_path, bytes)
+                else None
+            )
+            child_scope["raw_path"] = (
+                child_scope["path"].encode("utf-8") if child_raw_path is None else child_raw_path
+            )
             parent_root = str(child_scope.get("root_path", "")).rstrip("/")
             child_scope["root_path"] = parent_root + mount_root
             return _MountedResponse(application, child_scope, request._receive)
@@ -2574,6 +2627,15 @@ class Wreath:
                 await self._lifespan(receive, send)
                 return
             raise ValueError(f"unsupported ASGI scope: {scope_type!r}")
+        if self._has_host_routes and _invalid_routing_host(scope):
+            await self._finish_http_plain(
+                ProblemResponse(status=400, detail="Invalid Host header"),
+                send,
+                scope["method"],
+                scope,
+                False,
+            )
+            return
         await self._dispatch_http(scope, receive, send, scope["method"], scope["path"], False)
 
     def _wreath_http(self, context: Any, receive: Any, send: Send) -> Awaitable[None]:
@@ -2846,8 +2908,8 @@ class Wreath:
                 else resolve_identity(
                     payload,
                     self._capability_descriptor,
-                    identity.roles,
-                    identity.permissions,
+                    identity.authority_roles,
+                    identity.authority_permissions,
                 )
             )
             if matched is None:
@@ -3277,8 +3339,8 @@ class Wreath:
             else resolve_identity(
                 payload,
                 self._capability_descriptor,
-                identity.roles,
-                identity.permissions,
+                identity.authority_roles,
+                identity.authority_permissions,
             )
         )
         if matched is not None:
@@ -3728,8 +3790,8 @@ class Wreath:
             else resolve_identity(
                 ticket,
                 self._capability_descriptor,
-                identity.roles,
-                identity.permissions,
+                identity.authority_roles,
+                identity.authority_permissions,
             )
         )
         if matched is not None:
@@ -4720,6 +4782,7 @@ class Wreath:
         return_annotations = self._application_image.return_annotations()
         router = CompiledRouter(self._routing)
         has_dynamic_routes = False
+        has_host_routes = False
         app_middleware = tuple(
             item[2] for item in sorted(self._middleware, key=lambda item: (item[0], item[1]))
         )
@@ -4889,6 +4952,7 @@ class Wreath:
                     host=definition.host,
                 )
                 has_dynamic_routes |= dynamic
+                has_host_routes |= definition.host is not None
                 handler_requirements[compiled] = requirement
                 if requestless and not definition.dependencies:
                     requestless_handlers.add(compiled)
@@ -4949,6 +5013,7 @@ class Wreath:
         self._flight_route_ids = None  # rebuilt lazily against the new routes
         self.router = router
         self._has_dynamic_routes = has_dynamic_routes
+        self._has_host_routes = has_host_routes
         self._match = router._table.match
         self._classify = getattr(router._table, "classify", None)
         self._classify_request = getattr(router._table, "classify_request", None)
@@ -5182,7 +5247,9 @@ class Wreath:
         if identity is None:
             return 0
         return _build_compiled_capability_mask(
-            self._capability_descriptor, identity.roles, identity.permissions
+            self._capability_descriptor,
+            identity.authority_roles,
+            identity.authority_permissions,
         )
 
     async def _run_stage(
@@ -5272,10 +5339,10 @@ class Wreath:
                 )
         if not access_resolved:
             for check in requirement.role_checks:
-                if not _check_set(identity.roles, check):
+                if not _check_set(identity.authority_roles, check):
                     raise Forbidden("Forbidden")
             for check in requirement.permission_checks:
-                if not _check_set(identity.permissions, check):
+                if not _check_set(identity.authority_permissions, check):
                     raise Forbidden("Forbidden")
         if requirement.policies:
             authorizer = self._authorizer

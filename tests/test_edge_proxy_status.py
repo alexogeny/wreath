@@ -61,9 +61,14 @@ class _PostRequest(_Request):
     def __init__(self, idempotency_key: str | None) -> None:
         super().__init__()
         self.idempotency_key = idempotency_key
+        if idempotency_key is not None:
+            self.headers.append((b"idempotency-key", idempotency_key.encode()))
 
     async def body(self) -> bytes:
         return b""
+
+    async def stream(self):
+        yield b""
 
     def header(self, name: str, default: Any = None) -> Any:
         if name == "idempotency-key":
@@ -187,6 +192,47 @@ async def test_asgi_proxy_forwards_query_strings_without_a_dangling_separator() 
 
 
 @pytest.mark.asyncio
+async def test_asgi_proxy_preserves_the_encoded_path_before_appending_the_query() -> None:
+    upstream = Upstream("http://origin")
+    client = _RecordingFailedClient()
+    proxy = ReverseProxy(UpstreamPool([upstream]), {upstream.url: client}, attempts=1)
+    request = _Request()
+    request.path = "/public?admin=true"
+    request.query_string = b"view=summary"
+    request.scope = {"raw_path": b"/public%3Fadmin=true"}
+
+    await proxy(request)
+
+    assert client.targets == ["/public%3Fadmin=true?view=summary"]
+
+
+@pytest.mark.asyncio
+async def test_asgi_proxy_stops_reading_when_the_body_exceeds_its_limit() -> None:
+    class ChunkedRequest(_PostRequest):
+        def __init__(self) -> None:
+            super().__init__(None)
+            self.read_chunks: list[bytes] = []
+
+        async def body(self) -> bytes:
+            raise AssertionError("the proxy must enforce its limit while streaming")
+
+        async def stream(self):
+            for chunk in (b"1234", b"5", b"not-read"):
+                self.read_chunks.append(chunk)
+                yield chunk
+
+    upstream = Upstream("http://origin")
+    proxy = ReverseProxy(UpstreamPool([upstream]), {upstream.url: _FailedClient()}, max_body=4)
+    request = ChunkedRequest()
+
+    response = await proxy(request)
+
+    assert response.status == 413
+    assert request.read_chunks == [b"1234", b"5"]
+    assert upstream.total == 0
+
+
+@pytest.mark.asyncio
 async def test_asgi_proxy_retries_a_post_only_with_an_idempotency_key() -> None:
     first = Upstream("http://first")
     second = Upstream("http://second")
@@ -201,6 +247,32 @@ async def test_asgi_proxy_retries_a_post_only_with_an_idempotency_key() -> None:
     clients = {first.url: _FailedClient(), second.url: _FailedClient()}
     single = ReverseProxy(UpstreamPool([first, second]), clients, attempts=2)
     await single(_PostRequest(None))
+    assert first.failures + second.failures == 1
+
+
+@pytest.mark.asyncio
+async def test_asgi_proxy_does_not_retry_a_post_with_duplicate_idempotency_keys() -> None:
+    first = Upstream("http://first")
+    second = Upstream("http://second")
+    clients = {first.url: _FailedClient(), second.url: _FailedClient()}
+    proxy = ReverseProxy(UpstreamPool([first, second]), clients, attempts=2)
+    request = _PostRequest("first-key")
+    request.headers.append((b"idempotency-key", b"second-key"))
+
+    await proxy(request)
+
+    assert first.failures + second.failures == 1
+
+
+@pytest.mark.asyncio
+async def test_asgi_proxy_does_not_retry_a_post_with_a_comma_idempotency_key() -> None:
+    first = Upstream("http://first")
+    second = Upstream("http://second")
+    clients = {first.url: _FailedClient(), second.url: _FailedClient()}
+    proxy = ReverseProxy(UpstreamPool([first, second]), clients, attempts=2)
+
+    await proxy(_PostRequest("first-key, second-key"))
+
     assert first.failures + second.failures == 1
 
 

@@ -50,6 +50,16 @@ class Connector:
         return connection
 
 
+@pytest.mark.parametrize("window", [float("nan"), float("inf")])
+def test_database_pool_and_shutdown_timeouts_must_be_finite(window: float) -> None:
+    with pytest.raises(ValueError, match="positive and finite"):
+        PoolConfig(acquire_timeout=window)
+    with pytest.raises(ValueError, match="positive and finite"):
+        PoolConfig(command_timeout=window)
+    with pytest.raises(ValueError, match="finite"):
+        Database("main", "postgresql://primary/app", shutdown_timeout=window)
+
+
 @pytest.mark.asyncio
 async def test_workloads_use_isolated_pools_with_one_dsn() -> None:
     connector = Connector()

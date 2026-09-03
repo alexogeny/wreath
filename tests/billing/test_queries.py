@@ -160,6 +160,33 @@ async def test_missing_or_other_subject_rows_are_not_returned() -> None:
     assert await queries.command("organization:globex", "refund", "refund-1") is None
 
 
+async def test_subscription_and_invoice_reads_use_the_subject_merchant_account() -> None:
+    session = _Session(rows=[None, None])
+    queries = PostgresBillingQueries(
+        lambda: session,
+        provider="stripe",
+        merchant_account_for=lambda subject: {
+            "organization:acme": "acct_acme",
+            "organization:globex": "acct_globex",
+        }[subject],
+    )
+
+    await queries.subscription("organization:acme")
+    await queries.invoice("organization:globex", "in_1")
+
+    subscription_sql, subscription_parameters = session.calls[0]
+    invoice_sql, invoice_parameters = session.calls[1]
+    assert "merchant_account IS NOT DISTINCT FROM $3" in subscription_sql
+    assert subscription_parameters == ("organization:acme", "stripe", "acct_acme")
+    assert "merchant_account IS NOT DISTINCT FROM $3" in invoice_sql
+    assert invoice_parameters == (
+        "organization:globex",
+        "stripe",
+        "acct_globex",
+        "in_1",
+    )
+
+
 async def test_invoice_listing_is_keyset_paginated_and_bounded() -> None:
     newest = datetime(2026, 10, 3, tzinfo=UTC)
     middle = datetime(2026, 10, 2, tzinfo=UTC)
@@ -183,9 +210,9 @@ async def test_invoice_listing_is_keyset_paginated_and_bounded() -> None:
     sql, parameters = session.calls[0]
     assert "subject=$1" in sql
     assert "subscription_id" not in sql.split("WHERE", 1)[1]
-    assert "(paid_through,invoice_id) < ($3::timestamptz,$4::text)" in sql
-    assert "ORDER BY paid_through DESC,invoice_id DESC LIMIT $5" in sql
-    assert parameters == ("organization:acme", "stripe", None, None, 3)
+    assert "(paid_through,invoice_id) < ($4::timestamptz,$5::text)" in sql
+    assert "ORDER BY paid_through DESC,invoice_id DESC LIMIT $6" in sql
+    assert parameters == ("organization:acme", "stripe", None, None, None, 3)
 
     second = await queries.invoices(
         "organization:acme",
@@ -197,6 +224,7 @@ async def test_invoice_listing_is_keyset_paginated_and_bounded() -> None:
     assert session.calls[1][1] == (
         "organization:acme",
         "stripe",
+        None,
         middle,
         "in_2",
         3,
@@ -204,11 +232,12 @@ async def test_invoice_listing_is_keyset_paginated_and_bounded() -> None:
 
     await queries.invoices("organization:acme", subscription="sub_1", limit=2)
     scoped_sql, scoped_parameters = session.calls[2]
-    assert "subscription_id=$3" in scoped_sql
-    assert "($4::timestamptz IS NULL" in scoped_sql
+    assert "subscription_id=$4" in scoped_sql
+    assert "($5::timestamptz IS NULL" in scoped_sql
     assert scoped_parameters == (
         "organization:acme",
         "stripe",
+        None,
         "sub_1",
         None,
         None,
@@ -258,7 +287,7 @@ async def test_entitlement_adapter_reads_one_subject_snapshot_per_resolution() -
     assert access == SubscriptionAccess("pro", frozenset({"api", "export"}))
     assert adapter.names() == frozenset({"api", "export"})
     assert len(session.calls) == 1
-    assert session.calls[0][1] == ("organization:acme", "stripe")
+    assert session.calls[0][1] == ("organization:acme", "stripe", None)
 
 
 async def test_entitlement_adapter_does_not_trust_identity_id_as_ledger_scope() -> None:
@@ -272,4 +301,4 @@ async def test_entitlement_adapter_does_not_trust_identity_id_as_ledger_scope() 
     assert await adapter.resolve(_Identity("organization:globex", "acme")) == SubscriptionAccess(
         None, frozenset()
     )
-    assert session.calls[0][1] == ("organization:acme", "stripe")
+    assert session.calls[0][1] == ("organization:acme", "stripe", None)

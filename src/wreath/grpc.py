@@ -594,13 +594,21 @@ class GrpcService:
         max_bytes = self.max_message_bytes
 
         async def endpoint(request: Any) -> Any:
+            content_type, encoding_header, timeout_header, accept_encoding, duplicate = (
+                _call_headers(request)
+            )
             # Read before the try, so a refusal below still answers in the
             # coding the client said it could read. It cannot itself fail: an
             # unknown entry in `grpc-accept-encoding` simply is not chosen.
-            outgoing = reply_encoding(_header(request, "grpc-accept-encoding"))
+            outgoing = reply_encoding(accept_encoding)
             try:
-                encoding = _check_transport(request)
-                deadline = _deadline_of(request)
+                if duplicate is not None:
+                    raise GrpcError(
+                        Status.INVALID_ARGUMENT,
+                        f"gRPC transport header {duplicate!r} occurs more than once",
+                    )
+                encoding = _check_transport(request, content_type, encoding_header)
+                deadline = _deadline_of(timeout_header)
                 incoming = _messages(request, request_model, max_bytes, encoding)
                 if kind in (_UNARY, _SERVER_STREAM):
                     call = handler(request, await _exactly_one(incoming))
@@ -626,13 +634,48 @@ class GrpcService:
         return endpoint
 
 
-def _header(request: Any, name: str) -> str | None:
-    """One header by name. `Request.headers` is the raw ASGI pair list; `header`
-    is the by-name accessor that decodes and indexes."""
-    return request.header(name)
+def _call_headers(
+    request: Any,
+) -> tuple[str | None, str | None, str | None, str | None, str | None]:
+    headers = getattr(request, "headers", None)
+    if not isinstance(headers, (list, tuple)):
+        return (
+            request.header("content-type"),
+            request.header("grpc-encoding"),
+            request.header("grpc-timeout"),
+            request.header("grpc-accept-encoding"),
+            None,
+        )
+    content_type = encoding = timeout = None
+    te_seen = False
+    accept = None
+    duplicate = None
+    for name, raw in headers:
+        name = name.lower()
+        if name == b"grpc-accept-encoding":
+            if accept is None:
+                accept = raw.decode("latin-1")
+            continue
+        if name == b"content-type":
+            duplicate = "content-type" if content_type is not None else duplicate
+            content_type = raw.decode("latin-1")
+        elif name == b"te":
+            duplicate = "te" if te_seen else duplicate
+            te_seen = True
+        elif name == b"grpc-encoding":
+            duplicate = "grpc-encoding" if encoding is not None else duplicate
+            encoding = raw.decode("latin-1")
+        elif name == b"grpc-timeout":
+            duplicate = "grpc-timeout" if timeout is not None else duplicate
+            timeout = raw.decode("latin-1")
+    return content_type, encoding, timeout, accept, duplicate
 
 
-def _check_transport(request: Any) -> str:
+def _check_transport(
+    request: Any,
+    raw_content_type: str | None,
+    raw_encoding: str | None,
+) -> str:
     """Refuse a request the transport cannot carry, and return its coding.
 
     **ASGI offers no way to learn at startup which protocols the server will
@@ -648,14 +691,13 @@ def _check_transport(request: Any) -> str:
             f"HTTP/{version}. Wreath's native server is the only one here that "
             f"serves h2 -- a foreign ASGI server cannot carry gRPC.",
         )
-    content_type = (_header(request, "content-type") or "").split(";")[0].strip()
+    content_type = (raw_content_type or "").split(";")[0].strip()
     if content_type not in _ACCEPTED_CONTENT_TYPES:
         raise GrpcError(Status.INTERNAL, f"unsupported content-type {content_type!r}")
-    return negotiated_encoding(_header(request, "grpc-encoding"))
+    return negotiated_encoding(raw_encoding)
 
 
-def _deadline_of(request: Any) -> float | None:
-    raw = _header(request, "grpc-timeout")
+def _deadline_of(raw: str | None) -> float | None:
     return None if raw is None else parse_timeout(raw.strip())
 
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import math
 import os
 import signal
 import warnings
@@ -527,6 +528,14 @@ class ServerConfig:
             "_default_response_headers",
             _DefaultResponseHeaders(server_header, self.date_header),
         )
+        for name in (
+            "keep_alive_timeout",
+            "request_timeout",
+            "shutdown_timeout",
+            "ssl_shutdown_timeout",
+        ):
+            if not math.isfinite(getattr(self, name)):
+                raise ValueError(f"{name} must be finite")
         if self.port < 0 or self.port > 65535:
             raise ValueError("port must be in 0..65535")
         if self.backlog < 1:
