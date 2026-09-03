@@ -94,7 +94,7 @@ class DPoPVerifier:
 
     A replay ledger is required because a verifier-local map cannot detect a
     proof replayed through another worker. Single-process deployments may opt
-    into local state explicitly with ``local_replay=True``.
+    into local state explicitly with `local_replay=True`.
     """
 
     __slots__ = ("_algorithms", "_clock_skew", "_max_age", "_replay")
