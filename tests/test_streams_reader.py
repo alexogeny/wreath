@@ -465,7 +465,7 @@ async def test_an_unusable_key_is_refused(key: str) -> None:
 @pytest.mark.parametrize("key", ["a\r\nx-admin: yes", "a\nb", "a\x7fb"])
 async def test_a_key_carrying_a_control_character_cannot_append_a_header(key: str) -> None:
     streams, _log, _runner = _streams()
-    response = streams.attach(key)
+    response = streams.attach(key, public=True)
     assert response.status == 400
     assert b"would end the field" in response.body
     assert all(b"\r" not in value and b"\n" not in value for _n, value in response.headers)
@@ -736,7 +736,9 @@ async def test_started_is_counted_against_attached_and_a_gap_is_a_finding() -> N
 
 async def test_a_refused_cursor_answers_400_and_is_counted() -> None:
     streams, _log, _runner = _streams()
-    response = streams.attach("mine", since=StreamCursor.start("other").encode())
+    response = streams.attach(
+        "mine", since=StreamCursor.start("other").encode(), public=True
+    )
     assert response.status == 400
     assert b"belongs to a different stream" in response.body
     assert streams.stats()["cursor_refusals"] == 1
@@ -762,7 +764,7 @@ async def test_attach_returns_an_sse_response_that_frames_the_reader() -> None:
             await stream.write(word)
 
     await runner.attempt("stream_chat", "k", [["hello ", "world"]], fence=1, attempt=1)
-    response = streams.attach("k", idle=0.03, poll=0.005)
+    response = streams.attach("k", idle=0.03, poll=0.005, public=True)
     assert isinstance(response, SSEResponse)
     body = b"".join([chunk async for chunk in response.body])
     assert b"event: chunk\n" in body
@@ -793,7 +795,7 @@ async def test_push_stream_sends_one_json_frame_per_event() -> None:
 
     await runner.attempt("stream_chat", "k", [["a", "b"]], fence=1, attempt=1)
     socket = _Socket()
-    await push_stream(socket, streams, "k", idle=0.03, poll=0.005)
+    await push_stream(socket, streams, "k", idle=0.03, poll=0.005, public=True)
     decoded = [json.loads(frame) for frame in socket.frames]
     assert [frame["kind"] for frame in decoded] == ["chunk", "chunk", "end"]
     assert [frame["data"] for frame in decoded[:2]] == ["a", "b"]
@@ -1057,7 +1059,9 @@ async def test_attach_accepts_a_cursor_object_as_well_as_a_header() -> None:
 
     await runner.attempt("stream_chat", "k", [["a", "b"]], fence=1, attempt=1)
     events = await _collect(streams, "k")
-    response = streams.attach("k", since=events[0].cursor, idle=0.03, poll=0.005)
+    response = streams.attach(
+        "k", since=events[0].cursor, idle=0.03, poll=0.005, public=True
+    )
     body = b"".join([chunk async for chunk in response.body])
     assert b"data: b\n" in body
     assert b"data: a\n" not in body, "the cursor was ignored and the stream replayed"

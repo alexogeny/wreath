@@ -8,6 +8,12 @@ import pytest
 from wreath.services import Supervisor
 
 
+@pytest.mark.parametrize("drain_timeout", [float("nan"), float("inf")])
+def test_supervisor_drain_timeout_must_be_finite(drain_timeout: float) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        Supervisor(drain_timeout=drain_timeout)
+
+
 class _Service:
     """A service whose `drain` fails, or whose task dies of its own accord."""
 

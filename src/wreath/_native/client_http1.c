@@ -2485,6 +2485,13 @@ cs_at_eof(WreathClientStream *self, PyObject *Py_UNUSED(ignored))
     return PyBool_FromLong(self->eof && cs_avail(self) == 0);
 }
 
+
+static PyObject *
+cs_has_buffered_data(WreathClientStream *self, PyObject *Py_UNUSED(ignored))
+{
+    return PyBool_FromLong(cs_avail(self) != 0);
+}
+
 static PyObject *
 cs_buffer_get(PyObject *op, void *Py_UNUSED(closure))
 {
@@ -2914,6 +2921,7 @@ static PyMethodDef cs_methods[] = {
     {"read_response", (PyCFunction)cs_read_response, METH_VARARGS, NULL},
     {"_response_timeout", (PyCFunction)cs_response_timeout, METH_NOARGS, NULL},
     {"at_eof", (PyCFunction)cs_at_eof, METH_NOARGS, NULL},
+    {"_has_buffered_data", (PyCFunction)cs_has_buffered_data, METH_NOARGS, NULL},
     {"_drain", (PyCFunction)cs_drain, METH_NOARGS, NULL},
     {"_wait_closed", (PyCFunction)cs_wait_closed, METH_NOARGS, NULL},
     {NULL, NULL, 0, NULL},

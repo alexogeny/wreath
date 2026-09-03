@@ -48,6 +48,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
+from math import isfinite
 from time import perf_counter
 from typing import Any
 
@@ -96,6 +97,10 @@ class HealthCheck:
     probe: Probe
     critical: bool = True
     timeout: float | None = 1.0
+
+    def __post_init__(self) -> None:
+        if self.timeout is not None and (not isfinite(self.timeout) or self.timeout <= 0):
+            raise ValueError("health check timeout must be finite and positive, or None")
 
 
 def callable_check(

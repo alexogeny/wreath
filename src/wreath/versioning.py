@@ -139,7 +139,16 @@ def negotiate_version(request: Any, *, default: str, supported: Iterable[str]) -
         the negotiated tag, or `default` when the header names none of them
     """
     allowed = {str(item) for item in supported}
-    read = getattr(request, "header", None)
-    raw = read("accept-version", "") if callable(read) else ""
+    read_single = getattr(request, "_single_header", None)
+    if callable(read_single):
+        try:
+            raw_value = read_single(b"accept-version")
+        except ValueError:
+            raw = ""
+        else:
+            raw = raw_value.decode("latin-1") if raw_value is not None else ""
+    else:
+        read = getattr(request, "header", None)
+        raw = read("accept-version", "") if callable(read) else ""
     header = raw.strip() if isinstance(raw, str) else ""
     return header if header in allowed else str(default)

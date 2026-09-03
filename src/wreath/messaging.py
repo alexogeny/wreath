@@ -57,6 +57,7 @@ from ._jobcore import (
 )
 from ._leased import claim_sql, fenced_update_sql
 from .temporal import Duration
+from .tenancy import _enqueue_tenant_scope, check_enqueue_tenant
 
 MessageHandler = Callable[["Message"], Awaitable[None]]
 
@@ -537,6 +538,7 @@ class MessageBus:
         returning `None` for every legacy payload.
         """
         _validate_channel(channel)
+        tenant = check_enqueue_tenant(tenant)
         if require_group and not durable:
             raise ValueError(
                 "require_group applies to durable publishes; ephemeral fan-out "
@@ -663,7 +665,8 @@ class MessageBus:
             '(channel, "group", payload, tenant, state, run_at, max_attempts, '
             f"dedup_key{trace_column}) "
             f"VALUES {', '.join(rows)} "
-            'ON CONFLICT (channel, "group", dedup_key) WHERE dedup_key IS NOT NULL DO NOTHING'
+            'ON CONFLICT (channel, "group", tenant, dedup_key) '
+            "WHERE dedup_key IS NOT NULL DO NOTHING"
         )
         await runner.execute(sql, *params)
         # One doorbell for the whole fan-out. The notification carries no
@@ -881,6 +884,15 @@ class MessageBus:
                         f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS trace_context text",
                     ),
                 ),
+                Step(
+                    version=3,
+                    statements=(
+                        f"DROP INDEX IF EXISTS {self._schema}.messages_dedup_idx",
+                        f"CREATE UNIQUE INDEX IF NOT EXISTS messages_dedup_idx ON {table} "
+                        '(channel, "group", tenant, dedup_key) '
+                        "WHERE dedup_key IS NOT NULL",
+                    ),
+                ),
             ),
         )
 
@@ -1035,7 +1047,8 @@ class MessageBus:
             except Exception:  # noqa: BLE001 - at-most-once; nowhere to retry to
                 self.handler_errors += 1
 
-        future = asyncio.ensure_future(_run())
+        with _enqueue_tenant_scope(message.tenant):
+            future = asyncio.ensure_future(_run())
         self._inflight.add(future)
         future.add_done_callback(self._inflight.discard)
 
@@ -1091,7 +1104,8 @@ class MessageBus:
             (message.trace_context, "") if message.trace_context else None
         )
         try:
-            await self._deliver_bound(sub, message)
+            with _enqueue_tenant_scope(message.tenant):
+                await self._deliver_bound(sub, message)
         finally:
             _telemetry.outbound_context.reset(token)
 

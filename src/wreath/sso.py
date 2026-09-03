@@ -47,11 +47,13 @@ on whichever branch fired, including the one nobody was testing.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import secrets
 import time
 from base64 import urlsafe_b64encode
-from collections.abc import Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import Any, Literal
 from urllib.parse import urlsplit
 from xml.sax.saxutils import quoteattr
@@ -185,8 +187,13 @@ class PendingLoginStore:
     __slots__ = ("_by_id", "_max_entries", "_next_sweep", "_ttl")
 
     def __init__(self, *, ttl: float = 600.0, max_entries: int = 10_000) -> None:
-        if ttl <= 0:
-            raise ValueError("pending-login ttl must be positive")
+        if (
+            isinstance(ttl, bool)
+            or not isinstance(ttl, (int, float))
+            or not isfinite(ttl)
+            or ttl <= 0
+        ):
+            raise ValueError("pending-login ttl must be a positive finite number")
         if max_entries < 1:
             raise ValueError("pending-login max_entries must be at least one")
         self._by_id = CapabilityMap(
@@ -200,15 +207,19 @@ class PendingLoginStore:
         self._next_sweep = float("inf")
 
     def put(self, pending: PendingLogin) -> None:
+        if (
+            isinstance(pending.issued_at, bool)
+            or not isinstance(pending.issued_at, (int, float))
+            or not isfinite(pending.issued_at)
+        ):
+            raise SsoRefusal("invalid-time", "the pending-login issue time must be finite")
         self._sweep(pending.issued_at)
         if len(self._by_id) >= self._max_entries:
             raise SsoRefusal(
                 "pending-capacity",
                 f"the pending-login store is at its ceiling of {self._max_entries}",
             )
-        if not self._by_id.put(
-            pending.request_id, pending, now=pending.issued_at
-        ):
+        if not self._by_id.put(pending.request_id, pending, now=pending.issued_at):
             raise SsoRefusal(
                 "pending-capacity",
                 f"the pending-login store is at its ceiling of {self._max_entries}",
@@ -233,6 +244,16 @@ class PendingLoginStore:
                 "issued, has already been spent, or has expired. An assertion that "
                 "answers no request is unsolicited and is not a login here.",
             )
+        if (
+            isinstance(moment, bool)
+            or not isinstance(moment, (int, float))
+            or not isfinite(moment)
+            or moment < pending.issued_at
+        ):
+            raise SsoRefusal(
+                "invalid-time",
+                "the clock is invalid or earlier than when this SAML login was issued",
+            )
         if moment - pending.issued_at >= self._ttl:
             self._by_id.discard(request_id)
             raise SsoRefusal(
@@ -240,17 +261,24 @@ class PendingLoginStore:
                 f"the login for InResponseTo={request_id!r} was issued "
                 f"{moment - pending.issued_at:.0f}s ago and the window is {self._ttl:.0f}s",
             )
-        if not relay_state or not session_id:
+        self._by_id.discard(request_id)
+        if (
+            not isinstance(relay_state, str)
+            or not relay_state
+            or not isinstance(session_id, str)
+            or not session_id
+        ):
             raise SsoRefusal(
                 "state-session-mismatch",
                 "SAML RelayState and its browser session binding are required",
             )
-        if pending.relay_state != relay_state or pending.session_id != session_id:
+        relay_matches = hmac.compare_digest(pending.relay_state, relay_state)
+        session_matches = hmac.compare_digest(pending.session_id, session_id)
+        if not (relay_matches and session_matches):
             raise SsoRefusal(
                 "state-session-mismatch",
                 "this SAML response belongs to a different browser session",
             )
-        self._by_id.discard(request_id)
         return pending
 
     def organization_for(self, request_id: str) -> str:
@@ -513,7 +541,13 @@ class JitProvisioning:
     data.
     """
 
-    __slots__ = ("_accounts", "_memberships", "_roles", "_second_factor")
+    __slots__ = (
+        "_accounts",
+        "_memberships",
+        "_revoke_sessions",
+        "_roles",
+        "_second_factor",
+    )
 
     def __init__(
         self,
@@ -521,9 +555,13 @@ class JitProvisioning:
         roles: Iterable[str] = (),
         vocabulary: Iterable[str] = ("member", "admin"),
         require_second_factor: bool = False,
+        revoke_sessions: Callable[[str], Awaitable[Any]] | None = None,
     ) -> None:
+        if revoke_sessions is not None and not callable(revoke_sessions):
+            raise TypeError("JIT revoke_sessions must be an async callable")
         self._roles = tuple(roles)
         self._second_factor = require_second_factor
+        self._revoke_sessions = revoke_sessions
         vocab = set(vocabulary)
         # Checked here rather than at provisioning time: the roles are
         # configuration, and configuration that can only fail on somebody's
@@ -556,12 +594,19 @@ class JitProvisioning:
             created=created,
         )
 
-    def revoke(self, *, organization: str, email: str) -> int:
+    async def revoke(self, *, organization: str, email: str) -> int:
         """De-provision. A revoked user holding a live cookie is why SSO was bought."""
         key = (organization, email.strip().lower())
-        user_id = self._accounts.pop(key, None)
+        user_id = self._accounts.get(key)
         if user_id is None:
             return 0
+        revoke_sessions = self._revoke_sessions
+        if revoke_sessions is None:
+            raise RuntimeError(
+                "JIT deprovisioning requires a session revoker so live sessions cannot survive"
+            )
+        await revoke_sessions(user_id)
+        self._accounts.pop(key, None)
         self._memberships.pop(user_id, None)
         return 1
 
@@ -626,8 +671,13 @@ class OidcRelyingParty:
                 "OIDC issuer must be an absolute HTTPS URL without credentials, "
                 "a query, or a fragment",
             )
-        if ttl <= 0:
-            raise ValueError("OIDC state ttl must be positive")
+        if (
+            isinstance(ttl, bool)
+            or not isinstance(ttl, (int, float))
+            or not isfinite(ttl)
+            or ttl <= 0
+        ):
+            raise ValueError("OIDC state ttl must be a positive finite number")
         if max_pending < 1:
             raise ValueError("OIDC max_pending must be at least one")
         self._issuer = issuer.rstrip("/")
@@ -729,6 +779,16 @@ class OidcRelyingParty:
             )
         self._flows.discard(state)
         moment = time.time() if now is None else now
+        if (
+            isinstance(moment, bool)
+            or not isinstance(moment, (int, float))
+            or not isfinite(moment)
+            or moment < flow.issued_at
+        ):
+            raise SsoRefusal(
+                "invalid-time",
+                "the clock is invalid or earlier than when this OIDC state was issued",
+            )
         if moment - flow.issued_at > self._ttl:
             raise SsoRefusal(
                 "expired-state",

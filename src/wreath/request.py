@@ -788,7 +788,16 @@ class Request:
             raise RuntimeError("this Request is not attached to a Wreath application")
         host = app._host_for(name, parameters)
         if host is None:
-            host = self.header("host")
+            try:
+                raw_host = self._single_header(b"host")
+            except ValueError:
+                raise RuntimeError("request Host header occurs more than once") from None
+            if raw_host is None:
+                host = None
+            else:
+                host = raw_host.decode("latin-1")
+                if _core.normalize_host(host, False) is None:
+                    raise RuntimeError("request has an invalid Host header")
         if not host:
             server = self.scope.get("server")
             if server is None:
@@ -1279,12 +1288,11 @@ class Request:
         raise `StreamConsumed`. If `body()` ran first, its cached bytes are
         replayed once without touching the receive channel.
 
-        A `Content-Digest` a signature covered is hashed **incrementally** here
-        and compared when the last chunk arrives, so a streaming handler gets
-        the same guarantee as `body()` without materialising anything. A
-        consumer that stops early leaves it unchecked, which it must: the bytes
-        it did not read cannot be hashed, and there is no complete body to have
-        an opinion about.
+        A `Content-Digest` a signature covered is hashed **incrementally** here.
+        Those uncommon signed bodies are retained up to `max_body_bytes` and
+        yielded only after the last chunk matches, so a handler cannot act on
+        bytes whose authenticated digest has not been established. Ordinary
+        unsigned streams retain no complete body.
 
         Raises:
             BadRequest: a covered `Content-Digest` does not match these bytes.
@@ -1304,6 +1312,7 @@ class Request:
         body_check = (
             None if expected is None else (new_hash(expected[0].replace("-", "")), expected[1])
         )
+        held = bytearray() if body_check is not None else None
         try:
             while True:
                 message = await self._receive()
@@ -1321,13 +1330,17 @@ class Request:
                         total += len(body)
                         if body_check is not None:
                             body_check[0].update(body)
-                        yield body
+                            cast(bytearray, held).extend(body)
+                        else:
+                            yield body
                     if not more_body:
                         if body_check is not None:
                             if not compare_digest(body_check[0].digest(), body_check[1]):
                                 raise BadRequest(
                                     "request body does not match its signed content-digest"
                                 )
+                            if held:
+                                yield bytes(held)
                         return
                     continue
                 message_type = message["type"]
@@ -1345,16 +1358,18 @@ class Request:
                         raise PayloadTooLarge(f"request body exceeds {limit} bytes")
                     total += len(body)
                     if body_check is not None:
-                        # Before the yield, not after: a consumer that stops
-                        # early must not leave a chunk it *did* read unhashed.
                         body_check[0].update(body)
-                    yield body
+                        cast(bytearray, held).extend(body)
+                    else:
+                        yield body
                 if not message.get("more_body", False):
                     if body_check is not None:
                         if not compare_digest(body_check[0].digest(), body_check[1]):
                             raise BadRequest(
                                 "request body does not match its signed content-digest"
                             )
+                        if held:
+                            yield bytes(held)
                     return
         finally:
             if getattr(self, "_body", _MISSING) is _STREAMING:
@@ -1422,7 +1437,7 @@ class Request:
             return cached
         # Via the `headers` property, not `self.scope`: on the native path the
         # ASGI scope is lazily built, and reading one header should not force it.
-        content_type = find_header(self.headers, b"content-type")
+        content_type = self._single_header(b"content-type")
         media_type = content_type.split(b";", 1)[0].strip().lower() if content_type else b""
         if media_type == b"multipart/form-data":
             boundary = _multipart_boundary(cast(bytes, content_type))

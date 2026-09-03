@@ -201,11 +201,29 @@ async def test_fresh_auth_uses_the_newest_linked_authentication_stamp() -> None:
     stale.action = f"{approvals.approve_prefix}approval_7"
     assert await chat._dispatch(kind="action", name=stale.action, context=stale) is None
 
+    clock[0] = 101.0
     fresh = context(claims={"auth_time": 99.0, "second_factor_at": 101.0})
     fresh.action = stale.action
     result = await chat._dispatch(kind="action", name=fresh.action, context=fresh)
     assert result is not None
     assert result.content == "Approved."
+
+
+@pytest.mark.asyncio
+async def test_fresh_auth_refuses_a_linked_authentication_stamp_from_the_future() -> None:
+    clock = [100.0]
+    chat, _, approvals = flow(clock)
+    current = context(claims={"auth_time": 101.0})
+    await approvals.issue(
+        current,
+        approval_id="approval_7",
+        action="deploy",
+        ttl=30,
+        require_fresh_auth=True,
+    )
+
+    current.action = f"{approvals.approve_prefix}approval_7"
+    assert await chat._dispatch(kind="action", name=current.action, context=current) is None
 
 
 @pytest.mark.asyncio

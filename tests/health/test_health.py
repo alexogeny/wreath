@@ -58,6 +58,12 @@ async def _hang() -> None:
     await asyncio.sleep(10)
 
 
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf")])
+def test_health_check_timeout_must_be_finite(timeout: float):
+    with pytest.raises(ValueError, match="finite"):
+        callable_check("db", _hang, timeout=timeout)
+
+
 @pytest.mark.asyncio
 async def test_a_failed_non_critical_check_degrades_without_dropping_traffic():
     serving, detail = await evaluate(

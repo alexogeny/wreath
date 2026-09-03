@@ -106,7 +106,7 @@ async def test_approval_is_expiring_single_use_and_bound_to_tenant_and_principal
         ttl=30.0,
     )
 
-    with pytest.raises(ApprovalMismatch, match="tenant"):
+    with pytest.raises(ApprovalExpired, match="unknown or expired"):
         await approvals.claim("approval-1", tenant="tenant-b", principal_id="user-7")
     with pytest.raises(ApprovalMismatch, match="principal"):
         await approvals.claim("approval-1", tenant="tenant-a", principal_id="user-8")
@@ -117,6 +117,24 @@ async def test_approval_is_expiring_single_use_and_bound_to_tenant_and_principal
     assert grant.resource == "version:3"
     with pytest.raises(ApprovalMismatch, match="already used"):
         await approvals.claim("approval-1", tenant="tenant-a", principal_id="user-7")
+
+
+@pytest.mark.asyncio
+async def test_same_approval_id_is_isolated_between_tenants() -> None:
+    approvals = store([100.0])
+    for tenant in ("tenant-a", "tenant-b"):
+        await approvals.issue(
+            approval_id="approval-1",
+            tenant=tenant,
+            principal_id="user-7",
+            action=f"release:{tenant}",
+            ttl=30.0,
+        )
+
+    first = await approvals.claim("approval-1", tenant="tenant-a", principal_id="user-7")
+    second = await approvals.claim("approval-1", tenant="tenant-b", principal_id="user-7")
+    assert first.action == "release:tenant-a"
+    assert second.action == "release:tenant-b"
 
 
 @pytest.mark.asyncio
@@ -183,6 +201,27 @@ async def test_fresh_auth_requirement_uses_the_authentication_instant() -> None:
 
     with pytest.raises(ApprovalMismatch, match="already used"):
         await approvals.deny("fresh", tenant="tenant-a", principal_id="user-7")
+
+
+@pytest.mark.asyncio
+async def test_fresh_auth_requirement_refuses_a_future_authentication_instant() -> None:
+    approvals = store([100.0])
+    await approvals.issue(
+        approval_id="fresh",
+        tenant="tenant-a",
+        principal_id="user-7",
+        action="wire",
+        ttl=30.0,
+        require_fresh_auth=True,
+    )
+
+    with pytest.raises(ApprovalMismatch, match="future"):
+        await approvals.claim(
+            "fresh",
+            tenant="tenant-a",
+            principal_id="user-7",
+            authenticated_at=101.0,
+        )
 
 
 @pytest.mark.asyncio
@@ -386,6 +425,7 @@ def test_postgres_approval_store_declares_qualified_additive_schema() -> None:
     sql = approvals.schema_sql()
     assert 'CREATE TABLE IF NOT EXISTS "private"."agent_approvals"' in sql
     assert "PRIMARY KEY (approval_id)" in sql
+    assert "(tenant, approval_id)" in sql
     assert "CHECK (state IN ('pending','denied','used'))" in sql
 
 
@@ -410,7 +450,7 @@ async def test_postgres_issue_is_one_atomic_expired_id_replacing_insert() -> Non
     assert session.entered == session.exited == 1
     assert len(session.calls) == 1
     sql, parameters = session.calls[0]
-    assert "ON CONFLICT (approval_id) DO UPDATE" in sql
+    assert "ON CONFLICT (tenant,approval_id) DO UPDATE" in sql
     assert "expires_at <= $9::float8" in sql
     assert parameters == (
         "approval-1",
@@ -530,7 +570,7 @@ async def test_postgres_claim_reports_the_stored_refusal_after_losing_the_transi
         )
 
     assert len(session.calls) == 2
-    assert session.calls[1][1] == ("approval-1",)
+    assert session.calls[1][1] == ("approval-1", "tenant-a")
 
 
 @pytest.mark.asyncio
@@ -553,11 +593,25 @@ async def test_postgres_claim_fresh_auth_is_checked_by_the_atomic_update() -> No
 
 
 @pytest.mark.asyncio
+async def test_postgres_claim_refuses_future_authentication_before_sql() -> None:
+    session = _PostgresSession()
+
+    with pytest.raises(ApprovalMismatch, match="future"):
+        await _postgres_store(session).claim(
+            "approval-1",
+            tenant="tenant-a",
+            principal_id="user-7",
+            authenticated_at=101.0,
+        )
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("require_fresh_auth", "authenticated_at", "message"),
     [
         (True, None, "requires fresh authentication"),
-        (True, 101.0, "could not be claimed"),
+        (True, 101.0, "future"),
         (False, 99.0, "could not be claimed"),
     ],
 )
@@ -664,6 +718,7 @@ async def test_postgres_deny_reports_each_stored_refusal(
             principal_id=principal,
         )
     assert len(session.calls) == 2
+    assert session.calls[1][1] == ("approval-1", tenant)
 
 
 def test_postgres_configuration_refuses_invalid_factory_and_schema() -> None:

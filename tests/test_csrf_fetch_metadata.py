@@ -63,10 +63,10 @@ async def test_form_enabled_policy_reads_fetch_metadata_once(
     class CountingRequest(Request):
         fetch_metadata_reads = 0
 
-        def header(self, name: str | bytes, default: str | None = None) -> str | None:
+        def _single_header(self, name: bytes) -> bytes | None:
             if name == b"sec-fetch-site":
                 self.fetch_metadata_reads += 1
-            return super().header(name, default)
+            return super()._single_header(name)
 
     request = CountingRequest(
         {

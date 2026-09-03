@@ -46,8 +46,14 @@ def test_metrics_factory_mounts_scrape_route() -> None:
 
 
 def test_users_factory_mounts_lifecycle() -> None:
+    class Sessions:
+        async def delete_for(self, _subject: str) -> int:
+            return 0
+
     app = Wreath()
-    app.users(InMemoryUserStore(), secret="s" * 32, base_url="https://app")
+    app.users(
+        InMemoryUserStore(), sessions=Sessions(), secret="s" * 32, base_url="https://app"
+    )
     paths = _paths(app)
     assert ("/users/register", "POST") in paths
     assert ("/users/login", "POST") in paths

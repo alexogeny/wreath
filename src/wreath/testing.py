@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote, urlencode
 
 from ._headers import find_header
@@ -34,6 +34,7 @@ from ._json import dumps as _json_dumps
 from ._json import loads as _json_loads
 
 Message = dict[str, Any]
+RequestHeaders = Mapping[str, str] | Iterable[tuple[str, str]]
 
 _DEFAULT_ASGI = {"version": "3.0", "spec_version": "2.5"}
 
@@ -503,7 +504,7 @@ class TestClient:
         method: str,
         path: str,
         *,
-        headers: dict[str, str] | None = None,
+        headers: RequestHeaders | None = None,
         params: dict[str, Any] | None = None,
         content: bytes = b"",
         json: Any = None,
@@ -570,7 +571,7 @@ class TestClient:
         method: str,
         path: str,
         *,
-        headers: dict[str, str] | None = None,
+        headers: RequestHeaders | None = None,
         params: dict[str, Any] | None = None,
         content: bytes = b"",
         json: Any = None,
@@ -583,9 +584,24 @@ class TestClient:
         by hand. `request()` collects, which is right for every assertion in a
         test and wrong for a stream something is reading as it arrives.
         """
+        supplied: tuple[tuple[str, str], ...]
+        if headers is None:
+            supplied = ()
+        elif isinstance(headers, Mapping):
+            supplied = tuple(cast(Iterable[tuple[str, str]], headers.items()))
+        else:
+            supplied = tuple(cast(Iterable[tuple[str, str]], headers))
+        overridden = {name.lower() for name, _value in supplied}
+        combined = (
+            *(
+                (name, value)
+                for name, value in self._headers.items()
+                if name.lower() not in overridden
+            ),
+            *supplied,
+        )
         raw_headers = [
-            (name.lower().encode("latin-1"), value.encode("latin-1"))
-            for name, value in {**self._headers, **(headers or {})}.items()
+            (name.lower().encode("latin-1"), value.encode("latin-1")) for name, value in combined
         ]
         if json is not None:
             content = _json_dumps(json)

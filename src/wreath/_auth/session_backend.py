@@ -91,6 +91,7 @@ class SessionIdentityBackend:
             roles=frozenset(str(role) for role in roles),
             permissions=frozenset(str(item) for item in granted),
             claims=dict(principal),
+            namespace=str(principal.get("iss") or ""),
         )
 
     def challenge(self, request: Request) -> str | None:

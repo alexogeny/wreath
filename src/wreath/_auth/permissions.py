@@ -53,6 +53,7 @@ from ..cache import BoundedCache
 from ..request import Request
 from ..response import JSONResponse, ProblemResponse, Response, SSEResponse
 from ..router import Router
+from .models import qualified_identity_value
 from .requirements import (
     AuthRequirement,
     add_authenticated,
@@ -260,6 +261,16 @@ def _private_stream(response: SSEResponse) -> SSEResponse:
     return response
 
 
+def _combined_request_header(request: Request, name: bytes) -> str | None:
+    combined: str | None = None
+    for field_name, value in request.headers:
+        if field_name.lower() != name:
+            continue
+        text = value.decode("latin-1")
+        combined = text if combined is None else f"{combined},{text}"
+    return combined
+
+
 def _distinct_identifiers(identifiers: list[Any]) -> list[str]:
     """The ids as strings, refusing a list that collapses.
 
@@ -281,7 +292,10 @@ def _distinct_identifiers(identifiers: list[Any]) -> list[str]:
 
 def _principal_key(identity: Any) -> str:
     """The subscription key. Typed, so two kinds of principal cannot collide."""
-    return f"{identity.type}::{identity.id}"
+    identity_id = qualified_identity_value(
+        str(getattr(identity, "namespace", "")), str(identity.id)
+    )
+    return f"{identity.type}::{identity_id}"
 
 
 async def _decide(
@@ -471,7 +485,7 @@ def permissions_router(
             _request_flags(authorizer, request),
             _request_facts(authorizer, request),
         )
-        if _etag_matches(request.header("if-none-match"), tag):
+        if _etag_matches(_combined_request_header(request, b"if-none-match"), tag):
             response = Response(b"", status=304)
             response.headers.append((b"etag", tag.encode("ascii")))
             return _private(response)
@@ -667,8 +681,8 @@ def _manifest_etag(
     manifest until this changes.
     """
     digest = hashlib.blake2s(digest_size=16)
-    digest.update(f"{identity.type}::{identity.id}\x00".encode())
-    for role in sorted(identity.roles):
+    digest.update(f"{_principal_key(identity)}\x00".encode())
+    for role in sorted(identity.authority_roles):
         digest.update(f"{role}\x00".encode())
     digest.update(b"\x01")
     for resource_type, actions in vocabulary.items():

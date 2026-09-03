@@ -41,6 +41,7 @@ import threading
 from collections.abc import Awaitable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from math import isfinite
 from typing import Any, cast
 from urllib.parse import SplitResult, urljoin, urlsplit
 
@@ -342,8 +343,10 @@ class ClientTimeout:
 
     def __post_init__(self) -> None:
         values = (self.pool, self.connect, self.tls, self.response_headers, self.response_body)
-        if any(value <= 0 for value in values) or (self.total is not None and self.total <= 0):
-            raise ValueError("client timeouts must be positive")
+        if any(not isfinite(value) or value <= 0 for value in values) or (
+            self.total is not None and (not isfinite(self.total) or self.total <= 0)
+        ):
+            raise ValueError("client timeouts must be finite and positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,8 +396,13 @@ class RetryPolicy:
     def __post_init__(self) -> None:
         if self.attempts <= 0:
             raise ValueError("retry attempts must be positive")
-        if self.backoff_base <= 0 or self.backoff_cap <= 0:
-            raise ValueError("retry backoff_base and backoff_cap must be positive")
+        if (
+            not isfinite(self.backoff_base)
+            or not isfinite(self.backoff_cap)
+            or self.backoff_base <= 0
+            or self.backoff_cap <= 0
+        ):
+            raise ValueError("retry backoff_base and backoff_cap must be finite and positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -428,10 +436,15 @@ class RatePolicy:
 
     def __post_init__(self) -> None:
         if self.enabled:
-            if self.rate <= 0 or self.capacity <= 0:
-                raise ValueError("an enabled RatePolicy needs positive rate and capacity")
-            if self.max_wait <= 0:
-                raise ValueError("RatePolicy max_wait must be positive")
+            if (
+                not isfinite(self.rate)
+                or not isfinite(self.capacity)
+                or self.rate <= 0
+                or self.capacity <= 0
+            ):
+                raise ValueError("an enabled RatePolicy needs finite positive rate and capacity")
+            if not isfinite(self.max_wait) or self.max_wait <= 0:
+                raise ValueError("RatePolicy max_wait must be finite and positive")
 
 
 _DEFAULT_RATE = RatePolicy()
@@ -744,10 +757,12 @@ class _StreamContext:
             await connection.writer.drain()
             client._requests += 1
             minor, status, reason, headers = await client._read_head(connection.reader)
-        except (ConnectionError, OSError, asyncio.IncompleteReadError) as error:
+        except BaseException as error:
             await client._release(connection, False)
             self._connection = None
-            raise _TransportError("connection failed during HTTP exchange") from error
+            if isinstance(error, (ConnectionError, OSError, asyncio.IncompleteReadError)):
+                raise _TransportError("connection failed during HTTP exchange") from error
+            raise
         self._minor = minor
         self._response_headers = headers
         return StreamingClientResponse(
@@ -1635,6 +1650,8 @@ class HTTPClient:
     def _request_target(self, target: str) -> bytes:
         if not target.startswith("/") or target.startswith("//"):
             raise ValueError("request target must be origin-relative")
+        if "#" in target:
+            raise ValueError("request target cannot contain a fragment")
         _validate_origin_path(target.partition("?")[0], label="request target")
         combined = f"{self._base_path}{target}" if self._base_path else target
         try:
@@ -1669,8 +1686,10 @@ class HTTPClient:
             relative = urlsplit(joined)
             target = relative.path or "/"
             parsed = relative
-        if self._base_path and target != self._base_path and not target.startswith(
-            f"{self._base_path}/"
+        if (
+            self._base_path
+            and target != self._base_path
+            and not target.startswith(f"{self._base_path}/")
         ):
             raise RedirectError("redirect location escapes the configured base path")
         return f"{target}?{parsed.query}" if parsed.query else target
@@ -1987,11 +2006,13 @@ class HTTPClient:
         """
         mode, length = _client_codec.response_framing(method, status, headers)
         if mode == "none":
+            self._reject_buffered_extra(reader)
             self._framed_cleanly = True
             return
         if mode == "chunked":
             async for chunk in self._iter_chunked(reader):
                 yield chunk
+            self._reject_buffered_extra(reader)
             self._framed_cleanly = True
             return
         if mode == "length":
@@ -2004,6 +2025,7 @@ class HTTPClient:
                     raise ProtocolError("upstream closed mid-body")
                 remaining -= len(chunk)
                 yield chunk
+            self._reject_buffered_extra(reader)
             self._framed_cleanly = True
             return
         # Close-delimited: the end *is* the close, so the connection can never
@@ -2189,6 +2211,10 @@ class HTTPClient:
 
     @staticmethod
     def _reject_buffered_extra(reader: asyncio.StreamReader) -> None:
+        if type(reader) is _ClientStream:
+            if cast(Any, reader)._has_buffered_data():
+                raise ProtocolError("unsolicited bytes follow the framed response body")
+            return
         buffered = getattr(reader, "_buffer", None)
         if buffered:
             raise ProtocolError("unsolicited bytes follow the framed response body")

@@ -92,6 +92,16 @@ async def test_steps_must_ascend_without_repeating() -> None:
         Component(name="x", steps=(Step(2, ("SELECT 1",)), Step(1, ("SELECT 1",))))
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["billing'); DROP SCHEMA app CASCADE; --", "billing\nSELECT pg_sleep(10)"],
+)
+async def test_component_name_cannot_inject_the_emitted_sql(name: str) -> None:
+    with pytest.raises(ValueError, match="component name"):
+        component = Component(name=name, steps=(Step(1, ("SELECT 1",)),))
+        emit_sql([component])
+
+
 async def test_an_unquotable_identifier_is_refused() -> None:
     with pytest.raises(ValueError, match="unusable SQL identifier"):
         marker_statements('ev"il')

@@ -272,14 +272,23 @@ class Slack:
 
     async def _receive(self, chat: Any, request: Request, *, expected: str) -> Response:
         body = await request.body()
-        headers = {
-            name.decode("latin-1"): value.decode("latin-1") for name, value in request.headers
-        }
+        headers: dict[str, str] = {}
+        protected = {"x-slack-signature", "x-slack-request-timestamp"}
+        duplicate_content_type = False
+        for raw_name, raw_value in request.headers:
+            name = raw_name.decode("latin-1").lower()
+            if name in protected and name in headers:
+                return Response(status=401, media_type=b"")
+            if name == "content-type" and name in headers:
+                duplicate_content_type = True
+            headers[name] = raw_value.decode("latin-1")
         try:
             verified = self._verify(body, headers)
         except ValueError:
             return Response(status=401, media_type=b"")
-        media_type = (request.header("content-type") or "").partition(";")[0].strip().lower()
+        if duplicate_content_type:
+            return Response(status=415, media_type=b"")
+        media_type = headers.get("content-type", "").partition(";")[0].strip().lower()
         if media_type != expected:
             return Response(status=415, media_type=b"")
         try:

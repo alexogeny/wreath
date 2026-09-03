@@ -1083,6 +1083,7 @@ begin_headers_cb(nghttp3_conn *conn, int64_t stream_id, void *cu, void *su)
     s->timeout_handle = NULL;
     s->header_list = wreath_header_block_new_objects(16);
     s->body_buffer = PyByteArray_FromStringAndSize(NULL, 0);
+    s->content_length = -1;
     s->body_received = 0;
     s->body_frames = 0;
     s->receive_waiter = NULL;
@@ -1270,6 +1271,22 @@ h3_authorities_equal(PyObject *authority, PyObject *host, PyObject *scheme)
            PyOS_strnicmp(left.host, right.host, left.host_len) == 0;
 }
 
+static int
+parse_h3_content_length(const char *data, Py_ssize_t size, Py_ssize_t *out)
+{
+    if (size == 0) return -1;
+    Py_ssize_t value = 0;
+    for (Py_ssize_t i = 0; i < size; i++) {
+        unsigned char ch = (unsigned char)data[i];
+        if (ch < '0' || ch > '9') return -1;
+        int digit = ch - '0';
+        if (value > (PY_SSIZE_T_MAX - digit) / 10) return -1;
+        value = value * 10 + digit;
+    }
+    *out = value;
+    return 0;
+}
+
 /* Build the ASGI scope from the collected header list and spawn the app task. */
 static int
 start_request(WreathH3Stream *s)
@@ -1294,6 +1311,8 @@ start_request(WreathH3Stream *s)
         return -1;
     }
     int has_host = 0;
+    int seen_regular = 0;
+    Py_ssize_t content_length = -1;
     Py_ssize_t n = wreath_headers_count(s->header_list);
     for (Py_ssize_t i = 0; i < n; i++) {
         const char *np;
@@ -1312,11 +1331,31 @@ start_request(WreathH3Stream *s)
             return -1;
         }
         if (nl > 0 && np[0] == ':') {
-            if (nl == 7 && memcmp(np, ":method", 7) == 0) method = value;
-            else if (nl == 5 && memcmp(np, ":path", 5) == 0) path = value;
-            else if (nl == 7 && memcmp(np, ":scheme", 7) == 0) scheme = value;
-            else if (nl == 10 && memcmp(np, ":authority", 10) == 0) authority = value;
+            if (seen_regular) goto message_err;
+            if (nl == 7 && memcmp(np, ":method", 7) == 0) {
+                if (method != NULL) goto message_err;
+                method = value;
+            }
+            else if (nl == 5 && memcmp(np, ":path", 5) == 0) {
+                if (path != NULL) goto message_err;
+                path = value;
+            }
+            else if (nl == 7 && memcmp(np, ":scheme", 7) == 0) {
+                if (scheme != NULL) goto message_err;
+                scheme = value;
+            }
+            else if (nl == 10 && memcmp(np, ":authority", 10) == 0) {
+                if (authority != NULL) goto message_err;
+                authority = value;
+            }
+            else {
+                goto message_err;
+            }
             continue;
+        }
+        seen_regular = 1;
+        if (!nghttp3_check_header_name((const uint8_t *)np, (size_t)nl)) {
+            goto message_err;
         }
         /* Note host presence here rather than rescanning the scope headers
          * once the loop is done; the synthesized name is a cached constant. */
@@ -1324,6 +1363,24 @@ start_request(WreathH3Stream *s)
             if (host != NULL) goto message_err;
             host = value;
             has_host = 1;
+        }
+        else if ((nl == 10 && memcmp(np, "connection", 10) == 0) ||
+                 (nl == 10 && memcmp(np, "keep-alive", 10) == 0) ||
+                 (nl == 16 && memcmp(np, "proxy-connection", 16) == 0) ||
+                 (nl == 17 && memcmp(np, "transfer-encoding", 17) == 0) ||
+                 (nl == 7 && memcmp(np, "upgrade", 7) == 0)) {
+            goto message_err;
+        }
+        else if (nl == 2 && memcmp(np, "te", 2) == 0) {
+            if (vl != 8 || memcmp(vp, "trailers", 8) != 0) goto message_err;
+        }
+        else if (nl == 14 && memcmp(np, "content-length", 14) == 0) {
+            Py_ssize_t declared;
+            if (parse_h3_content_length(vp, vl, &declared) < 0 ||
+                (content_length >= 0 && content_length != declared)) {
+                goto message_err;
+            }
+            content_length = declared;
         }
         /* Capture the recorder correlation header in this same pass, so a
          * traceparent never costs a second header walk. */
@@ -1344,6 +1401,23 @@ start_request(WreathH3Stream *s)
             Py_DECREF(scope_headers);
             return -1;
         }
+    }
+    s->content_length = content_length;
+    if (s->request_ended && content_length != -1 && content_length != 0) {
+        goto message_err;
+    }
+    if (method == NULL || path == NULL || scheme == NULL) goto message_err;
+    const char *path_data = PyBytes_AS_STRING(path);
+    Py_ssize_t path_size = PyBytes_GET_SIZE(path);
+    int is_connect = PyBytes_GET_SIZE(method) == 7 &&
+                     memcmp(PyBytes_AS_STRING(method), "CONNECT", 7) == 0;
+    int is_options = PyBytes_GET_SIZE(method) == 7 &&
+                     memcmp(PyBytes_AS_STRING(method), "OPTIONS", 7) == 0;
+    int is_asterisk = path_size == 1 && path_data[0] == '*';
+    if (is_connect || path_size == 0 || (is_asterisk && !is_options) ||
+        (!is_asterisk && path_data[0] != '/') ||
+        memchr(path_data, '#', (size_t)path_size) != NULL) {
+        goto message_err;
     }
     if (authority != NULL) {
         H3Authority parsed;
@@ -1394,8 +1468,12 @@ start_request(WreathH3Stream *s)
      * microseconds. Left scalar deliberately. */
     Py_ssize_t q = -1;
     for (Py_ssize_t i = 0; i < pl; i++) { if (pp[i] == '?') { q = i; break; } }
-    PyObject *path_str = PyUnicode_DecodeUTF8(pp, q >= 0 ? q : pl, "surrogateescape");
-    PyObject *raw_path = PyBytes_FromStringAndSize(pp, pl);
+    Py_ssize_t path_len = q >= 0 ? q : pl;
+    int bad_path = 0;
+    PyObject *path_str = wreath_h3_request_capi->decode_request_path(
+        pp, path_len, &bad_path);
+    if (path_str == NULL && bad_path) goto message_err;
+    PyObject *raw_path = PyBytes_FromStringAndSize(pp, path_len);
     PyObject *query = q >= 0 ? PyBytes_FromStringAndSize(pp + q + 1, pl - q - 1)
                              : PyBytes_FromStringAndSize("", 0);
     PyObject *method_str = method
@@ -1417,7 +1495,7 @@ start_request(WreathH3Stream *s)
         scope = wreath_request_context_new(
             c->endpoint->scope_type, c->endpoint->scope_asgi,
             c->endpoint->scope_http_version, method_str, scheme_str, path_str,
-            raw_path, query, context_headers, Py_None, Py_None,
+            raw_path, query, context_headers, c->server_address, c->client_address,
             c->endpoint->scope_root_path
         );
         Py_DECREF(path_str); Py_DECREF(raw_path);
@@ -1433,10 +1511,11 @@ start_request(WreathH3Stream *s)
             return -1;
         }
         scope = Py_BuildValue(
-            "{s:s,s:s,s:N,s:N,s:N,s:N,s:N,s:O}",
+            "{s:s,s:s,s:N,s:N,s:N,s:N,s:N,s:O,s:O,s:O}",
             "type", "http", "http_version", "3",
             "scheme", scheme_str, "method", method_str, "path", path_str,
-            "raw_path", raw_path, "query_string", query, "headers", asgi_headers);
+            "raw_path", raw_path, "query_string", query, "headers", asgi_headers,
+            "server", c->server_address, "client", c->client_address);
         Py_DECREF(asgi_headers);
         Py_DECREF(scope_headers);
     }
@@ -1569,6 +1648,10 @@ end_headers_cb(nghttp3_conn *conn, int64_t stream_id, int fin, void *cu, void *s
     (void)conn; (void)stream_id; (void)cu;
     WreathH3Stream *s = (WreathH3Stream *)su;
     if (s == NULL || s->disconnected) return 0;
+    if (s->scope != NULL) {
+        h3_reject_stream(s, NGHTTP3_H3_MESSAGE_ERROR);
+        return 0;
+    }
     if (fin) s->request_ended = 1;
     if (s->request_refused) {
         return h3_refuse_unstarted_request(s, s->status) < 0
@@ -1644,6 +1727,10 @@ recv_data_cb(nghttp3_conn *conn, int64_t stream_id, const uint8_t *data,
         return 0;
     }
     Py_ssize_t total = s->body_received + (Py_ssize_t)datalen;
+    if (s->content_length >= 0 && total > s->content_length) {
+        h3_reject_stream(s, NGHTTP3_H3_MESSAGE_ERROR);
+        return 0;
+    }
     Py_ssize_t limit = (c != NULL) ? c->endpoint->max_body_bytes : 0;
     if (limit > 0 && total > limit) {
         h3_reject_stream(s, NGHTTP3_H3_EXCESSIVE_LOAD);
@@ -1701,6 +1788,10 @@ end_stream_cb(nghttp3_conn *conn, int64_t stream_id, void *cu, void *su)
     (void)conn; (void)stream_id; (void)cu;
     WreathH3Stream *s = (WreathH3Stream *)su;
     if (s == NULL) return 0;
+    if (s->content_length >= 0 && s->body_received != s->content_length) {
+        h3_reject_stream(s, NGHTTP3_H3_MESSAGE_ERROR);
+        return 0;
+    }
     s->request_ended = 1;
     if (s->receive_waiter != NULL) {
         PyObject *msg = s->conn != NULL && s->conn->endpoint->native_app != NULL

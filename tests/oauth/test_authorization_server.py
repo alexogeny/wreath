@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 
 import pytest
@@ -13,6 +14,17 @@ from wreath.oauth import (
     ClientRegistration,
     OAuthRefusal,
 )
+
+
+@pytest.mark.parametrize("field", ("lifetime", "code_ttl", "refresh_ttl"))
+@pytest.mark.parametrize("value", (math.nan, math.inf, -math.inf))
+def test_authorization_server_refuses_nonfinite_grant_lifetimes(field: str, value: float) -> None:
+    with pytest.raises(ValueError, match=field):
+        AuthorizationServer(
+            issuer="https://issuer.example",
+            **{field: value},
+        )
+
 
 CLIENT_SECRET = b"console-secret-material" * 2
 CLIENT = ClientRegistration(
@@ -110,9 +122,7 @@ def test_jwt_introspection_discloses_nothing_for_the_wrong_resource_server() -> 
         secret=b"a" * 32,
         clients=(RESOURCE, other),
     )
-    issued = introspection_server.issue_access(
-        subject="user-1", audience="resource-api", now=1000
-    )
+    issued = introspection_server.issue_access(subject="user-1", audience="resource-api", now=1000)
     response = introspection_server.introspection_jwt(
         issued.access_token,
         client_id="other-api",
@@ -139,9 +149,7 @@ def test_jwt_introspection_uses_the_servers_asymmetric_signer() -> None:
         signer=signer,
         clients=(resource,),
     )
-    issued = introspection_server.issue_access(
-        subject="user-1", audience="resource-api", now=1000
-    )
+    issued = introspection_server.issue_access(subject="user-1", audience="resource-api", now=1000)
     response = introspection_server.introspection_jwt(
         issued.access_token,
         client_id="resource-api",
@@ -256,9 +264,7 @@ def test_rich_authorization_details_are_validated_and_carried_by_the_token() -> 
         },
     )
     assert claims["authorization_details"] == list(token.authorization_details)
-    assert rich.metadata()["authorization_details_types_supported"] == [
-        "account_information"
-    ]
+    assert rich.metadata()["authorization_details_types_supported"] == ["account_information"]
 
 
 @pytest.mark.parametrize(

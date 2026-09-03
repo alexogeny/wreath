@@ -291,7 +291,7 @@ class TestTheSchemaMayBeOlderThanTheBuild:
         component = _bus(conn).component()
         first = next(step for step in component.steps if step.version == 1)
         assert not any("trace_context" in s for s in first.statements)
-        assert component.target_version == 2
+        assert component.target_version == 3
         second = next(step for step in component.steps if step.version == 2)
         assert any("trace_context" in s for s in second.statements)
 

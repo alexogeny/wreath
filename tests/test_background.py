@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import math
 import threading
 from pathlib import Path
 from typing import Any
@@ -354,6 +355,12 @@ async def test_a_runaway_background_task_is_cancelled_at_the_deadline() -> None:
     assert cancelled.is_set(), "the task outlived the invocation that owned it"
     assert app.background_timeouts == 1
     assert app.background_errors == 0  # a deadline is not a handler bug
+
+
+@pytest.mark.parametrize("value", (math.nan, math.inf, -math.inf))
+async def test_background_timeout_must_be_finite(value: float) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        Wreath(background_timeout=value)
 
 
 async def test_the_response_still_goes_out_before_the_deadline_bites() -> None:

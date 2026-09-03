@@ -121,6 +121,41 @@ async def post(app: Wreath, payload: Any) -> Any:
         )
 
 
+async def test_duplicate_authorization_is_refused_before_connector_verification() -> None:
+    app, _chat, _provider, verifier = mounted(inbox=MemoryInbox())
+    body = json.dumps(activity()).encode()
+    sent: list[dict[str, Any]] = []
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "scheme": "https",
+        "method": "POST",
+        "path": "/_wreath/chat/teams",
+        "raw_path": b"/_wreath/chat/teams",
+        "query_string": b"",
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"authorization", b"Bearer connector.jwt"),
+            (b"authorization", b"Bearer attacker.jwt"),
+        ],
+        "server": ("test", 443),
+        "client": ("127.0.0.1", 1),
+        "root_path": "",
+    }
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    await app(scope, receive, send)
+
+    assert sent[0]["status"] == 401
+    assert verifier.calls == []
+
+
 async def test_ordinary_activity_is_verified_then_acknowledged_exactly_once() -> None:
     app, chat, _, verifier = mounted(inbox=MemoryInbox())
     seen: list[str] = []
@@ -231,10 +266,11 @@ async def test_provider_replay_window_covers_the_configured_jwt_lifetime() -> No
 async def test_provider_replay_store_is_bounded_to_4096_deliveries() -> None:
     _, chat, teams, _ = mounted()
     first = TeamsActivity.parse(activity(id="delivery-0"))
-    for index in range(4097):
+    for index in range(4096):
         current = teams_module.replace(first, id=f"delivery-{index}")
         assert await teams._claim(chat, current)
-    assert await teams._claim(chat, first)
+    assert not await teams._claim(chat, teams_module.replace(first, id="attacker-spray"))
+    assert not await teams._claim(chat, first)
 
 
 async def test_same_activity_id_in_two_tenants_is_not_a_duplicate() -> None:
@@ -299,6 +335,23 @@ async def test_untrusted_service_url_is_forbidden_before_inbox_or_handler() -> N
         raise AssertionError("untrusted serviceUrl must not dispatch")
 
     response = await post(app, activity(serviceUrl="https://connector.example.test/amer/"))
+
+    assert response.status == 403
+    assert inbox.claims == set()
+
+
+async def test_bot_connector_token_cannot_be_redirected_to_an_alternate_port() -> None:
+    inbox = MemoryInbox()
+    app, chat, _, _ = mounted(inbox=inbox)
+
+    @chat.command("deploy", execution="inline")
+    async def deploy(request: Any) -> None:
+        raise AssertionError("alternate-port serviceUrl must not dispatch")
+
+    response = await post(
+        app,
+        activity(serviceUrl="https://smba.trafficmanager.net:8443/amer/"),
+    )
 
     assert response.status == 403
     assert inbox.claims == set()

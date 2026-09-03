@@ -37,6 +37,7 @@ from typing import Any
 from .._json import dumps as _json_dumps
 from .._json import loads as _json_loads
 from .._pgcatalog import column_exists
+from .._pgname import validate_identifier
 from .progress import WINDOW_SECONDS
 
 #: The pass state machine.
@@ -64,14 +65,17 @@ STOPPED = (BLOCKED, UNVERIFIED)
 
 
 def table_name(schema: str) -> str:
+    schema = validate_identifier(schema, "pass ledger schema")
     return f'"{schema}".passes'
 
 
 def holes_table_name(schema: str) -> str:
+    schema = validate_identifier(schema, "pass ledger schema")
     return f'"{schema}".pass_holes'
 
 
 def rewrites_table_name(schema: str) -> str:
+    schema = validate_identifier(schema, "pass ledger schema")
     return f'"{schema}".pass_rewrites'
 
 
@@ -705,7 +709,14 @@ class Ledger:
         )
         return _affected(tag) == 1
 
-    async def block(self, executor: Any, *, error: str, phase: str = BLOCKED) -> None:
+    async def block(
+        self,
+        executor: Any,
+        *,
+        error: str,
+        phase: str = BLOCKED,
+        expected: str | None = None,
+    ) -> bool:
         """Stop the pass, and say why in the row itself.
 
         *phase* distinguishes the two ways a pass stops: `blocked` at a chunk
@@ -713,13 +724,17 @@ class Ledger:
         `unverified` at a verification that answered no, which is not
         retryable at all.
         """
-        await executor.execute(
-            f"UPDATE {self._table} SET phase = $3, last_error = $4 WHERE name = $1 AND tenant = $2",
+        condition = "" if expected is None else " AND phase = $5"
+        tag = await executor.execute(
+            f"UPDATE {self._table} SET phase = $3, last_error = $4 "
+            f"WHERE name = $1 AND tenant = $2{condition}",
             self._name,
             self._tenant,
             phase,
             error[:2000],
+            *((expected,) if expected is not None else ()),
         )
+        return _affected(tag) == 1
 
     async def unblock(self, executor: Any) -> bool:
         """Return a pass stopped at a hole to walking. Refuses an unverified one.
@@ -744,7 +759,7 @@ class Ledger:
         )
         return _affected(tag) == 1
 
-    async def publish(self, executor: Any, *, fact: str | None, detail: str) -> None:
+    async def publish(self, executor: Any, *, fact: str | None, detail: str) -> bool:
         """Record that verification passed, and what it established.
 
         Written whether or not an irreversible step follows, because the fact is
@@ -752,13 +767,15 @@ class Ledger:
         migration someone else runs, and this row is what that migration reads
         before it agrees to narrow the column.
         """
-        await executor.execute(
-            f"UPDATE {self._table} SET verified_at = clock_timestamp(), "
-            "verified_fact = $3, last_error = NULL WHERE name = $1 AND tenant = $2",
+        updated = await executor.fetchval(
+            f"UPDATE {self._table} SET phase = 'verified', "
+            "verified_at = clock_timestamp(), verified_fact = $3, last_error = NULL "
+            "WHERE name = $1 AND tenant = $2 AND phase = 'verifying' RETURNING 1",
             self._name,
             self._tenant,
             (fact if fact is not None else detail)[:2000],
         )
+        return updated is not None
 
     async def begin_cycle(self, executor: Any, *, trace: str | None = None) -> bool:
         """Rewind a recurring pass to the start of a fresh cycle.
@@ -798,13 +815,16 @@ class Ledger:
         )
         return _affected(tag) == 1
 
-    async def record_error(self, executor: Any, error: str) -> None:
-        await executor.execute(
-            f"UPDATE {self._table} SET last_error = $3 WHERE name = $1 AND tenant = $2",
+    async def record_error(self, executor: Any, error: str, *, expected: str | None = None) -> bool:
+        condition = "" if expected is None else " AND phase = $4"
+        tag = await executor.execute(
+            f"UPDATE {self._table} SET last_error = $3 WHERE name = $1 AND tenant = $2{condition}",
             self._name,
             self._tenant,
             error[:2000],
+            *((expected,) if expected is not None else ()),
         )
+        return _affected(tag) == 1
 
     async def requeue(self, executor: Any, *, cursor_from: Any, cursor_to: Any) -> bool:
         """Append one unit to be walked out of order. The cursor never rewinds.

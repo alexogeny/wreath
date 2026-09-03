@@ -31,7 +31,7 @@ from .._reqcache import resolve_once
 from ..request import Request
 from .cedar_engine import CedarEntity, EntityUid
 from .facts import EMPTY, SetFact
-from .models import AuthorizationDecision, Identity
+from .models import AuthorizationDecision, Identity, qualified_identity_value
 from .principal import NO_LIMITS, Limits
 from .requirements import PolicyRequirement, second_factor_age
 
@@ -44,8 +44,16 @@ class _NativeRoutePlan:
     principal_entity: bool
 
 
+def _identity_id(identity: Identity) -> str:
+    return qualified_identity_value(identity.namespace, identity.id)
+
+
+def _identity_uid(identity: Identity) -> EntityUid:
+    return EntityUid(identity.type, _identity_id(identity))
+
+
 def _default_principal(identity: Identity) -> object:
-    return EntityUid(identity.type, identity.id)
+    return _identity_uid(identity)
 
 
 def _default_action(action: str, request: Request) -> object:
@@ -63,8 +71,8 @@ def _default_entities(request: Request) -> object:
     identity = request.identity
     if identity is None:
         return ()
-    uid = EntityUid(identity.type, identity.id)
-    parents = tuple(EntityUid("Role", role) for role in sorted(identity.roles))
+    uid = _identity_uid(identity)
+    parents = tuple(EntityUid("Role", role) for role in sorted(identity.authority_roles))
     return (CedarEntity(uid, attrs=identity.attributes, parents=parents),)
 
 
@@ -121,7 +129,7 @@ def request_flags(
     -- a `permit` and a `forbid` disagreeing about whether the same caller is in
     the same rollout is not a decision anybody wrote.
 
-    The bucketing context is `{"id": identity.id}`, which is what
+    The bucketing context is `{"id": qualified identity id}`, which is what
     `flags.flags_dependency` passes, so a percentage flag places a principal in
     the same bucket in a policy as in a handler. An anonymous request buckets
     against the empty string, exactly as it does everywhere else.
@@ -172,7 +180,7 @@ def _resolve_flags(
     identity = request.identity
     context: dict[str, Any] = {}
     if identity is not None:
-        context["id"] = identity.id
+        context["id"] = _identity_id(identity)
     if vocabulary is None:
         resolve_all = getattr(provider, "all", None)
         return (
@@ -675,8 +683,7 @@ class CedarAuthorizer:
         # first and is skipped; a request with no delegation never makes it.
         reads = getattr(engine, "reads_context", None)
         self._delegation_visible = bool(
-            callable(reads)
-            and (reads("delegated") or reads("actor") or reads("delegation_depth"))
+            callable(reads) and (reads("delegated") or reads("actor") or reads("delegation_depth"))
         )
         self._reads_now = None if not callable(reads) else bool(reads("now"))
         _validate_org_roles(self._facts[3].vocabulary, organizations)
@@ -774,7 +781,7 @@ class CedarAuthorizer:
     ) -> tuple[object, object, object, dict[str, object]]:
         """Map the resource-independent half of one or more engine queries."""
         principal = (
-            (identity.type, identity.id)
+            (identity.type, _identity_id(identity))
             if compiled is not None
             else _default_principal(identity)
             if self._principal is _default_principal

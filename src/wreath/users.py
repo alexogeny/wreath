@@ -11,7 +11,10 @@ The security-sensitive core (scrypt hashing, HMAC action tokens, flow logic) liv
 in the stdlib-only `wreath._userkit`; this module is the thin wreath glue.
 
     store = InMemoryUserStore()            # or an ORM-backed UserStore
-    app.include_router(user_router(store, secret=SECRET, base_url="https://app"))
+    sessions = PostgresSessionStore(database)
+    app.include_router(
+        user_router(store, sessions=sessions, secret=SECRET, base_url="https://app")
+    )
 
 `SessionPolicy` is required for login: without it `POST /login` answers 500
 rather than signing anyone in. `POST /logout` and `GET /me` degrade instead --
@@ -27,10 +30,12 @@ from __future__ import annotations
 import weakref
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from math import isfinite
 from time import monotonic, time
 from typing import Annotated, Any, cast
 
 from . import _secondfactor, _userkit
+from ._capability_map import CapabilityMap
 from ._secondfactor import (  # re-export the stdlib-only second-factor surface
     CHALLENGE_ENROLMENT,
     CHALLENGE_WEBAUTHN_ASSERT,
@@ -71,7 +76,6 @@ from ._webauthn import (
     unpack_credential,
 )
 from .binding import Body, Path
-from .cache import BoundedCache
 from .policy.sessions import rotate_session
 from .response import JSONResponse
 from .router import Router
@@ -491,12 +495,11 @@ class LoginLimiter:
     refused its legitimate owner is refused too, so an attacker who knows an
     address can keep that person out for one window.
 
-    **Per-process and in-memory.** The counts live in a `BoundedCache` inside
+    **Per-process and in-memory.** The counts live in a `CapabilityMap` inside
     this object, shared with nothing. Across N workers the real budget is
     N x `max_attempts`, a restart clears every count, and only `max_tracked`
-    identifiers are counted at once -- failures against more identifiers than
-    that evict the least recently used counts. This is a limitation of the
-    design, not a defect: it needs no Redis and no coordination.
+    identifiers are counted at once. At the ceiling, unknown identifiers are
+    refused for one window; live counters are never evicted by a key spray.
 
     Args:
         max_attempts: failed attempts allowed per identifier within one window.
@@ -508,7 +511,7 @@ class LoginLimiter:
         ValueError: max_attempts below 1, or a window that is not positive.
     """
 
-    __slots__ = ("_attempts", "_clock", "_max", "_window")
+    __slots__ = ("_attempts", "_clock", "_max", "_saturated_until", "_window")
 
     def __init__(
         self,
@@ -518,15 +521,23 @@ class LoginLimiter:
         max_tracked: int = 4096,
         clock: Callable[[], float] = monotonic,
     ) -> None:
+        if isinstance(max_attempts, bool) or not isinstance(max_attempts, int):
+            raise ValueError("max_attempts must be a positive integer")
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
-        if window <= 0:
-            raise ValueError("window must be positive")
+        if (
+            isinstance(window, bool)
+            or not isinstance(window, (int, float))
+            or not isfinite(window)
+            or window <= 0
+        ):
+            raise ValueError("window must be positive and finite")
         self._max = max_attempts
         self._window = window
         self._clock = clock
-        self._attempts: BoundedCache = BoundedCache(
-            max_entries=max_tracked, ttl=window, clock=clock
+        self._saturated_until = 0.0
+        self._attempts = CapabilityMap(
+            max_entries=max_tracked, ttl=window, clock=clock, overflow="refuse"
         )
 
     def allow(self, identifier: str) -> bool:
@@ -536,12 +547,12 @@ class LoginLimiter:
         that has never failed, or whose window has elapsed, is allowed and its
         expired entry is dropped in passing.
         """
-        entry = self._attempts.get(identifier)
+        entry = self._attempts.peek(identifier)
         if entry is None:
-            return True
+            return self._clock() >= self._saturated_until
         count, first = entry
         if self._clock() - first >= self._window:
-            self._attempts.delete(identifier)
+            self._attempts.discard(identifier)
             return True
         return count < self._max
 
@@ -553,12 +564,13 @@ class LoginLimiter:
         window increments the count and keeps the original start, which is what
         makes the window fixed rather than sliding.
         """
-        entry = self._attempts.get(identifier)
+        entry = self._attempts.peek(identifier)
         now = self._clock()
         if entry is None or now - entry[1] >= self._window:
-            self._attempts.set(identifier, (1, now))
+            if not self._attempts.put(identifier, (1, now)):
+                self._saturated_until = max(self._saturated_until, now + self._window)
             return
-        self._attempts.set(identifier, (entry[0] + 1, entry[1]))
+        self._attempts.put(identifier, (entry[0] + 1, entry[1]), keep_deadline=True)
 
     def record_success(self, identifier: str) -> None:
         """Clear the failure count and window for `identifier`.
@@ -567,7 +579,7 @@ class LoginLimiter:
         mistypes twice and then signs in starts from a full budget. Nothing else
         is stored per identifier, so this leaves no state behind.
         """
-        self._attempts.delete(identifier)
+        self._attempts.discard(identifier)
 
 
 async def reset_password_endpoint(
@@ -584,8 +596,9 @@ async def reset_password_endpoint(
     The second half is the point. A user resets a password *because* somebody
     else is in the account, and changing the credential only stops the next
     sign-in -- whoever is already holding a session keeps it. `sessions` is any
-    session store; one that cannot enumerate (no `delete_for`) is used for
-    nothing and does not fail the reset.
+    session store. Missing `delete_for` wiring refuses before the password is
+    changed, because reporting recovery while an attacker session survives is
+    unsafe.
 
     Sessions are dropped only for the subject named in the token, and only after
     the reset succeeded: a token that fails verification changes no password and
@@ -606,12 +619,14 @@ async def reset_password_endpoint(
     Returns:
         True when the password changed, False for a bad token or a refused new password.
     """
+    delete_for = None if sessions is None else getattr(sessions, "delete_for", None)
+    if delete_for is None:
+        raise RuntimeError(
+            "password reset requires a session store with delete_for(subject) revocation"
+        )
     subject = _userkit._token_subject(token)
     ok = await _userkit.reset_password(store, secret=secret, token=token, new_password=new_password)
-    if not ok or sessions is None or subject is None:
-        return ok
-    delete_for = getattr(sessions, "delete_for", None)
-    if delete_for is None:
+    if not ok or subject is None:
         return ok
     if session_key == "principal":
         # The historical call, byte for byte, so every store that predates the
@@ -651,6 +666,8 @@ def user_router(
     sessions: Any = None,
     max_login_attempts: int = 10,
     login_window: float = 300.0,
+    max_registration_attempts: int = 20,
+    registration_window: float = 60.0,
     max_reset_requests: int = 3,
     reset_window: float = 15 * 60.0,
     second_factors: SecondFactorStore | None = None,
@@ -669,9 +686,9 @@ def user_router(
     maps `(purpose, token) -> URL` for the emailed links; the default points at
     this router's own verify route and a `reset-password?token=` query.
 
-    `sessions` is the server-side session store, if there is one. Passing it
-    is what lets a password reset end the sessions somebody else is already
-    holding; without it the reset changes the credential and nothing more. A
+    `sessions` is the required server-side session store. Its `delete_for`
+    method lets a password reset end the sessions somebody else is already
+    holding; construction refuses without that revocation seam. A
     non-default `session_key` is handed to `sessions.delete_for` so it
     enumerates by the key this router writes -- give the store the same key
     (`PostgresSessionStore(..., session_key=...)`) so a caller of `delete_for`
@@ -733,6 +750,16 @@ def user_router(
     """
     if len(secret.encode("utf-8")) < 32:
         raise ValueError("user_router secret must contain at least 32 bytes")
+    if sessions is None or not callable(getattr(sessions, "delete_for", None)):
+        raise ValueError(
+            "user_router sessions must provide delete_for(subject) so password reset "
+            "can revoke existing sessions"
+        )
+    if not callable(getattr(store, "compare_and_set_password", None)):
+        raise ValueError(
+            "user_router store must provide compare_and_set_password(user_id, expected, "
+            "replacement) for single-use password reset tokens"
+        )
     mailer = email_sender if email_sender is not None else LogEmailSender()
     links = link_builder if link_builder is not None else _default_link(base_url, prefix)
     router = Router(prefix=prefix, tags=("users",))
@@ -741,12 +768,22 @@ def user_router(
         max_attempts=max_reset_requests,
         window=reset_window,
     )
+    registration_limiter = LoginLimiter(
+        max_attempts=max_registration_attempts,
+        window=registration_window,
+        max_tracked=1,
+    )
 
     def _session(request: Any) -> dict[str, Any] | None:
         return getattr(request.state, "session", None)
 
     @router.post("/register")
     async def register(request: Any, data: Annotated[RegisterInput, Body()]):
+        if not registration_limiter.allow("registration"):
+            refused = JSONResponse({"status": "registration_received"}, status=429)
+            refused.headers.append((b"retry-after", str(int(registration_window)).encode("ascii")))
+            return refused
+        registration_limiter.record_failure("registration")
         await _userkit.register(
             store,
             mailer,
@@ -1786,11 +1823,9 @@ def _mount_webauthn_routes(
             return record, False
         # Diagnostic only, and only after the refusal has already happened:
         # it chooses which *error code* answers, never whether the caller
-        # may proceed. `discard` afterwards because the handle lived in the
-        # session marker we just dropped, so the row is now unreachable by
-        # anyone and would otherwise sit out its TTL as litter.
+        # may proceed. The row may still be reachable from the rightful
+        # session: a copied marker must not let this caller discard it.
         row = await challenges.peek(handle)
-        await challenges.discard(handle)
         # The consume has already refused, so a live row under this handle
         # means either the wrong ceremony or the wrong person. Only the
         # second is the *binding* refusing; a registration challenge posted
@@ -2439,6 +2474,20 @@ def second_factor_router(
         raise ValueError(f"skew must be between 0 and {_secondfactor.MAX_SKEW} steps")
     if period <= 0:
         raise ValueError("period must be positive")
+    for name, window in (
+        ("enrolment_ttl", enrolment_ttl),
+        ("pending_ttl", pending_ttl),
+        ("step_up_ttl", step_up_ttl),
+        ("verify_window", verify_window),
+        ("webauthn_ttl", webauthn_ttl),
+    ):
+        if (
+            isinstance(window, bool)
+            or not isinstance(window, (int, float))
+            or not isfinite(window)
+            or window <= 0
+        ):
+            raise ValueError(f"{name} must be positive and finite")
     if origins and not rp_id:
         # Origins without an RP ID would configure routes that are not mounted,
         # which reads as "WebAuthn is on" while it is off.
@@ -2755,6 +2804,16 @@ class OrmUserStore:
         row.is_verified = user.is_verified
         await self._session.flush()  # unit-of-work: mutate loaded row, then flush
         return user
+
+    async def compare_and_set_password(self, user_id: str, expected: str, replacement: str) -> bool:
+        async with self._session.begin():
+            query = self._model.select().where(self._model.id == user_id).for_update()
+            row = await self._session.fetch_one(query)
+            if row is None or not _userkit.hmac.compare_digest(row.hashed_password, expected):
+                return False
+            row.hashed_password = replacement
+            await self._session.flush()
+        return True
 
 
 def default_second_factor_model(table: str = "user_second_factors") -> type[Any]:

@@ -739,7 +739,8 @@ async def _finish(
             f"{open_holes} chunk(s) were given up on, so the gate is barred. "
             "Clear them with `wreath passes retry`."
         )
-        await ledger.block(connection, error=error, phase=BLOCKED)
+        if not await ledger.block(connection, error=error, phase=BLOCKED, expected=WALKING):
+            return ShiftResult(chunks, rows, stopped="lost", holes=holes)
         return ShiftResult(chunks, rows, stopped="blocked", error=error, holes=holes)
 
     if not await ledger.set_phase(connection, expected=WALKING, phase=VERIFYING):
@@ -774,15 +775,21 @@ async def _run_gate(walk: Any, connection: Any, *, row: Any) -> ShiftResult:
         if verdict.transient:
             # Could not run, rather than ran and answered no. Leave the phase
             # alone and let the next shift try again.
-            await ledger.record_error(connection, verdict.detail)
+            if not await ledger.record_error(connection, verdict.detail, expected=VERIFYING):
+                return ShiftResult(stopped="lost")
             return ShiftResult(stopped="failed", error=verdict.detail)
         if not verdict.ok:
             # A verification that answered no means the walk's logic is wrong,
             # and running it again will fail identically at the same row.
-            await ledger.block(connection, error=verdict.detail, phase=UNVERIFIED)
+            if not await ledger.block(
+                connection,
+                error=verdict.detail,
+                phase=UNVERIFIED,
+                expected=VERIFYING,
+            ):
+                return ShiftResult(stopped="lost")
             return ShiftResult(stopped="blocked", error=verdict.detail)
-        await ledger.publish(connection, fact=gate.publishes, detail=verdict.detail)
-        if not await ledger.set_phase(connection, expected=VERIFYING, phase=VERIFIED):
+        if not await ledger.publish(connection, fact=gate.publishes, detail=verdict.detail):
             return ShiftResult(stopped="lost")
         phase = VERIFIED
 
@@ -802,7 +809,8 @@ async def _run_gate(walk: Any, connection: Any, *, row: Any) -> ShiftResult:
         await gate.then(connection, walk, None)
     except Exception as error:  # noqa: BLE001 - the step is the caller's code
         detail = f"the terminal step failed: {error!r}"
-        await ledger.record_error(connection, detail)
+        if not await ledger.record_error(connection, detail, expected=APPLYING):
+            return ShiftResult(stopped="lost")
         return ShiftResult(stopped="failed", error=detail)
     complete = await ledger.set_phase(connection, expected=APPLYING, phase=DONE)
     return ShiftResult(complete=complete, stopped="complete")

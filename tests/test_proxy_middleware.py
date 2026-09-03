@@ -26,10 +26,7 @@ def test_native_forwarded_values_preserve_bytes_strip_semantics(
     whitespace: bytes,
 ) -> None:
     assert _core.forwarded_proto(whitespace + b"HTTPS" + whitespace) == "https"
-    assert (
-        _core.forwarded_host(whitespace + b"front.example" + whitespace)
-        == b"front.example"
-    )
+    assert _core.forwarded_host(whitespace + b"front.example" + whitespace) == b"front.example"
 
 
 async def _call(app: Any, scope_extra: dict[str, Any], **kwargs: Any) -> tuple[int, dict]:
@@ -43,10 +40,14 @@ async def _call(app: Any, scope_extra: dict[str, Any], **kwargs: Any) -> tuple[i
         "path": "/",
         "raw_path": b"/",
         "query_string": b"",
-        "headers": [
-            (name.lower().encode(), value.encode())
-            for name, value in kwargs.get("headers", {}).items()
-        ],
+        "headers": (
+            [
+                (name.lower().encode(), value.encode())
+                for name, value in kwargs.get("headers", {}).items()
+            ]
+            if isinstance(kwargs.get("headers", {}), dict)
+            else kwargs["headers"]
+        ),
         "server": ("app", 80),
         "client": ("127.0.0.1", 5000),
         "root_path": "",
@@ -64,6 +65,71 @@ async def _call(app: Any, scope_extra: dict[str, Any], **kwargs: Any) -> tuple[i
     start = next(m for m in sent if m["type"] == "http.response.start")
     headers = {name.decode(): value.decode() for name, value in start["headers"]}
     return start["status"], headers
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [
+            (b"host", b"internal.local"),
+            (b"x-forwarded-for", b"198.51.100.1"),
+            (b"x-forwarded-for", b"203.0.113.9"),
+            (b"x-forwarded-proto", b"https"),
+            (b"x-forwarded-proto", b"http"),
+            (b"x-forwarded-host", b"attacker.example"),
+            (b"x-forwarded-host", b"public.example"),
+        ],
+        [
+            (b"host", b"internal.local"),
+            (b"x-forwarded-for", b"203.0.113.9, 10.0.0.5"),
+            (b"x-forwarded-proto", b"http, https"),
+            (b"x-forwarded-host", b"attacker.example, public.example"),
+        ],
+    ],
+)
+async def test_ambiguous_forwarded_fields_leave_original_request_values(
+    headers: list[tuple[bytes, bytes]],
+) -> None:
+    expected_client = (
+        ("10.0.0.5", 5000)
+        if headers[1][0] == b"x-forwarded-for" and len(headers) > 4
+        else ("203.0.113.9", None)
+    )
+    policy = ProxyPolicy(trusted=["10.0.0.0/8"])
+    reference = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/",
+            "headers": list(headers),
+            "client": ("10.0.0.5", 5000),
+        },
+        None,
+    )
+    policy._ingress_sync(reference)
+    assert reference.scheme == "http"
+    assert reference.client == expected_client
+    assert reference.header("host") == "internal.local"
+
+    app = Wreath(http_policy=HttpPolicy(proxy=policy))
+    seen = {}
+
+    @app.get("/")
+    async def index(request: Any) -> str:
+        seen.update(
+            scheme=request.scope["scheme"],
+            client=request.scope["client"],
+            host=request.header("host"),
+        )
+        return "ok"
+
+    await _call(app, {"client": ("10.0.0.5", 5000)}, headers=headers)
+    assert seen == {
+        "scheme": "http",
+        "client": expected_client,
+        "host": "internal.local",
+    }
 
 
 @pytest.mark.asyncio

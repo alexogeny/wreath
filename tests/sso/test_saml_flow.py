@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from _saml_fixtures import ACS, AUDIENCE, ISSUER, SigningIdentity, signed_response
 
+from wreath.saml import MemoryReplayLedger, ReplayLedgerCapacityError
 from wreath.sso import (
     IdentityProviderConfig,
     IdentityProviderDirectory,
@@ -12,7 +13,6 @@ from wreath.sso import (
     SsoRefusal,
     UnknownIdentityProvider,
 )
-from wreath.store import MemoryStore
 
 ACME, GLOBEX = "acme", "globex"
 
@@ -41,8 +41,18 @@ def provider(signers) -> SamlServiceProvider:
 
 
 @pytest.fixture
-def ledger() -> MemoryStore:
-    return MemoryStore(ttl=600)
+def ledger() -> MemoryReplayLedger:
+    return MemoryReplayLedger(ttl=600)
+
+
+def test_memory_replay_ledger_refuses_capacity_without_forgetting_spent_ids() -> None:
+    ledger = MemoryReplayLedger(ttl=600, max_entries=2, clock=lambda: 1000.0)
+
+    assert ledger.claim("issuer\x1fvictim")
+    assert ledger.claim("issuer\x1fother")
+    with pytest.raises(ReplayLedgerCapacityError, match="max_entries=2"):
+        ledger.claim("issuer\x1foverflow")
+    assert not ledger.claim("issuer\x1fvictim")
 
 
 def test_sp_metadata_names_the_acs_and_the_entity_id(provider) -> None:
@@ -135,6 +145,33 @@ def test_an_expired_pending_login_is_named_and_never_returned() -> None:
         store.spend("_old", relay_state="relay", session_id=_SESSION, now=111.0)
 
     assert raised.value.reason == "expired-request"
+
+
+@pytest.mark.parametrize("ttl", [float("nan"), float("inf")])
+def test_pending_login_lifetime_must_be_finite(ttl: float) -> None:
+    with pytest.raises(ValueError, match="positive finite"):
+        PendingLoginStore(ttl=ttl)
+
+
+@pytest.mark.parametrize("now", [99.0, float("nan"), float("-inf")])
+def test_pending_login_refuses_an_invalid_or_rewound_clock(now: float) -> None:
+    store = PendingLoginStore(ttl=10)
+    store.put(PendingLogin("_pending", "relay", ACME, 100.0, _SESSION))
+
+    with pytest.raises(SsoRefusal, match="clock") as raised:
+        store.spend("_pending", relay_state="relay", session_id=_SESSION, now=now)
+
+    assert raised.value.reason == "invalid-time"
+
+
+@pytest.mark.parametrize("issued_at", [float("nan"), float("inf")])
+def test_pending_login_refuses_a_non_finite_issue_clock(issued_at: float) -> None:
+    store = PendingLoginStore(ttl=10)
+
+    with pytest.raises(SsoRefusal, match="issue time") as raised:
+        store.put(PendingLogin("_pending", "relay", ACME, issued_at, _SESSION))
+
+    assert raised.value.reason == "invalid-time"
 
 
 def test_an_expired_login_releases_a_small_pending_store_slot() -> None:

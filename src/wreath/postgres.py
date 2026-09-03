@@ -9,6 +9,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
+from math import isfinite
 from time import monotonic_ns as _monotonic_ns
 from typing import Any, Literal, cast
 
@@ -159,8 +160,13 @@ class PoolConfig:
             raise ValueError("pool max_size must be positive and at least min_size")
         if self.max_queue < 0:
             raise ValueError("pool max_queue cannot be negative")
-        if self.acquire_timeout <= 0 or self.command_timeout <= 0:
-            raise ValueError("pool timeouts must be positive")
+        if (
+            self.acquire_timeout <= 0
+            or self.command_timeout <= 0
+            or not isfinite(self.acquire_timeout)
+            or not isfinite(self.command_timeout)
+        ):
+            raise ValueError("pool timeouts must be positive and finite")
         if self.statement_cache_size < 1:
             raise ValueError("pool statement_cache_size must be positive")
         if self.statement_cache_bytes < 1:
@@ -1019,6 +1025,8 @@ class Database:
     ) -> None:
         if not name or not dsn:
             raise ValueError("database name and dsn are required")
+        if not isfinite(shutdown_timeout):
+            raise ValueError("database shutdown_timeout must be finite")
         configured = pools or {"read": PoolConfig(), "write": PoolConfig(min_size=0)}
         self._configs = {_workload(key): _pool_config(value) for key, value in configured.items()}
         self._workload_dsns = {

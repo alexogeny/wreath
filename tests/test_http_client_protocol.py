@@ -53,6 +53,7 @@ def test_serialize_fixed_request() -> None:
     [
         ("PO ST", b"/", b"example.com", (), "method"),
         ("GET", b"relative", b"example.com", (), "target"),
+        ("GET", b"/safe#fragment", b"example.com", (), "target"),
         ("GET", b"/", b"example.com\r\nx-bad: yes", (), "host"),
         ("GET", b"/", b"example.com", ((b"x-bad\n", b"value"),), "header name"),
         ("GET", b"/", b"example.com", ((b"x-bad", b"a\r\nb: c"),), "header value"),

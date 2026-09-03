@@ -146,7 +146,8 @@ class ReverseProxy:
 
     async def __call__(self, request: Any) -> Response | StreamingResponse:
         """Proxy one request. Returns the upstream's response, streamed."""
-        if _request_incremental(request.headers) is True:
+        incremental, idempotency_key = _request_controls(request.headers)
+        if incremental is True:
             return Response(
                 b"",
                 status=501,
@@ -160,19 +161,21 @@ class ReverseProxy:
         if method in _BODYLESS:
             body = b""
         else:
-            body = await request.body()
-            if len(body) > self._max_body:
+            body = await self._read_body(request)
+            if body is None:
                 return Response(b"", status=413)
 
         headers = self._outbound(request)
-        target = request.path
+        scope = getattr(request, "scope", None)
+        raw_path = scope.get("raw_path") if isinstance(scope, dict) else None
+        target = raw_path.decode("ascii") if isinstance(raw_path, bytes) else request.path
         query = request.query_string
         if query:
             target = f"{target}?{query.decode('latin-1') if isinstance(query, bytes) else query}"
         # Retryable only while nothing has been sent to the client yet, which is
         # exactly up to the moment the head comes back. After that the response
         # is already going out and a second attempt would deliver a prefix twice.
-        retryable = method in IDEMPOTENT or request.header("idempotency-key")
+        retryable = method in IDEMPOTENT or idempotency_key is not None
 
         tried: frozenset[str] = frozenset()
         last = "no upstream available"
@@ -222,6 +225,33 @@ class ReverseProxy:
                 )
             ],
         )
+
+    async def _read_body(self, request: Any) -> bytes | None:
+        first_chunk = None
+        buffer = None
+        total = 0
+        stream = request.stream()
+        async for chunk in stream:
+            if not chunk:
+                continue
+            if len(chunk) > self._max_body - total:
+                close = getattr(stream, "aclose", None)
+                if close is not None:
+                    await close()
+                return None
+            total += len(chunk)
+            if first_chunk is None and buffer is None:
+                first_chunk = chunk
+                continue
+            if buffer is None:
+                if first_chunk is None:
+                    raise RuntimeError("proxy body collector lost its first chunk")
+                buffer = bytearray(first_chunk)
+                first_chunk = None
+            buffer.extend(chunk)
+        if buffer is not None:
+            return bytes(buffer)
+        return first_chunk if first_chunk is not None else b""
 
     def _buffered_length(self, response: Any) -> int | None:
         """The declared body size when it is small enough to read in one go."""
@@ -321,15 +351,25 @@ def _proxy_error(error: ClientError | OSError) -> str:
     return "proxy_internal_error"
 
 
-def _request_incremental(headers: list[tuple[bytes, bytes]]) -> bool | None:
-    value = None
+def _request_controls(headers: list[tuple[bytes, bytes]]) -> tuple[bool | None, bytes | None]:
+    incremental = None
+    idempotency_key = None
+    idempotency_valid = True
     for name, candidate in headers:
-        if name != b"incremental":
-            continue
-        if value is not None:
-            return None
-        value = candidate
-    return parse_boolean_item(value) if value is not None else None
+        if name == b"incremental":
+            if incremental is not None:
+                incremental = b""
+            else:
+                incremental = candidate
+        elif name == b"idempotency-key":
+            if idempotency_key is not None:
+                idempotency_valid = False
+            else:
+                idempotency_key = candidate
+    preference = parse_boolean_item(incremental) if incremental else None
+    if not idempotency_valid or not idempotency_key or b"," in idempotency_key:
+        idempotency_key = None
+    return preference, idempotency_key
 
 
 def _response_incremental_headers(

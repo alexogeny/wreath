@@ -133,7 +133,7 @@ def test_a_graphql_field_policy_is_in_the_vocabulary() -> None:
 def test_a_graphql_endpoint_with_no_authorizer_contributes_nothing() -> None:
     app = Wreath()
     graphql = GraphQL(Registry(FakeDatabase(), [User, Post]), models=[User, Post])
-    app.include_router(graphql.router())
+    app.include_router(graphql.router(public=True))
     assert declared_actions(app) == {}
 
 

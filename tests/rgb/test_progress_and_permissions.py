@@ -45,7 +45,7 @@ class TestProgressAuthorization:
     def test_omitting_the_guard_still_works_for_a_trusted_caller(self):
         registry = ProgressRegistry()
         registry.report("7", 50, "halfway")
-        assert status_response(registry, "7").status == 200
+        assert status_response(registry, "7", public=True).status == 200
 
 
 class TestProgressBusTrust:

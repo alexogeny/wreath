@@ -66,8 +66,9 @@ async def test_cancel_by_id_selects_on_the_id() -> None:
     database.connection.fetch_script = [[{"id": 7}]]
     assert await runner.cancel(7) is True
     sql, args = database.connection.calls[-1]
-    assert "id=$2" in sql and "dedup_key=$2" not in sql
-    assert args[1] == 7
+    assert "id=$3" in sql and "dedup_key=$3" not in sql
+    assert args[1] == ""
+    assert args[2] == 7
 
 
 async def test_cancel_by_key_hashes_the_key_the_way_enqueue_did() -> None:
@@ -75,9 +76,10 @@ async def test_cancel_by_key_hashes_the_key_the_way_enqueue_did() -> None:
     database.connection.fetch_script = [[{"id": 7}]]
     assert await runner.cancel(key="stream:conversation-7") is True
     sql, args = database.connection.calls[-1]
-    assert "dedup_key=$2" in sql and "id=$2" not in sql
-    assert args[1] == dedup_key("work", "stream:conversation-7")
-    assert args[1] != "stream:conversation-7"
+    assert "dedup_key=$3" in sql and "id=$3" not in sql
+    assert args[1] == ""
+    assert args[2] == dedup_key("work", "stream:conversation-7")
+    assert args[2] != "stream:conversation-7"
 
 
 async def test_cancel_bumps_the_fence_because_that_is_the_whole_mechanism() -> None:
@@ -134,7 +136,7 @@ async def test_the_reason_is_clamped_to_what_the_row_can_hold() -> None:
     database.connection.fetch_script = [[{"id": 7}]]
     await runner.cancel(7, reason="x" * 5000)
     _sql, args = database.connection.calls[-1]
-    assert len(args[2]) == 2000
+    assert len(args[3]) == 2000
 
 
 async def test_the_connection_is_released_even_though_nothing_was_claimed() -> None:

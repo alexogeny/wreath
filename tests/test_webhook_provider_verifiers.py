@@ -21,6 +21,17 @@ SECONDS = str(int(NOW.timestamp())).encode("ascii")
 BODY = dumps({"id": "evt_1", "type": "invoice.paid", "api_version": "2026-08"})
 
 
+@pytest.mark.parametrize("window", [float("nan"), float("inf")])
+def test_provider_freshness_and_replay_windows_must_be_finite(window: float) -> None:
+    for build in (
+        lambda: StandardWebhookVerifier(b"secret", max_age=window),
+        lambda: StripeWebhookVerifier(b"secret", max_age=window),
+        lambda: GitHubWebhookVerifier(b"secret", replay_ttl=window),
+    ):
+        with pytest.raises(ValueError, match="positive and finite"):
+            build()
+
+
 def test_standard_webhooks_profile() -> None:
     secret = b"standard-secret"
     signature = base64.b64encode(hmac.digest(secret, b"evt_1." + SECONDS + b"." + BODY, "sha256"))

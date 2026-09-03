@@ -69,8 +69,17 @@ from ._webpush import (
 )
 from .email import MailClass, Message, SuppressedError, Unsubscribe
 from .temporal import Duration
+from .tenancy import _enqueue_tenant_scope, check_enqueue_tenant
 
 _DELIVERY_CONCURRENCY = 8
+
+
+def _tenant_recipient_key(key: str) -> str:
+    tenant = check_enqueue_tenant(None)
+    if not tenant:
+        return key
+    return f"{len(tenant.encode('utf-8'))}:{tenant}:{key}"
+
 
 __all__ = [
     "Channel",
@@ -297,12 +306,13 @@ class Notifications:
         """Deliver `note` to one recipient on every channel they allow."""
         spec = self._spec_and_clock(note)
         moment = time.time() if now is None else now
+        recipient_key = _tenant_recipient_key(to.key)
         if self._count_expirations and self._count_expirations[0][0] < moment:
             self._sweep_rate_windows(moment)
-        if self._is_duplicate(spec, to, moment):
+        if self._is_duplicate(spec, recipient_key, moment):
             self.deduplicated += 1
             return SendResult(deduplicated=True)
-        if not self._within_rate_limit(to, moment):
+        if not self._within_rate_limit(recipient_key, moment):
             self.rate_limited += 1
             return SendResult(failed={"*": "rate limit exceeded for this recipient"})
 
@@ -333,7 +343,7 @@ class Notifications:
         if delivered:
             self.delivered += 1
             if spec.digest > 0:
-                key = (spec.name, to.key)
+                key = (spec.name, recipient_key)
                 deadline = moment + spec.digest
                 self._recent[key] = deadline
                 self._recent_sequence += 1
@@ -342,14 +352,14 @@ class Notifications:
                     (deadline, self._recent_sequence, key),
                 )
             if self._rate_limit > 0:
-                window = self._counts.get(to.key)
+                window = self._counts.get(recipient_key)
                 if window is None:
                     window = deque()
-                    self._counts[to.key] = window
+                    self._counts[recipient_key] = window
                     self._count_sequence += 1
                     heapq.heappush(
                         self._count_expirations,
-                        (moment + 3600, self._count_sequence, to.key),
+                        (moment + 3600, self._count_sequence, recipient_key),
                     )
                 window.append(moment)
         self.declined += len(declined)
@@ -363,19 +373,23 @@ class Notifications:
             await channel.deliver(to, note, spec)
             return
 
+        tenant = check_enqueue_tenant(None)
+
         async def job() -> None:
-            await channel.deliver(to, note, spec)
+            with _enqueue_tenant_scope(tenant):
+                await channel.deliver(to, note, spec)
 
         await self._enqueue(job)
 
-    def _is_duplicate(self, spec: KindSpec, to: Recipient, moment: float) -> bool:
+    def _is_duplicate(self, spec: KindSpec, to: Recipient | str, moment: float) -> bool:
         while self._recent_expirations and self._recent_expirations[0][0] <= moment:
             deadline, _sequence, key = heapq.heappop(self._recent_expirations)
             if self._recent.get(key) == deadline:
                 del self._recent[key]
         if spec.digest <= 0:
             return False
-        deadline = self._recent.get((spec.name, to.key))
+        recipient_key = _tenant_recipient_key(to.key) if isinstance(to, Recipient) else to
+        deadline = self._recent.get((spec.name, recipient_key))
         return deadline is not None and moment < deadline
 
     def _sweep_rate_windows(self, moment: float) -> None:
@@ -398,7 +412,7 @@ class Notifications:
                 (window[0] + 3600, self._count_sequence, key),
             )
 
-    def _within_rate_limit(self, to: Recipient, moment: float) -> bool:
+    def _within_rate_limit(self, to: Recipient | str, moment: float) -> bool:
         """Whether this recipient is under the hourly cap.
 
         Expiration is swept on sends rather than by a background task.  The
@@ -408,7 +422,8 @@ class Notifications:
         if self._rate_limit <= 0:
             return True
         self._sweep_rate_windows(moment)
-        window = self._counts.get(to.key)
+        recipient_key = _tenant_recipient_key(to.key) if isinstance(to, Recipient) else to
+        window = self._counts.get(recipient_key)
         return window is None or len(window) < self._rate_limit
 
 
@@ -484,10 +499,11 @@ class InMemoryPushSubscriptions:
 
     async def for_recipient(self, key: str) -> Sequence[PushSubscription]:
         """Every subscription registered for `key`."""
-        return tuple(self._by_recipient.get(key, ()))
+        return tuple(self._by_recipient.get(_tenant_recipient_key(key), ()))
 
     async def add(self, key: str, subscription: PushSubscription) -> None:
         """Register a subscription, replacing one with the same endpoint."""
+        key = _tenant_recipient_key(key)
         entries = self._by_recipient.setdefault(key, [])
         entries[:] = [entry for entry in entries if entry.endpoint != subscription.endpoint]
         entries.append(subscription)
@@ -547,17 +563,13 @@ class WebPush:
                 ),
                 return_exceptions=True,
             )
-            for (subscription, _body, _headers), result in zip(
-                requests, results, strict=True
-            ):
+            for (subscription, _body, _headers), result in zip(requests, results, strict=True):
                 if isinstance(result, BaseException):
                     raise result
                 if result.expired:
                     await self.subscriptions.remove(subscription.endpoint)
                 elif not result.delivered:
-                    errors.append(
-                        f"{subscription.endpoint}: {result.status} {result.detail}"
-                    )
+                    errors.append(f"{subscription.endpoint}: {result.status} {result.detail}")
             requests.clear()
 
         for subscription in subscriptions:
@@ -593,10 +605,15 @@ class InApp:
     rooms: Any
     name: str = "inapp"
 
+    @staticmethod
+    def room(recipient: Recipient) -> str:
+        """The tenant-qualified room a recipient's live inbox joins."""
+        return f"notifications:{_tenant_recipient_key(recipient.key)}"
+
     async def deliver(self, recipient: Recipient, note: Any, kind: KindSpec) -> None:
         """Publish to the room named for this recipient."""
         await self.rooms.broadcast(
-            f"notifications:{recipient.key}",
+            self.room(recipient),
             _text(note, "body") or _text(note, "title") or repr(note),
         )
 

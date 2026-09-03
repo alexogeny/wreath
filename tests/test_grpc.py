@@ -411,6 +411,29 @@ class TestServiceDeclaration:
         assert b"deflate" in trailers[b"grpc-message"]
         assert (b"grpc-accept-encoding", b"identity,gzip") in sent[0]["headers"]
 
+    @pytest.mark.parametrize(
+        "headers",
+        [
+            ((b"content-type", b"application/grpc+proto"),),
+            ((b"te", b"trailers"),),
+            ((b"grpc-encoding", b"identity"), (b"grpc-encoding", b"gzip")),
+            ((b"grpc-timeout", b"1S"), (b"grpc-timeout", b"2S")),
+        ],
+    )
+    def test_duplicate_singleton_transport_headers_are_refused(self, headers):
+        from wreath.protobuf import encode
+
+        sent = _drive(
+            self._echo_app(),
+            "/t.S/M",
+            frame_message(encode(Ping(text="a"))),
+            extra_headers=headers,
+        )
+
+        trailers = _grpc_status_headers(sent)
+        assert trailers[b"grpc-status"] == str(int(Status.INVALID_ARGUMENT)).encode()
+        assert b"occurs more than once" in trailers[b"grpc-message"]
+
     def test_a_unary_call_carrying_no_message_is_refused(self):
         sent = _drive(self._echo_app(), "/t.S/M", b"")
         trailers = _grpc_status_headers(sent)

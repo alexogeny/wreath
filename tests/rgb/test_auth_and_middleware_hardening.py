@@ -53,6 +53,13 @@ class TestCsrfHostileCookie:
             def _index_headers(self):
                 return {b"host": b"example.com", b"x-csrf-token": "café".encode()}
 
+            @property
+            def headers(self):
+                return list(self._index_headers().items())
+
+            def _single_header(self, name):
+                return self._index_headers().get(name)
+
         response = await middleware._ingress(_Request())
         assert response is not None and response.status == 403
 

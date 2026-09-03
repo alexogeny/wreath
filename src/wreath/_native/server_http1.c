@@ -1,5 +1,7 @@
 #include "server.h"
 
+#define WS_MAX_UNPRODUCTIVE_CONTROL_FRAMES 100
+
 /* --- HTTP/1.1 protocol internal forward declarations -------------------- */
 static int run_drive(WreathHttpProtocol *self);
 static int reset_request(WreathHttpProtocol *self);
@@ -611,7 +613,8 @@ receive_pressure_resume(WreathHttpProtocol *self)
 static int
 pause_pipeline_if_needed(WreathHttpProtocol *self)
 {
-    if (self->state != ST_REQUEST_RUNNING || self->reading_paused ||
+    if ((self->state != ST_REQUEST_RUNNING && self->state != ST_WS_HANDSHAKE) ||
+        self->reading_paused ||
         self->buf_len - self->cursor < self->max_header_bytes) {
         return 0;
     }
@@ -1796,6 +1799,23 @@ wreath_ws_subprotocol_valid(const char *data, Py_ssize_t size)
 }
 
 static int
+wreath_ws_key_valid(const char *data, Py_ssize_t size)
+{
+    if (size != 24 || data[22] != '=' || data[23] != '=') {
+        return 0;
+    }
+    for (Py_ssize_t i = 0; i < 22; i++) {
+        unsigned char ch = (unsigned char)data[i];
+        if (!((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+              (ch >= '0' && ch <= '9') || ch == '+' || ch == '/')) {
+            return 0;
+        }
+    }
+    return data[21] == 'A' || data[21] == 'Q' ||
+           data[21] == 'g' || data[21] == 'w';
+}
+
+static int
 wreath_ws_accept_header_allowed(const char *name, Py_ssize_t size)
 {
     return !wreath_ascii_equal_ci(name, size, "upgrade", 7)
@@ -2041,6 +2061,9 @@ ws_asgi_send(WreathHttpProtocol *self, PyObject *message, PyObject *type)
         self->state = ST_WS_OPEN;
         /* Frames may already sit in the buffer behind the handshake. */
         if (self->cursor < self->buf_len && run_drive(self) < 0) {
+            return NULL;
+        }
+        if (!self->closing && receive_pressure_resume(self) < 0) {
             return NULL;
         }
         return completed_none();
@@ -2331,6 +2354,8 @@ begin_websocket(WreathHttpProtocol *self, PyObject *method, long minor, PyObject
     if (materialized == NULL) return -1;
     headers = materialized;
     Py_ssize_t n = PyList_GET_SIZE(headers);
+    int key_count = 0;
+    int version_count = 0;
     int result = -1;
 
     protocols = PyList_New(0);
@@ -2344,13 +2369,12 @@ begin_websocket(WreathHttpProtocol *self, PyObject *method, long minor, PyObject
         PyObject *value = PyTuple_GET_ITEM(pair, 1);
         Py_ssize_t name_size = PyBytes_GET_SIZE(name);
         const char *name_data = PyBytes_AS_STRING(name);
-        if (key == NULL && name_size == 17 &&
-            memcmp(name_data, "sec-websocket-key", 17) == 0) {
-            key = value;
+        if (name_size == 17 && memcmp(name_data, "sec-websocket-key", 17) == 0) {
+            if (++key_count == 1) key = value;
         }
-        else if (version == NULL && name_size == 21 &&
+        else if (name_size == 21 &&
                  memcmp(name_data, "sec-websocket-version", 21) == 0) {
-            version = value;
+            if (++version_count == 1) version = value;
         }
         else if (name_size == 22 && memcmp(name_data, "sec-websocket-protocol", 22) == 0) {
             /* Comma-separated client subprotocol offers, in order. */
@@ -2398,7 +2422,7 @@ begin_websocket(WreathHttpProtocol *self, PyObject *method, long minor, PyObject
             while (ks > 0 && (kd[ks - 1] == ' ' || kd[ks - 1] == '\t')) { ks--; }
         }
         if (PyUnicode_CompareWithASCIIString(method, "GET") != 0 || minor != 1 ||
-            ks == 0) {
+            key_count != 1 || version_count > 1 || !wreath_ws_key_valid(kd, ks)) {
             result = send_error(self, 400) < 0 ? -1 : 0;
             goto done;
         }
@@ -2462,6 +2486,7 @@ begin_websocket(WreathHttpProtocol *self, PyObject *method, long minor, PyObject
     Py_CLEAR(self->ws_frag_buffer);
     self->ws_frag_size = 0;
     self->ws_frag_count = 0;
+    self->body_chunks = 0;
 
     connect_msg = PyDict_New();
     receive_queue_clear(self, 0);
@@ -2962,9 +2987,16 @@ ws_deliver_message(WreathHttpProtocol *self, int opcode, PyObject *payload)
         }
         rc = ws_enqueue_value(self, opcode, text);
         Py_DECREF(text);
+        if (rc == 0) {
+            self->body_chunks = 0;
+        }
         return rc;
     }
-    return ws_enqueue_value(self, opcode, payload);
+    int rc = ws_enqueue_value(self, opcode, payload);
+    if (rc == 0) {
+        self->body_chunks = 0;
+    }
+    return rc;
 }
 
 
@@ -2999,10 +3031,18 @@ drive_ws_frame(WreathHttpProtocol *self)
         /* Clients must mask every frame (RFC 6455 5.1). */
         return ws_fail(self, 1002) < 0 ? -1 : 0;
     }
-    /* Size limits are enforced per message on delivery (and per buffered
-     * fragment), matching the Python reference's order of checks. */
     fin = header.fin;
     opcode = header.opcode;
+    if ((opcode == WS_OP_CLOSE || opcode == WS_OP_PING || opcode == WS_OP_PONG) &&
+        (!fin || header.payload_len > 125)) {
+        return ws_fail(self, 1002) < 0 ? -1 : 0;
+    }
+    if ((opcode == WS_OP_PING || opcode == WS_OP_PONG) &&
+        ++self->body_chunks > WS_MAX_UNPRODUCTIVE_CONTROL_FRAMES) {
+        return ws_fail(self, 1008) < 0 ? -1 : 0;
+    }
+    /* Size limits are enforced per message on delivery (and per buffered
+     * fragment), matching the Python reference's order of checks. */
     payload = PyBytes_FromStringAndSize(NULL, header.payload_len);
     if (payload == NULL) {
         return -1;
@@ -3019,10 +3059,6 @@ drive_ws_frame(WreathHttpProtocol *self)
 
     if (opcode == WS_OP_CLOSE || opcode == WS_OP_PING || opcode == WS_OP_PONG) {
         Py_ssize_t size = PyBytes_GET_SIZE(payload);
-        if (!fin || size > 125) {
-            Py_DECREF(payload);
-            return ws_fail(self, 1002) < 0 ? -1 : 0;
-        }
         if (opcode == WS_OP_PING) {
             int rc = 0;
             if (!self->ws_close_sent) {
@@ -3169,6 +3205,9 @@ drive_ws_frame(WreathHttpProtocol *self)
             }
             rc = ws_enqueue_value(self, frag_opcode, final);
             Py_DECREF(final);
+            if (rc == 0) {
+                self->body_chunks = 0;
+            }
             return rc < 0 ? -1 : (self->closing ? 0 : 1);
         }
     }

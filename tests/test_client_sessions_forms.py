@@ -153,7 +153,7 @@ async def test_session_cleared_deletes_cookie() -> None:
 
 
 @pytest.mark.asyncio
-async def test_session_read_only_request_writes_no_cookie_for_a_populated_session() -> None:
+async def test_legacy_unbound_session_is_loaded_and_reissued_for_this_host() -> None:
     app = Wreath()
     middleware = SessionPolicy(secret="s" * 32)
     app.configure_http_policy(HttpPolicy(session=middleware))
@@ -167,7 +167,7 @@ async def test_session_read_only_request_writes_no_cookie_for_a_populated_sessio
     client = TestClient(app)
     response = await client.get("/read", headers={"cookie": f"wreath_session={token}"})
     assert response.json() == {"user": "ada"}
-    assert response.header("set-cookie") is None
+    assert (response.header("set-cookie") or "").startswith("wreath_session=")
 
 
 @pytest.mark.asyncio

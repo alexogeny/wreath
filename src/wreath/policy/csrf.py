@@ -26,6 +26,7 @@ see `CsrfPolicy` for why the origin check depends on it.
 from __future__ import annotations
 
 import hmac
+import math
 import re
 import time
 from collections.abc import Callable, Iterable
@@ -232,7 +233,7 @@ class CsrfPolicy:
         ValueError: The secret is under 32 bytes.
         ValueError: `cookie_name` or `header_name` is not a valid HTTP token.
         ValueError: A `__Host-` or `__Secure-` cookie name was given without `secure`.
-        ValueError: `max_age` is not positive.
+        ValueError: `max_age` is not positive and finite.
         ValueError: `same_site` is not strict, lax, or none.
         ValueError: `same_site` is none without `secure`.
     """
@@ -284,8 +285,8 @@ class CsrfPolicy:
             raise ValueError("a __Host- CSRF cookie must be Secure; pass secure=True")
         if cookie_name.startswith("__Secure-") and not secure:
             raise ValueError("a __Secure- CSRF cookie must be Secure; pass secure=True")
-        if max_age <= 0:
-            raise ValueError("CSRF max_age must be positive")
+        if not math.isfinite(max_age) or max_age <= 0:
+            raise ValueError("CSRF max_age must be positive and finite")
         normalized_same_site = same_site.lower()
         if normalized_same_site not in {"strict", "lax", "none"}:
             raise ValueError("same_site must be strict, lax, or none")
@@ -447,6 +448,26 @@ class CsrfPolicy:
         request.state.__setattr__(_STATE_ISSUE, renew)
         return None
 
+    def _has_duplicate_security_header(self, request: Request) -> bool:
+        seen_host = False
+        seen_origin = False
+        seen_token = False
+        for raw_name, _ in request.headers:
+            name = raw_name.lower()
+            if name == b"host":
+                if seen_host:
+                    return True
+                seen_host = True
+            elif name == b"origin":
+                if seen_origin:
+                    return True
+                seen_origin = True
+            elif name == self._header_name_bytes:
+                if seen_token:
+                    return True
+                seen_token = True
+        return False
+
     def _ingress_sync(self, request: Request, site: Any = _SITE_UNREAD):
         """Answer from `Sec-Fetch-Site` when the browser sent it; else the token.
 
@@ -469,7 +490,13 @@ class CsrfPolicy:
         mint on demand, which is where the saving comes from -- see `csrf_token`.
         """
         if site is _SITE_UNREAD:
-            site = request.header(_SEC_FETCH_SITE)
+            try:
+                raw_site = request._single_header(_SEC_FETCH_SITE)
+            except ValueError:
+                return ProblemResponse(
+                    status=403, title="Forbidden", detail="CSRF validation failed"
+                )
+            site = None if raw_site is None else raw_site.decode("latin-1")
         if site is not None:
             if request.method in _SAFE_METHODS:
                 # Nothing to validate and nothing to mint: this client will send
@@ -507,6 +534,8 @@ class CsrfPolicy:
         if exemption is not None:
             return exemption
 
+        if self._has_duplicate_security_header(request):
+            return ProblemResponse(status=403, title="Forbidden", detail="CSRF validation failed")
         headers = request._index_headers()
         submitted = headers.get(self._header_name_bytes)
         return self._validate_submission(request, headers, submitted, now)
@@ -515,7 +544,11 @@ class CsrfPolicy:
         """Validate a header token, or lazily parse an enabled form field."""
         if self._form_field is None:
             return self._ingress_sync(request)
-        site = request.header(_SEC_FETCH_SITE)
+        try:
+            raw_site = request._single_header(_SEC_FETCH_SITE)
+        except ValueError:
+            return ProblemResponse(status=403, title="Forbidden", detail="CSRF validation failed")
+        site = None if raw_site is None else raw_site.decode("latin-1")
         if site is not None or request.method in _SAFE_METHODS:
             return self._ingress_sync(request, site)
 
@@ -526,6 +559,8 @@ class CsrfPolicy:
             return exemption
 
         now = int(time.time())
+        if self._has_duplicate_security_header(request):
+            return ProblemResponse(status=403, title="Forbidden", detail="CSRF validation failed")
         headers = request._index_headers()
         submitted = headers.get(self._header_name_bytes)
         if submitted is None:

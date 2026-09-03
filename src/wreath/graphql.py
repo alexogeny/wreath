@@ -8,7 +8,7 @@ surface cannot drift from the REST one:
 from wreath.graphql import GraphQL
 
 api = GraphQL(app.orm("main"), models=[User, Post])
-app.include_router(api.router())
+app.include_router(api.router(public=True))
 ```
 What owning this in-tree buys, none of which a bolt-on library can:
 
@@ -144,11 +144,16 @@ class GraphQL:
         one clause.
 
         Raises:
-            ValueError: `on_denied` is not `"error"` or `"null"`, or `action`
-                is empty -- an unnamed action would reach Cedar as
+            ValueError: `models` was omitted, `on_denied` is not `"error"` or
+                `"null"`, or `action` is empty -- an unnamed action would reach Cedar as
                 `Action::""`, which no policy can match, so every field would
                 deny with nothing to point at.
         """
+        if models is None:
+            raise ValueError(
+                "GraphQL models= must be explicit; pass models=[...] with only the "
+                "types this endpoint may expose"
+            )
         if on_denied not in ("error", "null"):
             raise ValueError("on_denied must be 'error' or 'null'")
         if not action:
@@ -619,12 +624,25 @@ class GraphQL:
         path: str = "/graphql",
         *,
         session_factory: Any = None,
+        public: bool = False,
     ) -> Router:
         """A router serving POST `path` (and GET for the SDL, if enabled).
 
         `session_factory(request)` supplies the ORM session. Without one, a
         read session is opened per request from the registry and closed after.
+        An endpoint without the constructor's `authorizer=` must opt into an
+        intentionally unauthorised surface with `public=True`.
         """
+        if self._authorizer is None and not public:
+            raise ValueError(
+                "GraphQL.router() needs authorizer= on GraphQL(...) or public=True "
+                "for an intentionally public endpoint"
+            )
+        if self._authorizer is not None and public:
+            raise ValueError(
+                "GraphQL.router(public=True) conflicts with authorizer=; omit public=True "
+                "to enforce the authorizer"
+            )
         self.validate()
         router = Router()
         graphql = self
@@ -638,7 +656,15 @@ class GraphQL:
             # Requiring a content-type that forms cannot produce is what the
             # GraphQL-over-HTTP spec asks for, and it is the whole defence for a
             # cookie-authenticated schema.
-            content_type = (request.header("content-type") or "").split(";")[0].strip()
+            try:
+                raw_content_type = request._single_header(b"content-type")
+            except ValueError:
+                raw_content_type = None
+            content_type = (
+                ("" if raw_content_type is None else raw_content_type.decode("latin-1"))
+                .split(";", 1)[0]
+                .strip()
+            )
             if content_type not in _ACCEPTED_CONTENT_TYPES:
                 return JSONResponse(
                     {

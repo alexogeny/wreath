@@ -20,10 +20,10 @@ class CachePolicy:
     `policy` is consulted first and may return `None` to decline, in which case
     `default` applies. With no policy and no default, nothing is added.
 
-    A policy that resolves to a `public` directive on a response carrying
-    `Set-Cookie` is downgraded to `private, no-store`. A cookie is per-caller by
-    definition, and a shared cache that stored one would hand it to the next
-    caller through the same URL.
+    A policy that resolves to a `public` directive on an authenticated response
+    or one carrying `Set-Cookie` is downgraded to `private, no-store`. Either
+    makes the representation caller-specific, so a shared cache must not hand it
+    to the next caller through the same URL.
 
     Args:
         default: Applied when `policy` is absent or declines. None adds nothing.
@@ -114,6 +114,7 @@ class CachePolicy:
         """Append the selected `Cache-Control` header, or return the response as is."""
         headers = response.headers
         has_cookie: bool | None = None
+        identified = request.identity is not None
         if find_response_header(headers, b"cache-control") is None:
             selected = self.policy(request, response) if self.policy is not None else None
             if selected is None:
@@ -121,7 +122,7 @@ class CachePolicy:
             if selected is not None:
                 if selected.public:
                     has_cookie = find_response_header(headers, b"set-cookie") is not None
-                    if has_cookie:
+                    if identified or has_cookie:
                         selected = PRIVATE_NO_STORE
                 headers.append((b"cache-control", selected.to_header()))
 
@@ -136,7 +137,7 @@ class CachePolicy:
                 if selected_cdn.public:
                     if has_cookie is None:
                         has_cookie = find_response_header(headers, b"set-cookie") is not None
-                    if has_cookie:
+                    if identified or has_cookie:
                         selected_cdn = PRIVATE_NO_STORE
                 value = selected_cdn.to_targeted_header()
                 if not value:

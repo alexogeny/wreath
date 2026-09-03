@@ -78,6 +78,13 @@ def test_row_decoding_preserves_window_counters() -> None:
     assert (row.window_rows, row.window_units, row.holes_open) == (5, 6, 7)
 
 
+def test_pass_ledger_refuses_unsafe_schema_identifiers_at_construction() -> None:
+    schema = 'safe"; DROP SCHEMA public CASCADE; --'
+
+    with pytest.raises(ValueError, match="pass ledger schema"):
+        _ledger.Ledger(schema=schema, name="refresh")
+
+
 @pytest.mark.asyncio
 async def test_seed_records_a_rewrite_before_the_ledger_row() -> None:
     executor = Executor()
@@ -136,6 +143,36 @@ async def test_publish_uses_detail_only_when_no_fact_was_named() -> None:
     await ledger.publish(executor, fact="column:app.items.value", detail="unused")
     assert executor.calls[0][1][-1] == "verified by count"
     assert executor.calls[1][1][-1] == "column:app.items.value"
+
+
+@pytest.mark.asyncio
+async def test_publish_refuses_to_record_a_fact_after_verification_ownership_is_lost() -> None:
+    executor = Executor(value=None)
+    ledger = _ledger.Ledger(schema="wreath", name="refresh")
+
+    assert await ledger.publish(executor, fact="ready", detail="unused") is False
+    sql, _ = executor.calls[0]
+    assert "phase = 'verified'" in sql
+    assert "phase = 'verifying'" in sql
+    assert "RETURNING 1" in sql
+
+
+@pytest.mark.asyncio
+async def test_block_and_error_writes_compare_the_expected_phase() -> None:
+    class LostExecutor(Executor):
+        async def execute(self, sql: str, *args: Any) -> str:
+            self.calls.append((sql, args))
+            return "UPDATE 0"
+
+    executor = LostExecutor()
+    ledger = _ledger.Ledger(schema="wreath", name="refresh")
+
+    assert not await ledger.block(executor, error="no", expected="verifying")
+    assert not await ledger.record_error(executor, "offline", expected="applying")
+    assert "phase = $5" in executor.calls[0][0]
+    assert executor.calls[0][1][-1] == "verifying"
+    assert "phase = $4" in executor.calls[1][0]
+    assert executor.calls[1][1][-1] == "applying"
 
 
 @pytest.mark.asyncio

@@ -106,12 +106,26 @@ def test_schema_claims_commands_payments_subscriptions_and_invoices_without_prov
     assert "primary key (provider, payment_id)" in sql
     assert "primary key (provider, subscription_id)" in sql
     assert "primary key (provider, invoice_id)" in sql
+    assert "(provider, merchant_account, subscription_id) nulls not distinct" in sql
+    assert "(provider, merchant_account, invoice_id) nulls not distinct" in sql
+    assert "(provider, merchant_account, operation, idempotency_key) nulls not distinct" in sql
+    assert "(provider, merchant_account, payment_id) nulls not distinct" in sql
     assert "primary key (provider, merchant_account)" in sql
     assert "(subject,provider,paid_through desc,invoice_id desc)" in sql
     assert "(subject,provider,subscription_id,paid_through desc,invoice_id desc)" in sql
     assert "for update skip locked" not in sql
     for forbidden in ("secret", "api_key", "raw_body", "provider_body", "payload"):
         assert forbidden not in sql
+
+
+def test_account_identity_migrations_are_restart_safe_and_install_indexes_first() -> None:
+    component = PostgresBillingLedger().component()
+
+    for version in (2, 3):
+        statements = component.steps[version - 1].statements
+        first_drop = next(index for index, sql in enumerate(statements) if "DROP CONSTRAINT" in sql)
+        assert all("IF NOT EXISTS" in sql for sql in statements[:first_drop])
+        assert all("IF EXISTS" in sql for sql in statements[first_drop:] if "DROP" in sql)
 
 
 async def test_reconciliation_cursor_uses_compare_and_swap() -> None:
@@ -199,6 +213,7 @@ async def test_checkout_payment_projection_is_durable_and_monotonic() -> None:
         "cus_1",
         "acct_acme",
     )
+    assert "ON CONFLICT (provider,merchant_account,payment_id) DO UPDATE" in sql
 
 
 async def test_checkout_projection_refuses_invalid_and_contradictory_payments() -> None:
@@ -263,7 +278,7 @@ async def test_registering_a_new_command_returns_the_pending_durable_row() -> No
     assert command == _command(state=BillingCommandState.PENDING, fence=0)
     sql, parameters = session.calls[0]
     assert 'INSERT INTO "wreath"."billing_commands"' in sql
-    assert "ON CONFLICT (provider,operation,idempotency_key) DO NOTHING" in sql
+    assert "ON CONFLICT (provider,merchant_account,operation,idempotency_key) DO NOTHING" in sql
     assert parameters == (
         "stripe",
         "checkout",
@@ -272,6 +287,16 @@ async def test_registering_a_new_command_returns_the_pending_durable_row() -> No
         "organization:acme",
         "acct_acme",
     )
+
+
+async def test_command_conflict_lookup_stays_within_the_merchant_account() -> None:
+    session = _Session(rows=[None, _command_row()])
+
+    await PostgresBillingLedger().register_command(session, _identity())
+
+    sql, parameters = session.calls[1]
+    assert "merchant_account IS NOT DISTINCT FROM $2" in sql
+    assert parameters == ("stripe", "acct_acme", "checkout", "checkout-order-41")
 
 
 async def test_duplicate_command_is_idempotent_but_a_changed_digest_is_refused() -> None:
@@ -326,7 +351,7 @@ async def test_claim_uses_skip_locked_and_advances_the_fence_in_the_same_update(
     assert command == _command(state=BillingCommandState.LEASED, fence=8)
     sql, parameters = session.calls[0]
     assert "FOR UPDATE SKIP LOCKED LIMIT 1" in sql
-    assert "UPDATE \"wreath\".\"billing_commands\" AS b" in sql
+    assert 'UPDATE "wreath"."billing_commands" AS b' in sql
     assert "fencing_token=b.fencing_token+1" in sql
     assert "WHERE b.command_id=c.command_id" in sql
     assert "state IN ('pending','leased')" in sql
@@ -342,6 +367,8 @@ async def test_claim_uses_skip_locked_and_advances_the_fence_in_the_same_update(
         ("worker-1", 0, "billing command lease_seconds must be positive"),
         ("worker-1", -1, "billing command lease_seconds must be positive"),
         ("worker-1", True, "billing command lease_seconds must be positive"),
+        ("worker-1", float("nan"), "billing command lease_seconds must be positive and finite"),
+        ("worker-1", float("inf"), "billing command lease_seconds must be positive and finite"),
     ],
 )
 async def test_claim_refuses_invalid_lease_boundaries_before_sql(
@@ -399,6 +426,7 @@ async def test_every_command_transition_is_fenced(
     assert updated.state is BillingCommandState(target)
     sql, parameters = session.calls[0]
     assert "fencing_token=$4" in sql
+    assert "merchant_account IS NOT DISTINCT FROM $5" in sql
     assert f"state='{source}'" in sql
     assert parameters[:4] == (
         "stripe",
@@ -406,6 +434,7 @@ async def test_every_command_transition_is_fenced(
         "checkout-order-41",
         7,
     )
+    assert parameters[4] == "acct_acme"
 
 
 async def test_a_stale_command_transition_is_refused() -> None:
@@ -497,6 +526,30 @@ async def test_payment_before_snapshot_is_preserved_and_merged_monotonically() -
     statement = snapshot_session.calls[-1][0]
     assert "SELECT max(paid_through)" in statement
     assert "GREATEST" in statement
+
+
+async def test_subscription_and_invoice_conflicts_include_merchant_account() -> None:
+    ledger = PostgresBillingLedger()
+    session = _Session(
+        rows=[
+            {"subject": "organization:acme", "merchant_account": "acct_acme"},
+            {"inserted": 1},
+        ]
+    )
+
+    await ledger.apply_payment(session, _payment(), merchant_account="acct_acme")
+
+    owner_sql, owner_parameters = session.calls[0]
+    invoice_sql, invoice_parameters = session.calls[1]
+    assert "ON CONFLICT (provider,merchant_account,subscription_id)" in owner_sql
+    assert owner_parameters[:4] == (
+        "stripe",
+        "acct_acme",
+        "sub_1",
+        "organization:acme",
+    )
+    assert "ON CONFLICT (provider,merchant_account,invoice_id)" in invoice_sql
+    assert invoice_parameters[:3] == ("stripe", "acct_acme", "in_1")
 
 
 async def test_duplicate_invoice_is_idempotent_but_a_contradiction_is_refused() -> None:

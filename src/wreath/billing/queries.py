@@ -129,6 +129,7 @@ class PostgresBillingQueries:
     __slots__ = (
         "_commands",
         "_invoices",
+        "_merchant_account_for",
         "_payments",
         "_provider",
         "_session_factory",
@@ -140,29 +141,44 @@ class PostgresBillingQueries:
         session_factory: Callable[[], Any],
         *,
         provider: str,
+        merchant_account_for: Callable[[str], str | None] | None = None,
         schema: str = "wreath",
     ) -> None:
         if not callable(session_factory):
             raise TypeError("billing query session_factory must be callable")
         _required_text(provider, "query provider")
+        if merchant_account_for is not None and not callable(merchant_account_for):
+            raise TypeError("billing query merchant_account_for must be callable or None")
         quoted = quote_identifier(schema, reject_quote=True)
         self._session_factory = session_factory
         self._provider = provider
+        self._merchant_account_for = merchant_account_for
         self._commands = f'{quoted}."billing_commands"'
         self._payments = f'{quoted}."billing_payments"'
         self._subscriptions = f'{quoted}."billing_subscriptions"'
         self._invoices = f'{quoted}."billing_invoices"'
 
+    def _merchant_account(self, subject: str) -> str | None:
+        resolver = self._merchant_account_for
+        account = None if resolver is None else resolver(subject)
+        if account is not None:
+            _required_text(account, "query merchant account")
+        return account
+
     async def subscription(self, subject: str) -> SubscriptionSnapshot | None:
         _required_text(subject, "subject")
+        merchant_account = self._merchant_account(subject)
         async with self._session_factory() as session:
             row = await session.raw(
                 f"SELECT {_SUBSCRIPTION_COLUMNS} FROM {self._subscriptions} "
-                "WHERE subject=$1 AND provider=$2 AND plan IS NOT NULL AND state IS NOT NULL "
+                "WHERE subject=$1 AND provider=$2 "
+                "AND merchant_account IS NOT DISTINCT FROM $3 "
+                "AND plan IS NOT NULL AND state IS NOT NULL "
                 "AND provider_state IS NOT NULL ORDER BY updated_at DESC,subscription_id DESC "
                 "LIMIT 1",
                 subject,
                 self._provider,
+                merchant_account,
             ).fetchrow()
         return None if row is None else _subscription(row)
 
@@ -173,12 +189,15 @@ class PostgresBillingQueries:
     ) -> PaymentSnapshot | None:
         _required_text(subject, "subject")
         _required_text(payment, "payment id")
+        merchant_account = self._merchant_account(subject)
         async with self._session_factory() as session:
             row = await session.raw(
                 f"SELECT {_PAYMENT_COLUMNS} FROM {self._payments} "
-                "WHERE subject=$1 AND provider=$2 AND payment_id=$3",
+                "WHERE subject=$1 AND provider=$2 "
+                "AND merchant_account IS NOT DISTINCT FROM $3 AND payment_id=$4",
                 subject,
                 self._provider,
+                merchant_account,
                 payment,
             ).fetchrow()
         return None if row is None else _payment(row)
@@ -190,12 +209,15 @@ class PostgresBillingQueries:
     ) -> SubscriptionPayment | None:
         _required_text(subject, "subject")
         _required_text(invoice, "invoice id")
+        merchant_account = self._merchant_account(subject)
         async with self._session_factory() as session:
             row = await session.raw(
                 f"SELECT {_INVOICE_COLUMNS} FROM {self._invoices} "
-                "WHERE subject=$1 AND provider=$2 AND invoice_id=$3",
+                "WHERE subject=$1 AND provider=$2 "
+                "AND merchant_account IS NOT DISTINCT FROM $3 AND invoice_id=$4",
                 subject,
                 self._provider,
+                merchant_account,
                 invoice,
             ).fetchrow()
         return None if row is None else _invoice(row)
@@ -209,12 +231,16 @@ class PostgresBillingQueries:
         _required_text(subject, "subject")
         _required_text(idempotency_key, "command idempotency_key")
         _required_text(operation, "command operation")
+        merchant_account = self._merchant_account(subject)
         async with self._session_factory() as session:
             row = await session.raw(
                 f"SELECT {_COMMAND_COLUMNS} FROM {self._commands} "
-                "WHERE subject=$1 AND provider=$2 AND operation=$3 AND idempotency_key=$4",
+                "WHERE subject=$1 AND provider=$2 "
+                "AND merchant_account IS NOT DISTINCT FROM $3 "
+                "AND operation=$4 AND idempotency_key=$5",
                 subject,
                 self._provider,
+                merchant_account,
                 operation,
                 idempotency_key,
             ).fetchrow()
@@ -239,16 +265,19 @@ class PostgresBillingQueries:
             raise ValueError("billing invoice limit must be from 1 through 100")
         paid_through = None if cursor is None else cursor.paid_through
         invoice = None if cursor is None else cursor.invoice
+        merchant_account = self._merchant_account(subject)
         async with self._session_factory() as session:
             if subscription is None:
                 rows = await session.raw(
                     f"SELECT {_INVOICE_COLUMNS} FROM {self._invoices} "
-                    "WHERE subject=$1 AND provider=$2 AND "
-                    "($3::timestamptz IS NULL OR "
-                    "(paid_through,invoice_id) < ($3::timestamptz,$4::text)) "
-                    "ORDER BY paid_through DESC,invoice_id DESC LIMIT $5",
+                    "WHERE subject=$1 AND provider=$2 "
+                    "AND merchant_account IS NOT DISTINCT FROM $3 AND "
+                    "($4::timestamptz IS NULL OR "
+                    "(paid_through,invoice_id) < ($4::timestamptz,$5::text)) "
+                    "ORDER BY paid_through DESC,invoice_id DESC LIMIT $6",
                     subject,
                     self._provider,
+                    merchant_account,
                     paid_through,
                     invoice,
                     limit + 1,
@@ -256,12 +285,15 @@ class PostgresBillingQueries:
             else:
                 rows = await session.raw(
                     f"SELECT {_INVOICE_COLUMNS} FROM {self._invoices} "
-                    "WHERE subject=$1 AND provider=$2 AND subscription_id=$3 AND "
-                    "($4::timestamptz IS NULL OR "
-                    "(paid_through,invoice_id) < ($4::timestamptz,$5::text)) "
-                    "ORDER BY paid_through DESC,invoice_id DESC LIMIT $6",
+                    "WHERE subject=$1 AND provider=$2 "
+                    "AND merchant_account IS NOT DISTINCT FROM $3 "
+                    "AND subscription_id=$4 AND "
+                    "($5::timestamptz IS NULL OR "
+                    "(paid_through,invoice_id) < ($5::timestamptz,$6::text)) "
+                    "ORDER BY paid_through DESC,invoice_id DESC LIMIT $7",
                     subject,
                     self._provider,
+                    merchant_account,
                     subscription,
                     paid_through,
                     invoice,

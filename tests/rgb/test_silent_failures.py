@@ -136,6 +136,10 @@ class TestJobLoopFailuresAreCounted:
                 calls.append(sql)
                 return "OK"
 
+            async def fetchval(self, sql, *args):
+                calls.append(sql)
+                return True
+
         runner = self._runner(_Database())
 
         @runner.task("t", retries=0)

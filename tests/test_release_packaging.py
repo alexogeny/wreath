@@ -94,9 +94,42 @@ def test_ci_builds_linux_capabilities_before_tests() -> None:
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     steps = workflow["jobs"]["checks"]["steps"]
     commands = [step.get("run", "") for step in steps]
-    build_index = commands.index("WREATH_BUILD_LINUX=1 uv run python setup.py build_ext --inplace")
+    build_index = commands.index("WREATH_BUILD_LINUX=1 uv sync --frozen")
     test_index = next(index for index, command in enumerate(commands) if "wreath test" in command)
     assert build_index < test_index
+    assert sum("uv sync" in command for command in commands) == 1
+    assert all("setup.py build_ext" not in command for command in commands)
+
+
+def test_ci_reuses_the_strict_site_for_main_pages_deployment() -> None:
+    ci = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    docs = yaml.safe_load((ROOT / ".github/workflows/docs.yml").read_text())
+
+    checks = ci["jobs"]["checks"]
+    assert checks["steps"][-1]["uses"] == "actions/upload-artifact@v7"
+    assert checks["steps"][-1]["with"]["name"] == "site-${{ github.run_id }}"
+    assert checks["steps"][-1]["with"]["path"] == "site"
+    assert "deploy-pages" not in ci["jobs"]
+
+    workflow_run = docs[True]["workflow_run"]
+    assert workflow_run == {
+        "workflows": ["ci"],
+        "types": ["completed"],
+        "branches": ["main"],
+    }
+    deploy = docs["jobs"]["deploy-ci"]
+    assert "workflow_run.conclusion == 'success'" in deploy["if"]
+    assert "workflow_run.event == 'push'" in deploy["if"]
+    assert deploy["permissions"] == {
+        "actions": "read",
+        "pages": "write",
+        "id-token": "write",
+    }
+    download = deploy["steps"][0]
+    assert download["uses"] == "actions/download-artifact@v8"
+    assert download["with"]["run-id"] == "${{ github.event.workflow_run.id }}"
+    assert download["with"]["name"] == "site-${{ github.event.workflow_run.id }}"
+    assert ci["jobs"]["hygiene"]["if"] == "github.event_name == 'pull_request'"
 
 
 def test_windows_native_build_enables_c11_atomics_and_owns_pi() -> None:

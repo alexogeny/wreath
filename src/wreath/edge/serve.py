@@ -43,6 +43,7 @@ proxy -- slower by construction, and able to sit inside an application.
 from __future__ import annotations
 
 import asyncio
+from math import isfinite
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -222,8 +223,8 @@ async def serve(
         raise ValueError("max_body must be non-negative")
     if max_waiting < 1:
         raise ValueError("max_waiting must be at least 1")
-    if queue_timeout <= 0:
-        raise ValueError("queue_timeout must be positive")
+    if not isfinite(queue_timeout) or queue_timeout <= 0:
+        raise ValueError("queue_timeout must be finite and positive")
     if backlog < 1:
         raise ValueError("backlog must be at least 1")
     endpoints = [_endpoint(u.url) for u in pool.upstreams]

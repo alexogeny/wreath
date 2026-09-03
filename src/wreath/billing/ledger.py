@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from math import isfinite
 from typing import Any
 
 from .._leased import claim_sql
@@ -225,6 +226,37 @@ class PostgresBillingLedger:
                         ")",
                     ),
                 ),
+                Step(
+                    version=2,
+                    statements=(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS "
+                        f"billing_subscriptions_identity_idx ON {subscriptions} "
+                        "(provider, merchant_account, subscription_id) NULLS NOT DISTINCT",
+                        "CREATE UNIQUE INDEX IF NOT EXISTS billing_invoices_identity_idx ON "
+                        f"{invoices} "
+                        "(provider, merchant_account, invoice_id) NULLS NOT DISTINCT",
+                        f"ALTER TABLE {subscriptions} DROP CONSTRAINT IF EXISTS "
+                        "billing_subscriptions_pkey",
+                        f"ALTER TABLE {invoices} DROP CONSTRAINT IF EXISTS billing_invoices_pkey",
+                        "CREATE INDEX IF NOT EXISTS billing_invoices_account_subscription_idx ON "
+                        f"{invoices} "
+                        "(provider, merchant_account, subscription_id, paid_through DESC)",
+                    ),
+                ),
+                Step(
+                    version=3,
+                    statements=(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS billing_commands_identity_idx ON "
+                        f"{commands} "
+                        "(provider, merchant_account, operation, idempotency_key) "
+                        "NULLS NOT DISTINCT",
+                        "CREATE UNIQUE INDEX IF NOT EXISTS billing_payments_identity_idx ON "
+                        f"{payments} "
+                        "(provider, merchant_account, payment_id) NULLS NOT DISTINCT",
+                        f"ALTER TABLE {commands} DROP CONSTRAINT IF EXISTS billing_commands_pkey",
+                        f"ALTER TABLE {payments} DROP CONSTRAINT IF EXISTS billing_payments_pkey",
+                    ),
+                ),
             ),
         )
 
@@ -286,7 +318,7 @@ class PostgresBillingLedger:
             f"INSERT INTO {self._commands} "
             "(provider,operation,idempotency_key,digest,subject,merchant_account) "
             "VALUES ($1,$2,$3,$4,$5,$6) "
-            "ON CONFLICT (provider,operation,idempotency_key) DO NOTHING "
+            "ON CONFLICT (provider,merchant_account,operation,idempotency_key) DO NOTHING "
             f"RETURNING {_COMMAND_COLUMNS}",
             identity.provider,
             identity.operation,
@@ -298,8 +330,10 @@ class PostgresBillingLedger:
         if row is None:
             row = await session.raw(
                 f"SELECT {_COMMAND_COLUMNS} FROM {self._commands} "
-                "WHERE provider=$1 AND operation=$2 AND idempotency_key=$3",
+                "WHERE provider=$1 AND merchant_account IS NOT DISTINCT FROM $2 "
+                "AND operation=$3 AND idempotency_key=$4",
                 identity.provider,
+                identity.merchant_account,
                 identity.operation,
                 identity.idempotency_key,
             ).fetchrow()
@@ -332,6 +366,8 @@ class PostgresBillingLedger:
             raise ValueError("billing command lease_owner must not be empty")
         if type(lease_seconds) not in {int, float} or lease_seconds <= 0:
             raise ValueError("billing command lease_seconds must be positive")
+        if not isfinite(lease_seconds):
+            raise ValueError("billing command lease_seconds must be positive and finite")
         sql = claim_sql(
             self._commands,
             key="command_id",
@@ -392,7 +428,7 @@ class PostgresBillingLedger:
             source=BillingCommandState.SENDING,
             target=BillingCommandState.CONFIRMED,
             assignments=(
-                "state='confirmed',provider_reference=$5,lease_owner=NULL,"
+                "state='confirmed',provider_reference=$6,lease_owner=NULL,"
                 "lease_expires_at=NULL,completed_at=clock_timestamp(),"
                 "updated_at=clock_timestamp()"
             ),
@@ -445,7 +481,7 @@ class PostgresBillingLedger:
             source=BillingCommandState.SENDING,
             target=target,
             assignments=(
-                f"state='{target.value}',failure_code=$5,lease_owner=NULL,"
+                f"state='{target.value}',failure_code=$6,lease_owner=NULL,"
                 "lease_expires_at=NULL,completed_at=clock_timestamp(),"
                 "updated_at=clock_timestamp()"
             ),
@@ -476,11 +512,13 @@ class PostgresBillingLedger:
         updated = await session.raw(
             f"UPDATE {self._commands} SET {assignments} "
             "WHERE provider=$1 AND operation=$2 AND idempotency_key=$3 "
-            f"AND fencing_token=$4 AND state='{source.value}' RETURNING 1",
+            "AND fencing_token=$4 AND merchant_account IS NOT DISTINCT FROM $5 "
+            f"AND state='{source.value}' RETURNING 1",
             identity.provider,
             identity.operation,
             identity.idempotency_key,
             command.fencing_token,
+            identity.merchant_account,
             *values,
         ).fetchval()
         if updated is None:
@@ -520,9 +558,11 @@ class PostgresBillingLedger:
         await session.raw(
             f"UPDATE {self._subscriptions} AS s SET plan=$4,state=$5,provider_state=$6,"
             "paid_through=GREATEST(s.paid_through,$7::timestamptz,(SELECT max(paid_through) "
-            f"FROM {self._invoices} WHERE provider=$1 AND subscription_id=$2)),"
+            f"FROM {self._invoices} WHERE provider=$1 AND subscription_id=$2 "
+            "AND merchant_account IS NOT DISTINCT FROM $9)),"
             "trial_ends_at=$8,updated_at=clock_timestamp() "
-            "WHERE provider=$1 AND subscription_id=$2 AND subject=$3",
+            "WHERE provider=$1 AND subscription_id=$2 AND subject=$3 "
+            "AND merchant_account IS NOT DISTINCT FROM $9",
             snapshot.provider,
             snapshot.id,
             snapshot.subject,
@@ -531,6 +571,7 @@ class PostgresBillingLedger:
             snapshot.provider_state,
             snapshot.paid_through,
             snapshot.trial_ends_at,
+            merchant_account,
         ).execute()
 
     async def apply_checkout(self, session: Any, payment: PaymentSnapshot) -> None:
@@ -540,7 +581,7 @@ class PostgresBillingLedger:
             f"INSERT INTO {self._payments} AS existing "
             "(provider,payment_id,subject,reference,currency,amount_minor,state,customer,"
             "merchant_account) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) "
-            "ON CONFLICT (provider,payment_id) DO UPDATE SET state=CASE "
+            "ON CONFLICT (provider,merchant_account,payment_id) DO UPDATE SET state=CASE "
             "WHEN existing.state='succeeded' OR EXCLUDED.state='succeeded' THEN 'succeeded' "
             "WHEN existing.state='failed' OR EXCLUDED.state='failed' THEN 'failed' "
             "ELSE 'pending' END,updated_at=clock_timestamp() WHERE "
@@ -592,21 +633,24 @@ class PostgresBillingLedger:
         )
         inserted = await session.raw(
             f"INSERT INTO {self._invoices} "
-            "(provider,invoice_id,subscription_id,subject,merchant_account,paid_through) "
-            "VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (provider,invoice_id) DO NOTHING "
+            "(provider,merchant_account,invoice_id,subscription_id,subject,paid_through) "
+            "VALUES ($1,$2,$3,$4,$5,$6) "
+            "ON CONFLICT (provider,merchant_account,invoice_id) DO NOTHING "
             "RETURNING subscription_id,subject,merchant_account,paid_through",
             payment.provider,
+            merchant_account,
             payment.invoice,
             payment.subscription,
             payment.subject,
-            merchant_account,
             payment.paid_through,
         ).fetchrow()
         if inserted is None:
             existing = await session.raw(
                 f"SELECT subscription_id,subject,merchant_account,paid_through FROM "
-                f"{self._invoices} WHERE provider=$1 AND invoice_id=$2",
+                f"{self._invoices} WHERE provider=$1 AND merchant_account IS NOT DISTINCT "
+                "FROM $2 AND invoice_id=$3",
                 payment.provider,
+                merchant_account,
                 payment.invoice,
             ).fetchrow()
             expected = (
@@ -651,19 +695,21 @@ class PostgresBillingLedger:
     ) -> None:
         row = await session.raw(
             f"INSERT INTO {self._subscriptions} "
-            "(provider,subscription_id,subject,merchant_account) VALUES ($1,$2,$3,$4) "
-            "ON CONFLICT (provider,subscription_id) DO NOTHING "
+            "(provider,merchant_account,subscription_id,subject) VALUES ($1,$2,$3,$4) "
+            "ON CONFLICT (provider,merchant_account,subscription_id) DO NOTHING "
             "RETURNING subject,merchant_account",
             provider,
+            merchant_account,
             subscription,
             subject,
-            merchant_account,
         ).fetchrow()
         if row is None:
             row = await session.raw(
                 f"SELECT subject,merchant_account FROM {self._subscriptions} "
-                "WHERE provider=$1 AND subscription_id=$2",
+                "WHERE provider=$1 AND merchant_account IS NOT DISTINCT FROM $2 "
+                "AND subscription_id=$3",
                 provider,
+                merchant_account,
                 subscription,
             ).fetchrow()
         if row is None:

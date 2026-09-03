@@ -9,12 +9,22 @@ from typing import Any, Literal
 
 Mode = Literal["all", "any"]
 _METADATA = "__wreath_auth_requirement__"
+_MIN_TIMESTAMP = -(1 << 63)
+_MAX_TIMESTAMP = (1 << 63) - 1
 
 #: Where a completed second factor is recorded: on the session principal
 #: `wreath.users` writes, and therefore on `Identity.claims`, as Unix seconds.
 #: One name, read by the endpoint requirement and by the Cedar context mapper,
 #: so a rename moves both rather than silently disagreeing with one of them.
 SECOND_FACTOR_CLAIM = "second_factor_at"
+
+
+def _valid_timestamp(value: Any) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and _MIN_TIMESTAMP <= value <= _MAX_TIMESTAMP
+    )
 
 
 def second_factor_age(identity: Any, now: float) -> int | None:
@@ -25,9 +35,8 @@ def second_factor_age(identity: Any, now: float) -> int | None:
     identity minted by a flow that knows nothing about second factors -- a
     bearer token, an OIDC login -- rather than admitting it as infinitely fresh.
 
-    A stamp in the future reads as age zero rather than as a negative age. A
-    clock that stepped backwards, or a claim somebody wrote by hand, should not
-    be able to be *fresher than fresh* in an arithmetic comparison elsewhere.
+    A stamp in the future is invalid. Treating it as age zero would let an
+    untrusted claim remain fresh until the local clock caught up.
 
     Returns an `int` because it is handed to the Cedar engine as a context
     value, and Cedar has i64 longs and no floats.
@@ -38,9 +47,11 @@ def second_factor_age(identity: Any, now: float) -> int | None:
     stamp = claims.get(SECOND_FACTOR_CLAIM)
     # `bool` is an `int`, and `True` would otherwise read as a 1970 timestamp
     # and so as an ancient-but-present factor.
-    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+    if not _valid_timestamp(stamp) or not _valid_timestamp(now):
         return None
-    return max(0, int(now - stamp))
+    if stamp > now:
+        return None
+    return int(now - stamp)
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,9 +127,14 @@ class OAuthStepUpRequirement:
         max_age = self.max_age
         if max_age is not None:
             stamp = claims.get("auth_time")
-            if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+            if not _valid_timestamp(stamp):
                 return False
-            if now is None or max(0, int(now - stamp)) > max_age:
+            if (
+                now is None
+                or not _valid_timestamp(now)
+                or stamp > now
+                or int(now - stamp) > max_age
+            ):
                 return False
         acr_values = self.acr_values
         return not acr_values or claims.get("acr") in acr_values

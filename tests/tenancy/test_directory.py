@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from wreath import Request
 from wreath.tenancy import (
     InMemoryTenantDirectory,
     Tenancy,
@@ -50,6 +51,40 @@ class _Request:
 
 
 ACME = Tenant(key="acme", schema="tenant_acme", role="tenant_acme")
+
+
+@pytest.mark.parametrize(
+    ("source", "headers"),
+    [
+        (
+            TenantHeader("X-Tenant", trusted=True),
+            [(b"x-tenant", b"acme"), (b"x-tenant", b"globex")],
+        ),
+        (
+            TenantHostLabel("example.com"),
+            [(b"host", b"acme.example.com"), (b"host", b"globex.example.com")],
+        ),
+    ],
+)
+def test_duplicate_tenant_selectors_are_refused(
+    source: TenantHeader | TenantHostLabel,
+    headers: list[tuple[bytes, bytes]],
+) -> None:
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "headers": headers,
+        },
+        None,
+    )
+    tenancy = Tenancy(
+        directory=InMemoryTenantDirectory([ACME, Tenant("globex", "tenant_globex")]),
+        source=source,
+    )
+    with pytest.raises(TenancyError, match="more than once"):
+        tenancy.resolve_request(request)
 
 
 def test_a_tenant_carries_identity_placement_and_lifecycle() -> None:

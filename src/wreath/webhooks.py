@@ -51,6 +51,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from math import isfinite
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from ._capability_map import CapabilityMap
@@ -72,6 +73,23 @@ _HEADER_SIGNATURE = b"wreath-webhook-signature"
 _HEADER_CORRELATION = b"wreath-correlation-id"
 _HEADER_CAUSATION = b"wreath-causation-id"
 _HEADER_RELAY_PATH = b"wreath-webhook-relay-path"
+_SINGLETON_WEBHOOK_HEADERS = frozenset(
+    {
+        _HEADER_ID,
+        _HEADER_TYPE,
+        _HEADER_VERSION,
+        _HEADER_TIMESTAMP,
+        _HEADER_KEY_ID,
+        _HEADER_SIGNATURE,
+        b"webhook-id",
+        b"webhook-timestamp",
+        b"webhook-signature",
+        b"stripe-signature",
+        b"x-hub-signature-256",
+        b"x-github-delivery",
+        b"x-github-event",
+    }
+)
 _RELAY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 
 
@@ -414,8 +432,8 @@ class HMACWebhookVerifier(_NormalizedWebhookVerifier):
                     f"webhook verification key {key_id!r} must contain at least 32 bytes"
                 )
             copied[key_id] = secret
-        if max_age <= 0:
-            raise ValueError("webhook max_age must be positive")
+        if max_age <= 0 or not isfinite(max_age):
+            raise ValueError("webhook max_age must be positive and finite")
         self._keys = copied
         self.max_age = max_age
 
@@ -566,8 +584,8 @@ class StandardWebhookVerifier(_NormalizedWebhookVerifier):
             if not value:
                 raise ValueError("Standard Webhooks secret cannot be empty")
             decoded.append(value)
-        if max_age <= 0:
-            raise ValueError("webhook max_age must be positive")
+        if max_age <= 0 or not isfinite(max_age):
+            raise ValueError("webhook max_age must be positive and finite")
         self._secrets = tuple(decoded)
         self.max_age = max_age
 
@@ -619,8 +637,8 @@ class StripeWebhookVerifier(_NormalizedWebhookVerifier):
         supplied = secrets if isinstance(secrets, tuple) else (secrets,)
         if not supplied or any(not secret for secret in supplied):
             raise ValueError("at least one non-empty Stripe webhook secret is required")
-        if max_age <= 0:
-            raise ValueError("webhook max_age must be positive")
+        if max_age <= 0 or not isfinite(max_age):
+            raise ValueError("webhook max_age must be positive and finite")
         self._secrets = tuple(
             secret.encode("utf-8") if isinstance(secret, str) else bytes(secret)
             for secret in supplied
@@ -672,8 +690,8 @@ class GitHubWebhookVerifier(_NormalizedWebhookVerifier):
     def __init__(self, secret: bytes | str, *, replay_ttl: float = 86_400.0) -> None:
         if not secret:
             raise ValueError("GitHub webhook secret cannot be empty")
-        if replay_ttl <= 0:
-            raise ValueError("GitHub webhook replay_ttl must be positive")
+        if replay_ttl <= 0 or not isfinite(replay_ttl):
+            raise ValueError("GitHub webhook replay_ttl must be positive and finite")
         self._secret = secret.encode("utf-8") if isinstance(secret, str) else bytes(secret)
         self.max_age = replay_ttl
 
@@ -784,17 +802,17 @@ class LocalReplayStore:
     replicas -- it is the same claim in a table every worker shares.
 
     Doubly bounded, because a replay store that grows without limit is a memory
-    leak an unauthenticated sender controls: entries expire after `ttl`, and
-    the oldest is evicted once `max_entries` is reached. Eviction means an
-    event *can* be re-accepted before its TTL under sustained load. Size the
-    store for the burst you expect rather than treating the bound as advisory.
+    leak an unauthenticated sender controls: entries expire after `ttl`, and a
+    new claim is refused once `max_entries` live claims are held. Existing
+    claims are never evicted early, because key spraying must not make a replay
+    acceptable before its verification window closes.
 
     `ttl` should be at least the verifier's `max_age`: a request older than
     that window is rejected on the signature anyway, so a shorter TTL only
     creates a gap in which a replay is neither too old nor remembered.
 
     Args:
-        max_entries: Claims retained. The oldest is evicted when the store is full.
+        max_entries: Live claims retained before new claims are refused.
         ttl: Seconds a claim is remembered, on the monotonic clock.
 
     Raises:
@@ -804,8 +822,8 @@ class LocalReplayStore:
     __slots__ = ("_last_now", "_lock", "_table", "max_entries", "ttl")
 
     def __init__(self, *, max_entries: int, ttl: float) -> None:
-        if max_entries <= 0 or ttl <= 0:
-            raise ValueError("replay store bounds must be positive")
+        if max_entries <= 0 or ttl <= 0 or not isfinite(ttl):
+            raise ValueError("replay store bounds must be positive and finite")
         self.max_entries = max_entries
         self.ttl = ttl
         self._last_now = time.monotonic()
@@ -813,7 +831,7 @@ class LocalReplayStore:
             max_entries=max_entries,
             ttl=ttl,
             clock=time.monotonic,
-            overflow="earliest",
+            overflow="refuse",
         )
         self._lock = asyncio.Lock()
 
@@ -827,7 +845,8 @@ class LocalReplayStore:
 
         The whole check-and-insert happens under one lock, so two concurrent
         deliveries of the same event cannot both be told they won. Expiry and
-        eviction run here, which is why the store needs no sweeper task.
+        capacity admission run here, which is why the store needs no sweeper
+        task.
 
         Args:
             source: Namespace, so two senders may use the same event id.
@@ -942,13 +961,15 @@ class InboxClaim:
       let the sender retry rather than processing it twice.
     * `failed` -- a previous attempt recorded a failure and the row is not
       reclaimable; a human decides what happens next.
+    * `conflict` -- the event id was reused for different payload bytes or a
+      different payload version; never process or replay it.
 
     Args:
         fencing_token: Rises on every claim; `PostgresWebhookInbox.complete` refuses a stale one.
         result_status: The status a completed attempt returned, when one is recorded.
     """
 
-    outcome: Literal["claimed", "duplicate", "active", "failed"]
+    outcome: Literal["claimed", "duplicate", "active", "failed", "conflict"]
     fencing_token: int
     result_status: int | None = None
 
@@ -1007,8 +1028,9 @@ class PostgresWebhookInbox:
                 isinstance(lease_seconds, bool)
                 or not isinstance(lease_seconds, int | float)
                 or lease_seconds <= 0
+                or not isfinite(lease_seconds)
             ):
-                raise ValueError("webhook inbox lease_seconds must be positive")
+                raise ValueError("webhook inbox lease_seconds must be positive and finite")
             self._session_factory = session_factory
             self._lease_owner = lease_owner
             self._lease_seconds = float(lease_seconds)
@@ -1105,8 +1127,8 @@ class PostgresWebhookInbox:
             ValueError: `lease_seconds` is not positive.
             RuntimeError: The row vanished mid-transaction, which should not be reachable.
         """
-        if lease_seconds <= 0:
-            raise ValueError("webhook inbox lease_seconds must be positive")
+        if lease_seconds <= 0 or not isfinite(lease_seconds):
+            raise ValueError("webhook inbox lease_seconds must be positive and finite")
         payload_hash = hashlib.sha256(envelope.body).digest()
         sql = (
             f"INSERT INTO {self.table} AS i "
@@ -1119,6 +1141,8 @@ class PostgresWebhookInbox:
             "lease_expires_at=EXCLUDED.lease_expires_at, "
             "fencing_token=i.fencing_token + 1 "
             "WHERE i.state='processing' AND i.lease_expires_at < clock_timestamp() "
+            "AND i.payload_version=EXCLUDED.payload_version "
+            "AND i.payload_hash=EXCLUDED.payload_hash "
             "RETURNING fencing_token"
         )
         row = await session.raw(
@@ -1133,10 +1157,14 @@ class PostgresWebhookInbox:
         if row is not None:
             return InboxClaim("claimed", int(_row_value(row, "fencing_token", 0)))
         existing = await session.raw(
-            f"SELECT state, fencing_token, result_status FROM {self.table} "
+            f"SELECT state, fencing_token, result_status, "
+            "payload_version=$3 AND payload_hash=$4 AS identity_matches "
+            f"FROM {self.table} "
             "WHERE source=$1 AND message_id=$2",
             source,
             envelope.id,
+            envelope.version,
+            payload_hash,
         ).fetchrow()
         if existing is None:
             raise RuntimeError("webhook inbox claim disappeared inside transaction")
@@ -1144,6 +1172,8 @@ class PostgresWebhookInbox:
         token = int(_row_value(existing, "fencing_token", 1))
         status_value = _row_value(existing, "result_status", 2)
         status = None if status_value is None else int(status_value)
+        if not bool(_row_value(existing, "identity_matches", 3)):
+            return InboxClaim("conflict", token, status)
         if state == "completed":
             return InboxClaim("duplicate", token, status)
         if state == "failed":
@@ -1567,8 +1597,8 @@ class PostgresWebhookOutbox:
         Raises:
             ValueError: `lease_seconds` is not positive.
         """
-        if lease_seconds <= 0:
-            raise ValueError("webhook outbox lease_seconds must be positive")
+        if lease_seconds <= 0 or not isfinite(lease_seconds):
+            raise ValueError("webhook outbox lease_seconds must be positive and finite")
         table = self.table
         sql = claim_sql(
             table,
@@ -1637,8 +1667,8 @@ class PostgresWebhookOutbox:
             ValueError: `lease_seconds` is not positive.
             RuntimeError: The fencing token is stale, or the row is no longer sending.
         """
-        if lease_seconds <= 0:
-            raise ValueError("webhook outbox lease_seconds must be positive")
+        if lease_seconds <= 0 or not isfinite(lease_seconds):
+            raise ValueError("webhook outbox lease_seconds must be positive and finite")
         renewed = await session.raw(
             f"UPDATE {self.table} SET lease_expires_at=clock_timestamp()+"
             "$3::float8*interval '1 second' WHERE delivery_id=$1 "
@@ -1698,8 +1728,8 @@ class PostgresWebhookOutbox:
             ValueError: `delay` is negative.
             RuntimeError: The fencing token is stale, or the row is not leased or sending.
         """
-        if delay < 0:
-            raise ValueError("webhook retry delay cannot be negative")
+        if delay < 0 or not isfinite(delay):
+            raise ValueError("webhook retry delay must be non-negative and finite")
         await self._transition(
             session,
             delivery,
@@ -1937,7 +1967,9 @@ class WebhookSource:
     ) -> None:
         if (inbox is None) != (session_factory is None):
             raise ValueError("durable webhook sources require inbox and session_factory")
-        if inbox is not None and (not lease_owner or lease_seconds <= 0):
+        if inbox is not None and (
+            not lease_owner or lease_seconds <= 0 or not isfinite(lease_seconds)
+        ):
             raise ValueError("durable webhook source lease configuration is invalid")
         self._name = name
         self._verifier = verifier
@@ -1999,7 +2031,10 @@ class WebhookSource:
             header_bytes += len(name) + len(value)
             if header_bytes > self._limits.max_header_bytes:
                 return Response(status=413)
-            headers.setdefault(name.lower(), value)
+            name = name.lower()
+            if name in _SINGLETON_WEBHOOK_HEADERS and name in headers:
+                return Response(status=401)
+            headers.setdefault(name, value)
         body = await request.body()
         if len(body) > self._limits.max_body_bytes:
             return Response(status=413)
@@ -2037,7 +2072,7 @@ class WebhookSource:
                     )
                     if claim.outcome == "duplicate":
                         return Response(status=claim.result_status or 204)
-                    if claim.outcome in {"active", "failed"}:
+                    if claim.outcome in {"active", "failed", "conflict"}:
                         return Response(status=409)
                     await handler(WebhookContext(self._name, envelope, request, session), payload)
                     await self._inbox.complete(
@@ -2483,7 +2518,15 @@ class WebhookDispatcher:
     ) -> None:
         if not worker_id:
             raise ValueError("webhook dispatcher worker_id cannot be empty")
-        if lease_seconds <= 0 or max_attempts <= 0 or retry_delay < 0:
+        if (
+            lease_seconds <= 0
+            or not isfinite(lease_seconds)
+            or type(max_attempts) is not int
+            or max_attempts <= 0
+            or retry_delay < 0
+            or not isfinite(retry_delay)
+            or not isfinite(retry_cap)
+        ):
             raise ValueError("webhook dispatcher limits are invalid")
         if retry_cap < retry_delay:
             raise ValueError(
@@ -2587,8 +2630,8 @@ class WebhookDispatcher:
             ValueError: `idle_delay` is not positive.
             Exception: Whatever a delivery or the database raised, after recording it.
         """
-        if idle_delay <= 0:
-            raise ValueError("webhook dispatcher idle_delay must be positive")
+        if idle_delay <= 0 or not isfinite(idle_delay):
+            raise ValueError("webhook dispatcher idle_delay must be positive and finite")
         self._running = True
         self._last_error = None
         try:

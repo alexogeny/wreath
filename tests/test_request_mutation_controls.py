@@ -347,6 +347,36 @@ def test_reverse_url_uses_the_request_host_when_route_has_no_host() -> None:
     assert request.url_for("item", item_id=3) == "http://request.example:8080/items/3"
 
 
+def test_reverse_url_refuses_ambiguous_request_authority() -> None:
+    request = Request(
+        {
+            "type": "http",
+            "scheme": "https",
+            "headers": [
+                (b"host", b"attacker.example"),
+                (b"host", b"victim.example"),
+            ],
+        },
+        _no_receive,
+        app=_App(),
+    )
+
+    with pytest.raises(RuntimeError, match="Host header occurs more than once"):
+        request.url_for("item", item_id=3)
+
+
+@pytest.mark.parametrize("host", [b"evil.example/path", b"evil.example?next=", b"evil example"])
+def test_reverse_url_refuses_invalid_request_authority(host: bytes) -> None:
+    request = Request(
+        {"type": "http", "scheme": "https", "headers": [(b"host", host)]},
+        _no_receive,
+        app=_App(),
+    )
+
+    with pytest.raises(RuntimeError, match="invalid Host header"):
+        request.url_for("item", item_id=3)
+
+
 def test_reverse_url_omits_each_schemes_default_server_port() -> None:
     http = Request(
         {"type": "http", "scheme": "http", "headers": [], "server": ("host", 80)},
@@ -491,7 +521,7 @@ async def test_tuple_stream_accepts_a_matching_deferred_digest() -> None:
     )
     request.state.__setattr__(BODY_CHECK_SLOT, ("sha-256", hashlib.sha256(b"honest").digest()))
 
-    assert [chunk async for chunk in request.stream()] == [b"hon", b"est"]
+    assert [chunk async for chunk in request.stream()] == [b"honest"]
 
 
 @pytest.mark.asyncio
@@ -517,7 +547,7 @@ async def test_mapping_stream_accepts_a_matching_deferred_digest() -> None:
     )
     request.state.__setattr__(BODY_CHECK_SLOT, ("sha-256", hashlib.sha256(b"honest").digest()))
 
-    assert [chunk async for chunk in request.stream()] == [b"hon", b"est"]
+    assert [chunk async for chunk in request.stream()] == [b"honest"]
 
 
 @pytest.mark.asyncio

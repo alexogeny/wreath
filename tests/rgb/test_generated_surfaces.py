@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from wreath.graphql import GraphQL
 from wreath.orm import Mapped, Model, column
 from wreath.orm.registry import Registry
 from wreath.orm.types import Int64, Text
@@ -67,7 +68,7 @@ class TestGraphQLTransport:
 
         api = GraphQL(_registry(), models=[Person])
         app = Wreath()
-        app.include_router(api.router())
+        app.include_router(api.router(public=True))
 
         async with TestClient(app) as client:
             response = await client.post(
@@ -84,7 +85,7 @@ class TestGraphQLTransport:
 
         api = GraphQL(_registry(), models=[Person])
         app = Wreath()
-        app.include_router(api.router())
+        app.include_router(api.router(public=True))
 
         async with TestClient(app) as client:
             response = await client.post(
@@ -155,12 +156,10 @@ class _ListRequest:
     identity = None
 
 
-@pytest.mark.skip(
-    reason="documented rather than fixed: a GraphQL endpoint is exactly as "
-    "public as the route it is mounted on, and field policies do nothing "
-    "without an authorizer. Both are now stated in the module docstring and the "
-    "guide; making auth mandatory would break the deliberate public-API case. "
-    "See report 23 R-73."
-)
-def test_graphql_requires_an_authorizer():
-    raise AssertionError("unimplemented")
+def test_graphql_requires_an_authorizer_or_an_explicit_public_mount():
+    api = GraphQL(_registry(), models=[Person])
+
+    with pytest.raises(ValueError, match=r"authorizer.*public=True"):
+        api.router()
+
+    assert api.router(public=True).routes

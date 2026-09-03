@@ -19,9 +19,10 @@ Safe by default — a response is **not** cached when it would leak or mislead:
   everyone),
 * never one marked `Cache-Control: no-store` or `private`.
 
-The default key is `method + path + query` — i.e. a **shared/public** cache. If
-a response depends on who is asking, pass a `key` that includes the principal
-(e.g. `lambda r: f"{r.identity.id}:{r.path}"`) or don't cache it.
+The default key is `scheme + authority + method + path + query` — i.e. a
+**shared/public** cache within one request authority. If a response depends on
+who is asking, pass a `key` that includes the principal (e.g.
+`lambda r: f"{r.identity.id}:{r.path}"`) or don't cache it.
 
 ## The same signal, one layer out
 
@@ -82,11 +83,65 @@ _TAG_BYTES: Final = 8
 _UNCACHEABLE_BODY = ("StreamingResponse", "FileResponse", "SSEResponse", "PreparedResponse")
 
 
+class _AmbiguousAuthority(ValueError):
+    pass
+
+
 def default_cache_key(request: Any) -> str:
-    """`"GET /path?query"` — a shared, public-cache key (no per-user identity)."""
+    """A shared public key bound to the request's scheme and Host authority."""
     query = request.query_string
-    base = f"{request.method} {request.path}"
-    return f"{base}?{query.decode('latin-1')}" if query else base
+    base = f"{request.method} {_request_path(request)}"
+    resource = f"{base}?{query.decode('latin-1')}" if query else base
+    return f"{_authority_prefix(request)}{resource}"
+
+
+def _request_path(request: Any) -> str:
+    context = getattr(request, "_context", None)
+    raw_path = getattr(context, "raw_path", None) if context is not None else None
+    if raw_path is None:
+        scope = getattr(request, "_scope", None)
+        if not isinstance(scope, dict):
+            scope = getattr(request, "scope", None)
+        raw_path = scope.get("raw_path") if isinstance(scope, dict) else None
+    return raw_path.decode("latin-1") if isinstance(raw_path, bytes) else request.path
+
+
+def _authority_prefix(request: Any) -> str:
+    single = getattr(request, "_single_header", None)
+    if callable(single):
+        try:
+            raw = single(b"host")
+        except ValueError as error:
+            raise _AmbiguousAuthority("request Host occurs more than once") from error
+        host = None if raw is None else raw.decode("latin-1")
+    else:
+        raw_headers = getattr(request, "headers", None)
+        if isinstance(raw_headers, (list, tuple)):
+            found = None
+            for name, value in raw_headers:
+                if name.lower() != b"host":
+                    continue
+                if found is not None:
+                    raise _AmbiguousAuthority("request Host occurs more than once")
+                found = value
+            host = None if found is None else found.decode("latin-1")
+        else:
+            header = getattr(request, "header", None)
+            host = header("host") if callable(header) else None
+    if not host:
+        return ""
+    scheme = str(getattr(request, "scheme", "http")).lower()
+    authority = str(host).lower()
+    return f"{len(scheme.encode('utf-8'))}:{scheme}:{len(authority.encode('utf-8'))}:{authority}:"
+
+
+def _tenant_cache_key(request: Any, key: str) -> str:
+    state = getattr(request, "state", None)
+    tenant = getattr(state, "tenant", None)
+    if tenant is None:
+        return key
+    value = str(getattr(tenant, "key", tenant))
+    return f"{len(value.encode('utf-8'))}:{value}:{key}"
 
 
 def cache_key_for(names: Iterable[str]) -> Callable[[Any], str]:
@@ -108,12 +163,13 @@ def cache_key_for(names: Iterable[str]) -> Callable[[Any], str]:
             raise TypeError(f"cache_key_for names[{index}] must be str, got {type(name).__name__}")
 
     def key(request: Any) -> str:
-        base = f"{request.method} {request.path}"
+        prefix = _authority_prefix(request)
+        path = _request_path(request)
+        base = f"{prefix}{request.method} {path}"
         if not declared:
             return base
-        return _core.cache_key_selected(
-            request.method, request.path, request.query_string, declared
-        )
+        selected = _core.cache_key_selected(request.method, path, request.query_string, declared)
+        return f"{prefix}{selected}"
 
     # Mark keys that contain no principal for the authenticated-request guard.
     key._wreath_public = True  # ty: ignore[unresolved-attribute]
@@ -504,7 +560,8 @@ def cached(
     Args:
         ttl: seconds an entry stays fresh (`None` = until evicted by capacity).
         max_entries: hard ceiling on cached responses (LRU eviction past it).
-        key: builds the cache key from the request (default: method+path+query).
+        key: builds the cache key from the request (default:
+            scheme+authority+method+path+query).
         methods: request methods that may be served from cache.
         store: an explicit `BoundedCache` to share across handlers; a
             private one is created if omitted.
@@ -596,7 +653,13 @@ def cached(
                 if status_values is not None:
                     _apply_header(result, _CACHE_STATUS, status_values["bypass"])
                 return result
-            cache_key = key(request)
+            try:
+                cache_key = _tenant_cache_key(request, key(request))
+            except _AmbiguousAuthority:
+                result = await handler(request, *args, **kwargs)
+                if status_values is not None:
+                    _apply_header(result, _CACHE_STATUS, status_values["bypass"])
+                return result
             if request.method == "QUERY":
                 cache_key = await _query_cache_key(request, cache_key)
             hit = the_store.get(cache_key)
@@ -637,7 +700,10 @@ def cached(
             if request is None:
                 the_store.clear()
                 return None
-            base = key(request)
+            try:
+                base = _tenant_cache_key(request, key(request))
+            except _AmbiguousAuthority:
+                return None
             if request.method != "QUERY":
                 the_store.delete(base)
                 return None

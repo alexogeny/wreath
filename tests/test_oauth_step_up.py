@@ -19,6 +19,7 @@ from wreath._auth.requirements import (
     add_second_factor,
     merge_requirements,
     requirement_for,
+    second_factor_age,
 )
 from wreath.auth import BearerTokenBackend, Identity, oauth_step_up, second_factor
 from wreath.authorization import AuthorizationVocabulary
@@ -167,6 +168,26 @@ def test_oauth_step_up_refuses_boolean_authentication_time_at_epoch() -> None:
     identity = SimpleNamespace(claims={"auth_time": False})
 
     assert OAuthStepUpRequirement(max_age=60).satisfied_by(identity, now=0) is False
+
+
+def test_future_authentication_times_never_satisfy_recency_checks() -> None:
+    identity = SimpleNamespace(claims={"auth_time": 1001.0, "second_factor_at": 1001.0})
+
+    assert OAuthStepUpRequirement(max_age=60).satisfied_by(identity, now=1000.0) is False
+    assert second_factor_age(identity, 1000.0) is None
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [float("nan"), float("inf"), float("-inf"), 10**1000],
+)
+def test_invalid_numeric_authentication_times_never_satisfy_recency_checks(
+    stamp: int | float,
+) -> None:
+    identity = SimpleNamespace(claims={"auth_time": stamp, "second_factor_at": stamp})
+
+    assert OAuthStepUpRequirement(max_age=60).satisfied_by(identity, now=1000.0) is False
+    assert second_factor_age(identity, 1000.0) is None
 
 
 class FirstActions(StrEnum):
@@ -332,6 +353,14 @@ def test_oauth_and_session_step_up_cannot_declare_two_remediation_flows() -> Non
         @second_factor(max_age=60)
         async def endpoint() -> None:
             return None
+
+
+@pytest.mark.parametrize("max_age", [float("nan"), float("inf")])
+def test_session_second_factor_refuses_non_finite_freshness_windows(
+    max_age: float,
+) -> None:
+    with pytest.raises(ValueError, match="positive finite"):
+        second_factor(max_age=max_age)
 
 
 @pytest.mark.asyncio

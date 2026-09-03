@@ -141,6 +141,14 @@ def test_cognito_groups_map_to_roles():
     assert identity.roles == frozenset({"fleet-admin"})
 
 
+@pytest.mark.parametrize(
+    "roles",
+    [1, {"admin": False}, [{"admin": True}]],
+)
+def test_malformed_role_claims_fail_closed_without_raising(roles: object) -> None:
+    assert _verifier()(_hs(_claims(roles=roles))) is None
+
+
 def test_alg_none_is_rejected():
     # A classic downgrade: alg "none" with an empty signature.
     hb, pb, _ = _segments({"alg": "none", "typ": "JWT"}, _claims())

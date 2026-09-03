@@ -112,6 +112,30 @@ async def test_duplicate_content_encoding_is_refused_before_body_read() -> None:
     assert response is not None and response.status == 415
 
 
+@pytest.mark.asyncio
+async def test_duplicate_content_type_is_refused_before_format_aware_decoding() -> None:
+    async def should_not_receive() -> dict[str, Any]:
+        raise AssertionError("ambiguous content type must be refused before reading the body")
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/",
+            "headers": [
+                (b"content-encoding", b"gzip"),
+                (b"content-type", b"application/json"),
+                (b"content-type", b"application/x-www-form-urlencoded"),
+            ],
+        },
+        should_not_receive,
+    )
+
+    response = await RequestDecompressionPolicy()._ingress(request)
+
+    assert response is not None and response.status == 415
+
+
 @pytest.mark.parametrize("maximum", [0, -1, True, 1.5])
 def test_request_decompression_validates_its_expansion_bound(maximum: Any) -> None:
     with pytest.raises(ValueError, match="max_output_bytes"):

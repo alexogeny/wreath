@@ -1278,9 +1278,7 @@ def _fixture_parameter_ids(definition: FixtureDef) -> tuple[str, ...]:
             )
         )
     return _unique_ids(
-        tuple(
-            _value_id(value, definition.name, index) for index, value in enumerate(params)
-        )
+        tuple(_value_id(value, definition.name, index) for index, value in enumerate(params))
     )
 
 
@@ -1626,9 +1624,7 @@ def _value_id(value: Any, name: str, index: int) -> str:
     if isinstance(value, re.Pattern):
         pattern = value.pattern
         return (
-            pattern.decode("ascii", "backslashreplace")
-            if isinstance(pattern, bytes)
-            else pattern
+            pattern.decode("ascii", "backslashreplace") if isinstance(pattern, bytes) else pattern
         )
     if isinstance(value, enum.Enum):
         return str(value)
@@ -2693,9 +2689,7 @@ def _select_native_cases(
         path, separator, suffix = node_id.rpartition("::")
         name, parameter_separator, _parameter = suffix.partition("[")
         fresh = (
-            fresh_by_family.get(f"{path}::{name}")
-            if separator and parameter_separator
-            else None
+            fresh_by_family.get(f"{path}::{name}") if separator and parameter_separator else None
         )
         if fresh is None:
             unresolved.add(node_id)
@@ -2708,9 +2702,7 @@ def _select_native_cases(
         )
     fuzz_ids = tuple(sorted(case.node_id for case in collection.cases if case.has_mark("fuzz")))
     selected_cases = tuple(
-        case
-        for case in collection.cases
-        if case.node_id in resolved_ids or case.has_mark("fuzz")
+        case for case in collection.cases if case.node_id in resolved_ids or case.has_mark("fuzz")
     )
     schedule_seed = os.environ.get("WREATH_FUZZ_SCHEDULE_SEED")
     if schedule_seed is not None:
@@ -2791,17 +2783,23 @@ class _NativeOutcome:
                 print(result.exception)
 
     def finish(self) -> int:
-        from ._test_runner import MutationActivity, _no_gold_fuzz
+        from ._test_runner import MutationActivity, _no_gold_fuzz, _run_explicit_fuzz_replay
 
         renderer = self.state.renderer
         if renderer is None:
             raise RuntimeError("native activity renderer was not prepared")
+        fuzz_mode = getattr(self.namespace, "fuzz", "off")
         if self.namespace.mutant == "off":
+            if fuzz_mode == "on":
+                fuzz, fuzz_activity, fuzz_status = _run_explicit_fuzz_replay(self.namespace)
+                self._attach_fuzz(fuzz)
+                renderer.finish_pipeline(None, fuzz_activity)
+                return self.status if self.status != 0 else fuzz_status
             renderer.finish()
             return self.status
         if not self.suite.activity.counts()["passed"]:
             mutation_activity = MutationActivity(mode=str(self.namespace.mutant), state="no_green")
-            if self.namespace.fuzz == "on":
+            if fuzz_mode == "on":
                 fuzz, fuzz_activity = _no_gold_fuzz()
                 self._attach_fuzz(fuzz)
                 renderer.finish_pipeline(mutation_activity, fuzz_activity)
@@ -2810,7 +2808,7 @@ class _NativeOutcome:
             return self.status
         if self.namespace.mutant == "auto" and self.state.trace_spec is None:
             mutation_activity = MutationActivity(mode="auto", state="unrated")
-            if self.namespace.fuzz == "on":
+            if fuzz_mode == "on":
                 fuzz, fuzz_activity = _no_gold_fuzz()
                 self._attach_fuzz(fuzz)
                 renderer.finish_pipeline(mutation_activity, fuzz_activity)
@@ -2818,7 +2816,7 @@ class _NativeOutcome:
                 renderer.finish_with_mutation(mutation_activity)
             return self.status
         mutation, mutation_status, mutation_activity = self._finish_mutation(renderer)
-        if self.namespace.fuzz == "off":
+        if fuzz_mode == "off":
             renderer.finish_with_mutation(mutation_activity)
             return self.status if self.status != 0 else mutation_status
         fuzz_status = self._finish_fuzz(mutation, mutation_activity, renderer)

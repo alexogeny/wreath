@@ -4,38 +4,38 @@
     "realistic": {
       "status": 200,
       "totals": {
-        "c": 94,
-        "python": 2
+        "c": 90,
+        "python": 3
       },
       "pre_activation": {
-        "c": 36,
-        "python": 1
+        "c": 29,
+        "python": 2
       },
       "phases": {
         "ingress": {
-          "c": 32,
+          "c": 25,
           "python": 1
         },
         "routing": {
           "c": 4,
-          "python": 0
+          "python": 1
         },
         "handler": {
-          "c": 28,
+          "c": 30,
           "python": 1
         },
         "egress": {
-          "c": 30,
+          "c": 31,
           "python": 0
         }
       },
       "c_calls": {
-        "dict.get": 19,
-        "builtins.isinstance": 10,
+        "dict.get": 14,
+        "builtins.isinstance": 9,
+        "builtins.getattr": 8,
         "str.encode": 6,
-        "builtins.getattr": 6,
         "builtins.len": 4,
-        "bytes.lower": 3,
+        "bytes.lower": 2,
         "bytes.decode": 2,
         "time.perf_counter": 2,
         "lock.__enter__": 2,
@@ -46,9 +46,9 @@
         "wreath._native._core.replace_response_header": 2,
         "wreath._native._core.request_new": 1,
         "TrustedNetworks.contains": 1,
-        "wreath._native._core.build_header_map": 1,
         "TrustedNetworks.forwarded_client": 1,
         "wreath._native._core.forwarded_proto": 1,
+        "wreath._native._core.find_header": 1,
         "UserAgentDB.blocked": 1,
         "time.monotonic": 1,
         "TokenBucket.acquire": 1,
@@ -69,6 +69,7 @@
         "str.capitalize": 1,
         "str.join": 1,
         "wreath._native._core.replace_cookie": 1,
+        "wreath._native._core.build_header_map": 1,
         "wreath._native._core.find_response_header": 1,
         "list.extend": 1,
         "wreath._native._core.append_vary": 1,
@@ -77,6 +78,7 @@
       },
       "python_frames": {
         "src/wreath/app.py:__call__": 1,
+        "src/wreath/_auth/models.py:__post_init__": 1,
         "src/wreath/orm/types.py:to_wire": 1
       },
       "request": {

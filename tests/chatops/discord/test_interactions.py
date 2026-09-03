@@ -20,6 +20,33 @@ def _signed(payload: dict[str, object]) -> tuple[bytes, bytes, str, str]:
     return private.public_key().public_bytes_raw(), body, timestamp, signature
 
 
+async def _raw_post(app: Wreath, path: str, body: bytes, headers: list[tuple[bytes, bytes]]):
+    sent: list[dict[str, Any]] = []
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "scheme": "https",
+        "method": "POST",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": headers,
+        "server": ("test", 443),
+        "client": ("127.0.0.1", 1),
+        "root_path": "",
+    }
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    await app(scope, receive, send)
+    return sent
+
+
 def test_ed25519_verification_uses_timestamp_and_exact_raw_body() -> None:
     api = discord()
     public_key, body, timestamp, signature = _signed({"type": 1, "text": "café"})
@@ -82,6 +109,106 @@ async def test_ping_is_verified_before_returning_pong() -> None:
 
     assert response.status == 200
     assert response.json() == {"type": 1}
+
+
+async def test_duplicate_signature_headers_are_refused() -> None:
+    api = discord()
+    public_key, body, timestamp, signature = _signed({"type": 1})
+    app = Wreath()
+    chatops().ChatOps(
+        app,
+        name="test",
+        providers=(
+            api.Discord(
+                application_id="app-1",
+                public_key=public_key,
+                bot_token="token",
+                clock=lambda: 1_700_000_000,
+            ),
+        ),
+    )
+    sent = await _raw_post(
+        app,
+        "/_wreath/chat/discord/interactions",
+        body,
+        [
+            (b"x-signature-ed25519", b"00"),
+            (b"x-signature-ed25519", signature.encode()),
+            (b"x-signature-timestamp", timestamp.encode()),
+        ],
+    )
+    assert sent[0]["status"] == 401
+
+
+@pytest.mark.parametrize(
+    "content_types",
+    [
+        (b"application/json", b"application/x-www-form-urlencoded"),
+        (b"application/x-www-form-urlencoded", b"application/json"),
+    ],
+)
+async def test_duplicate_content_type_cannot_select_discord_interaction_parser(
+    content_types: tuple[bytes, bytes],
+) -> None:
+    api = discord()
+    public_key, body, timestamp, signature = _signed({"type": 1})
+    app = Wreath()
+    chatops().ChatOps(
+        app,
+        name="test",
+        providers=(
+            api.Discord(
+                application_id="app-1",
+                public_key=public_key,
+                bot_token="token",
+                clock=lambda: 1_700_000_000,
+            ),
+        ),
+    )
+
+    sent = await _raw_post(
+        app,
+        "/_wreath/chat/discord/interactions",
+        body,
+        [
+            *((b"content-type", value) for value in content_types),
+            (b"x-signature-ed25519", signature.encode()),
+            (b"x-signature-timestamp", timestamp.encode()),
+        ],
+    )
+
+    assert sent[0]["status"] == 415
+
+
+async def test_discord_interaction_refuses_non_json_media_type() -> None:
+    api = discord()
+    public_key, body, timestamp, signature = _signed({"type": 1})
+    app = Wreath()
+    chatops().ChatOps(
+        app,
+        name="test",
+        providers=(
+            api.Discord(
+                application_id="app-1",
+                public_key=public_key,
+                bot_token="token",
+                clock=lambda: 1_700_000_000,
+            ),
+        ),
+    )
+
+    sent = await _raw_post(
+        app,
+        "/_wreath/chat/discord/interactions",
+        body,
+        [
+            (b"content-type", b"application/x-www-form-urlencoded"),
+            (b"x-signature-ed25519", signature.encode()),
+            (b"x-signature-timestamp", timestamp.encode()),
+        ],
+    )
+
+    assert sent[0]["status"] == 415
 
 
 async def test_durable_ingress_passes_exact_verified_envelope_to_shared_atomic_owner() -> None:

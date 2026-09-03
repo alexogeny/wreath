@@ -26,7 +26,11 @@ async def ask(body: Ask) -> StreamHandle:
 
 @app.get("/chat/{key}")
 async def resume(request: Request, key: str) -> Response:
-    return streams.attach(key, since=request.header("last-event-id"))
+    return streams.attach(
+        key,
+        since=request.header("last-event-id"),
+        authorize=lambda stream_key: request.user.owns_stream(stream_key),
+    )
 ```
 
 **No provider client ships here.** Providers change monthly,
@@ -84,6 +88,7 @@ from ._b64 import b64_encode
 from ._jobcore import validate_identifier
 from .log import DEFAULT_LIMIT, Column, Cursor, Flush, Log, PostgresLog
 from .response import JSONResponse, Response, ServerSentEvent, SSEResponse, StreamingResponse
+from .tenancy import check_enqueue_tenant
 
 __all__ = [
     "DEFAULT_IDLE",
@@ -440,8 +445,16 @@ class StreamWriter:
 
     __slots__ = ("_buffer", "_capacity", "_fence", "_flushes", "_index", "_key", "_written")
 
-    def __init__(self, log: PostgresLog, key: str, *, fence: int, resume_from: int) -> None:
-        self._buffer = log.buffered(key)
+    def __init__(
+        self,
+        log: PostgresLog,
+        key: str,
+        *,
+        fence: int,
+        resume_from: int,
+        storage_key: str | None = None,
+    ) -> None:
+        self._buffer = log.buffered(storage_key or key)
         self._capacity = log.declaration.flush.capacity
         self._key = key
         self._fence = fence
@@ -724,16 +737,17 @@ class Streams:
     async def writer(self, key: str, *, fence: int, attempt: int = 1) -> StreamWriter:
         """Join a job owned by another subsystem to this stream log."""
         _check_key(key)
+        storage_key = _storage_key(key, check_enqueue_tenant(None))
         if isinstance(fence, bool) or not isinstance(fence, int) or fence < 1:
             raise ValueError("a stream writer fence must be a positive integer")
         if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
             raise ValueError("a stream writer attempt must be a positive integer")
         if attempt > 1 and self._on_retry == "truncate":
-            await self._truncate_below(key, fence)
-        if key not in self._started_keys:
+            await self._truncate_below(storage_key, fence)
+        if storage_key not in self._started_keys:
             self.started += 1
-            self._started_keys.set(key, True)
-        return StreamWriter(self._log, key, fence=fence, resume_from=0)
+            self._started_keys.set(storage_key, True)
+        return StreamWriter(self._log, key, fence=fence, resume_from=0, storage_key=storage_key)
 
     async def start(
         self,
@@ -778,11 +792,13 @@ class Streams:
                 "argument here would run two different producers"
             )
         _check_key(key)
+        tenant = check_enqueue_tenant(tenant)
+        storage_key = _storage_key(key, tenant)
         handle = await self._jobs.launch(
             entry.task, key, list(args), key=_dedup(key), tenant=tenant
         )
         self.started += 1
-        self._started_keys.set(key, True)
+        self._started_keys.set(storage_key, True)
         return StreamHandle(key=key, task_id=handle.task_id, state=handle.state)
 
     async def cancel(self, key: str, *, reason: str = "cancelled") -> bool:
@@ -803,9 +819,10 @@ class Streams:
             because a reader still needs to be let go.
         """
         _check_key(key)
-        fence, index = await self._head(key)
+        storage_key = _storage_key(key, check_enqueue_tenant(None))
+        fence, index = await self._head(storage_key)
         await self._log.append(
-            key,
+            storage_key,
             fence=fence,
             idx=index + 1,
             kind=KIND_CANCELLED,
@@ -822,9 +839,12 @@ class Streams:
         attempt supersedes nothing, and a retry either truncates what came
         before or leaves it for the reader to skip.
         """
+        storage_key = _storage_key(key, check_enqueue_tenant(context.tenant))
         if context.attempt > 1 and self._on_retry == "truncate":
-            await self._truncate_below(key, context.fence)
-        writer = StreamWriter(self._log, key, fence=context.fence, resume_from=0)
+            await self._truncate_below(storage_key, context.fence)
+        writer = StreamWriter(
+            self._log, key, fence=context.fence, resume_from=0, storage_key=storage_key
+        )
         try:
             await entry.func(writer, *args)
         except asyncio.CancelledError:
@@ -871,6 +891,7 @@ class Streams:
         idle: float | None = None,
         poll: float | None = None,
         limit: int = REPLAY_LIMIT,
+        _storage: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Replay from `since`, then tail, until the stream ends or goes quiet.
 
@@ -905,18 +926,26 @@ class Streams:
             ValueError: `since` is not a cursor for `key`.
         """
         _check_key(key)
-        start = since if isinstance(since, StreamCursor) else StreamCursor.decode(since, key=key)
+        storage_key = _storage or _storage_key(key, check_enqueue_tenant(None))
+        start = (
+            since
+            if isinstance(since, StreamCursor)
+            else StreamCursor.decode(since, key=storage_key)
+        )
         idle_for = self._idle if idle is None else idle
         poll_for = self._poll if poll is None else poll
         if idle_for <= 0 or poll_for <= 0:
             raise ValueError("idle and poll must be positive numbers of seconds")
         if start.cursor != Cursor.start():
             self.resumed += 1
-        if self._started_keys.get(key) is not None and self._attached_keys.get(key) is None:
-            self._attached_keys.set(key, True)
+        if (
+            self._started_keys.get(storage_key) is not None
+            and self._attached_keys.get(storage_key) is None
+        ):
+            self._attached_keys.set(storage_key, True)
             self.attached += 1
 
-        fence = max(await self._max_fence(key), start.fence)
+        fence = max(await self._max_fence(storage_key), start.fence)
         position = StreamCursor(start.token, fence, start.cursor)
         index = -1
         if fence > start.fence > 0:
@@ -926,7 +955,7 @@ class Streams:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + idle_for
         while True:
-            batch = await self._log.read(key, after=position.cursor, limit=limit)
+            batch = await self._log.read(storage_key, after=position.cursor, limit=limit)
             if batch:
                 deadline = loop.time() + idle_for
             for record in batch:
@@ -976,6 +1005,7 @@ class Streams:
         idle: float | None = None,
         poll: float | None = None,
         authorize: Callable[[str], bool] | None = None,
+        public: bool = False,
     ) -> Response | SSEResponse:
         """An SSE response replaying from `since` and then tailing `key`.
 
@@ -993,7 +1023,10 @@ class Streams:
         starting from zero -- a silent restart would hand the client a second
         copy of everything it already rendered, which is the failure mode this
         whole module exists to remove.
+
+        Pass `public=True` only when every stream key is intentionally public.
         """
+        _require_reader_access(authorize, public)
         if authorize is not None and not authorize(key):
             return _unknown_stream(key)
         try:
@@ -1006,21 +1039,31 @@ class Streams:
             # thing about which end has the problem.
             return JSONResponse({"error": str(error), "key": key[:64]}, status=400)
         try:
+            storage_key = _storage_key(key, check_enqueue_tenant(None))
             resume = (
-                since if isinstance(since, StreamCursor) else StreamCursor.decode(since, key=key)
+                since
+                if isinstance(since, StreamCursor)
+                else StreamCursor.decode(since, key=storage_key)
             )
         except ValueError as error:
             self.cursor_refusals += 1
             return JSONResponse({"error": str(error), "key": key}, status=400)
         return SSEResponse(
-            self._sse(key, resume, idle, poll),
+            self._sse(key, storage_key, resume, idle, poll),
             headers=[(b"x-stream-key", key.encode("utf-8"))],
         )
 
     async def _sse(
-        self, key: str, since: StreamCursor, idle: float | None, poll: float | None
+        self,
+        key: str,
+        storage_key: str,
+        since: StreamCursor,
+        idle: float | None,
+        poll: float | None,
     ) -> AsyncIterator[ServerSentEvent]:
-        async for event in self.follow(key, since=since, idle=idle, poll=poll):
+        async for event in self.follow(
+            key, since=since, idle=idle, poll=poll, _storage=storage_key
+        ):
             yield event.as_sse()
 
     def counters(self) -> Any:
@@ -1131,6 +1174,12 @@ def _dedup(key: str) -> str:
     return f"stream:{key}"
 
 
+def _storage_key(key: str, tenant: str) -> str:
+    if not tenant:
+        return key
+    return f"{len(tenant.encode('utf-8'))}:{tenant}:{key}"
+
+
 def _check_key(key: str) -> None:
     """Guard the one value a caller supplies that reaches an index and a header.
 
@@ -1172,6 +1221,7 @@ async def push_stream(
     idle: float | None = None,
     poll: float | None = None,
     authorize: Callable[[str], bool] | None = None,
+    public: bool = False,
 ) -> bool:
     """Push `key`'s events as JSON text frames over an accepted WebSocket.
 
@@ -1180,7 +1230,9 @@ async def push_stream(
     connected for something else and a second HTTP request would be a second
     connection for no reason. Each frame carries `id`, so a client that
     reconnects resumes exactly as an `EventSource` would.
+    Pass `public=True` only when every stream key is intentionally public.
     """
+    _require_reader_access(authorize, public)
     if authorize is not None and not authorize(key):
         return False
 
@@ -1192,6 +1244,15 @@ async def push_stream(
             encoded.decode("utf-8") if isinstance(encoded, bytes) else encoded
         )
     return True
+
+
+def _require_reader_access(authorize: Callable[[str], bool] | None, public: bool) -> None:
+    if authorize is None and not public:
+        raise ValueError(
+            "a stream reader needs authorize= or public=True for an intentionally public stream"
+        )
+    if authorize is not None and public:
+        raise ValueError("public=True conflicts with authorize=; omit public=True to enforce it")
 
 
 def check_stream_attachment(streams: Streams, *, ratio: float = 0.5) -> list[str]:

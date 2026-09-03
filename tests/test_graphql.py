@@ -730,7 +730,7 @@ async def test_an_allowed_field_passes_the_authorizer(
 
 @pytest.mark.asyncio
 async def test_introspection_is_off_by_default(registry: Registry) -> None:
-    router = GraphQL(registry, models=[User]).router()
+    router = GraphQL(registry, models=[User]).router(public=True)
     methods = {(m, r.path) for r in router.routes for m in r.methods}
     assert ("GET", "/graphql") not in methods
     assert ("POST", "/graphql") in methods
@@ -738,7 +738,7 @@ async def test_introspection_is_off_by_default(registry: Registry) -> None:
 
 @pytest.mark.asyncio
 async def test_introspection_can_be_enabled(registry: Registry) -> None:
-    router = GraphQL(registry, models=[User], introspection=True).router()
+    router = GraphQL(registry, models=[User], introspection=True).router(public=True)
     methods = {(m, r.path) for r in router.routes for m in r.methods}
     assert ("GET", "/graphql") in methods
 
@@ -766,7 +766,9 @@ def test_graphql_and_rest_share_one_model_set(registry: Registry) -> None:
 def test_each_root_field_becomes_a_typed_operation(registry: Registry) -> None:
     from wreath._graphql.typegen import graphql_operations
 
-    operations = {op.id: op for op in graphql_operations(GraphQL(registry).schema)}
+    operations = {
+        op.id: op for op in graphql_operations(GraphQL(registry, models=[User, Post]).schema)
+    }
 
     singular = operations["graphqlUser"]
     assert singular.response_body.kind == "reference"
@@ -782,7 +784,9 @@ def test_each_root_field_becomes_a_typed_operation(registry: Registry) -> None:
 def test_relationship_fields_reference_their_target_type(registry: Registry) -> None:
     from wreath._graphql.typegen import graphql_models
 
-    models = {model.name: model for model in graphql_models(GraphQL(registry).schema)}
+    models = {
+        model.name: model for model in graphql_models(GraphQL(registry, models=[User, Post]).schema)
+    }
     posts = next(f for f in models["User"].fields if f.wire_name == "posts")
     assert posts.type.kind == "array"
     assert posts.type.arguments[0].name == "Post"
@@ -895,9 +899,7 @@ async def test_async_per_object_resolvers_start_the_whole_level_together(
     assert started == list(range(1, 41))
     assert peak == 32
     assert second_wave_initial_active == 0
-    assert [row["tag"] for row in body["data"]["users"]] == [
-        f"u{index}" for index in range(1, 41)
-    ]
+    assert [row["tag"] for row in body["data"]["users"]] == [f"u{index}" for index in range(1, 41)]
 
 
 @pytest.mark.asyncio
@@ -1393,7 +1395,7 @@ def test_on_denied_must_be_a_known_mode(registry: Registry) -> None:
 
 def test_resolvers_cannot_be_added_after_the_endpoint_is_serving(registry: Registry) -> None:
     api = GraphQL(registry, models=[User])
-    api.router()  # freezes
+    api.router(public=True)  # freezes
 
     with pytest.raises(ResolverError, match="before the endpoint serves"):
 
@@ -1467,7 +1469,7 @@ async def test_the_http_endpoint_refuses_a_non_object_json_body(
     registry: Registry,
 ) -> None:
     app = Wreath()
-    app.include_router(GraphQL(registry, models=[User]).router())
+    app.include_router(GraphQL(registry, models=[User]).router(public=True))
 
     async with TestClient(app) as client:
         response = await client.post("/graphql", json=[])
@@ -1483,10 +1485,10 @@ async def test_the_http_endpoint_refuses_each_malformed_request_field(
     registry: Registry,
 ) -> None:
     app = Wreath()
-    app.include_router(GraphQL(registry, models=[User]).router())
+    app.include_router(GraphQL(registry, models=[User]).router(public=True))
 
     async with TestClient(app) as client:
-        missing_type = await client.post("/graphql", content=b'{}')
+        missing_type = await client.post("/graphql", content=b"{}")
         bad_query = await client.post("/graphql", json={"query": 7})
         bad_variables = await client.post(
             "/graphql", json={"query": "{ users { id } }", "variables": []}
@@ -1498,9 +1500,46 @@ async def test_the_http_endpoint_refuses_each_malformed_request_field(
 
 
 @pytest.mark.asyncio
+async def test_the_http_endpoint_refuses_duplicate_content_type_before_parsing(
+    registry: Registry,
+) -> None:
+    app = Wreath()
+    app.include_router(GraphQL(registry, models=[User]).router(public=True))
+    body = b'{"query":"{ users { id } }"}'
+    sent: list[dict[str, Any]] = []
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "scheme": "https",
+        "method": "POST",
+        "path": "/graphql",
+        "raw_path": b"/graphql",
+        "query_string": b"",
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"content-type", b"text/plain"),
+        ],
+        "server": ("test", 443),
+        "client": ("127.0.0.1", 1),
+        "root_path": "",
+    }
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    await app(scope, receive, send)
+
+    assert sent[0]["status"] == 415
+
+
+@pytest.mark.asyncio
 async def test_a_non_string_operation_name_is_treated_as_absent(registry: Registry) -> None:
     app = Wreath()
-    app.include_router(GraphQL(registry, models=[User]).router())
+    app.include_router(GraphQL(registry, models=[User]).router(public=True))
 
     async with TestClient(app) as client:
         response = await client.post(
@@ -1515,7 +1554,7 @@ async def test_a_non_string_operation_name_is_treated_as_absent(registry: Regist
 @pytest.mark.asyncio
 async def test_a_string_operation_name_selects_the_named_operation(registry: Registry) -> None:
     app = Wreath()
-    app.include_router(GraphQL(registry, models=[User]).router())
+    app.include_router(GraphQL(registry, models=[User]).router(public=True))
 
     async with TestClient(app) as client:
         response = await client.post(

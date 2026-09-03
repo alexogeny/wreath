@@ -599,6 +599,26 @@ async def test_urlencoded_form_at_the_field_limit_is_accepted() -> None:
 
 
 @pytest.mark.asyncio
+async def test_form_refuses_duplicate_content_type_before_reading_the_body() -> None:
+    async def unread() -> Any:
+        raise AssertionError("duplicate Content-Type reached the body stream")
+
+    request = Request(
+        {
+            "type": "http",
+            "headers": [
+                (b"content-type", b"application/x-www-form-urlencoded"),
+                (b"content-type", b"multipart/form-data; boundary=B"),
+            ],
+        },
+        unread,
+    )
+
+    with pytest.raises(ValueError, match="header occurs more than once"):
+        await request.form()
+
+
+@pytest.mark.asyncio
 async def test_the_field_limit_refusal_reaches_the_client_as_413() -> None:
     from wreath import Wreath
     from wreath.testing import TestClient

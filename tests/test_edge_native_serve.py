@@ -55,10 +55,12 @@ async def test_native_serve_refuses_upstream_urls_that_are_not_origins(url: str)
         ("connections", 0, "connections must be at least 1"),
         ("max_body", -1, "max_body must be non-negative"),
         ("backlog", 0, "backlog must be at least 1"),
+        ("queue_timeout", float("nan"), "queue_timeout must be finite"),
+        ("queue_timeout", float("inf"), "queue_timeout must be finite"),
     ],
 )
 async def test_native_serve_refuses_invalid_resource_limits(
-    option: str, value: int, message: str
+    option: str, value: int | float, message: str
 ) -> None:
     with pytest.raises(ValueError, match=message):
         await _serve()(

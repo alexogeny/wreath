@@ -1397,18 +1397,19 @@ async def generate_test(
     from .testing import TestClient
 
     request = recorded_request(recording)
+    headers = tuple(
+        (name_.decode("latin-1"), value.decode("latin-1"))
+        for name_, value in request.headers
+        if name_ not in (b"host", b"content-length", b"connection")
+    )
     async with TestClient(app) as client:
         response = await client.request(
             request.method,
             request.path
             + (f"?{request.query_string.decode('latin-1')}" if request.query_string else ""),
-            headers={
-                name_.decode("latin-1"): value.decode("latin-1")
-                for name_, value in request.headers
-                # `host` and framing headers are the test client's business;
-                # carrying them over would assert on transport, not behaviour.
-                if name_ not in (b"host", b"content-length", b"connection")
-            },
+            # `host` and framing headers are the test client's business;
+            # carrying them over would assert on transport, not behaviour.
+            headers=headers,
             content=request.body,
         )
 
@@ -1418,11 +1419,6 @@ async def generate_test(
     explicit_attribute = ":" in target
     import_line = f"from {module} import {attribute}" if explicit_attribute else f"import {module}"
     application = attribute if explicit_attribute else f"{module}.{attribute}"
-    headers = {
-        name_.decode("latin-1"): value.decode("latin-1")
-        for name_, value in request.headers
-        if name_ not in (b"host", b"content-length", b"connection")
-    }
     where = f" from {origin}" if origin else ""
     path_literal = request.path + (
         f"?{request.query_string.decode('latin-1')}" if request.query_string else ""

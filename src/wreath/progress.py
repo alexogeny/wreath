@@ -16,11 +16,19 @@ stream reads it.
 
     @app.get("/imports/{task_id}/status")
     async def status(request):
-        return status_response(progress, request.path_params["task_id"])
+        return status_response(
+            progress,
+            request.path_params["task_id"],
+            authorize=lambda task_id: request.user.owns_task(task_id),
+        )
 
     @app.get("/imports/{task_id}/stream")
     async def stream(request):
-        return progress_stream(progress, request.path_params["task_id"])
+        return progress_stream(
+            progress,
+            request.path_params["task_id"],
+            authorize=lambda task_id: request.user.owns_task(task_id),
+        )
 
 Inside the task, `reporter.update(42, "processing invoices")` /
 `reporter.done()` / `reporter.fail(exc)`.
@@ -53,6 +61,7 @@ from ._json import dumps as _json_dumps
 from .cache import BoundedCache
 from .response import JSONResponse, Response, ServerSentEvent, SSEResponse
 from .temporal import Duration
+from .tenancy import check_enqueue_tenant
 
 __all__ = [
     "MAX_MESSAGE_CHARS",
@@ -166,6 +175,13 @@ class ProgressRegistry:
         self._store: BoundedCache = BoundedCache(max_entries=max_tasks, ttl=window)
         self._bridge = BusBridge(bus, channel=channel, apply=self._apply)
 
+    @staticmethod
+    def _key(task_id: str) -> str:
+        tenant = check_enqueue_tenant(None)
+        if not tenant:
+            return task_id
+        return f"{len(tenant.encode('utf-8'))}:{tenant}:{task_id}"
+
     def report(
         self,
         task_id: str,
@@ -176,7 +192,7 @@ class ProgressRegistry:
         error: str | None = None,
     ) -> None:
         progress = Progress(_clamp(percent), message[:MAX_MESSAGE_CHARS], state, error)
-        self._store.set(task_id, progress)
+        self._store.set(self._key(task_id), progress)
         # Guarded rather than left to the bridge's own no-bus check, so a
         # registry with no bus -- the default, and every test -- does not build
         # a wire payload per report only to throw it away.
@@ -196,7 +212,7 @@ class ProgressRegistry:
         state = payload.get("state")
         error = payload.get("error")
         self._store.set(
-            task_id,
+            self._key(task_id),
             Progress(
                 _clamp(percent),
                 # Bounded: this arrives from the bus, so its size is not this
@@ -213,7 +229,7 @@ class ProgressRegistry:
         return ProgressReporter(self, task_id)
 
     def get(self, task_id: str) -> Progress | None:
-        return self._store.get(task_id)
+        return self._store.get(self._key(task_id))
 
     async def stream(
         self, task_id: str, *, interval: float = 1.0, max_duration: float | None = None
@@ -300,6 +316,7 @@ def status_response(
     task_id: str,
     *,
     authorize: Callable[[str], bool] | None = None,
+    public: bool = False,
 ) -> Response:
     """A JSON status for `task_id` (`404` if unknown, expired, or refused).
 
@@ -313,7 +330,9 @@ def status_response(
 
     A refusal answers `404`, identical to an unknown id: a distinct `403`
     would confirm which ids exist, which is most of what enumeration wants.
+    Pass `public=True` only when every task in the registry is public.
     """
+    _require_reader_access(authorize, public)
     if authorize is not None and not authorize(task_id):
         return _unknown_task(task_id)
     progress = registry.get(task_id)
@@ -343,13 +362,16 @@ def progress_stream(
     interval: float = 1.0,
     max_duration: float | None = None,
     authorize: Callable[[str], bool] | None = None,
+    public: bool = False,
 ) -> SSEResponse | Response:
     """An SSE response streaming `progress` events until the task is terminal.
 
     `authorize` and `max_duration` are `status_response`'s and
     `ProgressRegistry.stream`'s respectively; a refused caller gets the
     same `404` a missing task does, before any stream is opened.
+    Pass `public=True` only when every task in the registry is public.
     """
+    _require_reader_access(authorize, public)
     if authorize is not None and not authorize(task_id):
         return _unknown_task(task_id)
     return SSEResponse(_progress_events(registry, task_id, interval, max_duration))
@@ -363,10 +385,21 @@ async def push_progress(
     interval: float = 1.0,
     max_duration: float | None = None,
     authorize: Callable[[str], bool] | None = None,
+    public: bool = False,
 ) -> bool:
-    """Push progress as JSON text frames over an accepted WebSocket until terminal."""
+    """Push authorised progress as JSON frames until terminal; opt public explicitly."""
+    _require_reader_access(authorize, public)
     if authorize is not None and not authorize(task_id):
         return False
     async for progress in registry.stream(task_id, interval=interval, max_duration=max_duration):
         await websocket.send_text(_as_text(progress.as_dict()))
     return True
+
+
+def _require_reader_access(authorize: Callable[[str], bool] | None, public: bool) -> None:
+    if authorize is None and not public:
+        raise ValueError(
+            "a progress reader needs authorize= or public=True for intentionally public progress"
+        )
+    if authorize is not None and public:
+        raise ValueError("public=True conflicts with authorize=; omit public=True to enforce it")

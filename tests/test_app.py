@@ -903,6 +903,50 @@ async def test_host_route_precedes_the_host_agnostic_route() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["GET", "POST", "OPTIONS"])
+async def test_host_routing_refuses_ambiguous_authority_before_resolution(method: str) -> None:
+    app = Wreath()
+    activated: list[str] = []
+
+    @app.get("/", host="{tenant}.example.test")
+    async def tenant(request: Any, tenant: str) -> str:
+        activated.append(tenant)
+        return tenant
+
+    sent = await invoke(
+        app,
+        "/",
+        method=method,
+        scope_extra={
+            "headers": [
+                (b"host", b"attacker.example.test"),
+                (b"host", b"victim.example.test"),
+            ]
+        },
+    )
+
+    assert sent[0]["status"] == 400
+    assert activated == []
+
+
+@pytest.mark.asyncio
+async def test_host_routing_refuses_invalid_authority_before_resolution() -> None:
+    app = Wreath()
+
+    @app.get("/", host="{tenant}.example.test")
+    async def tenant(request: Any, tenant: str) -> str:
+        return tenant
+
+    sent = await invoke(
+        app,
+        "/",
+        scope_extra={"headers": [(b"host", b"victim.example.test/path")]},
+    )
+
+    assert sent[0]["status"] == 400
+
+
+@pytest.mark.asyncio
 async def test_mount_dispatches_a_child_asgi_application_with_root_path() -> None:
     from wreath.testing import TestClient
 
@@ -936,6 +980,32 @@ async def test_mount_dispatches_a_child_asgi_application_with_root_path() -> Non
     assert dict(response.headers)[b"x-parent"] == b"wreath"
     assert observed == [("/health", "/service")]
     assert app.url_path_for("service", path="health/live") == "/service/health/live"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw_path",
+    [b"/service/public%3Fadmin=true", b"/serv%69ce/public%3Fadmin=true"],
+)
+async def test_mount_preserves_the_encoded_child_raw_path(raw_path: bytes) -> None:
+    observed: list[tuple[str, bytes]] = []
+
+    async def child(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        observed.append((scope["path"], scope["raw_path"]))
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    app = Wreath()
+    app.mount("/service", child)
+
+    sent = await invoke(
+        app,
+        "/service/public?admin=true",
+        raw_path=raw_path,
+    )
+
+    assert sent[0]["status"] == 204
+    assert observed == [("/public?admin=true", b"/public%3Fadmin=true")]
 
 
 @pytest.mark.asyncio

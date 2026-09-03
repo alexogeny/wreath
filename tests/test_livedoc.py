@@ -59,11 +59,13 @@ def _document(**kwargs: Any) -> LiveDocument:
     [
         ({"max_subscribers": -1}, "max_subscribers must be non-negative"),
         ({"max_per_principal": -1}, "max_per_principal must be non-negative"),
-        ({"keepalive": 0}, "keepalive must be positive"),
+        ({"keepalive": 0}, "keepalive must be finite and positive"),
+        ({"keepalive": float("nan")}, "keepalive must be finite"),
+        ({"keepalive": float("inf")}, "keepalive must be finite"),
     ],
 )
 async def test_document_refuses_invalid_stream_limits(
-    option: dict[str, int], message: str
+    option: dict[str, int | float], message: str
 ) -> None:
     with pytest.raises(ValueError, match=message):
         _document(**option)
@@ -75,7 +77,20 @@ async def test_change_events_refuses_a_nonpositive_keepalive_override() -> None:
     assert subscription is not None
     events = change_events(subscription, keepalive=0)
 
-    with pytest.raises(ValueError, match="keepalive must be positive"):
+    with pytest.raises(ValueError, match="keepalive must be finite and positive"):
+        await anext(events)
+
+    assert subscription.closed
+
+
+@pytest.mark.parametrize("keepalive", [float("nan"), float("inf")])
+async def test_change_events_refuses_a_nonfinite_keepalive_override(keepalive: float) -> None:
+    document = _document()
+    subscription = document.subscribe("User::ada")
+    assert subscription is not None
+    events = change_events(subscription, keepalive=keepalive)
+
+    with pytest.raises(ValueError, match="keepalive must be finite"):
         await anext(events)
 
     assert subscription.closed

@@ -492,6 +492,27 @@ async def test_the_manifest_is_revalidatable_so_the_client_stops_asking() -> Non
 
 
 @pytest.mark.asyncio
+async def test_manifest_revalidation_combines_repeated_if_none_match_fields() -> None:
+    async with TestClient(_app()) as client:
+        first = await client.get(
+            "/permissions/manifest",
+            headers={"authorization": "Bearer ada:editor"},
+        )
+        etag = first.header("etag")
+        again = await client.get(
+            "/permissions/manifest",
+            headers=[
+                ("authorization", "Bearer ada:editor"),
+                ("if-none-match", '"not-current"'),
+                ("if-none-match", etag or ""),
+            ],
+        )
+
+    assert etag
+    assert again.status == 304
+
+
+@pytest.mark.asyncio
 async def test_the_manifest_etag_changes_when_the_users_roles_do() -> None:
     async with TestClient(_app()) as client:
         before = (

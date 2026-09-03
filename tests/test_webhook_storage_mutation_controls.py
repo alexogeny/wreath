@@ -134,7 +134,12 @@ async def test_duplicate_inbox_claim_preserves_absent_result_status() -> None:
     session = _Session(
         rows=[
             None,
-            {"state": "completed", "fencing_token": 2, "result_status": None},
+            {
+                "state": "completed",
+                "fencing_token": 2,
+                "result_status": None,
+                "identity_matches": True,
+            },
         ]
     )
 
@@ -206,7 +211,7 @@ async def test_outbox_renew_refuses_a_stale_fencing_token() -> None:
 async def test_outbox_retry_refuses_negative_delay_before_querying() -> None:
     session = _Session()
 
-    with pytest.raises(ValueError, match="retry delay cannot be negative"):
+    with pytest.raises(ValueError, match="retry delay must be non-negative and finite"):
         await PostgresWebhookOutbox().mark_retry(
             session, _delivery(), delay=-1, status=None, failure=None
         )

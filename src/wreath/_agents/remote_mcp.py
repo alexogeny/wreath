@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
-from .identity import principal_id
+from .identity import principal_scope_id
 
 PROTOCOL_VERSION = "2025-11-25"
 
@@ -490,7 +490,7 @@ class RemoteMCPClient:
         tenant = getattr(context, "tenant", None)
         if not isinstance(tenant, str) or not tenant:
             raise MCPRemoteScopeError("remote MCP invocation requires a non-empty tenant")
-        resolved_principal = principal_id(context.principal, label="remote MCP")
+        resolved_principal = principal_scope_id(context.principal, label="remote MCP")
         scope = (tenant, resolved_principal)
         if self._scope is None:
             self._scope = scope

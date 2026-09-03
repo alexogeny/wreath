@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -35,7 +36,10 @@ PAID_THROUGH = datetime(2026, 10, 1, tzinfo=UTC)
 
 
 def snapshot(
-    *, provider: str = "stripe", subject: str = "organization:acme"
+    *,
+    provider: str = "stripe",
+    subject: str = "organization:acme",
+    account: str | None = None,
 ) -> SubscriptionSnapshot:
     return SubscriptionSnapshot(
         provider,
@@ -44,16 +48,23 @@ def snapshot(
         "pro",
         SubscriptionState.ACTIVE,
         "active",
+        merchant_account=account,
     )
 
 
-def payment(*, provider: str = "stripe", subject: str = "organization:acme") -> SubscriptionPayment:
+def payment(
+    *,
+    provider: str = "stripe",
+    subject: str = "organization:acme",
+    account: str | None = None,
+) -> SubscriptionPayment:
     return SubscriptionPayment(
         provider,
         "in_1",
         "sub_1",
         subject,
         PAID_THROUGH,
+        account,
     )
 
 
@@ -87,21 +98,33 @@ def test_payment_before_subscription_is_preserved_until_the_snapshot_arrives() -
     assert merged.paid_through == PAID_THROUGH
 
 
-@pytest.mark.parametrize(
-    ("later", "message"),
-    [
-        (snapshot(subject="organization:globex"), "subject"),
-        (snapshot(provider="chargebee"), "provider"),
-    ],
-)
-def test_subscription_ledger_refuses_contradictory_ownership(
-    later: SubscriptionSnapshot, message: str
-) -> None:
+def test_subscription_ledger_refuses_contradictory_ownership() -> None:
     ledger = SubscriptionLedger()
     ledger.apply(payment())
 
-    with pytest.raises(ValueError, match=message):
-        ledger.apply(later)
+    with pytest.raises(ValueError, match="subject"):
+        ledger.apply(snapshot(subject="organization:globex"))
+
+
+def test_subscription_and_invoice_ids_are_scoped_to_the_merchant_account() -> None:
+    ledger = SubscriptionLedger()
+    acme = snapshot(subject="organization:acme", account="acct_acme")
+    globex = snapshot(subject="organization:globex", account="acct_globex")
+
+    ledger.apply(acme)
+    ledger.apply(payment(subject="organization:acme", account="acct_acme"))
+    ledger.apply(globex)
+    ledger.apply(payment(subject="organization:globex", account="acct_globex"))
+
+    assert ledger.get(
+        "stripe", "sub_1", "organization:acme", merchant_account="acct_acme"
+    ) == replace(acme, paid_through=PAID_THROUGH)
+    assert ledger.get(
+        "stripe", "sub_1", "organization:globex", merchant_account="acct_globex"
+    ) == replace(globex, paid_through=PAID_THROUGH)
+
+    chargebee = snapshot(provider="chargebee", subject="organization:other")
+    assert ledger.apply(chargebee) == chargebee
 
 
 def test_subscription_entitlements_resolve_plan_and_grants_atomically() -> None:

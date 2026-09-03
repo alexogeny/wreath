@@ -1,10 +1,10 @@
 """First-class signed-cookie session policy.
 
 The session is a plain dict on `request.state.session`. It is serialized to
-JSON, signed with HMAC-SHA256, and stored client-side in a cookie — nothing
-is kept on the server unless a `store` is given. Tampered or expired cookies
-yield a fresh empty session; the cookie is only (re)written when the session
-content changed:
+JSON, signed with HMAC-SHA256 together with the request's tenant and Host, and
+stored client-side in a cookie — nothing is kept on the server unless a `store`
+is given. Tampered, expired, or cross-tenant cookies yield a fresh empty
+session; the cookie is only (re)written when the session content changed:
 
 ```python
 app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="…")))
@@ -29,6 +29,7 @@ from typing import Any
 from .._b64 import b64url_decode, b64url_encode
 from .._json import dumps as _json_dumps
 from .._json import loads as _json_loads
+from .._native import _core
 from ..request import Request
 from ..response import Response
 
@@ -54,6 +55,40 @@ MIN_SECRET_BYTES = 32
 #: The serialization of an absent/rejected session, so a request that never
 #: touches it compares equal and writes no cookie.
 _EMPTY_SESSION = _json_dumps({})
+
+
+class _AmbiguousSessionAuthority(Exception):
+    pass
+
+
+def _session_binding(request: Request) -> tuple[bytes, bool]:
+    tenant = getattr(request.state, "tenant", None)
+    tenant_key = "" if tenant is None else str(getattr(tenant, "key", tenant))
+    single_header = getattr(request, "_single_header", None)
+    if callable(single_header):
+        try:
+            raw = single_header(b"host")
+        except ValueError as error:
+            raise _AmbiguousSessionAuthority from error
+        raw_host = "" if raw is None else raw.decode("latin-1")
+    else:
+        header = getattr(request, "header", None)
+        raw_host = (header("host") or "") if callable(header) else ""
+    host = _core.normalize_host(raw_host, False) or raw_host.lower()
+    tenant_bytes = tenant_key.encode("utf-8")
+    host_bytes = host.encode("utf-8")
+    binding = (
+        len(tenant_bytes).to_bytes(8, "big")
+        + tenant_bytes
+        + len(host_bytes).to_bytes(8, "big")
+        + host_bytes
+    )
+    return binding, tenant is not None
+
+
+def _signed_bytes(binding: bytes, body: str, stamp: str) -> bytes:
+    signed = f"{body}.{stamp}".encode("ascii")
+    return binding + b"\0" + signed if binding else signed
 
 
 class SessionPolicy:
@@ -94,6 +129,12 @@ class SessionPolicy:
     so a secret can be rotated without invalidating every live session at once.
     A cookie accepted under a previous secret is always re-signed with the
     current one, which is what lets the old secret eventually be retired.
+
+    Signatures also bind the normalized Host and, when tenancy middleware has
+    run, the resolved tenant key. A valid cookie planted on a sibling host or
+    replayed under another tenant is therefore invalid. Pre-binding cookies are
+    accepted only by applications with no resolved tenant and immediately
+    re-signed; tenant applications fail those legacy cookies closed.
 
     Args:
         secret: HMAC key, at least 32 bytes as UTF-8.
@@ -217,13 +258,14 @@ class SessionPolicy:
             ),
         )
 
-    def _sign(self, payload: bytes, issued_at: int) -> str:
+    def _sign(self, payload: bytes, issued_at: int, binding: bytes = b"") -> str:
         body = b64url_encode(payload)
-        stamp = str(issued_at).encode("ascii")
-        mac = hmac.new(self._secret, body.encode("ascii") + b"." + stamp, "sha256").hexdigest()
+        stamp = str(issued_at)
+        signed = _signed_bytes(binding, body, stamp)
+        mac = hmac.new(self._secret, signed, "sha256").hexdigest()
         return f"{body}.{issued_at}.{mac}"
 
-    def _load(self, value: str) -> tuple[dict[str, Any], bytes] | None:
+    def _load(self, value: str, binding: bytes = b"") -> tuple[dict[str, Any], bytes] | None:
         """The session and the exact payload bytes it was decoded from.
 
         Returning the payload lets `before` skip re-serializing what it just
@@ -234,7 +276,7 @@ class SessionPolicy:
         """
         try:
             body, stamp, mac = value.split(".")
-            signed = f"{body}.{stamp}".encode("ascii")
+            signed = _signed_bytes(binding, body, stamp)
             for secret in self._verification_secrets:
                 expected = hmac.new(secret, signed, "sha256").hexdigest()
                 if hmac.compare_digest(mac, expected):
@@ -267,9 +309,23 @@ class SessionPolicy:
             await self._before_stored(request)
             return None
         loaded = None
+        binding = None
         raw = request.cookies.get(self._cookie)
         if raw is not None:
-            loaded = self._load(raw)
+            try:
+                binding, tenant_bound = _session_binding(request)
+            except _AmbiguousSessionAuthority:
+                state = request.state
+                state.session = {}
+                state._session_loaded = None
+                state._session_binding = None
+                state._session_server_side = False
+                return None
+            loaded = self._load(raw, binding)
+            if loaded is None and not tenant_bound:
+                legacy = self._load(raw)
+                if legacy is not None:
+                    loaded = (legacy[0], b"")
         if loaded is None:
             session: dict[str, Any] = {}
             baseline = _EMPTY_SESSION
@@ -285,6 +341,7 @@ class SessionPolicy:
         state = request.state
         state.session = session
         state._session_loaded = baseline
+        state._session_binding = binding
         state._session_server_side = False
         return None
 
@@ -292,8 +349,25 @@ class SessionPolicy:
         sid: str | None = None
         session: dict[str, Any] = {}
         raw = request.cookies.get(self._cookie)
+        try:
+            binding, tenant_bound = _session_binding(request)
+        except _AmbiguousSessionAuthority:
+            state = request.state
+            state.session = session
+            state._session_loaded = None
+            state._session_sid = None
+            state._session_rotate = False
+            state._session_resign = False
+            state._session_server_side = True
+            return
+        resign = False
         if raw is not None:
-            decoded = self._load_sid(raw)
+            loaded_sid = self._load_sid(raw, binding, _status=True)
+            decoded, resign = loaded_sid if isinstance(loaded_sid, tuple) else (None, False)
+            if decoded is None and not tenant_bound:
+                loaded_sid = self._load_sid(raw, _status=True)
+                decoded, _previous = loaded_sid if isinstance(loaded_sid, tuple) else (None, False)
+                resign = decoded is not None
             if decoded is not None:
                 stored = await self._store.load(decoded)
                 if stored is not None:
@@ -307,7 +381,9 @@ class SessionPolicy:
         state.session = session
         state._session_sid = sid
         state._session_loaded = baseline
+        state._session_binding = binding
         state._session_rotate = False
+        state._session_resign = resign
         state._session_server_side = True
 
     async def _after_stored(self, request: Request, response: Any) -> Any:
@@ -319,6 +395,7 @@ class SessionPolicy:
             return response
         sid = state.get("_session_sid")
         rotate = bool(state.get("_session_rotate"))
+        resign = bool(state.get("_session_resign"))
 
         if not session:
             # Emptied: drop the row and clear the cookie.
@@ -357,10 +434,13 @@ class SessionPolicy:
                     return response
             else:
                 await self._store.save(sid, session, self._max_age)
-        if changed and hasattr(response, "set_cookie"):
+        if (changed or resign) and hasattr(response, "set_cookie"):
+            binding = state.get("_session_binding")
+            if binding is None:
+                binding, _tenant_bound = _session_binding(request)
             response.set_cookie(
                 self._cookie,
-                self._sign(sid.encode("ascii"), int(time.time())),
+                self._sign(sid.encode("ascii"), int(time.time()), binding),
                 max_age=self._max_age,
                 httponly=self._http_only,
                 secure=self._secure,
@@ -368,20 +448,25 @@ class SessionPolicy:
             )
         return response
 
-    def _load_sid(self, value: str) -> str | None:
+    def _load_sid(
+        self, value: str, binding: bytes = b"", *, _status: bool = False
+    ) -> str | tuple[str, bool] | None:
         """The signed session id from a cookie, or None if it does not verify."""
         try:
             body, stamp, mac = value.split(".")
-            signed = f"{body}.{stamp}".encode("ascii")
-            for secret in self._verification_secrets:
+            signed = _signed_bytes(binding, body, stamp)
+            previous = False
+            for index, secret in enumerate(self._verification_secrets):
                 expected = hmac.new(secret, signed, "sha256").hexdigest()
                 if hmac.compare_digest(mac, expected):
+                    previous = index > 0
                     break
             else:
                 return None
             if int(stamp) + self._max_age < int(time.time()):
                 return None
-            return b64url_decode(body).decode("ascii")
+            sid = b64url_decode(body).decode("ascii")
+            return (sid, previous) if _status else sid
         except ValueError, TypeError, UnicodeDecodeError:
             return None
 
@@ -409,9 +494,15 @@ class SessionPolicy:
         if not session:
             response.delete_cookie(self._cookie)
             return response
+        binding = state.get("_session_binding")
+        if binding is None:
+            try:
+                binding, _tenant_bound = _session_binding(request)
+            except _AmbiguousSessionAuthority:
+                return response
         response.set_cookie(
             self._cookie,
-            self._sign(serialized, int(time.time())),
+            self._sign(serialized, int(time.time()), binding),
             max_age=self._max_age,
             httponly=self._http_only,
             secure=self._secure,

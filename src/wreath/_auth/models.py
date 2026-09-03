@@ -8,6 +8,10 @@ from dataclasses import dataclass, field
 from .principal import Limits, Narrowing
 
 
+def qualified_identity_value(namespace: str, value: str) -> str:
+    return f"{len(namespace)}:{namespace}{value}" if namespace else value
+
+
 @dataclass(frozen=True, slots=True)
 class Identity:
     """Who is calling, and everything that can only *reduce* what they may do.
@@ -29,6 +33,10 @@ class Identity:
     a privileged identity class. `claims` remains unrelated: it is the token's
     own untrusted/application-facing claims (OIDC and friends), carried
     verbatim, and nothing derives authority from it.
+
+    `namespace` distinguishes locally unique ids issued by different identity
+    providers without changing the application-facing `id`. JWT identities use
+    their verified `iss`; session bridges must carry it forward.
     """
 
     id: str
@@ -39,6 +47,21 @@ class Identity:
     limits: Limits | None = None
     narrowing: Narrowing | None = None
     attributes: Mapping[str, object] = field(default_factory=dict)
+    namespace: str = ""
+    authority_roles: frozenset[str] = field(init=False)
+    authority_permissions: frozenset[str] = field(init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "authority_roles",
+            frozenset(qualified_identity_value(self.namespace, item) for item in self.roles),
+        )
+        object.__setattr__(
+            self,
+            "authority_permissions",
+            frozenset(qualified_identity_value(self.namespace, item) for item in self.permissions),
+        )
 
 
 @dataclass(frozen=True, slots=True)

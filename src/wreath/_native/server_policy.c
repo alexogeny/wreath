@@ -978,8 +978,10 @@ run_proxy(WreathPolicyState *state, PyObject *proxy, PyObject *headers)
     Py_DECREF(contains);
     if (trusted <= 0) return trusted;
 
-    PyObject *forwarded = find_header(headers, "x-forwarded-for", 15, NULL);
-    if (forwarded != NULL) {
+    Py_ssize_t forwarded_count = 0;
+    PyObject *forwarded = find_header(
+        headers, "x-forwarded-for", 15, &forwarded_count);
+    if (forwarded != NULL && forwarded_count == 1) {
         PyObject *client = PyObject_CallMethodOneArg(
             networks, policy_name_forwarded_client, forwarded);
         if (client == NULL) return -1;
@@ -995,10 +997,13 @@ run_proxy(WreathPolicyState *state, PyObject *proxy, PyObject *headers)
     }
 
     if (PyTuple_GET_ITEM(proxy, 1) == Py_True) {
-        PyObject *proto = find_header(headers, "x-forwarded-proto", 17, NULL);
-        if (proto != NULL) {
+        Py_ssize_t proto_count = 0;
+        PyObject *proto = find_header(
+            headers, "x-forwarded-proto", 17, &proto_count);
+        if (proto != NULL && proto_count == 1) {
             const char *data = PyBytes_AS_STRING(proto);
             Py_ssize_t size = PyBytes_GET_SIZE(proto);
+            if (memchr(data, ',', (size_t)size) != NULL) goto proxy_host;
             Py_ssize_t end = 0;
             while (end < size && data[end] != ',') end++;
             Py_ssize_t start = 0;
@@ -1013,12 +1018,15 @@ run_proxy(WreathPolicyState *state, PyObject *proxy, PyObject *headers)
         }
     }
 
+proxy_host:
     if (PyTuple_GET_ITEM(proxy, 2) == Py_True) {
+        Py_ssize_t host_count = 0;
         PyObject *forwarded_host = find_header(
-            headers, "x-forwarded-host", 16, NULL);
-        if (forwarded_host != NULL) {
+            headers, "x-forwarded-host", 16, &host_count);
+        if (forwarded_host != NULL && host_count == 1) {
             const char *data = PyBytes_AS_STRING(forwarded_host);
             Py_ssize_t size = PyBytes_GET_SIZE(forwarded_host);
+            if (memchr(data, ',', (size_t)size) != NULL) return 0;
             Py_ssize_t end = 0;
             while (end < size && data[end] != ',') end++;
             Py_ssize_t start = 0;

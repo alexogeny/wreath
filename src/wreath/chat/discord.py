@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import math
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -93,6 +94,8 @@ class DiscordInteractionVerifier:
                 ) from exc
         if len(public_key) != 32:
             raise DiscordConfigurationError("Discord public_key must be exactly 32 bytes")
+        if max_age is not None and (not math.isfinite(max_age) or max_age <= 0):
+            raise DiscordConfigurationError("Discord max_age must be positive and finite")
         self._public_key = bytes(public_key)
         self._verify = verify
         self._clock = clock
@@ -999,7 +1002,16 @@ class Discord:
         @app.post(path)
         async def interactions(request: Request) -> Response:
             body = await request.body()
-            headers = {name.lower(): value for name, value in request.headers}
+            headers: dict[bytes, bytes] = {}
+            protected = {b"x-signature-ed25519", b"x-signature-timestamp"}
+            duplicate_content_type = False
+            for name, value in request.headers:
+                name = name.lower()
+                if name in protected and name in headers:
+                    return Response(status=401)
+                if name == b"content-type" and name in headers:
+                    duplicate_content_type = True
+                headers[name] = value
             signature = headers.get(b"x-signature-ed25519")
             timestamp = headers.get(b"x-signature-timestamp")
             if signature is None or timestamp is None:
@@ -1012,6 +1024,14 @@ class Discord:
                 )
             except UnicodeDecodeError, InvalidDiscordSignature:
                 return Response(status=401)
+            if duplicate_content_type:
+                return Response(status=415)
+            content_type = headers.get(b"content-type")
+            if (
+                content_type is not None
+                and content_type.partition(b";")[0].strip().lower() != b"application/json"
+            ):
+                return Response(status=415)
             try:
                 payload = await request.json()
             except TypeError, ValueError:

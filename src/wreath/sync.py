@@ -95,6 +95,7 @@ from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequenc
 from dataclasses import dataclass
 from typing import Any, Final
 
+from ._auth.models import qualified_identity_value
 from ._json import dumps as _json_dumps
 from ._livedoc import DEFAULT_KEEPALIVE, LiveDocument, Subscription
 from ._native import _core
@@ -507,7 +508,9 @@ def _principal_id(principal: Any) -> str:
     for attribute in ("sub", "id"):
         value = getattr(principal, attribute, None)
         if value is not None:
-            return str(value)
+            return qualified_identity_value(
+                str(getattr(principal, "namespace", "")), str(value)
+            )
     return str(principal)
 
 

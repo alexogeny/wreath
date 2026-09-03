@@ -22,6 +22,16 @@ def test_a_quota_refuses_configuration_that_would_refuse_everything() -> None:
         Quota(name="api", limit=1.0, period=60.0, cost=2.0)
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+@pytest.mark.parametrize("field", ["limit", "period", "cost"])
+def test_quota_authority_bounds_must_be_finite(field: str, value: float) -> None:
+    values = {"limit": 10.0, "period": 60.0, "cost": 1.0}
+    values[field] = value
+
+    with pytest.raises(ValueError, match="finite"):
+        Quota(name="api", **values)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -125,17 +135,21 @@ def test_configuring_a_store_twice_is_refused() -> None:
         store.configure(Quota(name="api", limit=1.0, period=10.0))
 
 
-def test_the_ceiling_evicts_the_fullest_counter() -> None:
+def test_the_ceiling_refuses_new_keys_until_stale_counters_can_be_reclaimed() -> None:
     store = MemoryQuotaStore(max_entries=2)
     store.configure(Quota(name="api", limit=5.0, period=10.0))
     store.try_spend("heavy", 0.0)
     store.try_spend("heavy", 0.0)
     store.try_spend("light", 0.0)
 
-    store.try_spend("new", 0.0)
+    assert store.try_spend("new", 0.0) > 0.0
+    assert store.peek("heavy") == 2.0
+    assert store.peek("light") == 1.0
 
-    assert store.peek("heavy") == 0.0  # evicted
-    assert store.peek("light") == 1.0  # kept
+    assert store.try_spend("next-period", 10.0) == 0.0
+    assert store.peek("heavy") == 0.0
+    assert store.peek("light") == 0.0
+    assert store.peek("next-period") == 1.0
 
 
 def test_a_store_used_before_configure_says_so() -> None:

@@ -61,6 +61,7 @@ typedef struct {
 
     PyObject *header_list;       /* list[(name,value)] during header assembly */
     PyObject *body_buffer;       /* bytearray coalescing queued request DATA */
+    Py_ssize_t content_length;   /* declared content-length, or -1 */
     Py_ssize_t body_received;    /* request payload bytes accepted for this stream */
     Py_ssize_t body_frames;      /* non-empty DATA callbacks accepted */
     PyObject *receive_waiter;    /* Future or NULL */
@@ -108,6 +109,8 @@ typedef struct WreathH3Conn {
     socklen_t remote_addrlen;
     struct sockaddr_storage local_addr;
     socklen_t local_addrlen;
+    PyObject *client_address;
+    PyObject *server_address;
     uint8_t scid[NGTCP2_MAX_CIDLEN];
     size_t scidlen;
     PyObject *streams;                /* dict {int64 stream_id: WreathH3Stream} */

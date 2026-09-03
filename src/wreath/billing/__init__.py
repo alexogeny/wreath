@@ -306,6 +306,7 @@ class Billing:
         return PostgresBillingQueries(
             session_factory,
             provider=provider,
+            merchant_account_for=self._merchant_account,
             schema=self.ledger._schema,
         )
 

@@ -340,7 +340,21 @@ def _target(resource: BFFResource, path: str, query: bytes) -> str:
 
 
 def _forwarded_request_headers(request: Request, token: str) -> tuple[tuple[bytes, bytes], ...]:
-    selected = [(name, value) for name, value in request.headers if name in _REQUEST_HEADERS]
+    selected: list[tuple[bytes, bytes]] = []
+    content_type_seen = False
+    idempotency_key_seen = False
+    for name, value in request.headers:
+        if name not in _REQUEST_HEADERS:
+            continue
+        if name == b"content-type":
+            if content_type_seen:
+                raise BadRequest("Content-Type must not occur more than once")
+            content_type_seen = True
+        elif name == b"idempotency-key":
+            if idempotency_key_seen:
+                raise BadRequest("Idempotency-Key must not occur more than once")
+            idempotency_key_seen = True
+        selected.append((name, value))
     selected.append((b"authorization", b"Bearer " + token.encode("ascii")))
     return tuple(selected)
 
@@ -412,12 +426,13 @@ def bff_router(
         access_token = await resolve(request)
         if access_token is None:
             raise Unauthorized("The BFF session is not authenticated", challenge="BFF")
+        headers = _forwarded_request_headers(request, access_token)
         target = _target(resource, path, request.query_string)
         body = await request.body()
         upstream = await resource.client.request(
             request.method,
             target,
-            headers=_forwarded_request_headers(request, access_token),
+            headers=headers,
             body=body,
         )
         return _forwarded_response(upstream)

@@ -208,6 +208,24 @@ def test_the_postgres_store_keeps_its_own_schema_and_tenant_column() -> None:
     assert "search_path" not in ddl
 
 
+@pytest.mark.parametrize(
+    ("options", "offending"),
+    [
+        ({"schema": 'safe"; DROP SCHEMA public CASCADE; --'}, "workflow schema"),
+        ({"table": 'safe"; DROP TABLE accounts; --'}, "workflow table"),
+        ({"table": "a" * 54}, "workflow instances table"),
+    ],
+)
+def test_postgres_store_refuses_unsafe_or_truncated_identifiers(
+    options: dict[str, str], offending: str
+) -> None:
+    with pytest.raises(ValueError, match=offending):
+        PostgresWorkflowStore.schema_sql(**options)
+
+    with pytest.raises(ValueError, match=offending):
+        PostgresWorkflowStore(object(), **options)
+
+
 def _memory_store() -> InMemoryWorkflowStore:
     """The store the checklist runs against: step records, no database."""
     return InMemoryWorkflowStore()

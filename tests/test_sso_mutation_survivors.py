@@ -57,7 +57,7 @@ def test_identity_provider_requires_at_least_one_signing_certificate() -> None:
 
 @pytest.mark.parametrize("ttl", [0, -1])
 def test_pending_login_store_requires_a_positive_ttl(ttl: float) -> None:
-    with pytest.raises(ValueError, match="ttl must be positive"):
+    with pytest.raises(ValueError, match="ttl must be a positive finite number"):
         PendingLoginStore(ttl=ttl)
 
 
@@ -177,7 +177,7 @@ def test_oidc_issuer_requires_https_a_host_and_no_userinfo(issuer: str) -> None:
 
 @pytest.mark.parametrize("ttl", [0, -1])
 def test_oidc_requires_a_positive_state_ttl(ttl: float) -> None:
-    with pytest.raises(ValueError, match="ttl must be positive"):
+    with pytest.raises(ValueError, match="state ttl must be a positive finite number"):
         _party(ttl=ttl)
 
 

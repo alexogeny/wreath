@@ -288,7 +288,7 @@ async def test_a_store_from_before_the_second_parameter_still_works() -> None:
     _require(result["rows"] == {}, f"the session survived its own password reset: {result}")
 
 
-async def test_a_store_that_cannot_enumerate_at_all_still_resets() -> None:
+async def test_a_store_that_cannot_enumerate_at_all_is_refused() -> None:
     from wreath.users import InMemoryUserStore, hash_password, reset_password_endpoint
 
     users = InMemoryUserStore()
@@ -304,14 +304,14 @@ async def test_a_store_that_cannot_enumerate_at_all_still_resets() -> None:
         async def delete(self, sid: str) -> None:
             return None
 
-    done = await reset_password_endpoint(
-        users,
-        _Minimal(),
-        secret=SECRET,
-        token=await _reset_token(users, "ann@example.test"),
-        new_password="a-much-better-one",
-    )
-    _require(done is True, "a store with no delete_for failed the reset")
+    with pytest.raises(RuntimeError, match="delete_for"):
+        await reset_password_endpoint(
+            users,
+            _Minimal(),
+            secret=SECRET,
+            token=await _reset_token(users, "ann@example.test"),
+            new_password="a-much-better-one",
+        )
 
 
 class _FakeStatement:
@@ -347,7 +347,7 @@ async def test_the_postgres_store_binds_the_session_key_it_was_given() -> None:
     _require("'account'" not in sql, f"the session key was interpolated into SQL: {sql}")
     _require("data -> $2" in sql, f"the session key is not a bound parameter: {sql}")
     _require(
-        statement.calls == [("u1", "account")],
+        statement.calls == [("u1", "account", "")],
         f"the configured key was not bound: {statement.calls}",
     )
 
@@ -362,7 +362,7 @@ async def test_the_postgres_store_defaults_to_principal() -> None:
 
     _, statement = database.statements["wreath_session_delete_for_wreath_session"]
     _require(
-        statement.calls == [("u1", "principal")],
+        statement.calls == [("u1", "principal", "")],
         f"the default key changed: {statement.calls}",
     )
 

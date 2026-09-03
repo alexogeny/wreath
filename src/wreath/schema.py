@@ -38,7 +38,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
-from ._pgname import quote_identifier
+from ._pgname import quote_identifier, validate_identifier
 
 logger = logging.getLogger("wreath")
 
@@ -117,8 +117,7 @@ class Component:
     schema: str = DEFAULT_SCHEMA
 
     def __post_init__(self) -> None:
-        if not self.name:
-            raise ValueError("component name must not be empty")
+        validate_identifier(self.name, "component name", allow_hyphen=True)
         versions = [step.version for step in self.steps]
         if versions != sorted(set(versions)):
             raise ValueError(

@@ -204,6 +204,24 @@ def test_middleware_validates_configuration() -> None:
             RateLimitPolicy(**kwargs)
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"limit": float("nan")},
+        {"limit": float("inf")},
+        {"limit": 1, "window": float("nan")},
+        {"limit": 1, "window": float("inf")},
+        {"limit": 1, "cost": float("nan")},
+        {"limit": 1, "cost": float("inf")},
+        {"limit": 1, "burst": float("nan")},
+        {"limit": 1, "burst": float("inf")},
+    ],
+)
+def test_rate_limit_refuses_non_finite_policy_bounds(kwargs: dict[str, float]) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        RateLimitPolicy(**kwargs)
+
+
 def test_a_store_cannot_be_shared_between_conflicting_policies() -> None:
     store = MemoryRateLimitStore()
     RateLimitPolicy(limit=10, window=60.0, store=store)

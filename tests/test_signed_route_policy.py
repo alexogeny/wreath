@@ -6,6 +6,7 @@ import pytest
 
 from wreath import Request, Wreath
 from wreath.policy import HttpPolicy, SignedRoutePolicy
+from wreath.tenancy import Tenant, tenant_scope
 from wreath.testing import TestClient
 from wreath.tokens import ActionTokens, MemoryTokenLedger, TokenPurpose
 
@@ -19,6 +20,38 @@ def _tokens(clock, *, single_use: bool = False) -> ActionTokens:
         ledger=ledger,
         clock=clock,
     )
+
+
+def test_signed_route_binds_tenant_before_consuming_single_use_token() -> None:
+    tenant_a = Tenant("tenant_a", "tenant_a")
+    tenant_b = Tenant("tenant_b", "tenant_b")
+    policy = SignedRoutePolicy(
+        _tokens(lambda: 1_000.0, single_use=True),
+        "download",
+        ("/download",),
+    )
+    with tenant_scope(tenant_a):
+        signed = policy.sign("/download")
+    query = signed.partition("?")[2].encode("ascii")
+
+    def request(tenant: Tenant) -> Request:
+        value = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/download",
+                "query_string": query,
+                "headers": [],
+            },
+            None,
+        )
+        value.state.tenant = tenant
+        return value
+
+    refused = policy._ingress_sync(request(tenant_b))
+    assert refused is not None
+    assert refused.status == 403
+    assert policy._ingress_sync(request(tenant_a)) is None
 
 
 @pytest.mark.asyncio
@@ -46,6 +79,27 @@ async def test_signed_route_binds_exact_path_method_and_query() -> None:
     assert changed.status == 403
     assert missing.status == 403
     assert unrelated.status == 404
+
+
+def test_signed_route_binds_the_raw_target_forwarded_by_a_proxy() -> None:
+    policy = SignedRoutePolicy(_tokens(lambda: 1_000.0), "download", ("/download",))
+    signed = policy.sign("/download")
+    query = signed.partition("?")[2].encode("ascii")
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/download",
+            "raw_path": b"/down%6coad",
+            "query_string": query,
+            "headers": [],
+        },
+        None,
+    )
+
+    refusal = policy._ingress_sync(request)
+
+    assert refusal is not None and refusal.status == 403
 
 
 @pytest.mark.asyncio

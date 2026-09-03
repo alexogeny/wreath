@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import math
 import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -15,6 +16,7 @@ from typing import (
 )
 
 from wreath import logging as log
+from wreath._auth.models import qualified_identity_value
 from wreath._auth.requirements import second_factor_age
 from wreath._capability_map import CapabilityMap
 from wreath._json import dumps as json_dumps
@@ -430,6 +432,8 @@ class InMemoryChatActionStore:
         ttl: float = 900.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        if ttl <= 0 or not math.isfinite(ttl):
+            raise ValueError("chat action ttl must be positive and finite")
         self._actions = CapabilityMap(
             max_entries=max_entries,
             ttl=ttl,
@@ -1037,7 +1041,12 @@ class ChatOps:
     async def _admit(self, context: Any, declaration: ChatDeclaration) -> bool:
         if self.rate_limit is not None:
             identity = getattr(context, "identity", None)
-            actor = getattr(identity, "id", None) or getattr(context, "actor", "anonymous")
+            identity_id = getattr(identity, "id", None)
+            actor = (
+                qualified_identity_value(str(getattr(identity, "namespace", "")), str(identity_id))
+                if identity_id
+                else getattr(context, "actor", "anonymous")
+            )
             key = ":".join(
                 (
                     "chat",
@@ -1167,7 +1176,12 @@ class ChatOps:
         if channel_actor_id is None:
             channel_actor_id = getattr(context, "actor", "")
             channel_actor_id = getattr(channel_actor_id, "id", channel_actor_id)
-        actor_id = getattr(identity, "id", None) or str(channel_actor_id)
+        identity_id = getattr(identity, "id", None)
+        actor_id = (
+            qualified_identity_value(str(getattr(identity, "namespace", "")), str(identity_id))
+            if identity_id
+            else str(channel_actor_id)
+        )
         channel = str(getattr(context, "provider", "teams"))
         await self.audit.append(
             _AuditRecord(

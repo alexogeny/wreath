@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -639,6 +640,11 @@ async def test_local_action_store_refuses_capacity_and_expires_capabilities() ->
         actor="user-1",
     )
     assert replacement.workflow == "release-2"
+
+
+def test_local_action_store_refuses_an_infinite_capability_lifetime() -> None:
+    with pytest.raises(ValueError, match="positive and finite"):
+        InMemoryChatActionStore(max_entries=1, ttl=math.inf)
 
 
 class Provider:

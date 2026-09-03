@@ -6,13 +6,12 @@ import pytest
 from _pgfidelity import check_for
 
 from wreath import Wreath
+from wreath._b64 import b64url_decode
 from wreath.policy import HttpPolicy
 from wreath.policy.sessions import SessionPolicy, rotate_session
 from wreath.session_store import PostgresSessionStore
 from wreath.state import State
 from wreath.testing import TestClient
-
-pytestmark = pytest.mark.asyncio
 
 
 class MemoryStore:
@@ -32,9 +31,7 @@ class MemoryStore:
         self.saves += 1
         self.rows[sid] = dict(data)
 
-    async def save_if_present(
-        self, sid: str, data: dict[str, Any], max_age: int
-    ) -> bool:
+    async def save_if_present(self, sid: str, data: dict[str, Any], max_age: int) -> bool:
         if sid not in self.rows:
             return False
         await self.save(sid, data, max_age)
@@ -108,6 +105,57 @@ def _cookie(response: Any) -> str:
     return header.split(";")[0].split("=", 1)[1]
 
 
+@pytest.mark.parametrize("server_side", (False, True))
+async def test_duplicate_host_neither_recovers_nor_reissues_a_session(
+    server_side: bool,
+) -> None:
+    store = MemoryStore() if server_side else None
+    app = Wreath()
+    app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, store=store)))
+
+    @app.get("/set")
+    async def set_session(request: Any) -> dict:
+        request.state.session["user"] = "ada"
+        return {"ok": True}
+
+    @app.get("/ambiguous")
+    async def ambiguous(request: Any) -> dict:
+        user = request.state.session.get("user")
+        request.state.session["attempt"] = "new"
+        return {"user": user}
+
+    async with TestClient(app) as client:
+        issued = await client.get("/set", headers={"host": "first.example"})
+        token = _cookie(issued)
+        scope, _body = client._scope(
+            "GET",
+            "/ambiguous",
+            headers={"cookie": f"wreath_session={token}"},
+        )
+        scope["headers"].extend(((b"host", b"first.example"), (b"host", b"routed.example")))
+        sent: list[dict[str, Any]] = []
+
+        async def receive() -> dict[str, Any]:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message: dict[str, Any]) -> None:
+            sent.append(message)
+
+        await client.app(scope, receive, send)
+
+    first = sent[0]
+    body = (
+        first.get("body", b"")
+        if first["type"] == "wreath.response"
+        else b"".join(
+            message.get("body", b"") for message in sent if message["type"] == "http.response.body"
+        )
+    )
+    headers = list(first["headers"])
+    assert b'"user":null' in body
+    assert all(name != b"set-cookie" for name, _value in headers)
+
+
 async def test_the_cookie_carries_only_an_id_and_contents_live_in_the_store() -> None:
     store = MemoryStore()
     app, _ = _app(store)
@@ -117,10 +165,9 @@ async def test_the_cookie_carries_only_an_id_and_contents_live_in_the_store() ->
     token = _cookie(login)
 
     # The signed payload is the opaque session id, not the session content.
-    middleware = SessionPolicy(secret="s" * 32, store=store)
-    sid = middleware._load_sid(token)
-    assert sid is not None and sid in store.rows
     assert len(store.rows) == 1
+    sid = next(iter(store.rows))
+    assert b64url_decode(token.split(".", 1)[0]).decode("ascii") == sid
     assert next(iter(store.rows.values())) == {"user": "ada"}
 
     who = await client.get("/whoami", headers={"cookie": f"wreath_session={token}"})
@@ -223,6 +270,41 @@ async def test_without_a_store_the_session_still_travels_in_the_cookie() -> None
     assert (await client.get("/get", headers={"cookie": f"wreath_session={token}"})).json() == {
         "user": "ada"
     }
+
+
+async def test_previous_secret_reissues_a_host_bound_server_session() -> None:
+    store = MemoryStore()
+    old = Wreath()
+    old.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="o" * 32, store=store)))
+
+    @old.get("/login")
+    async def login(request: Any) -> dict[str, bool]:
+        request.state.session["user"] = "ada"
+        return {"ok": True}
+
+    token = _cookie(await TestClient(old).get("/login", headers={"host": "app.test"}))
+
+    current = Wreath()
+    current.configure_http_policy(
+        HttpPolicy(
+            session=SessionPolicy(
+                secret="n" * 32,
+                previous_secrets=("o" * 32,),
+                store=store,
+            )
+        )
+    )
+
+    @current.get("/whoami")
+    async def whoami(request: Any) -> dict[str, Any]:
+        return {"user": request.state.session.get("user")}
+
+    response = await TestClient(current).get(
+        "/whoami",
+        headers={"host": "app.test", "cookie": f"wreath_session={token}"},
+    )
+    assert response.json() == {"user": "ada"}
+    assert (response.header("set-cookie") or "").startswith("wreath_session=")
 
 
 def test_cookie_session_loader_rejects_expiry_and_non_object_json() -> None:
@@ -345,22 +427,25 @@ async def test_load_accepts_decoded_objects_and_refuses_other_json_shapes() -> N
 
 
 @pytest.mark.parametrize(
-    ("session_key", "expected_key"),
-    [(None, "principal"), ("account", "account")],
+    ("session_key", "namespace", "expected_key"),
+    [(None, "", "principal"), ("account", "issuer-a", "account")],
 )
 async def test_delete_for_uses_the_selected_session_key_and_returns_zero_for_unknown_status(
     session_key: str | None,
+    namespace: str,
     expected_key: str,
 ) -> None:
     database = FakeDatabase()
     store = PostgresSessionStore(database, session_key="principal")
 
-    assert await store.delete_for("ada", session_key=session_key) == 0
+    assert await store.delete_for("ada", session_key=session_key, namespace=namespace) == 0
     statement = database.statements["wreath_session_delete_for_wreath_session"]
-    assert statement.calls == [("ada", expected_key)]
+    assert "->> 'iss'" in statement.sql
+    assert "$3::text" in statement.sql
+    assert statement.calls == [("ada", expected_key, namespace)]
 
     database.results[statement.sql] = "DELETE 3"
-    assert await store.delete_for("ada", session_key=session_key) == 3
+    assert await store.delete_for("ada", session_key=session_key, namespace=namespace) == 3
 
 
 async def test_expiry_is_pushed_to_the_database_clock() -> None:
@@ -661,7 +746,7 @@ async def test_an_unchanged_session_in_use_has_its_expiry_extended() -> None:
     assert response.json() == {"user": "ada"}
     assert store.touches == [("sid-1", 600)]  # extended ...
     assert store.saves == saves  # ... without rewriting the row
-    assert response.header("set-cookie") is None  # and without reissuing the cookie
+    assert (response.header("set-cookie") or "").startswith("wreath_session=")
 
 
 async def test_a_changed_session_is_saved_rather_than_touched() -> None:

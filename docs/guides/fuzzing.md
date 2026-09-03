@@ -139,17 +139,17 @@ replay-only command above for that target.
 
 ## Continuous fuzzing
 
-`.github/workflows/fuzz.yml` has two trust and cost profiles:
+Pull-request replay runs in `.github/workflows/ci.yml`, using the same compiled
+environment and ordinary test baseline as the required `checks` job. It
+restores the latest main-branch corpus read-only, evaluates Python mutations
+changed from the PR base, and replays every registered Python target. When no
+Python control changed, it runs corpus replay without mutation sampling. Pull
+requests never save corpus caches or compile sanitizer harnesses.
 
-- A relevant pull request restores the latest main-branch corpus read-only,
-  evaluates Python mutations changed from the PR base, and replays every
-  registered target. If the change has no Python source or yields no mutation
-  candidate, it falls back to an eight-control sample so the smoke run never
-  passes or fails merely because selection was empty. Pull requests never save
-  corpus caches.
-- The daily schedule and manual dispatch run four independently seeded shards
-  for each target. At most two shards execute concurrently. Each shard gets
-  50,000 primary cases and a four-minute wall-clock budget.
+`.github/workflows/fuzz.yml` owns the higher-cost native evidence. The daily
+schedule and manual dispatch run four independently seeded Python and native
+shards for each target. At most two shards execute concurrently. Each shard
+gets 50,000 primary cases and a four-minute wall-clock budget.
 
 Every scheduled shard uploads two run artifacts:
 

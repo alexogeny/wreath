@@ -208,6 +208,36 @@ async def test_an_unverifiable_token_is_named_as_such() -> None:
         assert f'resource_metadata="{METADATA_URL}"' in challenge
 
 
+async def test_comma_combined_authorization_is_refused_before_verification() -> None:
+    verified: list[str] = []
+
+    def verify(value: str) -> Identity:
+        verified.append(value)
+        return Identity("ada", claims={"aud": RESOURCE})
+
+    app = Wreath()
+    MCP(
+        app,
+        name="camera-trap",
+        version="1.0.0",
+        auth=protection(verifier=verify),
+    )
+    async with TestClient(app) as client:
+        response = await client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": PROTOCOL_VERSION},
+            },
+            headers={"authorization": "Bearer valid, Bearer attacker"},
+        )
+
+    assert response.status == 401
+    assert verified == []
+
+
 async def test_the_challenge_is_on_every_method() -> None:
     app, _ = build()
     async with TestClient(app) as client:
@@ -534,6 +564,12 @@ def test_a_rate_limit_that_is_not_a_limit_is_refused() -> None:
         ToolRateLimit(0)
     with pytest.raises(ValueError, match="window"):
         ToolRateLimit(1, 0.0)
+
+
+@pytest.mark.parametrize("window", [float("nan"), float("inf")])
+def test_a_tool_rate_limit_window_must_be_finite(window: float) -> None:
+    with pytest.raises(ValueError, match="positive and finite"):
+        ToolRateLimit(1, window)
 
 
 def test_a_burst_below_one_is_refused_and_a_burst_below_the_limit_is_not() -> None:

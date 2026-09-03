@@ -32,6 +32,14 @@ from wreath.users import (
     user_router,
 )
 
+
+class _Revocations:
+    async def delete_for(self, _subject: str) -> int:
+        return 0
+
+
+_REVOCATIONS = _Revocations()
+
 PASSWORD = "correct horse battery staple"
 
 
@@ -67,7 +75,15 @@ def _two_router_app(
     """
     app = Wreath()
     app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
-    app.include_router(user_router(users, secret="u" * 32, second_factors=login_store, clock=clock))
+    app.include_router(
+        user_router(
+            users,
+            sessions=_REVOCATIONS,
+            secret="u" * 32,
+            second_factors=login_store,
+            clock=clock,
+        )
+    )
     with warnings.catch_warnings():
         # The router warns about `enrolments=None`; that is a different subject.
         warnings.simplefilter("ignore", UserWarning)
@@ -171,7 +187,13 @@ async def test_two_user_store_objects_over_one_table_do_not_defeat_the_wiring_ch
     app = Wreath()
     app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
     app.include_router(
-        user_router(login_users, secret="u" * 32, second_factors=login_store, clock=clock)
+        user_router(
+            login_users,
+            sessions=_REVOCATIONS,
+            secret="u" * 32,
+            second_factors=login_store,
+            clock=clock,
+        )
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
@@ -205,7 +227,9 @@ async def test_two_unrelated_stores_are_still_not_consulted_for_each_other() -> 
     app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
     # The first application's login reads no second-factor store at all, and its
     # own user has no factor. The second application's user 1 does.
-    app.include_router(user_router(first_users, secret="u" * 32, clock=clock))
+    app.include_router(
+        user_router(first_users, sessions=_REVOCATIONS, secret="u" * 32, clock=clock)
+    )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         app.include_router(

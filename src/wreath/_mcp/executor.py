@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
-from .._auth.models import Identity
+from .._auth.models import Identity, qualified_identity_value
 from ..binding import ValidationError
 from ..request import Request
 from . import record as _record
@@ -232,7 +232,13 @@ class ToolExecutor:
                 "supply a verified principal"
             )
         principal_id = getattr(identity, "id", None)
-        principal_key = "" if principal_id is None else str(principal_id)
+        principal_key = (
+            ""
+            if principal_id is None
+            else qualified_identity_value(
+                str(getattr(identity, "namespace", "")), str(principal_id)
+            )
+        )
         effect_id = _effect_id(tenant, principal_key, call_id, name)
         invocation = ToolInvocation(
             tenant=tenant,
@@ -261,7 +267,7 @@ class ToolExecutor:
                 tool=name,
                 outcome=outcome,
                 duration_ms=(time.perf_counter() - started) * 1000.0,
-                principal=principal_id,
+                principal=None if principal_id is None else principal_key,
                 session=f"agent:{tenant}",
             )
 

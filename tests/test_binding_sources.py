@@ -48,6 +48,31 @@ async def test_explicit_binding_sources_and_aliases() -> None:
 
 
 @pytest.mark.asyncio
+async def test_scalar_header_binding_refuses_duplicate_values() -> None:
+    app = Wreath()
+    activated = False
+
+    @app.get("/protected")
+    async def protected(
+        request: Any,
+        token: Annotated[str, Header(alias="x-api-key")],
+    ) -> str:
+        nonlocal activated
+        activated = True
+        return token
+
+    async with TestClient(app) as client:
+        response = await client.get(
+            "/protected",
+            headers=[("x-api-key", "gateway-approved"), ("x-api-key", "attacker")],
+        )
+
+    assert response.status == 422
+    assert response.json()["errors"][0]["loc"] == ["header", "x-api-key"]
+    assert activated is False
+
+
+@pytest.mark.asyncio
 async def test_form_source_and_missing_header_location() -> None:
     app = Wreath()
 
@@ -78,6 +103,48 @@ async def test_form_source_and_missing_header_location() -> None:
     assert missing.json()["errors"][0]["loc"] == ["header", "x-token"]
     assert response.status == 200
     assert response.text == "Wreath:ok"
+
+
+@pytest.mark.asyncio
+async def test_bound_form_refuses_duplicate_content_type_before_body_read() -> None:
+    app = Wreath()
+    read = False
+
+    @app.post("/form")
+    async def endpoint(request: Any, name: Annotated[str, Form()]) -> str:
+        return name
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/form",
+        "raw_path": b"/form",
+        "query_string": b"",
+        "headers": [
+            (b"content-type", b"application/x-www-form-urlencoded"),
+            (b"content-type", b"multipart/form-data; boundary=B"),
+        ],
+        "server": ("test", 80),
+        "client": ("test", 1),
+        "root_path": "",
+    }
+    sent = []
+
+    async def receive():
+        nonlocal read
+        read = True
+        return {"type": "http.request", "body": b"name=unsafe", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    await app(scope, receive, send)
+
+    assert sent[0]["status"] == 400
+    assert read is False
 
 
 def test_body_cannot_be_combined_with_form() -> None:
@@ -201,15 +268,19 @@ async def test_depends_is_still_written_as_a_default() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_repeated_query_parameter_binds_the_first_occurrence() -> None:
+async def test_a_repeated_scalar_query_parameter_is_refused() -> None:
     app = Wreath()
+    activated = False
 
     @app.get("/search")
     async def search(request: Any, page: Annotated[int, Query()] = 0) -> dict[str, int]:
+        nonlocal activated
+        activated = True
         return {"page": page}
 
     async with TestClient(app) as client:
         response = await client.get("/search?page=1&page=9")
 
-    assert response.status == 200
-    assert response.json() == {"page": 1}
+    assert response.status == 422
+    assert response.json()["errors"][0]["loc"] == ["query", "page"]
+    assert activated is False

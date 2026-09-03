@@ -112,6 +112,12 @@ def test_a_claim_needs_a_deadline_and_a_payload_it_may_reset() -> None:
         _declaration(ttl=0.0)
 
 
+@pytest.mark.parametrize("ttl", [float("nan"), float("inf")])
+def test_a_store_ttl_must_be_finite_at_declaration(ttl: float) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        _declaration(ttl=ttl)
+
+
 async def test_the_store_touches_no_database_until_a_statement_runs() -> None:
     store = PostgresStore(object(), _declaration(ttl=60.0, claim=True))
     assert store.table == "things"

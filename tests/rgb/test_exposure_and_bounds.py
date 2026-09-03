@@ -149,6 +149,7 @@ class TestIdempotencyBodyCap:
         class _Request:
             state = _State()
 
+        await store.reserve("k")
         await middleware.after(_Request(), Response(b"small"))
         state, replay = await store.reserve("k")
         assert state == "done" and replay[2] == b"small"

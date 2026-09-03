@@ -38,10 +38,12 @@ import hashlib
 from collections.abc import Iterable
 from typing import Any, Protocol
 
+from .._auth.models import qualified_identity_value
+from .._capability_map import CapabilityMap
 from .._jobcore import dedup_key
 from ..request import Request
 from ..response import ProblemResponse, Response
-from ..store import CLAIMED, Column, Keyed, MemoryStore, PostgresStore, Sql
+from ..store import CLAIMED, Column, Keyed, PostgresStore, Sql
 
 _UNCACHEABLE_BODY = ("StreamingResponse", "FileResponse", "SSEResponse", "PreparedResponse")
 
@@ -58,6 +60,21 @@ _RETRYABLE_STATUSES = frozenset({401, 403, 408, 409, 423, 425, 429, 449})
 #: and handing a stored copy to every retry re-issues credentials the server has
 #: already moved on from.
 _UNREPLAYABLE_HEADERS = frozenset({b"set-cookie", b"set-cookie2"})
+
+
+def _request_path(request: Request) -> str:
+    context = getattr(request, "_context", None)
+    scope = getattr(request, "_scope", None)
+    if context is not None:
+        raw_path = context.raw_path
+    elif scope is not None:
+        raw_path = scope.get("raw_path")
+    else:
+        # Small request doubles used by integrations may expose only the
+        # already-normalized path. Real framework requests always take one of
+        # the raw-path branches above.
+        return request.path
+    return raw_path.decode("latin-1") if isinstance(raw_path, bytes) else request.path
 
 
 def _replayable_headers(
@@ -96,7 +113,9 @@ class IdempotencyStore(Protocol):
 
         Returns `("fresh", None)` when this caller owns the key and should
         run the handler, `("in_flight", None)` when another request holds it,
-        or `("done", replay)` when a response is already stored.
+        `("done", replay)` when a response is already stored, or
+        `("full", None)` when bounded storage cannot admit a new key without
+        displacing a live one.
 
         Must be **atomic**: a read followed by a write lets two workers both
         conclude they were first, which is the one thing this policy exists
@@ -132,49 +151,51 @@ class MemoryIdempotencyStore:
     than the guarantee itself, and `PostgresIdempotencyStore` is the guarantee.
 
     The window runs from the first attempt, not from whenever the handler
-    finished -- `wreath.store.MemoryStore` keeps the deadline a key was claimed
-    with, so a slow request cannot extend its own key and the two stores honour
-    a key for the same length of time.
+    finished -- the capability map keeps the deadline a key was claimed with,
+    so a slow request cannot extend its own key and the two stores honour a key
+    for the same length of time.
 
     Args:
         ttl: Seconds a key is honoured, timed from the claim. Default one day.
-        max_entries: Replays kept before the least recently used is evicted.
+        max_entries: Live claims and replays retained. A new key is refused at
+            capacity rather than evicting one still inside its replay window.
     """
 
     __slots__ = ("_store",)
 
     def __init__(self, *, ttl: float = 24 * 60 * 60, max_entries: int = 4096) -> None:
-        self._store = MemoryStore(ttl=ttl, max_entries=max_entries)
+        self._store = CapabilityMap(
+            ttl=ttl,
+            max_entries=max_entries,
+            overflow="refuse",
+        )
 
     async def reserve(self, key: str) -> tuple[str, Replay | None]:
         """Claim `key` in this worker's memory.
 
         Returns `("fresh", None)` when this request owns the key and must run
         the handler, `("in_flight", None)` while another request *on this
-        worker* holds it, or `("done", replay)` when a response is already
-        stored. A key that expired or was evicted between the claim and the
-        read reads as fresh, which is the safe answer.
+        worker* holds it, `("done", replay)` when a response is already
+        stored, or `("full", None)` when admitting it would evict a live key.
         """
         # The claim is atomic by virtue of being synchronous: no await between
         # the read and the write, so no other task can interleave.
-        if self._store.claim(key):
+        if self._store.claim(key, CLAIMED):
             return ("fresh", None)
-        entry = self._store.read(key)
+        entry = self._store.peek(key)
         if entry is None:
-            # Expired or evicted between the claim and the read. The safe
-            # reading is "run it", the same as for a key never seen.
-            return ("fresh", None)
+            return ("full", None)
         if entry is CLAIMED:
             return ("in_flight", None)
         return ("done", entry)
 
     async def store(self, key: str, replay: Replay) -> None:
         """Keep `replay` under `key` for the remainder of the claimed window."""
-        self._store.set(key, replay)
+        self._store.complete(key, replay)
 
     async def release(self, key: str) -> None:
         """Drop `key` from this worker's memory. Not an error when it is gone."""
-        self._store.delete(key)
+        self._store.discard(key)
 
 
 class PostgresIdempotencyStore:
@@ -541,6 +562,7 @@ class IdempotencyPolicy:
                     ),
                 ),
                 (409, HeaderSpec("Retry-After", description="Whole seconds; always 1.")),
+                (503, HeaderSpec("Retry-After", description="Whole seconds; always 1.")),
             ),
             responses=(
                 (
@@ -550,12 +572,27 @@ class IdempotencyPolicy:
                         media_type="application/problem+json",
                     ),
                 ),
+                (
+                    503,
+                    ResponseSpec(
+                        description=(
+                            "The bounded in-memory idempotency store cannot admit a new key."
+                        ),
+                        media_type="application/problem+json",
+                    ),
+                ),
             ),
             methods=frozenset({"POST", "PUT", "PATCH", "DELETE"}),
             behaviours=frozenset({"idempotency-key"}),
         )
 
-    def _key(self, request: Request, body: bytes = b"") -> str | None:
+    def _key(
+        self,
+        request: Request,
+        body: bytes = b"",
+        *,
+        header_value: str | None = None,
+    ) -> str | None:
         """The store key for this request, or None to leave it unguarded.
 
         **Idempotency requires an authenticated principal.** The key is scoped
@@ -572,7 +609,7 @@ class IdempotencyPolicy:
         """
         if request.method not in self._methods:
             return None
-        value = request.header(self._header)
+        value = self._header_value(request) if header_value is None else header_value
         if not value:
             return None
         identity = request.identity
@@ -588,26 +625,43 @@ class IdempotencyPolicy:
         tenant_key = "" if tenant_value is None else str(tenant_value)
         query_bytes = getattr(request, "query_string", b"")
         query = (
-            query_bytes.decode("latin-1")
-            if isinstance(query_bytes, bytes)
-            else str(query_bytes)
+            query_bytes.decode("latin-1") if isinstance(query_bytes, bytes) else str(query_bytes)
         )
         scope = _idempotency_request_scope(
             request.method,
-            request.path,
+            _request_path(request),
             str(getattr(identity, "type", "User")),
-            str(identity.id),
+            qualified_identity_value(str(getattr(identity, "namespace", "")), str(identity.id)),
             tenant_key,
             query,
             body,
         )
         return dedup_key(scope, value)
 
+    def _header_value(self, request: Request) -> str | None:
+        target = self._header.encode("latin-1")
+        headers = getattr(request, "headers", None)
+        if isinstance(headers, (list, tuple)):
+            found: bytes | None = None
+            for name, value in headers:
+                if name.lower() != target:
+                    continue
+                if found is not None:
+                    raise ValueError("Idempotency-Key must occur exactly once")
+                found = value
+            decoded = None if found is None else found.decode("latin-1")
+        else:
+            decoded = request.header(self._header)
+        if decoded is not None and "," in decoded:
+            raise ValueError("Idempotency-Key must not contain a comma")
+        return decoded
+
     async def action(self, request: Request):
         """Claim the key, or answer the request from the store.
 
         Returns None to let the handler run, a 409 problem response when the key
-        is already in flight, or the replayed response when one is stored.
+        is already in flight, a 503 when bounded storage cannot safely admit a
+        new key, or the replayed response when one is stored.
 
         Deliberately the `action` stage and not `before`: a global `before` hook
         runs at *ingress*, which is upstream of authentication, so
@@ -619,13 +673,17 @@ class IdempotencyPolicy:
         principal exists. The `after` half still runs for every response, as it
         must.
         """
-        key = self._key(request)
+        try:
+            value = self._header_value(request)
+        except ValueError as error:
+            return ProblemResponse(status=400, detail=str(error))
+        key = None if value is None else self._key(request, header_value=value)
         if key is not None:
             read_body = getattr(request, "body", None)
             body = await read_body() if callable(read_body) else b""
-            key = self._key(request, body)
+            key = self._key(request, body, header_value=value)
         if key is None:
-            if request.method in self._methods and request.header(self._header):
+            if request.method in self._methods and value:
                 # A key was sent and is not being honoured. Counted here and
                 # named on the response below, so the client is told rather than
                 # left to assume.
@@ -633,6 +691,13 @@ class IdempotencyPolicy:
                 request.state.idempotency_ignored = True
             return None
         state, entry = await self._store.reserve(key)
+        if state == "full":
+            unavailable = ProblemResponse(
+                status=503,
+                detail="idempotency capacity is temporarily unavailable",
+            )
+            unavailable.headers.append((b"retry-after", b"1"))
+            return unavailable
         if state == "in_flight":
             conflict = ProblemResponse(
                 status=409,

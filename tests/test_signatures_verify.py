@@ -6,7 +6,7 @@ import json
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from wreath import Wreath
+from wreath import Request, Wreath
 from wreath.signatures import (
     NonceLedger,
     SignatureError,
@@ -23,6 +23,47 @@ KEY_ID = "test-key-ed25519"
 PRIVATE = base64.urlsafe_b64decode("n4Ni-HpISpVObnQMW0wOhCKROaIKqKtW_2ZYb2p9KcU=")
 PUBLIC = base64.urlsafe_b64decode("JrQLj5P_89iXES9-vFgrIy29clF9CC_oPPsw3c5D0bs=")
 DIRECTORY = "https://bot.example/.well-known/http-message-signatures-directory"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        b"signature-input",
+        b"signature",
+        b"signature-agent",
+        b"host",
+        b"content-digest",
+    ],
+)
+def test_duplicate_singular_signature_fields_fail_before_nonce_claim(name: bytes) -> None:
+    now = 1_700_000_000.0
+    ledger = NonceLedger(max_entries=8, ttl=300.0)
+    signatures = build(nonces=ledger, clock=lambda: now)
+    headers = [
+        (key.lower().encode("ascii"), value.encode("latin-1"))
+        for key, value in signed_headers(clock=now, nonce="duplicate").items()
+    ]
+    originals = [value for key, value in headers if key == name]
+    if originals:
+        headers.append((name, originals[0]))
+    else:
+        headers.extend([(name, b"sha-256=:YQ==:"), (name, b"sha-256=:Yg==:")])
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "scheme": "https",
+            "path": "/probe",
+            "query_string": b"",
+            "headers": headers,
+        },
+        None,
+    )
+
+    facts = signatures.facts(request)
+    assert not facts.verified
+    assert facts.reason == "signature request field occurs more than once"
+    assert ledger.size == 0
 
 
 def signer(agent: str | None = DIRECTORY) -> SigningKey:
@@ -318,6 +359,56 @@ async def test_the_same_signed_request_twice_is_refused_the_second_time():
     assert ledger.replays == 1
 
 
+async def test_nonce_ledger_is_scoped_by_the_verified_public_key():
+    now = 1_700_000_000.0
+    other_directory = "https://other.example/.well-known/http-message-signatures-directory"
+    other_private = ed25519.Ed25519PrivateKey.generate()
+    other_public = other_private.public_key().public_bytes_raw()
+    signatures = Signatures(
+        directories=(DIRECTORY, other_directory),
+        nonces=NonceLedger(max_entries=8, ttl=300.0),
+        clock=lambda: now,
+        refresh_on_startup=False,
+    )
+    signatures.install(DIRECTORY, directory_document())
+    signatures.install(
+        other_directory,
+        {
+            "keys": [
+                {
+                    "kty": "OKP",
+                    "crv": "Ed25519",
+                    "kid": KEY_ID,
+                    "x": base64.urlsafe_b64encode(other_public).rstrip(b"=").decode(),
+                }
+            ]
+        },
+    )
+    first = sign_request(
+        signer(),
+        method="GET",
+        url=f"https://{HOST}/probe",
+        created=int(now),
+        nonce="shared-nonce",
+    )
+    first["Host"] = HOST
+    second = sign_request(
+        SigningKey(key_id=KEY_ID, sign=other_private.sign, agent=other_directory),
+        method="GET",
+        url=f"https://{HOST}/probe",
+        created=int(now),
+        nonce="shared-nonce",
+    )
+    second["Host"] = HOST
+
+    async with TestClient(app_with(signatures)) as client:
+        first_result = (await client.get("/probe", headers=first)).json()
+        second_result = (await client.get("/probe", headers=second)).json()
+
+    assert first_result["verified"] is True
+    assert second_result["verified"] is True
+
+
 async def test_a_signature_without_a_nonce_is_refused_when_a_ledger_is_configured():
     now = 1_700_000_000.0
     signatures = build(nonces=NonceLedger(), clock=lambda: now)
@@ -345,9 +436,7 @@ async def test_a_full_nonce_ledger_cannot_verify_a_fresh_signed_request():
 
     async with TestClient(app_with(signatures)) as client:
         body = (
-            await client.get(
-                "/probe", headers=signed_headers(clock=now, nonce="fresh-nonce")
-            )
+            await client.get("/probe", headers=signed_headers(clock=now, nonce="fresh-nonce"))
         ).json()
 
     assert body["verified"] is False
@@ -391,9 +480,10 @@ async def test_a_plaintext_directory_is_refused():
         Signatures(directories=("http://bot.example/x",))
 
 
-async def test_max_age_must_be_positive():
-    with pytest.raises(ValueError):
-        Signatures(max_age=0)
+@pytest.mark.parametrize("max_age", [0, float("nan"), float("inf")])
+async def test_max_age_must_be_finite_and_positive(max_age):
+    with pytest.raises(ValueError, match="finite and positive"):
+        Signatures(max_age=max_age)
 
 
 async def test_installing_an_unconfigured_directory_raises():

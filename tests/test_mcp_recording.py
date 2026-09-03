@@ -202,7 +202,7 @@ async def test_the_verified_caller_is_on_the_marker() -> None:
                 },
             )
         marker = markers(records)[0]
-        assert marker["principal"] == "ada"
+        assert marker["principal"] == "19:https://idp.exampleada"
         # The session id is a bearer credential for that session's in-flight
         # calls, so it correlates and never identifies.
         assert marker["session"].startswith("#")

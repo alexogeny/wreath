@@ -374,6 +374,49 @@ async def test_a_request_without_host_gets_a_relative_location() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "hosts",
+    [
+        [b"attacker.example", b"directory.example"],
+        [b"attacker.example/path"],
+    ],
+    ids=["duplicate", "invalid"],
+)
+async def test_ambiguous_host_gets_a_relative_location(hosts: list[bytes]) -> None:
+    app = directory().app
+    sent: list[dict[str, Any]] = []
+    path = "/scim/v2/ServiceProviderConfig"
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "scheme": "https",
+        "method": "GET",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": [
+            (b"authorization", b"Bearer let-me-in"),
+            *((b"host", host) for host in hosts),
+        ],
+        "server": ("directory.example", 443),
+        "client": ("127.0.0.1", 1),
+        "root_path": "",
+    }
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    await app(scope, receive, send)
+    body = json.loads(next(message["body"] for message in sent if "body" in message))
+
+    assert body["meta"]["location"] == "/scim/v2/ServiceProviderConfig"
+
+
+@pytest.mark.asyncio
 async def test_a_provisioned_account_has_a_password_nothing_can_satisfy() -> None:
     fixture = directory()
     async with fixture.client() as client:
@@ -613,9 +656,7 @@ async def test_cursor_errors_distinguish_count_syntax_and_expiry(
     async with fixture.client() as client:
         for index in range(2):
             await provision(client, f"user{index}@example.com")
-        invalid_count = await client.get(
-            "/scim/v2/Users?cursor&count=not-an-integer", headers=AUTH
-        )
+        invalid_count = await client.get("/scim/v2/Users?cursor&count=not-an-integer", headers=AUTH)
         first = (await client.get("/scim/v2/Users?cursor&count=1", headers=AUTH)).json()
         now += 2
         expired = await client.get(
@@ -634,9 +675,7 @@ async def test_cursor_is_bound_to_the_initial_count_and_query() -> None:
             await provision(client, f"user{index}@example.com")
         first = (await client.get("/scim/v2/Users?cursor&count=1", headers=AUTH)).json()
         cursor = first["nextCursor"]
-        changed_count = await client.get(
-            f"/scim/v2/Users?cursor={cursor}&count=2", headers=AUTH
-        )
+        changed_count = await client.get(f"/scim/v2/Users?cursor={cursor}&count=2", headers=AUTH)
         changed_filter = await client.get(
             f'/scim/v2/Users?cursor={cursor}&count=1&filter=userName%20sw%20"u"',
             headers=AUTH,

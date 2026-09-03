@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ._json import dumps as _json_dumps
+from ._native import _core
 from .linkset import LinkContext, Linkset, LinksetResponse, LinkTarget
 from .response import Response
 
@@ -25,8 +26,14 @@ def catalog_path(name: str, value: str | None) -> str | None:
 
 
 def _absolute(request: Any, path: str) -> str:
-    host = request.header("host", "")
-    if not host:
+    try:
+        raw_host = request._single_header(b"host")
+    except ValueError:
+        return path
+    if raw_host is None:
+        return path
+    host = raw_host.decode("latin-1")
+    if _core.normalize_host(host, False) is None:
         return path
     return f"{request.scheme}://{host}{path}"
 
@@ -44,9 +51,7 @@ def catalog_response(
             LinkTarget(_absolute(request, spec_path), type="application/json"),
         )
     if docs_path is not None:
-        links["service-doc"] = (
-            LinkTarget(_absolute(request, docs_path), type="text/html"),
-        )
+        links["service-doc"] = (LinkTarget(_absolute(request, docs_path), type="text/html"),)
     if not links:
         return Response(
             _json_dumps({"linkset": [{"anchor": _absolute(request, api_path)}]}),
