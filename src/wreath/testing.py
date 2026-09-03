@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote, urlencode
 
 from ._headers import find_header
@@ -584,7 +584,13 @@ class TestClient:
         by hand. `request()` collects, which is right for every assertion in a
         test and wrong for a stream something is reading as it arrives.
         """
-        supplied = tuple((headers.items() if isinstance(headers, Mapping) else headers) or ())
+        supplied: tuple[tuple[str, str], ...]
+        if headers is None:
+            supplied = ()
+        elif isinstance(headers, Mapping):
+            supplied = tuple(cast(Iterable[tuple[str, str]], headers.items()))
+        else:
+            supplied = tuple(cast(Iterable[tuple[str, str]], headers))
         overridden = {name.lower() for name, _value in supplied}
         combined = (
             *(
