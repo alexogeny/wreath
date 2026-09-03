@@ -378,6 +378,22 @@ async def test_effect_identity_is_isolated_by_resolved_principal() -> None:
     assert mcp.progress.get(f"agent-tool:{bob.effect_id}") is not None
 
 
+async def test_anonymous_effect_identity_does_not_collide_with_the_text_none() -> None:
+    executor = configured_mcp().executor("echo")
+    common = {
+        "name": "echo",
+        "arguments": {"query": {"value": "x"}},
+        "tenant": "tenant-a",
+        "delegation": None,
+        "call_id": "call-1",
+    }
+
+    anonymous = await executor.invoke(principal=None, **common)
+    named = await executor.invoke(principal=Identity("None"), **common)
+
+    assert anonymous.effect_id != named.effect_id
+
+
 async def test_direct_rate_limits_are_isolated_by_tenant_and_principal() -> None:
     mcp = MCP(name="agents", version="1")
 

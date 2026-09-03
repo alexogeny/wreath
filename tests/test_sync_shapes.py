@@ -433,6 +433,31 @@ def test_native_model_snapshot_materializes_the_public_boundary_once():
     )
 
 
+def test_a_native_model_with_a_custom_key_uses_the_public_snapshot_path():
+    NativeSyncRow = _native_sync_row_type()
+    sync = Sync(NativeSyncRow, key=lambda row: f"custom-{row.id}")
+
+    result = sync._snapshot([NativeSyncRow(id=7, caption="seven")])
+
+    assert result.keys == ("custom-7",)
+
+
+def test_a_non_model_duck_type_uses_the_public_snapshot_path():
+    from wreath.orm import Model
+
+    class DuckRow(Row):
+        pass
+
+    primary_key = DuckRow._orm_primary_key
+    DuckRow._orm_primary_key = Model._orm_primary_key
+    sync = Sync(DuckRow)
+    DuckRow._orm_primary_key = primary_key
+
+    result = sync._snapshot([DuckRow("a", "one")])
+
+    assert result.keys == ("a",)
+
+
 def test_native_model_snapshot_keeps_the_missing_primary_key_refusal():
     NativeSyncRow = _native_sync_row_type()
     sync = Sync(NativeSyncRow)

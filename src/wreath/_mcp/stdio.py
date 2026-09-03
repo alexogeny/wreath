@@ -68,6 +68,7 @@ async def serve(
     path: str = "/mcp",
     stdin: Any = None,
     stdout: Any = None,
+    max_message_bytes: int = 1 << 20,
 ) -> int:
     """Relay newline-delimited JSON-RPC between a pipe and `app`'s MCP route.
 
@@ -75,6 +76,13 @@ async def serve(
         A process exit code: 0 when stdin reached end of file cleanly.
     """
     from ..testing import TestClient
+
+    if (
+        not isinstance(max_message_bytes, int)
+        or isinstance(max_message_bytes, bool)
+        or max_message_bytes <= 0
+    ):
+        raise ValueError("max_message_bytes must be a positive integer")
 
     source = sys.stdin.buffer if stdin is None else stdin
     sink = sys.stdout.buffer if stdout is None else stdout
@@ -97,10 +105,17 @@ async def serve(
 
         try:
             while True:
-                line = await asyncio.to_thread(source.readline)
+                line = await asyncio.to_thread(source.readline, max_message_bytes + 2)
                 if not line:
                     return 0
-                message = line.strip()
+                if not line.endswith(b"\n"):
+                    raise ValueError(f"MCP stdio message exceeds {max_message_bytes} bytes")
+                framed = line[:-1]
+                if framed.endswith(b"\r"):
+                    framed = framed[:-1]
+                if len(framed) > max_message_bytes:
+                    raise ValueError(f"MCP stdio message exceeds {max_message_bytes} bytes")
+                message = framed.strip()
                 if not message:
                     continue
                 if not session:

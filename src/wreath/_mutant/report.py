@@ -84,6 +84,29 @@ def render(report: Report, *, verbose: bool = False) -> str:
         f"{counts[Outcome.ERROR]} declined"
     )
     lines.append(summary)
+    if report.selection is not None:
+        selection = report.selection
+        lines.append(
+            "                selection: "
+            f"{selection['selected_candidates']}/{selection['eligible_candidates']} candidates "
+            f"in {selection['selected_files']}/{selection['candidate_files']} files."
+        )
+        missing = selection["missing_operators"]
+        if missing:
+            lines.append(f"                unrepresented operators: {', '.join(missing)}")
+        unsupported = selection["unsupported_declarations"]
+        if unsupported:
+            lines.append(
+                f"                unsupported module-level declarations: {len(unsupported)}; "
+                "move them into an application factory function."
+            )
+    if report.differential_fuzz is not None:
+        fuzz = report.differential_fuzz
+        lines.append(
+            "                differential fuzz: "
+            f"{fuzz['cases_executed']}/{fuzz['case_budget']} cases across "
+            f"{fuzz['probes']} mutant-target probe(s); master seed {fuzz['master_seed']}."
+        )
     rating = rate_counts({outcome.value: count for outcome, count in counts.items()})
     lines.append(
         f"                {rating.label}: {rating.action}; "

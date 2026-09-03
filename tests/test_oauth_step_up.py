@@ -1,12 +1,27 @@
 from __future__ import annotations
 
+from enum import StrEnum
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from wreath import Wreath
-from wreath._auth.requirements import merge_requirements, requirement_for
+from wreath._auth.requirements import (
+    AuthRequirement,
+    OAuthStepUpRequirement,
+    SetRequirement,
+    _merge_oauth_step_up,
+    add_authenticated,
+    add_identify,
+    add_oauth_step_up,
+    add_public,
+    add_second_factor,
+    merge_requirements,
+    requirement_for,
+)
 from wreath.auth import BearerTokenBackend, Identity, oauth_step_up, second_factor
+from wreath.authorization import AuthorizationVocabulary
 from wreath.testing import TestClient
 
 
@@ -120,6 +135,172 @@ def test_oauth_step_up_refuses_incomplete_or_ambiguous_declarations() -> None:
         oauth_step_up(acr_values=("has space",))
     with pytest.raises(ValueError, match="unique"):
         oauth_step_up(acr_values=("myACR", "myACR"))
+
+
+@pytest.mark.parametrize("value", [1, b"loa", "café", "loa\x00", 'loa"2', "loa\\2"])
+def test_oauth_step_up_refuses_each_unsafe_authentication_class(value: object) -> None:
+    with pytest.raises(ValueError, match="non-empty ASCII"):
+        OAuthStepUpRequirement(acr_values=(value,))
+
+
+@pytest.mark.parametrize("claims", [None, [], "claims", 1])
+def test_oauth_step_up_refuses_non_mapping_claims(claims: object) -> None:
+    identity = SimpleNamespace(claims=claims)
+
+    assert OAuthStepUpRequirement(max_age=60).satisfied_by(identity, now=1000) is False
+
+
+@pytest.mark.parametrize("stamp", [None, True, False, "900", object()])
+def test_oauth_step_up_refuses_each_invalid_authentication_time(stamp: object) -> None:
+    identity = SimpleNamespace(claims={"auth_time": stamp})
+
+    assert OAuthStepUpRequirement(max_age=60).satisfied_by(identity, now=1000) is False
+
+
+def test_oauth_step_up_requires_current_time_for_recency_check() -> None:
+    identity = SimpleNamespace(claims={"auth_time": 900})
+
+    assert OAuthStepUpRequirement(max_age=60).satisfied_by(identity) is False
+
+
+def test_oauth_step_up_refuses_boolean_authentication_time_at_epoch() -> None:
+    identity = SimpleNamespace(claims={"auth_time": False})
+
+    assert OAuthStepUpRequirement(max_age=60).satisfied_by(identity, now=0) is False
+
+
+class FirstActions(StrEnum):
+    READ = "read"
+    SHARED = "shared"
+
+
+class SecondActions(StrEnum):
+    WRITE = "write"
+    SHARED = "shared"
+
+
+class EmptyAction(StrEnum):
+    EMPTY = ""
+
+
+def test_authorization_vocabulary_requires_at_least_one_enum() -> None:
+    with pytest.raises(ValueError, match="at least one StrEnum"):
+        AuthorizationVocabulary()
+
+
+@pytest.mark.parametrize("enum", [1, object(), str, int])
+def test_authorization_vocabulary_requires_str_enum_classes(enum: object) -> None:
+    with pytest.raises(TypeError, match="built from StrEnum classes"):
+        AuthorizationVocabulary(enum)
+
+
+def test_authorization_vocabulary_refuses_empty_action() -> None:
+    with pytest.raises(ValueError, match="actions cannot be empty"):
+        AuthorizationVocabulary(EmptyAction)
+
+
+def test_authorization_vocabulary_refuses_duplicate_action_across_enums() -> None:
+    with pytest.raises(ValueError, match="actions must be unique: shared"):
+        AuthorizationVocabulary(FirstActions, SecondActions)
+
+
+def test_authorization_vocabulary_accepts_unique_actions() -> None:
+    assert AuthorizationVocabulary(FirstActions).actions == ("read", "shared")
+
+
+@pytest.mark.parametrize(
+    ("requirement", "declares"),
+    [
+        (AuthRequirement(), False),
+        (AuthRequirement(public=True), True),
+        (AuthRequirement(identify=True), True),
+        (AuthRequirement(authenticated=True), True),
+    ],
+)
+def test_auth_requirement_declaration_modes_are_distinct(
+    requirement: AuthRequirement,
+    declares: bool,
+) -> None:
+    assert requirement.declares_access is declares
+
+
+@pytest.mark.parametrize(
+    ("check", "level"),
+    [
+        (SetRequirement(frozenset({"admin"}), "all"), 2),
+        (SetRequirement(frozenset({"admin"}), "any"), 1),
+        (SetRequirement(frozenset({"editor"}), "all"), 1),
+    ],
+)
+def test_auth_requirement_admin_level_requires_exact_all_admin_check(
+    check: SetRequirement,
+    level: int,
+) -> None:
+    assert AuthRequirement(role_checks=(check,)).access_level == level
+
+
+def test_oauth_step_up_merge_handles_absent_right_requirement() -> None:
+    left = OAuthStepUpRequirement(max_age=60)
+
+    assert _merge_oauth_step_up(left, None) is left
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "max_age", "acr_values"),
+    [
+        (
+            OAuthStepUpRequirement(acr_values=("loa",)),
+            OAuthStepUpRequirement(max_age=60),
+            60,
+            ("loa",),
+        ),
+        (
+            OAuthStepUpRequirement(max_age=60),
+            OAuthStepUpRequirement(acr_values=("loa",)),
+            60,
+            ("loa",),
+        ),
+    ],
+)
+def test_oauth_step_up_merge_preserves_each_one_sided_constraint(
+    left: OAuthStepUpRequirement,
+    right: OAuthStepUpRequirement,
+    max_age: int,
+    acr_values: tuple[str, ...],
+) -> None:
+    merged = _merge_oauth_step_up(left, right)
+
+    assert merged == OAuthStepUpRequirement(max_age=max_age, acr_values=acr_values)
+
+
+def test_protected_requirement_refuses_predeclared_public_endpoint() -> None:
+    def endpoint() -> None:
+        return None
+
+    add_public(endpoint)
+
+    with pytest.raises(ValueError, match="public.*authentication"):
+        add_authenticated(endpoint)
+
+
+def test_public_requirement_refuses_identifying_endpoint() -> None:
+    def endpoint() -> None:
+        return None
+
+    add_identify(endpoint)
+
+    with pytest.raises(ValueError, match="public.*authentication"):
+        add_public(endpoint)
+
+
+def test_session_step_up_refuses_existing_oauth_step_up_directly() -> None:
+    def endpoint() -> None:
+        return None
+
+    add_oauth_step_up(endpoint, OAuthStepUpRequirement(max_age=60))
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        add_second_factor(endpoint, 60)
 
 
 def test_stacked_oauth_step_up_guards_keep_the_strictest_common_requirement() -> None:

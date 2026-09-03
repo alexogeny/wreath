@@ -45,9 +45,11 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from .differential import DifferentialFuzzConfig, apply_differential_fuzz
 from .model import Mutation, Outcome, Report, Site, Verdict
-from .operators import Candidate, scan, tag
+from .operators import Candidate, scan, tag, unsupported_module_declarations
 from .patch import (
+    CapturedDefault,
     CodePatch,
     PatchError,
     PolicyPatch,
@@ -111,6 +113,45 @@ class Plan:
     """Mutation id -> the lines whose execution selects a test for it."""
 
     sources: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class SampleSelection:
+    """A deterministic sample and the coverage it represents."""
+
+    identifiers: tuple[str, ...]
+    eligible_candidates: int
+    candidate_counts_by_operator: dict[str, int]
+    selected_counts_by_operator: dict[str, int]
+    candidate_files: int
+    selected_files: int
+    missing_operators: tuple[str, ...]
+    unsupported_declarations: tuple[str, ...] = ()
+    errors: tuple[tuple[str, str], ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "eligible_candidates": self.eligible_candidates,
+            "selected_candidates": len(self.identifiers),
+            "candidate_files": self.candidate_files,
+            "selected_files": self.selected_files,
+            "by_operator": {
+                operator: {
+                    "eligible": eligible,
+                    "selected": self.selected_counts_by_operator.get(operator, 0),
+                }
+                for operator, eligible in self.candidate_counts_by_operator.items()
+            },
+            "missing_operators": list(self.missing_operators),
+            "unsupported_declarations": list(self.unsupported_declarations),
+        }
+
+
+def _identify_candidate(candidate: Candidate, relative: str, seen: dict[str, int]) -> str:
+    identifier = f"{candidate.operator}@{relative}:{candidate.line}"
+    duplicate = seen.get(identifier, 0)
+    seen[identifier] = duplicate + 1
+    return f"{identifier}#{duplicate}" if duplicate else identifier
 
 
 def module_name_for(path: Path) -> str | None:
@@ -228,8 +269,14 @@ def build_plan(
             continue
         if selected_ids is None:
             plan.sources.append(relative)
+        try:
+            importlib.import_module(name)
+        except Exception as error:
+            plan.errors.append((name, f"not importable: {type(error).__name__}: {error}"))
+            continue
         tag(tree)
         selected: list[tuple[Candidate, str]] = []
+
         for candidate in scan(tree, name):
             if operator_prefixes and not candidate.operator.startswith(operator_prefixes):
                 continue
@@ -238,30 +285,35 @@ def build_plan(
                 # rebinds a module-level name, and the name's assignment *is*
                 # the line, so the same test applies.
                 continue
-            identifier = f"{candidate.operator}@{relative}:{candidate.line}"
+            identifier = _identify_candidate(candidate, relative, seen)
             # The suffix is part of the id, so it has to exist before `--only`
             # can match on it -- otherwise `...:403#1` selects nothing and the
             # run silently reports on a mutation the caller did not ask for.
-            count = seen.get(identifier, 0)
-            seen[identifier] = count + 1
-            if count:
-                identifier = f"{identifier}#{count}"
             if only_pattern is not None and only_pattern.search(identifier) is None:
                 continue
             if selected_ids is not None and identifier not in selected_ids:
                 continue
             selected.append((candidate, identifier))
+        if selected_ids is None:
+            for candidate in unsupported_module_declarations(tree, name):
+                if operator_prefixes and not candidate.operator.startswith(operator_prefixes):
+                    continue
+                if touched is not None and candidate.line not in touched[relative]:
+                    continue
+                identifier = _identify_candidate(candidate, relative, seen)
+                if only_pattern is not None and only_pattern.search(identifier) is None:
+                    continue
+                plan.errors.append(
+                    (
+                        identifier,
+                        "module-level declaration cannot be mutated without replaying startup "
+                        "side effects; place it inside an application factory function",
+                    )
+                )
         if not selected:
             continue
         if selected_ids is not None:
             plan.sources.append(relative)
-        try:
-            importlib.import_module(name)
-        except BaseException as error:  # noqa: BLE001 - a target that cannot be
-            # imported contributes no mutants; naming it is the whole point, and
-            # an optional-dependency ImportError must not end the run.
-            plan.errors.append((name, f"not importable: {type(error).__name__}: {error}"))
-            continue
         for candidate, identifier in selected:
             mutation = _build(candidate, tree, name, relative, str(path), identifier)
             if isinstance(mutation, str):
@@ -287,17 +339,39 @@ def sample_identifiers(
     only: Sequence[str] = (),
     changed: str | None = None,
 ) -> tuple[str, ...]:
-    """Choose a stable whole-corpus sample without compiling every mutation.
+    """Choose a stable risk-stratified whole-corpus sample."""
+    return select_sample(
+        roots,
+        repo,
+        count,
+        operators=operators,
+        only=only,
+        changed=changed,
+    ).identifiers
 
-    Hash ranking gives every eligible identifier the same deterministic chance
-    of selection.  It deliberately does not use the discovery order: source
-    order is exactly why ``--limit`` spends a small budget at file heads.
+
+def select_sample(
+    roots: Sequence[Path],
+    repo: Path,
+    count: int,
+    *,
+    operators: Sequence[str] = (),
+    only: Sequence[str] = (),
+    changed: str | None = None,
+) -> SampleSelection:
+    """Choose a deterministic sample that represents operator families first.
+
+    One candidate from each family is selected before remaining slots are
+    filled by whole-corpus hash rank. When the budget is smaller than the
+    family count, rare families go first.
     """
     if count < 1:
         raise ValueError("mutation sample size must be at least 1")
     touched = changed_lines(repo, changed) if changed is not None else None
     seen: dict[str, int] = {}
-    identifiers: list[str] = []
+    identifiers: list[tuple[str, str, str]] = []
+    errors: list[tuple[str, str]] = []
+    unsupported: list[str] = []
     operator_prefixes = tuple(operators)
     only_pattern = re.compile("|".join(map(re.escape, only))) if only else None
     for path in discover(roots):
@@ -313,6 +387,11 @@ def sample_identifiers(
             # The selected build pass reports errors for selected sources. A
             # file that cannot yield identifiers cannot enter the sample.
             continue
+        try:
+            importlib.import_module(name)
+        except Exception as error:
+            errors.append((name, f"not importable: {type(error).__name__}: {error}"))
+            continue
         tag(tree)
         for candidate in scan(tree, name):
             if operator_prefixes and not candidate.operator.startswith(operator_prefixes):
@@ -326,13 +405,61 @@ def sample_identifiers(
                 identifier = f"{identifier}#{duplicate}"
             if only_pattern is not None and only_pattern.search(identifier) is None:
                 continue
-            identifiers.append(identifier)
+            identifiers.append((identifier, candidate.operator, relative))
+        for candidate in unsupported_module_declarations(tree, name):
+            if operator_prefixes and not candidate.operator.startswith(operator_prefixes):
+                continue
+            if touched is not None and candidate.line not in touched[relative]:
+                continue
+            identifier = _identify_candidate(candidate, relative, seen)
+            if only_pattern is not None and only_pattern.search(identifier) is None:
+                continue
+            unsupported.append(identifier)
 
     def rank(identifier: str) -> tuple[bytes, str]:
         digest = hashlib.blake2b(identifier.encode(), digest_size=16).digest()
         return digest, identifier
 
-    return tuple(sorted(identifiers, key=rank)[:count])
+    grouped: dict[str, list[tuple[str, str, str]]] = {}
+    files: set[str] = set()
+    for item in identifiers:
+        grouped.setdefault(item[1], []).append(item)
+        files.add(item[2])
+    for candidates in grouped.values():
+        candidates.sort(key=lambda item: rank(item[0]))
+
+    selected: list[tuple[str, str, str]] = []
+    selected_ids: set[str] = set()
+    for operator in sorted(grouped, key=lambda item: (len(grouped[item]), item)):
+        if len(selected) >= count:
+            break
+        item = grouped[operator][0]
+        selected.append(item)
+        selected_ids.add(item[0])
+    if len(selected) < count:
+        remainder = sorted(
+            (item for item in identifiers if item[0] not in selected_ids),
+            key=lambda item: rank(item[0]),
+        )
+        selected.extend(remainder[: count - len(selected)])
+
+    selected.sort(key=lambda item: rank(item[0]))
+    selected_counts: dict[str, int] = {}
+    for _, operator, _ in selected:
+        selected_counts[operator] = selected_counts.get(operator, 0) + 1
+    candidate_counts = {operator: len(items) for operator, items in sorted(grouped.items())}
+    missing = tuple(operator for operator in candidate_counts if operator not in selected_counts)
+    return SampleSelection(
+        identifiers=tuple(item[0] for item in selected),
+        eligible_candidates=len(identifiers),
+        candidate_counts_by_operator=candidate_counts,
+        selected_counts_by_operator=dict(sorted(selected_counts.items())),
+        candidate_files=len(files),
+        selected_files=len({item[2] for item in selected}),
+        missing_operators=missing,
+        unsupported_declarations=tuple(unsupported),
+        errors=tuple(errors),
+    )
 
 
 def watch_selected_identifiers(
@@ -395,8 +522,19 @@ def _build(
     if candidate.kind == "value":
         # A Cedar policy is compiled the moment the module binds it, so
         # rebinding the text is only half the mutation -- see `PolicyPatch`.
-        build = PolicyPatch if candidate.operator.startswith("cedar.") else ValuePatch
-        patch = build(module_name=module, path=candidate.value_path, value=candidate.value)
+        if candidate.operator.startswith("cedar."):
+            patch = PolicyPatch(
+                module_name=module,
+                path=candidate.value_path,
+                value=candidate.value,
+            )
+        else:
+            patch = ValuePatch(
+                module_name=module,
+                path=candidate.value_path,
+                value=candidate.value,
+                captured_defaults=_captured_default_targets(tree, candidate.value_path),
+            )
         try:
             if patch.is_noop():
                 return "the replacement value equals the declared one"
@@ -422,6 +560,58 @@ def _build(
     if patch.is_noop():
         return "compiles to the same bytecode"
     return Mutation(identifier, candidate.operator, candidate.control, site, module, patch)
+
+
+def _captured_default_targets(
+    tree: ast.Module, value_path: tuple[str, ...]
+) -> tuple[CapturedDefault, ...]:
+    if len(value_path) != 1:
+        return ()
+    name = value_path[0]
+    found: dict[str, tuple[set[int], set[str]]] = {}
+
+    class Visitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.classes: list[str] = []
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            self.classes.append(node.name)
+            for statement in node.body:
+                self.visit(statement)
+            self.classes.pop()
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self._record(node)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self._record(node)
+
+        def _record(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+            scope = ".".join((*self.classes, node.name))
+            positions, keywords = found.setdefault(scope, (set(), set()))
+            positions.update(
+                index
+                for index, default in enumerate(node.args.defaults)
+                if isinstance(default, ast.Name) and default.id == name
+            )
+            keywords.update(
+                argument.arg
+                for argument, default in zip(
+                    node.args.kwonlyargs, node.args.kw_defaults, strict=True
+                )
+                if isinstance(default, ast.Name) and default.id == name
+            )
+
+    Visitor().visit(tree)
+    return tuple(
+        CapturedDefault(
+            scope=scope,
+            positional=tuple(sorted(positions)),
+            keywords=tuple(sorted(keywords)),
+        )
+        for scope, (positions, keywords) in found.items()
+        if positions or keywords
+    )
 
 
 # running
@@ -611,13 +801,21 @@ def run_native_baseline(
                 ),
                 encoding="utf-8",
             )
-        finally:
-            os._exit(0)
-    os.waitpid(pid, 0)
+        except Exception as error:
+            target.write_text(
+                json.dumps({"error": f"{type(error).__name__}: {error}"}),
+                encoding="utf-8",
+            )
+            os._exit(1)
+        os._exit(0)
+    _, status = os.waitpid(pid, 0)
     if not target.exists():
-        raise RuntimeError("the native baseline produced no result; the suite may have crashed")
+        exit_code = os.waitstatus_to_exitcode(status)
+        raise RuntimeError(f"the native baseline exited {exit_code} without a result")
     payload = json.loads(target.read_text(encoding="utf-8"))
     target.unlink(missing_ok=True)
+    if "error" in payload:
+        raise RuntimeError(f"native baseline failed: {payload['error']}")
     index: dict[tuple[str, int], tuple[str, ...]] = {}
     for key, nodes in payload["hits"]:
         path, _, line = key.rpartition(":")
@@ -643,16 +841,46 @@ import sys
 from wreath._mutant.runner import prepare_native_collection
 from wreath._native_test_runner import _test_import_paths, run_selected
 
-files = json.loads(sys.argv[1])
-node_ids = json.loads(sys.argv[2])
+payload = json.load(sys.stdin)
+files = payload["files"]
+node_ids = payload["node_ids"]
 collection = prepare_native_collection(files)
+fresh_node_ids = [case.node_id for case in collection.cases]
 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
     with _test_import_paths(collection.files):
-        results = run_selected(collection, node_ids, max_failures=0)
-print(json.dumps([[result.node_id, result.outcome] for result in results]))
+        results = run_selected(collection, fresh_node_ids, max_failures=0)
+fresh_results = dict(
+    zip(fresh_node_ids, (result.outcome for result in results), strict=True)
+)
+fresh_families = {}
+for node_id, outcome in fresh_results.items():
+    path, separator, suffix = node_id.rpartition("::")
+    name, parameter_separator, _parameter = suffix.partition("[")
+    if separator and parameter_separator:
+        fresh_families.setdefault(f"{path}::{name}", []).append(outcome)
+reconciled = []
+for node_id in node_ids:
+    outcome = fresh_results.get(node_id)
+    if outcome is None:
+        path, separator, suffix = node_id.rpartition("::")
+        name, parameter_separator, _parameter = suffix.partition("[")
+        family = (
+            fresh_families.get(f"{path}::{name}")
+            if separator and parameter_separator
+            else None
+        )
+        if family is None:
+            raise RuntimeError(f"fresh native baseline did not collect {node_id!r}")
+        outcome = next(
+            (candidate for candidate in ("failed", "interrupted") if candidate in family),
+            "passed" if "passed" in family else family[0],
+        )
+    reconciled.append([node_id, outcome])
+print(json.dumps(reconciled))
 """
     completed = subprocess.run(
-        [sys.executable, "-c", script, json.dumps(files), json.dumps(node_ids)],
+        [sys.executable, "-c", script],
+        input=json.dumps({"files": files, "node_ids": node_ids}),
         capture_output=True,
         text=True,
         check=False,
@@ -911,7 +1139,7 @@ def start_mutant(
                 os._exit(0)
             try:
                 patch.apply()
-            except Exception as error:  # noqa: BLE001 - the child's only job is
+            except Exception as error:
                 # to report why it could not run; re-raising loses the reason.
                 _write_mutant_payload(
                     target,
@@ -1391,6 +1619,7 @@ def execute(
     preselected: frozenset[str] | None = None,
     activity_file: Path | None = None,
     test_engine: str = "native",
+    differential_fuzz: DifferentialFuzzConfig | None = None,
 ) -> Report:
     started = time.perf_counter()
     if jobs < 1:
@@ -1405,17 +1634,17 @@ def execute(
             "remove it or use --test-engine pytest"
         )
     selected_ids = preselected
+    selection: SampleSelection | None = None
     if selected_ids is None and sample:
-        selected_ids = frozenset(
-            sample_identifiers(
-                roots,
-                repo,
-                sample,
-                operators=operators,
-                only=only,
-                changed=changed,
-            )
+        selection = select_sample(
+            roots,
+            repo,
+            sample,
+            operators=operators,
+            only=only,
+            changed=changed,
         )
+        selected_ids = frozenset(selection.identifiers)
     plan = build_plan(
         roots,
         repo,
@@ -1424,9 +1653,13 @@ def execute(
         changed=changed,
         selected_ids=selected_ids,
     )
+    if selection is not None:
+        plan.errors[:0] = selection.errors
     if limit:
         plan.mutations = plan.mutations[:limit]
     report = Report(sources=tuple(plan.sources))
+    if selection is not None:
+        report.selection = selection.as_dict()
 
     def emit(event: str, **values: object) -> None:
         if activity_file is None:
@@ -1680,6 +1913,8 @@ def execute(
                 note=reason,
             )
         )
+    if differential_fuzz is not None:
+        apply_differential_fuzz(report, differential_fuzz, workdir=workdir)
     report.total_seconds = time.perf_counter() - started
     if live_native_collections:
         for collection in unique_native_collections(live_native_collections.values()):

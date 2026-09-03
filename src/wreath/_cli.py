@@ -40,6 +40,78 @@ LoopName = Literal["asyncio", "uvloop", "metal"]
 _DEFAULT_MUTANT_SAMPLES = 192
 
 
+def _add_fuzz_campaign_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    backend_default: str,
+) -> None:
+    parser.add_argument(
+        "--fuzz-cases",
+        type=int,
+        default=1_000,
+        metavar="N",
+        help="maximum inputs executed in each fuzz target campaign (default: 1000)",
+    )
+    parser.add_argument(
+        "--fuzz-budget",
+        type=float,
+        default=10.0,
+        metavar="SECONDS",
+        help=(
+            "fuzz-execution time shared by post-mutation campaigns; native builds have "
+            "their own bounded timeout (default: 10)"
+        ),
+    )
+    parser.add_argument(
+        "--fuzz-seed",
+        type=int,
+        default=None,
+        metavar="INTEGER",
+        help="replay one campaign seed; omitted chooses and records a fresh seed",
+    )
+    parser.add_argument(
+        "--fuzz-corpus",
+        default=".wreath/fuzz/corpus",
+        metavar="PATH",
+        help="persistent content-addressed fuzz corpus root",
+    )
+    parser.add_argument(
+        "--fuzz-artifacts",
+        default=".wreath/fuzz/artifacts",
+        metavar="PATH",
+        help="persistent minimized finding and reproduction artifact root",
+    )
+    parser.add_argument(
+        "--fuzz-backend",
+        choices=("python", "native", "all"),
+        default=backend_default,
+        help="feedback engine: Python semantic/PEP 669, native SanitizerCoverage, or all",
+    )
+    parser.add_argument(
+        "--fuzz-native-build",
+        default=".wreath/fuzz/native-build",
+        metavar="PATH",
+        help="standalone ASan/UBSan/SanitizerCoverage harness build root",
+    )
+    parser.add_argument(
+        "--fuzz-native-reuse-build",
+        action="store_true",
+        help="reuse native harnesses only when their instrumentation manifest still matches",
+    )
+    parser.add_argument(
+        "--fuzz-target",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="campaign target to run (repeatable; default: targets matching mutation evidence)",
+    )
+    parser.add_argument(
+        "--fuzz-replay-only",
+        action="store_true",
+        help="replay seed and regression corpora without generating new inputs",
+    )
+
+
 class CliError(Exception):
     """An expected command-line failure with a stable process exit code."""
 
@@ -525,15 +597,16 @@ def build_parser() -> argparse.ArgumentParser:
     from ._mutant.cli import add_arguments as _add_mutant_arguments
 
     _add_mutant_arguments(mutant_parser)
-    commands.add_parser(
+    fuzz_parser = commands.add_parser(
         "fuzz",
-        help="run tests, prove mutation controls, then fuzz only gold test files",
+        help="prove mutation controls, replay killers and evolve relevant input corpora",
         description=(
-            "Run the native test and mutation pipeline, then execute the complete "
-            "test surface of files whose ordinary tests killed a mutant. Test options "
-            "may be passed exactly as for `wreath test`."
+            "Run the native test and mutation pipeline, replay exact killers in a fresh "
+            "process, then evolve persistent corpora for coverage-guided targets selected "
+            "from mutation metadata. Test options may be passed exactly as for `wreath test`."
         ),
     )
+    _add_fuzz_campaign_arguments(fuzz_parser, backend_default="all")
     test_parser = commands.add_parser(
         "test",
         help="run tests with pytest or Wreath's native compatibility engine",
@@ -699,10 +772,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--fuzz",
         choices=("auto", "on", "off"),
         default="auto",
-        help="run each mutation-gold file's killers and explicit deterministic "
-        "fuzz cases in a fresh process; every clean file earns completion: "
-        "auto enables it with mutation (default), on, or off",
+        help="replay mutation-gold tests, then run coverage-guided campaigns for "
+        "matching fuzz targets: auto enables it with mutation (default), on, or off",
     )
+    _add_fuzz_campaign_arguments(test_parser, backend_default="python")
     test_parser.add_argument(
         "--stage-events",
         default=None,
@@ -3648,7 +3721,16 @@ def _write_bytes(path: str, data: bytes) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(argv) if argv is not None else sys.argv[1:]
     if arguments[:1] == ["fuzz"]:
-        arguments = ["test", "--mutant", "on", "--fuzz", "on", *arguments[1:]]
+        arguments = [
+            "test",
+            "--mutant",
+            "on",
+            "--fuzz",
+            "on",
+            "--fuzz-backend",
+            "all",
+            *arguments[1:],
+        ]
     parser = build_parser()
     if arguments[:1] == ["test"]:
         # Pytest owns a large and extensible option vocabulary, while the

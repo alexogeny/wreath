@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from functools import partial
 
 import pytest
 
@@ -365,6 +366,54 @@ def test_a_resource_that_takes_arguments_is_refused_at_registration() -> None:
         @mcp.resource("camera://one", description="Varies by input.")
         async def varying(request, camera: str) -> str:
             return camera
+
+
+def test_a_resource_needs_a_nonempty_uri() -> None:
+    mcp = MCP(name="x", version="1.0.0")
+    with pytest.raises(ValueError, match="needs a URI"):
+
+        @mcp.resource("", description="Cannot be addressed.")
+        async def unaddressed(request) -> str:
+            return ""
+
+
+def test_resource_names_use_each_declared_fallback_in_order() -> None:
+    mcp = MCP(name="x", version="1.0.0")
+
+    @mcp.resource("camera://function", description="Uses the function name.")
+    async def function_name(request) -> str:
+        return ""
+
+    @mcp.resource(
+        "camera://explicit",
+        name="chosen-name",
+        description="Uses the explicit name.",
+    )
+    async def ignored_function_name(request) -> str:
+        return ""
+
+    async def unnamed_reader(request) -> str:
+        return ""
+
+    mcp.resource("camera://uri", description="Uses the URI.")(partial(unnamed_reader))
+
+    names = {resource.uri: resource.name for resource in mcp.resources}
+    assert names == {
+        "camera://explicit": "chosen-name",
+        "camera://function": "function_name",
+        "camera://uri": "camera://uri",
+    }
+
+
+def test_a_resource_description_defaults_to_the_reader_docstring() -> None:
+    mcp = MCP(name="x", version="1.0.0")
+
+    @mcp.resource("camera://documented")
+    async def documented(request) -> str:
+        """The reader's own description."""
+        return ""
+
+    assert mcp.resources[0].description == "The reader's own description."
 
 
 def test_a_resource_without_a_description_is_refused() -> None:

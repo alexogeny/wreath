@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import datetime
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
-from wreath._passes.gate import Verification
+from wreath._passes.gate import Verification, refuse_reused_predicate
 from wreath.passes import (
     Buckets,
     Ceiling,
@@ -35,6 +37,105 @@ RECORDED = Key("recorded_at", "timestamptz", indexed=True)
 def test_a_successful_verification_cannot_also_be_transient():
     with pytest.raises(ValueError, match="successful verification cannot be transient"):
         Verification(True, transient=True)
+
+
+async def test_no_rows_match_combines_a_unit_scope_with_its_predicate() -> None:
+    class Executor:
+        def __init__(self) -> None:
+            self.sql = ""
+
+        async def fetchrow(self, sql: str) -> None:
+            self.sql = sql
+
+    executor = Executor()
+    verdict = await NoRowsMatch("ready = false").check(
+        executor,
+        walk=SimpleNamespace(table="jobs"),
+        scope="tenant_id = 7",
+    )
+
+    assert verdict.ok is True
+    assert "(ready = false) AND (tenant_id = 7)" in executor.sql
+
+
+async def test_reconcile_refuses_unequal_results() -> None:
+    class Executor:
+        def __init__(self) -> None:
+            self.values = iter((4, 5))
+
+        async def fetchval(self, _sql: str) -> int:
+            return next(self.values)
+
+    verdict = await Reconcile("source", "against").check(
+        Executor(), walk=SimpleNamespace()
+    )
+
+    assert verdict.ok is False
+    assert verdict.transient is False
+    assert "source = 4" in verdict.detail
+    assert "against = 5" in verdict.detail
+
+
+@pytest.mark.parametrize("name", ["not-valid", "two words"])
+def test_constraint_names_must_be_unquoted_identifiers(name: str) -> None:
+    with pytest.raises(PassDeclarationError, match="constraint name"):
+        Constraint(name, "ready")
+
+
+@pytest.mark.parametrize("check", [None, 1, "", "   "])
+def test_constraint_checks_must_be_nonempty_sql(check: object) -> None:
+    with pytest.raises(PassDeclarationError, match="CHECK expression"):
+        Constraint("ready_check", cast(Any, check))
+
+
+async def test_a_constraint_refuses_unit_scope_before_using_the_executor() -> None:
+    verdict = await Constraint("ready_check", "ready").check(
+        object(),
+        walk=SimpleNamespace(table="jobs"),
+        scope="tenant_id = 7",
+    )
+
+    assert verdict == Verification(
+        False,
+        "Constraint verifies a whole table, so it cannot be used with Gate(scope='unit')",
+    )
+
+
+async def test_a_non_violation_validation_error_is_transient() -> None:
+    class Executor:
+        async def execute(self, sql: str) -> None:
+            if "VALIDATE CONSTRAINT" in sql:
+                raise OperationalError("connection reset")
+
+    verdict = await Constraint("ready_check", "ready").check(
+        Executor(), walk=SimpleNamespace(table="jobs")
+    )
+
+    assert verdict.ok is False
+    assert verdict.transient is True
+    assert "could not validate" in verdict.detail
+
+
+def test_gate_refuses_a_verifier_without_a_check() -> None:
+    with pytest.raises(PassDeclarationError, match="must be NoRowsMatch"):
+        Gate(verify=object(), publishes="ready")
+
+
+def test_gate_refuses_a_noncallable_terminal_step() -> None:
+    with pytest.raises(PassDeclarationError, match="async callable"):
+        Gate(verify=NoRowsMatch("ready"), publishes="ready", then=object())
+
+
+def test_gate_refuses_a_blank_published_fact() -> None:
+    with pytest.raises(PassDeclarationError, match="needs a name"):
+        Gate(verify=NoRowsMatch("ready"), publishes="   ")
+
+
+@pytest.mark.parametrize("where", [None, 1])
+def test_predicate_reuse_ignores_work_without_a_sql_predicate(where: object) -> None:
+    gate = Gate(verify=NoRowsMatch(str(where)), publishes="ready")
+
+    refuse_reused_predicate(gate, SimpleNamespace(where=where))
 
 
 async def _nap(_seconds):

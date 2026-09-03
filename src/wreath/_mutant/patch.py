@@ -48,6 +48,13 @@ class PatchError(RuntimeError):
     """A mutation could not be built or applied. This tool's fault, not yours."""
 
 
+@dataclass(frozen=True, slots=True)
+class CapturedDefault:
+    scope: str
+    positional: tuple[int, ...] = ()
+    keywords: tuple[str, ...] = ()
+
+
 def resolve_scope(module: ModuleType, scope: str) -> FunctionType:
     """Find the live function object named by a dotted `Class.method` path.
 
@@ -233,8 +240,13 @@ class ValuePatch:
     module_name: str
     path: tuple[str, ...]
     value: Any
+    captured_defaults: tuple[CapturedDefault, ...] = ()
     _previous: Any = field(default=_UNSET, repr=False)
     _aliases: tuple[tuple[ModuleType, str], ...] = field(default=(), repr=False)
+    _default_values: tuple[
+        tuple[FunctionType, tuple[Any, ...] | None, dict[str, Any] | None, CapturedDefault],
+        ...,
+    ] = field(default=(), repr=False)
 
     def _container(self) -> Any:
         module = sys.modules.get(self.module_name)
@@ -260,9 +272,56 @@ class ValuePatch:
         name = self.path[-1]
         self._previous = getattr(container, name, _UNSET)
         self._aliases = self._find_aliases(container)
+        self._default_values = self._resolve_captured_defaults()
         setattr(container, name, self.value)
         for module, key in self._aliases:
             setattr(module, key, self.value)
+        for function, defaults, keyword_defaults, capture in self._default_values:
+            if defaults is not None and capture.positional:
+                function.__defaults__ = tuple(
+                    self.value if index in capture.positional else value
+                    for index, value in enumerate(defaults)
+                )
+            if keyword_defaults is not None and capture.keywords:
+                function.__kwdefaults__ = {
+                    key: self.value if key in capture.keywords else value
+                    for key, value in keyword_defaults.items()
+                }
+
+    def _resolve_captured_defaults(
+        self,
+    ) -> tuple[
+        tuple[FunctionType, tuple[Any, ...] | None, dict[str, Any] | None, CapturedDefault],
+        ...,
+    ]:
+        if not self.captured_defaults:
+            return ()
+        module = sys.modules.get(self.module_name)
+        if module is None:  # pragma: no cover - the runner imports first
+            raise PatchError(f"{self.module_name} is not imported")
+        resolved: list[
+            tuple[FunctionType, tuple[Any, ...] | None, dict[str, Any] | None, CapturedDefault]
+        ] = []
+        for capture in self.captured_defaults:
+            function = resolve_scope(module, capture.scope)
+            defaults = function.__defaults__
+            keyword_defaults = function.__kwdefaults__
+            if any(
+                defaults is None
+                or index >= len(defaults)
+                or defaults[index] is not self._previous
+                for index in capture.positional
+            ):
+                raise PatchError(f"{capture.scope} positional defaults moved since import")
+            if any(
+                keyword_defaults is None
+                or key not in keyword_defaults
+                or keyword_defaults[key] is not self._previous
+                for key in capture.keywords
+            ):
+                raise PatchError(f"{capture.scope} keyword defaults moved since import")
+            resolved.append((function, defaults, keyword_defaults, capture))
+        return tuple(resolved)
 
     def _find_aliases(self, container: Any) -> tuple[tuple[ModuleType, str], ...]:
         """Where else this exact object is bound -- when that question is real.
@@ -297,11 +356,15 @@ class ValuePatch:
     def undo(self) -> None:
         if self._previous is _UNSET:
             return
+        for function, defaults, keyword_defaults, _capture in self._default_values:
+            function.__defaults__ = defaults
+            function.__kwdefaults__ = keyword_defaults
         setattr(self._container(), self.path[-1], self._previous)
         for module, key in self._aliases:
             setattr(module, key, self._previous)
         self._previous = _UNSET
         self._aliases = ()
+        self._default_values = ()
 
 
 def _slot_names(cls: type) -> tuple[str, ...]:

@@ -15,6 +15,7 @@ from wreath._port.analyzer.orm import _index_tree
 from wreath._port.analyzer.queries import plain_filter_mappings, query_rule
 from wreath._port.analyzer.responses import response_class_rule
 from wreath._port.analyzer.sessions import _function_query_names, session_functions, session_sites
+from wreath._port.emit.buffer import _ends_argument_list
 from wreath._port.emit.queries import _QueryPlan
 
 
@@ -157,6 +158,13 @@ class _SegmentEmitter:
     @staticmethod
     def _seg(node: ast.AST) -> str:
         return ast.unparse(node)
+
+
+@pytest.mark.parametrize("source", [b"f(a,   )", b"f(a,  # why\n)"])
+def test_argument_list_separator_looks_past_whitespace_and_trailing_comments(
+    source: bytes,
+) -> None:
+    assert _ends_argument_list(source, len(source) - 1)
 
 
 @pytest.mark.parametrize("source", ["delete(1)", "delete(force=True)"])

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from wreath._json import jsonpath_find as native_jsonpath_find
-from wreath.jsonpath import JSONPathError, compile_jsonpath, jsonpath
+from wreath.jsonpath import JSONPathError, _iregexp_fullmatch, compile_jsonpath, jsonpath
 
 STORE = {
     "store": {
@@ -133,6 +133,47 @@ def test_iregexp_refuses_invalid_atoms_and_escapes_without_raising() -> None:
     assert jsonpath("$[?match(@, '\\\\') ]", ["x"]) == []
     assert jsonpath("$[?match(@, '\\\\p{Lu') ]", ["A"]) == []
     assert jsonpath("$[?match(@, '\\\\.') ]", ["."]) == ["."]
+
+
+@pytest.mark.parametrize(
+    ("pattern", "value", "matches"),
+    [
+        ("[^a]", "b", True),
+        ("[^a]", "a", False),
+        ("[-a]", "-", True),
+        ("[a-]", "-", True),
+        ("[a-z]", "m", True),
+        ("[a-z]", "A", False),
+        ("[\\p{Lu}]", "Ж", True),
+        ("[\\P{Lu}]", "ж", True),
+    ],
+)
+def test_iregexp_character_class_forms(
+    pattern: str,
+    value: str,
+    matches: bool,
+) -> None:
+    assert (_iregexp_fullmatch(pattern, value) is not None) is matches
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    ["(", "[", "[]", "[a", "[a-\\p{L}]", "[[]", "\\q", "\\p{NoSuch}", "\\p{L"],
+)
+def test_iregexp_rejects_each_malformed_atom_or_class(pattern: str) -> None:
+    assert _iregexp_fullmatch(pattern, "a") is None
+
+
+@pytest.mark.parametrize(
+    ("expression", "message"),
+    [
+        ("$['abc\\", "selector list needs"),
+        ("$['abc", "unterminated JSONPath string literal"),
+    ],
+)
+def test_unterminated_string_literal_names_the_error(expression: str, message: str) -> None:
+    with pytest.raises(JSONPathError, match=message):
+        compile_jsonpath(expression)
 
 
 def test_comparison_operators_are_derived_from_equality_and_less_than() -> None:

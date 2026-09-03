@@ -28,11 +28,43 @@ def test_samesite_none_without_secure_is_an_error() -> None:
     assert fired["cookie-samesite-none-insecure"] is Severity.ERROR
 
 
+def test_empty_cookie_name_is_ignored() -> None:
+    fired = _fire(_view(scheme="https", cookies=["=value; SameSite=None"]))
+
+    assert not any(rule_id.startswith("cookie-") for rule_id in fired)
+
+
+def test_samesite_none_requires_both_none_and_insecure() -> None:
+    secure_none = _fire(_view(cookies=["sid=x; SameSite=None; Secure"]))
+    insecure_lax = _fire(_view(cookies=["sid=x; SameSite=Lax"]))
+
+    assert "cookie-samesite-none-insecure" not in secure_none
+    assert "cookie-samesite-none-insecure" not in insecure_lax
+
+
 def test_host_prefix_violation_is_an_error() -> None:
     # __Host- forbids Domain; this one sets it, so it is invalid.
     bad = ["__Host-sid=x; Secure; Domain=example.com; Path=/"]
     fired = _fire(_view(scheme="https", cookies=bad))
     assert fired["cookie-prefix"] is Severity.ERROR
+
+
+def test_host_prefix_requires_secure_root_path_and_no_domain() -> None:
+    valid = _fire(_view(scheme="https", cookies=["__Host-sid=x; Secure; Path=/"]))
+    wrong_path = _fire(_view(scheme="https", cookies=["__Host-sid=x; Secure; Path=/app"]))
+    insecure = _fire(_view(scheme="https", cookies=["__Host-sid=x; Path=/"]))
+
+    assert "cookie-prefix" not in valid
+    assert wrong_path["cookie-prefix"] is Severity.ERROR
+    assert insecure["cookie-prefix"] is Severity.ERROR
+
+
+def test_secure_prefix_applies_only_to_insecure_prefixed_cookies() -> None:
+    ordinary = _fire(_view(cookies=["sid=x"]))
+    valid = _fire(_view(cookies=["__Secure-sid=x; Secure"]))
+
+    assert "cookie-prefix" not in ordinary
+    assert "cookie-prefix" not in valid
 
 
 def test_well_formed_cookie_only_warns_on_missing_defenses() -> None:
@@ -50,11 +82,25 @@ def test_missing_cookie_defenses_warn() -> None:
     assert fired["cookie-samesite"] is Severity.WARN
 
 
+def test_plain_http_cookie_does_not_require_secure() -> None:
+    fired = _fire(_view(scheme="http", cookies=["sid=x; SameSite=Lax; HttpOnly"]))
+
+    assert "cookie-secure" not in fired
+
+
 def test_hsts_required_on_https_only() -> None:
     assert "hsts" in _fire(_view(scheme="https"))
     assert "hsts" not in _fire(_view(scheme="http"))
     ok = _fire(_view(scheme="https", headers={"Strict-Transport-Security": "max-age=63072000"}))
     assert "hsts" not in ok and "hsts-max-age" not in ok
+
+
+def test_short_hsts_max_age_is_reported() -> None:
+    fired = _fire(
+        _view(scheme="https", headers={"Strict-Transport-Security": "max-age=60"})
+    )
+
+    assert fired["hsts-max-age"] is Severity.INFO
 
 
 def test_401_requires_www_authenticate() -> None:
@@ -79,6 +125,21 @@ def test_cors_wildcard_with_credentials_is_an_error() -> None:
         )
     )
     assert fired["cors-credentials"] is Severity.ERROR
+
+
+def test_cors_needs_both_wildcard_origin_and_credentials_to_fail() -> None:
+    wildcard_only = _fire(_view(headers={"Access-Control-Allow-Origin": "*"}))
+    credentials_with_origin = _fire(
+        _view(
+            headers={
+                "Access-Control-Allow-Origin": "https://example.test",
+                "Access-Control-Allow-Credentials": "true",
+            }
+        )
+    )
+
+    assert "cors-credentials" not in wildcard_only
+    assert "cors-credentials" not in credentials_with_origin
 
 
 def test_nosniff_and_referrer_policy_reported_when_absent() -> None:

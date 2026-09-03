@@ -214,6 +214,11 @@ async def test_reference_websocket_runs_optional_stages_and_stops_on_a_refusal()
     assert await policy._reference_websocket(object()) == "ai-refusal"
     assert traffic.calls == []
 
+    ai.result = None
+    traffic.result = None
+    assert await policy._reference_websocket(object()) == "origin"
+    assert origin.calls == ["async"]
+
 
 def _rate(**overrides: Any):
     key = object()

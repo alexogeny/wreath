@@ -23,6 +23,34 @@
 #include <string.h>
 
 
+static int
+edge_field_name_valid(const char *p, Py_ssize_t n)
+{
+    if (n <= 0) return 0;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)p[i];
+        if (c == 0 || !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z')
+              || (c >= 'a' && c <= 'z') || strchr("!#$%&'*+-.^_`|~", c))) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+
+static int
+edge_field_value_valid(const char *p, Py_ssize_t n)
+{
+    for (Py_ssize_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)p[i];
+        if (c == 0 || c == '\r' || c == '\n' || (c < 0x20 && c != '\t') || c == 0x7f) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+
 /* Fields dropped from every forwarded request.
  *
  * The union of RFC 9110's hop-by-hop list, the fields this proxy owns
@@ -167,6 +195,28 @@ append_literal(PyObject *parts, const char *text, Py_ssize_t len)
 }
 
 
+static PyObject *
+quoted_pair_bytes(PyObject *value)
+{
+    const char *src = PyBytes_AS_STRING(value);
+    Py_ssize_t size = PyBytes_GET_SIZE(value);
+    Py_ssize_t escapes = 0;
+    for (Py_ssize_t i = 0; i < size; i++) {
+        escapes += src[i] == '"' || src[i] == '\\';
+    }
+    if (escapes == 0) return Py_NewRef(value);
+    if (size > PY_SSIZE_T_MAX - escapes) return PyErr_NoMemory();
+    PyObject *result = PyBytes_FromStringAndSize(NULL, size + escapes);
+    if (result == NULL) return NULL;
+    char *dst = PyBytes_AS_STRING(result);
+    for (Py_ssize_t i = 0; i < size; i++) {
+        if (src[i] == '"' || src[i] == '\\') *dst++ = '\\';
+        *dst++ = src[i];
+    }
+    return result;
+}
+
+
 /* Read one (name, value) pair, refusing anything that is not two bytes objects.
  *
  * Refusing rather than coercing is the safe answer for this function
@@ -191,6 +241,12 @@ unpack_pair(PyObject *pair, PyObject **name, PyObject **value)
         Py_DECREF(fast);
         PyErr_SetString(PyExc_TypeError,
                         "header names and values must be bytes");
+        return -1;
+    }
+    if (!edge_field_name_valid(PyBytes_AS_STRING(n), PyBytes_GET_SIZE(n))
+        || !edge_field_value_valid(PyBytes_AS_STRING(v), PyBytes_GET_SIZE(v))) {
+        Py_DECREF(fast);
+        PyErr_SetString(PyExc_ValueError, "invalid header name or value");
         return -1;
     }
     *name = Py_NewRef(n);
@@ -244,6 +300,11 @@ wreath_edge_request_headers(PyObject *Py_UNUSED(module), PyObject *const *args,
         PyErr_SetString(PyExc_TypeError, "scheme and via must be bytes");
         return NULL;
     }
+    if (!edge_field_value_valid(PyBytes_AS_STRING(scheme), PyBytes_GET_SIZE(scheme))
+        || !edge_field_value_valid(PyBytes_AS_STRING(via), PyBytes_GET_SIZE(via))) {
+        PyErr_SetString(PyExc_ValueError, "invalid scheme or via field value");
+        return NULL;
+    }
 
     PyObject *client_bytes = NULL;      /* the peer, latin-1 encoded, or NULL */
     if (client != Py_None) {
@@ -253,6 +314,12 @@ wreath_edge_request_headers(PyObject *Py_UNUSED(module), PyObject *const *args,
         }
         client_bytes = PyUnicode_AsLatin1String(client);
         if (client_bytes == NULL) return NULL;
+        if (!edge_field_value_valid(PyBytes_AS_STRING(client_bytes),
+                                    PyBytes_GET_SIZE(client_bytes))) {
+            Py_DECREF(client_bytes);
+            PyErr_SetString(PyExc_ValueError, "invalid client field value");
+            return NULL;
+        }
     }
 
     PyObject *fast = PySequence_Fast(inbound, "inbound headers must be a sequence");
@@ -352,12 +419,15 @@ wreath_edge_request_headers(PyObject *Py_UNUSED(module), PyObject *const *args,
             Py_DECREF(parts);
             goto error;
         }
-        if (append_literal(parts, "for=\"", 5) < 0
-            || PyList_Append(parts, client_bytes) < 0
+        PyObject *escaped = quoted_pair_bytes(client_bytes);
+        if (escaped == NULL || append_literal(parts, "for=\"", 5) < 0
+            || PyList_Append(parts, escaped) < 0
             || append_literal(parts, "\"; ", 3) < 0) {
+            Py_XDECREF(escaped);
             Py_DECREF(parts);
             goto error;
         }
+        Py_DECREF(escaped);
     }
     if (append_literal(parts, "proto=", 6) < 0 || PyList_Append(parts, scheme) < 0) {
         Py_DECREF(parts);
@@ -368,13 +438,17 @@ wreath_edge_request_headers(PyObject *Py_UNUSED(module), PyObject *const *args,
         goto error;
     }
     if (host != NULL) {
+        PyObject *escaped = quoted_pair_bytes(host);
         if (append_pair(out, "x-forwarded-host", 16, host) < 0
+            || escaped == NULL
             || append_literal(parts, "; host=\"", 8) < 0
-            || PyList_Append(parts, host) < 0
+            || PyList_Append(parts, escaped) < 0
             || append_literal(parts, "\"", 1) < 0) {
+            Py_XDECREF(escaped);
             Py_DECREF(parts);
             goto error;
         }
+        Py_DECREF(escaped);
     }
     PyObject *forwarded = join_bytes("", 0, parts);
     Py_DECREF(parts);

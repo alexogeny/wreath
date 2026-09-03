@@ -75,6 +75,7 @@ elicitation tools before requests begin.
 ```python title="agent-tools.py"
 from typing import Any
 
+from wreath import Request
 from wreath.agents import (
     AgentCatalog,
     AgentProfile,
@@ -92,7 +93,7 @@ def support_agent(models: Any) -> AgentRuntime:
         action="Case::read",
         resource='Case::"requested"',
     )
-    async def read_case(request: Any, case_id: str) -> dict[str, Any]:
+    async def read_case(request: Request, case_id: str) -> dict[str, Any]:
         return await request.state.cases.read(request.identity, case_id)
 
     profile = AgentProfile(

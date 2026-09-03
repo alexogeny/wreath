@@ -57,6 +57,7 @@ typedef struct {
     PyObject *receive_callable;
     PyObject *send_callable;
     PyObject *done_callable;
+    PyObject *timeout_handle;
 
     PyObject *header_list;       /* list[(name,value)] during header assembly */
     PyObject *body_buffer;       /* bytearray coalescing queued request DATA */
@@ -156,6 +157,8 @@ typedef struct WreathH3Endpoint {
     Py_ssize_t retained_response_segments;
     Py_ssize_t response_backpressure_waiters;
     uint64_t response_backpressure_pauses;
+    uint8_t retry_secret[32];
+    Py_ssize_t connection_count;
 
     /* limits (from ServerConfig) */
     Py_ssize_t max_concurrent_streams;
@@ -173,6 +176,7 @@ typedef struct WreathH3Endpoint {
     Py_ssize_t initial_connection_window;
     Py_ssize_t qpack_table_bytes;
     Py_ssize_t qpack_blocked_streams;
+    double request_timeout;
 
     /* Native Flight Recorder: borrowed worker (or NULL when telemetry is off). */
     wreath_nfr_worker *nfr_worker;

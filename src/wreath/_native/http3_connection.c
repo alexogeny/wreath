@@ -7,7 +7,9 @@
 #include "http3.h"
 
 #include <arpa/inet.h>
+#include <limits.h>
 #include <netinet/in.h>
+#include <openssl/rand.h>
 #include <string.h>
 #include <time.h>
 
@@ -87,10 +89,17 @@ wreath_h3_worker_from(PyObject *recorder)
 /* Length of every connection ID we issue. Short-header (1-RTT) packets do not
  * carry the DCID length, so the decoder must be told this exact value. */
 #define WREATH_H3_CIDLEN 18
+#define WREATH_H3_MAX_CONNECTIONS 4096
 
-/* Per-process secret for stateless-reset and Retry tokens (dev-grade). */
-static const uint8_t wreath_h3_secret[32] =
-    "wth-http3-static-secret-32byte!!";
+static int
+h3_random(uint8_t *dest, size_t size)
+{
+    if (size > INT_MAX || RAND_priv_bytes(dest, (int)size) != 1) {
+        PyErr_SetString(PyExc_RuntimeError, "operating system entropy unavailable");
+        return -1;
+    }
+    return 0;
+}
 
 /* --- address conversion -------------------------------------------------- */
 
@@ -174,6 +183,11 @@ register_cid(WreathH3Endpoint *ep, WreathH3Conn *c, const uint8_t *cid, size_t c
     int rc = PyDict_SetItem(ep->conns, key, c->capsule);
     if (rc == 0) {
         rc = PyList_Append(c->cids, key);  /* track for teardown */
+        if (rc < 0) {
+            PyObject *error = PyErr_GetRaisedException();
+            if (PyDict_DelItem(ep->conns, key) < 0) PyErr_Clear();
+            PyErr_SetRaisedException(error);
+        }
     }
     Py_DECREF(key);
     return rc;
@@ -205,8 +219,8 @@ static void
 rand_cb(uint8_t *dest, size_t destlen, const ngtcp2_rand_ctx *rand_ctx)
 {
     (void)rand_ctx;
-    for (size_t i = 0; i < destlen; i++) {
-        dest[i] = (uint8_t)(rand() & 0xff);
+    if (h3_random(dest, destlen) < 0) {
+        Py_FatalError("HTTP/3 transport entropy unavailable");
     }
 }
 
@@ -216,12 +230,11 @@ get_new_connection_id_cb(ngtcp2_conn *conn, ngtcp2_cid *cid, uint8_t *token,
 {
     (void)conn;
     WreathH3Conn *c = (WreathH3Conn *)user_data;
-    for (size_t i = 0; i < cidlen; i++) {
-        cid->data[i] = (uint8_t)(rand() & 0xff);
-    }
+    if (h3_random(cid->data, cidlen) < 0) return NGTCP2_ERR_CALLBACK_FAILURE;
     cid->datalen = cidlen;
     if (ngtcp2_crypto_generate_stateless_reset_token(
-            token, wreath_h3_secret, sizeof(wreath_h3_secret), cid) != 0) {
+            token, c->endpoint->retry_secret,
+            sizeof(c->endpoint->retry_secret), cid) != 0) {
         return NGTCP2_ERR_CALLBACK_FAILURE;
     }
     if (c->capsule == NULL) {
@@ -361,12 +374,10 @@ send_retry(WreathH3Endpoint *ep, const ngtcp2_pkt_hd *hd,
 {
     ngtcp2_cid retry_scid;
     retry_scid.datalen = WREATH_H3_CIDLEN;
-    for (size_t i = 0; i < retry_scid.datalen; i++) {
-        retry_scid.data[i] = (uint8_t)(rand() & 0xff);
-    }
+    if (h3_random(retry_scid.data, retry_scid.datalen) < 0) return -1;
     uint8_t token[NGTCP2_CRYPTO_MAX_RETRY_TOKENLEN2];
     ngtcp2_ssize tokenlen = ngtcp2_crypto_generate_retry_token2(
-        token, wreath_h3_secret, sizeof(wreath_h3_secret), hd->version,
+        token, ep->retry_secret, sizeof(ep->retry_secret), hd->version,
         (const ngtcp2_sockaddr *)remote, remotelen, &retry_scid, &hd->dcid,
         wreath_h3_timestamp());
     if (tokenlen < 0) {
@@ -430,6 +441,7 @@ close_conn(WreathH3Endpoint *ep, WreathH3Conn *c)
         return;
     }
     c->closed = 1;
+    if (ep->connection_count > 0) ep->connection_count--;
     if (c->streams != NULL) {
         PyObject *values = PyDict_Values(c->streams);
         if (values != NULL) {
@@ -491,9 +503,7 @@ create_conn(WreathH3Endpoint *ep, const ngtcp2_pkt_hd *hd, const ngtcp2_path *pa
     /* our source CID */
     ngtcp2_cid scid;
     scid.datalen = WREATH_H3_CIDLEN;
-    for (size_t i = 0; i < scid.datalen; i++) {
-        scid.data[i] = (uint8_t)(rand() & 0xff);
-    }
+    if (h3_random(scid.data, scid.datalen) < 0) goto fail;
     memcpy(c->scid, scid.data, scid.datalen);
     c->scidlen = scid.datalen;
 
@@ -569,6 +579,7 @@ create_conn(WreathH3Endpoint *ep, const ngtcp2_pkt_hd *hd, const ngtcp2_path *pa
         Py_DECREF(c->capsule);
         goto fail;
     }
+    ep->connection_count++;
     Py_DECREF(c->capsule);  /* dict now owns it */
     return c;
 
@@ -682,31 +693,13 @@ wreath_h3_flush(WreathH3Conn *c)
 static PyObject *endpoint_on_timer(PyObject *op, PyObject *ignored);
 
 static void
-rearm_timer(WreathH3Endpoint *ep)
+schedule_timer(WreathH3Endpoint *ep, uint64_t expiry)
 {
-    /* Find the nearest expiry across all connections. */
-    uint64_t min_expiry = UINT64_MAX;
-    PyObject *values = PyDict_Values(ep->conns);
-    if (values != NULL) {
-        for (Py_ssize_t i = 0; i < PyList_GET_SIZE(values); i++) {
-            WreathH3Conn *c = (WreathH3Conn *)PyCapsule_GetPointer(
-                PyList_GET_ITEM(values, i), "neoh3conn");
-            if (c == NULL || c->conn == NULL) {
-                continue;
-            }
-            uint64_t e = ngtcp2_conn_get_expiry(c->conn);
-            if (e < min_expiry) {
-                min_expiry = e;
-            }
-        }
-        Py_DECREF(values);
-    }
-    if (min_expiry == UINT64_MAX) {
-        return;
-    }
+    double target = (double)expiry / (double)NGTCP2_SECONDS;
+    if (ep->timer_handle != NULL && ep->timer_target <= target) return;
     uint64_t now = wreath_h3_timestamp();
-    double delay = (min_expiry <= now) ? 0.0
-                   : (double)(min_expiry - now) / (double)NGTCP2_SECONDS;
+    double delay = (expiry <= now) ? 0.0
+                   : (double)(expiry - now) / (double)NGTCP2_SECONDS;
     /* schedule loop.call_later(delay, self._on_timer) */
     PyObject *cb = PyObject_GetAttr((PyObject *)ep, h3_name_on_timer);
     if (cb == NULL) {
@@ -741,12 +734,44 @@ rearm_timer(WreathH3Endpoint *ep)
         }
     }
     Py_XSETREF(ep->timer_handle, handle);
+    ep->timer_target = target;
+}
+
+static void
+rearm_connection_timer(WreathH3Endpoint *ep, WreathH3Conn *c)
+{
+    if (c != NULL && !c->closed && c->conn != NULL) {
+        schedule_timer(ep, ngtcp2_conn_get_expiry(c->conn));
+    }
+}
+
+static void
+rearm_timer(WreathH3Endpoint *ep)
+{
+    uint64_t min_expiry = UINT64_MAX;
+    PyObject *values = PyDict_Values(ep->conns);
+    if (values == NULL) {
+        PyErr_Clear();
+    } else {
+        for (Py_ssize_t i = 0; i < PyList_GET_SIZE(values); i++) {
+            WreathH3Conn *c = (WreathH3Conn *)PyCapsule_GetPointer(
+                PyList_GET_ITEM(values, i), "neoh3conn");
+            if (c != NULL && c->conn != NULL && !c->closed) {
+                uint64_t expiry = ngtcp2_conn_get_expiry(c->conn);
+                if (expiry < min_expiry) min_expiry = expiry;
+            }
+        }
+        Py_DECREF(values);
+    }
+    if (min_expiry != UINT64_MAX) schedule_timer(ep, min_expiry);
 }
 
 static PyObject *
 endpoint_on_timer(PyObject *op, PyObject *Py_UNUSED(ignored))
 {
     WreathH3Endpoint *ep = (WreathH3Endpoint *)op;
+    Py_CLEAR(ep->timer_handle);
+    ep->timer_target = -1.0;
     uint64_t now = wreath_h3_timestamp();
     PyObject *values = PyDict_Values(ep->conns);
     if (values != NULL) {
@@ -832,11 +857,14 @@ endpoint_datagram_received(PyObject *op, PyObject *args)
         }
         ngtcp2_cid odcid;
         if (ngtcp2_crypto_verify_retry_token2(
-                &odcid, hd.token, hd.tokenlen, wreath_h3_secret,
-                sizeof(wreath_h3_secret), hd.version,
+                &odcid, hd.token, hd.tokenlen, ep->retry_secret,
+                sizeof(ep->retry_secret), hd.version,
                 (const ngtcp2_sockaddr *)&remote, remotelen, &hd.dcid,
                 10 * NGTCP2_SECONDS, wreath_h3_timestamp()) != 0) {
             Py_RETURN_NONE;  /* invalid/expired token: drop */
+        }
+        if (ep->connection_count >= WREATH_H3_MAX_CONNECTIONS) {
+            Py_RETURN_NONE;
         }
         c = create_conn(ep, &hd, &path, &odcid);
         if (c == NULL) {
@@ -861,8 +889,8 @@ endpoint_datagram_received(PyObject *op, PyObject *args)
          ngtcp2_conn_in_draining_period(c->conn))) {
         close_conn(ep, c);
     }
+    rearm_connection_timer(ep, c);
     reap_conns(ep);
-    rearm_timer(ep);
     Py_RETURN_NONE;
 }
 
@@ -1133,6 +1161,8 @@ endpoint_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwargs))
     ep->retained_response_segments = 0;
     ep->response_backpressure_waiters = 0;
     ep->response_backpressure_pauses = 0;
+    ep->connection_count = 0;
+    if (h3_random(ep->retry_secret, sizeof(ep->retry_secret)) < 0) return -1;
     ep->reap = NULL;
     ep->reap_len = 0;
     ep->reap_cap = 0;
@@ -1153,6 +1183,13 @@ endpoint_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwargs))
         wreath_read_ssize_attr(config, "qpack_table_bytes", &ep->qpack_table_bytes) < 0 ||
         wreath_read_ssize_attr(config, "qpack_blocked_streams", &ep->qpack_blocked_streams) < 0) {
         return -1;
+    }
+    {
+        PyObject *timeout = PyObject_GetAttrString(config, "request_timeout");
+        if (timeout == NULL) return -1;
+        ep->request_timeout = PyFloat_AsDouble(timeout);
+        Py_DECREF(timeout);
+        if (ep->request_timeout == -1.0 && PyErr_Occurred()) return -1;
     }
 
     /* Build the QUIC-capable SSL_CTX (OpenSSL 3.5+). */

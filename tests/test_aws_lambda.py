@@ -6,7 +6,7 @@ import pytest
 
 from wreath import Wreath
 from wreath._asgi_state import ResponseCapture
-from wreath.aws_lambda import LambdaAdapter
+from wreath.aws_lambda import LambdaAdapter, _response, _scope, _v2_headers
 from wreath.response import JSONResponse, Response
 
 
@@ -159,6 +159,76 @@ def test_lambda_refuses_unknown_payload_versions_and_malformed_events() -> None:
     with pytest.raises(ValueError, match="requestContext"):
         adapter({"version": "2.0"}, None)
     adapter.close()
+
+
+def test_lambda_scope_refuses_each_malformed_v2_container() -> None:
+    with pytest.raises(ValueError, match="http object"):
+        _scope({"version": "2.0", "requestContext": {"http": None}}, None)
+    with pytest.raises(ValueError, match="headers must be an object"):
+        _v2_headers({"headers": []})
+    for cookies in ({}, ["valid", 7]):
+        with pytest.raises(ValueError, match="cookies must be a list of strings"):
+            _v2_headers({"cookies": cookies})
+
+
+def test_lambda_scope_preserves_body_client_and_platform_variants() -> None:
+    base = {"httpMethod": "POST", "path": "/", "requestContext": {}}
+    _version, anonymous, empty = _scope(base, "context")
+    assert empty == b""
+    assert anonymous["client"] is None
+    assert anonymous["extensions"] == {
+        "wreath.lambda": {"event": base, "context": "context"}
+    }
+
+    _version, malformed_identity, _body = _scope(
+        {**base, "requestContext": {"identity": 7}}, None
+    )
+    assert malformed_identity["client"] is None
+
+    event = {
+        **base,
+        "requestContext": {"identity": {"sourceIp": "203.0.113.9"}},
+        "body": "aGVsbG8=",
+        "isBase64Encoded": True,
+        "_wreath_google": {"project": "demo"},
+    }
+    _version, populated, body = _scope(event, None)
+    assert populated["client"] == ("203.0.113.9", None)
+    assert populated["extensions"] == {"wreath.google": {"project": "demo"}}
+    assert body == b"hello"
+
+    with pytest.raises(ValueError, match="body must be a string or null"):
+        _scope({**base, "body": 7}, None)
+    with pytest.raises(ValueError, match="body is not valid base64"):
+        _scope({**base, "body": "not-base64!", "isBase64Encoded": True}, None)
+
+
+def test_lambda_v2_cookies_are_joined_only_when_present() -> None:
+    assert _v2_headers({"cookies": []}) == []
+    assert _v2_headers({"cookies": ["a=1", "b=2"]}) == [
+        (b"cookie", b"a=1; b=2")
+    ]
+
+
+def test_lambda_response_classifies_content_and_cookie_headers_exactly() -> None:
+    binary = _response("2.0", 200, ((b"x-format", b"text/plain"),), b"hello")
+    assert binary["body"] == "aGVsbG8="
+    assert binary["isBase64Encoded"] is True
+    assert "cookies" not in binary
+
+    cookies = _response(
+        "2.0",
+        200,
+        (
+            (b"content-type", b"text/plain"),
+            (b"set-cookie", b"a=1"),
+            (b"x-test", b"value"),
+        ),
+        b"hello",
+    )
+    assert cookies["body"] == "hello"
+    assert cookies["cookies"] == ["a=1"]
+    assert cookies["headers"] == {"content-type": "text/plain", "x-test": "value"}
 
 
 def test_lambda_startup_failure_closes_the_warm_driver() -> None:

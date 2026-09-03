@@ -89,7 +89,7 @@ class AgentArtifactManager:
         if not isinstance(artifact_id, str) or not artifact_id:
             raise ValueError("artifact_id must be a non-empty string")
         tenant, principal_id, conversation = self._scope(context)
-        identity = _digest_parts(tenant, principal_id, conversation, str(ordinal))
+        identity = _digest_parts(tenant, principal_id, conversation, artifact_id, str(ordinal))
         return f"agents/artifacts/{identity[:2]}/{identity}"
 
     def _artifact(

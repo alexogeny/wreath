@@ -114,3 +114,13 @@ def test_operations_configuration_is_refused_early() -> None:
     for value in (0, -1, True, float("inf"), float("nan")):
         with pytest.raises(ValueError, match="webhook_lag"):
             operations.alert(webhook_lag=value, reconciliation_age=10)
+
+
+def test_outcome_counts_distinguish_positive_updates_from_zero_resolution() -> None:
+    operations = BillingOperations("commerce")
+
+    for invalid in (0, -1, True):
+        with pytest.raises(ValueError, match="positive integer"):
+            operations.outcome_unknown(invalid)
+
+    operations.outcome_resolved(unknown=0, dead=0)

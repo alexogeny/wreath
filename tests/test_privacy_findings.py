@@ -407,6 +407,52 @@ def test_two_separate_loops_are_two_components_rather_than_one() -> None:
     ), "a component must not mix the two rings"
 
 
+def test_one_way_bridge_between_loops_is_one_component() -> None:
+    from wreath._privacy.graph import Graph, Node, order_children_first
+
+    class LeftOne: ...
+
+    class LeftTwo: ...
+
+    class RightOne: ...
+
+    class RightTwo: ...
+
+    models = (LeftOne, LeftTwo, RightOne, RightTwo)
+    names = {
+        LeftOne: "z.left_one",
+        LeftTwo: "z.left_two",
+        RightOne: "a.right_one",
+        RightTwo: "a.right_two",
+    }
+    nodes = {
+        model: Node(model, model.__name__, *names[model].split("."), ("id",), {})
+        for model in models
+    }
+    edge = object()
+    graph = Graph(
+        nodes,
+        {
+            LeftOne: ((edge, LeftTwo), (edge, RightOne)),
+            LeftTwo: ((edge, LeftOne),),
+            RightOne: ((edge, RightTwo),),
+            RightTwo: ((edge, RightOne),),
+        },
+        {
+            LeftOne: ((edge, LeftTwo),),
+            LeftTwo: ((edge, LeftOne),),
+            RightOne: ((edge, LeftOne), (edge, RightTwo)),
+            RightTwo: ((edge, RightOne),),
+        },
+    )
+
+    ordered, cycles = order_children_first(graph, set(models))
+
+    assert ordered == []
+    assert len(cycles) == 1
+    assert set(cycles[0]) == set(models)
+
+
 def test_a_table_downstream_of_a_loop_is_not_part_of_it() -> None:
     from wreath._privacy.graph import order_children_first
 

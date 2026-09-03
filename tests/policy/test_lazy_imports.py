@@ -119,3 +119,10 @@ def test_policy_type_refusals_and_missing_exports_are_directly_observable() -> N
     missing = "Nonexistent"
     with pytest.raises(AttributeError, match="no attribute 'Nonexistent'"):
         getattr(policy, missing)
+
+
+def test_direct_lazy_resolution_accepts_a_declared_export() -> None:
+    from wreath import policy
+    from wreath.policy.cors import CorsPolicy
+
+    assert policy.__getattr__("CorsPolicy") is CorsPolicy

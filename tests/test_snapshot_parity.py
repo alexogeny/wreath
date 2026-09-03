@@ -4,12 +4,38 @@ import asyncio
 
 import pytest
 
+import wreath._snapshot as snapshot_module
 from wreath._snapshot import SnapshotCache as PureSnapshotCache
 from wreath.cache import SnapshotCache
 
 BACKENDS = [PureSnapshotCache]
 if SnapshotCache is not PureSnapshotCache:
     BACKENDS.append(SnapshotCache)
+
+
+def test_python_snapshot_accepts_disabled_entry_and_byte_limits() -> None:
+    cache = PureSnapshotCache(max_entries=None, max_bytes=None)
+    assert cache.replace({1: "a"}) == 1
+    assert cache.get(1) == "a"
+
+
+def test_python_snapshot_default_entry_limit_refuses_the_next_entry() -> None:
+    cache = PureSnapshotCache(max_bytes=None)
+    entries = dict.fromkeys(range(65_537))
+
+    with pytest.raises(ValueError, match="exceeding max_entries 65536"):
+        cache.replace(entries)
+
+
+def test_python_snapshot_default_byte_limit_refuses_the_next_byte(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = PureSnapshotCache(max_entries=None)
+    retained = 64 * 1024 * 1024 + 1
+    monkeypatch.setattr(snapshot_module, "getsizeof", lambda _value: retained)
+
+    with pytest.raises(ValueError, match="exceeding max_bytes 67108864"):
+        cache.replace({})
 
 
 @pytest.mark.parametrize("cache_type", BACKENDS)

@@ -6,8 +6,14 @@ import pytest
 
 from wreath.auth import Identity
 from wreath.authorization import CedarAuthorizer, CedarPolicies, PrecisionLadder, coarsen
-from wreath.crud import crud_router
+from wreath.crud import Access
+from wreath.crud import crud_router as _crud_router
 from wreath.geospatial import Coordinate
+
+
+def crud_router(*args, **kwargs):
+    kwargs.setdefault("authorize", Access.public())
+    return _crud_router(*args, **kwargs)
 
 STATION = Coordinate(lat=-23.6980, lon=133.8807)
 

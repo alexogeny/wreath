@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -125,7 +126,7 @@ async def test_default_bearer_verifier_uses_the_provider_audience(monkeypatch) -
 
     def capture_verify(token: str, **kwargs: Any) -> object:
         seen.update(kwargs)
-        return object()
+        return SimpleNamespace(claims={"token_use": "access"})
 
     provider = _provider()
     provider._cache = Cache()

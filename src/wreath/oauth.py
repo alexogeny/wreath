@@ -50,7 +50,9 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import math
 import secrets
+import threading
 import time
 from base64 import urlsafe_b64encode
 from collections.abc import Iterable, Mapping
@@ -58,6 +60,7 @@ from dataclasses import dataclass, is_dataclass
 from typing import Any, ClassVar, Final, cast
 from urllib.parse import urlsplit
 
+from ._b64 import b64url_decode as _b64url_decode
 from ._json import dumps as _json_dumps
 from ._json import loads as _json_loads
 from .binding import ValidationError, validate
@@ -111,8 +114,7 @@ class ClientRegistration:
             and self.introspection_encrypted_response_alg is None
         ):
             raise ValueError(
-                "introspection_encrypted_response_enc requires "
-                "introspection_encrypted_response_alg"
+                "introspection_encrypted_response_enc requires introspection_encrypted_response_alg"
             )
         if not self.confidential:
             if self.client_secret is not None:
@@ -317,9 +319,13 @@ class AuthorizationServer:
         "_issued",
         "_issuer",
         "_lifetime",
+        "_lock",
+        "_max_pending_grants",
         "_refresh",
         "_refresh_ttl",
         "_revoked",
+        "_revoked_expiries",
+        "_revoked_ids",
         "_secret",
         "_signer",
         "_signing_alg",
@@ -339,6 +345,7 @@ class AuthorizationServer:
         refresh_ttl: float = 30 * 24 * 3600.0,
         signer: Any = None,
         authorization_detail_types: Mapping[str, type] | None = None,
+        max_pending_grants: int = 10000,
     ) -> None:
         normalized_issuer = issuer.rstrip("/")
         parsed_issuer = urlsplit(normalized_issuer)
@@ -377,7 +384,11 @@ class AuthorizationServer:
         for client in clients:
             self.register(client)
         self._lifetime = lifetime
+        self._lock = threading.RLock()
         self._code_ttl = code_ttl
+        if max_pending_grants <= 0:
+            raise ValueError("OAuth max_pending_grants must be positive")
+        self._max_pending_grants = max_pending_grants
         if refresh_ttl <= 0:
             raise ValueError("OAuth refresh_ttl must be positive")
         self._refresh_ttl = refresh_ttl
@@ -387,10 +398,42 @@ class AuthorizationServer:
         #: Refresh token -> the chain it belonged to, kept after rotation spends
         #: it. Without this a reused token's chain is unknowable: `rotate` pops
         #: the record, so the reuse branch has nothing to revoke.
-        self._spent: dict[str, tuple[str, str, str]] = {}
+        self._spent: dict[str, tuple[str, str, str, float]] = {}
         self._revoked: set[str] = set()
+        self._revoked_expiries: dict[str, tuple[str | None, float]] = {}
+        self._revoked_ids: set[str] = set()
         self._issued = 0
         self._signing_seconds = 0.0
+
+    def _reserve_pending_grant(self, now: float, entries: int = 1) -> None:
+        for code, record in list(self._codes.items()):
+            if now - record.issued_at > self._code_ttl:
+                del self._codes[code]
+        for token, record in list(self._refresh.items()):
+            if now - record.issued_at > self._refresh_ttl:
+                del self._refresh[token]
+                self._chains.pop(record.chain, None)
+        for token, (_chain, _client_id, _dpop_jkt, issued_at) in list(self._spent.items()):
+            if now - issued_at > self._refresh_ttl:
+                del self._spent[token]
+        for token, (token_id, expires_at) in list(self._revoked_expiries.items()):
+            if now >= expires_at:
+                del self._revoked_expiries[token]
+                self._revoked.discard(token)
+                if token_id is not None:
+                    self._revoked_ids.discard(token_id)
+        state_entries = (
+            len(self._codes)
+            + len(self._refresh)
+            + len(self._spent)
+            + len(self._revoked)
+            + sum(1 + len(tokens) for tokens in self._chains.values())
+        )
+        if state_entries + entries > self._max_pending_grants:
+            raise OAuthRefusal(
+                "server-busy",
+                f"the OAuth pending grant state reached its {self._max_pending_grants} entry limit",
+            )
 
     def metadata(self) -> dict[str, Any]:
         """RFC 8414 metadata, so a client configures itself instead of being told."""
@@ -676,6 +719,30 @@ class AuthorizationServer:
         authorization_details: Any = (),
         now: float | None = None,
     ) -> str:
+        with self._lock:
+            return self._issue_code(
+                client_id=client_id,
+                subject=subject,
+                challenge=challenge,
+                redirect_uri=redirect_uri,
+                scope=scope,
+                tenant=tenant,
+                authorization_details=authorization_details,
+                now=now,
+            )
+
+    def _issue_code(
+        self,
+        *,
+        client_id: str,
+        subject: str,
+        challenge: str,
+        redirect_uri: str,
+        scope: Iterable[str] = (),
+        tenant: str = "",
+        authorization_details: Any = (),
+        now: float | None = None,
+    ) -> str:
         """Mint one authorization code, bound to a client, a URI and a challenge.
 
         `challenge` and `redirect_uri` carry **no defaults**. The challenge must
@@ -706,6 +773,8 @@ class AuthorizationServer:
                 f"{', '.join(outside)}; a client cannot ask for more than it was "
                 "granted at registration",
             )
+        moment = time.time() if now is None else now
+        self._reserve_pending_grant(moment)
         code = secrets.token_urlsafe(32)
         self._codes[code] = _Code(
             client_id=client_id,
@@ -714,12 +783,34 @@ class AuthorizationServer:
             challenge=challenge,
             redirect_uri=redirect_uri,
             tenant=tenant,
-            issued_at=time.time() if now is None else now,
+            issued_at=moment,
             authorization_details=rich_details,
         )
         return code
 
     def redeem(
+        self,
+        code: str,
+        *,
+        verifier: str,
+        client_id: str,
+        client_secret: bytes | str | None = None,
+        redirect_uri: str,
+        dpop_jkt: str = "",
+        now: float | None = None,
+    ) -> IssuedToken:
+        with self._lock:
+            return self._redeem(
+                code,
+                verifier=verifier,
+                client_id=client_id,
+                client_secret=client_secret,
+                redirect_uri=redirect_uri,
+                dpop_jkt=dpop_jkt,
+                now=now,
+            )
+
+    def _redeem(
         self,
         code: str,
         *,
@@ -753,7 +844,7 @@ class AuthorizationServer:
             # Two parties hold this code and only one of them is the client.
             # Refusing the second alone would leave the attacker's token live if
             # they redeemed first, so neither keeps anything.
-            self._revoked.add(record.issued_token)
+            self._revoke_access(record.issued_token)
             del self._codes[code]
             raise OAuthRefusal(
                 "code-replayed",
@@ -836,6 +927,34 @@ class AuthorizationServer:
         client_id: str = "",
         authorization_details: Any = (),
     ) -> IssuedToken:
+        with self._lock:
+            return self._issue_access(
+                subject=subject,
+                audience=audience,
+                scope=scope,
+                tenant=tenant,
+                now=now,
+                with_refresh=with_refresh,
+                refresh_client_id=refresh_client_id,
+                dpop_jkt=dpop_jkt,
+                client_id=client_id,
+                authorization_details=authorization_details,
+            )
+
+    def _issue_access(
+        self,
+        *,
+        subject: str | None,
+        audience: str,
+        scope: Iterable[str] = (),
+        tenant: str = "",
+        now: float | None = None,
+        with_refresh: bool = False,
+        refresh_client_id: str = "",
+        dpop_jkt: str = "",
+        client_id: str = "",
+        authorization_details: Any = (),
+    ) -> IssuedToken:
         """Mint one access token. What comes out is what `JwtVerifier` verifies."""
         self._require_dpop(client_id, dpop_jkt)
         rich_details = (
@@ -851,6 +970,7 @@ class AuthorizationServer:
             "iat": int(moment),
             "exp": int(expires),
             "jti": secrets.token_urlsafe(12),
+            "token_use": "access",
         }
         if subject is not None:
             claims["sub"] = subject
@@ -876,6 +996,7 @@ class AuthorizationServer:
                 dpop_jkt=dpop_jkt,
                 authorization_details=rich_details,
                 now=moment,
+                _extra_entries=1,
             )
             refresh, chain = minted.token, minted.chain
         access = self._encode(claims)
@@ -952,7 +1073,36 @@ class AuthorizationServer:
         dpop_jkt: str = "",
         authorization_details: Any = (),
         now: float | None = None,
+        _extra_entries: int = 0,
     ) -> _Refresh:
+        with self._lock:
+            return self._issue_refresh(
+                subject=subject,
+                audience=audience,
+                scope=scope,
+                tenant=tenant,
+                client_id=client_id,
+                dpop_jkt=dpop_jkt,
+                authorization_details=authorization_details,
+                now=now,
+                _extra_entries=_extra_entries,
+            )
+
+    def _issue_refresh(
+        self,
+        *,
+        subject: str,
+        audience: str = "",
+        scope: Iterable[str] = (),
+        tenant: str = "",
+        client_id: str = "",
+        dpop_jkt: str = "",
+        authorization_details: Any = (),
+        now: float | None = None,
+        _extra_entries: int = 0,
+    ) -> _Refresh:
+        moment = time.time() if now is None else now
+        self._reserve_pending_grant(moment, 2 + _extra_entries)
         chain = secrets.token_urlsafe(12)
         rich_details = (
             self.validate_authorization_details(authorization_details)
@@ -963,7 +1113,7 @@ class AuthorizationServer:
             token=secrets.token_urlsafe(32),
             subject=subject,
             chain=chain,
-            issued_at=time.time() if now is None else now,
+            issued_at=moment,
             audience=audience or self._issuer,
             scope=tuple(scope),
             tenant=tenant,
@@ -985,13 +1135,33 @@ class AuthorizationServer:
         dpop_jkt: str = "",
         now: float | None = None,
     ) -> IssuedToken:
+        with self._lock:
+            return self._rotate(
+                refresh,
+                audience=audience,
+                client_id=client_id,
+                client_secret=client_secret,
+                dpop_jkt=dpop_jkt,
+                now=now,
+            )
+
+    def _rotate(
+        self,
+        refresh: _Refresh | str,
+        *,
+        audience: str = "",
+        client_id: str | None = None,
+        client_secret: bytes | str | None = None,
+        dpop_jkt: str = "",
+        now: float | None = None,
+    ) -> IssuedToken:
         """Exchange a refresh token for a new pair. Reuse revokes the whole chain."""
         token = refresh if isinstance(refresh, str) else refresh.token
         record = self._refresh.get(token)
         if record is None:
             spent = self._spent.get(token)
             if spent is not None:
-                chain, spent_client_id, spent_dpop_jkt = spent
+                chain, spent_client_id, spent_dpop_jkt, _issued_at = spent
                 self._authenticate_refresh_client(
                     spent_client_id,
                     client_id=client_id,
@@ -1032,6 +1202,7 @@ class AuthorizationServer:
                 "refresh-expired",
                 f"this refresh token expired after its {self._refresh_ttl:g}s lifetime",
             )
+        self._reserve_pending_grant(moment, 2)
         del self._refresh[token]
         issued = self.issue_access(
             subject=record.subject,
@@ -1056,7 +1227,12 @@ class AuthorizationServer:
             authorization_details=record.authorization_details,
         )
         self._refresh[successor.token] = successor
-        self._spent[token] = (record.chain, record.client_id, record.dpop_jkt)
+        self._spent[token] = (
+            record.chain,
+            record.client_id,
+            record.dpop_jkt,
+            record.issued_at,
+        )
         self._chains.setdefault(record.chain, []).append(issued.access_token)
         return IssuedToken(
             access_token=issued.access_token,
@@ -1092,24 +1268,71 @@ class AuthorizationServer:
         self._authenticate_client(bound_client_id, client_secret)
 
     def revoke_chain(self, chain: str) -> int:
+        with self._lock:
+            return self._revoke_chain(chain)
+
+    def _revoke_chain(self, chain: str) -> int:
         issued = self._chains.pop(chain, [])
-        self._revoked.update(issued)
+        for access_token in issued:
+            self._revoke_access(access_token)
         for token, record in list(self._refresh.items()):
             if record.chain == chain:
                 del self._refresh[token]
         # Spent tokens go too, or a third presentation of an already-revoked
         # token would try to revoke a chain that is no longer there and read as
         # a fresh incident.
-        for token, (spent_chain, _client_id, _dpop_jkt) in list(self._spent.items()):
+        for token, (spent_chain, _client_id, _dpop_jkt, _issued_at) in list(self._spent.items()):
             if spent_chain == chain:
                 del self._spent[token]
         return len(issued)
 
-    def is_revoked(self, access_token: str) -> bool:
-        """The `RevocationCheck` `JwtVerifier` already takes."""
-        return access_token in self._revoked
+    def _revoke_access(self, access_token: str) -> None:
+        with self._lock:
+            self._revoked.add(access_token)
+            try:
+                payload = access_token.split(".", 2)[1]
+                claims = _json_loads(_b64url_decode(payload))
+            except IndexError, ValueError:
+                return
+            token_id = claims.get("jti") if isinstance(claims, Mapping) else None
+            if isinstance(token_id, str):
+                self._revoked_ids.add(token_id)
+            expires_at = claims.get("exp") if isinstance(claims, Mapping) else None
+            if (
+                isinstance(expires_at, int | float)
+                and not isinstance(expires_at, bool)
+                and math.isfinite(expires_at)
+            ):
+                self._revoked_expiries[access_token] = (
+                    token_id if isinstance(token_id, str) else None,
+                    float(expires_at),
+                )
+
+    def is_revoked(self, token_or_claims: str | Mapping[str, Any]) -> bool:
+        """Accept either a compact token or the verified claims `JwtVerifier` supplies."""
+        with self._lock:
+            if isinstance(token_or_claims, str):
+                return token_or_claims in self._revoked
+            token_id = token_or_claims.get("jti")
+            return isinstance(token_id, str) and token_id in self._revoked_ids
 
     def introspection_jwt(
+        self,
+        token: str,
+        *,
+        client_id: str,
+        client_secret: bytes | str | None,
+        now: float | None = None,
+    ) -> str:
+        with self._lock:
+            return self._introspection_jwt(
+                token,
+                client_id=client_id,
+                client_secret=client_secret,
+                now=now,
+            )
+
+    def _introspection_jwt(
         self,
         token: str,
         *,
@@ -1168,7 +1391,7 @@ class AuthorizationServer:
                 signature,
             ):
                 return {"active": False}
-        except (KeyError, OverflowError, TypeError, ValueError):
+        except KeyError, OverflowError, TypeError, ValueError:
             return {"active": False}
 
         issuer = claims.get("iss")

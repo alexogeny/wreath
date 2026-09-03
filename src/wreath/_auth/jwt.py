@@ -334,6 +334,8 @@ def peek_header(token: str) -> dict[str, Any] | None:
     """
     try:
         first = token.split(".", 1)[0]
+        if not first or len(first) > ((_MAX_SEGMENT_BYTES * 4 + 2) // 3):
+            return None
         header = _json_loads(_b64url_decode(first))
     except (ValueError, KeyError):
         return None

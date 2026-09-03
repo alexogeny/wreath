@@ -115,13 +115,8 @@ def _tokenize(source: str) -> list[tuple[str, str, int]]:
     i = 0
     line = 1
     length = len(source)
-    while i < length:
-        start = source.find("{", i)
-        if start == -1 or start + 1 >= length or source[start + 1] not in "{%":
-            if start == -1 or start + 1 >= length:
-                # complexity: allow SL-SLICE-LOOP -- tail copied once before break
-                tokens.append(("text", source[i:], line))
-                break
+    while (start := source.find("{", i)) != -1:
+        if not source.startswith(("{{", "{%"), start):
             continue_at = start + 1
             tokens.append(("text", source[i:continue_at], line))
             line += source.count("\n", i, continue_at)
@@ -140,6 +135,8 @@ def _tokenize(source: str) -> list[tuple[str, str, int]]:
         tokens.append((kind, inner, line))
         line += source.count("\n", start, end + 2)
         i = end + 2
+    if i < length:
+        tokens.append(("text", source[i:], line))
     return tokens
 
 
@@ -162,8 +159,7 @@ def compile_tape(
 
     for kind, text, line in _tokenize(source):
         if kind == "text":
-            if text:
-                tape.append((OP_TEXT, text.encode("utf-8")))
+            tape.append((OP_TEXT, text.encode("utf-8")))
             continue
         if kind == "var":
             tape.append((OP_VAR, _parse_path(text, line), line))

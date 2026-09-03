@@ -98,12 +98,15 @@ def test_tenant_resolution_has_no_default_source() -> None:
 
 def test_a_resolved_name_is_looked_up_and_never_used_as_a_schema() -> None:
     directory = InMemoryTenantDirectory([Tenant(key="acme", schema="t_7f3a", role="r_7f3a")])
-    tenancy = Tenancy(directory=directory, source=TenantHeader("X-Tenant"))
+    tenancy = Tenancy(directory=directory, source=TenantHeader("X-Tenant", trusted=True))
     assert tenancy.resolve_name("acme").schema == "t_7f3a"
 
 
 def test_a_request_naming_no_tenant_is_refused_naming_the_source() -> None:
-    tenancy = Tenancy(directory=InMemoryTenantDirectory([ACME]), source=TenantHeader("X-Tenant"))
+    tenancy = Tenancy(
+        directory=InMemoryTenantDirectory([ACME]),
+        source=TenantHeader("X-Tenant", trusted=True),
+    )
     with pytest.raises(UnknownTenant, match="X-Tenant"):
         tenancy.resolve_request(_Request())
 
@@ -143,7 +146,7 @@ def test_resolution_checks_status_as_well_as_existence() -> None:
     directory = InMemoryTenantDirectory(
         [Tenant(key="acme", schema="tenant_acme", status=TenantStatus.SUSPENDED)]
     )
-    tenancy = Tenancy(directory=directory, source=TenantHeader("X-Tenant"))
+    tenancy = Tenancy(directory=directory, source=TenantHeader("X-Tenant", trusted=True))
     with pytest.raises(TenantSuspended):
         tenancy.resolve_request(_Request({"X-Tenant": "acme"}))
 

@@ -68,6 +68,13 @@ def test_managed_policy_refuses_invalid_sample_sizes(value: object) -> None:
         migrations.ResolutionPolicy.managed(sample_size=value)
 
 
+@pytest.mark.parametrize("sample_size", [0, 3])
+def test_managed_policy_keeps_a_valid_sample_size(sample_size: int) -> None:
+    assert migrations.ResolutionPolicy.managed(sample_size=sample_size) == (
+        migrations.ResolutionPolicy("managed", sample_size)
+    )
+
+
 @pytest.mark.parametrize(
     ("action", "tenant", "holes_open", "fragments"),
     [

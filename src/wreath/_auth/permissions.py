@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from secrets import token_bytes
 from typing import Any, cast
 from weakref import WeakKeyDictionary
@@ -464,7 +464,13 @@ def permissions_router(
         # change the answer -- who is asking, what roles they hold, and the
         # policy set itself -- so a promotion or a deploy invalidates it and
         # nothing else does.
-        tag = _manifest_etag(identity, authorizer, vocabulary, _request_flags(authorizer, request))
+        tag = _manifest_etag(
+            identity,
+            authorizer,
+            vocabulary,
+            _request_flags(authorizer, request),
+            _request_facts(authorizer, request),
+        )
         if _etag_matches(request.header("if-none-match"), tag):
             response = Response(b"", status=304)
             response.headers.append((b"etag", tag.encode("ascii")))
@@ -546,7 +552,11 @@ def permissions_router(
             # what cannot be stated truthfully is settled by a conditional
             # request rather than guessed at.
             return _manifest_etag(
-                identity, authorizer, vocabulary_now(), _request_flags(authorizer, request)
+                identity,
+                authorizer,
+                vocabulary_now(),
+                _request_flags(authorizer, request),
+                _request_facts(authorizer, request),
             )
 
         return _private_stream(change_stream(subscription, tag_for=tag_for))
@@ -641,6 +651,7 @@ def _manifest_etag(
     authorizer: Any,
     vocabulary: dict[str, tuple[str, ...]],
     flags: frozenset[str] = frozenset(),
+    facts: Mapping[str, frozenset[str]] | None = None,
 ) -> str:
     """A tag over every input that can change the answer.
 
@@ -667,6 +678,12 @@ def _manifest_etag(
     digest.update(b"\x03")
     for flag in sorted(flags):
         digest.update(f"{flag}\x00".encode())
+    digest.update(b"\x04")
+    for name, values in sorted((facts or {}).items()):
+        digest.update(f"{name}\x00".encode())
+        for value in sorted(values):
+            digest.update(f"{value}\x00".encode())
+        digest.update(b"\x01")
     return f'W/"{digest.hexdigest()}"'
 
 
@@ -681,6 +698,13 @@ def _request_flags(authorizer: Any, request: Any) -> frozenset[str]:
     if not callable(resolve):
         return frozenset()
     return cast("frozenset[str]", resolve(request))
+
+
+def _request_facts(authorizer: Any, request: Any) -> Mapping[str, frozenset[str]]:
+    resolve = getattr(authorizer, "facts_for", None)
+    if not callable(resolve):
+        return {}
+    return cast("Mapping[str, frozenset[str]]", resolve(request))
 
 
 def _shared_fingerprint(app: Any) -> str:

@@ -5,7 +5,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -19,6 +19,8 @@ from wreath._agents.remote_mcp import (
     RemoteMCPClient,
     RemoteMCPToolCatalog,
     UnknownToolOutcome,
+    _origin,
+    _sse_objects,
 )
 
 
@@ -95,12 +97,13 @@ class Transport:
 
 
 class TokenProvider:
-    def __init__(self) -> None:
+    def __init__(self, value: str = "access-token") -> None:
         self.origins: list[str] = []
+        self.value = value
 
     async def token(self, origin: str) -> str:
         self.origins.append(origin)
-        return "access-token"
+        return self.value
 
 
 class Audit:
@@ -123,6 +126,330 @@ def context() -> SimpleNamespace:
         conversation="conversation-1",
         correlation_id="trace-1",
     )
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "message"),
+    [
+        ("http://tools.example/mcp", "absolute HTTPS"),
+        ("/mcp", "absolute HTTPS"),
+        ("https:///mcp", "absolute HTTPS"),
+        ("https://user@tools.example/mcp", "userinfo"),
+        ("https://tools.example/mcp#fragment", "fragment"),
+    ],
+)
+def test_remote_origin_refuses_each_invalid_endpoint_part(
+    endpoint: str, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _origin(endpoint)
+
+
+def test_remote_origin_normalizes_default_and_preserves_nondefault_ports() -> None:
+    assert _origin("https://tools.example:443/mcp") == "https://tools.example"
+    assert _origin("https://tools.example:8443/mcp") == "https://tools.example:8443"
+
+
+@pytest.mark.parametrize(
+    "option",
+    ["max_tools", "max_pages", "max_schema_bytes", "max_response_bytes", "max_sse_events"],
+)
+def test_client_refuses_each_non_positive_limit(option: str) -> None:
+    with pytest.raises(ValueError, match="limits must be positive"):
+        RemoteMCPClient(
+            "https://tools.example/mcp",
+            transport=Transport(),
+            **{option: 0},
+        )
+
+
+def test_client_refuses_empty_name_and_mismatched_transport_origin() -> None:
+    with pytest.raises(ValueError, match="name must be non-empty"):
+        RemoteMCPClient("https://tools.example/mcp", transport=Transport(), name="")
+
+    other = Transport()
+    other.origin = "https://other.example"
+    with pytest.raises(ValueError, match="does not match endpoint origin"):
+        RemoteMCPClient("https://tools.example/mcp", transport=other)
+
+
+@pytest.mark.asyncio
+async def test_initialized_headers_require_protocol_and_omit_absent_session() -> None:
+    client = RemoteMCPClient("https://tools.example/mcp", transport=Transport())
+
+    with pytest.raises(RuntimeError, match="protocol version is not initialized"):
+        await client._headers(initialized=True)
+
+    client._protocol_version = "2025-11-25"
+    assert await client._headers(initialized=True) == {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25",
+    }
+
+
+@pytest.mark.asyncio
+async def test_post_refuses_http_error_status() -> None:
+    transport = Transport(
+        MCPHTTPResponse(
+            "https://tools.example/mcp",
+            429,
+            {"content-type": "application/json"},
+            b"{}",
+        )
+    )
+    client = RemoteMCPClient("https://tools.example/mcp", transport=transport)
+
+    with pytest.raises(MCPRemoteError, match="status 429"):
+        await client._post({"jsonrpc": "2.0", "method": "probe"}, initialized=False)
+
+
+def test_session_header_accepts_absence_and_refuses_each_invalid_byte_range() -> None:
+    client = RemoteMCPClient("https://tools.example/mcp", transport=Transport())
+    assert client._session_from_initialize() is None
+
+    client._last_response = MCPHTTPResponse(
+        "https://tools.example/mcp", 200, {}, b"{}"
+    )
+    assert client._session_from_initialize() is None
+
+    for session in ("", "contains space", "contains\x7f"):
+        client._last_response = MCPHTTPResponse(
+            "https://tools.example/mcp",
+            200,
+            {"mcp-session-id": session},
+            b"{}",
+        )
+        with pytest.raises(MCPRemoteError, match="visible ASCII"):
+            client._session_from_initialize()
+
+
+def test_tool_normalization_refuses_each_malformed_declaration() -> None:
+    client = RemoteMCPClient(
+        "https://tools.example/mcp",
+        transport=Transport(),
+        max_schema_bytes=16,
+    )
+    invalid = (
+        ([], "declaration must be an object"),
+        ({"name": "", "inputSchema": {}}, "name must be a non-empty string"),
+        ({"name": 7, "inputSchema": {}}, "name must be a non-empty string"),
+        ({"name": "lookup", "inputSchema": []}, "inputSchema must be an object"),
+        (
+            {"name": "lookup", "inputSchema": {"description": "far too large"}},
+            "schema byte ceiling",
+        ),
+        (
+            {"name": "lookup", "description": 7, "inputSchema": {}},
+            "description must be text",
+        ),
+    )
+
+    for declaration, message in invalid:
+        with pytest.raises(MCPRemoteError, match=message):
+            client._normalize_tool(declaration)
+
+
+@pytest.mark.parametrize(
+    ("declaration", "description"),
+    [
+        ({"name": "lookup", "description": "Description", "inputSchema": {}}, "Description"),
+        ({"name": "lookup", "title": "Title", "inputSchema": {}}, "Title"),
+        ({"name": "lookup", "inputSchema": {}}, "lookup"),
+        ({"name": "lookup", "description": "", "title": "Title", "inputSchema": {}}, "Title"),
+        ({"name": "lookup", "description": "", "title": "", "inputSchema": {}}, "lookup"),
+    ],
+)
+def test_tool_normalization_uses_the_declared_description_fallback_order(
+    declaration: dict[str, Any], description: str
+) -> None:
+    client = RemoteMCPClient("https://tools.example/mcp", transport=Transport())
+    assert client._normalize_tool(declaration)["description"] == description
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("initialize_result", "message"),
+    [
+        (
+            {"protocolVersion": "old", "capabilities": {"tools": {}}},
+            "unsupported protocol version",
+        ),
+        ({"protocolVersion": "2025-11-25", "capabilities": None}, "tools capability"),
+        (
+            {"protocolVersion": "2025-11-25", "capabilities": {"tools": []}},
+            "tools capability",
+        ),
+    ],
+)
+async def test_connect_refuses_invalid_protocol_and_capability_negotiation(
+    initialize_result: Mapping[str, Any], message: str
+) -> None:
+    transport = Transport(response(initialize_result, request_id=1))
+
+    with pytest.raises(MCPRemoteError, match=message):
+        await RemoteMCPClient("https://tools.example/mcp", transport=transport).connect()
+
+    assert transport.closed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("page", [None, "not-an-array"])
+async def test_tool_listing_refuses_non_array_pages(page: object) -> None:
+    transport = Transport(response({"tools": page}, request_id=1))
+    client = RemoteMCPClient("https://tools.example/mcp", transport=transport)
+    client._protocol_version = "2025-11-25"
+
+    with pytest.raises(MCPRemoteError, match="requires a tools array"):
+        await client._list_tools()
+
+
+@pytest.mark.asyncio
+async def test_tool_listing_starts_without_cursor_and_refuses_duplicate_names() -> None:
+    transport = Transport(
+        tools_page(tool("same"), tool("same"), request_id=1)
+    )
+    client = RemoteMCPClient("https://tools.example/mcp", transport=transport)
+    client._protocol_version = "2025-11-25"
+
+    with pytest.raises(MCPRemoteError, match="duplicate remote MCP tool name 'same'"):
+        await client._list_tools()
+
+    assert payload(transport.calls[0])["params"] == {}
+
+
+@pytest.mark.asyncio
+async def test_reconnect_with_stable_catalogue_reuses_compiled_specifications() -> None:
+    transport = Transport(
+        initialized(),
+        MCPHTTPResponse("https://tools.example/mcp", 202, {}, b""),
+        tools_page(tool("lookup"), request_id=2),
+        MCPHTTPResponse("https://tools.example/mcp", 204, {}, b""),
+        initialized(session="session-2", request_id=3),
+        MCPHTTPResponse("https://tools.example/mcp", 202, {}, b""),
+        tools_page(tool("lookup"), request_id=4),
+    )
+    client = RemoteMCPClient("https://tools.example/mcp", transport=transport)
+
+    await client.connect()
+    first = client.specifications
+    await client.close()
+    await client.connect()
+
+    assert client.specifications is first
+
+
+@pytest.mark.asyncio
+async def test_invocation_refuses_invalid_scope_and_unknown_tool_before_io() -> None:
+    client = RemoteMCPClient("https://tools.example/mcp", transport=Transport())
+    client._connected = True
+    client._specifications = (SimpleNamespace(name="lookup"),)
+
+    for tenant in ("", 7):
+        invalid = context()
+        invalid.tenant = tenant
+        with pytest.raises(MCPRemoteScopeError, match="non-empty tenant"):
+            await client.invoke(
+                "lookup", {}, call_id="call", context=invalid
+            )
+
+    with pytest.raises(LookupError, match="has no tool 'missing'"):
+        await client.invoke("missing", {}, call_id="call", context=context())
+
+
+@pytest.mark.asyncio
+async def test_close_without_session_skips_delete_and_propagates_transport_failure() -> None:
+    class FailingCloseTransport(Transport):
+        async def close(self) -> None:
+            raise LookupError("transport close failed")
+
+    transport = FailingCloseTransport()
+    client = RemoteMCPClient("https://tools.example/mcp", transport=transport)
+    await client._close_session()
+    assert transport.calls == []
+
+    with pytest.raises(LookupError, match="transport close failed"):
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_close_preserves_session_failure_and_notes_transport_failure() -> None:
+    class FailingCloseTransport(Transport):
+        async def close(self) -> None:
+            raise LookupError("transport close failed")
+
+    transport = FailingCloseTransport(
+        MCPHTTPResponse("https://tools.example/mcp", 500, {}, b"")
+    )
+    client = RemoteMCPClient("https://tools.example/mcp", transport=transport)
+    client._protocol_version = "2025-11-25"
+    client._session_id = "session-1"
+
+    with pytest.raises(MCPRemoteError, match="session close failed") as caught:
+        await client.close()
+
+    assert caught.value.__notes__ == [
+        "remote MCP transport close also failed: transport close failed"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_close_does_not_invent_a_note_when_only_session_close_fails() -> None:
+    transport = Transport(MCPHTTPResponse("https://tools.example/mcp", 500, {}, b""))
+    client = RemoteMCPClient("https://tools.example/mcp", transport=transport)
+    client._protocol_version = "2025-11-25"
+    client._session_id = "session-1"
+
+    with pytest.raises(MCPRemoteError, match="session close failed") as caught:
+        await client.close()
+
+    assert getattr(caught.value, "__notes__", []) == []
+
+
+def test_catalog_refuses_non_positive_and_exceeded_client_ceilings() -> None:
+    client = RemoteMCPClient("https://tools.example/mcp", transport=Transport())
+
+    with pytest.raises(ValueError, match="max_clients must be positive"):
+        RemoteMCPToolCatalog((), max_clients=0)
+    with pytest.raises(MCPToolLimitExceeded, match="client ceiling 1"):
+        RemoteMCPToolCatalog((client, client), max_clients=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_catalog_rollback_reports_only_real_cleanup_failures(
+    cleanup_fails: bool,
+) -> None:
+    class Client:
+        def __init__(self, name: str, *, connect_fails: bool = False) -> None:
+            self.name = name
+            self.connect_fails = connect_fails
+            self.specifications: tuple[object, ...] = ()
+
+        async def connect(self) -> None:
+            if self.connect_fails:
+                raise RuntimeError("connect failed")
+
+        async def close(self) -> None:
+            if cleanup_fails:
+                raise LookupError("cleanup failed")
+
+    first = Client("first")
+    second = Client("second", connect_fails=True)
+    catalog = RemoteMCPToolCatalog(cast(Any, (first, second)), max_clients=2)
+
+    with pytest.raises(RuntimeError, match="connect failed") as caught:
+        await catalog.connect()
+
+    expected = ["remote MCP client 'first' rollback failed: cleanup failed"]
+    assert getattr(caught.value, "__notes__", []) == (expected if cleanup_fails else [])
+
+
+def test_sse_parser_refuses_the_first_event_beyond_its_ceiling() -> None:
+    body = b'data: {"event":1}\n\ndata: {"event":2}\n\n'
+
+    with pytest.raises(MCPRemoteError, match="exceeds event ceiling 1"):
+        _sse_objects(body, max_events=1)
 
 
 @pytest.mark.asyncio
@@ -168,6 +495,53 @@ async def test_connect_initializes_notifies_and_compiles_bounded_paginated_tools
     assert tokens.origins == ["https://tools.example"] * 4
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cursor", ["", 1])
+async def test_connect_refuses_each_invalid_pagination_cursor(cursor: object) -> None:
+    transport = Transport(
+        initialized(),
+        MCPHTTPResponse("https://tools.example/mcp", 202, {}, b""),
+        response({"tools": [], "nextCursor": cursor}, request_id=2),
+        MCPHTTPResponse("https://tools.example/mcp", 204, {}, b""),
+    )
+
+    with pytest.raises(MCPRemoteError, match="nextCursor must be a non-empty string"):
+        await RemoteMCPClient("https://tools.example/mcp", transport=transport).connect()
+
+    assert transport.closed is True
+
+
+@pytest.mark.asyncio
+async def test_connect_refuses_a_repeated_pagination_cursor() -> None:
+    transport = Transport(
+        initialized(),
+        MCPHTTPResponse("https://tools.example/mcp", 202, {}, b""),
+        tools_page(request_id=2, cursor="page-2"),
+        tools_page(request_id=3, cursor="page-2"),
+        MCPHTTPResponse("https://tools.example/mcp", 204, {}, b""),
+    )
+
+    with pytest.raises(MCPRemoteError, match="repeated cursor 'page-2'"):
+        await RemoteMCPClient("https://tools.example/mcp", transport=transport).connect()
+
+    assert transport.closed is True
+
+
+@pytest.mark.asyncio
+async def test_connect_refuses_an_empty_access_token_before_io() -> None:
+    transport = Transport(initialized())
+
+    with pytest.raises(MCPRemoteError, match="empty token"):
+        await RemoteMCPClient(
+            "https://tools.example/mcp",
+            transport=transport,
+            token_provider=TokenProvider(""),
+        ).connect()
+
+    assert transport.calls == []
+    assert transport.closed is True
+
+
 def test_catalog_select_is_synchronous_only_after_connect_and_refuses_collisions() -> None:
     one = RemoteMCPClient(
         "https://tools.example/mcp",
@@ -180,6 +554,29 @@ def test_catalog_select_is_synchronous_only_after_connect_and_refuses_collisions
         catalog.select(("lookup",))
     with pytest.raises(ValueError, match="duplicate remote MCP client"):
         RemoteMCPToolCatalog((one, one), max_clients=2)
+
+
+@pytest.mark.asyncio
+async def test_catalog_connect_is_idempotent_and_selection_is_exact() -> None:
+    transport = Transport(
+        initialized(),
+        MCPHTTPResponse("https://tools.example/mcp", 202, {}, b""),
+        tools_page(tool("lookup"), request_id=2),
+    )
+    catalog = RemoteMCPToolCatalog(
+        (RemoteMCPClient("https://tools.example/mcp", transport=transport),),
+        max_clients=1,
+    )
+
+    await catalog.connect()
+    calls = len(transport.calls)
+    await catalog.connect()
+
+    assert len(transport.calls) == calls
+    with pytest.raises(ValueError, match="selection contains duplicates"):
+        catalog.select(("lookup", "lookup"))
+    with pytest.raises(LookupError, match="unknown remote MCP tools: missing"):
+        catalog.select(("missing",))
 
 
 @pytest.mark.asyncio

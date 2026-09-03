@@ -6,7 +6,7 @@ import pytest
 
 from wreath._series import envelope
 from wreath.geospatial import BoundingBox, Coordinate, grid
-from wreath.series import Cells, Series, SeriesError, avg, count, max_, sum_
+from wreath.series import Cells, Measure, Series, SeriesError, avg, count, max_, sum_
 from wreath.temporal import Day
 
 from .conftest import Sighting
@@ -47,6 +47,11 @@ class TestTheSpineIsDense:
 
 
 class TestFillIsPerMeasureAndNotRestated:
+    def test_a_disabled_identity_is_not_used(self):
+        measure = Measure("CUSTOM", None, "custom", identity="not-an-identity")
+        declaration = type("Declaration", (), {"measures": (("value", measure),)})()
+        assert envelope.fill(declaration, "value", None) is None
+
     def test_a_cell_and_a_bucket_fill_identically(self):
         measures = {"seen": count(), "mean_weight": avg(Sighting.weight_kg)}
         spatial = (

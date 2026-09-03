@@ -5,7 +5,7 @@ import datetime
 import enum
 import uuid
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import pytest
 
@@ -16,6 +16,7 @@ from wreath.binding import (
     _jsonable,
     _projection_is_identity,
     _response_input,
+    _response_union_match,
 )
 
 
@@ -249,6 +250,86 @@ def test_a_scalar_mapping_entry_bypasses_its_compiled_converter() -> None:
         "cost": "1.25",
     }
     assert calls == [Decimal("1.25")]
+
+
+@pytest.mark.parametrize(
+    ("annotation", "value", "matches"),
+    [
+        (Any, _UUID, True),
+        (object, _UUID, True),
+        (type(None), None, True),
+        (type(None), 0, False),
+        (Literal["found"], "found", True),
+        (Literal["found"], "missing", False),
+        (list[int], [1], True),
+        (list[int], (1,), False),
+        (int, 1, True),
+        (int, "1", False),
+    ],
+)
+def test_response_union_arm_matching_is_exact(
+    annotation: Any,
+    value: Any,
+    matches: bool,
+) -> None:
+    assert _response_union_match(annotation, value) is matches
+
+
+@pytest.mark.parametrize("value", [bytearray(b"binary"), memoryview(b"binary")])
+def test_interpreted_json_conversion_encodes_each_mutable_buffer(value: object) -> None:
+    assert _jsonable(bytes, value) == "YmluYXJ5"
+
+
+def test_interpreted_json_conversion_uses_any_for_unparameterized_mapping() -> None:
+    assert _jsonable(dict, {"id": _UUID}) == {"id": str(_UUID)}
+
+
+def test_interpreted_json_conversion_does_not_take_tuple_args_for_mapping_value() -> None:
+    assert _jsonable(tuple[str, int], {"id": _UUID}) == {"id": str(_UUID)}
+
+
+def test_compiled_dataclass_projection_distinguishes_instance_mapping_and_other() -> None:
+    project = _compile_response_input(Point)
+    instance = Point(1, 2)
+    other = [1, 2]
+
+    assert project(instance) is instance
+    assert project({"x": 1, "y": 2, "extra": 3}) == {"x": 1, "y": 2}
+    assert project(other) is other
+
+
+@pytest.mark.parametrize(
+    ("annotation", "value", "expected"),
+    [
+        (list[Point], (Point(1, 2),), [Point(1, 2)]),
+        (tuple[Point, ...], ({"x": 1, "y": 2},), [{"x": 1, "y": 2}]),
+        (tuple[int, str], [1, "two", "extra"], [1, "two"]),
+        (dict[str, Point], {"p": {"x": 1, "y": 2}}, {"p": {"x": 1, "y": 2}}),
+        (dict, {"p": Point(1, 2)}, {"p": Point(1, 2)}),
+    ],
+)
+def test_compiled_container_projection_has_exact_shape(
+    annotation: Any,
+    value: Any,
+    expected: Any,
+) -> None:
+    assert _compile_response_input(annotation)(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("annotation", "value"),
+    [
+        (list[Point], {"p": Point(1, 2)}),
+        (tuple[Point, ...], {"p": Point(1, 2)}),
+        (tuple[int, str], {"p": Point(1, 2)}),
+        (dict[str, Point], [Point(1, 2)]),
+    ],
+)
+def test_compiled_container_projection_preserves_wrong_container_shape(
+    annotation: Any,
+    value: Any,
+) -> None:
+    assert _compile_response_input(annotation)(value) is value
 
 
 def test_a_self_referential_dataclass_compiles_and_still_converts() -> None:

@@ -95,12 +95,9 @@ def _ends_argument_list(source: bytes, close: int) -> bool:
         if byte in b" \t\r\n":
             index -= 1
             continue
-        if byte == b"\n":  # pragma: no cover - covered above
-            index -= 1
-            continue
         line_start = source.rfind(b"\n", 0, index) + 1
         hash_at = source.find(b"#", line_start, index + 1)
-        if hash_at != -1 and source.find(b"\n", hash_at, index + 1) == -1:
+        if hash_at != -1:
             index = hash_at - 1  # step over a trailing comment
             continue
         return byte in b",("

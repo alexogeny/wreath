@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from . import _fenced
+from .markdown import _safe_href
 
 __all__ = ["extract", "restore"]
 
@@ -39,7 +40,7 @@ def _render(config: list[str]) -> str:
     cards = []
     for index, (title, description, href, meta) in enumerate(entries, 1):
         cards.append(
-            f'<a class="story-card" href="{_esc(href)}">'
+            f'<a class="story-card" href="{_safe_href(href)}">'
             f'<span class="story-index">{index:02}</span>'
             f"<h2>{_esc(title)}</h2><p>{_esc(description)}</p>"
             f'<span class="story-meta">{_esc(meta)}</span>'

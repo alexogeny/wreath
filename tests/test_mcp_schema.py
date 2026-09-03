@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 import pytest
 
 from wreath import Wreath
-from wreath.binding import Body, Cookie, File, Header, Query
+from wreath.binding import Body, Cookie, File, Form, Header, Query
 from wreath.mcp import MCP, ToolSignatureError
 from wreath.openapi import generate_openapi
 
@@ -117,8 +117,12 @@ def test_a_header_parameter_is_refused_at_registration() -> None:
 
     with pytest.raises(ToolSignatureError) as caught:
         tool_schema(probe, name="probe")
-    assert "a header" in str(caught.value)
-    assert "token" in str(caught.value)
+    message = str(caught.value)
+    assert "a header" in message
+    assert "token" in message
+    assert "tool 'probe'" in message
+    assert "route None" not in message
+    assert "Narrow the selector" not in message
 
 
 def test_a_cookie_parameter_is_refused_at_registration() -> None:
@@ -139,6 +143,15 @@ def test_an_uploaded_file_parameter_is_refused_at_registration() -> None:
     with pytest.raises(ToolSignatureError) as caught:
         tool_schema(probe, name="probe")
     assert "an uploaded file" in str(caught.value)
+
+
+def test_a_whole_form_model_is_refused_at_registration() -> None:
+    async def probe(request, form: Annotated[SightingQuery, Form()]) -> dict:
+        """Probe."""
+        return {}
+
+    with pytest.raises(ToolSignatureError, match="whole multipart form"):
+        tool_schema(probe, name="probe")
 
 
 def test_a_dependency_is_refused_with_the_reason() -> None:

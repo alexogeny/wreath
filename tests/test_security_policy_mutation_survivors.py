@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from wreath.policy.security import SecurityHeadersPolicy
+from wreath.policy.security import (
+    SecurityHeadersPolicy,
+    TrustedHostPolicy,
+    WebSocketOriginPolicy,
+    csp_nonce,
+)
+from wreath.request import Request
 
 
 def test_security_headers_can_disable_every_optional_header() -> None:
@@ -51,6 +57,58 @@ def test_raw_hsts_is_kept_without_structured_directives() -> None:
     policy = SecurityHeadersPolicy(strict_transport_security="max-age=10")
 
     assert policy.hsts_header == (b"strict-transport-security", b"max-age=10")
+
+
+def test_structured_hsts_omits_unrequested_directives() -> None:
+    policy = SecurityHeadersPolicy(hsts_max_age=10)
+
+    assert policy.hsts_header == (b"strict-transport-security", b"max-age=10")
+
+
+def test_nonce_preparation_does_nothing_without_a_nonce_policy() -> None:
+    policy = SecurityHeadersPolicy()
+    request = Request({"type": "http", "headers": []}, None)
+
+    policy._prepare_nonce(request)
+
+    with pytest.raises(RuntimeError, match="has not enabled CSP nonces"):
+        csp_nonce(request)
+
+
+def test_trusted_host_rejects_duplicate_and_missing_headers() -> None:
+    policy = TrustedHostPolicy(("good.example",))
+
+    duplicated = Request(
+        {
+            "type": "http",
+            "headers": [(b"host", b"bad.example"), (b"host", b"good.example")],
+        },
+        None,
+    )
+    missing = Request({"type": "http", "headers": []}, None)
+
+    assert policy._ingress_sync(duplicated).status == 400
+    assert policy._ingress_sync(missing).status == 400
+
+
+@pytest.mark.asyncio
+async def test_websocket_origin_rejects_duplicate_headers_even_if_the_last_is_allowed() -> None:
+    policy = WebSocketOriginPolicy(("https://good.example",))
+    request = Request(
+        {
+            "type": "websocket",
+            "headers": [
+                (b"origin", b"https://bad.example"),
+                (b"origin", b"https://good.example"),
+            ],
+        },
+        None,
+    )
+
+    response = await policy._ingress(request)
+
+    assert response is not None
+    assert response.status == 403
 
 
 @pytest.mark.parametrize("directive", [None, "", "script src"])

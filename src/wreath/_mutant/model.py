@@ -174,6 +174,7 @@ class Verdict:
 
     seconds: float = 0.0
     note: str = ""
+    fuzz_evidence: tuple[dict[str, Any], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -188,6 +189,7 @@ class Verdict:
             "killers": list(self.killers[:20]),
             "seconds": round(self.seconds, 3),
             "note": self.note,
+            **({"fuzz": list(self.fuzz_evidence)} if self.fuzz_evidence else {}),
         }
 
 
@@ -206,6 +208,8 @@ class Report:
     live_completed: int = 0
     live_cancelled_at_seal: int = 0
     live_first_started_seconds: float | None = None
+    selection: dict[str, Any] | None = None
+    differential_fuzz: dict[str, Any] | None = None
 
     def by_outcome(self, outcome: Outcome) -> list[Verdict]:
         return [v for v in self.verdicts if v.outcome is outcome]
@@ -237,6 +241,12 @@ class Report:
                 "seconds": round(self.baseline_seconds, 3),
             },
             "counts": counts,
+            **({"selection": self.selection} if self.selection is not None else {}),
+            **(
+                {"differential_fuzz": self.differential_fuzz}
+                if self.differential_fuzz is not None
+                else {}
+            ),
             "rating": rate_counts(counts).as_dict(),
             "seconds": round(self.total_seconds, 3),
             "live_kills": self.live_kills,

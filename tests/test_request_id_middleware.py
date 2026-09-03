@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -125,6 +126,35 @@ def test_request_id_without_the_middleware_is_an_error() -> None:
 
     with pytest.raises(RuntimeError, match="has not assigned an id"):
         request_id(Request({"type": "http", "headers": []}, None))
+
+
+def test_request_id_prefers_the_native_request_context() -> None:
+    from wreath.request import Request
+
+    native = SimpleNamespace(policy_request_id=b"native-trace-7")
+    request = Request(native, None)
+    request.state._wreath_request_id = "python-fallback"
+
+    assert request_id(request) == "native-trace-7"
+
+
+def test_request_id_policy_description_matches_trust_and_echo_switches() -> None:
+    default = RequestIdPolicy().describe()
+    trusted = RequestIdPolicy(trust_inbound=True).describe()
+    silent = RequestIdPolicy(echo=False).describe()
+
+    assert default.request_headers == ()
+    assert len(default.response_headers) == 1
+    assert len(trusted.request_headers) == 1
+    assert len(trusted.response_headers) == 1
+    assert silent.response_headers == ()
+
+
+def test_request_id_inbound_returns_none_when_the_header_is_absent() -> None:
+    from wreath.request import Request
+
+    request = Request({"type": "http", "headers": []}, None)
+    assert RequestIdPolicy(trust_inbound=True)._inbound(request) is None
 
 
 def test_configuration_is_validated() -> None:

@@ -60,6 +60,12 @@ def test_fault_container_refuses_magic_and_version_by_name() -> None:
         FaultSchedule.from_bytes(_MAGIC_FAULTS + b"\xff")
 
 
+def test_fault_container_requires_its_fault_chunk() -> None:
+    adapter_only = _MAGIC_FAULTS + b"\x01" + _chunk(b"ADPT", struct.pack("<I", 0))
+    with pytest.raises(ReplayError, match="missing its FALT chunk"):
+        FaultSchedule.from_bytes(adapter_only)
+
+
 def test_a_second_copy_of_a_chunk_is_refused_rather_than_preferred() -> None:
     original = record_transport_segments([GET])
     forged = TransportRecording((TransportSegment(0, int(SegmentKind.DATA), b"XXXX"),))

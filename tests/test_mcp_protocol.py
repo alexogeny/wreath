@@ -103,6 +103,29 @@ def test_parse_message_requires_json_rpc_2(payload: dict) -> None:
     assert '"jsonrpc": "2.0"' in caught.value.message
 
 
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"jsonrpc": "2.0", "id": None, "method": "ping"}, "a request id must not be null"),
+        (
+            {"jsonrpc": "2.0", "id": [], "method": "ping"},
+            "a request id must be a string or an integer",
+        ),
+        (
+            {"jsonrpc": "2.0", "id": 1, "method": 7},
+            "a JSON-RPC method must be a string",
+        ),
+    ],
+)
+def test_parse_message_refuses_invalid_request_identity_and_method(
+    payload: dict[str, object], message: str
+) -> None:
+    with pytest.raises(JsonRpcError) as caught:
+        parse_message(payload)
+    assert caught.value.code == INVALID_REQUEST
+    assert caught.value.message == message
+
+
 async def test_initialize_negotiates_and_mints_a_session() -> None:
     app, mcp = build()
     async with TestClient(app) as client:

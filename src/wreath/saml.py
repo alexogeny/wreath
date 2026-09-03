@@ -1150,7 +1150,7 @@ async def verify_response(
     signature = _signature_of(assertion)
     covered = assertion
     if signature is None:
-        signature = _signature_of(response) if response is not assertion else None
+        signature = _signature_of(response)
         covered = response
     if signature is None:
         raise _refuse(

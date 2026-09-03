@@ -99,6 +99,16 @@ _NAT64_WELL_KNOWN_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
 _IPV4_COMPATIBLE_PREFIX = ipaddress.IPv6Network("::/96")
 _IPV6_LOOPBACK = ipaddress.IPv6Address("::1")
 
+_AMBIGUOUS_TARGET_ESCAPES = ("%2e", "%2f", "%5c")
+
+
+def _validate_origin_path(path: str, *, label: str) -> None:
+    lower = path.lower()
+    if any(escape in lower for escape in _AMBIGUOUS_TARGET_ESCAPES):
+        raise ValueError(f"{label} contains an encoded separator or dot segment")
+    if "\\" in path or any(segment in {".", ".."} for segment in path.split("/")):
+        raise ValueError(f"{label} contains a dot segment or backslash separator")
+
 
 async def _timed(pending: Any, deadline_seconds: float) -> bytes:
     """Await a stream read under a timeout, skipping wait_for entirely when
@@ -999,6 +1009,7 @@ class HTTPClient:
         self._scheme = parsed.scheme
         self._host = parsed.hostname.encode("idna").decode("ascii").lower()
         self._port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        _validate_origin_path(parsed.path, label="base_url path")
         self._base_path = parsed.path.rstrip("/")
         self._authority_bytes = self._authority().encode("ascii")
         self._limits = limits
@@ -1624,6 +1635,7 @@ class HTTPClient:
     def _request_target(self, target: str) -> bytes:
         if not target.startswith("/") or target.startswith("//"):
             raise ValueError("request target must be origin-relative")
+        _validate_origin_path(target.partition("?")[0], label="request target")
         combined = f"{self._base_path}{target}" if self._base_path else target
         try:
             return combined.encode("ascii")
@@ -1636,6 +1648,10 @@ class HTTPClient:
         except UnicodeDecodeError as error:
             raise RedirectError("redirect location must be ASCII/percent-encoded") from error
         parsed = urlsplit(value)
+        try:
+            _validate_origin_path(parsed.path, label="redirect location")
+        except ValueError as error:
+            raise RedirectError(str(error)) from error
         if parsed.scheme or parsed.netloc:
             self._destination.validate_url(parsed)
             port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -1648,11 +1664,16 @@ class HTTPClient:
             if not same_origin:
                 raise RedirectError("cross-origin redirects require a separately configured client")
             target = parsed.path or "/"
-            return f"{target}?{parsed.query}" if parsed.query else target
-        joined = urljoin(current, value)
-        relative = urlsplit(joined)
-        target = relative.path or "/"
-        return f"{target}?{relative.query}" if relative.query else target
+        else:
+            joined = urljoin(current, value)
+            relative = urlsplit(joined)
+            target = relative.path or "/"
+            parsed = relative
+        if self._base_path and target != self._base_path and not target.startswith(
+            f"{self._base_path}/"
+        ):
+            raise RedirectError("redirect location escapes the configured base path")
+        return f"{target}?{parsed.query}" if parsed.query else target
 
     def _authority(self) -> str:
         default = (self._scheme == "http" and self._port == 80) or (

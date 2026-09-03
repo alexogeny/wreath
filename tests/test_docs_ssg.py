@@ -68,6 +68,33 @@ def test_duplicate_heading_slugs_are_disambiguated() -> None:
     assert slugs == ["setup", "setup-1"]
 
 
+def test_empty_headings_receive_a_stable_fallback_slug() -> None:
+    from wreath._docs.markdown import _Renderer
+
+    assert _Renderer()._unique_slug("") == "section"
+
+
+def test_page_title_is_the_first_level_one_heading() -> None:
+    out = render("## Preface\n\n# Main\n\n# Later\n")
+
+    assert out.title == "Main"
+
+
+def test_table_rows_stop_before_following_prose() -> None:
+    out = render("| A | B |\n|---|---|\n| 1 | 2 |\nafter\n")
+
+    assert "<td>after</td>" not in out.html
+    assert "<p>after</p>" in out.html
+
+
+def test_heading_ids_refuse_each_incomplete_or_empty_form() -> None:
+    from wreath._docs.markdown import _parse_heading_id
+
+    assert _parse_heading_id("Title {#id") is None
+    assert _parse_heading_id("Title}") is None
+    assert _parse_heading_id("Title {#}") is None
+
+
 def _site(tmp_path):
     src = tmp_path / "docs"
     (src / "guides").mkdir(parents=True)
@@ -92,6 +119,31 @@ def test_build_writes_pages_css_and_rewrites_links(tmp_path) -> None:
     assert 'class="nav-page active"' in routing  # active nav item
     assert (tmp_path / "site" / "assets" / "docs.js").is_file()
     assert "../assets/docs.js" in routing
+
+
+def test_build_defaults_to_the_current_directory(tmp_path, monkeypatch) -> None:
+    site = _site(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    report = build(site)
+
+    assert report.ok
+    assert report.output == "site"
+    assert (tmp_path / "site" / "index.html").is_file()
+
+
+def test_missing_source_directory_is_not_scanned(tmp_path, monkeypatch) -> None:
+    from pathlib import Path
+
+    def unexpected_scan(_path, _pattern):
+        raise AssertionError("a missing source directory must not be scanned")
+
+    monkeypatch.setattr(Path, "rglob", unexpected_scan)
+    site = Site("Demo", "missing", "site", Nav(Page("Home", "index.md")))
+
+    report = build(site, root=tmp_path)
+
+    assert report.errors == ("nav page missing on disk: index.md",)
 
 
 def test_strict_build_flags_dead_links(tmp_path) -> None:
@@ -134,12 +186,67 @@ def test_strict_build_checks_nested_cli_arguments(tmp_path) -> None:
     assert any("Wreath CLI example" in error and "arm-id" in error for error in report.errors)
 
 
+def test_command_lines_fold_continuations_and_keep_their_start_line() -> None:
+    from wreath._docs.commands import _logical_lines
+
+    assert list(_logical_lines("only")) == [(1, "only")]
+    assert list(_logical_lines("first\nsecond\\\nthird\nlast\\")) == [
+        (1, "first"),
+        (2, "second third"),
+        (4, "last "),
+    ]
+
+
+def test_command_extraction_skips_assignments_and_stops_at_shell_operators() -> None:
+    from wreath._docs.commands import _wreath_arguments
+
+    assert _wreath_arguments("A=1 B=2") is None
+    assert _wreath_arguments("MODE=dev uv run wreath run app:app") == ["run", "app:app"]
+    assert _wreath_arguments("wreath run app:app | cat") == ["run", "app:app"]
+    assert _wreath_arguments("wreath run app:app >output.txt") == ["run", "app:app"]
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_code_and_command_findings_follow_build_strictness(tmp_path, strict) -> None:
+    site = dataclasses.replace(_site(tmp_path), strict=strict)
+    (tmp_path / "docs" / "index.md").write_text(
+        "# Home\n\n```python\ndb.ping()\n```\n\n"
+        "```bash\nwreath capture /run/wreath/app.sock disarm 17\n```\n"
+    )
+
+    report = build(site, root=tmp_path)
+
+    selected = report.errors if strict else report.warnings
+    rejected = report.warnings if strict else report.errors
+    assert any("Database has no attribute `ping`" in finding for finding in selected)
+    assert any("Wreath CLI example" in finding for finding in selected)
+    assert rejected == ()
+
+
 def test_orphan_page_is_warned(tmp_path) -> None:
     site = _site(tmp_path)
     (tmp_path / "docs" / "loose.md").write_text("# Loose\n")  # not in nav
     report = build(site, root=tmp_path)
     assert any("orphan" in warning for warning in report.warnings)
     assert report.ok and report.pages == 2  # an orphan is not built
+
+
+def test_an_orphan_deleted_during_build_is_named_as_an_orphan(tmp_path, monkeypatch) -> None:
+    from pathlib import Path
+
+    site = _site(tmp_path)
+    loose = tmp_path / "docs" / "loose.md"
+    loose.write_text("# Loose\n")
+    is_file = Path.is_file
+
+    def present(path):
+        return path != loose and is_file(path)
+
+    monkeypatch.setattr(Path, "is_file", present)
+
+    report = build(site, root=tmp_path)
+
+    assert "orphan page missing on disk: loose.md" in report.errors
 
 
 def test_a_dead_link_on_an_orphan_page_is_still_reported(tmp_path) -> None:
@@ -232,6 +339,15 @@ def test_code_is_highlighted_and_still_escaped() -> None:
     assert "tok-comment" in out.html and "&lt;" in out.html
 
 
+def test_highlighter_escapes_unknown_languages_and_preserves_plain_gaps() -> None:
+    from wreath._docs.highlight import highlight
+
+    assert highlight("<raw>", "unknown") == "&lt;raw&gt;"
+    assert ">def</span> name <span class=\"tok-keyword\">return" in highlight(
+        "def name return", "python"
+    )
+
+
 def test_admonition_and_table(tmp_path) -> None:
     table = render("| A | B |\n|:-:|--|\n| 1 | 2 |\n")
     assert "<table>" in table.html and "text-align:center" in table.html
@@ -264,6 +380,34 @@ def test_search_index_is_written(tmp_path) -> None:
     assert section["x"] == "text"
     routing = (tmp_path / "site" / "guides" / "routing.html").read_text()
     assert 'id="docs-search"' in routing and 'data-root="../"' in routing
+
+
+def test_invalid_search_boost_falls_back_to_the_default(tmp_path) -> None:
+    site = _site(tmp_path)
+    (tmp_path / "docs" / "index.md").write_text(
+        "---\nboost: fastest\n---\n# Home\n\ntext\n"
+    )
+
+    report = build(site, root=tmp_path)
+    index = json.loads((tmp_path / "site" / "assets" / "search-index.json").read_text())
+
+    assert report.ok
+    assert "b" not in index["p"][0]
+
+
+def test_empty_metadata_is_omitted_without_a_base_url(tmp_path) -> None:
+    source = tmp_path / "docs"
+    source.mkdir()
+    (source / "index.md").write_text("# Home\n")
+    site = Site("Demo", "docs", "site", Nav(Page("Home", "index.md")))
+
+    build(site, root=tmp_path)
+
+    html = (tmp_path / "site" / "index.html").read_text()
+    index = json.loads((tmp_path / "site" / "assets" / "search-index.json").read_text())
+    assert 'rel="canonical"' not in html
+    assert "w" not in index["s"][0]
+    assert not (tmp_path / "site" / "sitemap.xml").exists()
 
 
 def test_prev_next_and_frontmatter_description(tmp_path) -> None:
@@ -347,6 +491,32 @@ def test_themes_and_feels_compose(tmp_path) -> None:
         Site("s", "docs", "o", Nav(Page("H", "i.md")), feel="nope")
 
 
+def test_colour_tokens_honor_explicit_roles_and_derive_missing_ones() -> None:
+    from wreath._docs import Palette
+    from wreath._docs.theme import _colour_tokens
+
+    explicit_light, explicit_dark = _colour_tokens(
+        Palette(
+            primary="primary",
+            accent="accent",
+            link="link",
+            dark_link="dark-link",
+            dark_primary="dark-primary",
+            dark_accent="dark-accent",
+        )
+    )
+    derived_light, derived_dark = _colour_tokens(Palette(primary="primary", accent="accent"))
+
+    assert "--link:link;" in explicit_light
+    assert "--link:primary;" in derived_light
+    assert "--link:dark-link;" in explicit_dark
+    assert "--primary:dark-primary;" in explicit_dark
+    assert "--accent:dark-accent;" in explicit_dark
+    assert "--link:color-mix(in oklab, primary 45%, #ffffff);" in derived_dark
+    assert "--primary:color-mix(in oklab, primary 62%, #ffffff);" in derived_dark
+    assert "--accent:color-mix(in oklab, accent 62%, #ffffff);" in derived_dark
+
+
 def test_build_applies_theme_and_feel(tmp_path) -> None:
     from wreath._docs import THEMES
 
@@ -361,8 +531,9 @@ def test_build_applies_theme_and_feel(tmp_path) -> None:
 def test_chart_from_json_renders_svg(tmp_path) -> None:
     import json
 
-    (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "bench.json").write_text(
+    src = tmp_path / "docs"
+    (src / "data").mkdir(parents=True)
+    (src / "data" / "bench.json").write_text(
         json.dumps(
             {
                 "results": [
@@ -373,11 +544,10 @@ def test_chart_from_json_renders_svg(tmp_path) -> None:
             }
         )
     )
-    src = tmp_path / "docs"
     (src / "guides").mkdir(parents=True)
     (src / "guides" / "routing.md").write_text("# R\n")
     (src / "index.md").write_text(
-        "# Bench\n\n```chart\nsource: ../data/bench.json\ndata: results\n"
+        "# Bench\n\n```chart\nsource: data/bench.json\ndata: results\n"
         "x: name\ny: rps\nsort: desc\ntitle: RPS\n```\n"
     )
     build(_site_like(tmp_path), root=tmp_path)
@@ -420,6 +590,45 @@ def test_a_chart_orders_its_bars_the_way_the_block_asked(tmp_path, sort, expecte
     svg = _render(config, tmp_path)
 
     assert re.findall(r">([abc])<", svg) == expected
+
+
+def test_a_chart_refuses_an_empty_numeric_series(tmp_path) -> None:
+    from wreath._docs.charts import _render
+
+    (tmp_path / "empty.json").write_text("{}")
+
+    assert _render({"source": "empty.json"}, tmp_path) == (
+        '<div class="chart-error">chart: no plottable numeric data</div>'
+    )
+
+
+def test_chart_bars_scale_from_zero_to_the_largest_value() -> None:
+    from wreath._docs.charts import _svg_bar
+
+    zero = _svg_bar([("zero", 0.0)], "", "")
+    largest = _svg_bar([("largest", 2.0)], "", "")
+
+    assert 'width="2.0"' in zero
+    assert 'width="456.0"' in largest
+
+
+@pytest.mark.parametrize(("title", "present"), [("Throughput", True), ("", False)])
+def test_chart_caption_follows_the_declared_title(title, present) -> None:
+    from wreath._docs.charts import _svg_bar
+
+    svg = _svg_bar([("one", 1.0)], title, "")
+
+    assert ('<figcaption class="chart-title">' in svg) is present
+
+
+def test_chart_emphasizes_only_wreath_bars() -> None:
+    from wreath._docs.charts import _svg_bar
+
+    svg = _svg_bar([("Wreath", 2.0), ("Other", 1.0)], "", "")
+    wreath, other = svg.split('<text class="chart-label"')[1:]
+
+    assert 'font-weight="600"' in wreath
+    assert 'font-weight="400"' in other
 
 
 def test_robots_and_404(tmp_path) -> None:
@@ -481,6 +690,29 @@ def _threaded_nav_site(tmp_path, **kwargs) -> Nav:
     )
     build(Site("S", "docs", "out", nav, strict=False, **kwargs), root=tmp_path)
     return nav
+
+
+def test_nav_context_uses_its_compiled_navigation_image(monkeypatch) -> None:
+    from wreath._docs import site as site_module
+
+    site = Site(
+        "Demo",
+        "docs",
+        "site",
+        Nav(
+            Page("Home", "index.md"),
+            Page("Other", "other.md"),
+            Page("Third", "third.md"),
+        ),
+    )
+    image = site_module._NavigationImage((), {})
+
+    def unexpected_compile(_site):
+        raise AssertionError("the supplied navigation image must be reused")
+
+    monkeypatch.setattr(site_module, "_compile_navigation", unexpected_compile)
+
+    assert site_module._nav_context(site, "index.html", image) == ("", "", "", "")
 
 
 def test_nav_sections_collapse_and_auto_open(tmp_path) -> None:
@@ -589,6 +821,44 @@ def test_chart_source_is_published(tmp_path) -> None:
     assert '<figure class="chart">' in out and "chart-error" not in out
     # The data file the chart read is copied into the site so its link resolves.
     assert (tmp_path / "out" / "data" / "d.json").is_file()
+
+
+def test_chart_source_outside_docs_is_neither_read_nor_published(tmp_path) -> None:
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (tmp_path / "secret.json").write_text(
+        '{"results":[{"k":"sensitive-marker","v":9}]}'
+    )
+    (docs / "index.md").write_text(
+        "# Home\n\n```chart\nsource: ../secret.json\ndata: results\nx: k\ny: v\n```\n"
+    )
+
+    report = build(
+        Site("S", "docs", "out", Nav(Page("Home", "index.md")), strict=False),
+        root=tmp_path,
+    )
+
+    out = (tmp_path / "out" / "index.html").read_text()
+    assert report.ok
+    assert "chart: source escapes build root: ../secret.json" in out
+    assert "sensitive-marker" not in out
+    assert not (tmp_path / "out" / "secret.json").exists()
+
+
+def test_an_orphan_chart_source_is_not_published(tmp_path) -> None:
+    docs = tmp_path / "docs"
+    (docs / "data").mkdir(parents=True)
+    (docs / "data" / "d.json").write_text('{"results":[{"k":"a","v":3}]}')
+    (docs / "index.md").write_text("# Home\n")
+    (docs / "loose.md").write_text(
+        "# Loose\n\n```chart\nsource: data/d.json\ndata: results\nx: k\ny: v\n```\n"
+    )
+    site = Site("S", "docs", "out", Nav(Page("Home", "index.md")), strict=False)
+
+    report = build(site, root=tmp_path)
+
+    assert any("orphan page" in warning for warning in report.warnings)
+    assert not (tmp_path / "out" / "data" / "d.json").exists()
 
 
 def test_cli_build_end_to_end(tmp_path) -> None:
@@ -889,6 +1159,75 @@ def test_a_code_fence_can_name_its_file_and_shade_lines() -> None:
     assert "code-head" not in render("```python\none\n```\n").html
 
 
+def test_code_block_attributes_distinguish_values_bare_flags_and_absence() -> None:
+    from wreath._docs.codeblocks import Block
+
+    block = Block('python title="app.py" no-check', "pass", 1)
+
+    assert block.attribute("title") == "app.py"
+    assert block.attribute("no-check") == ""
+    assert block.attribute("missing") is None
+
+
+def test_code_block_descriptions_fall_back_for_unnamed_owners() -> None:
+    from wreath._docs.codeblocks import _describe
+
+    class Owner:
+        def __repr__(self) -> str:
+            return "unnamed-owner"
+
+    assert _describe(Owner) == "Owner"
+    assert _describe(Owner()) == "unnamed-owner"
+
+
+def test_code_block_resolution_counts_named_and_unknown_roots() -> None:
+    from wreath._docs import codeblocks
+
+    findings, coverage = codeblocks.check_page(
+        "```python\nawait db.ping()\nunknown.missing\n(1).real\n```\n",
+        "guide.md",
+    )
+
+    assert any("Database has no attribute `ping`" in finding.message for finding in findings)
+    assert coverage.roots == {"db": 1, "unknown": 1}
+    assert coverage.resolved == 1
+    assert coverage.unresolved == 2
+
+
+def test_code_block_resolution_checks_module_attributes() -> None:
+    from wreath._docs import codeblocks
+
+    findings, _ = codeblocks.check_page(
+        "```python\nimport wreath\nwreath.Wreath\nwreath.not_a_public_name\n```\n",
+        "guide.md",
+    )
+
+    assert len(findings) == 1
+    assert "module wreath has no `not_a_public_name`" in findings[0].message
+
+
+def test_code_block_members_include_each_declared_field_shape() -> None:
+    from wreath._docs.codeblocks import _has_member
+
+    class SingleSlot:
+        __slots__ = "single"
+
+    class TupleSlots:
+        __slots__ = ("first", "second")
+
+    class AnnotatedOnly:
+        declared: int
+
+    del SingleSlot.single
+    del TupleSlots.first
+    del TupleSlots.second
+
+    assert _has_member(SingleSlot, "single")
+    assert _has_member(TupleSlots, "second")
+    assert _has_member(AnnotatedOnly, "declared")
+    assert not _has_member(AnnotatedOnly, "missing")
+
+
 def test_line_shading_survives_a_multiline_token() -> None:
     out = render('```python hl_lines="2"\nx = 1\ny = """a\nb"""\n```\n')
     assert out.html.count('<span class="hl">') == 1
@@ -992,6 +1331,22 @@ def test_a_hero_can_name_the_signals_it_demonstrates() -> None:
     assert "realtime" in rendered and "durable work" in rendered
 
 
+def test_a_hero_bounds_repeated_actions_and_signals() -> None:
+    from wreath._docs import hero
+
+    source = "```hero\n" + "\n".join(
+        [*(f"action: Action {index} -> {index}.md" for index in range(6))]
+        + [*(f"signal: signal-{index}" for index in range(8))]
+    ) + "\n```\n"
+    _, tokens = hero.extract(source)
+    rendered = next(iter(tokens.values()))
+
+    assert rendered.count('<a class="hero-action') == 4
+    assert rendered.count("<span>") == 6
+    assert "Action 4" not in rendered
+    assert "signal-6" not in rendered
+
+
 def test_story_cards_are_link_checked_and_bounded(tmp_path) -> None:
     from wreath._docs import cards
 
@@ -1051,6 +1406,33 @@ def test_an_unknown_figure_says_so_rather_than_drawing_nothing() -> None:
     assert "request-boundary" in rendered  # ... and lists what it does have
 
 
+def test_an_unknown_figure_names_an_empty_registry(monkeypatch) -> None:
+    from wreath._docs import figures
+
+    monkeypatch.setattr(figures, "FIGURES", {})
+
+    _, tokens = figures.extract("```figure\nname: absent\n```\n")
+
+    assert "this build has none" in next(iter(tokens.values()))
+
+
+def test_figure_title_and_note_are_optional_and_escaped() -> None:
+    from wreath._docs import figures
+
+    _, full_tokens = figures.extract(
+        "```figure\nname: request-boundary\ntitle: A & B\nnote: Below < here\n```\n"
+    )
+    full = next(iter(full_tokens.values()))
+    _, bare_tokens = figures.extract("```figure\nname: request-boundary\n```\n")
+    bare = next(iter(bare_tokens.values()))
+
+    assert '<span class="fig-title">A &amp; B</span>' in full
+    assert '<p class="fig-note">Below &lt; here</p>' in full
+    assert '<figcaption class="fig-head"><span></span>' in bare
+    assert 'class="fig-title"' not in bare
+    assert 'class="fig-note"' not in bare
+
+
 def test_the_bitset_figure_agrees_with_the_matching_it_illustrates() -> None:
     from wreath._native._core import PolicyRouteTable
 
@@ -1063,6 +1445,21 @@ def test_the_bitset_figure_agrees_with_the_matching_it_illustrates() -> None:
     assert matched is not None
     survivors = [route for route, alive in _ROUTES if alive == len(_COLUMNS) - 1]
     assert survivors == [matched[0]], (survivors, matched)
+
+
+def test_the_bitset_figure_marks_only_the_states_its_routes_reach() -> None:
+    from wreath._docs.figures import _route_bitset
+
+    figure = _route_bitset("bitset")
+
+    assert figure.count('class="f-box"') == 4
+    assert figure.count('class="f-box f-box-ghost"') == 2
+    assert figure.count('class="f-route"') == 5
+    assert figure.count('class="f-route f-route-hit"') == 1
+    assert figure.count('class="f-cell"') == 12
+    assert figure.count('class="f-cell f-cell-on"') == 8
+    assert figure.count('class="f-cell f-cell-on f-cell-hit"') == 4
+    assert 'class="f-cell f-cell-hit"' not in figure
 
 
 def test_a_figure_can_be_stopped_without_javascript(tmp_path) -> None:
@@ -1113,6 +1510,45 @@ def test_a_tilde_fence_encloses_a_block_the_same_way() -> None:
 
     text, tokens = hero.extract("~~~~\n```hero\ntitle: Example\n```\n~~~~\n")
     assert not tokens and "title: Example" in text
+
+
+def test_fenced_block_scanning_handles_a_missing_closer() -> None:
+    from wreath._docs import _fenced
+
+    text, tokens = _fenced.extract(
+        "```fixture\none\ntwo", "```fixture", lambda body: "|".join(body), "FIXTURE"
+    )
+
+    assert text == "\x00FIXTURE0\x00"
+    assert tokens == {"\x00FIXTURE0\x00": "one|two"}
+
+
+def test_fenced_block_scanning_stops_at_the_closer() -> None:
+    from wreath._docs import _fenced
+
+    text, tokens = _fenced.extract(
+        "```fixture\none\n```\nafter", "```fixture", lambda body: "|".join(body), "FIXTURE"
+    )
+
+    assert text == "\x00FIXTURE0\x00\nafter"
+    assert tokens == {"\x00FIXTURE0\x00": "one"}
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        "````markdown\nprose\n```hero\ntitle: Example\n```\n````\n",
+        "````markdown\n~~~~\n```hero\ntitle: Example\n```\n````\n",
+        "````markdown\n````not-a-close\n```hero\ntitle: Example\n```\n````\n",
+    ],
+)
+def test_enclosing_fences_ignore_non_closing_lines(page) -> None:
+    from wreath._docs import hero
+
+    text, tokens = hero.extract(page)
+
+    assert not tokens
+    assert "title: Example" in text
 
 
 def test_double_backticks_swallow_the_prose_between_two_literals() -> None:
@@ -1236,6 +1672,48 @@ def test_apidoc_skips_slots_and_non_members() -> None:
     out = apidoc.expand("::: wreath.health.HealthCheck")
     assert "#### `name`" not in out  # a slot, not a method
     assert "HealthCheck(" in out  # ...but the field is in the signature
+
+
+def test_apidoc_class_rendering_handles_absent_and_noncallable_initializers() -> None:
+    from wreath._docs.apidoc import _render_class
+
+    class Plain:
+        pass
+
+    class NoncallableInit:
+        __init__ = 3
+
+    assert _render_class(Plain, 1) == "# `Plain`\n"
+    assert _render_class(NoncallableInit, 1) == "# `NoncallableInit`\n"
+
+
+def test_apidoc_member_rendering_marks_only_real_metadata() -> None:
+    from wreath._docs.apidoc import _render_member
+
+    def plain():
+        pass
+
+    def documented():
+        """Useful member."""
+
+    plain_rendered = _render_member(plain, "plain", 2)
+    documented_rendered = _render_member(documented, "documented", 2)
+
+    assert plain_rendered == "## `plain`\n\n```python\nplain()\n```"
+    assert "Useful member." in documented_rendered
+
+
+def test_apidoc_property_rendering_omits_an_absent_return_annotation() -> None:
+    from wreath._docs.apidoc import _render_member, _return_annotation
+
+    def unannotated():
+        pass
+
+    rendered = _render_member(unannotated, "value", 2, "property")
+
+    assert "```python" not in rendered
+    assert _return_annotation(unannotated) == ""
+    assert _return_annotation(None) == ""
 
 
 def test_apidoc_renders_module_level_type_instances() -> None:
@@ -1594,6 +2072,55 @@ def test_an_unreachable_host_costs_the_counts_and_nothing_else(tmp_path, monkeyp
     assert 'href="https://github.com/you/proj"' in index and "repo-stats" not in index
 
 
+def test_repo_fetch_uses_the_declared_timeout(monkeypatch) -> None:
+    from wreath._docs import repo as repo_mod
+
+    def unavailable(_request, *, timeout):
+        assert timeout == 4.0
+        raise TimeoutError
+
+    monkeypatch.setattr(repo_mod.urllib.request, "urlopen", unavailable)
+
+    warnings: list[str] = []
+    assert repo_mod._get("github", "you/proj", warnings) is None
+    assert warnings
+
+
+def test_repo_description_fetches_counts_only_when_requested(monkeypatch) -> None:
+    from wreath._docs import Repo
+    from wreath._docs import repo as repo_mod
+
+    def unexpected_counts(*_args):
+        raise AssertionError("counts were not requested")
+
+    monkeypatch.setattr(repo_mod, "_counts", unexpected_counts)
+
+    assert repo_mod.describe(Repo("https://github.com/you/proj"), []).stars == -1
+
+    warnings: list[str] = []
+    info = repo_mod.describe(Repo("https://github.com/you", stats=True), warnings)
+    assert info.stars == -1
+    assert warnings == ["repo stats: cannot read owner/name out of https://github.com/you"]
+
+
+def test_repo_headers_are_host_specific_and_honor_either_github_token(monkeypatch) -> None:
+    from wreath._docs.repo import _headers
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    assert _headers("gitlab") == {"User-Agent": "wreath-docs", "Accept": "application/json"}
+    assert _headers("github") == {
+        "User-Agent": "wreath-docs",
+        "Accept": "application/vnd.github+json",
+    }
+
+    monkeypatch.setenv("GITHUB_TOKEN", "workflow-token")
+    assert _headers("github")["Authorization"] == "Bearer workflow-token"
+    monkeypatch.delenv("GITHUB_TOKEN")
+    monkeypatch.setenv("GH_TOKEN", "cli-token")
+    assert _headers("github")["Authorization"] == "Bearer cli-token"
+
+
 def test_repo_stats_need_a_host_with_an_api() -> None:
     from wreath._docs import Repo
 
@@ -1602,6 +2129,13 @@ def test_repo_stats_need_a_host_with_an_api() -> None:
         Repo("https://git.example/you/proj", stats=True)  # ...counts are not
     with pytest.raises(ValueError):
         Repo("ftp://github.com/you/proj")
+
+
+def test_repo_slug_requires_two_nonempty_path_parts() -> None:
+    from wreath._docs import Repo
+
+    assert Repo("https://github.com//you///proj/").slug() == "you/proj"
+    assert Repo("https://github.com/you").slug() == ""
 
 
 def test_compact_counts_round_the_way_a_reader_reads_them() -> None:
@@ -1665,7 +2199,6 @@ def test_the_stemmer_agrees_with_its_twin_in_the_browser() -> None:
     for rule in (
         "/ies$/",
         "/(ches|shes|sses|xes|zes)$/",
-        "/es$/",
         "/s$/.test(word) && !/ss$/.test(word)",
         "word.length <= 4",
     ):
@@ -1799,6 +2332,96 @@ def test_capability_map_renders_a_row_per_documented_subsystem(tmp_path) -> None
     assert 'href="guides/widgets.html"' in page and "Holding a widget" in page
 
 
+def test_capability_expansion_leaves_pages_without_the_directive_untouched(tmp_path) -> None:
+    from wreath._docs import capabilities
+
+    sink: list[str] = []
+
+    assert capabilities.expand("# Plain page", tmp_path, "plain.md", sink) == "# Plain page"
+    assert sink == []
+
+
+def test_capability_expansion_reports_context_only_when_supplied(tmp_path) -> None:
+    from wreath._docs import capabilities
+
+    with_page: list[str] = []
+    without_page: list[str] = []
+
+    rendered = capabilities.expand("::: capability-map", tmp_path, "guide.md", with_page)
+    capabilities.expand("::: capability-map", tmp_path, sink=without_page)
+
+    assert "Capability map unavailable" in rendered
+    assert with_page[0].startswith("guide.md: ::: capability-map")
+    assert without_page[0].startswith("::: capability-map")
+
+
+def test_capability_expansion_needs_no_diagnostic_sink(tmp_path) -> None:
+    from wreath._docs import capabilities
+
+    missing = capabilities.expand("::: capability-map", tmp_path)
+    (tmp_path / "agents").mkdir()
+    (tmp_path / "agents" / "manifest.json").write_text(
+        json.dumps({"subsystems": [{"name": "unfinished"}]})
+    )
+    invalid = capabilities.expand("::: capability-map", tmp_path)
+
+    assert "Capability map unavailable" in missing
+    assert "| Capability |" in invalid
+
+
+def test_capability_expansion_replaces_only_the_directive_line(tmp_path) -> None:
+    from wreath._docs import capabilities
+
+    (tmp_path / "agents").mkdir()
+    (tmp_path / "agents" / "manifest.json").write_text(json.dumps({"subsystems": []}))
+
+    expanded = capabilities.expand("Before\n::: capability-map\nAfter", tmp_path)
+
+    assert expanded.startswith("Before\n| Capability |")
+    assert expanded.endswith("\nAfter")
+
+
+def test_capability_aliases_are_normalized_nonempty_and_unique() -> None:
+    from wreath._docs.capabilities import aliases
+
+    manifest = {
+        "subsystems": [
+            {"capability": "One", "replaces": [" Widget ", "", "widget", "OTHER"]},
+            {"capability": "Two"},
+        ]
+    }
+
+    assert aliases(manifest) == ["widget", "other"]
+
+
+def test_capability_table_falls_back_for_empty_columns(tmp_path) -> None:
+    from wreath._docs.capabilities import table
+
+    rendered, problems = table(
+        {"subsystems": [{"name": "builtin", "capability": "Included"}]}, tmp_path
+    )
+    source = tmp_path / "docs"
+    (source / "guides").mkdir(parents=True)
+    (source / "guides" / "included.md").write_text("# Included guide\n")
+    linked, linked_problems = table(
+        {
+            "subsystems": [
+                {
+                    "name": "linked",
+                    "capability": "Linked",
+                    "guides": ["docs/guides/included.md"],
+                }
+            ]
+        },
+        source,
+    )
+
+    assert problems == []
+    assert "| Included | — | built in | — |" in rendered
+    assert linked_problems == []
+    assert "[Included guide](guides/included.md)" in linked
+
+
 def test_capability_map_omits_a_subsystem_marked_internal(tmp_path) -> None:
     site = _capability_site(tmp_path, _one_subsystem(capability=None))
     report = build(site, root=tmp_path)
@@ -1852,6 +2475,41 @@ def test_capability_map_without_a_manifest_fails_strictly(tmp_path) -> None:
     assert any("capability-map" in error for error in report.errors)
     # ... and the page still renders, so a local preview shows what is wrong.
     assert "Capability map unavailable" in (tmp_path / "site" / "index.html").read_text()
+
+
+def test_generated_directive_findings_follow_build_strictness(tmp_path) -> None:
+    source = tmp_path / "docs"
+    source.mkdir()
+    (source / "index.md").write_text(
+        "```plate\ntitle: Dependencies\n```\n\n::: capability-map\n"
+    )
+    site = Site(
+        "Demo",
+        "docs",
+        "site",
+        Nav(Page("Home", "index.md")),
+        strict=False,
+    )
+
+    report = build(site, root=tmp_path)
+
+    assert report.errors == ()
+    assert any("```plate cannot read" in warning for warning in report.warnings)
+    assert any("capability-map cannot read" in warning for warning in report.warnings)
+
+
+def test_absent_directives_skip_their_expanders(tmp_path, monkeypatch) -> None:
+    from wreath._docs import apidoc, capabilities
+
+    site = _site(tmp_path)
+
+    def unexpected_expand(*_args, **_kwargs):
+        raise AssertionError("an absent directive must not be expanded")
+
+    monkeypatch.setattr(capabilities, "expand", unexpected_expand)
+    monkeypatch.setattr(apidoc, "expand", unexpected_expand)
+
+    assert build(site, root=tmp_path).ok
 
 
 def _plate_site(tmp_path, manifest: dict, block: str = ""):

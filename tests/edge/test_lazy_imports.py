@@ -79,3 +79,24 @@ print(json.dumps({
     assert contract["dir"] == sorted(expected)
     assert contract["exports"] == expected
     assert contract["missing"] == "module 'wreath.edge' has no attribute 'Nonexistent'"
+
+
+def test_importing_the_serve_module_does_not_replace_the_public_callable() -> None:
+    source = """
+import importlib, json
+from wreath import edge
+importlib.import_module('wreath.edge.serve')
+print(json.dumps({
+    'callable': callable(edge.serve),
+    'module': getattr(edge.serve, '__module__', ''),
+}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", source], capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "callable": True,
+        "module": "wreath.edge.serve",
+    }

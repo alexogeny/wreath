@@ -66,6 +66,34 @@ def test_ecdsa_signatures_verify_under_the_trees_own_verifier() -> None:
     assert verify_es256(public[0], public[1], message, signature)
 
 
+def test_ecdsa_sign_retries_a_rejected_nonce(monkeypatch: pytest.MonkeyPatch) -> None:
+    import wreath._webpush as webpush
+
+    accepted = b"s" * 64
+    results = iter((None, accepted))
+    monkeypatch.setattr(webpush._core, "curve_p256_sign", lambda *_args: next(results))
+
+    assert _ecdsa_sign(1, bytes(32)) == accepted
+
+
+def test_encrypt_names_an_identity_shared_point(monkeypatch: pytest.MonkeyPatch) -> None:
+    import wreath._webpush as webpush
+
+    _, _, subscription = _receiver()
+    multiply = webpush._mul
+    calls = 0
+
+    def identity_on_shared_secret(scalar: int, point: tuple[int, int]) -> object:
+        nonlocal calls
+        calls += 1
+        return None if calls == 2 else multiply(scalar, point)
+
+    monkeypatch.setattr(webpush, "_mul", identity_on_shared_secret)
+
+    with pytest.raises(PushError, match="point at infinity"):
+        encrypt(subscription, b"x", salt=bytes(16), ephemeral=1)
+
+
 def test_ecdsa_signatures_verify_under_cryptography() -> None:
     keys = VapidKeys.generate("mailto:ops@example.com")
     digest = hashlib.sha256(b"payload").digest()

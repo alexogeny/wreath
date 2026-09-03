@@ -58,10 +58,8 @@ def _bus(conn: FakeConn) -> MessageBus:
     return MessageBus(FakeDB(conn), name="events")
 
 
-def _msg(**kw: Any) -> Message:
-    base = dict(channel="orders", group="g", tenant="", payload={}, id=3, fence=1)
-    base.update(kw)
-    return Message(**base)  # type: ignore[arg-type]
+def _msg() -> Message:
+    return Message(channel="orders", group="g", tenant="", payload={}, id=3, fence=1)
 
 
 async def test_publish_ephemeral_emits_pg_notify_with_json_body() -> None:
@@ -69,7 +67,8 @@ async def test_publish_ephemeral_emits_pg_notify_with_json_body() -> None:
     await _bus(conn).publish("orders", {"id": 1})
     sql, args = conn.calls[-1]
     assert "pg_notify" in sql
-    assert args[1] == json.dumps({"id": 1})
+    envelope = json.loads(args[1].removeprefix("\x1eWREATH-EPHEMERAL/1 "))
+    assert envelope == {"tenant": "", "payload": {"id": 1}}
 
 
 async def test_publish_durable_inserts_one_row_per_group() -> None:

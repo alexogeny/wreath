@@ -7,7 +7,12 @@ from typing import Any, cast
 
 import pytest
 
-from wreath._agents.http_transport import HTTPClientTransport, MCPHTTPClientTransport
+from wreath._agents.http_transport import (
+    HTTPClientTransport,
+    MCPHTTPClientTransport,
+    _absolute_url,
+    _origin,
+)
 from wreath.http_client import HTTPClient
 
 
@@ -72,6 +77,44 @@ class Client:
 
 def transport(client: Client, base_url: str = "https://api.example/v1") -> HTTPClientTransport:
     return HTTPClientTransport(cast(HTTPClient, client), base_url=base_url)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ftp://api.example/path",
+        "https:///path",
+        "https://user@api.example/path",
+        "https://user:password@api.example/path",
+        "https://api.example:0/path",
+        "https://api.example/path#fragment",
+    ],
+)
+def test_absolute_url_rejects_each_invalid_authority_part(value: str) -> None:
+    with pytest.raises(ValueError, match="absolute HTTP URL"):
+        _absolute_url(value, label="test URL")
+
+
+def test_origin_normalizes_ipv6_and_default_ports() -> None:
+    assert _origin(_absolute_url("http://[::1]:80", label="test URL")) == "http://[::1]"
+    assert (
+        _origin(_absolute_url("https://[::1]:443", label="test URL"))
+        == "https://[::1]"
+    )
+    assert (
+        _origin(_absolute_url("https://[::1]:8443", label="test URL"))
+        == "https://[::1]:8443"
+    )
+
+
+def test_origin_refuses_a_split_result_without_a_host() -> None:
+    with pytest.raises(ValueError, match="include a host"):
+        _origin(_absolute_url("https://api.example", label="test URL")._replace(netloc=""))
+
+
+def test_model_transport_base_url_refuses_a_query() -> None:
+    with pytest.raises(ValueError, match="must not include a query"):
+        transport(Client(), "https://api.example/v1?version=1")
 
 
 async def test_streams_without_body_copies_and_closes_after_exhaustion() -> None:
@@ -270,3 +313,41 @@ async def test_mcp_adapter_refuses_wrong_endpoint_and_over_limit_body() -> None:
 
     assert len(client.requests) == 1
     assert context.exits == [ValueError]
+
+
+def test_mcp_adapter_refuses_insecure_or_mismatched_origins() -> None:
+    with pytest.raises(ValueError, match="must use HTTPS"):
+        MCPHTTPClientTransport(
+            cast(HTTPClient, Client(origin="http://api.example")),
+            endpoint="http://api.example/mcp",
+        )
+    with pytest.raises(ValueError, match="must match HTTPClient origin"):
+        MCPHTTPClientTransport(
+            cast(HTTPClient, Client(origin="https://other.example")),
+            endpoint="https://api.example/mcp",
+        )
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "target"),
+    [
+        ("https://api.example", "/"),
+        ("https://api.example/mcp?token=one", "/mcp?token=one"),
+    ],
+)
+async def test_mcp_adapter_preserves_root_and_query_targets(
+    endpoint: str, target: str
+) -> None:
+    context = StreamContext(Response(body=chunks(b"{}")))
+    client = Client(contexts=[context])
+    adapter = MCPHTTPClientTransport(cast(HTTPClient, client), endpoint=endpoint)
+
+    await adapter.request(
+        "POST",
+        endpoint,
+        headers={},
+        body=None,
+        max_response_bytes=2,
+    )
+
+    assert client.requests == [("POST", target, (), b"")]

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -327,6 +329,27 @@ def test_fuzz_tiles_move_between_named_groups_and_finish_as_stars() -> None:
     assert "Fuzzing       ■" in text
     assert "Mutant pass   ×" in text
     assert "Fuzz       ■ 1 active · 1 complete" in text
+
+
+def test_fuzz_summary_distinguishes_replay_from_generated_campaign_evidence() -> None:
+    activity = runner.FuzzActivity(
+        state="complete",
+        selected_files=frozenset({"tests/test_xml.py"}),
+        passed_files=frozenset({"tests/test_xml.py"}),
+        campaign_targets=("http1-parser", "xml-parser"),
+        campaign_cases=1_250,
+        campaign_corpus_added=17,
+        campaign_findings=1,
+        campaign_seed=8_675_309,
+    )
+
+    lines = runner._fuzz_lines(activity)
+
+    assert lines[0] == "  Gold replay ★ 1 files passed · 0 failed"
+    assert lines[1] == (
+        "  Fuzz       × 2 targets · 1,250 cases · 17 corpus additions · "
+        "1 finding · seed 8675309"
+    )
 
 
 def test_fuzz_pulses_only_files_reported_running_by_a_worker(tmp_path: Path) -> None:
@@ -933,6 +956,44 @@ def test_a_failed_mutation_process_is_refused_before_reading_its_report(
         runner._finish_mutation_process(namespace, mutation)
 
 
+def test_a_completed_mutation_fuzz_finding_retains_its_report_and_failure_status(
+    tmp_path: Path,
+) -> None:
+    class FindingProcess:
+        def poll(self) -> int:
+            return 1
+
+        def wait(self) -> int:
+            return 1
+
+    output = tmp_path / "mutation.json"
+    output.write_text(
+        json.dumps(
+            {
+                "baseline": {"failures": []},
+                "counts": {"killed": 0, "survived": 1, "unreached": 0, "error": 0},
+                "mutants": [],
+                "rating": {"label": "FUZZ FINDING", "action": "Reproduce it.", "tone": "bad"},
+                "differential_fuzz": {"failures": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    mutation = runner._MutationProcess(
+        process=FindingProcess(),
+        output_path=output,
+        activity_path=tmp_path / "events.jsonl",
+        event_state=runner._MutationEventState(total=1),
+        baseline_reused=True,
+    )
+    namespace = SimpleNamespace(mutant="auto", mutant_fail_on_survivor=False)
+
+    report, status = runner._finish_mutation_process(namespace, mutation)
+
+    assert status == 1
+    assert report["differential_fuzz"]["failures"] == 1
+
+
 def test_a_killed_event_with_a_non_list_killer_field_awards_no_gold(
     tmp_path: Path,
 ) -> None:
@@ -957,15 +1018,45 @@ def test_mutation_sample_cache_round_trips_exact_selection_and_watch_lines(
     selected = frozenset({"guard.remove-raise@shop/gate.py:7"})
     watched = {"/repo/shop/gate.py": frozenset({7, 8})}
     whole_files = frozenset({"/repo/shop/constants.py"})
+    selection = {
+        "eligible_candidates": 9,
+        "selected_candidates": 1,
+        "by_operator": {"guard.remove-raise": {"eligible": 9, "selected": 1}},
+    }
 
-    runner._write_mutation_sample_cache(path, key, selected, watched, whole_files)
+    runner._write_mutation_sample_cache(
+        path,
+        key,
+        selected,
+        watched,
+        whole_files,
+        selection,
+    )
 
     assert runner._read_mutation_sample_cache(path, key) == (
         selected,
         watched,
         whole_files,
+        selection,
     )
     assert runner._read_mutation_sample_cache(path, {"fingerprint": "changed"}) is None
+
+
+def test_mutation_source_fingerprint_reads_content_not_only_file_metadata(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "policy.py"
+    source.write_text("allowed = True\n", encoding="utf-8")
+    original_stat = source.stat()
+    first = runner._mutation_source_fingerprint((source,))
+
+    source.write_text("allowed = None\n", encoding="utf-8")
+    source.touch()
+    os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+    assert source.stat().st_size == original_stat.st_size
+    assert source.stat().st_mtime_ns == original_stat.st_mtime_ns
+    assert runner._mutation_source_fingerprint((source,)) != first
 
 
 def test_test_command_forwards_unknown_pytest_arguments_in_order(
@@ -1026,6 +1117,54 @@ def test_test_command_defaults_to_native_execution() -> None:
     assert namespace.grid == "never"
     assert namespace.mutant_engine == "native"
     assert namespace.fuzz == "auto"
+    assert namespace.fuzz_cases == 1_000
+    assert namespace.fuzz_budget == 10.0
+    assert namespace.fuzz_seed is None
+    assert namespace.fuzz_corpus == ".wreath/fuzz/corpus"
+    assert namespace.fuzz_artifacts == ".wreath/fuzz/artifacts"
+    assert namespace.fuzz_backend == "python"
+    assert namespace.fuzz_native_build == ".wreath/fuzz/native-build"
+    assert namespace.fuzz_target == []
+    assert namespace.fuzz_replay_only is False
+
+
+def test_test_command_accepts_a_reproducible_fuzz_campaign() -> None:
+    namespace = cli_parser.build_parser().parse_args(
+        [
+            "test",
+            "--fuzz",
+            "on",
+            "--fuzz-cases",
+            "73",
+            "--fuzz-budget",
+            "2.5",
+            "--fuzz-seed",
+            "8675309",
+            "--fuzz-corpus",
+            "corpus",
+            "--fuzz-artifacts",
+            "findings",
+            "--fuzz-backend",
+            "all",
+            "--fuzz-native-build",
+            "native-build",
+            "--fuzz-target",
+            "http1",
+            "--fuzz-target",
+            "xml",
+            "--fuzz-replay-only",
+        ]
+    )
+
+    assert namespace.fuzz_cases == 73
+    assert namespace.fuzz_budget == 2.5
+    assert namespace.fuzz_seed == 8_675_309
+    assert namespace.fuzz_corpus == "corpus"
+    assert namespace.fuzz_artifacts == "findings"
+    assert namespace.fuzz_backend == "all"
+    assert namespace.fuzz_native_build == "native-build"
+    assert namespace.fuzz_target == ["http1", "xml"]
+    assert namespace.fuzz_replay_only is True
 
 
 def test_test_command_refuses_removed_animated_grid_modes() -> None:
@@ -1071,6 +1210,34 @@ def test_fuzz_refuses_to_run_without_mutation_evidence() -> None:
         runner.execute(namespace)
 
 
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (["--fuzz-cases", "0"], "--fuzz-cases must be at least 1"),
+        (["--fuzz-budget", "0"], "--fuzz-budget must be greater than zero"),
+        (["--fuzz-seed", "-1"], "--fuzz-seed must be between 0 and 2\\*\\*64 - 1"),
+    ],
+)
+def test_fuzz_campaign_refuses_invalid_bounds_early(
+    arguments: list[str],
+    message: str,
+) -> None:
+    namespace = cli_parser.build_parser().parse_args(["test", *arguments])
+
+    with pytest.raises(ValueError, match=message):
+        runner._dispatch_test_engine(namespace)
+
+
+def test_fuzz_campaign_refuses_a_platform_without_fork_before_running_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    namespace = cli_parser.build_parser().parse_args(["test", "--fuzz", "on"])
+    monkeypatch.setattr(runner.multiprocessing, "get_all_start_methods", lambda: ["spawn"])
+
+    with pytest.raises(ValueError, match="requires a platform with multiprocessing fork"):
+        runner._dispatch_test_engine(namespace)
+
+
 def test_fuzz_without_gold_has_an_explicit_empty_stage() -> None:
     report, activity = runner._no_gold_fuzz()
 
@@ -1094,6 +1261,7 @@ def test_fuzz_command_runs_the_fresh_native_evidence_pipeline(
     assert received[0].engine == "native"
     assert received[0].mutant == "on"
     assert received[0].fuzz == "on"
+    assert received[0].fuzz_backend == "all"
     assert received[0].workers == "1"
 
 
@@ -1129,6 +1297,584 @@ def test_fuzz_runs_exact_killers_from_each_gold_file() -> None:
     assert runner._mutation_gold_tests(mutation, ("tests/test_first.py",)) == (
         "tests/test_first.py::test_guard",
     )
+
+
+def test_fuzz_targets_follow_mutated_source_and_operator_metadata() -> None:
+    mutation = {
+        "mutants": [
+            {
+                "path": "src/wreath/xml.py",
+                "operator": "guard.remove-raise",
+                "outcome": "survived",
+            },
+            {
+                "path": "src/wreath/unrelated.py",
+                "operator": "guard.remove-raise",
+                "outcome": "killed",
+            },
+        ]
+    }
+
+    selected, reason = runner._select_fuzz_targets(mutation, ())
+
+    assert tuple(target.name for target in selected) == ("xml-parser",)
+    assert reason == "mutation-metadata"
+
+
+def test_explicit_fuzz_targets_are_validated_and_deduplicated() -> None:
+    selected, reason = runner._select_fuzz_targets(
+        {},
+        ("xml-parser", "http1-parser", "xml-parser"),
+    )
+
+    assert tuple(target.name for target in selected) == ("xml-parser", "http1-parser")
+    assert reason == "explicit"
+
+    with pytest.raises(ValueError, match="unknown fuzz target 'missing'"):
+        runner._select_fuzz_targets({}, ("missing",))
+
+
+def test_fuzz_targets_fall_back_to_the_registry_when_no_mutant_maps() -> None:
+    selected, reason = runner._select_fuzz_targets(
+        {"mutants": [{"path": "app.py", "operator": "expression.take-branch"}]},
+        (),
+    )
+
+    assert tuple(target.name for target in selected) == (
+        "graphql-parser",
+        "h2-frames",
+        "http-replay-codec",
+        "http1-parser",
+        "multipart-parser",
+        "xml-parser",
+    )
+    assert reason == "fallback-all"
+
+
+def test_generated_fuzz_campaign_records_replayable_seed_and_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wreath import _fuzz
+
+    received_path = tmp_path / "received.json"
+
+    def run_campaign(target: Any, config: Any) -> SimpleNamespace:
+        received_path.write_text(
+            json.dumps(
+                {
+                    "name": target.name,
+                    "max_cases": config.max_cases,
+                    "max_seconds": config.max_seconds,
+                    "generate": config.generate,
+                    "seed": config.seed,
+                    "journal": str(config.journal_path),
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(
+            target=target.name,
+            seed=config.seed,
+            cases_executed=73,
+            corpus_size=12,
+            corpus_added=3,
+            coverage_features=9,
+            semantic_features=4,
+            generated_digests=("generated",),
+            initial_corpus_digests=("initial",),
+            corpus_digests=("corpus",),
+            findings=(),
+            stop_reason="case-limit",
+            elapsed_seconds=0.25,
+        )
+
+    monkeypatch.setattr(_fuzz, "run_campaign", run_campaign)
+    namespace = SimpleNamespace(
+        fuzz_target=[],
+        fuzz_seed=41,
+        fuzz_cases=73,
+        fuzz_budget=2.0,
+        fuzz_corpus=str(tmp_path / "corpus"),
+        fuzz_artifacts=str(tmp_path / "artifacts"),
+        fuzz_replay_only=False,
+    )
+    mutation = {
+        "differential_fuzz": {"seconds": 0.25},
+        "mutants": [
+            {
+                "path": "src/wreath/xml.py",
+                "operator": "guard.remove-raise",
+                "outcome": "survived",
+            }
+        ]
+    }
+
+    report, status = runner._run_fuzz_campaigns(namespace, mutation)
+
+    assert status == 0
+    assert report["seed"] == 41
+    assert report["selection"] == "mutation-metadata"
+    assert report["counts"] == {
+        "targets": 1,
+        "cases": 73,
+        "corpus_added": 3,
+        "findings": 0,
+        "errors": 0,
+    }
+    assert report["targets"][0]["name"] == "xml-parser"
+    assert report["targets"][0]["initial_corpus_manifest_sha256"] == (
+        runner._digest_manifest(("initial",))
+    )
+    received = json.loads(received_path.read_text(encoding="utf-8"))
+    assert received["name"] == "xml-parser"
+    assert received["max_cases"] == 73
+    assert received["max_seconds"] == pytest.approx(1.75)
+    assert received["generate"] is True
+    assert received["seed"] == report["targets"][0]["seed"]
+    assert received["journal"].endswith("active-input.json")
+
+
+def test_native_fuzz_backend_runs_the_compiler_instrumented_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wreath._fuzz import native
+
+    received: list[Any] = []
+
+    def run_native_campaign(target: Any, config: Any) -> SimpleNamespace:
+        received.append((target, config))
+        return SimpleNamespace(
+            target=target.name,
+            seed=config.seed,
+            exit_code=0,
+            command=("harness", "corpus"),
+            findings=(),
+            cases_executed=73,
+            coverage_features=10,
+            fuzzer_features=20,
+            peak_rss_mb=31,
+            corpus_size=3,
+            corpus_added=2,
+            corpus_addition_digests=("b" * 64, "c" * 64),
+            corpus_digests=("a" * 64, "b" * 64, "c" * 64),
+            stdout="cov: 10 ft: 20",
+            stderr="",
+        )
+
+    monkeypatch.setattr(native, "run_native_campaign", run_native_campaign)
+    namespace = SimpleNamespace(
+        fuzz_target=["http1-parser"],
+        fuzz_seed=41,
+        fuzz_cases=73,
+        fuzz_budget=2.0,
+        fuzz_corpus=str(tmp_path / "corpus"),
+        fuzz_artifacts=str(tmp_path / "artifacts"),
+        fuzz_backend="native",
+        fuzz_native_build=str(tmp_path / "native-build"),
+        fuzz_native_reuse_build=True,
+        fuzz_replay_only=False,
+    )
+
+    report, status = runner._run_fuzz_campaigns(namespace, {})
+
+    assert status == 0
+    assert report["backend"] == "native"
+    assert report["targets"][0]["backend"] == "native"
+    assert report["targets"][0]["command"] == ["harness", "corpus"]
+    assert report["targets"][0]["coverage_features"] == 10
+    assert report["targets"][0]["fuzzer_features"] == 20
+    assert report["targets"][0]["corpus_size"] == 3
+    assert report["targets"][0]["corpus_added"] == 2
+    assert report["targets"][0]["generated_manifest_sha256"] is None
+    assert report["targets"][0][
+        "corpus_addition_manifest_sha256"
+    ] == runner._digest_manifest(
+        ("b" * 64, "c" * 64)
+    )
+    assert report["targets"][0]["corpus_manifest_sha256"] == runner._digest_manifest(
+        ("a" * 64, "b" * 64, "c" * 64)
+    )
+    assert report["counts"]["corpus_added"] == 2
+    assert received[0][1].max_runs == 73
+    assert received[0][1].rebuild is False
+
+
+def test_native_fuzz_backend_runs_every_explicit_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wreath._fuzz import native
+
+    received: list[str] = []
+
+    def run_native_campaign(target: Any, config: Any) -> SimpleNamespace:
+        received.append(target.name)
+        corpus_added = 1 if target.name == "graphql-parser" else 2
+        corpus_digests = tuple(
+            f"{value:064x}" for value in range(1, corpus_added + 2)
+        )
+        return SimpleNamespace(
+            target=target.name,
+            seed=config.seed,
+            exit_code=0,
+            command=("harness",),
+            findings=(),
+            cases_executed=1,
+            coverage_features=1,
+            fuzzer_features=1,
+            peak_rss_mb=1,
+            corpus_size=len(corpus_digests),
+            corpus_added=corpus_added,
+            corpus_addition_digests=corpus_digests[-corpus_added:],
+            corpus_digests=corpus_digests,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr(native, "run_native_campaign", run_native_campaign)
+    namespace = SimpleNamespace(
+        fuzz_target=["graphql-parser", "http1-parser"],
+        fuzz_seed=41,
+        fuzz_cases=1,
+        fuzz_budget=2.0,
+        fuzz_corpus=str(tmp_path / "corpus"),
+        fuzz_artifacts=str(tmp_path / "artifacts"),
+        fuzz_backend="native",
+        fuzz_native_build=str(tmp_path / "native-build"),
+        fuzz_native_reuse_build=True,
+        fuzz_replay_only=True,
+    )
+
+    report, status = runner._run_fuzz_campaigns(namespace, {})
+
+    assert status == 0
+    assert received == ["graphql-parser", "http1-parser"]
+    assert report["counts"]["targets"] == 2
+    assert report["counts"]["corpus_added"] == 3
+
+
+def test_native_fuzz_budget_refuses_less_than_one_whole_campaign_second(
+    tmp_path: Path,
+) -> None:
+    namespace = SimpleNamespace(
+        fuzz_target=["http1-parser"],
+        fuzz_seed=41,
+        fuzz_cases=1,
+        fuzz_budget=0.5,
+        fuzz_corpus=str(tmp_path / "corpus"),
+        fuzz_artifacts=str(tmp_path / "artifacts"),
+        fuzz_backend="native",
+        fuzz_native_build=str(tmp_path / "native-build"),
+        fuzz_native_reuse_build=True,
+        fuzz_replay_only=False,
+    )
+
+    with pytest.raises(ValueError, match="one whole second"):
+        runner._run_fuzz_campaigns(namespace, {})
+
+
+def test_all_fuzz_backend_aggregates_python_and_native_corpus_additions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wreath._fuzz import native
+
+    def run_python(_target: Any, _config: Any) -> tuple[dict[str, Any], int]:
+        return (
+            {
+                "backend": "python",
+                "name": "http1-parser",
+                "seed": 1,
+                "cases": 3,
+                "corpus_size": 5,
+                "corpus_added": 4,
+                "coverage_features": 1,
+                "semantic_features": 1,
+                "generated_manifest_sha256": runner._digest_manifest(()),
+                "corpus_manifest_sha256": runner._digest_manifest(()),
+                "findings": [],
+                "stop_reason": "case-limit",
+                "seconds": 0.01,
+            },
+            0,
+        )
+
+    def run_native(target: Any, config: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            target=target.name,
+            seed=config.seed,
+            exit_code=0,
+            command=("harness",),
+            findings=(),
+            cases_executed=7,
+            coverage_features=1,
+            fuzzer_features=1,
+            peak_rss_mb=1,
+            corpus_size=3,
+            corpus_added=2,
+            corpus_addition_digests=("b" * 64, "c" * 64),
+            corpus_digests=("a" * 64, "b" * 64, "c" * 64),
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr(runner, "_run_fuzz_target_isolated", run_python)
+    monkeypatch.setattr(native, "run_native_campaign", run_native)
+    namespace = SimpleNamespace(
+        fuzz_target=["http1-parser"],
+        fuzz_seed=41,
+        fuzz_cases=7,
+        fuzz_budget=2.0,
+        fuzz_corpus=str(tmp_path / "corpus"),
+        fuzz_artifacts=str(tmp_path / "artifacts"),
+        fuzz_backend="all",
+        fuzz_native_build=str(tmp_path / "native-build"),
+        fuzz_native_reuse_build=True,
+        fuzz_replay_only=False,
+    )
+
+    report, status = runner._run_fuzz_campaigns(namespace, {})
+
+    assert status == 0
+    assert report["counts"] == {
+        "targets": 2,
+        "cases": 10,
+        "corpus_added": 6,
+        "findings": 0,
+        "errors": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"corpus_size": -1}, "corpus_size must be a non-negative integer"),
+        ({"corpus_added": -1}, "corpus_added must be a non-negative integer"),
+        ({"corpus_added": 2}, "corpus_added cannot exceed corpus_size"),
+        ({"corpus_digests": ()}, "corpus_size must equal the corpus digest count"),
+        (
+            {"corpus_added": 0},
+            "corpus_added must equal the corpus addition digest count",
+        ),
+        (
+            {"corpus_addition_digests": ("not-a-digest",)},
+            r"corpus_addition_digests\[0\]",
+        ),
+        ({"corpus_addition_digests": ("c" * 64,)}, "must be present in corpus_digests"),
+        (
+            {
+                "corpus_size": 2,
+                "corpus_digests": ("b" * 64, "b" * 64),
+            },
+            "corpus_digests must not contain duplicate digests",
+        ),
+        (
+            {
+                "corpus_size": 2,
+                "corpus_added": 2,
+                "corpus_addition_digests": ("b" * 64, "a" * 64),
+                "corpus_digests": ("a" * 64, "b" * 64),
+            },
+            "corpus_addition_digests must be sorted",
+        ),
+        (
+            {
+                "corpus_size": 2,
+                "corpus_digests": ("b" * 64, "a" * 64),
+            },
+            "corpus_digests must be sorted",
+        ),
+    ],
+)
+def test_native_fuzz_report_refuses_malformed_corpus_evidence(
+    changes: dict[str, Any],
+    message: str,
+) -> None:
+    values: dict[str, Any] = {
+        "target": "http1-parser",
+        "seed": 1,
+        "exit_code": 0,
+        "command": ("harness",),
+        "findings": (),
+        "cases_executed": 1,
+        "coverage_features": 1,
+        "fuzzer_features": 1,
+        "peak_rss_mb": 1,
+        "corpus_size": 1,
+        "corpus_added": 1,
+        "corpus_addition_digests": ("b" * 64,),
+        "corpus_digests": ("b" * 64,),
+        "stdout": "",
+        "stderr": "",
+    }
+    values.update(changes)
+
+    with pytest.raises(ValueError, match=message):
+        runner._native_fuzz_campaign_dict(SimpleNamespace(**values))
+
+
+def test_generated_fuzz_findings_are_serialized_and_fail_the_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wreath import _fuzz
+
+    finding = SimpleNamespace(
+        digest="a" * 64,
+        deterministic=True,
+        exception_type="builtins.AssertionError",
+        exception_message="invariant",
+        original_size=20,
+        minimized_size=3,
+        input_path=tmp_path / "input",
+        metadata_path=tmp_path / "metadata.json",
+    )
+
+    def run_campaign(target: Any, config: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            target=target.name,
+            seed=config.seed,
+            cases_executed=1,
+            corpus_size=1,
+            corpus_added=1,
+            coverage_features=2,
+            semantic_features=1,
+            generated_digests=(),
+            corpus_digests=(),
+            findings=(finding,),
+            stop_reason="finding-limit",
+            elapsed_seconds=0.01,
+        )
+
+    monkeypatch.setattr(_fuzz, "run_campaign", run_campaign)
+    namespace = SimpleNamespace(
+        fuzz_target=["xml-parser"],
+        fuzz_seed=7,
+        fuzz_cases=1,
+        fuzz_budget=1.0,
+        fuzz_corpus=str(tmp_path / "corpus"),
+        fuzz_artifacts=str(tmp_path / "artifacts"),
+        fuzz_replay_only=True,
+    )
+
+    report, status = runner._run_fuzz_campaigns(namespace, {})
+
+    assert status == 1
+    assert report["counts"]["findings"] == 1
+    assert report["targets"][0]["findings"][0]["input_path"] == str(tmp_path / "input")
+
+
+def test_fuzz_campaign_recovers_a_native_signal_with_exact_input_and_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wreath._fuzz import FuzzTarget
+
+    crashing_input = b"native-crash-vector"
+
+    def crash(data: bytes) -> None:
+        assert data == crashing_input
+        os.write(sys.stderr.fileno(), b"AddressSanitizer: deliberate test diagnostic\n")
+        os.kill(os.getpid(), signal.SIGABRT)
+
+    target = FuzzTarget("native-crash", crash, seeds=(crashing_input,))
+    monkeypatch.setattr(
+        runner,
+        "_select_fuzz_targets",
+        lambda _report, _requested: ((target,), "explicit"),
+    )
+    namespace = SimpleNamespace(
+        fuzz_target=[target.name],
+        fuzz_seed=81,
+        fuzz_cases=1,
+        fuzz_budget=2.0,
+        fuzz_corpus=str(tmp_path / "corpus"),
+        fuzz_artifacts=str(tmp_path / "artifacts"),
+        fuzz_replay_only=False,
+    )
+
+    report, status = runner._run_fuzz_campaigns(namespace, {})
+
+    assert status == 1
+    assert report["counts"] == {
+        "targets": 1,
+        "cases": 1,
+        "corpus_added": 0,
+        "findings": 1,
+        "errors": 0,
+    }
+    campaign = report["targets"][0]
+    assert campaign["stop_reason"] == "signal"
+    assert campaign["crash_case_ordinal"] == 0
+    finding = campaign["findings"][0]
+    assert Path(finding["input_path"]).read_bytes() == crashing_input
+    diagnostic = Path(finding["metadata_path"]).with_name("diagnostic.log")
+    assert "AddressSanitizer" in diagnostic.read_text(encoding="utf-8")
+
+
+def test_fuzz_campaign_reports_worker_failure_before_any_input_as_infrastructure_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wreath import _fuzz
+
+    def fail_before_campaign(_target: Any, _config: Any) -> None:
+        raise RuntimeError("campaign setup failed")
+
+    monkeypatch.setattr(_fuzz, "run_campaign", fail_before_campaign)
+    namespace = SimpleNamespace(
+        fuzz_target=["xml-parser"],
+        fuzz_seed=17,
+        fuzz_cases=1,
+        fuzz_budget=1.0,
+        fuzz_corpus=str(tmp_path / "corpus"),
+        fuzz_artifacts=str(tmp_path / "artifacts"),
+        fuzz_replay_only=False,
+    )
+
+    report, status = runner._run_fuzz_campaigns(namespace, {})
+
+    assert status == 2
+    assert report["counts"]["errors"] == 1
+    assert report["targets"][0]["stop_reason"] == "infrastructure-error"
+    assert "before recording an active input" in report["targets"][0]["error"]
+    assert "campaign setup failed" in report["targets"][0]["error"]
+
+
+def test_mutation_process_receives_the_differential_fuzz_contract() -> None:
+    namespace = cli_parser.build_parser().parse_args(
+        [
+            "test",
+            "--fuzz",
+            "on",
+            "--fuzz-cases",
+            "91",
+            "--fuzz-budget",
+            "6",
+            "--fuzz-seed",
+            "19",
+            "--fuzz-corpus",
+            "corpus",
+            "--fuzz-artifacts",
+            "artifacts",
+            "--fuzz-target",
+            "xml-parser",
+            "--fuzz-replay-only",
+        ]
+    )
+
+    arguments = runner._mutation_arguments(namespace)
+
+    assert "--differential-fuzz" in arguments
+    assert arguments[arguments.index("--fuzz-cases") + 1] == "91"
+    assert arguments[arguments.index("--fuzz-seconds") + 1] == "3.0"
+    assert arguments[arguments.index("--fuzz-seed") + 1] == "19"
+    assert arguments[arguments.index("--fuzz-corpus-root") + 1] == "corpus"
+    assert arguments[arguments.index("--fuzz-artifact-root") + 1] == "artifacts"
+    assert arguments[arguments.index("--fuzz-target") + 1] == "xml-parser"
+    assert "--fuzz-replay-only" in arguments
 
 
 def test_live_fuzz_unlocks_when_five_percent_of_passed_files_are_gold() -> None:
@@ -1376,6 +2122,8 @@ def test_fuzz_command_executes_killers_and_explicit_cases_in_each_gold_file(
         encoding="utf-8",
     )
     report = tmp_path / "report.json"
+    fuzz_corpus = tmp_path / "fuzz-corpus"
+    fuzz_artifacts = tmp_path / "fuzz-artifacts"
 
     completed = subprocess.run(
         [
@@ -1395,6 +2143,18 @@ def test_fuzz_command_executes_killers_and_explicit_cases_in_each_gold_file(
             "tests",
             "--mutant-operator",
             "guard.remove-raise",
+            "--fuzz-cases",
+            "4",
+            "--fuzz-budget",
+            "2",
+            "--fuzz-backend",
+            "python",
+            "--fuzz-seed",
+            "99",
+            "--fuzz-corpus",
+            str(fuzz_corpus),
+            "--fuzz-artifacts",
+            str(fuzz_artifacts),
             "--grid",
             "never",
             "--no-history",
@@ -1419,6 +2179,22 @@ def test_fuzz_command_executes_killers_and_explicit_cases_in_each_gold_file(
     assert document["fuzz"]["schedule_seeds"] == ["wreath-fuzz-v1"]
     assert document["fuzz"]["fuzzed_files"] == ["tests/test_policy.py"]
     assert document["fuzz"]["live_started"] is True
+    assert document["fuzz"]["campaign"]["seed"] == 99
+    assert document["fuzz"]["campaign"]["selection"] == "fallback-all"
+    campaign_counts = document["fuzz"]["campaign"]["counts"]
+    assert campaign_counts["targets"] == 6
+    assert campaign_counts["cases"] == 24
+    assert campaign_counts["corpus_added"] > 0
+    assert campaign_counts["findings"] == 0
+    assert campaign_counts["errors"] == 0
+    assert {target["name"] for target in document["fuzz"]["campaign"]["targets"]} == {
+        "graphql-parser",
+        "h2-frames",
+        "http-replay-codec",
+        "http1-parser",
+        "multipart-parser",
+        "xml-parser",
+    }
 
 
 def test_auto_mutation_workers_reclaim_idle_suite_slots_after_seal() -> None:

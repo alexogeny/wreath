@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 from typing import cast
 
 import pytest
 
 from wreath.response import Response
-from wreath.response_cache import cache_key_for, cached, default_cache_key
+from wreath.response_cache import (
+    CDNPurge,
+    Tags,
+    cache_key_for,
+    cached,
+    default_cache_key,
+    watched_name,
+)
 
 
 class _Req:
@@ -39,6 +47,17 @@ class _QueryReq(_Req):
     async def body(self) -> bytes:
         self.body_reads += 1
         return self._body
+
+
+class _RecordingQueue:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[str, ...], str | None]] = []
+
+    async def enqueue(self, task: str, *args: str, key: str | None = None) -> None:
+        self.calls.append((task, args, key))
+
+
+_TAGS = Tags(secret=b"response-cache-mutation-tests")
 
 
 pytestmark = pytest.mark.asyncio
@@ -90,6 +109,47 @@ async def test_cache_status_reports_method_and_policy_bypasses() -> None:
 
     assert (b"cache-status", b'"Wreath";fwd=method') in method.headers
     assert (b"cache-status", b'"Wreath";fwd=bypass') in policy.headers
+
+
+async def test_cache_status_reports_a_safe_uncached_method_as_bypass() -> None:
+    @cached(ttl=100, methods=("GET",), cache_status="Wreath")
+    async def handler(request):
+        return Response(b"body")
+
+    response = await handler(_Req(method="HEAD"))
+
+    assert (b"cache-status", b'"Wreath";fwd=bypass') in response.headers
+
+
+async def test_cache_status_reports_an_uncacheable_response_as_a_miss() -> None:
+    @cached(ttl=100, cache_status="Wreath")
+    async def handler(request):
+        return Response(b"missing", status=404)
+
+    response = await handler(_Req())
+
+    assert (b"cache-status", b'"Wreath";fwd=uri-miss') in response.headers
+    assert handler.cache_store.stats.size == 0
+
+
+async def test_an_untagged_unsafe_method_emits_no_group_invalidation() -> None:
+    @cached(methods=("GET",))
+    async def handler(request):
+        return Response(b"updated")
+
+    response = await handler(_Req(method="POST"))
+
+    assert not [name for name, _ in response.headers if name == b"cache-group-invalidation"]
+
+
+async def test_a_safe_uncached_method_emits_no_group_invalidation() -> None:
+    @cached(methods=("GET",), invalidate_on=("Report",), tags=_TAGS)
+    async def handler(request):
+        return Response(b"metadata")
+
+    response = await handler(_Req(method="HEAD"))
+
+    assert not [name for name, _ in response.headers if name == b"cache-group-invalidation"]
 
 
 async def test_cache_status_is_opt_in() -> None:
@@ -176,6 +236,23 @@ async def test_query_cache_keys_include_content_and_representation_metadata() ->
     ]
 
 
+async def test_query_cache_keys_ignore_unrelated_headers() -> None:
+    calls = 0
+
+    @cached(ttl=100, key=lambda request: "same-base-key")
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        return Response(str(calls).encode())
+
+    plain = _QueryReq(b'{}')
+    unrelated = _QueryReq(b'{}')
+    unrelated.headers.append((b"x-request-id", b"different"))
+
+    assert (await handler(plain)).body == b"1"
+    assert (await handler(unrelated)).body == b"1"
+
+
 async def test_non_get_is_not_cached() -> None:
     calls = 0
 
@@ -230,6 +307,134 @@ async def test_ttl_expiry_reruns_handler() -> None:
     clock.now = 11
     await handler(_Req())
     assert calls == 2
+
+
+async def test_declared_ttl_is_applied_to_the_private_store() -> None:
+    @cached(ttl=2.5)
+    async def handler(request):
+        return Response(b"x")
+
+    assert handler.cache_store.ttl == 2.5
+
+
+async def test_a_handler_without_invalidation_models_has_no_subscription_metadata() -> None:
+    @cached
+    async def handler(request):
+        return Response(b"x")
+
+    assert not hasattr(handler, "invalidated_by")
+
+
+async def test_watched_name_falls_back_to_an_objects_string_form() -> None:
+    class Nameless:
+        def __str__(self) -> str:
+            return "fallback-name"
+
+    assert watched_name(Nameless()) == "fallback-name"
+
+
+async def test_watched_name_keeps_an_explicit_string() -> None:
+    assert watched_name("Report") == "Report"
+
+
+async def test_watched_name_does_not_recoerce_a_string_subclass() -> None:
+    class ModelName(str):
+        def __str__(self) -> str:
+            return "coerced"
+
+    name = ModelName("Report")
+
+    assert watched_name(name) is name
+
+
+async def test_cdn_purge_uses_a_declared_deduplication_key() -> None:
+    queue = _RecordingQueue()
+    purge = CDNPurge(queue, tags=_TAGS, key=lambda tag: f"custom:{tag}")
+
+    await purge._enqueue("report-tag")
+
+    assert queue.calls == [("wreath_cdn_purge", ("report-tag",), "custom:report-tag")]
+
+
+async def test_a_closed_cdn_purger_refuses_new_models() -> None:
+    purge = CDNPurge(_RecordingQueue(), tags=_TAGS)
+    purge.close()
+
+    with pytest.raises(RuntimeError, match="purger was closed"):
+        purge.watch("Report")
+
+
+async def test_watching_no_models_does_not_subscribe_the_cdn_purger() -> None:
+    purge = CDNPurge(_RecordingQueue(), tags=_TAGS)
+
+    purge.watch()
+
+    assert purge.watching == frozenset()
+    assert purge._subscribed is False
+
+
+async def test_a_pending_cdn_tag_is_not_scheduled_twice() -> None:
+    purge = CDNPurge(_RecordingQueue(), tags=_TAGS)
+    purge._pending.add("report-tag")
+
+    purge._schedule("report-tag")
+
+    assert purge._runner is None
+
+
+async def test_a_cdn_runner_is_not_started_without_pending_work() -> None:
+    purge = CDNPurge(_RecordingQueue(), tags=_TAGS)
+
+    purge._start_runner()
+
+    assert purge._runner is None
+
+
+async def test_a_live_cdn_runner_is_not_replaced() -> None:
+    purge = CDNPurge(_RecordingQueue(), tags=_TAGS)
+    runner = asyncio.current_task()
+    assert runner is not None
+    purge._runner = runner
+    purge._pending.add("report-tag")
+
+    purge._start_runner()
+
+    assert purge._runner is runner
+
+
+async def test_cdn_runner_uses_an_explicit_event_loop() -> None:
+    class Loop:
+        def __init__(self) -> None:
+            self.called = False
+
+        def create_task(self, coroutine):
+            self.called = True
+            return asyncio.create_task(coroutine)
+
+    queue = _RecordingQueue()
+    purge = CDNPurge(queue, tags=_TAGS)
+    purge._pending.add("report-tag")
+    loop = Loop()
+
+    purge._start_runner(cast(asyncio.AbstractEventLoop, loop))
+    runner = purge._runner
+    assert runner is not None
+    await runner
+
+    assert loop.called is True
+
+
+async def test_a_stale_done_callback_keeps_the_live_cdn_runner() -> None:
+    purge = CDNPurge(_RecordingQueue(), tags=_TAGS)
+    live = asyncio.current_task()
+    assert live is not None
+    stale = asyncio.create_task(asyncio.sleep(0))
+    await stale
+    purge._runner = live
+
+    purge._runner_done(stale)
+
+    assert purge._runner is live
 
 
 async def test_invalidate_clears_and_targets() -> None:
@@ -410,8 +615,6 @@ async def test_declared_query_names_are_refused_when_declared() -> None:
 
 
 async def test_concurrent_callers_of_a_cold_key_share_one_computation() -> None:
-    import asyncio
-
     calls = 0
     started = asyncio.Event()
     release = asyncio.Event()

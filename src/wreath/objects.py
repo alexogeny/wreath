@@ -59,7 +59,7 @@ import zlib
 from collections.abc import AsyncIterable, AsyncIterator, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from ._native import _core
 
@@ -356,6 +356,21 @@ class ObjectStore(Protocol):
         """An `ObjectPath` bound to this store and `key`."""
         ...
 
+
+@runtime_checkable
+class _AtomicUploadObjectStore(ObjectStore, Protocol):
+    async def _upload_read_versioned(self, key: str) -> tuple[bytes, str] | None: ...
+
+    async def _upload_compare_and_swap(
+        self,
+        key: str,
+        data: bytes,
+        *,
+        expected_etag: str | None,
+        content_type: str | None,
+    ) -> ObjectStat | None: ...
+
+    async def _upload_delete_versioned(self, key: str, *, expected_etag: str) -> bool: ...
 
 class ObjectPath:
     """An immutable handle to one key in one store, shaped like `pathlib.Path`.
@@ -753,6 +768,38 @@ class MemoryObjectStore:
         """Remove `key`. Not an error when it is already gone."""
         self._objects.pop(normalize_key(key), None)
 
+    async def _upload_read_versioned(self, key: str) -> tuple[bytes, str] | None:
+        stored = self._objects.get(normalize_key(key))
+        if stored is None:
+            return None
+        data, _content_type = stored
+        return data, _etag(data)
+
+    async def _upload_compare_and_swap(
+        self,
+        key: str,
+        data: bytes,
+        *,
+        expected_etag: str | None,
+        content_type: str | None = None,
+    ) -> ObjectStat | None:
+        key = normalize_key(key)
+        current = self._objects.get(key)
+        current_etag = None if current is None else _etag(current[0])
+        if current_etag != expected_etag:
+            return None
+        stored = bytes(data)
+        self._objects[key] = stored, content_type
+        return ObjectStat(key, len(stored), _etag(stored), None, content_type)
+
+    async def _upload_delete_versioned(self, key: str, *, expected_etag: str) -> bool:
+        key = normalize_key(key)
+        current = self._objects.get(key)
+        if current is None or _etag(current[0]) != expected_etag:
+            return False
+        del self._objects[key]
+        return True
+
     def url(self, key: str, *, expires: int = 3600, method: str = "GET") -> str:
         """A `memory://` URL signed with this store's secret.
 
@@ -1017,6 +1064,144 @@ class LocalObjectStore:
             dir_fd=parent_fd,
         )
 
+    def _upload_lock(self, key: str) -> tuple[int, int]:
+        import fcntl
+
+        lock_dir_name = ".wreath-upload-locks"
+        try:
+            os.mkdir(lock_dir_name, 0o700, dir_fd=self._root_fd)
+        except FileExistsError:
+            pass
+        lock_dir = os.open(
+            lock_dir_name,
+            os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC,
+            dir_fd=self._root_fd,
+        )
+        try:
+            lock_name = hashlib.sha256(key.encode()).hexdigest()
+            lock_fd = os.open(
+                lock_name,
+                os.O_RDWR | os.O_CREAT | _O_NOFOLLOW | _O_CLOEXEC,
+                0o600,
+                dir_fd=lock_dir,
+            )
+        except BaseException:
+            os.close(lock_dir)
+            raise
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        return lock_dir, lock_fd
+
+    @staticmethod
+    def _upload_unlock(lock_dir: int, lock_fd: int) -> None:
+        import fcntl
+
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+        os.close(lock_dir)
+
+    @staticmethod
+    def _read_at(parent_fd: int, name: str) -> bytes | None:
+        try:
+            fd = os.open(name, os.O_RDONLY | _O_NOFOLLOW | _O_CLOEXEC, dir_fd=parent_fd)
+        except FileNotFoundError:
+            return None
+        try:
+            chunks = []
+            while chunk := os.read(fd, _CHUNK):
+                chunks.append(chunk)
+            return b"".join(chunks)
+        finally:
+            os.close(fd)
+
+    async def _upload_read_versioned(self, key: str) -> tuple[bytes, str] | None:
+        return await asyncio.to_thread(self._upload_read_versioned_sync, normalize_key(key))
+
+    def _upload_read_versioned_sync(self, key: str) -> tuple[bytes, str] | None:
+        lock_dir, lock_fd = self._upload_lock(key)
+        try:
+            parent_fd, opened, name = self._open_parent(key.split("/"), False)
+            try:
+                raw = self._read_at(parent_fd, name)
+            finally:
+                for fd in opened:
+                    os.close(fd)
+            return None if raw is None else (raw, _etag(raw))
+        except ObjectError:
+            return None
+        finally:
+            self._upload_unlock(lock_dir, lock_fd)
+
+    async def _upload_compare_and_swap(
+        self,
+        key: str,
+        data: bytes,
+        *,
+        expected_etag: str | None,
+        content_type: str | None,
+    ) -> ObjectStat | None:
+        return await asyncio.to_thread(
+            self._upload_compare_and_swap_sync,
+            normalize_key(key),
+            data,
+            expected_etag,
+            content_type,
+        )
+
+    def _upload_compare_and_swap_sync(
+        self, key: str, data: bytes, expected_etag: str | None, content_type: str | None
+    ) -> ObjectStat | None:
+        lock_dir, lock_fd = self._upload_lock(key)
+        try:
+            parent_fd, opened, name = self._open_parent(key.split("/"), True)
+            tmp = _tmp_name(name)
+            try:
+                current = self._read_at(parent_fd, name)
+                current_etag = None if current is None else _etag(current)
+                if current_etag != expected_etag:
+                    return None
+                fd = self._open_new(parent_fd, tmp)
+                try:
+                    _write_all(fd, data)
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                os.replace(tmp, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                return ObjectStat(key, st.st_size, _fs_etag(st), st.st_mtime, content_type)
+            finally:
+                try:
+                    os.unlink(tmp, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+                for fd in opened:
+                    os.close(fd)
+        finally:
+            self._upload_unlock(lock_dir, lock_fd)
+
+    async def _upload_delete_versioned(self, key: str, *, expected_etag: str) -> bool:
+        return await asyncio.to_thread(
+            self._upload_delete_versioned_sync, normalize_key(key), expected_etag
+        )
+
+    def _upload_delete_versioned_sync(self, key: str, expected_etag: str) -> bool:
+        lock_dir, lock_fd = self._upload_lock(key)
+        try:
+            try:
+                parent_fd, opened, name = self._open_parent(key.split("/"), False)
+            except ObjectError:
+                return False
+            try:
+                current = self._read_at(parent_fd, name)
+                if current is None or _etag(current) != expected_etag:
+                    return False
+                os.unlink(name, dir_fd=parent_fd)
+                return True
+            finally:
+                for fd in opened:
+                    os.close(fd)
+        finally:
+            self._upload_unlock(lock_dir, lock_fd)
+
     def _open_parent(self, parts: _List[str], create: bool) -> tuple[int, _List[int], str]:
         """Walk (optionally creating) parent dirs beneath the root, refusing symlinks.
 
@@ -1123,7 +1308,12 @@ class LocalObjectStore:
     def _walk(self, prefix: str) -> _List[str]:
         parent = prefix.rpartition("/")[0]
         if not parent:
-            return _core.local_walk(self._root, os.scandir, os.path.join)
+            return [
+                key
+                for key in _core.local_walk(self._root, os.scandir, os.path.join)
+                if key != ".wreath-upload-locks"
+                and not key.startswith(".wreath-upload-locks/")
+            ]
         try:
             if normalize_key(parent) != parent:
                 return _core.local_walk(self._root, os.scandir, os.path.join)
@@ -1139,6 +1329,8 @@ class LocalObjectStore:
             return [
                 f"{parent}/{key}"
                 for key in _core.local_walk(descriptor_path, os.scandir, os.path.join)
+                if key != ".wreath-upload-locks"
+                and not key.startswith(".wreath-upload-locks/")
             ]
         finally:
             for fd in opened:
@@ -1782,6 +1974,54 @@ class S3ObjectStore:
         etag = (resp.header(b"etag") or b"").decode("ascii").strip('"')
         return ObjectStat(key=key, size=len(data), etag=etag, content_type=content_type)
 
+    async def _upload_read_versioned(self, key: str) -> tuple[bytes, str] | None:
+        key = normalize_key(key)
+        resp = await self._send("GET", self._obj_path(key))
+        if resp.status == 404:
+            return None
+        self._ok(resp, 200)
+        etag = (resp.header(b"etag") or b"").decode("ascii").strip('"')
+        if not etag:
+            raise ObjectError("S3 upload state response has no ETag")
+        return resp.body, etag
+
+    async def _upload_compare_and_swap(
+        self,
+        key: str,
+        data: bytes,
+        *,
+        expected_etag: str | None,
+        content_type: str | None,
+    ) -> ObjectStat | None:
+        key = normalize_key(key)
+        condition = (
+            {"if-none-match": "*"}
+            if expected_etag is None
+            else {"if-match": f'"{expected_etag}"'}
+        )
+        if content_type:
+            condition["content-type"] = content_type
+        resp = await self._send(
+            "PUT", self._obj_path(key), body=data, extra_headers=condition
+        )
+        if resp.status in (409, 412):
+            return None
+        self._ok(resp, 200)
+        etag = (resp.header(b"etag") or b"").decode("ascii").strip('"')
+        return ObjectStat(key, len(data), etag, content_type=content_type)
+
+    async def _upload_delete_versioned(self, key: str, *, expected_etag: str) -> bool:
+        key = normalize_key(key)
+        resp = await self._send(
+            "DELETE",
+            self._obj_path(key),
+            extra_headers={"if-match": f'"{expected_etag}"'},
+        )
+        if resp.status in (404, 409, 412):
+            return False
+        self._ok(resp, 204)
+        return True
+
     async def write_stream(
         self,
         key: str,
@@ -2255,6 +2495,10 @@ class UploadState:
     created: float = 0.0
     updated: float = 0.0
     backend: dict[str, Any] = field(default_factory=dict)
+    principal: str = ""
+    tenant: str = ""
+    claim: str = ""
+    claimed: float = 0.0
 
     def copy(self) -> UploadState:
         """An independent copy, including the backend's own dict.
@@ -2276,6 +2520,10 @@ class UploadState:
             created=self.created,
             updated=self.updated,
             backend=_json.loads(_json.dumps(self.backend)),
+            principal=self.principal,
+            tenant=self.tenant,
+            claim=self.claim,
+            claimed=self.claimed,
         )
 
     def to_json(self) -> bytes:
@@ -2297,6 +2545,10 @@ class UploadState:
                 "created": self.created,
                 "updated": self.updated,
                 "backend": self.backend,
+                "principal": self.principal,
+                "tenant": self.tenant,
+                "claim": self.claim,
+                "claimed": self.claimed,
             }
         ).encode()
 
@@ -2318,7 +2570,27 @@ class UploadState:
             created=float(data.get("created", 0.0)),
             updated=float(data.get("updated", 0.0)),
             backend=dict(data.get("backend") or {}),
+            principal=str(data.get("principal", "")),
+            tenant=str(data.get("tenant", "")),
+            claim=str(data.get("claim", "")),
+            claimed=float(data.get("claimed", 0.0)),
         )
+
+
+def _adopt_upload_state(target: UploadState, source: UploadState) -> None:
+    target.id = source.id
+    target.key = source.key
+    target.offset = source.offset
+    target.length = source.length
+    target.complete = source.complete
+    target.content_type = source.content_type
+    target.created = source.created
+    target.updated = source.updated
+    target.backend = source.copy().backend
+    target.principal = source.principal
+    target.tenant = source.tenant
+    target.claim = source.claim
+    target.claimed = source.claimed
 
 
 @runtime_checkable
@@ -2347,6 +2619,10 @@ class UploadStore(Protocol):
         """The current state, or None when there is no such upload."""
         ...
 
+    async def claim(self, state: UploadState, *, expected: int) -> bool:
+        """Fence backend work if the stored offset is still `expected`."""
+        ...
+
     async def advance(self, state: UploadState, *, expected: int) -> bool:
         """Store `state` if the stored offset is still `expected`.
 
@@ -2354,8 +2630,12 @@ class UploadStore(Protocol):
         """
         ...
 
-    async def delete(self, upload_id: str) -> None:
-        """Forget an upload. Absent is success."""
+    async def release(self, state: UploadState) -> bool:
+        """Release the claim carried by `state` without advancing it."""
+        ...
+
+    async def delete(self, upload_id: str, *, claim: str = "") -> bool:
+        """Forget an unclaimed upload, or the upload holding `claim`."""
         ...
 
     async def expired(self, before: float) -> list[UploadState]:
@@ -2378,71 +2658,249 @@ class MemoryUploadStore:
     there is nothing for another task to interleave at.
     """
 
-    __slots__ = ("_states",)
+    __slots__ = ("_max_entries", "_states")
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_entries: int = 1024) -> None:
+        if not isinstance(max_entries, int) or isinstance(max_entries, bool) or max_entries <= 0:
+            raise ValueError("max_entries must be a positive integer")
+        self._max_entries = max_entries
         self._states: dict[str, UploadState] = {}
 
     async def create(self, state: UploadState) -> None:
         if state.id in self._states:
             raise ObjectError(f"upload already exists: {state.id!r}")
+        if len(self._states) >= self._max_entries:
+            raise _UploadCapacity("pending upload limit reached")
         self._states[state.id] = state.copy()
 
     async def read(self, upload_id: str) -> UploadState | None:
         current = self._states.get(upload_id)
         return current.copy() if current is not None else None
 
-    async def advance(self, state: UploadState, *, expected: int) -> bool:
+    async def claim(self, state: UploadState, *, expected: int) -> bool:
         current = self._states.get(state.id)
-        if current is None or current.offset != expected:
+        if current is None or current.offset != expected or current.claim:
             return False
-        self._states[state.id] = state.copy()
+        claimed = current.copy()
+        claimed.claim = os.urandom(16).hex()
+        claimed.claimed = _now()
+        self._states[state.id] = claimed
+        _adopt_upload_state(state, claimed)
         return True
 
-    async def delete(self, upload_id: str) -> None:
-        self._states.pop(upload_id, None)
+    async def advance(self, state: UploadState, *, expected: int) -> bool:
+        current = self._states.get(state.id)
+        if (
+            current is None
+            or current.offset != expected
+            or current.claim != state.claim
+        ):
+            return False
+        stored = state.copy()
+        stored.claim = ""
+        stored.claimed = 0.0
+        self._states[state.id] = stored
+        state.claim = ""
+        state.claimed = 0.0
+        return True
+
+    async def release(self, state: UploadState) -> bool:
+        current = self._states.get(state.id)
+        if current is None or not state.claim or current.claim != state.claim:
+            return False
+        stored = state.copy()
+        stored.claim = ""
+        stored.claimed = 0.0
+        self._states[state.id] = stored
+        state.claim = ""
+        state.claimed = 0.0
+        return True
+
+    async def delete(self, upload_id: str, *, claim: str = "") -> bool:
+        current = self._states.get(upload_id)
+        if current is None:
+            return False
+        if current.claim != claim:
+            return False
+        del self._states[upload_id]
+        return True
 
     async def expired(self, before: float) -> _List[UploadState]:
-        return [state for state in list(self._states.values()) if state.updated < before]
+        stale: _List[UploadState] = []
+        for current in list(self._states.values()):
+            if current.updated >= before or (current.claim and current.claimed >= before):
+                continue
+            claimed = current.copy()
+            claimed.claim = os.urandom(16).hex()
+            claimed.claimed = _now()
+            self._states[current.id] = claimed.copy()
+            stale.append(claimed)
+        return stale
 
 
 class ObjectUploadStore:
     """Upload state as a small object beside the bytes, in the same store.
 
-    The shared-state answer that adds no datastore: a worker that did not
-    create the upload can still read its record, because the record is in the
-    bucket every worker already talks to. One extra round trip per request buys
-    that, which is a fair trade against a resume that fails on a sibling worker.
-
-    **The conditional advance is enforced in-process, and across processes it
-    degrades to the offset check.** A plain object store has no
-    compare-and-swap, so `advance` re-reads the record and refuses when the
-    stored offset moved -- which closes the window for two appends *this*
-    worker is serving, and narrows but does not close it for two workers
-    serving the same upload at once. The draft already requires a client not to
-    append to one upload in parallel; this makes a violating client lose an
-    append rather than corrupt an object, because the loser's bytes were
-    written to its own part key and are simply never assembled.
+    Admission and state advances require the backing store's atomic upload
+    compare-and-swap capability. Construction refuses a store without it so a
+    multi-worker deployment cannot silently degrade to a read-then-write race.
 
     Args:
         store: where records live; ordinarily the same store as the bytes.
         prefix: key prefix for records, kept distinct from the objects' own.
     """
 
-    __slots__ = ("_prefix", "_store")
+    __slots__ = ("_counter_key", "_max_entries", "_prefix", "_store")
 
-    def __init__(self, store: ObjectStore, *, prefix: str = ".uploads/") -> None:
-        self._store = store
+    def __init__(
+        self, store: ObjectStore, *, prefix: str = ".uploads/", max_entries: int = 1024
+    ) -> None:
+        if not isinstance(max_entries, int) or isinstance(max_entries, bool) or max_entries <= 0:
+            raise ValueError("max_entries must be a positive integer")
+        required = (
+            "_upload_read_versioned",
+            "_upload_compare_and_swap",
+            "_upload_delete_versioned",
+        )
+        missing = [name for name in required if not callable(getattr(store, name, None))]
+        if missing:
+            raise TypeError(
+                "ObjectUploadStore needs an object store with atomic upload compare-and-swap; "
+                f"{type(store).__name__} does not provide {', '.join(missing)}"
+            )
+        self._store = cast(_AtomicUploadObjectStore, store)
         self._prefix = prefix
+        self._max_entries = max_entries
+        self._counter_key = f"{prefix}.admission.json"
 
     def _record_key(self, upload_id: str) -> str:
         return f"{self._prefix}{upload_id}.json"
 
     async def create(self, state: UploadState) -> None:
         key = self._record_key(state.id)
-        if await self._store.exists(key):
+        reservation = await self._reserve(state.id)
+        stored = await self._store._upload_compare_and_swap(
+            key,
+            state.to_json(),
+            expected_etag=None,
+            content_type="application/json",
+        )
+        if stored is None:
+            await self._release_reservation(state.id, reservation)
             raise ObjectError(f"upload already exists: {state.id!r}")
-        await self._store.write(key, state.to_json(), content_type="application/json")
+        if not await self._commit_reservation(state.id, reservation):
+            versioned = await self._store._upload_read_versioned(key)
+            if versioned is None:
+                raise ObjectError(f"upload admission for {state.id!r} expired before creation")
+            removed = await self._store._upload_delete_versioned(
+                key, expected_etag=versioned[1]
+            )
+            if not removed:
+                raise ObjectError(
+                    f"upload admission for {state.id!r} was lost and its record "
+                    "could not be reclaimed"
+                )
+            raise ObjectError(f"upload admission for {state.id!r} expired before creation")
+
+    @staticmethod
+    def _admission_entries(raw: bytes) -> dict[str, dict[str, Any]]:
+        try:
+            entries = _json.loads(raw)["entries"]
+            if not isinstance(entries, dict):
+                raise TypeError
+            parsed: dict[str, dict[str, Any]] = {}
+            for upload_id, entry in entries.items():
+                if (
+                    not isinstance(upload_id, str)
+                    or not isinstance(entry, dict)
+                    or not isinstance(entry.get("token"), str)
+                    or not isinstance(entry.get("created"), (int, float))
+                    or not isinstance(entry.get("committed"), bool)
+                ):
+                    raise TypeError
+                parsed[upload_id] = dict(entry)
+            return parsed
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ObjectError("corrupt upload admission counter") from exc
+
+    async def _reserve(self, upload_id: str) -> str:
+        token = os.urandom(16).hex()
+        for _attempt in range(128):
+            versioned = await self._store._upload_read_versioned(self._counter_key)
+            if versioned is None:
+                entries, etag = {}, None
+            else:
+                raw, etag = versioned
+                entries = self._admission_entries(raw)
+            if upload_id in entries:
+                raise ObjectError(f"upload already exists or is being created: {upload_id!r}")
+            if len(entries) >= self._max_entries:
+                raise _UploadCapacity("pending upload limit reached")
+            entries[upload_id] = {
+                "token": token,
+                "created": _now(),
+                "committed": False,
+            }
+            body = _json.dumps({"entries": entries}).encode()
+            changed = await self._store._upload_compare_and_swap(
+                self._counter_key,
+                body,
+                expected_etag=etag,
+                content_type="application/json",
+            )
+            if changed is not None:
+                return token
+        raise ObjectError("upload admission counter remained contended")
+
+    async def _commit_reservation(self, upload_id: str, token: str) -> bool:
+        for _attempt in range(128):
+            versioned = await self._store._upload_read_versioned(self._counter_key)
+            if versioned is None:
+                return False
+            raw, etag = versioned
+            entries = self._admission_entries(raw)
+            entry = entries.get(upload_id)
+            if entry is None or entry["token"] != token:
+                return False
+            if entry["committed"]:
+                return True
+            entry["committed"] = True
+            changed = await self._store._upload_compare_and_swap(
+                self._counter_key,
+                _json.dumps({"entries": entries}).encode(),
+                expected_etag=etag,
+                content_type="application/json",
+            )
+            if changed is not None:
+                return True
+        raise ObjectError("upload admission counter remained contended")
+
+    async def _release_reservation(self, upload_id: str, token: str | None = None) -> bool:
+        for _attempt in range(128):
+            versioned = await self._store._upload_read_versioned(self._counter_key)
+            if versioned is None:
+                return False
+            raw, etag = versioned
+            entries = self._admission_entries(raw)
+            entry = entries.get(upload_id)
+            if entry is None or token is not None and entry["token"] != token:
+                return False
+            del entries[upload_id]
+            if not entries:
+                if await self._store._upload_delete_versioned(
+                    self._counter_key, expected_etag=etag
+                ):
+                    return True
+                continue
+            changed = await self._store._upload_compare_and_swap(
+                self._counter_key,
+                _json.dumps({"entries": entries}).encode(),
+                expected_etag=etag,
+                content_type="application/json",
+            )
+            if changed is not None:
+                return True
+        raise ObjectError("upload admission counter remained contended")
 
     async def read(self, upload_id: str) -> UploadState | None:
         try:
@@ -2451,28 +2909,160 @@ class ObjectUploadStore:
             return None
         return UploadState.from_json(raw)
 
-    async def advance(self, state: UploadState, *, expected: int) -> bool:
-        current = await self.read(state.id)
-        if current is None or current.offset != expected:
+    async def claim(self, state: UploadState, *, expected: int) -> bool:
+        key = self._record_key(state.id)
+        versioned = await self._store._upload_read_versioned(key)
+        if versioned is None:
             return False
-        await self._store.write(
-            self._record_key(state.id), state.to_json(), content_type="application/json"
+        raw, etag = versioned
+        current = UploadState.from_json(raw)
+        if current.offset != expected or current.claim:
+            return False
+        current.claim = os.urandom(16).hex()
+        current.claimed = _now()
+        changed = await self._store._upload_compare_and_swap(
+            key,
+            current.to_json(),
+            expected_etag=etag,
+            content_type="application/json",
         )
+        if changed is None:
+            return False
+        _adopt_upload_state(state, current)
         return True
 
-    async def delete(self, upload_id: str) -> None:
-        try:
-            await self._store.delete(self._record_key(upload_id))
-        except ObjectError:
-            return
+    async def advance(self, state: UploadState, *, expected: int) -> bool:
+        key = self._record_key(state.id)
+        versioned = await self._store._upload_read_versioned(key)
+        if versioned is None:
+            return False
+        raw, etag = versioned
+        current = UploadState.from_json(raw)
+        if current.offset != expected or current.claim != state.claim:
+            return False
+        stored = state.copy()
+        stored.claim = ""
+        stored.claimed = 0.0
+        changed = await self._store._upload_compare_and_swap(
+            key,
+            stored.to_json(),
+            expected_etag=etag,
+            content_type="application/json",
+        )
+        if changed is None:
+            return False
+        state.claim = ""
+        state.claimed = 0.0
+        return True
+
+    async def release(self, state: UploadState) -> bool:
+        key = self._record_key(state.id)
+        versioned = await self._store._upload_read_versioned(key)
+        if versioned is None or not state.claim:
+            return False
+        raw, etag = versioned
+        if UploadState.from_json(raw).claim != state.claim:
+            return False
+        stored = state.copy()
+        stored.claim = ""
+        stored.claimed = 0.0
+        changed = await self._store._upload_compare_and_swap(
+            key,
+            stored.to_json(),
+            expected_etag=etag,
+            content_type="application/json",
+        )
+        if changed is None:
+            return False
+        state.claim = ""
+        state.claimed = 0.0
+        return True
+
+    async def delete(self, upload_id: str, *, claim: str = "") -> bool:
+        key = self._record_key(upload_id)
+        versioned = await self._store._upload_read_versioned(key)
+        if versioned is None:
+            return False
+        raw, etag = versioned
+        if UploadState.from_json(raw).claim != claim:
+            return False
+        if await self._store._upload_delete_versioned(key, expected_etag=etag):
+            await self._release_reservation(upload_id)
+            return True
+        return False
 
     async def expired(self, before: float) -> _List[UploadState]:
+        admissions = await self._store._upload_read_versioned(self._counter_key)
         stale: _List[UploadState] = []
+        record_ids: set[str] = set()
         async for stat in self._store.list(prefix=self._prefix):
-            state = await self.read(stat.key.removeprefix(self._prefix).removesuffix(".json"))
-            if state is not None and state.updated < before:
+            if stat.key == self._counter_key or not stat.key.endswith(".json"):
+                continue
+            upload_id = stat.key.removeprefix(self._prefix).removesuffix(".json")
+            record_ids.add(upload_id)
+            versioned = await self._store._upload_read_versioned(stat.key)
+            if versioned is None:
+                continue
+            raw, etag = versioned
+            state = UploadState.from_json(raw)
+            if state.updated >= before or (state.claim and state.claimed >= before):
+                continue
+            state.claim = os.urandom(16).hex()
+            state.claimed = _now()
+            changed = await self._store._upload_compare_and_swap(
+                stat.key,
+                state.to_json(),
+                expected_etag=etag,
+                content_type="application/json",
+            )
+            if changed is not None:
                 stale.append(state)
+        await self._reconcile_admissions(record_ids, before, admissions)
         return stale
+
+    async def _reconcile_admissions(
+        self,
+        record_ids: set[str],
+        before: float,
+        versioned: tuple[bytes, str] | None,
+    ) -> None:
+        if versioned is None:
+            if not record_ids:
+                return
+            etag = None
+            entries: dict[str, dict[str, Any]] = {}
+        else:
+            raw, etag = versioned
+            entries = self._admission_entries(raw)
+        removable = [
+            upload_id
+            for upload_id, entry in entries.items()
+            if upload_id not in record_ids
+            and (entry["committed"] or float(entry["created"]) < before)
+        ]
+        missing = record_ids.difference(entries)
+        if not removable and not missing:
+            return
+        for upload_id in removable:
+            del entries[upload_id]
+        for upload_id in missing:
+            entries[upload_id] = {
+                "token": os.urandom(16).hex(),
+                "created": 0.0,
+                "committed": True,
+            }
+        if not entries:
+            if etag is not None:
+                await self._store._upload_delete_versioned(
+                    self._counter_key, expected_etag=etag
+                )
+            return
+        await self._store._upload_compare_and_swap(
+            self._counter_key,
+            _json.dumps({"entries": entries}).encode(),
+            expected_etag=etag,
+            content_type="application/json",
+        )
 
 
 class _UploadBackend:
@@ -2485,6 +3075,10 @@ class _UploadBackend:
         raise NotImplementedError
 
     async def finish(self, state: UploadState) -> ObjectStat:
+        raise NotImplementedError
+
+    async def rollback_append(self, before: UploadState, after: UploadState) -> bool:
+        """Reclaim one failed attempt; return whether the old upload remains usable."""
         raise NotImplementedError
 
     async def abort(self, state: UploadState) -> None:
@@ -2511,18 +3105,25 @@ class _PartsUploadBackend(_UploadBackend):
         self._store = store
         self._prefix = prefix
 
-    def _part_key(self, upload_id: str, number: int) -> str:
+    def _part_key(self, upload_id: str, number: int, nonce: str) -> str:
+        return f"{self._prefix}{upload_id}/{number:08d}-{nonce}.part"
+
+    def _legacy_part_key(self, upload_id: str, number: int) -> str:
         return f"{self._prefix}{upload_id}/{number:08d}.part"
 
     async def append(self, state: UploadState, data: bytes | bytearray | memoryview) -> None:
         number = int(state.backend.get("parts", 0)) + 1
-        await self._store.write(self._part_key(state.id, number), data)
+        part_key = self._part_key(state.id, number, os.urandom(16).hex())
+        await self._store.write(part_key, data)
         state.backend["parts"] = number
+        state.backend.setdefault("part_keys", []).append(part_key)
 
     async def finish(self, state: UploadState) -> ObjectStat:
         count = int(state.backend.get("parts", 0))
         store = self._store
-        part_keys = [self._part_key(state.id, number) for number in range(1, count + 1)]
+        part_keys = state.backend.get("part_keys") or [
+            self._legacy_part_key(state.id, number) for number in range(1, count + 1)
+        ]
 
         async def _chunks() -> AsyncIterator[bytes]:
             for part_key in part_keys:
@@ -2533,6 +3134,13 @@ class _PartsUploadBackend(_UploadBackend):
         for part_key in part_keys:
             await store.delete(part_key)
         return stat
+
+    async def rollback_append(self, before: UploadState, after: UploadState) -> bool:
+        previous = set(before.backend.get("part_keys", ()))
+        for part_key in after.backend.get("part_keys", ()):
+            if part_key not in previous:
+                await self._store.delete(part_key)
+        return True
 
     async def abort(self, state: UploadState) -> None:
         """Delete every staged part. Failures propagate; they are not noise.
@@ -2545,8 +3153,11 @@ class _PartsUploadBackend(_UploadBackend):
         for it: `sweep` counts into `aborted_uploads`, and a `DELETE` reports.
         """
         count = int(state.backend.get("parts", 0))
-        for number in range(1, count + 1):
-            await self._store.delete(self._part_key(state.id, number))
+        part_keys = state.backend.get("part_keys") or [
+            self._legacy_part_key(state.id, number) for number in range(1, count + 1)
+        ]
+        for part_key in part_keys:
+            await self._store.delete(part_key)
 
 
 class _S3UploadBackend(_UploadBackend):
@@ -2603,6 +3214,10 @@ class _S3UploadBackend(_UploadBackend):
                 content_type=state.content_type,
             )
 
+    async def rollback_append(self, before: UploadState, after: UploadState) -> bool:
+        await self.abort(after)
+        return False
+
     async def abort(self, state: UploadState) -> None:
         upload_id = state.backend.get("upload_id")
         if upload_id is None:
@@ -2624,6 +3239,7 @@ _S3_MAX_PARTS = 10_000
 #: length here to move into C, and adding a vectorised sniffer would widen the
 #: build for work the interpreter does in nanoseconds. See the guide.
 _SNIFF_BYTES = 32
+_DEFAULT_MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 
 _SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b"\x89PNG\r\n\x1a\n", "image/png"),
@@ -2660,6 +3276,10 @@ def sniff_content_type(prefix: bytes) -> str | None:
     if lowered.startswith((b"<html", b"<!doc")) or lowered == b"<?xml ":
         return "text/plain"
     return None
+
+
+class _UploadCapacity(ObjectError):
+    pass
 
 
 class _Refused(Exception):
@@ -2720,7 +3340,8 @@ class ResumableUploads:
         store: where finished objects and parts are written.
         uploads: where in-progress upload state lives. Defaults to
             `MemoryUploadStore`, which confines an upload to one worker; pass
-            `ObjectUploadStore(store)` behind more than one.
+            `ObjectUploadStore(store)` behind more than one. Its backing store
+            must provide atomic upload compare-and-swap.
         prefix: key prefix for finished objects.
         staging: key prefix for parts and records; swept, never served.
         limits: what to advertise and enforce. `min_append_size` is raised to
@@ -2808,7 +3429,9 @@ class ResumableUploads:
         self._inflight: set[str] = set()
 
         backend = self._backend()
-        declared = limits if limits is not None else UploadLimits()
+        declared = (
+            limits if limits is not None else UploadLimits(max_size=_DEFAULT_MAX_UPLOAD_BYTES)
+        )
         floor = max(backend.min_append, declared.min_append_size or 0)
         ceiling = declared.max_append_size
         if max_append_bytes is not None:
@@ -2882,12 +3505,23 @@ class ResumableUploads:
             content_type=request.header("content-type"),
             created=now,
             updated=now,
+            principal=self._request_principal(request),
+            tenant=self._request_tenant(request),
         )
         if state.content_type == PARTIAL_UPLOAD:
             # The creation body is not a partial-upload fragment; the type
             # describes the representation being built.
             state.content_type = None
-        await self._uploads.create(state)
+        try:
+            await self._uploads.create(state)
+        except _UploadCapacity:
+            await self.sweep(now=now)
+            try:
+                await self._uploads.create(state)
+            except _UploadCapacity as error:
+                raise _Refused(
+                    429, "pending upload limit reached; finish or cancel an upload"
+                ) from error
         try:
             await self._consume(request, state, complete=complete, first=True)
         except _Refused:
@@ -2957,7 +3591,26 @@ class ResumableUploads:
         state = await self._uploads.read(request.path_params.get("upload_id", ""))
         if state is None:
             raise _Refused(404, "no such upload")
+        if state.principal != self._request_principal(request):
+            raise _Refused(404, "no such upload")
+        if state.tenant != self._request_tenant(request):
+            raise _Refused(404, "no such upload")
         return state
+
+    @staticmethod
+    def _request_principal(request: Request) -> str:
+        identity = request.identity
+        if identity is None:
+            return ""
+        return f"{identity.type}:{identity.id}"
+
+    @staticmethod
+    def _request_tenant(request: Request) -> str:
+        tenant = getattr(request.state, "tenant", None)
+        if tenant is None:
+            return ""
+        key = getattr(tenant, "key", tenant)
+        return str(key)
 
     async def _admit(self, request: Request, declared: int | None) -> None:
         """Refuse at creation, before a byte has been read."""
@@ -3026,6 +3679,12 @@ class ResumableUploads:
             raise _Refused(400, f"a non-final append must be at least {floor} bytes")
         if complete and state.length is not None and expected + len(buffered) != state.length:
             raise _Refused(400, "a complete upload must match the declared length")
+        if (
+            state.length is None
+            and self._quota is not None
+            and not await self._quota(request, expected + len(buffered))
+        ):
+            raise _Refused(413, "storage quota exceeded")
 
         # No `buffered and` clause: `sniff_content_type(b"")` matches nothing
         # and `_check_sniff` then returns without touching the state, so testing
@@ -3038,8 +3697,36 @@ class ResumableUploads:
             self._check_sniff(state, bytes(buffered[:_SNIFF_BYTES]))
 
         backend = self._backend()
-        if buffered:
-            await backend.append(state, buffered)
+        proposed_length = state.length
+        proposed_content_type = state.content_type
+        if not await self._uploads.claim(state, expected=expected):
+            raise _Refused(
+                409,
+                "the upload advanced underneath this request",
+                [(b"upload-offset", str(expected).encode("ascii"))],
+            )
+        before_append = state.copy()
+        state.length = proposed_length
+        state.content_type = proposed_content_type
+        append_succeeded = False
+        try:
+            if buffered:
+                await backend.append(state, buffered)
+            append_succeeded = True
+        finally:
+            if not append_succeeded:
+                reusable = (
+                    await backend.rollback_append(before_append, state) if buffered else True
+                )
+                if reusable:
+                    if not await self._uploads.release(before_append):
+                        raise ObjectError(
+                            f"upload {state.id!r} failed and its state claim could not be released"
+                        )
+                elif not await self._uploads.delete(state.id, claim=state.claim):
+                    raise ObjectError(
+                        f"upload {state.id!r} failed and its aborted state could not be removed"
+                    )
         state.offset = expected + len(buffered)
         state.complete = complete
         state.updated = _now()
@@ -3050,9 +3737,20 @@ class ResumableUploads:
             # check and two mutants survived on it.
             state.length = state.offset
         if not await self._uploads.advance(state, expected=expected):
-            # Somebody else moved the offset between the read and here, so
-            # these bytes belong to no assembly. They are already written to
-            # this attempt's own part key, and the sweeper reclaims them.
+            reusable = (
+                await backend.rollback_append(before_append, state) if buffered else True
+            )
+            if reusable:
+                if not await self._uploads.release(before_append):
+                    raise ObjectError(
+                        f"upload {state.id!r} lost its advance and its state claim "
+                        "could not be released"
+                    )
+            elif not await self._uploads.delete(state.id, claim=state.claim):
+                raise ObjectError(
+                    f"upload {state.id!r} lost its advance and its aborted state "
+                    "could not be removed"
+                )
             state.offset = expected
             raise _Refused(
                 409,
@@ -3076,7 +3774,8 @@ class ResumableUploads:
 
     async def _finish(self, state: UploadState, backend: _UploadBackend) -> None:
         await backend.finish(state)
-        await self._uploads.delete(state.id)
+        if not await self._uploads.delete(state.id):
+            raise ObjectError(f"completed upload {state.id!r} could not remove its state")
         if self._on_complete is not None:
             # The upload id is the idempotency key: a completion retried after
             # a lost response enqueues nothing the second time.
@@ -3085,8 +3784,16 @@ class ResumableUploads:
             )
 
     async def _discard(self, state: UploadState) -> None:
+        state.claim = ""
+        if not await self._uploads.claim(state, expected=state.offset):
+            raise _Refused(
+                409,
+                "another operation is in flight for this upload",
+                [(b"upload-offset", str(state.offset).encode("ascii"))],
+            )
         await self._backend().abort(state)
-        await self._uploads.delete(state.id)
+        if not await self._uploads.delete(state.id, claim=state.claim):
+            raise ObjectError(f"aborted upload {state.id!r} could not remove its fenced state")
 
     async def sweep(self, *, now: float | None = None) -> int:
         """Reclaim uploads idle for longer than `expire`. Returns how many.
@@ -3113,27 +3820,49 @@ class ResumableUploads:
         for state in stale:
             try:
                 await backend.abort(state)
-            except ObjectError, OSError:
+            except (ObjectError, OSError) as error:
                 # Named rather than blanket: these are the storage layer saying
                 # no. A TypeError out of here is a bug in this file and must
                 # not be filed under "the bucket was unavailable".
                 self.aborted_uploads += 1
+                if not await self._uploads.release(state):
+                    raise ObjectError(
+                        f"expired upload {state.id!r} failed cleanup and its claim "
+                        "could not be released"
+                    ) from error
                 continue
-            await self._uploads.delete(state.id)
+            if not await self._uploads.delete(state.id, claim=state.claim):
+                raise ObjectError(
+                    f"expired upload {state.id!r} was reclaimed but its fenced state survived"
+                )
             reclaimed += 1
         self.swept_uploads += reclaimed
         return reclaimed
 
-    def router(self, path: str = "/uploads", *, permissions: Iterable[str] = ()) -> Any:
+    def router(
+        self,
+        path: str = "/uploads",
+        *,
+        permissions: Iterable[str] | None = None,
+        public: bool = False,
+    ) -> Any:
         """Ordinary wreath routes for the four protocol operations.
 
         `permissions` is the router's own keyword and applies to every route,
         so authorization here is the same declaration as on any other route --
         which is the property a presigned URL gives up.
         """
+        declared_permissions = tuple(permissions or ())
+        if not declared_permissions and not public:
+            raise ValueError(
+                "upload router permissions are required; pass permissions=(...) or public=True"
+            )
+        if public and declared_permissions:
+            raise ValueError("upload router accepts permissions=(...) or public=True, not both")
+
         from .router import Router
 
-        router = Router(permissions=permissions)
+        router = Router(permissions=declared_permissions)
         base = path.rstrip("/")
         resource = f"{base}/{{upload_id}}"
 

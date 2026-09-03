@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
 
 import pytest
 
 from wreath import Wreath
+from wreath._route_lifecycle import _instant
 from wreath.openapi import generate_openapi
 from wreath.response import StreamingResponse
 from wreath.testing import TestClient
@@ -82,6 +83,24 @@ def test_route_deprecation_refuses_a_naive_datetime() -> None:
         @app.get("/naive", deprecated_at=datetime(2025, 1, 1))
         async def naive(request: Any) -> str:
             return "no"
+
+
+def test_route_lifecycle_refuses_non_datetimes_and_unknown_offsets() -> None:
+    class UnknownOffset(tzinfo):
+        def utcoffset(self, value: datetime | None) -> None:
+            return None
+
+    class MissingTimezone(datetime):
+        def utcoffset(self) -> timedelta:
+            return timedelta(0)
+
+    invalid: Any = "2025-01-01"
+    with pytest.raises(TypeError, match="sunset_at.*datetime"):
+        _instant("sunset_at", invalid)
+    with pytest.raises(ValueError, match="sunset_at.*timezone-aware"):
+        _instant("sunset_at", datetime(2025, 1, 1, tzinfo=UnknownOffset()))
+    with pytest.raises(ValueError, match="sunset_at.*timezone-aware"):
+        _instant("sunset_at", MissingTimezone(2025, 1, 1))
 
 
 def test_route_deprecation_refuses_an_unencoded_non_ascii_link() -> None:

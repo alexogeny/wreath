@@ -179,6 +179,15 @@ def test_render_emits_valid_json_lines():
     assert not text.endswith("\n")
 
 
+def test_render_uses_the_current_time_when_timestamp_is_omitted(monkeypatch):
+    monkeypatch.setattr(emf.time, "time", lambda: 1.234)
+    snap = _Snap(0, 0, [], _Loss())
+
+    blobs = [json.loads(line) for line in emf.EmfBridge(_Src(snap)).render().splitlines()]
+
+    assert {blob["_aws"]["Timestamp"] for blob in blobs} == {1234}
+
+
 def test_subsystem_counters_use_the_same_collection_and_failure_isolation():
     class Broken:
         def counters(self):
@@ -223,6 +232,32 @@ def test_subsystem_counters_obey_cumulative_mode():
     bridge.blobs(snap, timestamp_ms=1)
     second = bridge.blobs(snap, timestamp_ms=2)[-1]
     assert second["jobs_run_errors"] == 3
+
+
+def test_python_counter_definition_distinguishes_gauges_resets_and_cumulative_mode():
+    values = {"count": 10, "ready": 2}
+    reading = Counters("jobs", "mail", values, gauges=frozenset({"ready"}))
+    deltas = {}
+    options = {
+        "timestamp_ms": 1,
+        "namespace": "Wreath",
+        "dimensions": {},
+        "deltas": deltas,
+        "lock": emf.threading.Lock(),
+    }
+    emf._counter_blobs((reading,), cumulative=False, **options)
+
+    values.update(count=13, ready=5)
+    changed = emf._counter_blobs((reading,), cumulative=False, **options)[0]
+    assert (changed["jobs_count"], changed["jobs_ready"]) == (3, 5)
+
+    values["count"] = 1
+    reset = emf._counter_blobs((reading,), cumulative=False, **options)[0]
+    assert reset["jobs_count"] == 1
+
+    values["count"] = 7
+    cumulative = emf._counter_blobs((reading,), cumulative=True, **options)[0]
+    assert cumulative["jobs_count"] == 7
 
 
 def test_subsystem_counter_kernel_preserves_signed_gauges_and_large_integers():

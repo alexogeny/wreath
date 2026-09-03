@@ -188,9 +188,8 @@ def _ecdsa_sign(private: int, digest: bytes) -> bytes:
     HMAC-SHA256 is broken, rather than if either one is.
     """
     seed = private.to_bytes(32, "big") + digest + os.urandom(32)
-    # The three retries below are required by FIPS 186-4 §6.4 and are each
-    # reached with probability around 2^-128, so no test can drive them and
-    # `wreath mutant` reports them as survivors. They are not redundant: without
+    # The retries below are required by FIPS 186-4 §6.4 and are each reached
+    # naturally with probability around 2^-128. They are not redundant: without
     # them a once-in-the-universe nonce would emit a signature that discloses
     # the private key, and the loop is the specified handling rather than
     # defensive padding.

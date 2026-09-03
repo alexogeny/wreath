@@ -12,12 +12,10 @@ depends on *which field* a name resolves to has to be applied afterwards. That
 is the whole reason this walk exists as a second pass rather than another
 counter in `_Parser`.
 
-**Additive, never multiplicative.** A list field does not multiply its
-children. Fan-out is what a declaration is *for* -- `cost=` on the field that
-fans out is how an author says "this one is expensive" -- and inferring a
-multiplier from `limit` arguments would make the budget depend on values a
-client chooses, which is a different and much harder contract to explain. Page
-size is bounded separately by `max_page_size`.
+List projections are multiplied by `max_page_size`, the declaration-time bound
+the executor also enforces. Client `limit` values never enter the calculation:
+using the stable worst case keeps cached documents valid and prevents a nested
+relationship tree from doing multiplicative work under an additive budget.
 
 **Unknown fields cost nothing.** A field the schema does not have is a client
 mistake that the executor reports with a message naming it; refusing it here
@@ -52,7 +50,14 @@ def _fields(selections: tuple[Any, ...], document: Any, type_name: str) -> list[
         return []
 
 
-def weigh(schema: Any, document: Any, operation: Any, *, max_complexity: int) -> int:
+def weigh(
+    schema: Any,
+    document: Any,
+    operation: Any,
+    *,
+    max_complexity: int,
+    max_page_size: int = 100,
+) -> int:
     """Total declared cost of `operation`, refusing it past `max_complexity`.
 
     Shares the parser's budget rather than introducing a second one. The two
@@ -77,7 +82,14 @@ def weigh(schema: Any, document: Any, operation: Any, *, max_complexity: int) ->
             continue
         total += root.cost
         if field.selection_set is not None:
-            total += _weigh_type(schema, document, root.type_name, field.selection_set)
+            total += _weigh_type(
+                schema,
+                document,
+                root.type_name,
+                field.selection_set,
+                fanout=max_page_size if getattr(root, "is_list", False) else 1,
+                max_page_size=max_page_size,
+            )
         if total > max_complexity:
             raise GraphQLSyntaxError(
                 f"document costs more than {max_complexity}; a field may declare "
@@ -87,7 +99,15 @@ def weigh(schema: Any, document: Any, operation: Any, *, max_complexity: int) ->
     return total
 
 
-def _weigh_type(schema: Any, document: Any, type_name: str, selection_set: Any) -> int:
+def _weigh_type(
+    schema: Any,
+    document: Any,
+    type_name: str,
+    selection_set: Any,
+    *,
+    fanout: int,
+    max_page_size: int,
+) -> int:
     """The cost of one selection set, read against the object type it is on.
 
     Recursion is bounded by the parser's `max_depth`, which has already run:
@@ -101,7 +121,14 @@ def _weigh_type(schema: Any, document: Any, type_name: str, selection_set: Any) 
         declared = object_type.fields.get(field.name)
         if declared is None:
             continue
-        total += declared.cost
+        total += declared.cost * fanout
         if field.selection_set is not None:
-            total += _weigh_type(schema, document, declared.type_name, field.selection_set)
+            total += _weigh_type(
+                schema,
+                document,
+                declared.type_name,
+                field.selection_set,
+                fanout=fanout * max_page_size if declared.is_list else fanout,
+                max_page_size=max_page_size,
+            )
     return total

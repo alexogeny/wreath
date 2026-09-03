@@ -63,6 +63,7 @@ MessageHandler = Callable[["Message"], Awaitable[None]]
 _ACK = "ack"
 _RETRY = "retry"
 _REJECT = "reject"
+_EPHEMERAL_PREFIX = "\x1eWREATH-EPHEMERAL/1 "
 
 #: How often a bus re-reads the shared group registry. A group registered by a
 #: newly deployed service becomes visible to an already-running publisher within
@@ -545,10 +546,6 @@ class MessageBus:
             encoded = payload.encode()
             body = encoded.decode("utf-8")
         else:
-            # Plain payloads have always exposed stdlib json.dumps' exact text
-            # on PostgreSQL's wire (including its spaces and ASCII escaping).
-            # Keep that contract; receiving can use the native compatible
-            # decoder without altering a byte a publisher emits.
             body = json.dumps(payload)
             encoded = body.encode("utf-8")
         if durable:
@@ -561,14 +558,17 @@ class MessageBus:
                 require_group=require_group,
             )
             return
-        check_notify_payload(encoded)
+        wire_body = _EPHEMERAL_PREFIX + json.dumps(
+            {"tenant": tenant, "payload": _json.loads(encoded)}
+        )
+        check_notify_payload(wire_body.encode("utf-8"))
         wire = self._channel_wire(channel)
         if tx is not None:
-            await tx.execute("SELECT pg_notify($1, $2)", wire, body)
+            await tx.execute("SELECT pg_notify($1, $2)", wire, wire_body)
             return
         connection = await self._db.acquire(self._workload)
         try:
-            await connection.execute("SELECT pg_notify($1, $2)", wire, body)
+            await connection.execute("SELECT pg_notify($1, $2)", wire, wire_body)
         finally:
             await self._db.release(self._workload, connection)
 
@@ -1004,13 +1004,26 @@ class MessageBus:
         if channel is None:
             return
         payload: Any = None
-        if note.payload:
+        tenant = ""
+        wire_payload = note.payload
+        if wire_payload.startswith(_EPHEMERAL_PREFIX):
+            envelope: Any = None
+            with contextlib.suppress(ValueError, TypeError):
+                envelope = _json.loads(wire_payload.removeprefix(_EPHEMERAL_PREFIX))
+            if (
+                isinstance(envelope, dict)
+                and set(envelope) == {"tenant", "payload"}
+                and isinstance(envelope["tenant"], str)
+            ):
+                tenant = envelope["tenant"]
+                payload = envelope["payload"]
+        elif wire_payload:
             # Only a malformed payload is tolerated here -- a publisher on an
             # older wire format, say. Anything else is ours to hear about.
             with contextlib.suppress(ValueError, TypeError):
-                payload = _json.loads(note.payload)
+                payload = _json.loads(wire_payload)
         for sub in ephemeral_subs.get(channel, ()):  # at-most-once, fire-and-forget
-            message = Message(channel=channel, group=sub.group, tenant="", payload=payload)
+            message = Message(channel=channel, group=sub.group, tenant=tenant, payload=payload)
             self._spawn_ephemeral(sub, message)
 
     def _spawn_ephemeral(self, sub: _Subscription, message: Message) -> None:

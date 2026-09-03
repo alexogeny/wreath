@@ -77,6 +77,7 @@ typedef struct {
     PyObject *receive_callable;/* bound _receive */
     PyObject *send_callable;   /* bound _send */
     PyObject *done_callable;   /* bound _done */
+    PyObject *timeout_handle;  /* request_timeout TimerHandle */
 
     /* request body plumbing: C-owned queue of coalesced chunks */
     H2BodyChunk *body_chunks;
@@ -213,6 +214,7 @@ typedef struct {
     Py_ssize_t max_header_count;
     Py_ssize_t max_body_bytes;
     Py_ssize_t max_body_chunks;
+    double request_timeout;
     Py_ssize_t hpack_max;
 
     int write_paused;
@@ -1189,21 +1191,46 @@ stream_send(PyObject *op, PyObject *message)
         if (block == NULL) {
             return NULL;
         }
-        /* trailers are ordinary fields only */
-        Py_ssize_t count = headers ? PySequence_Size(headers) : 0;
-        for (Py_ssize_t i = 0; i < count; i++) {
-            PyObject *pair = PySequence_GetItem(headers, i);
-            PyObject *name = PySequence_GetItem(pair, 0);
-            PyObject *value = PySequence_GetItem(pair, 1);
-            Py_DECREF(pair);
-            char *nptr, *vptr; Py_ssize_t nlen, vlen;
-            PyBytes_AsStringAndSize(name, &nptr, &nlen);
-            PyBytes_AsStringAndSize(value, &vptr, &vlen);
-            wreath_hpack_encode_literal(block, (const uint8_t *)nptr, nlen,
-                                     (const uint8_t *)vptr, vlen);
-            Py_DECREF(name);
-            Py_DECREF(value);
+        PyObject *items = headers != NULL
+            ? PySequence_Fast(headers, "response trailers must be a sequence")
+            : PyTuple_New(0);
+        if (items == NULL) {
+            Py_DECREF(block);
+            return NULL;
         }
+        Py_ssize_t count = PySequence_Fast_GET_SIZE(items);
+        for (Py_ssize_t i = 0; i < count; i++) {
+            PyObject *name;
+            PyObject *value;
+            PyObject *pair = PySequence_Fast_GET_ITEM(items, i);
+            if (response_header_parts(pair, &name, &value) < 0) {
+                Py_DECREF(items);
+                Py_DECREF(block);
+                return NULL;
+            }
+            char *nptr = PyBytes_AS_STRING(name);
+            Py_ssize_t nlen = PyBytes_GET_SIZE(name);
+            if (nptr[0] == ':'
+                || wreath_ascii_equal_ci(nptr, nlen, "connection", 10)
+                || wreath_ascii_equal_ci(nptr, nlen, "content-length", 14)
+                || wreath_ascii_equal_ci(nptr, nlen, "transfer-encoding", 17)) {
+                Py_DECREF(items);
+                Py_DECREF(block);
+                PyErr_SetString(PyExc_RuntimeError,
+                                "invalid HTTP/2 response trailer");
+                return NULL;
+            }
+            char *vptr = PyBytes_AS_STRING(value);
+            Py_ssize_t vlen = PyBytes_GET_SIZE(value);
+            if (wreath_hpack_encode_literal(
+                    block, (const uint8_t *)nptr, nlen,
+                    (const uint8_t *)vptr, vlen) < 0) {
+                Py_DECREF(items);
+                Py_DECREF(block);
+                return NULL;
+            }
+        }
+        Py_DECREF(items);
         if (h2_write_frame((PyObject *)proto, FRAME_HEADERS,
                            FLAG_END_HEADERS | FLAG_END_STREAM, self->id,
                            (const uint8_t *)PyByteArray_AS_STRING(block),
@@ -1330,6 +1357,12 @@ stream_finish(Http2Stream *self, PyObject *exc, PyObject *owner,
               uint8_t nfr_terminal)
 {
     Http2Protocol *proto = (Http2Protocol *)self->protocol;
+    if (self->timeout_handle != NULL) {
+        PyObject *cancelled = PyObject_CallMethod(self->timeout_handle, "cancel", NULL);
+        if (cancelled == NULL) PyErr_Clear();
+        else Py_DECREF(cancelled);
+        Py_CLEAR(self->timeout_handle);
+    }
     /* Publish one completion cell for this stream's request. The worker lives on
      * the protocol; the context lives on the stream. */
     if (proto != NULL && proto->nfr_worker != NULL && self->nfr_active) {
@@ -1415,6 +1448,40 @@ stream_done(PyObject *op, PyObject *task)
     Py_RETURN_NONE;
 }
 
+static PyObject *
+stream_timeout(PyObject *op, PyObject *Py_UNUSED(ignored))
+{
+    Http2Stream *self = (Http2Stream *)op;
+    Http2Protocol *proto = (Http2Protocol *)self->protocol;
+    Py_CLEAR(self->timeout_handle);
+    if (proto == NULL || self->state == S_CLOSED) Py_RETURN_NONE;
+    if (!self->response_started) {
+        PyObject *status = PyLong_FromLong(408);
+        PyObject *headers = PyList_New(0);
+        PyObject *body = PyBytes_FromStringAndSize("", 0);
+        PyObject *started = status != NULL && headers != NULL
+            ? h2_response_start(self, status, headers, 0, 0) : NULL;
+        PyObject *finished = started != NULL && body != NULL
+            ? h2_response_body(self, body, 0, 1) : NULL;
+        Py_XDECREF(status);
+        Py_XDECREF(headers);
+        Py_XDECREF(body);
+        Py_XDECREF(started);
+        if (finished == NULL) return NULL;
+        Py_DECREF(finished);
+    }
+    else if (!self->response_ended
+             && h2_stream_error((PyObject *)proto, self->id, H2_CANCEL) < 0) {
+        return NULL;
+    }
+    if (self->task != NULL) {
+        PyObject *cancelled = PyObject_CallMethod(self->task, "cancel", NULL);
+        if (cancelled == NULL) return NULL;
+        Py_DECREF(cancelled);
+    }
+    Py_RETURN_NONE;
+}
+
 static int
 start_stream_app(Http2Protocol *proto, Http2Stream *stream)
 {
@@ -1488,6 +1555,14 @@ start_stream_app(Http2Protocol *proto, Http2Stream *stream)
         Py_CLEAR(stream->task);
         return -1;
     }
+    if (proto->request_timeout > 0.0) {
+        PyObject *callback = PyObject_GetAttrString((PyObject *)stream, "_on_timeout");
+        if (callback == NULL) return -1;
+        stream->timeout_handle = PyObject_CallMethod(
+            proto->loop, "call_later", "dO", proto->request_timeout, callback);
+        Py_DECREF(callback);
+        if (stream->timeout_handle == NULL) return -1;
+    }
     return 0;
 }
 
@@ -1504,6 +1579,7 @@ static PyMethodDef stream_methods[] = {
     {"_wreath_stream_body", (PyCFunction)(void (*)(void))stream_wreath_body,
      METH_FASTCALL, NULL},
     {"_done", stream_done, METH_O, NULL},
+    {"_on_timeout", stream_timeout, METH_NOARGS, NULL},
     {NULL, NULL, 0, NULL},
 };
 
@@ -1517,6 +1593,7 @@ stream_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(self->receive_callable);
     Py_VISIT(self->send_callable);
     Py_VISIT(self->done_callable);
+    Py_VISIT(self->timeout_handle);
     for (Py_ssize_t i = self->body_head; i < self->body_len; i++) {
         Py_VISIT(self->body_chunks[i].body);
     }
@@ -1541,6 +1618,11 @@ stream_clear(PyObject *op)
     Py_CLEAR(self->receive_callable);
     Py_CLEAR(self->send_callable);
     Py_CLEAR(self->done_callable);
+    if (self->timeout_handle != NULL) {
+        PyObject *cancelled = PyObject_CallMethod(self->timeout_handle, "cancel", NULL);
+        Py_XDECREF(cancelled);
+        Py_CLEAR(self->timeout_handle);
+    }
     body_queue_clear(self);
     Py_CLEAR(self->receive_waiter);
     Py_CLEAR(self->pending_body);
@@ -2070,6 +2152,7 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
     st->receive_callable = NULL;
     st->send_callable = NULL;
     st->done_callable = NULL;
+    st->timeout_handle = NULL;
     st->body_chunks = NULL;
     st->body_cap = st->body_len = st->body_head = 0;
     st->receive_waiter = NULL;
@@ -3545,6 +3628,13 @@ h2_init(PyObject *op, PyObject *args, PyObject *kwargs)
         wreath_read_ssize_attr(config, "max_body_chunks", &self->max_body_chunks) < 0 ||
         wreath_read_ssize_attr(config, "hpack_table_bytes", &self->hpack_max) < 0) {
         return -1;
+    }
+    {
+        PyObject *timeout = PyObject_GetAttrString(config, "request_timeout");
+        if (timeout == NULL) return -1;
+        self->request_timeout = PyFloat_AsDouble(timeout);
+        Py_DECREF(timeout);
+        if (self->request_timeout == -1.0 && PyErr_Occurred()) return -1;
     }
     self->peer_initial_window = 65535;   /* RFC default until peer SETTINGS */
     self->conn_send_window = 65535;

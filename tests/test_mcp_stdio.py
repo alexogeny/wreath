@@ -62,6 +62,31 @@ class Sink:
         return await asyncio.wait_for(self._pending.get(), timeout=seconds)
 
 
+class StubResponse:
+    def __init__(self, body: bytes = b"", session: str | None = None) -> None:
+        self.body = body
+        self.session = session
+
+    def header(self, name: str) -> str | None:
+        return self.session if name == "mcp-session-id" else None
+
+
+class StubClient:
+    def __init__(self, *responses: StubResponse) -> None:
+        self.responses = list(responses)
+        self.posts: list[bytes] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        return None
+
+    async def post(self, _path: str, *, content: bytes, headers: dict) -> StubResponse:
+        self.posts.append(content)
+        return self.responses.pop(0)
+
+
 @contextlib.asynccontextmanager
 async def relay_session() -> AsyncIterator[tuple[Pipe, Sink]]:
     pipe = Pipe()
@@ -98,6 +123,94 @@ def build() -> Wreath:
         return {"summary": answer["content"]["text"]}
 
     return app
+
+
+async def test_default_process_streams_are_used_when_not_overridden(monkeypatch) -> None:
+    message = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {"protocolVersion": PROTOCOL_VERSION, "capabilities": {}},
+    }
+    source = io.BytesIO(json.dumps(message).encode() + b"\n")
+    sink = io.BytesIO()
+    monkeypatch.setattr(
+        stdio,
+        "sys",
+        SimpleNamespace(
+            stdin=SimpleNamespace(buffer=source),
+            stdout=SimpleNamespace(buffer=sink),
+        ),
+    )
+
+    assert await stdio.serve(build()) == 0
+    assert json.loads(sink.getvalue())["id"] == 1
+
+
+async def test_blank_input_lines_are_ignored(monkeypatch) -> None:
+    client = StubClient()
+    monkeypatch.setattr(testing, "TestClient", lambda app: client)
+
+    assert await stdio.serve(object(), stdin=io.BytesIO(b" \r\n"), stdout=io.BytesIO()) == 0
+    assert client.posts == []
+
+
+async def test_an_empty_initial_response_writes_no_blank_frame(monkeypatch) -> None:
+    client = StubClient(StubResponse())
+    sink = io.BytesIO()
+    monkeypatch.setattr(testing, "TestClient", lambda app: client)
+
+    assert await stdio.serve(object(), stdin=io.BytesIO(b"{}\n"), stdout=sink) == 0
+    assert sink.getvalue() == b""
+
+
+async def test_a_response_without_a_session_opens_no_stream(monkeypatch) -> None:
+    client = StubClient(StubResponse(body=b"{}"))
+    pumps = 0
+
+    async def pump(*args: Any, **kwargs: Any) -> None:
+        nonlocal pumps
+        pumps += 1
+
+    monkeypatch.setattr(testing, "TestClient", lambda app: client)
+    monkeypatch.setattr(stdio, "_pump", pump)
+
+    assert await stdio.serve(object(), stdin=io.BytesIO(b"{}\n"), stdout=io.BytesIO()) == 0
+    assert pumps == 0
+
+
+async def test_an_empty_relay_response_writes_no_blank_frame(monkeypatch) -> None:
+    second_posted = asyncio.Event()
+
+    class Client(StubClient):
+        async def post(self, path: str, *, content: bytes, headers: dict) -> StubResponse:
+            response = await super().post(path, content=content, headers=headers)
+            if len(self.posts) == 2:
+                second_posted.set()
+            return response
+
+    async def idle_pump(*args: Any, **kwargs: Any) -> None:
+        await asyncio.Event().wait()
+
+    client = Client(StubResponse(body=b'{"id":1}', session="s"), StubResponse())
+    pipe = Pipe()
+    sink = io.BytesIO()
+    monkeypatch.setattr(testing, "TestClient", lambda app: client)
+    monkeypatch.setattr(stdio, "_pump", idle_pump)
+    serving = asyncio.create_task(stdio.serve(object(), stdin=pipe.reader, stdout=sink))
+    try:
+        pipe.writer.write(b"{}\n{}\n")
+        pipe.writer.flush()
+        await asyncio.wait_for(second_posted.wait(), timeout=0.5)
+        pipe.close()
+        assert await asyncio.wait_for(serving, timeout=0.5) == 0
+        assert sink.getvalue() == b'{"id":1}\n'
+    finally:
+        pipe.close()
+        if not serving.done():
+            serving.cancel()
+            await asyncio.gather(serving, return_exceptions=True)
+        pipe.reader.close()
 
 
 async def test_relay_applies_backpressure_at_its_inflight_ceiling(monkeypatch) -> None:
@@ -260,6 +373,101 @@ async def test_stream_pump_emits_every_complete_data_line_in_one_chunk() -> None
     await _pump(BatchedClient(), "/rpc", "session", written.append, asyncio.Lock())
 
     assert written == [b'{"id":1}', b'{"id":2}']
+
+
+async def test_stream_pump_accepts_native_response_messages() -> None:
+    written: list[bytes] = []
+
+    class NativeClient:
+        def _scope(self, *_args, **_kwargs):
+            return {}, b""
+
+        async def app(self, _scope, _receive, send):
+            await send({"type": "wreath.response", "body": b'data: {"id":1}\n'})
+
+    await _pump(NativeClient(), "/rpc", "session", written.append, asyncio.Lock())
+
+    assert written == [b'{"id":1}']
+
+
+async def test_stream_pump_discards_consumed_bytes_between_chunks() -> None:
+    written: list[bytes] = []
+
+    class SegmentedClient:
+        def _scope(self, *_args, **_kwargs):
+            return {}, b""
+
+        async def app(self, _scope, _receive, send):
+            await send({"type": "http.response.body", "body": b'data: {"id":1}\ndata: '})
+            await send({"type": "http.response.body", "body": b'{"id":2}\n'})
+
+    await _pump(SegmentedClient(), "/rpc", "session", written.append, asyncio.Lock())
+
+    assert written == [b'{"id":1}', b'{"id":2}']
+
+
+async def test_empty_session_headers_do_not_claim_a_session() -> None:
+    assert "mcp-session-id" not in stdio._headers("")
+
+
+async def test_normal_shutdown_propagates_a_stream_failure(monkeypatch) -> None:
+    failed = asyncio.Event()
+
+    async def failing_pump(*args: Any, **kwargs: Any) -> None:
+        failed.set()
+        raise RuntimeError("stream failed")
+
+    client = StubClient(StubResponse(body=b"{}", session="s"))
+    pipe = Pipe()
+    monkeypatch.setattr(testing, "TestClient", lambda app: client)
+    monkeypatch.setattr(stdio, "_pump", failing_pump)
+    serving = asyncio.create_task(stdio.serve(object(), stdin=pipe.reader, stdout=io.BytesIO()))
+    try:
+        pipe.send({})
+        await asyncio.wait_for(failed.wait(), timeout=0.5)
+        pipe.close()
+        with pytest.raises(RuntimeError, match="stream failed"):
+            await asyncio.wait_for(serving, timeout=0.5)
+    finally:
+        pipe.close()
+        if not serving.done():
+            serving.cancel()
+            await asyncio.gather(serving, return_exceptions=True)
+        pipe.reader.close()
+
+
+async def test_cancellation_is_not_replaced_by_a_stream_failure(monkeypatch) -> None:
+    failed = asyncio.Event()
+
+    async def failing_pump(*args: Any, **kwargs: Any) -> None:
+        failed.set()
+        raise RuntimeError("stream failed")
+
+    client = StubClient(StubResponse(body=b"{}", session="s"))
+    pipe = Pipe()
+    monkeypatch.setattr(testing, "TestClient", lambda app: client)
+    monkeypatch.setattr(stdio, "_pump", failing_pump)
+    serving = asyncio.create_task(stdio.serve(object(), stdin=pipe.reader, stdout=io.BytesIO()))
+    try:
+        pipe.send({})
+        await asyncio.wait_for(failed.wait(), timeout=0.5)
+        serving.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await serving
+    finally:
+        pipe.close()
+        if not serving.done():
+            serving.cancel()
+            await asyncio.gather(serving, return_exceptions=True)
+        pipe.reader.close()
+
+
+async def test_shutdown_tolerates_an_absent_current_task(monkeypatch) -> None:
+    client = StubClient()
+    monkeypatch.setattr(testing, "TestClient", lambda app: client)
+
+    with mock.patch.object(stdio.asyncio, "current_task", return_value=None):
+        assert await stdio.serve(object(), stdin=io.BytesIO(), stdout=io.BytesIO()) == 0
 
 
 async def test_end_of_input_stops_the_relay() -> None:

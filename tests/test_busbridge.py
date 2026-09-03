@@ -142,12 +142,13 @@ async def test_a_worker_ignores_the_echo_of_its_own_publish() -> None:
 
 async def test_another_workers_message_is_accepted() -> None:
     bus = FakeBus()
-    _bridge, accepted = _collecting(bus)
+    bridge, accepted = _collecting(bus)
 
     _channel, handler = bus.handlers[0]
     await handler(_Message("test_channel", {"n": 1, "origin": "worker-a"}))
 
     assert accepted == [{"n": 1, "origin": "worker-a"}]
+    assert bridge.untagged_applied == 0
 
 
 async def test_a_payload_with_no_origin_is_treated_as_foreign() -> None:

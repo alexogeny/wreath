@@ -177,6 +177,40 @@ async def test_durable_claim_and_enqueue_share_the_inbox_transaction_and_tenant(
     ]
 
 
+async def test_durable_command_is_authorized_before_it_is_enqueued() -> None:
+    class Authorizer:
+        def __init__(self) -> None:
+            self.actions: list[str] = []
+
+        async def authorize(self, _context: Any, requirement: Any) -> Any:
+            from wreath.authorization import AuthorizationDecision
+
+            self.actions.append(requirement.action)
+            return AuthorizationDecision(True)
+
+    authorizer = Authorizer()
+    inbox = AtomicInbox()
+    jobs = RecordingJobs()
+    app = Wreath()
+    chat = ChatOps(
+        app,
+        name="operations",
+        path="/chat",
+        providers=(Slack(signing_secret=SIGNING_SECRET, clock=lambda: NOW),),
+        inbox=inbox,
+        jobs=jobs,
+        authorizer=authorizer,
+    )
+
+    @chat.command("deploy", execution="durable", action="Release::deploy")
+    async def deploy(environment: str) -> None:
+        raise AssertionError("durable command ran inline")
+
+    assert (await post_command(app, slash_body())).status == 200
+    assert authorizer.actions == ["Release::deploy"]
+    assert len(jobs.enqueued) == 1
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

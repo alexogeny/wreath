@@ -63,6 +63,33 @@ def _verifier(**overrides) -> JwtVerifier:
     return JwtVerifier(**kwargs)
 
 
+def test_an_unresolved_key_refuses_before_signature_verification(monkeypatch) -> None:
+    def unexpected_verification(*args, **kwargs):
+        pytest.fail("an unresolved key reached signature verification")
+
+    monkeypatch.setattr(jwt_module, "_verify_signature", unexpected_verification)
+
+    assert (
+        jwt_module.verify_jwt(
+            _hs(_claims()),
+            key_resolver=lambda _header: None,
+            algorithms=frozenset({"HS256"}),
+            issuer=None,
+            audiences=frozenset(),
+            leeway=0,
+            required=(),
+            identity=jwt_module.default_identity,
+            now=1_700_000_000,
+        )
+        is None
+    )
+
+
+def test_a_thumbprint_refuses_an_unsupported_key_type() -> None:
+    with pytest.raises(ValueError, match="does not support key type 'unsupported'"):
+        jwt_module.jwk_thumbprint({"kty": "unsupported"})
+
+
 def test_a_segment_outside_the_alphabet_is_refused() -> None:
     with pytest.raises(ValueError, match="invalid base64url"):
         jwt_module._b64url_decode("YWJj!")
@@ -85,9 +112,7 @@ def _reason_for(value: object, claim: str = "exp") -> int:
 
 
 def test_configured_audiences_are_compiled_for_membership() -> None:
-    assert jwt_module._compile_audiences(("api", "admin", "api")) == frozenset(
-        {"api", "admin"}
-    )
+    assert jwt_module._compile_audiences(("api", "admin", "api")) == frozenset({"api", "admin"})
 
 
 @pytest.mark.parametrize("claim", ["exp", "nbf", "iat"])
@@ -339,6 +364,90 @@ def _jwks_cache(document: dict):
             return _Response(self._body)
 
     return JwksCache(http_client=_Client(_json.dumps(document).encode()), jwks_path="/jwks")
+
+
+class _JwksResponse:
+    def __init__(self, body: bytes) -> None:
+        self.status = 200
+        self.body = body
+
+    def header(self, _name, default=None):
+        return default
+
+
+class _SequenceJwksClient:
+    def __init__(self, *bodies: bytes) -> None:
+        self.bodies = list(bodies)
+        self.calls = 0
+
+    async def get(self, _path: str) -> _JwksResponse:
+        selected = self.bodies[min(self.calls, len(self.bodies) - 1)]
+        self.calls += 1
+        return _JwksResponse(selected)
+
+
+async def test_jwks_cache_refreshes_expired_keys_but_not_fresh_keys(monkeypatch):
+    import json as _json
+
+    from wreath._auth.jwks import JwksCache
+
+    first = _json.dumps({"keys": [{"kty": "oct", "k": "AAAA", "kid": "k1"}]}).encode()
+    second = _json.dumps({"keys": [{"kty": "oct", "k": "AQID", "kid": "k1"}]}).encode()
+    client = _SequenceJwksClient(first, second)
+    clock = [100.0]
+    monkeypatch.setattr(JwksCache, "_now", lambda _self: clock[0])
+    cache = JwksCache(http_client=client, jwks_path="/jwks")
+    await cache.prefetch()
+
+    assert (await cache.resolve("k1")).secret == b"\x00\x00\x00"
+    await cache._maybe_refresh("k1")
+    assert client.calls == 1
+
+    clock[0] = 1000.0
+    assert (await cache.resolve("k1")).secret == b"\x01\x02\x03"
+    assert client.calls == 2
+
+
+async def test_empty_jwks_is_not_negative_cached_as_an_unknown_kid() -> None:
+    from wreath._auth.jwks import JwksCache
+
+    client = _SequenceJwksClient(b'{"keys": []}')
+    cache = JwksCache(http_client=client, jwks_path="/jwks")
+    await cache.prefetch()
+
+    assert await cache.resolve("missing") is None
+    assert client.calls == 2
+
+
+async def test_oversized_valid_jwks_is_refused_before_json_parsing() -> None:
+    from wreath._auth.jwks import _MAX_JWKS_BYTES, JwksCache
+
+    body = b'{"keys": [], "padding": "' + b"x" * _MAX_JWKS_BYTES + b'"}'
+    cache = JwksCache(http_client=_SequenceJwksClient(body), jwks_path="/jwks")
+
+    await cache.prefetch()
+
+    assert cache.fetch_errors == 1
+    assert cache.empty_documents == 0
+
+
+async def test_jwks_assigns_unique_names_and_keeps_the_first_duplicate_kid() -> None:
+    unnamed = _jwks_cache({"keys": [{"kty": "oct", "k": "AAAA"}, {"kty": "oct", "k": "AQID"}]})
+    await unnamed.prefetch()
+    assert await unnamed.resolve(None) is None
+    assert unnamed.duplicate_kids == 0
+
+    duplicate = _jwks_cache(
+        {
+            "keys": [
+                {"kty": "oct", "k": "AAAA", "kid": "same"},
+                {"kty": "oct", "k": "AQID", "kid": "same"},
+            ]
+        }
+    )
+    await duplicate.prefetch()
+    assert (await duplicate.resolve("same")).secret == b"\x00\x00\x00"
+    assert duplicate.duplicate_kids == 1
 
 
 async def test_a_non_object_in_keys_does_not_discard_the_rest():
@@ -644,6 +753,107 @@ async def test_a_transient_error_still_keeps_the_cached_keys():
     await cache.prefetch()
     assert await cache.resolve("k1") is not None
     assert cache.empty_documents == 0
+
+
+async def test_a_transport_error_uses_stale_keys_only_within_the_outage_budget(
+    monkeypatch,
+):
+    from wreath._auth.jwks import JwksCache
+
+    clock = [100.0]
+
+    class _Response:
+        status = 200
+        body = b'{"keys": [{"kty": "oct", "k": "AAAA", "kid": "k1"}]}'
+
+        def header(self, name, default=None):
+            return default
+
+    class _Client:
+        calls = 0
+
+        async def get(self, path):
+            self.calls += 1
+            if self.calls > 1:
+                raise OSError("identity provider unavailable")
+            return _Response()
+
+    monkeypatch.setattr(JwksCache, "_now", lambda _self: clock[0])
+    cache = JwksCache(
+        http_client=_Client(),
+        jwks_path="/jwks",
+        ttl=60,
+        min_refresh_interval=0,
+        max_stale=20,
+    )
+    await cache.prefetch()
+
+    clock[0] = 165
+    assert await cache.resolve("k1") is not None
+    assert cache.fetch_errors == 1
+
+    clock[0] = 181
+    assert await cache.resolve("k1") is None
+    assert cache.fetch_errors == 2
+
+
+async def test_zero_stale_budget_refuses_a_key_at_exact_expiry(monkeypatch) -> None:
+    from wreath._auth.jwks import JwksCache
+
+    clock = [100.0]
+
+    class _Response:
+        status = 200
+        body = b'{"keys": [{"kty": "oct", "k": "AAAA", "kid": "k1"}]}'
+
+        def header(self, name, default=None):
+            return default
+
+    class _Client:
+        calls = 0
+
+        async def get(self, path):
+            self.calls += 1
+            if self.calls > 1:
+                raise OSError("identity provider unavailable")
+            return _Response()
+
+    monkeypatch.setattr(JwksCache, "_now", lambda _self: clock[0])
+    cache = JwksCache(
+        http_client=_Client(),
+        jwks_path="/jwks",
+        ttl=60,
+        min_refresh_interval=0,
+        max_stale=0,
+    )
+    await cache.prefetch()
+
+    clock[0] = 160
+    assert await cache.resolve("k1") is None
+
+
+def test_jwks_cache_refuses_non_finite_stale_budgets() -> None:
+    from wreath._auth.jwks import JwksCache
+
+    for max_stale in (float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="max_stale must be non-negative"):
+            JwksCache(http_client=object(), jwks_path="/jwks", max_stale=max_stale)
+
+
+@pytest.mark.parametrize("value", [-1.0, float("nan"), float("inf")])
+def test_jwks_cache_refuses_invalid_key_ttls(value: float) -> None:
+    from wreath._auth.jwks import JwksCache
+
+    with pytest.raises(ValueError, match="ttl must be non-negative and finite"):
+        JwksCache(http_client=object(), jwks_path="/jwks", ttl=value)
+
+
+@pytest.mark.parametrize("value", [-1.0, float("nan"), float("inf")])
+def test_jwks_cache_refuses_invalid_refresh_intervals(value: float) -> None:
+    from wreath._auth.jwks import JwksCache
+
+    with pytest.raises(ValueError, match="min_refresh_interval must be non-negative and finite"):
+        JwksCache(http_client=object(), jwks_path="/jwks", min_refresh_interval=value)
 
 
 async def test_a_document_of_only_encryption_keys_also_revokes():

@@ -77,6 +77,19 @@ def _check_token(value: str, source: str) -> str:
     return value
 
 
+def _authorization_count(headers: _Headers) -> int:
+    return sum(name.lower() == b"authorization" for name, _value in headers)
+
+
+def _validate_path(path: str, *, label: str) -> None:
+    path_only = path.partition("?")[0]
+    lowered = path_only.lower()
+    if any(escape in lowered for escape in ("%2e", "%2f", "%5c")):
+        raise ValueError(f"{label} contains an encoded separator or dot segment")
+    if "\\" in path_only or any(part in {".", ".."} for part in path_only.split("/")):
+        raise ValueError(f"{label} contains a dot segment or backslash separator")
+
+
 class ServiceClient:
     """An HTTP client bound to a base path and a (refreshing) bearer token.
 
@@ -112,6 +125,17 @@ class ServiceClient:
         base_path: str = "",
         default_headers: _Headers = (),
     ) -> None:
+        default_authorizations = _authorization_count(default_headers)
+        if default_authorizations > 1:
+            raise ValueError(
+                "ServiceClient default_headers must not contain more than one Authorization header"
+            )
+        if token is not None and default_authorizations:
+            raise ValueError(
+                "ServiceClient default_headers must not contain Authorization "
+                "when token supplies the service credential"
+            )
+        _validate_path(base_path, label="ServiceClient base_path")
         self._client = client
         self._token = token
         self._base_path = base_path.rstrip("/")
@@ -143,9 +167,9 @@ class ServiceClient:
         """Send one request to `base_path + path` with the bearer header attached.
 
         The token is resolved per call, so a refreshing source hands over a
-        current credential on every request. Header precedence is bearer, then
-        `default_headers`, then `headers`; nothing is de-duplicated, so a
-        caller that passes its own `authorization` sends two of them.
+        current credential on every request. Ambiguous `Authorization`
+        combinations are refused; a lone caller-supplied value is accepted only
+        when the client has no configured credential.
 
         Args:
             path: Origin-relative; a leading `/` is optional and one is inserted if absent.
@@ -159,6 +183,19 @@ class ServiceClient:
             ValueError: The resolved token is not printable ASCII, so it cannot be
                 carried in an `Authorization` header.
         """
+        request_authorizations = _authorization_count(headers)
+        if request_authorizations > 1:
+            raise ValueError(
+                "ServiceClient request headers must not contain more than one Authorization header"
+            )
+        if request_authorizations and (
+            self._token is not None or _authorization_count(self._default_headers)
+        ):
+            raise ValueError(
+                "ServiceClient request headers must not contain Authorization; "
+                "configure the credential on the client"
+            )
+        _validate_path(path, label="ServiceClient request path")
         target = self._base_path + path if path.startswith("/") else f"{self._base_path}/{path}"
         merged = await self._bearer() + self._default_headers + tuple(headers)
         return await self._client.request(

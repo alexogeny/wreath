@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from wreath.log import (
+    DEFAULT_LIMIT,
     KEEP_FOREVER,
     Batch,
     Column,
@@ -32,6 +33,10 @@ def test_cursor_round_trips_through_its_wire_form():
 def test_a_missing_cursor_reads_from_the_start():
     assert Cursor.decode(None) == Cursor(0, 0)
     assert Cursor.decode("") == Cursor.start()
+
+
+def test_the_default_read_page_is_bounded():
+    assert DEFAULT_LIMIT == 512
 
 
 @pytest.mark.parametrize(
@@ -168,6 +173,7 @@ def test_dedup_declares_a_unique_index_scoped_to_the_stream():
     # Scoped to the stream: two subjects may legitimately carry the same
     # idempotency key, and a global unique index would drop the second one.
     assert "(stream, dedup) WHERE dedup IS NOT NULL" in unique[0]
+    assert not any("_dedup_idx" in statement for statement in _log(dedup=False).statements())
 
 
 def test_dedup_declares_the_column_the_index_is_over():
@@ -201,6 +207,17 @@ class _Database:
             raise ValueError(f"duplicate PostgreSQL statement: {name}")
         self.registered[name] = sql
         return object()
+
+
+class _EmptyStatement:
+    async def fetch(self, *args: object) -> tuple[()]:
+        return ()
+
+
+class _ReadDatabase(_Database):
+    def statement(self, name: str, sql: str, *, workload: str = "read") -> object:
+        super().statement(name, sql, workload=workload)
+        return _EmptyStatement()
 
 
 def test_every_read_stops_at_the_horizon():
@@ -286,9 +303,19 @@ def test_a_read_with_a_non_positive_limit_is_refused(limit):
     # message can say which argument was wrong.
     import asyncio
 
-    log = PostgresLog(_Database(), _log())
+    log = PostgresLog(_ReadDatabase(), _log())
     with pytest.raises(ValueError, match="limit must be positive"):
         asyncio.run(log.read("s", after=Cursor.start(), limit=limit))
+    assert asyncio.run(log.read("s", after=Cursor.start(), limit=1)) == Batch((), Cursor.start())
+
+
+def test_an_empty_buffer_is_not_due_after_its_time_threshold():
+    log = PostgresLog(_Database(), _log(flush=Flush(bytes=64, every=0.01)))
+    buffer = log.buffered("s")
+    buffer._since -= 1
+    assert buffer.due is False
+    assert buffer.offer(actor="me", body={}) is True
+    assert buffer.due is True
 
 
 def _bind(log: PostgresLog, stream: str, **values: object) -> list[object]:

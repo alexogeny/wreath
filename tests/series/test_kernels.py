@@ -248,6 +248,11 @@ class TestChartProjection:
         first = prepared.project_chart_text(downsample_rows=(0,), threshold=6, tick_target=5)
 
         assert prepared.project_chart_text(downsample_rows=[0], threshold=6, tick_target=5) is first
+        uncached = prepared.project_chart_text(
+            downsample_rows=(0,), threshold=6, tick_target=5, cache=False
+        )
+        assert uncached == first
+        assert uncached is not first
 
         second = prepared.project_chart_text(downsample_rows=(0,), threshold=7, tick_target=5)
         assert second is not first
@@ -272,6 +277,45 @@ class TestChartProjection:
         assert second == first
         assert second is not first
         assert prepared._chart_plan_cache is plan
+        assert prepared._chart_text_cache is None
+
+    def test_numeric_projection_cache_is_keyed_and_optional(self):
+        buckets = tuple(range(12))
+        sparse = {("alpha", False): {bucket: {"count": bucket / 7} for bucket in buckets}}
+        prepared = ChartData(buckets, sparse, {"count": None})
+
+        first = prepared.project_chart(downsample_rows=(0,), threshold=6, tick_target=5)
+        repeated = prepared.project_chart(downsample_rows=[0], threshold=6, tick_target=5)
+        uncached_same = prepared.project_chart(
+            downsample_rows=(0,), threshold=6, tick_target=5, cache=False
+        )
+        changed = prepared.project_chart(downsample_rows=(0,), threshold=7, tick_target=5)
+        fresh = ChartData(buckets, sparse, {"count": None})
+        uncached_first = fresh.project_chart(
+            downsample_rows=(0,), threshold=6, tick_target=5, cache=False
+        )
+        uncached_second = fresh.project_chart(
+            downsample_rows=(0,), threshold=6, tick_target=5, cache=False
+        )
+
+        assert repeated is first
+        assert uncached_same == first
+        assert uncached_same is not first
+        assert changed is not first
+        assert uncached_first == uncached_second
+        assert uncached_first is not uncached_second
+        assert fresh._chart_cache is None
+
+    def test_numeric_and_text_projection_refuse_non_integer_row_collections(self):
+        prepared = ChartData(
+            (0,), {("alpha", False): {0: {"count": 1.0}}}, {"count": 0.0}
+        )
+
+        for project in (prepared.project_chart, prepared.project_chart_text):
+            with pytest.raises(TypeError, match="integer"):
+                project(downsample_rows=("0",))
+            with pytest.raises(TypeError, match="integer"):
+                project(downsample_rows=(0,), full_rows=("0",))
 
     def test_it_matches_the_individual_data_kernels(self):
         buckets = tuple(range(9))

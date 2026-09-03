@@ -239,6 +239,19 @@ def test_buffered_registered_event_never_calls_the_native_publisher() -> None:
     assert native.calls == []
 
 
+def test_buffered_event_without_a_request_is_dropped_before_buffer_access() -> None:
+    with log.testing_runtime(level=log.INFO, capture_level=log.TRACE) as records:
+        event = log.event(
+            "mutation.unbound-buffer",
+            "value {value}",
+            level=log.DEBUG,
+            fields=(log.field("value", int),),
+        )
+        event(1)
+
+    assert records == []
+
+
 def test_kwargs_emitter_below_capture_level_avoids_the_context_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import fields
 from types import SimpleNamespace
 
@@ -23,16 +24,22 @@ async def test_publish_ephemeral_notifies():
     call = next(c for c in db.calls if "pg_notify" in c[0])
     wire, body = call[1]
     assert wire.startswith("wm_")
-    assert json.loads(body) == {"id": 1}
+    envelope = json.loads(body.removeprefix(messaging_module._EPHEMERAL_PREFIX))
+    assert envelope == {"tenant": "", "payload": {"id": 1}}
 
 
-async def test_plain_payloads_keep_their_exact_legacy_wire_text():
+async def test_plain_payloads_are_wrapped_without_changing_their_value():
     db = DatabaseDouble()
     bus = _bus(db)
     payload = {"greeting": "olá", "not_a_number": float("nan"), 7: True}
     await bus.publish("booking_created", payload)
     call = next(c for c in db.calls if "pg_notify" in c[0])
-    assert call[1][1] == json.dumps(payload)
+    body = call[1][1]
+    envelope = json.loads(body.removeprefix(messaging_module._EPHEMERAL_PREFIX))
+    assert envelope["tenant"] == ""
+    assert envelope["payload"]["greeting"] == "olá"
+    assert envelope["payload"]["7"] is True
+    assert math.isnan(envelope["payload"]["not_a_number"])
 
 
 async def test_an_envelope_is_opt_in_and_plain_payloads_keep_their_wire_shape():
@@ -46,7 +53,7 @@ async def test_an_envelope_is_opt_in_and_plain_payloads_keep_their_wire_shape():
     )
     await bus.publish("booking_created", envelope)
     call = next(c for c in db.calls if "pg_notify" in c[0])
-    wire = json.loads(call[1][1])
+    wire = json.loads(call[1][1].removeprefix(messaging_module._EPHEMERAL_PREFIX))["payload"]
     assert wire["__wreath_message__"] == 1
     assert wire["payload"] == {"id": 1}
     delivered = Message(payload=wire, channel="booking_created", group=None, tenant="")

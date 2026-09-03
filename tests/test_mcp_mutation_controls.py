@@ -66,6 +66,122 @@ def _request(identity: Identity | None = None) -> Request:
     return request
 
 
+@pytest.mark.parametrize("progress_interval", [0, -1, -0.25])
+def test_mcp_refuses_each_nonpositive_progress_interval(progress_interval: float) -> None:
+    with pytest.raises(ValueError, match="progress_interval must be positive"):
+        _server(progress_interval=progress_interval)
+
+
+def test_mcp_preserves_supplied_progress_registry() -> None:
+    progress = object()
+
+    assert _server(progress=progress)._progress is progress
+
+
+async def _initialize_direct(mcp: MCP, params: dict[str, object]) -> tuple[dict[str, Any], Any]:
+    response = await mcp._initialize(
+        _request(Identity("user")),
+        Message("initialize", params, id=1, is_request=True),
+        Identity("user"),
+        stream=False,
+    )
+    body = json.loads(response.body)
+    session_id = next(
+        value.decode()
+        for name, value in response.headers
+        if name == b"mcp-session-id"
+    )
+    session = mcp._sessions.get(session_id)
+    assert session is not None
+    return body, session
+
+
+@pytest.mark.asyncio
+async def test_initialize_preserves_supported_protocol_and_client_facts() -> None:
+    mcp = _server(instructions="Use the declared tools.")
+    protocol = next(iter(server_module.SUPPORTED_PROTOCOL_VERSIONS))
+
+    body, session = await _initialize_direct(
+        mcp,
+        {
+            "protocolVersion": protocol,
+            "clientInfo": {"name": "probe", "version": "1"},
+            "capabilities": {"roots": {"listChanged": True}},
+        },
+    )
+
+    assert body["result"]["protocolVersion"] == protocol
+    assert body["result"]["instructions"] == "Use the declared tools."
+    assert session.client_info == {"name": "probe", "version": "1"}
+    assert session.client_capabilities == {"roots": {"listChanged": True}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [None, 1, "client", [], object()])
+async def test_initialize_replaces_each_invalid_client_fact_shape(value: object) -> None:
+    _body, session = await _initialize_direct(
+        _server(),
+        {
+            "protocolVersion": "unsupported",
+            "clientInfo": value,
+            "capabilities": value,
+        },
+    )
+
+    assert session.protocol_version == server_module.PROTOCOL_VERSION
+    assert session.client_info == {}
+    assert session.client_capabilities == {}
+
+
+@pytest.mark.asyncio
+async def test_initialize_omits_absent_instructions() -> None:
+    body, _session_value = await _initialize_direct(
+        _server(),
+        {"protocolVersion": server_module.PROTOCOL_VERSION},
+    )
+
+    assert "instructions" not in body["result"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", [None, 1, b"tool", [], {}])
+async def test_tools_call_refuses_each_non_text_name(name: object) -> None:
+    with pytest.raises(JsonRpcError) as caught:
+        await _server()._tools_call(
+            _request(),
+            _session(),
+            Message("tools/call", {"name": name}, id=1, is_request=True),
+        )
+
+    assert caught.value.code == INVALID_PARAMS
+    assert caught.value.message == "`params.name` must name a tool"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments", [1, "arguments", [], (), object()])
+async def test_tools_call_refuses_each_non_object_arguments(arguments: object) -> None:
+    mcp = _server()
+
+    @mcp.tool(description="Probe invalid arguments.")
+    async def probe(request: Request) -> dict[str, bool]:
+        return {"ok": True}
+
+    with pytest.raises(JsonRpcError) as caught:
+        await mcp._tools_call(
+            _request(),
+            _session(),
+            Message(
+                "tools/call",
+                {"name": "probe", "arguments": arguments},
+                id=1,
+                is_request=True,
+            ),
+        )
+
+    assert caught.value.code == INVALID_PARAMS
+    assert caught.value.message == "`params.arguments` must be a JSON object"
+
+
 def test_set_requirement_all_and_any_have_distinct_meanings() -> None:
     actual = ["reader"]
     all_check = SetRequirement(frozenset(("reader", "writer")), "all")

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 import wreath.agents as agents
 
 
@@ -51,3 +53,9 @@ def test_public_agent_api_is_lazy_and_vendor_neutral() -> None:
 def test_every_declared_agent_export_resolves_lazily() -> None:
     assert set(agents.__all__) == set(agents._EXPORTS)
     assert all(getattr(agents, name) is not None for name in agents.__all__)
+
+
+def test_an_unknown_agent_export_is_an_attribute_error() -> None:
+    name = "UnknownAgentExport"
+    with pytest.raises(AttributeError, match="has no attribute 'UnknownAgentExport'"):
+        getattr(agents, name)

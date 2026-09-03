@@ -21,7 +21,13 @@ accident:
   row to the top of every semantic query while its visible content stays put.
   `expose=(...)` names one back; a generated column stays unwritable regardless.
 
-    router = crud_router(Widget, open_session, expose=(), readonly=("owner_id",))
+    router = crud_router(
+        Widget,
+        open_session,
+        expose=(),
+        readonly=("owner_id",),
+        authorize=Access.authenticated(),
+    )
     app.include_router(router)          # after app.enable_crud()
 
 Routes (any subset via `operations=`): `GET /` (paginated list),
@@ -365,7 +371,9 @@ def crud_router(
     `authorize` rules attach as route metadata that the app enforces in its
     single-pass pipeline, so a denied write never touches the database.
     `Access.deny()` is the exception: it is enforced inside the handler and answers
-    403 whatever the identity. Rules default to `Access.public()`.
+    403 whatever the identity. There is no default: every generated operation
+    must resolve to a rule, and an intentionally open route says
+    `Access.public()` explicitly.
 
     `object_authorizer` is the seam for decisions that need the row itself —
     ownership, tenant match, a Cedar evaluation over the object's own attributes.
@@ -389,7 +397,8 @@ def crud_router(
         exclude: columns never serialized at all
         operations: which of list/retrieve/create/update/delete to generate
         page_size: default page size for `GET /`, raisable per request up to 100
-        authorize: one `Access` rule, or a mapping keyed by operation, group or `"*"`
+        authorize: one `Access` rule, or a complete mapping keyed by operation,
+            group or `"*"`; use `Access.public()` for intentional public access
         object_authorizer: `(request, op, instance) -> bool`, optionally async
         precision: column name to `PrecisionLadder`, making a coordinate's
             *resolution* an authorization outcome rather than a verdict — exact
@@ -399,9 +408,17 @@ def crud_router(
 
     Raises:
         ValueError: the model has a composite primary key, the field lists
-            conflict, or `precision` names a column that is not serialized
+            conflict, `authorize` does not cover a selected operation, or
+            `precision` names a column that is not serialized
     """
     from .router import Router
+
+    if authorize is None:
+        raise ValueError(
+            "crud_router authorize is required; the correct form is "
+            "authorize=Access.authenticated() or an explicit Access.public() for "
+            "intentionally public routes"
+        )
 
     spec = _as_model(model)
     columns = spec.__wreath_column_map__
@@ -540,7 +557,7 @@ def crud_router(
             return None
         return {key: value for key, value in body.items() if key in writable_fields}
 
-    rules = {op: _rule_for(authorize, op) for op in _DEFAULT_OPERATIONS}
+    rules = {op: _rule_for(authorize, op) for op in ops}
 
     async def object_denied(request: Any, op: str, instance: Any) -> bool:
         return object_authorizer is not None and not await _object_ok(
@@ -712,10 +729,8 @@ def _coerce_pk_for(model: type) -> Callable[[str], Any]:
     return coerce
 
 
-def _rule_for(authorize: Access | Mapping[str, Access] | None, op: str) -> Access:
-    """Resolve the `Access` rule for `op` (op > group > `"*"` > public)."""
-    if authorize is None:
-        return Access.public()
+def _rule_for(authorize: Access | Mapping[str, Access], op: str) -> Access:
+    """Resolve the `Access` rule for `op` (op > group > `"*"`)."""
     if isinstance(authorize, Access):
         return authorize
     if op in authorize:
@@ -724,7 +739,11 @@ def _rule_for(authorize: Access | Mapping[str, Access] | None, op: str) -> Acces
         return authorize[group]
     if "*" in authorize:
         return authorize["*"]
-    return Access.public()
+    raise ValueError(
+        f"authorize does not cover selected CRUD operation {op!r}; the correct "
+        f"form is authorize={{\"{op}\": Access.authenticated()}} or an explicit "
+        '"*": Access.public() for intentionally public routes'
+    )
 
 
 def _apply_requirement(handler: Any, rule: Access) -> Any:

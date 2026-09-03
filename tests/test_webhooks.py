@@ -5,6 +5,7 @@ import random
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from _pgfidelity import check_for
@@ -588,6 +589,24 @@ def test_webhook_limits_are_positive_and_hubs_are_unique() -> None:
         app.webhooks("partners")
 
 
+def test_webhook_hub_without_durable_stores_has_no_schema_owners() -> None:
+    app = Wreath()
+    hooks = app.webhooks("ephemeral")
+    hooks.source(
+        "sender",
+        path="/hooks/ephemeral",
+        verifier=HMACWebhookVerifier(KEYS),
+    )
+    hooks.destination(
+        "receiver",
+        client=_FakeHTTPClient(),
+        path="/callbacks",
+        signer=HMACWebhookSigner(KEYS, key_id="current"),
+    )
+
+    assert hooks.schema_owners == ()
+
+
 @pytest.mark.asyncio
 async def test_relay_creates_new_id_and_preserves_correlation_and_causation() -> None:
     fake = _FakeHTTPClient()
@@ -853,6 +872,60 @@ async def test_durable_source_rolls_back_claim_and_side_effect_when_handler_fail
     assert response.status == 500
     assert session.transactions == ["begin", "rollback"]
     assert len(session.calls) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("result_status", "expected"), [(202, 202), (None, 204)])
+async def test_durable_source_replays_the_completed_result_status(
+    result_status: int | None,
+    expected: int,
+) -> None:
+    app = Wreath()
+    session = _FakeSession(
+        rows=[
+            None,
+            {
+                "state": "completed",
+                "fencing_token": 3,
+                "result_status": result_status,
+            },
+        ]
+    )
+
+    @asynccontextmanager
+    async def session_factory():
+        yield session
+
+    source = app.webhooks("completed-replay").source(
+        "sender",
+        path="/hooks/completed-replay",
+        verifier=HMACWebhookVerifier(KEYS),
+        inbox=PostgresWebhookInbox(),
+        session_factory=session_factory,
+    )
+
+    @source.event("widget.changed", payload=WidgetChanged)
+    async def changed(context: WebhookContext, event: WidgetChanged) -> None:
+        raise AssertionError("a completed delivery must not be handled again")
+
+    envelope = WebhookEnvelope(
+        id="evt-completed",
+        type="widget.changed",
+        version="1",
+        timestamp=datetime.now(UTC),
+        content_type="application/json",
+        body=b'{"value":9}',
+    )
+    headers = {
+        name.decode(): value.decode()
+        for name, value in HMACWebhookSigner(KEYS, key_id="current").headers(envelope)
+    }
+    async with TestClient(app) as client:
+        response = await client.post(
+            "/hooks/completed-replay", headers=headers, content=envelope.body
+        )
+
+    assert response.status == expected
 
 
 @pytest.mark.asyncio
@@ -1150,6 +1223,39 @@ async def test_dispatcher_records_uncertain_transport_as_unknown() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatcher_without_a_renewal_factory_creates_no_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeSession(rows=[_delivery_row()], values=[1, 1])
+    outbox = PostgresWebhookOutbox()
+    destination = (
+        Wreath()
+        .webhooks("no-lease-renewal")
+        .destination(
+            "receiver",
+            client=_FakeHTTPClient(202),
+            path="/callbacks",
+            signer=HMACWebhookSigner(KEYS, key_id="current"),
+            outbox=outbox,
+        )
+    )
+    dispatcher = WebhookDispatcher(
+        outbox,
+        {"receiver": destination},
+        worker_id="worker-no-renew",
+    )
+
+    def unexpected_create_task(coroutine: Any, *, name: str) -> None:
+        coroutine.close()
+        raise AssertionError(f"unexpected renewal task {name}")
+
+    monkeypatch.setattr(asyncio, "create_task", unexpected_create_task)
+    result = await dispatcher.run_once(session)
+
+    assert result is not None and result.outcome == "delivered"
+
+
+@pytest.mark.asyncio
 async def test_dispatcher_renews_lease_while_delivery_is_in_flight() -> None:
     primary = _FakeSession(rows=[_delivery_row()], values=[1, 1])
     renewal = _FakeSession(values=[1, 1, 1])
@@ -1444,6 +1550,19 @@ def test_a_signer_asked_for_a_key_it_does_not_hold_refuses() -> None:
     assert dict(signer.headers(_envelope()))[b"wreath-webhook-key-id"] == b"current"
 
 
+def test_a_signer_refuses_missing_or_malformed_key_configuration() -> None:
+    secret = KEYS["current"]
+    with pytest.raises(ValueError, match="key id is not configured"):
+        HMACWebhookSigner(KEYS, key_id="missing")
+    for key_id in ("", 7):
+        keys: Any = {"current": secret, key_id: secret}
+        with pytest.raises(ValueError, match="key ids must be non-empty strings"):
+            HMACWebhookSigner(keys, key_id="current")
+    keys = {"current": secret, "bad": "not-bytes"}
+    with pytest.raises(TypeError, match="must be bytes"):
+        HMACWebhookSigner(keys, key_id="current")
+
+
 def test_a_verifier_with_no_usable_key_is_refused_at_construction() -> None:
     with pytest.raises(ValueError, match="non-empty webhook verification key"):
         HMACWebhookVerifier({})
@@ -1452,6 +1571,17 @@ def test_a_verifier_with_no_usable_key_is_refused_at_construction() -> None:
     # One bad entry poisons the mapping, exactly as for origins elsewhere.
     with pytest.raises(ValueError, match="at least 32 bytes"):
         HMACWebhookVerifier({"current": KEYS["current"], "previous": b""})
+
+
+def test_a_verifier_refuses_malformed_key_ids_and_secret_types() -> None:
+    secret = KEYS["current"]
+    for key_id in ("", 7):
+        keys: Any = {"current": secret, key_id: secret}
+        with pytest.raises(ValueError, match="key ids must be non-empty strings"):
+            HMACWebhookVerifier(keys)
+    keys = {"current": secret, "bad": "not-bytes"}
+    with pytest.raises(TypeError, match="must be bytes"):
+        HMACWebhookVerifier(keys)
 
 
 def test_a_verifier_replay_window_that_can_never_hold_is_refused() -> None:

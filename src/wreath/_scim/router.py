@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import inspect
 import secrets
 import time
 from collections.abc import Callable, Iterable, Mapping
@@ -267,6 +268,7 @@ def _scim_write_helpers(
     users: Any,
     organizations: Any,
     data_helpers: dict[str, Any],
+    revoke_sessions: Callable[[str], Any] | None,
 ) -> dict[str, Any]:
     find_by_user_name = data_helpers["find_by_user_name"]
     hashed = data_helpers["hashed"]
@@ -326,6 +328,16 @@ def _scim_write_helpers(
             if not isinstance(password, str) or not password:
                 raise PatchError("invalidValue", "password must be a non-empty string")
             updated = _replace(updated, hashed_password=await hashed(password))
+        if _session_revocation_required(current, target):
+            if revoke_sessions is None:
+                raise PatchError(
+                    "mutability",
+                    "changing active or password requires scim_router(revoke_sessions=...) "
+                    "so already-issued sessions are invalidated",
+                )
+            revoked = revoke_sessions(str(record.id))
+            if inspect.isawaitable(revoked):
+                await revoked
         if updated is record:
             return record
         return await users.update(updated)
@@ -363,6 +375,13 @@ def _scim_write_helpers(
         "commit_user": commit_user,
         "commit_group": commit_group,
     }
+
+
+def _session_revocation_required(
+    current: Mapping[str, Any], target: Mapping[str, Any]
+) -> bool:
+    disabled = bool(current.get("active")) and target.get("active") is False
+    return disabled or target.get("password") is not None
 
 
 def _scim_query_helpers(
@@ -727,6 +746,7 @@ def _make_scim_context(
     cursor_key: bytes,
     user_filter_cache: BoundedCache,
     group_filter_cache: BoundedCache,
+    revoke_sessions: Callable[[str], Any] | None,
 ) -> _ScimBuildContext:
     values = {
         **(
@@ -742,6 +762,7 @@ def _make_scim_context(
             users=users,
             organizations=organizations,
             data_helpers=data_helpers,
+            revoke_sessions=revoke_sessions,
         ),
         **(
             query_helpers := _scim_query_helpers(
@@ -1473,6 +1494,7 @@ def scim_router(
     max_filter_scan: int = MAX_FILTER_SCAN,
     cursor_secret: bytes | str | None = None,
     cursor_timeout: int = 3600,
+    revoke_sessions: Callable[[str], Any] | None = None,
 ) -> Router:
     """SCIM 2.0 provisioning endpoints for one organisation, over stores you already have.
 
@@ -1642,6 +1664,7 @@ def scim_router(
         cursor_key=cursor_key,
         user_filter_cache=user_filter_cache,
         group_filter_cache=group_filter_cache,
+        revoke_sessions=revoke_sessions,
     )
     _mount_scim_discovery(context)
     _mount_scim_users(context)

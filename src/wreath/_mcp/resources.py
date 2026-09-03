@@ -80,7 +80,7 @@ class Resource:
             entry["mimeType"] = self.mime_type
         return entry
 
-    def render(self, value: Any) -> dict[str, Any]:
+    def render(self, value: Any, *, _encoded: bytes | None = None) -> dict[str, Any]:
         """One `contents` entry for whatever the reader returned.
 
         `bytes` travel as a base64 `blob` and everything else as `text`, because
@@ -102,7 +102,7 @@ class Resource:
         return {
             "uri": self.uri,
             "mimeType": self.mime_type or JSON_MEDIA_TYPE,
-            "text": _json_dumps(value).decode("utf-8"),
+            "text": (_encoded if _encoded is not None else _json_dumps(value)).decode("utf-8"),
         }
 
 
@@ -195,9 +195,24 @@ def build_resource(
     )
 
 
-def read_result(resource: Resource, value: Any) -> Mapping[str, Any]:
+def read_result(
+    resource: Resource, value: Any, *, max_bytes: int | None = None
+) -> Mapping[str, Any]:
     """The `resources/read` result for one reader's return value."""
-    return {"contents": [resource.render(value)]}
+    encoded = None
+    if max_bytes is None:
+        pass
+    elif isinstance(value, (bytes, bytearray, memoryview)):
+        if 4 * ((len(value) + 2) // 3) > max_bytes:
+            raise ValueError(f"MCP result exceeds the {max_bytes}-byte serialized result limit")
+    elif not isinstance(value, str):
+        encoded = _json_dumps(value)
+        if len(encoded) > max_bytes:
+            raise ValueError(f"MCP result exceeds the {max_bytes}-byte serialized result limit")
+    result = {"contents": [resource.render(value, _encoded=encoded)]}
+    if max_bytes is not None and len(_json_dumps(result)) > max_bytes:
+        raise ValueError(f"MCP result exceeds the {max_bytes}-byte serialized result limit")
+    return result
 
 
 __all__ = [

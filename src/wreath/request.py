@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from hashlib import new as new_hash
 from hmac import compare_digest
 from tempfile import TemporaryFile
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ._headers import build_header_map, find_header
 from ._json import loads as _json_loads
@@ -1390,9 +1390,8 @@ class Request:
         """Parse a urlencoded or multipart request body. Parsed once and cached.
 
         A `multipart/form-data` content type is parsed as multipart, and
-        anything else -- including a missing content type -- is parsed as
-        urlencoded. The urlencoded codec refuses nothing: a JSON body handed to
-        it comes back as one field whose name is the whole body, not an error.
+        `application/x-www-form-urlencoded` is parsed as urlencoded. A missing
+        or different media type is refused before the body is read.
         Uploaded parts, meaning the ones carrying a filename, land in
         `FormData.files`; every other part is a text field.
 
@@ -1424,13 +1423,18 @@ class Request:
         # Via the `headers` property, not `self.scope`: on the native path the
         # ASGI scope is lazily built, and reading one header should not force it.
         content_type = find_header(self.headers, b"content-type")
-        if content_type is not None and content_type.startswith(b"multipart/form-data"):
-            boundary = _multipart_boundary(content_type)
+        media_type = content_type.split(b";", 1)[0].strip().lower() if content_type else b""
+        if media_type == b"multipart/form-data":
+            boundary = _multipart_boundary(cast(bytes, content_type))
             if boundary is None:
                 raise ValueError("multipart body without a boundary parameter")
             result = await _stream_multipart(self.stream(), boundary, self._limits)
             self._form = result
             return result
+        if media_type != b"application/x-www-form-urlencoded":
+            raise ValueError(
+                "form() requires application/x-www-form-urlencoded or multipart/form-data"
+            )
         body = await self.body()
         limit = self._limits.max_form_fields
         fields, every = _core.parse_form_urlencoded(body, limit, PayloadTooLarge)

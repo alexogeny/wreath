@@ -95,6 +95,69 @@ def test_outbound_exchange_codec_is_an_exact_inverse() -> None:
         encode_exchange(replace(recorded, sequence=-1))
 
 
+def test_reference_exchange_codec_preserves_optional_and_redaction_states() -> None:
+    for recorded in (
+        replace(exchange(), idempotency_key=None),
+        replace(exchange(), headers_redacted=True),
+        replace(exchange(), request_headers=((b"authorization", b"secret"),)),
+        replace(exchange(), response_headers=((b"set-cookie", b"secret"),)),
+    ):
+        decoded = _decode_exchange_reference(_encode_exchange_reference(recorded))
+        assert decoded.idempotency_key == recorded.idempotency_key
+        assert decoded.headers_redacted is (
+            recorded.headers_redacted
+            or recorded.request_headers == ((b"authorization", b"secret"),)
+            or recorded.response_headers == ((b"set-cookie", b"secret"),)
+        )
+
+
+def test_reference_exchange_encoder_refuses_each_integer_wire_bound() -> None:
+    recorded = exchange()
+    for changed in (
+        {"dependency_id": -1},
+        {"dependency_id": 65_536},
+        {"response_status": 65_536},
+        {"sequence": -1},
+        {"sequence": 1 << 64},
+    ):
+        with pytest.raises(HttpReplayError, match="exceeds"):
+            _encode_exchange_reference(replace(recorded, **changed))
+
+
+def test_reference_exchange_encoder_refuses_each_body_over_the_wire_bound() -> None:
+    class Huge(bytes):
+        def __len__(self) -> int:
+            return 1 << 32
+
+    for changed in ({"request_body": Huge()}, {"response_body": Huge()}):
+        with pytest.raises(HttpReplayError, match="body exceeds"):
+            _encode_exchange_reference(replace(exchange(), **changed))
+
+
+def test_reference_exchange_decoder_refuses_flags_truncation_and_trailing_bytes() -> None:
+    empty = replace(
+        exchange(),
+        request_headers=(),
+        response_headers=(),
+        request_body=b"request",
+        response_body=b"",
+        idempotency_key=None,
+        reason=b"",
+    )
+    payload = _encode_exchange_reference(empty)
+    with pytest.raises(HttpReplayError, match="body is truncated"):
+        _decode_exchange_reference(payload[:-1])
+    with pytest.raises(HttpReplayError, match="trailing bytes"):
+        _decode_exchange_reference(payload + b"x")
+
+    no_bodies = _encode_exchange_reference(
+        replace(empty, request_body=b"", response_body=b"")
+    )
+    unknown_flags = no_bodies[:-4] + (2).to_bytes(4, "little")
+    with pytest.raises(HttpReplayError, match="unknown flags"):
+        _decode_exchange_reference(unknown_flags)
+
+
 def test_native_outbound_exchange_codec_matches_the_independent_definition() -> None:
     recorded = replace(
         exchange(),

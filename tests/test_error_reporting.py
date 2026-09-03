@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from wreath import Wreath
-from wreath.client_facts import ClientFactsProvider, WreathGeoIP
+from wreath.client_facts import ClientFacts, ClientFactsProvider, UserAgentFacts, WreathGeoIP
 from wreath.errors import (
     BugsnagErrorReporter,
     ErrorEvent,
@@ -26,6 +26,70 @@ class Reporter:
 
     async def report(self, event: ErrorEvent) -> None:
         self.events.append(event)
+
+
+async def _receive() -> dict[str, object]:
+    return {"type": "http.request", "body": b"", "more_body": False}
+
+
+def _request() -> Request:
+    return Request({"type": "http", "headers": []}, _receive)
+
+
+def test_sentry_reporter_validates_optional_client_facts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        sys.modules,
+        "sentry_sdk",
+        SimpleNamespace(capture_exception=lambda _error: None),
+    )
+
+    SentryErrorReporter()
+    with pytest.raises(TypeError, match="client_facts.*resolve"):
+        SentryErrorReporter(client_facts=object())
+
+
+async def test_sentry_reporter_captures_directly_without_both_context_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[Exception] = []
+    monkeypatch.setitem(
+        sys.modules,
+        "sentry_sdk",
+        SimpleNamespace(capture_exception=captured.append),
+    )
+
+    first = RuntimeError("no resolver")
+    await SentryErrorReporter().report(ErrorEvent(first, _request(), "request"))
+
+    class Resolver:
+        def resolve(self, _request: Request) -> ClientFacts:
+            raise AssertionError("a requestless event must not resolve facts")
+
+    second = RuntimeError("no request")
+    reporter = SentryErrorReporter(client_facts=Resolver())
+    await reporter.report(ErrorEvent(second, None, "job"))
+
+    assert captured == [first, second]
+
+
+async def test_sentry_client_facts_require_scope_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        sys.modules,
+        "sentry_sdk",
+        SimpleNamespace(capture_exception=lambda _error: None),
+    )
+
+    class Resolver:
+        def resolve(self, _request: Request) -> ClientFacts:
+            return ClientFacts(None, UserAgentFacts(raw=""))
+
+    reporter = SentryErrorReporter(client_facts=Resolver())
+    with pytest.raises(RuntimeError, match="requires sentry-sdk with new_scope"):
+        await reporter.report(ErrorEvent(RuntimeError("reported"), _request(), "request"))
 
 
 def test_otlp_reporter_is_not_registered_twice_on_a_wreath_app() -> None:
@@ -141,3 +205,44 @@ async def test_sentry_error_context_gets_bounded_client_facts(monkeypatch) -> No
         "geo.country.iso_code": "US",
     }
     assert scope.tags["geo.country.iso_code"] == "US"
+
+
+@pytest.mark.parametrize("mobile", [None, True])
+async def test_sentry_context_omits_unknown_tags_and_preserves_known_mobile(
+    monkeypatch: pytest.MonkeyPatch,
+    mobile: bool | None,
+) -> None:
+    class Scope:
+        def __init__(self) -> None:
+            self.context: dict[str, object] = {}
+            self.tags: dict[str, object] = {}
+
+        def set_context(self, name: str, value: object) -> None:
+            self.context[name] = value
+
+        def set_tag(self, name: str, value: object) -> None:
+            self.tags[name] = value
+
+    scope = Scope()
+
+    @contextmanager
+    def new_scope():
+        yield scope
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentry_sdk",
+        SimpleNamespace(capture_exception=lambda _error: None, new_scope=new_scope),
+    )
+
+    facts = ClientFacts(None, UserAgentFacts(raw="", mobile=mobile))
+
+    class Resolver:
+        def resolve(self, _request: Request) -> ClientFacts:
+            return facts
+
+    reporter = SentryErrorReporter(client_facts=Resolver())
+    await reporter.report(ErrorEvent(RuntimeError("reported"), _request(), "request"))
+
+    expected = {} if mobile is None else {"browser.mobile": "true"}
+    assert scope.tags == expected

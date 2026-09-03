@@ -34,6 +34,10 @@ def test_proxy_status_prefers_a_token_for_ascii_alpn_bytes() -> None:
     assert ProxyStatus("edge", next_protocol=b"h2").to_header() == (b"edge;next-protocol=h2")
 
 
+def test_proxy_status_allows_an_empty_optional_detail() -> None:
+    assert ProxyStatus("edge", details="").to_header() == b'edge;details=""'
+
+
 def test_proxy_status_serializes_rfc_9532_next_hop_alias_examples() -> None:
     status = ProxyStatus(
         "proxy.example.net",
@@ -63,13 +67,23 @@ def test_proxy_status_can_report_that_dns_returned_no_aliases() -> None:
     assert ProxyStatus("edge", next_hop_aliases=()).to_header() == (b'edge;next-hop-aliases=""')
 
 
+def test_proxy_status_normalizes_a_trailing_root_label() -> None:
+    assert ProxyStatus("edge", next_hop_aliases=("origin.example.",)).to_header() == (
+        b'edge;next-hop-aliases="origin.example"'
+    )
+
+
 @pytest.mark.parametrize(
     ("aliases", "message"),
     [
         ("one.example", "iterable of DNS names"),
         (("",), "must not be empty"),
+        ((object(),), "entries must be str"),
         ((r"bad\q.example",), "escape"),
+        (("bad\\",), "escape"),
+        (("left..right",), "empty DNS label"),
         (("a" * 64 + ".example",), "label"),
+        ((".".join(("a" * 63,) * 4),), "255-octet DNS limit"),
         (("snowman.\N{SNOWMAN}",), "IDNA"),
     ],
 )

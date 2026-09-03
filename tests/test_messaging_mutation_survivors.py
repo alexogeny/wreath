@@ -70,6 +70,12 @@ def test_optional_envelope_text_accepts_an_empty_string() -> None:
     messaging_module._check_envelope_text("correlation_id", "", 255)
 
 
+def test_optional_envelope_text_refusal_does_not_claim_non_empty_is_required() -> None:
+    with pytest.raises(ValueError, match=r"must be a string") as caught:
+        messaging_module._check_envelope_text("correlation_id", 7, 255)
+    assert "non-empty" not in str(caught.value)
+
+
 def test_message_envelope_refuses_an_oversized_wire_value() -> None:
     with pytest.raises(ValueError, match="maximum"):
         MessageEnvelope("event", "x" * messaging_module.MAX_ENVELOPE_BYTES)

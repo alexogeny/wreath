@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import replace
 
 import pytest
 from cryptography.hazmat.primitives import hashes, serialization
@@ -11,6 +12,7 @@ from wreath._dkim import (
     DkimSigner,
     Ed25519Key,
     RsaKey,
+    _fold,
     _parse_headers,
     _split_message,
     canonicalize_body_relaxed,
@@ -139,6 +141,10 @@ def test_ed25519_public_key_derivation_matches_cryptography(ed25519_pem: str) ->
     )
 
 
+def test_private_keys_can_be_loaded_from_ascii_bytes(ed25519_pem: str) -> None:
+    assert load_private_key(ed25519_pem.encode("ascii")) == load_private_key(ed25519_pem)
+
+
 def test_a_tampered_body_breaks_the_signature(rsa_pem: str) -> None:
     signer = DkimSigner("example.com", "sel", load_private_key(rsa_pem))
     original = signer.sign(MESSAGE, now=1_800_000_000)
@@ -154,6 +160,30 @@ def test_signed_headers_are_listed_in_the_h_tag(rsa_pem: str) -> None:
     # Only headers the message actually carries: signing an absent header with
     # `h=` naming it tells a verifier to hash a field that is not there.
     assert "cc" not in listed
+
+
+def test_an_explicit_signature_timestamp_is_emitted_exactly() -> None:
+    signer = DkimSigner("example.com", "sel", Ed25519Key(b"a" * 32))
+
+    assert _tag(signer.sign(MESSAGE, now=123.9), "t") == "123"
+
+
+def test_long_signature_headers_fold_only_at_token_boundaries() -> None:
+    value = "first " + "x" * 80 + " final"
+
+    folded = _fold(value)
+
+    assert _fold("first second") == "first second"
+    assert _fold("x" * 80) == "x" * 80
+    assert folded == "first\r\n\t " + "x" * 80 + "\r\n\t final"
+
+
+def test_header_parser_keeps_continuations_and_ignores_malformed_lines() -> None:
+    fields = _parse_headers(
+        b" orphan continuation\r\nSubject: first\r\n\tsecond\r\nmalformed\r\nFrom: a@b.c"
+    )
+
+    assert fields == [("subject", " first\r\n\tsecond"), ("from", " a@b.c")]
 
 
 def _tag(header: str, name: str) -> str:
@@ -189,6 +219,20 @@ def test_a_corrupted_signature_is_caught_before_it_is_returned(rsa_pem: str) -> 
     )
     with pytest.raises(DkimError, match="failed its own verification"):
         DkimSigner("example.com", "sel", mismatched).sign(MESSAGE)
+
+
+@pytest.mark.parametrize("missing", ["p", "q", "dp", "dq", "qinv"])
+def test_an_incomplete_rsa_crt_tuple_uses_the_complete_private_exponent(
+    rsa_pem: str, missing: str
+) -> None:
+    real = load_private_key(rsa_pem)
+    assert isinstance(real, RsaKey)
+    partial = replace(real, **{missing: 0})
+
+    expected = DkimSigner("example.com", "sel", real).sign(MESSAGE, now=1_800_000_000)
+    actual = DkimSigner("example.com", "sel", partial).sign(MESSAGE, now=1_800_000_000)
+
+    assert _tag(actual, "b") == _tag(expected, "b")
 
 
 # A corrupt or wrong-format key file is an ordinary operational event -- a

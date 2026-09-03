@@ -128,7 +128,7 @@ class TestCrudFieldAllowList:
     async def test_only_named_fields_are_serialized(self):
         import json
 
-        from wreath.crud import crud_router
+        from wreath.crud import Access, crud_router
 
         model = self._model()
         row = model(id=1, name="Ann", dob="1990-01-01", iban="GB00")
@@ -145,6 +145,7 @@ class TestCrudFieldAllowList:
             lambda request: _Session(),
             operations=("list",),
             fields=("id", "name"),
+            authorize=Access.public(),
         )
 
         class _Request:
@@ -156,7 +157,7 @@ class TestCrudFieldAllowList:
         assert payload["items"] == [{"id": 1, "name": "Ann"}]
 
     def test_naming_an_unknown_field_is_refused(self):
-        from wreath.crud import crud_router
+        from wreath.crud import Access, crud_router
 
         with pytest.raises(ValueError, match="nope"):
             crud_router(
@@ -164,10 +165,11 @@ class TestCrudFieldAllowList:
                 lambda request: None,
                 operations=("list",),
                 fields=("id", "nope"),
+                authorize=Access.public(),
             )
 
     def test_fields_and_expose_are_mutually_exclusive(self):
-        from wreath.crud import crud_router
+        from wreath.crud import Access, crud_router
 
         with pytest.raises(ValueError, match="fields"):
             crud_router(
@@ -176,6 +178,7 @@ class TestCrudFieldAllowList:
                 operations=("list",),
                 fields=("id",),
                 expose=("dob",),
+                authorize=Access.public(),
             )
 
     def test_the_deny_list_still_applies_without_fields(self):

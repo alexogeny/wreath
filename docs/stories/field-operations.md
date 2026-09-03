@@ -105,8 +105,11 @@ uploads = resumable(
 )
 
 app = Wreath()
-app.include_router(uploads.router("/uploads"))
+app.include_router(uploads.router("/uploads", public=True))
 ```
+
+The example declares a public upload surface deliberately. A deployed field
+application should normally pass its upload permission instead.
 
 The client creates an upload, remembers only the returned `Location`, and asks that
 resource for its accepted offset after reconnecting. A wrong offset is answered with

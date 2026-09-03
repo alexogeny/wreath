@@ -3,14 +3,16 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Mapping
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
+from wreath._agents.core import _exceeds_utf8
 from wreath.agents import (
     AgentBudgetExceeded,
     AgentCapturePolicy,
     AgentCatalog,
+    AgentConfigurationError,
     AgentInvocationContext,
     AgentObservability,
     AgentProfile,
@@ -99,6 +101,44 @@ def test_model_contracts_are_immutable_and_validate_the_wire_shape() -> None:
         ToolSpecification("", "bad", {})
 
 
+def test_utf8_ceiling_refuses_character_and_encoded_byte_overflow() -> None:
+    assert _exceeds_utf8("12345", 4) is True
+    assert _exceeds_utf8("€€", 4) is True
+    assert _exceeds_utf8("a", 4) is False
+
+
+def test_model_usage_rejects_each_negative_counter() -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        ModelUsage(input_tokens=-1)
+    with pytest.raises(ValueError, match="non-negative"):
+        ModelUsage(output_tokens=-1)
+    with pytest.raises(ValueError, match="non-negative"):
+        ModelUsage(cached_input_tokens=-1)
+
+
+def test_model_messages_refuse_invalid_roles_and_incomplete_tool_identity() -> None:
+    with pytest.raises(ValueError, match="unsupported model message role"):
+        ModelMessage(cast(Any, "invalid"), "content")
+    with pytest.raises(ValueError, match="require non-empty name and call_id"):
+        ModelMessage("tool", "content", name="lookup")
+    with pytest.raises(ValueError, match="require non-empty name and call_id"):
+        ModelMessage("tool", "content", call_id="call-1")
+
+
+def test_model_requests_refuse_empty_messages_and_non_positive_output_limit() -> None:
+    with pytest.raises(ValueError, match="messages must be non-empty"):
+        ModelRequest("model", ())
+    with pytest.raises(ValueError, match="max_output_tokens must be positive"):
+        ModelRequest("model", (ModelMessage("user", "hello"),), max_output_tokens=0)
+
+
+def test_invocation_context_refuses_each_empty_scope_part() -> None:
+    with pytest.raises(ValueError, match="tenant must be non-empty"):
+        AgentInvocationContext("", object(), "conversation")
+    with pytest.raises(ValueError, match="conversation must be non-empty"):
+        AgentInvocationContext("tenant", object(), "")
+
+
 def test_catalog_compiles_tenant_profile_selection_and_refuses_unknown_names() -> None:
     plane = Backplane(())
     internal = AgentProfile(name="internal", backplane=plane, model="model-1")
@@ -157,6 +197,57 @@ def test_profile_refuses_unbounded_or_ambiguous_configuration_at_construction() 
             model="model",
             fallbacks=(ModelTarget(plane, ""),),
         )
+
+
+def test_profile_refuses_each_invalid_identity_and_budget_boundary() -> None:
+    plane = Backplane(())
+    invalid = (
+        ({"name": ""}, "profile name"),
+        ({"backplane": object()}, "backplane"),
+        ({"model": ""}, "model"),
+        ({"max_output_tokens": True}, "max_output_tokens"),
+        ({"max_total_tokens": 1.5}, "max_total_tokens"),
+        ({"max_tool_calls": -1}, "max_tool_calls"),
+        ({"max_output_tokens": 0}, "max_output_tokens"),
+        ({"max_tool_argument_bytes": 0}, "max_tool_argument_bytes"),
+        ({"timeout": True}, "timeout"),
+        ({"timeout": "forever"}, "timeout"),
+        ({"timeout": 0}, "timeout"),
+        ({"delegation_ttl": True}, "delegation_ttl"),
+        ({"delegation_ttl": "forever"}, "delegation_ttl"),
+        ({"delegation_ttl": 0}, "delegation_ttl"),
+        ({"tools": ("",)}, "empty tool name"),
+    )
+    for options, message in invalid:
+        values: dict[str, Any] = {
+            "name": "profile",
+            "backplane": plane,
+            "model": "model",
+            **options,
+        }
+        with pytest.raises((TypeError, ValueError), match=message):
+            AgentProfile(**values)
+
+    assert AgentProfile(
+        name="profile", backplane=plane, model="model", timeout=None
+    ).timeout is None
+    assert AgentProfile(
+        name="profile", backplane=plane, model="model", max_output_tokens=1
+    ).max_output_tokens == 1
+
+
+def test_catalog_refuses_each_invalid_declaration_boundary() -> None:
+    plane = Backplane(())
+    profile = AgentProfile(name="one", backplane=plane, model="model")
+
+    with pytest.raises(ValueError, match="at least one profile"):
+        AgentCatalog(())
+    with pytest.raises(ValueError, match="duplicate agent profile"):
+        AgentCatalog((profile, profile))
+    with pytest.raises(ValueError, match="default selects unknown profile"):
+        AgentCatalog((profile,), default="missing")
+    with pytest.raises(ValueError, match="tenant selector must be non-empty"):
+        AgentCatalog((profile,), tenants={"": "one"})
 
 
 @pytest.mark.parametrize(
@@ -227,6 +318,99 @@ async def test_runtime_runs_a_tool_loop_without_protocol_loopback() -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_refuses_empty_prompt_before_backplane_access() -> None:
+    plane = Backplane(())
+    profile = AgentProfile(name="profile", backplane=plane, model="model")
+    runtime = AgentRuntime(AgentCatalog((profile,)))
+
+    with pytest.raises(ValueError, match="prompt must be non-empty"):
+        [event async for event in runtime.execute("", context=context())]
+
+    assert plane.requests == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_omits_absent_system_prompt() -> None:
+    plane = Backplane((ModelResponseEvent.completed(),))
+    profile = AgentProfile(name="profile", backplane=plane, model="model")
+
+    [
+        event
+        async for event in AgentRuntime(AgentCatalog((profile,))).execute(
+            "hello", context=context()
+        )
+    ]
+
+    assert plane.requests[0].messages == (ModelMessage("user", "hello"),)
+
+
+@pytest.mark.asyncio
+async def test_runtime_refuses_delegation_for_a_principal_without_narrowing() -> None:
+    plane = Backplane((ModelResponseEvent.completed(),))
+    profile = AgentProfile(
+        name="profile",
+        backplane=plane,
+        model="model",
+        delegation_scope=frozenset({"documents:read"}),
+    )
+
+    with pytest.raises(AgentConfigurationError, match="does not support narrow"):
+        [
+            event
+            async for event in AgentRuntime(AgentCatalog((profile,))).execute(
+                "hello", context=context()
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_refuses_model_tool_call_without_catalog() -> None:
+    plane = Backplane(
+        (
+            ModelResponseEvent.tool_call("lookup", "call-1", {}),
+            ModelResponseEvent.completed(),
+        )
+    )
+    profile = AgentProfile(name="profile", backplane=plane, model="model")
+
+    with pytest.raises(AgentConfigurationError, match="without a tool catalog"):
+        [
+            event
+            async for event in AgentRuntime(AgentCatalog((profile,))).execute(
+                "hello", context=context()
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_refuses_pending_tool_call_at_final_turn() -> None:
+    plane = Backplane(
+        (
+            ModelResponseEvent.tool_call("lookup", "call-1", {}),
+            ModelResponseEvent.completed(),
+        )
+    )
+    profile = AgentProfile(
+        name="profile",
+        backplane=plane,
+        model="model",
+        tools=("lookup",),
+        max_turns=1,
+    )
+    tools = Tools()
+
+    with pytest.raises(AgentBudgetExceeded, match="turn budget"):
+        [
+            event
+            async for event in AgentRuntime(
+                AgentCatalog((profile,)), tools=tools
+            ).execute("hello", context=context())
+        ]
+
+    assert tools.calls == []
+
+
+@pytest.mark.asyncio
 async def test_retryable_failure_falls_back_only_before_any_visible_event() -> None:
     failed = Backplane(BackplaneError("busy", retryable=True), name="primary")
     backup = Backplane(
@@ -265,14 +449,49 @@ async def test_retryable_failure_falls_back_only_before_any_visible_event() -> N
             pass
     assert no_call.requests == []
 
+    flagged = Backplane(
+        BackplaneError("uncertain", retryable=True, output_started=True),
+    )
+    flagged_backup = Backplane(())
+    uncertain = AgentProfile(
+        name="uncertain",
+        backplane=flagged,
+        model="model-a",
+        fallbacks=(ModelTarget(flagged_backup, "model-b"),),
+    )
+    with pytest.raises(BackplaneError, match="uncertain"):
+        async for _ in AgentRuntime(AgentCatalog((uncertain,))).execute(
+            "hello", context=context()
+        ):
+            pass
+    assert flagged_backup.requests == []
+
+
+@pytest.mark.asyncio
+async def test_retryable_failure_without_a_fallback_still_raises() -> None:
+    failed = Backplane(BackplaneError("busy", retryable=True))
+    profile = AgentProfile(name="default", backplane=failed, model="model")
+
+    with pytest.raises(BackplaneError, match="busy"):
+        async for _ in AgentRuntime(AgentCatalog((profile,))).execute(
+            "hello", context=context()
+        ):
+            pass
+
 
 @pytest.mark.asyncio
 async def test_incomplete_or_post_terminal_model_stream_never_reaches_tools() -> None:
-    for events in (
-        (ModelResponseEvent.tool_call("lookup", "call-1", {}),),
+    for events, message in (
         (
-            ModelResponseEvent.completed(),
-            ModelResponseEvent.tool_call("lookup", "call-1", {}),
+            (ModelResponseEvent.tool_call("lookup", "call-1", {}),),
+            "ended without completed",
+        ),
+        (
+            (
+                ModelResponseEvent.completed(),
+                ModelResponseEvent.tool_call("lookup", "call-1", {}),
+            ),
+            "emitted an event after completed",
         ),
     ):
         plane = Backplane(events)
@@ -284,7 +503,7 @@ async def test_incomplete_or_post_terminal_model_stream_never_reaches_tools() ->
         )
         tools = Tools()
 
-        with pytest.raises(BackplaneError, match="completed"):
+        with pytest.raises(BackplaneError, match=message):
             async for _ in AgentRuntime(AgentCatalog((profile,)), tools=tools).execute(
                 "hello", context=context()
             ):
@@ -571,7 +790,7 @@ async def test_runtime_observes_model_and_tool_boundaries_without_payloads() -> 
         (
             ModelResponseEvent.text_delta("done", request_id="request-2"),
             ModelResponseEvent.usage_report(ModelUsage(5, 3)),
-            ModelResponseEvent.completed(request_id="request-2"),
+            ModelResponseEvent.completed(),
         ),
     )
     profile = AgentProfile(
@@ -687,6 +906,59 @@ async def test_observer_failure_is_counted_without_replaying_a_tool_effect() -> 
 
 
 @pytest.mark.asyncio
+async def test_denied_tool_observation_does_not_read_an_absent_result() -> None:
+    class Observer:
+        def __init__(self) -> None:
+            self.events: list[Any] = []
+
+        async def record(self, event: Any) -> None:
+            self.events.append(event)
+
+    class DeniedTools(Tools):
+        async def invoke(
+            self,
+            name: str,
+            arguments: Mapping[str, Any],
+            *,
+            call_id: str,
+            context: AgentInvocationContext,
+        ) -> object:
+            del name, arguments, call_id, context
+            raise PermissionError("denied")
+
+    plane = Backplane(
+        (
+            ModelResponseEvent.tool_call("lookup", "call-1", {}),
+            ModelResponseEvent.completed(),
+        )
+    )
+    profile = AgentProfile(
+        name="observed",
+        backplane=plane,
+        model="model",
+        tools=("lookup",),
+    )
+    observer = Observer()
+    runtime = AgentRuntime(
+        AgentCatalog((profile,)),
+        tools=DeniedTools(),
+        observability=AgentObservability(observer=observer),
+    )
+
+    with pytest.raises(PermissionError, match="denied"):
+        [
+            event
+            async for event in runtime.execute(
+                "hello",
+                context=AgentInvocationContext("acme", "user-1", "conversation-1"),
+            )
+        ]
+
+    assert observer.events[-1].kind == "tool"
+    assert observer.events[-1].outcome == "denied"
+
+
+@pytest.mark.asyncio
 async def test_profile_delegation_uses_the_existing_principal_narrowing_owner() -> None:
     class Principal:
         def __init__(self) -> None:
@@ -744,6 +1016,80 @@ async def test_runtime_is_a_chat_backend_and_keeps_the_resolved_principal() -> N
         ("text", "hello"),
         ("completed", None),
     ]
+
+
+@pytest.mark.asyncio
+async def test_chat_runtime_uses_the_most_specific_available_correlation() -> None:
+    for correlation, expected in (
+        (
+            ChatCorrelation(
+                interaction_id="interaction-1",
+                job_id="job-1",
+                trace_id="trace-1",
+            ),
+            "trace-1",
+        ),
+        (ChatCorrelation(interaction_id="interaction-1", job_id="job-1"), "job-1"),
+        (ChatCorrelation(interaction_id="interaction-1"), "interaction-1"),
+    ):
+        plane = Backplane(
+            (
+                ModelResponseEvent.tool_call("lookup", "call-1", {}),
+                ModelResponseEvent.completed(),
+            ),
+            (ModelResponseEvent.completed(),),
+        )
+        tools = Tools()
+        runtime = AgentRuntime(
+            AgentCatalog(
+                (
+                    AgentProfile(
+                        name="default",
+                        backplane=plane,
+                        model="model",
+                        tools=("lookup",),
+                    ),
+                )
+            ),
+            tools=tools,
+        )
+        supplied = AgentRequest(
+            tenant="acme",
+            actor="user-1",
+            conversation="conversation-1",
+            prompt="hi",
+            correlation=correlation,
+            principal=object(),
+        )
+
+        [event async for event in runtime.run(supplied)]
+
+        assert tools.calls[0][3].correlation_id == expected
+
+
+@pytest.mark.asyncio
+async def test_chat_runtime_does_not_render_non_text_model_events() -> None:
+    plane = Backplane(
+        (
+            ModelResponseEvent("usage", text="not chat text", usage=ModelUsage(1, 1)),
+            ModelResponseEvent.completed(),
+        )
+    )
+    runtime = AgentRuntime(
+        AgentCatalog((AgentProfile(name="default", backplane=plane, model="model"),))
+    )
+    supplied = AgentRequest(
+        tenant="acme",
+        actor="user-1",
+        conversation="conversation-1",
+        prompt="hi",
+        correlation=ChatCorrelation(interaction_id="interaction-1"),
+        principal=object(),
+    )
+
+    events = [event async for event in runtime.run(supplied)]
+
+    assert [(event.kind, event.content) for event in events] == [("completed", None)]
 
 
 def test_chatops_registers_an_agent_as_one_durable_governed_command() -> None:

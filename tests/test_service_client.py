@@ -76,6 +76,33 @@ async def test_no_token_means_no_authorization_header() -> None:
     assert _auth(client.calls[-1]["headers"]) is None
 
 
+async def test_no_token_refuses_multiple_caller_authorization_headers() -> None:
+    client = _FakeClient()
+    service = ServiceClient(client)
+
+    with pytest.raises(ValueError, match="more than one Authorization"):
+        await service.get(
+            "/x",
+            headers=(
+                (b"authorization", b"Bearer first"),
+                (b"Authorization", b"Bearer second"),
+            ),
+        )
+
+    assert client.calls == []
+
+
+async def test_no_token_refuses_multiple_default_authorization_headers() -> None:
+    with pytest.raises(ValueError, match="more than one Authorization"):
+        ServiceClient(
+            _FakeClient(),
+            default_headers=(
+                (b"authorization", b"Bearer first"),
+                (b"Authorization", b"Bearer second"),
+            ),
+        )
+
+
 async def test_default_and_per_call_headers_merge() -> None:
     client = _FakeClient()
     svc = ServiceClient(client, token="t", default_headers=((b"x-app", b"acme"),))

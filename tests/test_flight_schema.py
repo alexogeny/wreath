@@ -4,12 +4,18 @@ import re
 import struct
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from wreath import _flight_reference as codec
 from wreath import _flight_schema as fs
-from wreath._flight_metadata import build_metadata_image
+from wreath._flight_metadata import (
+    _auth_policy_name,
+    _Interner,
+    _plan_descriptor,
+    build_metadata_image,
+)
 from wreath.recording import (
     BodyCapture,
     CaptureBudget,
@@ -20,12 +26,37 @@ from wreath.recording import (
 from wreath.telemetry import (
     HistogramConfig,
     Mode,
+    OTLPConfig,
     PerRoutePolicy,
     TelemetryConfig,
     TelemetryConfigError,
 )
 
 _NATIVE = Path(__file__).parents[1] / "src" / "wreath" / "_native"
+
+
+def test_only_a_shortened_raw_capture_is_truncated() -> None:
+    assert fs.CaptureField(
+        fs.CaptureFieldClass.REQUEST_HEADER,
+        1,
+        fs.CaptureDisposition.RAW,
+        4,
+        b"abc",
+    ).truncated
+    assert not fs.CaptureField(
+        fs.CaptureFieldClass.REQUEST_HEADER,
+        1,
+        fs.CaptureDisposition.RAW,
+        3,
+        b"abc",
+    ).truncated
+    assert not fs.CaptureField(
+        fs.CaptureFieldClass.REQUEST_HEADER,
+        1,
+        fs.CaptureDisposition.HASHED,
+        32,
+        b"12345678",
+    ).truncated
 
 
 def test_completion_cell_round_trips() -> None:
@@ -251,7 +282,15 @@ def test_metadata_image_rejects_something_that_is_not_one() -> None:
 def test_default_config_is_off_and_valid() -> None:
     config = TelemetryConfig()
     assert config.mode is Mode.OFF
-    assert config.memory_budget(route_count=100).total >= 0
+    budget = config.memory_budget(route_count=100)
+    assert budget.total >= 0
+    assert budget.phase_scratch == 0
+
+
+def test_string_histogram_policy_is_normalized() -> None:
+    config = HistogramConfig(**{"per_route": "selected", "max_route_histograms": 3})
+    assert config.per_route is PerRoutePolicy.SELECTED
+    assert config.histogram_count(10) == 4
 
 
 def test_config_rejects_invalid_mode_and_ring() -> None:
@@ -259,6 +298,24 @@ def test_config_rejects_invalid_mode_and_ring() -> None:
         TelemetryConfig(mode=99)  # type: ignore[arg-type]
     with pytest.raises(TelemetryConfigError):
         TelemetryConfig(mode=Mode.PULSE, ring_records=10_000)  # not power of two
+
+
+def test_off_mode_accepts_empty_capacity_but_a_ring_path_does_not() -> None:
+    config = TelemetryConfig(mode=Mode.OFF, ring_records=0, active_requests=0)
+    assert config.ring_records == 0
+    mapped = TelemetryConfig(mode=Mode.OFF, ring_records=8, ring_path="flight.ring")
+    assert mapped.ring_path == "flight.ring"
+    with pytest.raises(TelemetryConfigError, match="ring_path maps the ring"):
+        TelemetryConfig(mode=Mode.OFF, ring_records=0, ring_path="flight.ring")
+
+
+def test_completion_summaries_can_be_disabled_with_an_empty_ring() -> None:
+    config = TelemetryConfig(
+        mode=Mode.PULSE,
+        ring_records=0,
+        completion_summaries=False,
+    )
+    assert config.completion_summaries is False
 
 
 def test_forensic_requires_capture_slabs() -> None:
@@ -306,6 +363,39 @@ def test_memory_budget_components_are_exact() -> None:
         + budget.export_queue
         + budget.logging
     )
+
+
+def test_memory_budget_mode_and_export_components_are_conditional() -> None:
+    detailed = TelemetryConfig(
+        mode=Mode.DETAILED,
+        capture_slabs=2,
+        slab_bytes=4096,
+        otlp=OTLPConfig(enabled=False, export_queue=16, batch_size=8),
+    ).memory_budget()
+    assert detailed.phase_scratch > 0
+    assert detailed.capture == 0
+    assert detailed.export_queue == 0
+
+    exporting = TelemetryConfig(
+        otlp=OTLPConfig(enabled=True, export_queue=16, batch_size=8)
+    ).memory_budget()
+    assert exporting.export_queue == 16 * fs.CELL_SIZE
+
+
+def test_memory_budget_refuses_a_negative_route_count() -> None:
+    with pytest.raises(TelemetryConfigError, match="route_count must be >= 0"):
+        TelemetryConfig().memory_budget(route_count=-1)
+
+
+def test_memory_budget_refuses_a_computed_terabyte(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class HugeBudget:
+        total = (1 << 40) + 1
+
+    monkeypatch.setattr("wreath.telemetry.MemoryBudget", lambda **kwargs: HugeBudget())
+    with pytest.raises(TelemetryConfigError, match="exceeds 1 TiB"):
+        TelemetryConfig().memory_budget()
 
 
 def test_memory_budget_counts_the_logging_tables() -> None:
@@ -402,6 +492,55 @@ def test_metadata_builder_covers_routes_and_plans() -> None:
     plan = next(p for p in image.plans if p.plan_id == user_route.plan_id)
     assert any(name == "uid" for name, _kind, _type in plan.params)
     assert user_route.coverage == "mixed"
+
+
+def test_plan_descriptor_preserves_short_rows_body_returns_and_limits() -> None:
+    serializers = _Interner()
+    validators = _Interner()
+    limits = _Interner()
+    spec = SimpleNamespace(
+        path_params=(("short", object()), ("typed", object(), int)),
+        body=("body", dict),
+        returns=list,
+        query_constraints=(("page", object()),),
+    )
+
+    _key, descriptor = _plan_descriptor(spec, serializers, validators, limits)
+
+    assert descriptor["params"] == (
+        ("short", "path", "None"),
+        ("typed", "path", "int"),
+    )
+    assert descriptor["body_type"] == "dict"
+    assert descriptor["returns_type"] == "list"
+    assert descriptor["validator_name"] == "validate:dict"
+    assert descriptor["serializer_name"] == "serialize:list"
+    assert descriptor["limit_names"] == ["limit:query:page"]
+
+    _key, no_return = _plan_descriptor(
+        SimpleNamespace(returns=None), _Interner(), _Interner(), _Interner()
+    )
+    assert no_return["returns_type"] == "None"
+    assert no_return["serializer_name"] == ""
+
+
+def test_auth_policy_name_distinguishes_every_requirement_kind() -> None:
+    role = SimpleNamespace(mode="any", values=frozenset({"admin"}))
+    permission = SimpleNamespace(mode="all", values=frozenset({"write"}))
+
+    def policy() -> None:
+        return None
+
+    assert _auth_policy_name(SimpleNamespace(authenticated=True)) == "auth"
+    assert _auth_policy_name(SimpleNamespace(role_checks=(role,))) == "role:any:admin"
+    assert (
+        _auth_policy_name(SimpleNamespace(permission_checks=(permission,)))
+        == "perm:all:write"
+    )
+    policy_name = _auth_policy_name(SimpleNamespace(policies=(policy,)))
+    assert policy_name is not None
+    assert policy_name.startswith("policy:")
+    assert "auth" not in policy_name.split("|")
 
 
 def _header_text() -> str:

@@ -70,14 +70,16 @@ def _command_row(
     digest: str = "a" * 64,
     fence: int = 0,
     provider_reference: str | None = None,
+    subject: str = "organization:acme",
+    merchant_account: str | None = "acct_acme",
 ) -> dict[str, Any]:
     return {
         "provider": "stripe",
         "operation": "checkout",
         "idempotency_key": "checkout-order-41",
         "digest": digest,
-        "subject": "organization:acme",
-        "merchant_account": "acct_acme",
+        "subject": subject,
+        "merchant_account": merchant_account,
         "state": state,
         "fencing_token": fence,
         "provider_reference": provider_reference,
@@ -141,6 +143,33 @@ async def test_reconciliation_cursor_uses_compare_and_swap() -> None:
     assert parameters == ("stripe", "acct_acme", "page_8", "page_7")
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("expected", "", "billing reconciliation expected cursor must not be empty"),
+        ("expected", 1, "billing reconciliation expected cursor must not be empty"),
+        ("cursor", "", "billing reconciliation cursor must not be empty"),
+        ("cursor", 1, "billing reconciliation cursor must not be empty"),
+    ],
+)
+async def test_reconciliation_cursor_refuses_empty_and_non_text_values(
+    field: str, value: object, message: str
+) -> None:
+    session = _Session()
+    arguments: dict[str, Any] = {"expected": None, "cursor": None}
+    arguments[field] = value
+
+    with pytest.raises(ValueError) as caught:
+        await PostgresBillingLedger().advance(
+            session,
+            provider="stripe",
+            merchant_account=None,
+            **arguments,
+        )
+    assert str(caught.value) == message
+    assert session.calls == []
+
+
 async def test_checkout_payment_projection_is_durable_and_monotonic() -> None:
     payment = PaymentSnapshot(
         provider="stripe",
@@ -172,6 +201,25 @@ async def test_checkout_payment_projection_is_durable_and_monotonic() -> None:
     )
 
 
+async def test_checkout_projection_refuses_invalid_and_contradictory_payments() -> None:
+    invalid = _Session()
+    with pytest.raises(TypeError, match="requires PaymentSnapshot"):
+        await PostgresBillingLedger().apply_checkout(invalid, object())
+    assert invalid.calls == []
+
+    payment = PaymentSnapshot(
+        provider="stripe",
+        id="pi_1",
+        subject="organization:acme",
+        reference="order-41",
+        amount=Money("USD", 2900),
+        state=PaymentState.SUCCEEDED,
+    )
+    contradictory = _Session(rows=[None])
+    with pytest.raises(ValueError, match="contradicts its immutable ownership or amount"):
+        await PostgresBillingLedger().apply_checkout(contradictory, payment)
+
+
 def test_command_identity_is_immutable_and_digest_is_a_sha256_hex_value() -> None:
     with pytest.raises(ValueError, match="digest.*64 lower-case hexadecimal"):
         _identity(digest="not-a-digest")
@@ -184,6 +232,27 @@ def test_command_identity_is_immutable_and_digest_is_a_sha256_hex_value() -> Non
             digest="b" * 64,
             subject="",
         )
+
+
+def test_command_identity_and_state_configuration_is_exact() -> None:
+    invalid_digest: Any = 1
+    with pytest.raises(ValueError, match="digest must be 64 lower-case hexadecimal"):
+        _identity(digest=invalid_digest)
+
+    invalid_identity: Any = object()
+    with pytest.raises(TypeError, match="identity must be BillingCommandIdentity"):
+        BillingCommand(invalid_identity, BillingCommandState.PENDING, 0)
+    invalid_state: Any = "pending"
+    with pytest.raises(TypeError, match="state must be BillingCommandState"):
+        BillingCommand(_identity(), invalid_state, 0)
+    for fence in (True, -1):
+        with pytest.raises(ValueError, match="fencing_token must be a non-negative integer"):
+            BillingCommand(_identity(), BillingCommandState.PENDING, fence)
+    for name in ("provider_reference", "failure_code"):
+        for invalid in ("", 1):
+            options: dict[str, Any] = {name: invalid}
+            with pytest.raises(ValueError, match=f"{name} must be None or a non-empty string"):
+                BillingCommand(_identity(), BillingCommandState.PENDING, 0, **options)
 
 
 async def test_registering_a_new_command_returns_the_pending_durable_row() -> None:
@@ -216,6 +285,25 @@ async def test_duplicate_command_is_idempotent_but_a_changed_digest_is_refused()
         await PostgresBillingLedger().register_command(changed, _identity())
 
 
+async def test_register_command_refuses_each_invalid_identity_boundary() -> None:
+    session = _Session()
+    with pytest.raises(TypeError, match="must use BillingCommandIdentity"):
+        await PostgresBillingLedger().register_command(session, object())
+    assert session.calls == []
+
+    disappeared = _Session(rows=[None, None])
+    with pytest.raises(RuntimeError, match="disappeared after its idempotency conflict"):
+        await PostgresBillingLedger().register_command(disappeared, _identity())
+
+    for row, message in (
+        (_command_row(subject="organization:other"), "immutable subject"),
+        (_command_row(merchant_account="acct_other"), "immutable merchant account"),
+    ):
+        changed = _Session(rows=[row])
+        with pytest.raises(ValueError, match=message):
+            await PostgresBillingLedger().register_command(changed, _identity())
+
+
 async def test_unknown_is_terminal_and_register_does_not_create_a_new_command() -> None:
     session = _Session(rows=[None, _command_row(state="unknown")])
 
@@ -244,6 +332,43 @@ async def test_claim_uses_skip_locked_and_advances_the_fence_in_the_same_update(
     assert "state IN ('pending','leased')" in sql
     assert "sending" not in sql.split("RETURNING", 1)[0]
     assert parameters == ("billing-worker-1", 30)
+
+
+@pytest.mark.parametrize(
+    ("lease_owner", "lease_seconds", "message"),
+    [
+        ("", 30, "billing command lease_owner must not be empty"),
+        (1, 30, "billing command lease_owner must not be empty"),
+        ("worker-1", 0, "billing command lease_seconds must be positive"),
+        ("worker-1", -1, "billing command lease_seconds must be positive"),
+        ("worker-1", True, "billing command lease_seconds must be positive"),
+    ],
+)
+async def test_claim_refuses_invalid_lease_boundaries_before_sql(
+    lease_owner: object, lease_seconds: object, message: str
+) -> None:
+    session = _Session()
+
+    with pytest.raises(ValueError) as caught:
+        await PostgresBillingLedger().claim_command(
+            session,
+            lease_owner=lease_owner,
+            lease_seconds=lease_seconds,
+        )
+    assert str(caught.value) == message
+    assert session.calls == []
+
+
+async def test_claim_returns_none_when_no_command_is_available() -> None:
+    session = _Session(rows=[None])
+
+    command = await PostgresBillingLedger().claim_command(
+        session,
+        lease_owner="worker-1",
+        lease_seconds=30,
+    )
+
+    assert command is None
 
 
 @pytest.mark.parametrize(
@@ -306,6 +431,22 @@ async def test_expired_sending_commands_become_terminal_unknown_and_bump_the_fen
     assert "fencing_token=c.fencing_token+1" in sql
     assert "failure_code='lease_expired_after_send'" in sql
     assert parameters == (25,)
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5])
+async def test_expired_sending_refuses_invalid_limits_before_sql(limit: object) -> None:
+    session = _Session()
+
+    with pytest.raises(ValueError, match="limit must be a positive integer"):
+        await PostgresBillingLedger().settle_expired_sending(session, limit=limit)
+    assert session.calls == []
+
+
+@pytest.mark.parametrize("settled", [None, 0])
+async def test_expired_sending_normalizes_an_empty_count(settled: object) -> None:
+    session = _Session(values=[settled])
+
+    assert await PostgresBillingLedger().settle_expired_sending(session) == 0
 
 
 def _snapshot(*, subject: str = "organization:acme", account: str = "acct_acme") -> tuple:
@@ -393,6 +534,31 @@ async def test_duplicate_invoice_is_idempotent_but_a_contradiction_is_refused() 
             changed,
             payment,
             merchant_account="acct_acme",
+        )
+
+
+async def test_invoice_and_subscription_conflicts_cannot_disappear() -> None:
+    invoice = _Session(
+        rows=[
+            {"subject": "organization:acme", "merchant_account": "acct_acme"},
+            None,
+            None,
+        ]
+    )
+    with pytest.raises(ValueError, match="invoice 'in_1' contradicts its first value"):
+        await PostgresBillingLedger().apply_payment(
+            invoice,
+            _payment(),
+            merchant_account="acct_acme",
+        )
+
+    snapshot, account = _snapshot()
+    subscription = _Session(rows=[None, None])
+    with pytest.raises(RuntimeError, match="subscription disappeared"):
+        await PostgresBillingLedger().apply_subscription(
+            subscription,
+            snapshot,
+            merchant_account=account,
         )
 
 

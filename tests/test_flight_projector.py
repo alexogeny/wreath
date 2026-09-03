@@ -131,6 +131,18 @@ def test_span_time_is_derived_from_the_clock_calibration() -> None:
     assert trace.observed_unix_nano == epoch_unix + 5000 * 1_000_000
 
 
+def test_span_without_clock_calibration_uses_the_current_wall_time(monkeypatch) -> None:
+    observed = 1_800_000_000_000_000_000
+    monkeypatch.setattr("wreath._projector.time.time_ns", lambda: observed)
+    rec = FakeRecorder()
+    rec.feed(completion(1, end_offset_ms=5000))
+    proj = Projector(rec)
+
+    drain_until_settled(proj)
+
+    assert proj.snapshot().recent[0].observed_unix_nano == observed
+
+
 def test_completion_correlation_phases_join_in_order() -> None:
     rec = FakeRecorder()
     # The real ring order: completion, then correlation, then phase batch.
@@ -264,6 +276,16 @@ def test_pending_overflow_categorizes_an_evicted_correlation_orphan() -> None:
     assert snap.pending == 1
 
 
+def test_finalize_refuses_an_assembly_without_a_completion() -> None:
+    rec = FakeRecorder()
+    rec.feed(correlation(1))
+    proj = Projector(rec)
+    proj.poll()
+
+    with pytest.raises(ValueError, match="no completion cell"):
+        proj._finalize(1, proj._pending[1])
+
+
 def test_unknown_kind_cells_are_ignored() -> None:
     rec = FakeRecorder()
     control = bytearray(CELL_SIZE)
@@ -292,6 +314,9 @@ def test_failures_are_retained_separately() -> None:
     assert snap.assembled == 3
     failure_ids = {t.request_id for t in snap.failures}
     assert failure_ids == {2, 3}  # error terminal and slow-promoted, not the 200/OK
+
+    limited = proj.snapshot(failures=1)
+    assert [trace.request_id for trace in limited.failures] == [3]
 
 
 def test_route_metrics_aggregate_counts_errors_and_duration() -> None:

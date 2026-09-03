@@ -240,6 +240,24 @@ def test_flow_refuses_non_chat_and_non_approval_store_owners() -> None:
         ChatApprovalFlow(ChatOps(name="ops"), cast(Any, object()))
 
 
+def test_approved_handlers_refuse_invalid_and_duplicate_declarations() -> None:
+    _, _, approvals = flow([100.0])
+
+    async def handler(_context: ChatContext, _grant: Any) -> ChatReply:
+        return ChatReply.text("done")
+
+    for action in ("", cast(str, 1)):
+        with pytest.raises(ValueError, match="non-empty string"):
+            approvals.on_approved(action, handler)
+    for invalid in (object(), lambda _context, _grant: ChatReply.text("sync")):
+        with pytest.raises(TypeError, match="async callable"):
+            approvals.on_approved("deploy", cast(Any, invalid))
+
+    approvals.on_approved("deploy", handler)
+    with pytest.raises(ValueError, match="duplicate chat approved action"):
+        approvals.on_approved("deploy", handler)
+
+
 @pytest.mark.asyncio
 async def test_link_binding_refuses_each_missing_or_conflicting_server_side_fact() -> None:
     _, _, approvals = flow([100.0])
@@ -311,6 +329,7 @@ async def test_non_mapping_and_boolean_auth_claims_never_count_as_fresh_auth() -
 
     boolean = context(claims={"auth_time": True, "second_factor_at": False})
     boolean.action = invalid.action
+    assert approvals._authenticated_at(boolean) is None
     assert await chat._dispatch(kind="action", name=boolean.action, context=boolean) is None
 
     recording = RecordingStore()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass
 
 import pytest
@@ -22,6 +23,7 @@ from wreath.notifications import (
     Email,
     InApp,
     InMemoryPushSubscriptions,
+    KindSpec,
     Notifications,
     Recipient,
     WebPush,
@@ -83,6 +85,111 @@ async def test_chat_delivery_reuses_chatops_tenant_and_idempotency_contract() ->
     assert chat.calls[0]["content"] == "Ada shared a photo"
     assert isinstance(chat.calls[0]["idempotency_key"], str)
     assert len(chat.calls[0]["idempotency_key"]) == 64
+
+
+@dataclass(frozen=True)
+class ChatDestination:
+    tenant: object
+
+
+class RecordingChat:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def send(self, **values: object) -> None:
+        self.calls.append(values)
+
+
+async def test_chat_delivery_awaits_async_destination() -> None:
+    async def destination(recipient: Recipient) -> ChatDestination:
+        return ChatDestination(f"tenant:{recipient.key}")
+
+    chat = RecordingChat()
+    channel = Chat(chat, destination=destination)
+
+    await channel.deliver(
+        Recipient("u1"),
+        PhotoShared("Ada"),
+        type("Kind", (), {"name": "shared"})(),
+    )
+
+    assert chat.calls[0]["tenant"] == "tenant:u1"
+
+
+@pytest.mark.parametrize("tenant", [None, "", 1, b"tenant"])
+async def test_chat_delivery_requires_nonempty_text_tenant(tenant: object) -> None:
+    channel = Chat(RecordingChat(), destination=lambda _recipient: ChatDestination(tenant))
+
+    with pytest.raises(ValueError, match="non-empty tenant"):
+        await channel.deliver(
+            Recipient("u1"),
+            PhotoShared("Ada"),
+            type("Kind", (), {"name": "shared"})(),
+        )
+
+
+async def test_chat_delivery_uses_custom_renderer() -> None:
+    chat = RecordingChat()
+    channel = Chat(
+        chat,
+        destination=lambda _recipient: ChatDestination("tenant"),
+        render=lambda _note: "custom rendering",
+    )
+
+    await channel.deliver(
+        Recipient("u1"),
+        PhotoShared("Ada"),
+        type("Kind", (), {"name": "shared"})(),
+    )
+
+    assert chat.calls[0]["content"] == "custom rendering"
+
+
+@pytest.mark.parametrize("rendered", [None, "", 1, b"content"])
+async def test_chat_delivery_requires_nonempty_text_rendering(rendered: object) -> None:
+    channel = Chat(
+        RecordingChat(),
+        destination=lambda _recipient: ChatDestination("tenant"),
+        render=lambda _note: rendered,
+    )
+
+    with pytest.raises(ValueError, match="content must be non-empty text"):
+        await channel.deliver(
+            Recipient("u1"),
+            PhotoShared("Ada"),
+            type("Kind", (), {"name": "shared"})(),
+        )
+
+
+async def test_chat_delivery_prefers_body_to_title() -> None:
+    note = type("Note", (), {"body": "body", "title": "title"})()
+    chat = RecordingChat()
+    channel = Chat(chat, destination=lambda _recipient: ChatDestination("tenant"))
+
+    await channel.deliver(
+        Recipient("u1"),
+        note,
+        type("Kind", (), {"name": "shared"})(),
+    )
+
+    assert chat.calls[0]["content"] == "body"
+
+
+async def test_chat_delivery_falls_back_to_note_representation() -> None:
+    class Note:
+        def __repr__(self) -> str:
+            return "represented note"
+
+    chat = RecordingChat()
+    channel = Chat(chat, destination=lambda _recipient: ChatDestination("tenant"))
+
+    await channel.deliver(
+        Recipient("u1"),
+        Note(),
+        type("Kind", (), {"name": "shared"})(),
+    )
+
+    assert chat.calls[0]["content"] == "represented note"
 
 
 async def test_a_suppressed_address_still_receives_a_password_reset() -> None:
@@ -206,6 +313,76 @@ def test_declaring_one_name_twice_is_refused() -> None:
     notify.kind("shared")(type("A", (), {}))
     with pytest.raises(ValueError, match="already declared"):
         notify.kind("shared")(type("B", (), {}))
+
+
+def test_redeclaring_same_class_releases_its_previous_kind_name() -> None:
+    notify = Notifications(channels=[])
+
+    notify.kind("old-name")(PhotoShared)
+    notify.kind("new-name")(PhotoShared)
+    replacement = notify.kind("old-name")(type("Replacement", (), {}))
+
+    assert notify.spec_for(PhotoShared("Ada")).name == "new-name"
+    assert notify.spec_for(replacement()).name == "old-name"
+
+
+async def test_fatal_channel_exception_is_not_converted_to_delivery_failure() -> None:
+    class FatalDelivery(BaseException):
+        pass
+
+    class FatalChannel:
+        name = "fatal"
+
+        async def deliver(self, recipient: Recipient, note: object, kind: object) -> None:
+            raise FatalDelivery
+
+    notify = Notifications(channels=[FatalChannel()])
+    notify.kind("photo_shared")(PhotoShared)
+
+    with pytest.raises(FatalDelivery):
+        await notify.send(PhotoShared("Ada"), to=Recipient("u1"))
+
+
+def test_digest_sweep_preserves_newer_deadline_for_same_key() -> None:
+    notify = Notifications(channels=[])
+    key = ("shared", "u1")
+    notify._recent[key] = 200
+    notify._recent_expirations = [(100, 1, key)]
+    spec = KindSpec("shared", 60, MailClass.TRANSACTIONAL, None, ())
+
+    assert notify._is_duplicate(spec, Recipient("u1"), 150) is True
+    assert notify._recent == {key: 200}
+
+
+def test_rate_sweep_ignores_expiration_for_missing_recipient() -> None:
+    notify = Notifications(channels=[], rate_limit=2)
+    notify._count_expirations = [(100, 1, "missing")]
+
+    notify._sweep_rate_windows(200)
+
+    assert notify._counts == {}
+
+
+def test_rate_sweep_ignores_stale_deadline_for_existing_recipient() -> None:
+    notify = Notifications(channels=[], rate_limit=2)
+    notify._counts["u1"] = deque([1000])
+    notify._count_expirations = [(200, 1, "u1")]
+
+    notify._sweep_rate_windows(300)
+
+    assert notify._counts["u1"] == deque([1000])
+    assert notify._count_expirations == []
+
+
+def test_rate_sweep_removes_only_expired_events_and_reschedules_window() -> None:
+    notify = Notifications(channels=[], rate_limit=2)
+    notify._counts["u1"] = deque([100, 2000])
+    notify._count_expirations = [(3700, 1, "u1")]
+
+    notify._sweep_rate_windows(4000)
+
+    assert notify._counts["u1"] == deque([2000])
+    assert notify._count_expirations == [(5600, 1, "u1")]
 
 
 async def test_a_repeat_inside_the_digest_window_is_collapsed() -> None:
@@ -400,6 +577,59 @@ async def test_one_slow_push_endpoint_does_not_block_another_subscription() -> N
     await asyncio.wait_for(second_started.wait(), timeout=0.5)
     release.set()
     await delivery
+
+
+async def test_web_push_reraises_fatal_delivery_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FatalPush(BaseException):
+        pass
+
+    subscriptions = InMemoryPushSubscriptions()
+    await subscriptions.add("u1", SUBSCRIPTION)
+
+    async def post(endpoint: str, body: bytes, headers: dict[str, str]) -> PushResult:
+        raise FatalPush
+
+    monkeypatch.setattr(notifications, "encrypt", lambda _subscription, _payload: b"body")
+    monkeypatch.setattr(notifications, "vapid_headers", lambda _keys, _endpoint: {})
+    channel = WebPush(VapidKeys.generate("mailto:ops@example.com"), subscriptions, post=post)
+
+    with pytest.raises(FatalPush):
+        await channel.deliver(Recipient("u1"), PhotoShared("Ada"), object())
+
+
+async def test_web_push_limits_each_delivery_batch_to_declared_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subscriptions = InMemoryPushSubscriptions()
+    for index in range(17):
+        await subscriptions.add(
+            "u1",
+            PushSubscription(
+                f"https://push{index}.example.net/subscription",
+                SUBSCRIPTION.p256dh,
+                SUBSCRIPTION.auth,
+            ),
+        )
+    active = 0
+    peak = 0
+
+    async def post(endpoint: str, body: bytes, headers: dict[str, str]) -> PushResult:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0)
+        active -= 1
+        return PushResult(201, expired=False)
+
+    monkeypatch.setattr(notifications, "encrypt", lambda _subscription, _payload: b"body")
+    monkeypatch.setattr(notifications, "vapid_headers", lambda _keys, _endpoint: {})
+    channel = WebPush(VapidKeys.generate("mailto:ops@example.com"), subscriptions, post=post)
+
+    await channel.deliver(Recipient("u1"), PhotoShared("Ada"), object())
+
+    assert peak == 8
 
 
 async def test_an_encryption_failure_sends_only_the_valid_prefix(monkeypatch) -> None:

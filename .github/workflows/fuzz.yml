@@ -1,0 +1,216 @@
+name: fuzz
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/fuzz.yml
+      - docs/guides/cli.md
+      - docs/guides/fuzzing.md
+      - pyproject.toml
+      - uv.lock
+      - src/wreath/**
+      - tools/fuzz_native/**
+      - tests/test_fuzz_*.py
+      - tests/test_mutant.py
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.event_name == 'schedule' && 'scheduled' || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pr-smoke:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+      - uses: actions/cache/restore@v5
+        with:
+          path: .wreath/fuzz/corpus
+          key: Linux-wreath-fuzz-v1-pr-${{ github.run_id }}
+          restore-keys: |
+            Linux-wreath-fuzz-v1-
+      - name: Sync and build Linux capabilities
+        run: |
+          uv sync --frozen
+          WREATH_BUILD_LINUX=1 uv run --no-sync python setup.py build_ext --inplace
+      - name: Replay changed controls and corpus
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          run_smoke() {
+            uv run --no-sync wreath test \
+              --fuzz on \
+              --fuzz-backend all \
+              --fuzz-replay-only \
+              --fuzz-cases 256 \
+              --fuzz-budget 30 \
+              --fuzz-target graphql-parser \
+              --fuzz-target h2-frames \
+              --fuzz-target http-replay-codec \
+              --fuzz-target http1-parser \
+              --fuzz-target multipart-parser \
+              --fuzz-target xml-parser \
+              --fuzz-corpus .wreath/fuzz/corpus \
+              --fuzz-artifacts .wreath/fuzz/artifacts \
+              --no-history \
+              --report fuzz-pr-report.json \
+              "$@"
+          }
+          if git diff --name-only "$BASE_SHA"...HEAD -- \
+            'src/wreath/*.py' 'src/wreath/**/*.py' | grep -q .; then
+            set +e
+            run_smoke --mutant changed --mutant-changed "$BASE_SHA" 2>&1 | tee changed-fuzz.log
+            status=${PIPESTATUS[0]}
+            set -e
+            if [ "$status" -eq 0 ]; then
+              exit 0
+            fi
+            if [ "$status" -ne 2 ]; then
+              exit "$status"
+            fi
+            if ! grep -Fq 'matched no mutations' changed-fuzz.log; then
+              exit "$status"
+            fi
+          fi
+          run_smoke --mutant sample --mutant-samples 8 --mutant-budget 10
+      - name: Upload PR fuzz report and findings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-results-pr-${{ github.run_id }}
+          path: |
+            fuzz-pr-report.json
+            .wreath/fuzz/artifacts
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 90
+
+  campaign:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        target:
+          - graphql-parser
+          - h2-frames
+          - http-replay-codec
+          - http1-parser
+          - multipart-parser
+          - xml-parser
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+      - uses: actions/cache/restore@v5
+        with:
+          path: .wreath/fuzz/corpus
+          key: Linux-wreath-fuzz-v1-campaign-${{ github.run_id }}-${{ matrix.target }}-${{ matrix.shard }}
+          restore-keys: |
+            Linux-wreath-fuzz-v1-
+      - name: Sync and build Linux capabilities
+        run: |
+          uv sync --frozen
+          WREATH_BUILD_LINUX=1 uv run --no-sync python setup.py build_ext --inplace
+      - name: Run campaign shard
+        env:
+          TARGET: ${{ matrix.target }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          mkdir -p fuzz-reports
+          SEED="$(python -c 'import os; print((int(os.environ["GITHUB_RUN_ID"]) * 16 + int(os.environ["GITHUB_RUN_ATTEMPT"]) * 4 + int(os.environ["SHARD"])) % 2**64)')"
+          uv run --no-sync wreath test \
+            --mutant sample \
+            --mutant-samples 1 \
+            --mutant-budget 10 \
+            --fuzz on \
+            --fuzz-backend all \
+            --fuzz-cases 50000 \
+            --fuzz-budget 240 \
+            --fuzz-seed "$SEED" \
+            --fuzz-target "$TARGET" \
+            --fuzz-corpus .wreath/fuzz/corpus \
+            --fuzz-artifacts .wreath/fuzz/artifacts \
+            --no-history \
+            --report "fuzz-reports/${TARGET}-${SHARD}.json" \
+            tests/test_fuzz_targets.py
+      - name: Upload shard corpus
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-corpus-${{ matrix.target }}-${{ matrix.shard }}-${{ github.run_id }}
+          path: .wreath/fuzz/corpus
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 14
+      - name: Upload shard report and findings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-results-${{ matrix.target }}-${{ matrix.shard }}-${{ github.run_id }}
+          path: |
+            fuzz-reports
+            .wreath/fuzz/artifacts
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 90
+
+  merge-corpus:
+    if: ${{ always() && !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    needs: [campaign]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+      - name: Sync merge tooling
+        run: |
+          uv sync --frozen
+          uv run --no-sync python setup.py build_ext --inplace
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: fuzz-corpus-*-${{ github.run_id }}
+          path: shard-corpora
+      - name: Merge and safely prune exact duplicates
+        run: |
+          uv run --no-sync python -m wreath._fuzz.corpus_ci merge \
+            --source shard-corpora \
+            --output .wreath/fuzz/corpus \
+            --run-id "${{ github.run_id }}"
+      - name: Preserve Python and native feedback while pruning
+        run: |
+          uv run --no-sync python -m wreath._fuzz.corpus_ci finalize \
+            --corpus .wreath/fuzz/corpus \
+            --native-input .wreath/fuzz/native-merge-input \
+            --build-root .wreath/fuzz/native-merge-build \
+            --artifact-root .wreath/fuzz/artifacts
+      - uses: actions/cache/save@v5
+        with:
+          path: .wreath/fuzz/corpus
+          key: Linux-wreath-fuzz-v1-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Upload merged corpus
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-corpus-merged-${{ github.run_id }}
+          path: .wreath/fuzz/corpus
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 90

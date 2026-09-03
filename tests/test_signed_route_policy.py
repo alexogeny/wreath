@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from wreath import Wreath
+from wreath import Request, Wreath
 from wreath.policy import HttpPolicy, SignedRoutePolicy
 from wreath.testing import TestClient
 from wreath.tokens import ActionTokens, MemoryTokenLedger, TokenPurpose
@@ -89,6 +89,30 @@ def test_signed_route_configuration_and_signing_are_fail_closed() -> None:
         policy.sign("/other")
     with pytest.raises(ValueError, match="already contains"):
         policy.sign("/download?signature=attacker")
+
+
+def test_signed_route_reference_path_refuses_a_missing_signature(monkeypatch) -> None:
+    policy = SignedRoutePolicy(_tokens(lambda: 1_000.0), "download", ("/download",))
+
+    def unexpected_verification(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("a missing signature reached token verification")
+
+    monkeypatch.setattr(ActionTokens, "verify", unexpected_verification)
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/download",
+            "query_string": b"file=report.pdf",
+            "headers": [],
+        },
+        None,
+    )
+
+    refusal = policy._ingress_sync(request)
+
+    assert refusal is not None
+    assert refusal.status == 403
 
 
 def test_signed_route_policy_rejects_non_action_tokens() -> None:

@@ -183,6 +183,12 @@ class ToolExecutor:
             tool = registry.get(name)
             if tool is None:
                 raise ValueError(f"unknown MCP tool {name!r}")
+            if tool.route is not None:
+                raise ValueError(
+                    f"MCP tool {name!r} was derived from route {tool.route!r} and "
+                    "cannot be selected for direct agent calls because application "
+                    "middleware and MCP endpoint authentication would not run"
+                )
             if tool.sampling_requirement is not None or tool.elicitation_requirement is not None:
                 raise ValueError(
                     f"MCP tool {name!r} requires a client session for sampling or "
@@ -220,6 +226,11 @@ class ToolExecutor:
         if tool is None:
             raise ValueError(f"tool {name!r} is not in this agent's selected catalog")
         identity = _identity(principal, delegation)
+        if getattr(self._owner, "_auth", None) is not None and identity is None:
+            raise ToolAuthorizationError(
+                "this MCP server requires authentication; a direct call must "
+                "supply a verified principal"
+            )
         principal_id = getattr(identity, "id", None)
         principal_key = "" if principal_id is None else str(principal_id)
         effect_id = _effect_id(tenant, principal_key, call_id, name)

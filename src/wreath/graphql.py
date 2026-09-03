@@ -293,9 +293,16 @@ class GraphQL:
             policy_resource(policy)
         return policy
 
+    @staticmethod
+    def _checked_cost(cost: int) -> int:
+        if not isinstance(cost, int) or isinstance(cost, bool) or cost < 1:
+            raise ValueError(f"GraphQL cost must be a positive integer; got {cost!r}")
+        return cost
+
     def _add_resolver(self, spec: ResolverSpec) -> None:
         self._check_mutable()
         self._checked_policy(spec.policy)
+        self._checked_cost(spec.cost)
         object_type = self._schema.types.get(spec.type_name)
         if object_type is None:
             raise ResolverError(
@@ -327,6 +334,7 @@ class GraphQL:
     ) -> None:
         self._check_mutable()
         self._checked_policy(policy)
+        self._checked_cost(cost)
         # No `cost=` on the spec: `ResolverSpec.cost` is read in exactly one
         # place, `_add_resolver`, where it is copied onto the `SchemaField` of a
         # field *on a type*. A root's weight lives on the `RootField` below,
@@ -485,6 +493,7 @@ class GraphQL:
             document,
             operation,
             max_complexity=self._limits.max_complexity,
+            max_page_size=self._max_page_size,
         )
         self._cache.set(
             source,
@@ -512,7 +521,13 @@ class GraphQL:
             operation = document.operation(operation_name)
         except KeyError, ValueError:
             return
-        weigh(self._schema, document, operation, max_complexity=self._limits.max_complexity)
+        weigh(
+            self._schema,
+            document,
+            operation,
+            max_complexity=self._limits.max_complexity,
+            max_page_size=self._max_page_size,
+        )
 
     async def _run(
         self,
@@ -657,17 +672,24 @@ class GraphQL:
                     status=400,
                 )
             operation_name = payload.get("operationName")
+            if not isinstance(operation_name, str):
+                operation_name = None
 
             # A document that mutates needs the write workload; a read session
             # would send the mutation to a replica.
             session, close = await graphql._session(
-                request, session_factory, mutating=graphql._is_mutation(payload["query"])
+                request,
+                session_factory,
+                mutating=graphql._is_mutation(
+                    payload["query"],
+                    operation_name=operation_name,
+                ),
             )
             try:
                 body = await graphql._run(
                     payload["query"],
                     session,
-                    operation_name=operation_name if isinstance(operation_name, str) else None,
+                    operation_name=operation_name,
                     variables=variables,
                     request=request,
                     json_output=True,
@@ -699,14 +721,14 @@ class GraphQL:
 
         return router
 
-    def _is_mutation(self, source: str) -> bool:
+    def _is_mutation(self, source: str, *, operation_name: str | None = None) -> bool:
         """Whether `source` parses to a mutation. False for anything unparseable."""
         try:
             document = self.parse(source)
         except GraphQLSyntaxError:
             return False
         try:
-            return document.operation().operation == "mutation"
+            return document.operation(operation_name).operation == "mutation"
         except KeyError, ValueError:
             # `Document.operation` raises `KeyError` for a name it does not hold
             # and `ValueError` when the document has no unambiguous operation.

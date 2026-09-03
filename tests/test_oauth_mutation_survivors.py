@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 from base64 import urlsafe_b64decode, urlsafe_b64encode
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
 
 import wreath.oauth as oauth
+from wreath import JSONResponse, Wreath
+from wreath._auth.oauth2 import bearer_challenge, register_oauth2_login
+from wreath._auth.oidc import OidcProvider
 from wreath.oauth import AuthorizationServer, ClientRegistration, Es256Signer, OAuthRefusal
+from wreath.policy import HttpPolicy, SessionPolicy
+from wreath.testing import TestClient
 
 CLIENT_SECRET = b"confidential-client-secret-material"
 CLIENT = ClientRegistration(
@@ -21,6 +29,11 @@ PUBLIC = ClientRegistration(
     client_id="public",
     redirect_uris=("https://client.example/public",),
 )
+
+
+@dataclass(frozen=True, slots=True)
+class PaymentDetail:
+    amount: int
 
 
 def _server(**options: Any) -> AuthorizationServer:
@@ -38,6 +51,23 @@ def _claims(token: str) -> dict[str, object]:
     return json.loads(urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
 
 
+def _segment(value: object) -> str:
+    encoded = urlsafe_b64encode(json.dumps(value, separators=(",", ":")).encode())
+    return encoded.rstrip(b"=").decode()
+
+
+def _signed_token(
+    server: AuthorizationServer,
+    claims: dict[str, object],
+    *,
+    algorithm: str = "HS256",
+    typ: str = "JWT",
+) -> str:
+    signing_input = f"{_segment({'alg': algorithm, 'typ': typ})}.{_segment(claims)}"
+    signature = hmac.new(server.secret, signing_input.encode("ascii"), hashlib.sha256).digest()
+    return f"{signing_input}.{urlsafe_b64encode(signature).rstrip(b'=').decode()}"
+
+
 def _challenge(verifier: str) -> str:
     import hashlib
 
@@ -46,6 +76,370 @@ def _challenge(verifier: str) -> str:
         .rstrip(b"=")
         .decode("ascii")
     )
+
+
+def test_a_bare_bearer_challenge_has_no_trailing_separator() -> None:
+    assert bearer_challenge() == b"Bearer"
+
+
+def _login_app(provider: OidcProvider, *, seed: bool = False) -> Wreath:
+    app = Wreath()
+    if seed:
+        app.configure_http_policy(HttpPolicy(session=SessionPolicy(secret="s" * 32, secure=False)))
+
+        @app.get("/seed")
+        async def seed_session(request):
+            request.state.session.update(
+                {
+                    "_oidc_state_idp": "issued",
+                    "_oidc_verifier_idp": "verifier",
+                }
+            )
+            return JSONResponse({})
+
+    register_oauth2_login(
+        app,
+        "idp",
+        provider=provider,
+        client_id="client",
+        client_secret="secret",
+        redirect_uri="https://app.example/auth/callback",
+    )
+    return app
+
+
+def _oidc_provider(http_client: object) -> OidcProvider:
+    return OidcProvider(
+        "idp",
+        issuer="https://idp.example",
+        audience="client",
+        http_client=http_client,
+    )
+
+
+async def test_login_refuses_a_provider_without_an_authorization_endpoint() -> None:
+    app = _login_app(_oidc_provider(object()))
+
+    async with TestClient(app) as client:
+        response = await client.get("/auth/login")
+
+    assert response.status == 503
+    assert response.json() == {"error": "provider_not_discovered"}
+
+
+async def test_callback_refuses_a_provider_without_a_token_endpoint() -> None:
+    provider = _oidc_provider(object())
+    provider.authorization_endpoint = "https://idp.example/authorize"
+    app = _login_app(provider, seed=True)
+
+    async with TestClient(app) as client:
+        seeded = await client.get("/seed")
+        cookie = seeded.header("set-cookie")
+        assert cookie is not None
+        response = await client.get(
+            "/auth/callback?code=code&state=issued",
+            headers={"cookie": cookie.split(";", 1)[0]},
+        )
+
+    assert response.status == 503
+    assert response.json() == {"error": "provider_not_discovered"}
+
+
+async def test_successful_token_exchange_reaches_the_id_token_validation() -> None:
+    class Response:
+        status = 200
+        body = b"{}"
+
+    class Client:
+        async def post(self, *args, **kwargs) -> Response:
+            return Response()
+
+    provider = _oidc_provider(Client())
+    provider.authorization_endpoint = "https://idp.example/authorize"
+    provider.token_endpoint = "https://idp.example/token"
+    app = _login_app(provider, seed=True)
+
+    async with TestClient(app) as client:
+        seeded = await client.get("/seed")
+        cookie = seeded.header("set-cookie")
+        assert cookie is not None
+        response = await client.get(
+            "/auth/callback?code=code&state=issued",
+            headers={"cookie": cookie.split(";", 1)[0]},
+        )
+
+    assert response.status == 401
+    assert response.json() == {"error": "missing_id_token"}
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"introspection_encrypted_response_enc": "A256GCM"},
+        {"client_secret": b"x" * 32},
+        {"confidential": True},
+        {"confidential": True, "client_secret": b"short"},
+    ],
+)
+def test_client_registration_refuses_each_invalid_secret_or_encryption_shape(
+    options: dict[str, Any],
+) -> None:
+    with pytest.raises(ValueError):
+        ClientRegistration(client_id="invalid", **options)
+
+
+@pytest.mark.parametrize("detail_name", [None, 1, b"payment", ""])
+def test_authorization_detail_registry_requires_nonempty_text_names(
+    detail_name: object,
+) -> None:
+    with pytest.raises(ValueError, match="type names must be non-empty strings"):
+        _server(authorization_detail_types={detail_name: PaymentDetail})
+
+
+@pytest.mark.parametrize("model", [None, 1, object(), PaymentDetail(1), dict])
+def test_authorization_detail_registry_requires_dataclass_types(model: object) -> None:
+    with pytest.raises(ValueError, match="must map to a dataclass type"):
+        _server(authorization_detail_types={"payment": model})
+
+
+def test_authorization_response_omits_absent_state_on_each_branch() -> None:
+    server = _server()
+
+    assert server.authorization_response(code="code") == {
+        "iss": "https://issuer.example",
+        "code": "code",
+    }
+    assert server.authorization_response(error="denied") == {
+        "iss": "https://issuer.example",
+        "error": "denied",
+    }
+
+
+def _detail_server() -> AuthorizationServer:
+    return _server(authorization_detail_types={"payment": PaymentDetail})
+
+
+def test_authorization_details_refuse_oversized_json_before_parsing() -> None:
+    with pytest.raises(OAuthRefusal, match="exceeds the 64 KiB") as raised:
+        _detail_server().validate_authorization_details(" " * (64 * 1024 + 1))
+    assert raised.value.reason == "invalid-authorization-details"
+
+
+@pytest.mark.parametrize("details", [None, 1, object(), {"type": "payment"}])
+def test_authorization_details_require_a_list_or_tuple(details: object) -> None:
+    with pytest.raises(OAuthRefusal, match="JSON array of objects") as raised:
+        _detail_server().validate_authorization_details(details)
+    assert raised.value.reason == "invalid-authorization-details"
+
+
+def test_authorization_details_refuse_more_than_64_objects() -> None:
+    details = [{"type": "payment", "amount": 1}] * 65
+
+    with pytest.raises(OAuthRefusal, match="at most 64 objects"):
+        _detail_server().validate_authorization_details(details)
+
+
+@pytest.mark.parametrize("detail", [None, 1, "payment", ["payment"]])
+def test_authorization_details_require_each_entry_to_be_an_object(detail: object) -> None:
+    with pytest.raises(OAuthRefusal, match=r"authorization_details\[0\] must be an object"):
+        _detail_server().validate_authorization_details([detail])
+
+
+@pytest.mark.parametrize("detail_type", [None, 1, b"payment", ""])
+def test_authorization_details_require_nonempty_text_type(detail_type: object) -> None:
+    with pytest.raises(OAuthRefusal, match=r"\[0\]\.type must be a non-empty string"):
+        _detail_server().validate_authorization_details([{"type": detail_type, "amount": 1}])
+
+
+def test_authorization_details_name_unknown_type_exactly() -> None:
+    with pytest.raises(OAuthRefusal, match="names unknown type 'unknown'"):
+        _detail_server().validate_authorization_details([{"type": "unknown", "amount": 1}])
+
+
+@pytest.mark.parametrize("details", [None, (), []])
+def test_client_authorization_details_accept_each_empty_shape(details: object) -> None:
+    assert _detail_server()._client_authorization_details(PUBLIC, details) == ()
+
+
+def test_client_authorization_details_refuse_type_outside_registration() -> None:
+    with pytest.raises(OAuthRefusal, match="not registered.*payment"):
+        _detail_server()._client_authorization_details(
+            PUBLIC,
+            [{"type": "payment", "amount": 1}],
+        )
+
+
+def _introspection_server() -> AuthorizationServer:
+    resource = ClientRegistration(
+        client_id="resource",
+        confidential=True,
+        client_secret=b"r" * 32,
+        scopes=("read",),
+        introspection_signed_response_alg="HS256",
+    )
+    return _server(clients=(resource,))
+
+
+def _active_claims(**changes: object) -> dict[str, object]:
+    claims: dict[str, object] = {
+        "iss": "https://issuer.example",
+        "aud": "resource",
+        "exp": 2000,
+        "scope": "read write",
+    }
+    claims.update(changes)
+    return claims
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"iss": "https://other.example"},
+        {"exp": True},
+        {"exp": "2000"},
+        {"exp": None},
+        {"exp": 1000},
+        {"aud": "other"},
+    ],
+)
+def test_introspection_refuses_each_invalid_signed_claim(changes: dict[str, object]) -> None:
+    server = _introspection_server()
+    token = _signed_token(server, _active_claims(**changes))
+
+    assert server._introspection_claims(
+        token,
+        audience="resource",
+        scopes=("read",),
+        now=1000,
+    ) == {"active": False}
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "typ"),
+    [("HS512", "JWT"), ("HS256", "access+jwt")],
+)
+def test_introspection_refuses_each_invalid_protected_header(
+    algorithm: str,
+    typ: str,
+) -> None:
+    server = _introspection_server()
+    token = _signed_token(server, _active_claims(), algorithm=algorithm, typ=typ)
+
+    assert server._introspection_claims(
+        token,
+        audience="resource",
+        scopes=("read",),
+        now=1000,
+    ) == {"active": False}
+
+
+def test_introspection_refuses_revoked_signed_token() -> None:
+    server = _introspection_server()
+    token = _signed_token(server, _active_claims())
+    server._revoked.add(token)
+
+    assert server._introspection_claims(
+        token,
+        audience="resource",
+        scopes=("read",),
+        now=1000,
+    ) == {"active": False}
+
+
+def test_introspection_preserves_scope_when_resource_has_no_scope_filter() -> None:
+    server = _introspection_server()
+    token = _signed_token(server, _active_claims())
+
+    claims = server._introspection_claims(token, audience="resource", scopes=(), now=1000)
+
+    assert claims["active"] is True
+    assert claims["scope"] == "read write"
+
+
+def test_introspection_preserves_non_text_scope() -> None:
+    server = _introspection_server()
+    token = _signed_token(server, _active_claims(scope=["read"]))
+
+    claims = server._introspection_claims(
+        token,
+        audience="resource",
+        scopes=("read",),
+        now=1000,
+    )
+
+    assert claims["active"] is True
+    assert claims["scope"] == ["read"]
+
+
+def test_introspection_refuses_boolean_expiry_even_before_epoch() -> None:
+    server = _introspection_server()
+    token = _signed_token(server, _active_claims(exp=False))
+
+    assert server._introspection_claims(
+        token,
+        audience="resource",
+        scopes=("read",),
+        now=-1,
+    ) == {"active": False}
+
+
+def test_introspection_jwt_requires_registered_response_algorithm() -> None:
+    client = ClientRegistration(
+        client_id="ordinary-resource",
+        confidential=True,
+        client_secret=b"o" * 32,
+    )
+    server = _server(clients=(client,))
+
+    with pytest.raises(OAuthRefusal, match="not registered for JWT token introspection"):
+        server.introspection_jwt(
+            "token",
+            client_id="ordinary-resource",
+            client_secret=b"o" * 32,
+        )
+
+
+def test_introspection_jwt_uses_current_time_when_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = _introspection_server()
+    monkeypatch.setattr(oauth.time, "time", lambda: 1234.75)
+
+    response = server.introspection_jwt(
+        "not-a-token",
+        client_id="resource",
+        client_secret=b"r" * 32,
+    )
+
+    assert _claims(response)["iat"] == 1234
+
+
+def test_introspection_reports_missing_verifying_key() -> None:
+    server = _introspection_server()
+    token = _signed_token(server, _active_claims())
+    server._verifying_key = None
+
+    with pytest.raises(RuntimeError, match="without a verifying key"):
+        server._introspection_claims(
+            token,
+            audience="resource",
+            scopes=("read",),
+            now=1000,
+        )
+
+
+def test_introspection_refuses_invalid_signature() -> None:
+    server = _introspection_server()
+    token = _signed_token(server, _active_claims())
+    head, body, signature = token.split(".")
+    replacement = ("A" if signature[0] != "A" else "B") + signature[1:]
+
+    assert server._introspection_claims(
+        f"{head}.{body}.{replacement}",
+        audience="resource",
+        scopes=("read",),
+        now=1000,
+    ) == {"active": False}
 
 
 def test_pkce_challenge_must_be_ascii_even_at_the_exact_digest_length() -> None:
@@ -281,3 +675,50 @@ def test_revoking_one_chain_preserves_another_active_and_spent_chain() -> None:
         server.rotate(first, client_id="public", now=1002)
     assert raised.value.reason == "refresh-reused"
     assert server.is_revoked(first_rotated.access_token)
+
+
+def test_expired_spent_refresh_evidence_is_reclaimed() -> None:
+    server = _server(refresh_ttl=10)
+    first = server.issue_refresh(subject="user", audience="api", now=0)
+    second = server.rotate(first, now=1)
+    third = server.rotate(second.refresh_token, now=9)
+
+    assert first.token in server._spent
+    server.rotate(third.refresh_token, now=11)
+
+    assert first.token not in server._spent
+
+
+def test_expired_access_revocations_do_not_exhaust_pending_grant_capacity() -> None:
+    server = _server(lifetime=1, max_pending_grants=4)
+    for index in range(4):
+        issued = server.issue_access(subject=f"user-{index}", audience="api", now=0)
+        server._revoke_access(issued.access_token)
+
+    code = server.issue_code(
+        client_id="public",
+        subject="user",
+        challenge="x" * 43,
+        redirect_uri="https://client.example/public",
+        now=10_001,
+    )
+
+    assert code in server._codes
+    assert server._revoked == set()
+    assert server._revoked_ids == set()
+
+
+@pytest.mark.parametrize("expires_at", [False, float("nan"), float("inf")])
+def test_non_finite_or_boolean_token_expiry_is_not_used_for_revocation_cleanup(
+    expires_at: object,
+) -> None:
+    server = _server()
+    token = _signed_token(
+        server,
+        {"jti": "revoked", "exp": expires_at},
+    )
+
+    server._revoke_access(token)
+
+    assert token not in server._revoked_expiries
+    assert token in server._revoked

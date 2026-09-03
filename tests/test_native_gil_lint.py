@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from wreath._devtools.native_gil_lint import scan_text
+from wreath._devtools.native_gil_lint import _uses_variable, scan_text
 
 
 def codes(source: str) -> list[str]:
@@ -153,3 +153,89 @@ static int intentional(int fd, char *buffer) {
     return recv(fd, buffer, 1024, MSG_DONTWAIT);
 }
 """)
+
+
+def test_borrowed_reference_member_and_dereference_uses_are_detected() -> None:
+    assert _uses_variable("return value->ob_refcnt;", "value")
+    assert _uses_variable("return *value != NULL;", "value")
+    assert not _uses_variable("return other->ob_refcnt;", "value")
+
+
+def test_diagnostics_preserve_default_and_specific_messages() -> None:
+    blocking = scan_text(
+        "fixture.c",
+        "static int blocked(int fd) { return fsync(fd); }\n",
+    )
+    assert blocking[0].message == "potentially blocking native I/O while holding the GIL"
+
+    imbalance = scan_text(
+        "fixture.c",
+        "static void callback(void) {\n    PyGILState_Release(state);\n}\n",
+    )
+    assert imbalance[0].line == 2
+    assert imbalance[0].message == "callback has 0 Ensure and 1 Release call(s)"
+
+
+def test_gil_state_does_not_cross_function_or_module_boundaries() -> None:
+    findings = scan_text(
+        "fixture.c",
+        """
+PyGILState_STATE module_state = PyGILState_Ensure();
+static void first(void) {
+    Py_BEGIN_ALLOW_THREADS
+}
+static void second(PyObject *value) {
+    PyObject_CallNoArgs(value);
+}
+""",
+    )
+
+    assert [finding.code for finding in findings] == []
+
+
+def test_python_api_outside_allow_threads_is_not_ng001() -> None:
+    source = "static void safe(PyObject *value) { PyObject_CallNoArgs(value); }\n"
+
+    assert "NG001" not in codes(source)
+
+
+def test_borrowed_reference_is_checked_only_after_the_release_region() -> None:
+    assert "NG003" not in codes("""
+static void safe(PyObject *items) {
+    PyObject *value = PyList_GetItem(items, 0);
+    Py_BEGIN_ALLOW_THREADS
+    PyObject_IsTrue(value);
+    Py_END_ALLOW_THREADS
+    unrelated();
+}
+""")
+
+
+def test_only_registered_callbacks_without_an_ensure_report_ng005() -> None:
+    ordinary = "static void ordinary(PyObject *value) { PyObject_CallNoArgs(value); }\n"
+    acquired = """
+static void *worker(void *arg) {
+    PyGILState_STATE state = PyGILState_Ensure();
+    PyObject_CallNoArgs((PyObject *)arg);
+    PyGILState_Release(state);
+    return NULL;
+}
+static int start(PyObject *callable) {
+    pthread_t thread;
+    return pthread_create(&thread, NULL, worker, callable);
+}
+"""
+    no_python = """
+static void *worker(void *arg) {
+    consume(arg);
+    return NULL;
+}
+static int start(void *value) {
+    pthread_t thread;
+    return pthread_create(&thread, NULL, worker, value);
+}
+"""
+
+    assert "NG005" not in codes(ordinary)
+    assert "NG005" not in codes(acquired)
+    assert "NG005" not in codes(no_python)

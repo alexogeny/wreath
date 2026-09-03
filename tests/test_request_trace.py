@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -25,6 +27,36 @@ def test_every_scenario_serves_its_own_request(scenario: str) -> None:
 def test_the_traced_request_reaches_its_handler() -> None:
     trace, _status = _trace("realistic")
     assert any(event.phase == "handler" for event in trace.events)
+
+
+def test_handler_codes_include_only_real_declared_and_compiled_callables() -> None:
+    def declared() -> None:
+        pass
+
+    def compiled() -> None:
+        pass
+
+    app = SimpleNamespace(
+        _routes=(
+            SimpleNamespace(handler=declared),
+            SimpleNamespace(handler=object()),
+        ),
+        _handler_requirements={compiled: object(), "not-callable": object()},
+    )
+
+    assert request_trace._handler_codes(app) == frozenset(
+        {declared.__code__, compiled.__code__}
+    )
+
+
+def test_drive_takes_status_only_from_a_response_start() -> None:
+    async def app(scope, receive, send) -> None:
+        await send({"type": "http.response.body", "status": 599, "body": b""})
+        await send({"type": "http.response.start", "status": 204})
+
+    _trace_result, status = asyncio.run(request_trace._drive(app, "GET", "/", {}))
+
+    assert status == 204
 
 
 def test_the_harness_is_not_counted_against_the_app() -> None:
@@ -80,7 +112,74 @@ def test_check_reports_a_scenario_that_grew(monkeypatch: pytest.MonkeyPatch) -> 
     assert request_trace._check_baseline() == 1
 
 
+def _summary(*, python: int = 1, c: int = 2) -> dict[str, Any]:
+    return {
+        "pre_activation": {"python": python, "c": c},
+        "totals": {"python": python + 1, "c": c + 1},
+    }
+
+
+def test_check_refuses_a_missing_baseline(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(request_trace, "_baseline_path", lambda: tmp_path / "missing.json")
+
+    result = request_trace._check_baseline()
+
+    assert type(result) is int
+    assert result == 1
+    assert "no baseline" in capsys.readouterr().err
+
+
+def test_check_reports_a_scenario_missing_from_the_baseline(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "baseline.json"
+    path.write_text(json.dumps({"scenarios": {}}))
+    monkeypatch.setattr(request_trace, "_baseline_path", lambda: path)
+    monkeypatch.setattr(
+        request_trace,
+        "_measure_scenarios",
+        lambda: {"scenarios": {"new-scenario": _summary()}},
+    )
+
+    assert request_trace._check_baseline() == 1
+    assert "new-scenario: not in the baseline" in capsys.readouterr().out
+
+
+def test_check_accepts_an_exact_match_without_reporting_fake_changes(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    summary = _summary()
+    path = tmp_path / "baseline.json"
+    path.write_text(json.dumps({"scenarios": {"minimal": summary}}))
+    monkeypatch.setattr(request_trace, "_baseline_path", lambda: path)
+    monkeypatch.setattr(
+        request_trace,
+        "_measure_scenarios",
+        lambda: {"scenarios": {"minimal": _summary()}},
+    )
+
+    result = request_trace._check_baseline()
+    captured = capsys.readouterr()
+
+    assert type(result) is int
+    assert result == 0
+    assert "no crossings added" in captured.out
+    assert "grew" not in captured.out
+    assert "shrank" not in captured.out
+    assert captured.err == ""
+
+
 def test_check_and_update_are_refused_together(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(request_trace, "_baseline_path", lambda: tmp_path / "baseline.json")
     with pytest.raises(SystemExit, match="exclusive"):
         request_trace.main(["--check", "--update-baseline"])
+
+
+def test_check_and_update_each_run_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(request_trace, "_check_baseline", lambda: 7)
+    monkeypatch.setattr(request_trace, "_write_baseline", lambda: 8)
+
+    assert request_trace.main(["--check"]) == 7
+    assert request_trace.main(["--update-baseline"]) == 8

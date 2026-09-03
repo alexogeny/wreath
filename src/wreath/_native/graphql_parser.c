@@ -657,9 +657,11 @@ g_selection(GParser *p, Py_ssize_t depth)
     if (arguments == NULL || g_directives(p) < 0) {
         Py_XDECREF(arguments); Py_DECREF(name); Py_DECREF(key); return NULL;
     }
-    if (g_peek(p, '{')) set = g_selection_set(p, depth + 1);
-    if (g_peek(p, '{') || (set == NULL && PyErr_Occurred())) {
-        Py_DECREF(arguments); Py_DECREF(name); Py_DECREF(key); Py_XDECREF(set); return NULL;
+    if (g_peek(p, '{')) {
+        set = g_selection_set(p, depth + 1);
+        if (set == NULL) {
+            Py_DECREF(arguments); Py_DECREF(name); Py_DECREF(key); return NULL;
+        }
     }
     node = PyObject_CallFunctionObjArgs(
         GC(p, C_FIELD), name, key, arguments, set == NULL ? Py_None : set, NULL);
@@ -913,11 +915,13 @@ static int
 g_fragment_definition(GParser *p, PyObject *fragments)
 {
     PyObject *name = g_name(p);
-    PyObject *on = g_name(p);
+    PyObject *on = NULL;
     PyObject *condition = NULL;
     PyObject *set = NULL;
     PyObject *definition = NULL;
-    if (name == NULL || on == NULL) goto error;
+    if (name == NULL) goto error;
+    on = g_name(p);
+    if (on == NULL) goto error;
     if (PyUnicode_CompareWithASCIIString(on, "on") != 0) {
         g_error(p, "a fragment needs an `on` type condition",
                 "syntax", g_position(p));

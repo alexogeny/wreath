@@ -199,6 +199,13 @@ def test_name_sanitization():
     _parse(text)
 
 
+def test_name_sanitization_prefixes_a_namespace_that_starts_with_a_digit():
+    text = prom.render_exposition(_Snap(0, 0, [], _Loss()), namespace="1service")
+
+    assert "_1service_flight_pending" in text
+    _parse(text)
+
+
 def test_empty_snapshot_still_valid():
     text = prom.render_exposition(_Snap(0, 0, [], _Loss()))
     types, samples = _parse(text)

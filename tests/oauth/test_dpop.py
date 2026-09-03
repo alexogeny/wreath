@@ -8,7 +8,7 @@ import pytest
 
 from wreath._b64 import b64url_decode, b64url_encode
 from wreath._webpush import _ecdsa_sign
-from wreath.dpop import DPoPRefusal, DPoPVerifier
+from wreath.dpop import DPoPRefusal, DPoPVerifier, _target_uri
 from wreath.oauth import AuthorizationServer, ClientRegistration, Es256Signer, OAuthRefusal
 
 
@@ -61,6 +61,15 @@ def signer() -> Es256Signer:
 @pytest.fixture
 def verifier() -> DPoPVerifier:
     return DPoPVerifier(max_entries=8, max_age=300, clock_skew=30)
+
+
+def test_target_uri_brackets_only_ipv6_hosts() -> None:
+    assert _target_uri("https://server.example/token", proof=False) == (
+        "https://server.example/token"
+    )
+    assert _target_uri("https://[2001:db8::1]/token", proof=False) == (
+        "https://[2001:db8::1]/token"
+    )
 
 
 def test_a_valid_proof_returns_the_public_key_thumbprint(verifier, signer) -> None:

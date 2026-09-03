@@ -31,17 +31,20 @@ _PORT = 28150 + _SLOT * 40
 
 
 @pytest.mark.parametrize(
-    "ejection",
+    ("ejection", "message"),
     [
-        Ejection(failures=0),
-        Ejection(seconds=0),
-        Ejection(cap=0),
-        Ejection(seconds=10, cap=5),
+        (Ejection(failures=0), "ejection.failures must be at least 1"),
+        (Ejection(seconds=0), "ejection.seconds must be positive"),
+        (Ejection(cap=0), "ejection.cap must be positive"),
+        (Ejection(seconds=10, cap=5), "ejection.cap must be at least ejection.seconds"),
     ],
 )
-def test_upstream_pool_refuses_invalid_ejection_policy(ejection: Ejection) -> None:
-    with pytest.raises(ValueError, match="ejection"):
+def test_upstream_pool_refuses_invalid_ejection_policy(
+    ejection: Ejection, message: str
+) -> None:
+    with pytest.raises(ValueError) as caught:
         UpstreamPool([Upstream("http://origin.test")], ejection=ejection)
+    assert str(caught.value) == message
 
 
 @pytest.mark.parametrize(
@@ -208,6 +211,31 @@ def test_only_connection_values_name_hop_by_hop_fields() -> None:
     ]
 
 
+def test_headers_without_connection_skip_the_connection_value_scan(monkeypatch) -> None:
+    import wreath.edge.headers as header_module
+
+    def unexpected_scan(_headers):
+        raise AssertionError("ordinary headers must not trigger a Connection scan")
+
+    monkeypatch.setattr(header_module, "_connection_named", unexpected_scan)
+    assert forwardable(((b"accept", b"*/*"),)) == [(b"accept", b"*/*")]
+
+
+def test_connection_without_named_fields_skips_the_drop_set_union(monkeypatch) -> None:
+    import wreath.edge.headers as header_module
+
+    class EmptyNamed:
+        def __bool__(self):
+            return False
+
+        def __ror__(self, _other):
+            raise AssertionError("an empty named set must not be unioned")
+
+    monkeypatch.setattr(header_module, "_connection_named", lambda _headers: EmptyNamed())
+    headers = ((b"connection", b"close"), (b"accept", b"*/*"))
+    assert forwardable(headers) == [(b"accept", b"*/*")]
+
+
 def test_a_client_supplied_forwarding_header_is_replaced_not_appended() -> None:
     headers = ((b"x-forwarded-for", b"9.9.9.9"), (b"forwarded", b'for="9.9.9.9"'))
     assert forwardable(headers) == []
@@ -217,6 +245,11 @@ def test_a_client_supplied_forwarding_header_is_replaced_not_appended() -> None:
 def test_via_name_refuses_values_that_are_not_http_tokens(name: str) -> None:
     with pytest.raises(ValueError, match="via_name.*HTTP token"):
         via_token("1.1", name)
+
+
+def test_via_name_refuses_a_non_string_before_token_validation() -> None:
+    with pytest.raises(TypeError, match="via_name must be str, not int"):
+        via_token("1.1", 7)
 
 
 async def test_the_proxy_rewrites_forwarding_headers_and_host() -> None:

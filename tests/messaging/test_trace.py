@@ -8,6 +8,7 @@ import pytest
 from _pgfidelity import check_for
 
 from wreath import _pytest_plugin, telemetry
+from wreath import messaging as messaging_module
 from wreath.messaging import MessageBus
 
 PARENT = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
@@ -303,8 +304,8 @@ class TestTheSchemaMayBeOlderThanTheBuild:
         assert len(probes) == 1, f"probed the catalog {len(probes)} times"
 
 
-class TestEphemeralFanOutIsDeliberatelyUnchanged:
-    async def test_the_ephemeral_wire_format_is_the_payload_and_nothing_else(self):
+class TestEphemeralFanOutCarriesTenantContext:
+    async def test_the_ephemeral_wire_format_wraps_the_payload_without_trace_context(self):
         conn = FakeConn()
         bus = MessageBus(FakeDB(conn), name="events")
         token = _bound(PARENT)
@@ -314,10 +315,8 @@ class TestEphemeralFanOutIsDeliberatelyUnchanged:
             telemetry.outbound_context.reset(token)
         sql, args = conn.calls[-1]
         assert sql == "SELECT pg_notify($1, $2)"
-        assert json.loads(args[1]) == {"id": 1}, (
-            "the ephemeral payload is the user's message verbatim; wrapping it "
-            "in an envelope is a wire-format break and needs a versioned one"
-        )
+        envelope = json.loads(args[1].removeprefix(messaging_module._EPHEMERAL_PREFIX))
+        assert envelope == {"tenant": "", "payload": {"id": 1}}
         assert PARENT not in args[1]
 
 

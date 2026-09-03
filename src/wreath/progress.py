@@ -362,7 +362,11 @@ async def push_progress(
     *,
     interval: float = 1.0,
     max_duration: float | None = None,
-) -> None:
+    authorize: Callable[[str], bool] | None = None,
+) -> bool:
     """Push progress as JSON text frames over an accepted WebSocket until terminal."""
+    if authorize is not None and not authorize(task_id):
+        return False
     async for progress in registry.stream(task_id, interval=interval, max_duration=max_duration):
         await websocket.send_text(_as_text(progress.as_dict()))
+    return True

@@ -12,6 +12,16 @@ from wreath._agents.backplanes import (
     GeminiGenerateContentBackplane,
     OpenAICompatibleBackplane,
     OpenAIResponsesBackplane,
+    _anthropic_request,
+    _anthropic_response_stream,
+    _anthropic_usage,
+    _chat_completions_request,
+    _chat_usage,
+    _gemini_request,
+    _gemini_usage,
+    _openai_response_stream,
+    _openai_responses_request,
+    _openai_usage,
 )
 from wreath.agents import (
     BackplaneError,
@@ -28,6 +38,22 @@ type TransportResult = tuple[int, Mapping[str, str], TransportBody]
 async def chunks(*values: bytes) -> AsyncIterator[bytes]:
     for value in values:
         yield value
+
+
+async def anthropic_events(
+    *values: Mapping[str, Any], request_id: str | None = "header-id"
+) -> list[Any]:
+    body = b"".join(
+        b"data: " + json.dumps(value).encode() + b"\n\n" for value in values
+    )
+    return [
+        event
+        async for event in _anthropic_response_stream(
+            body,
+            request_id=request_id,
+            maximum=16_384,
+        )
+    ]
 
 
 class ClosableBody:
@@ -147,6 +173,280 @@ def test_backplane_configuration_refuses_invalid_facts_at_construction(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         factory()
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"api_version": ""}, "api_version"),
+        ({"default_max_output_tokens": 0}, "default_max_output_tokens"),
+    ],
+)
+def test_anthropic_configuration_refuses_invalid_protocol_defaults(
+    options: dict[str, Any], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        AnthropicMessagesBackplane(
+            api_key="secret", transport=Transport([]), **options
+        )
+
+
+def test_compatible_configuration_refuses_an_empty_configured_key() -> None:
+    with pytest.raises(ValueError, match="api_key"):
+        OpenAICompatibleBackplane(
+            base_url="https://models.example/v1",
+            transport=Transport([]),
+            api_key="",
+        )
+
+
+@pytest.mark.parametrize(
+    "normalize",
+    [_openai_usage, _chat_usage, _anthropic_usage, _gemini_usage],
+)
+def test_usage_normalizers_treat_non_mappings_as_empty(normalize: Any) -> None:
+    assert normalize(None) == ModelUsage(0, 0, 0)
+
+
+def test_openai_request_requires_complete_tool_history_identity() -> None:
+    incomplete = ModelRequest(
+        "model",
+        (
+            ModelMessage("assistant", "name only", name="weather"),
+            ModelMessage("assistant", "call only", call_id="call-1"),
+            ModelMessage("assistant", "", name="weather", call_id="call-2"),
+        ),
+    )
+
+    payload = _openai_responses_request(incomplete, stream=False)
+
+    assert payload["input"] == [
+        {"role": "assistant", "content": "name only"},
+        {"role": "assistant", "content": "call only"},
+        {
+            "type": "function_call",
+            "call_id": "call-2",
+            "name": "weather",
+            "arguments": "{}",
+        },
+    ]
+
+
+def test_openai_request_omits_empty_optional_sections() -> None:
+    empty = ModelRequest("model", (ModelMessage("user", "hello"),))
+    internal_only = replace(empty, metadata={"tenant": "secret", "agent_profile": "worker"})
+
+    assert _openai_responses_request(empty, stream=False) == {
+        "model": "model",
+        "input": [{"role": "user", "content": "hello"}],
+        "stream": False,
+    }
+    assert "metadata" not in _openai_responses_request(internal_only, stream=False)
+
+
+def test_anthropic_request_requires_complete_tool_history_identity() -> None:
+    incomplete = ModelRequest(
+        "model",
+        (
+            ModelMessage("assistant", "name only", name="weather"),
+            ModelMessage("assistant", "call only", call_id="call-1"),
+            ModelMessage("assistant", "", name="weather", call_id="call-2"),
+        ),
+    )
+
+    payload = _anthropic_request(
+        incomplete, stream=False, default_max_output_tokens=99
+    )
+
+    assert payload["messages"] == [
+        {"role": "assistant", "content": "name only"},
+        {"role": "assistant", "content": "call only"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "call-2",
+                    "name": "weather",
+                    "input": {},
+                }
+            ],
+        },
+    ]
+    assert payload["max_tokens"] == 99
+
+
+def test_anthropic_request_omits_empty_sections_and_preserves_zero_temperature() -> None:
+    empty = ModelRequest("model", (ModelMessage("user", "hello"),))
+    zero_temperature = replace(empty, temperature=0)
+    invalid_users = (
+        replace(empty, metadata={"user_id": ""}),
+        replace(empty, metadata={"user_id": 7}),
+    )
+
+    payload = _anthropic_request(empty, stream=False, default_max_output_tokens=99)
+    assert payload == {
+        "model": "model",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 99,
+        "stream": False,
+    }
+    assert _anthropic_request(
+        zero_temperature, stream=False, default_max_output_tokens=99
+    )["temperature"] == 0
+    for invalid in invalid_users:
+        assert "metadata" not in _anthropic_request(
+            invalid, stream=False, default_max_output_tokens=99
+        )
+    assert _anthropic_request(
+        replace(empty, metadata={"user_id": "user-7"}),
+        stream=False,
+        default_max_output_tokens=99,
+    )["metadata"] == {"user_id": "user-7"}
+
+
+@pytest.mark.asyncio
+async def test_openai_stream_preserves_fallback_id_and_ignores_non_text_delta() -> None:
+    body = b"".join(
+        (
+            b'data: {"type":"response.output_text.delta","delta":7,'
+            b'"response":{"id":""}}\n\n',
+            b'data: {"type":"response.completed"}\n\n',
+        )
+    )
+
+    events = [
+        event
+        async for event in _openai_response_stream(
+            body, request_id="header-id", maximum=1024
+        )
+    ]
+
+    assert [event.kind for event in events] == ["usage", "completed"]
+    assert all(event.provider_request_id == "header-id" for event in events)
+    assert events[0].usage == ModelUsage(0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_openai_stream_uses_envelope_for_non_mapping_error() -> None:
+    body = b'data: {"type":"error","error":"invalid","message":"specific"}\n\n'
+
+    with pytest.raises(BackplaneError, match="specific"):
+        [
+            event
+            async for event in _openai_response_stream(
+                body, request_id="header-id", maximum=1024
+            )
+        ]
+
+
+def test_gemini_request_preserves_roles_and_requires_complete_tool_identity() -> None:
+    messages = ModelRequest(
+        "model",
+        (
+            ModelMessage("user", "hello"),
+            ModelMessage("assistant", "plain"),
+            ModelMessage("assistant", "name only", name="weather"),
+            ModelMessage("assistant", "call only", call_id="call-1"),
+            ModelMessage("assistant", "", name="weather", call_id="call-2"),
+            ModelMessage("tool", "7", name="weather", call_id="call-2"),
+        ),
+    )
+
+    payload = _gemini_request(messages)
+
+    assert payload["contents"] == [
+        {"role": "user", "parts": [{"text": "hello"}]},
+        {"role": "model", "parts": [{"text": "plain"}]},
+        {"role": "model", "parts": [{"text": "name only"}]},
+        {"role": "model", "parts": [{"text": "call only"}]},
+        {
+            "role": "model",
+            "parts": [{"functionCall": {"name": "weather", "args": {}}}],
+        },
+        {
+            "role": "user",
+            "parts": [
+                {
+                    "functionResponse": {
+                        "name": "weather",
+                        "response": {"result": 7},
+                    }
+                }
+            ],
+        },
+    ]
+
+
+def test_gemini_request_omits_empty_options_and_preserves_explicit_values() -> None:
+    empty = ModelRequest("model", (ModelMessage("user", "hello"),))
+    configured = replace(empty, max_output_tokens=1, temperature=0)
+
+    assert _gemini_request(empty) == {
+        "contents": [{"role": "user", "parts": [{"text": "hello"}]}]
+    }
+    assert _gemini_request(configured)["generationConfig"] == {
+        "maxOutputTokens": 1,
+        "temperature": 0,
+    }
+
+
+def test_chat_request_preserves_message_roles_and_optional_fields() -> None:
+    messages = ModelRequest(
+        "model",
+        (
+            ModelMessage("user", "hello"),
+            ModelMessage("user", "named user", name="user-name", call_id="not-a-tool"),
+            ModelMessage("assistant", "name only", name="weather"),
+            ModelMessage("assistant", "call only", call_id="call-1"),
+            ModelMessage("assistant", "", name="weather", call_id="call-2"),
+            ModelMessage("tool", "result", name="weather", call_id="call-2"),
+        ),
+    )
+
+    payload = _chat_completions_request(messages, stream=False)
+
+    assert payload["messages"] == [
+        {"role": "user", "content": "hello"},
+        {"role": "user", "content": "named user", "name": "user-name"},
+        {"role": "assistant", "content": "name only", "name": "weather"},
+        {"role": "assistant", "content": "call only"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "id": "call-2",
+                    "function": {"name": "weather", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "content": "result",
+            "tool_call_id": "call-2",
+            "name": "weather",
+        },
+    ]
+    assert "stream_options" not in payload
+    assert "max_tokens" not in payload
+    assert "temperature" not in payload
+
+
+def test_chat_request_stream_and_generation_options_preserve_explicit_values() -> None:
+    configured = ModelRequest(
+        "model",
+        (ModelMessage("user", "hello"),),
+        max_output_tokens=1,
+        temperature=0,
+    )
+
+    payload = _chat_completions_request(configured, stream=True)
+
+    assert payload["max_tokens"] == 1
+    assert payload["temperature"] == 0
+    assert payload["stream_options"] == {"include_usage": True}
 
 
 async def test_openai_responses_non_streaming_renders_once_and_normalizes_every_fact() -> None:
@@ -387,6 +687,151 @@ async def test_anthropic_messages_streaming_maps_system_tools_usage_and_partial_
     assert payload["messages"][-1]["content"][0]["type"] == "tool_result"
     assert payload["tools"][0]["input_schema"] == request().tools[0].input_schema
     assert "metadata" not in payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        {"type": "message_start", "message": None},
+        {"type": "content_block_start", "index": 1, "content_block": None},
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "text"},
+        },
+        {
+            "type": "content_block_start",
+            "index": [],
+            "content_block": {"type": "tool_use", "id": "toolu_1", "name": "weather"},
+        },
+        {"type": "content_block_delta", "index": 0, "delta": None},
+    ],
+)
+async def test_anthropic_stream_ignores_each_malformed_optional_event(
+    malformed: Mapping[str, Any],
+) -> None:
+    events = await anthropic_events(malformed, {"type": "message_stop"})
+
+    assert [event.kind for event in events] == ["completed"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_does_not_turn_text_blocks_into_tools() -> None:
+    events = await anthropic_events(
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "text"},
+        },
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_stop"},
+    )
+
+    assert [event.kind for event in events] == ["completed"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_preserves_request_fallback_and_missing_usage() -> None:
+    events = await anthropic_events(
+        {"type": "message_start", "message": {"id": "", "usage": None}},
+        {"type": "message_delta", "usage": None},
+        {"type": "message_stop"},
+    )
+
+    assert [event.kind for event in events] == ["usage", "completed"]
+    assert all(event.provider_request_id == "header-id" for event in events)
+    assert events[0].usage == ModelUsage(0, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "delta",
+    [
+        {"type": "other", "text": "unexpected"},
+        {"type": "text_delta", "text": 1},
+    ],
+)
+async def test_anthropic_stream_ignores_each_invalid_text_delta(
+    delta: Mapping[str, Any],
+) -> None:
+    events = await anthropic_events(
+        {"type": "content_block_delta", "index": 0, "delta": delta},
+        {"type": "message_stop"},
+    )
+
+    assert [event.kind for event in events] == ["completed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("index", "delta"),
+    [
+        (1, {"type": "other", "partial_json": '{"city":"Melbourne"}'}),
+        (1.0, {"type": "input_json_delta", "partial_json": '{"city":"Melbourne"}'}),
+        (2, {"type": "input_json_delta", "partial_json": '{"city":"Melbourne"}'}),
+        (1, {"type": "input_json_delta", "partial_json": 7}),
+    ],
+)
+async def test_anthropic_stream_ignores_each_invalid_tool_delta(
+    index: object,
+    delta: Mapping[str, Any],
+) -> None:
+    events = await anthropic_events(
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "tool_use", "id": "toolu_1", "name": "weather"},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "input_json_delta", "partial_json": "{}"},
+        },
+        {"type": "content_block_delta", "index": index, "delta": delta},
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_stop"},
+    )
+
+    assert [event.kind for event in events] == ["tool_call", "completed"]
+    assert events[0].arguments == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("index", [1.0, 2])
+async def test_anthropic_stream_ignores_each_invalid_tool_stop(index: object) -> None:
+    events = await anthropic_events(
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "tool_use", "id": "toolu_1", "name": "weather"},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "input_json_delta", "partial_json": "{}"},
+        },
+        {"type": "content_block_stop", "index": index},
+        {"type": "message_stop"},
+    )
+
+    assert [event.kind for event in events] == ["completed"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_surfaces_explicit_provider_errors() -> None:
+    with pytest.raises(BackplaneError, match="capacity exhausted") as caught:
+        await anthropic_events(
+            {
+                "type": "error",
+                "error": {
+                    "type": "overloaded_error",
+                    "message": "capacity exhausted",
+                },
+            }
+        )
+
+    assert caught.value.retryable is True
 
 
 async def test_anthropic_truncated_stream_retries_before_visible_output() -> None:

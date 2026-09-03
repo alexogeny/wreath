@@ -253,7 +253,6 @@ _RUNTIME = r"""
     if (word.length <= 4) { return word; }
     if (/ies$/.test(word)) { return word.slice(0, -3) + 'y'; }
     if (/(ches|shes|sses|xes|zes)$/.test(word)) { return word.slice(0, -2); }
-    if (/es$/.test(word)) { return word.slice(0, -1); }
     if (/s$/.test(word) && !/ss$/.test(word)) { return word.slice(0, -1); }
     return word;
   }

@@ -68,11 +68,21 @@ def test_parses_shorthand_documents() -> None:
         'query { a(x: "unterminated) }',
         "subscription { x }",  # unsupported operation
         "fragment F { id }",  # missing `on`
+        "{A{A}}fragment",
+        "{A{A}{",
+        "query($A:A){A{A}{",
         "fragment F on T { id } fragment F on T { id }",  # duplicate
     ],
 )
 def test_malformed_documents_are_refused(source: str) -> None:
     with pytest.raises(GraphQLSyntaxError):
+        parse(source)
+
+
+def test_a_non_string_document_is_refused_by_the_graphql_contract() -> None:
+    source: Any = b"{ users { id } }"
+
+    with pytest.raises(GraphQLSyntaxError, match="must be a string"):
         parse(source)
 
 
@@ -184,6 +194,7 @@ def test_the_schema_is_derived_from_the_orm(registry: Registry) -> None:
     assert "posts: [Post!]!" in sdl  # to-many relationship
     assert "author: User" in sdl  # to-one relationship
     assert "users(limit: Int, offset: Int)" in sdl
+    assert "user(id: ID!): User" in sdl
 
 
 def test_narrowing_models_narrows_what_is_reachable(registry: Registry) -> None:
@@ -342,7 +353,7 @@ async def test_a_relationship_is_batched_not_resolved_per_parent(
 ) -> None:
     database.connection.script("users", [user_row(1), user_row(2), user_row(3)])
     database.connection.script("posts", [post_row(10, 1), post_row(11, 2)])
-    api = GraphQL(registry, models=[User, Post])
+    api = GraphQL(registry, models=[User, Post], max_page_size=3)
 
     body = await api.run("{ users { id posts { title } } }", Session(registry, "read"))
 
@@ -648,6 +659,12 @@ def test_a_policy_resource_is_a_cedar_entity_reference() -> None:
     # A policy already written as a reference is used verbatim, both spellings.
     assert policy_resource('Billing::"read"') == EntityUid("Billing", "read")
     assert policy_resource("Billing::read") == EntityUid("Billing", "read")
+
+
+@pytest.mark.parametrize("policy", ["User", ".email", "User."])
+def test_a_dotted_policy_resource_requires_both_names(policy: str) -> None:
+    with pytest.raises(ValueError, match="not a usable authorization resource"):
+        policy_resource(policy)
 
 
 def test_a_policy_no_engine_could_read_is_refused_at_declaration(registry: Registry) -> None:
@@ -1384,6 +1401,18 @@ def test_resolvers_cannot_be_added_after_the_endpoint_is_serving(registry: Regis
         async def late(users, info):
             return []
 
+    with pytest.raises(ResolverError, match="before the endpoint serves"):
+
+        @api.query("lateQuery", returns="User")
+        async def late_query(info):
+            return None
+
+    with pytest.raises(ResolverError, match="before the endpoint serves"):
+
+        @api.mutation("lateMutation", returns="User")
+        async def late_mutation(info):
+            return None
+
 
 def test_the_sdl_shows_resolvers_custom_roots_and_mutations(registry: Registry) -> None:
     api = GraphQL(registry, models=[User, Post])
@@ -1406,6 +1435,32 @@ def test_the_sdl_shows_resolvers_custom_roots_and_mutations(registry: Registry) 
     assert "type Mutation {" in sdl
     assert "createUser: User" in sdl
 
+    query = api.schema.roots["search"]
+    mutation = api.schema.mutations["createUser"]
+    assert query.resolver.type_name == "Query"
+    assert query.policy == "Query.search"
+    assert mutation.resolver.type_name == "Mutation"
+    assert mutation.policy == "Mutation.createUser"
+
+
+def test_an_explicit_root_policy_is_not_replaced_by_the_default(registry: Registry) -> None:
+    api = GraphQL(registry, models=[User])
+
+    @api.query("search", returns="User", policy='Search::"read"')
+    async def search(info):
+        return None
+
+    assert api.schema.roots["search"].policy == 'Search::"read"'
+
+
+def test_compiled_policy_schema_is_cached(registry: Registry) -> None:
+    api = GraphQL(registry, models=[User])
+
+    first = api._ensure_policy_schema()
+
+    assert first is not None
+    assert api._ensure_policy_schema() is first
+
 
 @pytest.mark.asyncio
 async def test_the_http_endpoint_refuses_a_non_object_json_body(
@@ -1421,6 +1476,58 @@ async def test_the_http_endpoint_refuses_a_non_object_json_body(
     assert response.json() == {
         "errors": [{"message": "expected a JSON object with a `query` string"}]
     }
+
+
+@pytest.mark.asyncio
+async def test_the_http_endpoint_refuses_each_malformed_request_field(
+    registry: Registry,
+) -> None:
+    app = Wreath()
+    app.include_router(GraphQL(registry, models=[User]).router())
+
+    async with TestClient(app) as client:
+        missing_type = await client.post("/graphql", content=b'{}')
+        bad_query = await client.post("/graphql", json={"query": 7})
+        bad_variables = await client.post(
+            "/graphql", json={"query": "{ users { id } }", "variables": []}
+        )
+
+    assert missing_type.status == 415
+    assert bad_query.status == 400
+    assert bad_variables.status == 400
+
+
+@pytest.mark.asyncio
+async def test_a_non_string_operation_name_is_treated_as_absent(registry: Registry) -> None:
+    app = Wreath()
+    app.include_router(GraphQL(registry, models=[User]).router())
+
+    async with TestClient(app) as client:
+        response = await client.post(
+            "/graphql",
+            json={"query": "query Named { users { id } }", "operationName": 7},
+        )
+
+    assert response.status == 200
+    assert "errors" not in response.json()
+
+
+@pytest.mark.asyncio
+async def test_a_string_operation_name_selects_the_named_operation(registry: Registry) -> None:
+    app = Wreath()
+    app.include_router(GraphQL(registry, models=[User]).router())
+
+    async with TestClient(app) as client:
+        response = await client.post(
+            "/graphql",
+            json={
+                "query": "query Good { users { id } } query Bad { missing }",
+                "operationName": "Good",
+            },
+        )
+
+    assert response.status == 200
+    assert "errors" not in response.json()
 
 
 # `wreath mutant` survived `expression.take-branch` on `"write" if mutating else
@@ -1549,6 +1656,7 @@ def _weighed(api: GraphQL, source: str) -> int:
         document,
         document.operation(),
         max_complexity=api._limits.max_complexity,
+        max_page_size=api._max_page_size,
     )
 
 
@@ -1556,7 +1664,7 @@ def _weighed(api: GraphQL, source: str) -> int:
 async def test_a_declared_cost_is_charged_and_a_plain_selection_is_not(
     registry: Registry,
 ) -> None:
-    api = GraphQL(registry, models=[User])
+    api = GraphQL(registry, models=[User], max_page_size=3)
 
     @api.field("User", "cheap", returns="Int")
     async def cheap(users, info):
@@ -1569,8 +1677,8 @@ async def test_a_declared_cost_is_charged_and_a_plain_selection_is_not(
     api.validate()
     # `users` is a derived list root and declares 10; `id` is a column at 1.
     baseline = _weighed(api, "{ users { id cheap } }")
-    assert baseline == 10 + 1 + 1
-    assert _weighed(api, "{ users { id expensive } }") == 10 + 1 + 50
+    assert baseline == 10 + 3 + 3
+    assert _weighed(api, "{ users { id expensive } }") == 10 + 3 + 150
     # Identical selection counts, a 49-point difference. Before this pass they
     # were the same number.
     assert (
@@ -1617,23 +1725,35 @@ async def test_a_document_within_budget_still_runs(
 
 
 @pytest.mark.asyncio
-async def test_cost_is_additive_rather_than_multiplied_by_a_list(
+async def test_cost_multiplies_nested_work_by_bounded_list_cardinality(
     registry: Registry,
 ) -> None:
-    api = GraphQL(registry, models=[User, Post])
+    api = GraphQL(registry, models=[User, Post], max_page_size=3)
     api.validate()
 
-    single = _weighed(api, "{ user(id: 1) { id } }")
-    listed = _weighed(api, "{ users { id } }")
-    assert single == 1 + 1  # a single-row root is an ordinary read
-    assert listed == 10 + 1  # a list root declares 10, not 10 x anything
-    # And `limit` does not enter into it: the budget must not depend on a value
-    # the client picks. `max_page_size` is what bounds that.
-    assert _weighed(api, "{ users(limit: 1000) { id } }") == listed
+    def weighed(source: str) -> int:
+        from wreath._graphql.cost import weigh
 
-    # A relationship declares 5, because it fans out a whole level -- which is
-    # the shape `cost=` exists for, charged once rather than per parent row.
-    assert _weighed(api, "{ users { id posts { title } } }") == 10 + 1 + 5 + 1
+        document = api.parse(source)
+        return weigh(
+            api._schema,
+            document,
+            document.operation(),
+            max_complexity=api._limits.max_complexity,
+            max_page_size=3,
+        )
+
+    single = weighed("{ user(id: 1) { id } }")
+    listed = weighed("{ users { id } }")
+    assert single == 1 + 1  # a single-row root is an ordinary read
+    assert listed == 10 + 3
+    # Client input cannot lower the security bound: max_page_size is the stable
+    # declaration-time ceiling used for the worst-case execution shape.
+    assert weighed("{ users(limit: 1000) { id } }") == listed
+
+    # Three users can each load three posts. Relationship work is charged per
+    # parent and its projection per possible child, not once for the document.
+    assert weighed("{ users { id posts { title } } }") == 10 + 3 + 15 + 9
 
 
 @pytest.mark.asyncio
@@ -1662,7 +1782,7 @@ async def test_a_mutation_is_weighed_against_the_mutation_roots(
 async def test_root_fragments_are_matched_against_the_operation_type(
     registry: Registry,
 ) -> None:
-    api = GraphQL(registry, models=[User])
+    api = GraphQL(registry, models=[User], max_page_size=3)
 
     @api.mutation("costlyWrite", returns="Int", cost=99)
     async def costly_write(info):
@@ -1674,7 +1794,7 @@ async def test_root_fragments_are_matched_against_the_operation_type(
             api,
             "query { ...Read } fragment Read on Query { users { id } }",
         )
-        == 10 + 1
+        == 10 + 3
     )
     assert (
         _weighed(
@@ -1689,7 +1809,7 @@ async def test_root_fragments_are_matched_against_the_operation_type(
 async def test_fragments_are_expanded_before_they_are_weighed(
     registry: Registry,
 ) -> None:
-    api = GraphQL(registry, models=[User])
+    api = GraphQL(registry, models=[User], max_page_size=3)
 
     @api.field("User", "expensive", returns="Int", cost=50)
     async def expensive(users, info):
@@ -1698,9 +1818,9 @@ async def test_fragments_are_expanded_before_they_are_weighed(
     api.validate()
     inline = _weighed(api, "{ users { id expensive } }")
     spread = _weighed(api, "{ users { id ...F } } fragment F on User { expensive }")
-    assert spread == inline == 10 + 1 + 50
+    assert spread == inline == 10 + 3 * (1 + 50)
     nested = _weighed(api, "{ users { ... on User { expensive } } }")
-    assert nested == 10 + 50
+    assert nested == 10 + 3 * 50
 
 
 @pytest.mark.asyncio
@@ -1745,7 +1865,7 @@ def test_costing_tolerates_missing_object_selection_sets(
     api.validate()
 
     assert _weighed(api, "{ user(id: 1) }") == 1
-    assert _weighed(api, "{ users { posts } }") == 10 + 5
+    assert _weighed(api, "{ users { posts } }") == 10 + 500
 
 
 @pytest.mark.asyncio

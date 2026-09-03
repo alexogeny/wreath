@@ -202,6 +202,23 @@ def test_a_global_middleware_that_also_scopes_itself_is_refused() -> None:
         generate_openapi(app)
 
 
+def test_a_global_middleware_without_a_route_predicate_declares_its_contract() -> None:
+    class Global:
+        global_scope = True
+
+        async def before(self, request: Any) -> None:
+            return None
+
+        def describe(self) -> MiddlewareContract:
+            return MiddlewareContract(
+                responses=((429, ResponseSpec(description="Too Many Requests")),)
+            )
+
+    operation = generate_openapi(_app_with(Global()))["paths"]["/widgets"]["get"]
+
+    assert operation["responses"]["429"]["description"] == "Too Many Requests"
+
+
 def test_only_one_global_preflight_handler_can_be_registered() -> None:
     class Preflight:
         async def before(self, request: Any) -> None:

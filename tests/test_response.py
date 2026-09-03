@@ -13,6 +13,7 @@ from wreath.response import (
     Response,
     StreamingResponse,
     TextResponse,
+    _disposition,
     _HeaderResponse,
 )
 
@@ -79,6 +80,23 @@ def test_default_headers() -> None:
         (b"content-type", b"application/octet-stream"),
         (b"content-length", b"3"),
     ]
+
+
+def test_content_digest_uses_explicit_content_instead_of_the_response_body() -> None:
+    response = Response(b"response body")
+    expected = Response(b"transmitted content")
+
+    response.set_content_digest("sha-256", content=b"transmitted content")
+    expected.set_content_digest("sha-256")
+
+    assert response.headers[-1] == expected.headers[-1]
+
+
+def test_attachment_disposition_uses_ascii_and_extended_filename_forms() -> None:
+    assert _disposition("asset.txt") == b'attachment; filename="asset.txt"'
+    assert _disposition("caf\N{LATIN SMALL LETTER E WITH ACUTE}.txt") == (
+        b'attachment; filename="caf?.txt"; filename*=UTF-8\'\'caf%C3%A9.txt'
+    )
 
 
 def test_exact_html_headers_materialize_only_when_observed() -> None:
@@ -379,6 +397,11 @@ def test_from_descriptor_close_is_explicit_and_idempotent(tmp_path) -> None:
     assert not _fd_is_open(fd)
     response.close()  # a second close must not touch a now-reused descriptor
     del response
+
+
+def test_a_partially_initialized_file_response_is_safe_to_finalize() -> None:
+    response = object.__new__(FileResponse)
+    response.__del__()
 
 
 @pytest.mark.asyncio

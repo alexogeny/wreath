@@ -7,6 +7,10 @@ import pytest
 from wreath._devtools import decomp, measure
 
 
+def test_default_measurement_scope_has_a_host_header() -> None:
+    assert measure.scope()["headers"] == [(b"host", b"example.com")]
+
+
 def test_the_stage_apps_all_serve_the_traced_route() -> None:
     template = measure.scope("GET", "/users/1", decomp.REQUEST_HEADERS)
     for auth in (False, True):
@@ -38,6 +42,11 @@ def test_verify_serving_accepts_a_serving_arm() -> None:
     arm = measure.Arm("full", app)
     template = measure.scope("GET", "/users/1", decomp.REQUEST_HEADERS)
     asyncio.run(measure.verify_serving([arm], template, "before"))
+
+
+def test_verify_serving_ignores_non_app_arms() -> None:
+    template = measure.scope()
+    asyncio.run(measure.verify_serving([measure.Arm("callable")], template, "before"))
 
 
 def test_the_noise_floor_comes_from_two_separate_arms() -> None:

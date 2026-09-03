@@ -435,7 +435,10 @@ _ACTIVITY_ROWS = tuple(
 )
 
 _TENANT_DIRECTORY = InMemoryTenantDirectory((Tenant("acme", "tenant_acme", "tenant_acme_role"),))
-_TENANCY = Tenancy(directory=_TENANT_DIRECTORY, source=TenantHeader("x-tenant"))
+_TENANCY = Tenancy(
+    directory=_TENANT_DIRECTORY,
+    source=TenantHeader("x-tenant", trusted=True),
+)
 _ORGANIZATIONS = InMemoryOrganizationStore(
     roles={"admin", "member", "billing"},
     organizations=(Organization("acme", "Acme Field Operations"),),

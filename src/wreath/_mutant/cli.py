@@ -17,6 +17,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from .differential import DifferentialFuzzConfig
 from .model import Outcome
 from .operators import OPERATORS
 from .report import render, render_json
@@ -57,11 +58,32 @@ def default_tests(repo: Path) -> list[str]:
 
 def _exit_status(report: Any, *, fail_on_survivor: bool) -> int:
     """Turn one completed report into CLI status without re-running it."""
+    differential = report.differential_fuzz
+    if isinstance(differential, dict) and int(differential.get("failures", 0)):
+        return 1
     if fail_on_survivor and (
         report.by_outcome(Outcome.SURVIVED) or report.by_outcome(Outcome.UNREACHED)
     ):
         return 1
     return 0
+
+
+def _read_preselection(path: Path) -> tuple[frozenset[str], dict[str, Any] | None]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return frozenset(str(item) for item in value), None
+    if not isinstance(value, dict) or value.get("version") != 1:
+        raise ValueError("selection must be a version 1 object with identifiers and metadata")
+    identifiers = value.get("identifiers")
+    metadata = value.get("metadata")
+    if not isinstance(identifiers, list) or any(not isinstance(item, str) for item in identifiers):
+        raise ValueError("selection identifiers must be a list of mutation id strings")
+    if not isinstance(metadata, dict):
+        raise ValueError("selection metadata must be an object")
+    return (
+        frozenset(str(identifier) for identifier in identifiers),
+        {str(key): item for key, item in metadata.items()},
+    )
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -206,6 +228,38 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="exit 1 when anything survived. Off by default: this is a report, "
         "not a gate, and a survivor is a question rather than a verdict.",
     )
+    parser.add_argument(
+        "--differential-fuzz",
+        action="store_true",
+        help="probe surviving mutants with matching fuzz targets in isolated children",
+    )
+    parser.add_argument(
+        "--fuzz-corpus-root",
+        default=".wreath/fuzz/corpus",
+        metavar="PATH",
+        help="persistent differential fuzz corpus root",
+    )
+    parser.add_argument(
+        "--fuzz-artifact-root",
+        default=".wreath/fuzz/artifacts",
+        metavar="PATH",
+        help="minimized differential finding artifact root",
+    )
+    parser.add_argument("--fuzz-seed", type=int, default=None, metavar="N")
+    parser.add_argument("--fuzz-cases", type=int, default=1_000, metavar="N")
+    parser.add_argument("--fuzz-seconds", type=float, default=10.0, metavar="SECONDS")
+    parser.add_argument(
+        "--fuzz-replay-only",
+        action="store_true",
+        help="replay the persisted corpus against survivors without generating inputs",
+    )
+    parser.add_argument(
+        "--fuzz-target",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="restrict differential probing to a named registered target (repeatable)",
+    )
 
 
 def execute_mutant(namespace: Any) -> int:
@@ -231,6 +285,38 @@ def execute_mutant(namespace: Any) -> int:
     if namespace.jobs < 1:
         print("wreath: error: --jobs must be at least 1", file=sys.stderr)
         return 2
+    if namespace.fuzz_cases < 1:
+        print("wreath: error: --fuzz-cases must be at least 1", file=sys.stderr)
+        return 2
+    if namespace.fuzz_seconds <= 0:
+        print("wreath: error: --fuzz-seconds must be positive", file=sys.stderr)
+        return 2
+    if namespace.fuzz_seed is not None and not 0 <= namespace.fuzz_seed < 2**64:
+        print(
+            "wreath: error: --fuzz-seed must be from 0 through 2**64 - 1",
+            file=sys.stderr,
+        )
+        return 2
+    if namespace.differential_fuzz and namespace.fuzz_target:
+        from wreath._fuzz_targets import TARGETS
+
+        available = {target.name for target in TARGETS}
+        unknown = sorted(set(namespace.fuzz_target) - available)
+        if unknown:
+            print(
+                f"wreath: error: unknown --fuzz-target {unknown[0]!r}; choose one of: "
+                f"{', '.join(sorted(available))}",
+                file=sys.stderr,
+            )
+            return 2
+    preselected: frozenset[str] | None = None
+    selection_metadata: dict[str, Any] | None = None
+    if namespace.selection is not None:
+        try:
+            preselected, selection_metadata = _read_preselection(Path(namespace.selection))
+        except (OSError, ValueError) as error:
+            print(f"wreath: error: invalid mutation selection: {error}", file=sys.stderr)
+            return 2
     if namespace.background_priority and hasattr(os, "nice"):
         # ``wreath test`` runs this interpreter beside its ordinary workers.
         # Let the semantic test run own the cores; planning and live probes can
@@ -271,19 +357,30 @@ def execute_mutant(namespace: Any) -> int:
                 jobs=namespace.jobs,
                 reclaim_workers=namespace.reclaim_workers,
                 suite_workers=namespace.suite_workers,
-                preselected=(
-                    frozenset(json.loads(Path(namespace.selection).read_text()))
-                    if namespace.selection is not None
-                    else None
-                ),
+                preselected=preselected,
                 activity_file=(
                     Path(namespace.activity_file) if namespace.activity_file is not None else None
                 ),
                 test_engine=namespace.test_engine,
+                differential_fuzz=(
+                    DifferentialFuzzConfig(
+                        Path(namespace.fuzz_corpus_root),
+                        Path(namespace.fuzz_artifact_root),
+                        seed=namespace.fuzz_seed,
+                        max_cases=namespace.fuzz_cases,
+                        max_seconds=namespace.fuzz_seconds,
+                        target_names=tuple(namespace.fuzz_target),
+                        generate=not namespace.fuzz_replay_only,
+                    )
+                    if namespace.differential_fuzz
+                    else None
+                ),
             )
         except ChangedUnavailable as error:
             print(f"wreath: error: --changed needs git: {error}", file=sys.stderr)
             return 2
+    if selection_metadata is not None:
+        report.selection = selection_metadata
 
     # A bound that selects nothing must not read as a clean run: the report
     # says `0 killed, 0 survived` and exits 0, which is a check that passes

@@ -217,6 +217,60 @@ async def test_a_sync_entitlement_method_returning_an_awaitable_is_awaited_once(
 
 
 @pytest.mark.asyncio
+async def test_a_request_aware_atomic_provider_needs_no_identity_fallback() -> None:
+    class RequestAware:
+        def resolve_request(self, request: Any) -> SubscriptionAccess:
+            return SubscriptionAccess("pro", frozenset({"export"}))
+
+        def names(self) -> frozenset[str]:
+            return frozenset({"export"})
+
+    assert (
+        await _status(
+            ENTITLEMENT_POLICY,
+            identity=Identity("alice"),
+            entitlements=RequestAware(),
+        )
+        == 200
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_request_scoped_provider_takes_precedence_over_identity_lookup() -> None:
+    class RequestScoped:
+        def for_request(self, request: Any) -> frozenset[str]:
+            return frozenset({"export"})
+
+        def entitlements(self, identity: Identity) -> frozenset[str]:
+            return frozenset()
+
+        def names(self) -> frozenset[str]:
+            return frozenset({"export"})
+
+    assert (
+        await _status(
+            ENTITLEMENT_POLICY,
+            identity=Identity("alice"),
+            entitlements=RequestScoped(),
+        )
+        == 200
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_atomic_provider_cannot_confirm_a_different_claimed_plan() -> None:
+    class Resolving:
+        def resolve(self, identity: Identity) -> SubscriptionAccess:
+            return SubscriptionAccess("free", frozenset({"export"}))
+
+        def names(self) -> frozenset[str]:
+            return frozenset({"export"})
+
+    identity = (human(Identity("alice")) | on_plan("pro")).bind()
+    assert await _status(ENTITLEMENT_POLICY, identity=identity, entitlements=Resolving()) == 403
+
+
+@pytest.mark.asyncio
 async def test_an_unrestricted_caller_keeps_what_the_provider_grants_whatever_the_plan() -> None:
     provider = Entitlements({"alice": {"export"}}, plans={"alice": "pro"})
     assert (

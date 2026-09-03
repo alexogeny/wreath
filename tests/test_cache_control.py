@@ -21,6 +21,62 @@ def test_cache_control_validation_and_serialization() -> None:
         CacheControl(immutable=True)
 
 
+@pytest.mark.parametrize(
+    ("policy", "headers"),
+    [
+        (CachePolicy(), ()),
+        (
+            CachePolicy(cdn_default=CacheControl(public=True, max_age=60)),
+            ("CDN-Cache-Control",),
+        ),
+        (
+            CachePolicy(cdn_policy=lambda request, response: CacheControl(private=True)),
+            ("CDN-Cache-Control",),
+        ),
+        (
+            CachePolicy(default=CacheControl(public=True, max_age=60)),
+            ("Cache-Control",),
+        ),
+    ],
+)
+def test_cache_contract_declares_cdn_headers_for_static_and_dynamic_policy(
+    policy: CachePolicy, headers: tuple[str, ...]
+) -> None:
+    assert tuple(spec.name for _status, spec in policy.describe().response_headers) == headers
+
+
+def test_cache_contract_exposes_constants_only_for_fixed_policies() -> None:
+    fixed = CachePolicy(
+        default=CacheControl(public=True, max_age=60),
+        cdn_default=CacheControl(private=True, max_age=600),
+    ).describe()
+    assert [(spec.name, spec.const) for _status, spec in fixed.response_headers] == [
+        ("Cache-Control", "public, max-age=60"),
+        ("CDN-Cache-Control", "private, max-age=600"),
+    ]
+
+    dynamic = CachePolicy(
+        default=CacheControl(public=True),
+        policy=lambda request, response: None,
+        cdn_default=CacheControl(private=True),
+        cdn_policy=lambda request, response: None,
+    ).describe()
+    assert [(spec.name, spec.const) for _status, spec in dynamic.response_headers] == [
+        ("Cache-Control", None),
+        ("CDN-Cache-Control", None),
+    ]
+
+
+def test_cache_contract_declares_a_browser_policy_without_a_default() -> None:
+    contract = CachePolicy(policy=lambda request, response: None).describe()
+    assert [spec.name for _status, spec in contract.response_headers] == ["Cache-Control"]
+
+
+def test_cache_policy_refuses_an_empty_cdn_default() -> None:
+    with pytest.raises(ValueError, match="cdn_default needs at least one cache directive"):
+        CachePolicy(cdn_default=CacheControl())
+
+
 def test_targeted_cache_control_uses_structured_dictionary_types() -> None:
     policy = CacheControl(
         private=True,
@@ -172,6 +228,83 @@ async def test_cache_middleware_protects_cdn_policy_when_a_cookie_is_set() -> No
     await middleware.after(_request(), response)
 
     assert (b"cdn-cache-control", b"private, no-store") in response.headers
+
+
+@pytest.mark.asyncio
+async def test_cache_middleware_uses_a_dynamic_cdn_policy() -> None:
+    middleware = CachePolicy(
+        cdn_default=CacheControl(private=True),
+        cdn_policy=lambda request, response: CacheControl(public=True, max_age=120),
+    )
+    response = Response(b"ok")
+    await middleware.after(_request(), response)
+    assert (b"cdn-cache-control", b"public, max-age=120") in response.headers
+
+
+@pytest.mark.asyncio
+async def test_a_declining_cdn_policy_without_a_default_is_a_noop() -> None:
+    middleware = CachePolicy(cdn_policy=lambda request, response: None)
+    response = Response(b"ok")
+    await middleware.after(_request(), response)
+    assert all(name.lower() != b"cdn-cache-control" for name, _value in response.headers)
+
+
+@pytest.mark.asyncio
+async def test_a_private_dynamic_cdn_policy_with_a_cookie_stays_private() -> None:
+    middleware = CachePolicy(
+        cdn_policy=lambda request, response: CacheControl(private=True, max_age=30)
+    )
+    response = Response(b"ok", headers=[(b"set-cookie", b"session=x")])
+    await middleware.after(_request(), response)
+    assert (b"cdn-cache-control", b"private, max-age=30") in response.headers
+
+
+@pytest.mark.asyncio
+async def test_browser_and_cdn_public_policies_share_the_cookie_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wreath.policy import cache as cache_module
+
+    original = cache_module.find_response_header
+    cookie_lookups = 0
+
+    def count_cookie(headers, name: bytes):
+        nonlocal cookie_lookups
+        if name == b"set-cookie":
+            cookie_lookups += 1
+        return original(headers, name)
+
+    monkeypatch.setattr(cache_module, "find_response_header", count_cookie)
+    middleware = CachePolicy(
+        CacheControl(public=True),
+        cdn_default=CacheControl(public=True),
+    )
+    await middleware.after(_request(), Response(b"ok"))
+    assert cookie_lookups == 1
+
+
+@pytest.mark.asyncio
+async def test_a_dynamic_cdn_policy_must_have_a_cache_directive() -> None:
+    middleware = CachePolicy(cdn_policy=lambda request, response: CacheControl())
+    with pytest.raises(ValueError, match="cdn_policy returned a policy with no cache directives"):
+        await middleware.after(_request(), Response(b"ok"))
+
+
+@pytest.mark.asyncio
+async def test_no_cdn_configuration_skips_the_cdn_header_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wreath.policy import cache as cache_module
+
+    original = cache_module.find_response_header
+
+    def reject_cdn_lookup(headers, name: bytes):
+        if name == b"cdn-cache-control":
+            raise AssertionError("no CDN policy means no CDN header lookup")
+        return original(headers, name)
+
+    monkeypatch.setattr(cache_module, "find_response_header", reject_cdn_lookup)
+    await CachePolicy().after(_request(), Response(b"ok"))
 
 
 @pytest.mark.asyncio

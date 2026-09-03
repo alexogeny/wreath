@@ -20,6 +20,22 @@ async def _receive() -> dict:
     return {"type": "http.request", "body": b"", "more_body": False}
 
 
+class _StoreStub:
+    def __init__(self, reservation: tuple[str, object | None] = ("fresh", None)) -> None:
+        self.reservation = reservation
+        self.releases: list[str] = []
+        self.stores: list[tuple[str, object]] = []
+
+    async def reserve(self, key: str):
+        return self.reservation
+
+    async def store(self, key: str, replay: object) -> None:
+        self.stores.append((key, replay))
+
+    async def release(self, key: str) -> None:
+        self.releases.append(key)
+
+
 def _request(
     method="POST",
     path="/orders",
@@ -102,12 +118,46 @@ async def test_5xx_is_not_cached_and_stays_retryable() -> None:
 
 
 async def test_safe_method_and_missing_key_are_ignored() -> None:
-    mw = IdempotencyPolicy()
-    assert await mw.action(_request(method="GET")) is None
-    assert await mw.action(_request(key=None)) is None
-    # Neither reserved a key, so `after` is a passthrough.
+    store = _StoreStub()
+    mw = IdempotencyPolicy(store=store)
+    safe = _request(method="GET")
+    missing = _request(key=None)
+    assert await mw.action(safe) is None
+    assert await mw.action(missing) is None
+    assert safe.state.get("idempotency_key") is None
+    assert safe.state.get("idempotency_ignored") is None
+    assert missing.state.get("idempotency_ignored") is None
     resp = Response(b"x")
-    assert await mw.after(_request(key=None), resp) is resp
+    assert await mw.after(missing, resp) is resp
+    assert store.stores == []
+
+
+async def test_an_ignored_key_is_reported_only_for_an_unsafe_authenticated_method() -> None:
+    mw = IdempotencyPolicy()
+    anonymous = _request(principal=None)
+    assert await mw.action(anonymous) is None
+    response = Response(b"x")
+    assert await mw.after(anonymous, response) is response
+    assert (b"idempotency-ignored", b"unauthenticated") in response.headers
+    assert mw.ignored == 1
+
+
+async def test_an_ignored_key_tolerates_a_response_without_headers() -> None:
+    mw = IdempotencyPolicy()
+    request = _request(principal=None)
+    assert await mw.action(request) is None
+    response = object()
+    assert await mw.after(request, response) is response
+
+
+async def test_after_without_a_claim_does_not_inspect_or_store_the_response() -> None:
+    store = _StoreStub()
+    mw = IdempotencyPolicy(store=store)
+    request = _request(key=None)
+    response = object()
+    assert await mw.after(request, response) is response
+    assert store.releases == []
+    assert store.stores == []
 
 
 async def test_key_is_scoped_by_principal() -> None:
@@ -164,6 +214,38 @@ async def test_anonymous_requests_are_not_guarded_and_never_replay_each_other() 
     assert await mw.action(_request(path="/signup", principal=None)) is None
 
 
+@pytest.mark.parametrize(
+    "reservation",
+    [
+        ("done", None),
+        ("fresh", (201, ((b"x-result", b"stored"),), b"wrong")),
+    ],
+)
+async def test_only_a_complete_done_reservation_is_replayed(reservation) -> None:
+    store = _StoreStub(reservation)
+    mw = IdempotencyPolicy(store=store)
+    request = _request()
+    assert await mw.action(request) is None
+    assert request.state.get("idempotency_key") is not None
+
+
+async def test_streaming_response_releases_the_claim() -> None:
+    from wreath.response import StreamingResponse
+
+    store = _StoreStub()
+    mw = IdempotencyPolicy(store=store)
+    request = _request()
+    assert await mw.action(request) is None
+
+    async def chunks():
+        yield b"created"
+
+    response = StreamingResponse(chunks(), status=201)
+    assert await mw.after(request, response) is response
+    assert len(store.releases) == 1
+    assert store.stores == []
+
+
 # The in-process store only covers retries that land on the worker that served
 # the original. A shared store covers the rest, which is the difference between
 # "usually replays" and a guarantee. These pin the store contract against a fake
@@ -216,6 +298,29 @@ async def test_the_memory_store_measures_the_window_from_the_first_attempt() -> 
 
     clock[0] += 4.0  # 10s after the first attempt, 4s after the write
     assert await store.reserve("k") == ("fresh", None)
+
+
+async def test_the_memory_store_treats_a_lost_claim_as_fresh() -> None:
+    from wreath.policy import MemoryIdempotencyStore
+
+    class LostClaim:
+        def claim(self, key: str) -> bool:
+            return False
+
+        def read(self, key: str):
+            return None
+
+    store = MemoryIdempotencyStore()
+    store._store = LostClaim()
+    assert await store.reserve("lost") == ("fresh", None)
+
+
+def test_replayable_headers_drop_names_and_values_containing_nul() -> None:
+    from wreath.policy.idempotency import _replayable_headers
+
+    assert _replayable_headers(
+        ((b"x-good", b"yes"), (b"x\x00bad", b"no"), (b"x-bad", b"no\x00"))
+    ) == ((b"x-good", b"yes"),)
 
 
 async def test_the_postgres_store_rejects_an_unsafe_table_name() -> None:
@@ -307,6 +412,11 @@ async def test_the_postgres_store_returns_a_stored_response(monkeypatch) -> None
     assert status == 201
     assert headers == ((b"content-type", b"application/json"),)
     assert body == b'{"id":7}'
+
+
+async def test_the_postgres_store_decodes_nullable_replay_fields(monkeypatch) -> None:
+    store, _connection = await _pg_store(monkeypatch, [None, (204, None, None)])
+    assert await store.reserve("k") == ("done", (204, (), b""))
 
 
 async def test_the_postgres_store_writes_the_response_without_moving_expiry(
