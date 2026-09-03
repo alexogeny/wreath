@@ -115,6 +115,8 @@ jobs:
         run: uv run --no-sync ruff check .
       - name: Ty
         run: uv run --no-sync ty check
+      - name: Strict docs build
+        run: uv run --no-sync wreath docs check
 
       - name: Fast tests
         # Default marks exclude fuzz/performance/network. The suite is ~14,500
