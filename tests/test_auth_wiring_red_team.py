@@ -347,7 +347,7 @@ async def test_the_postgres_store_binds_the_session_key_it_was_given() -> None:
     _require("'account'" not in sql, f"the session key was interpolated into SQL: {sql}")
     _require("data -> $2" in sql, f"the session key is not a bound parameter: {sql}")
     _require(
-        statement.calls == [("u1", "account")],
+        statement.calls == [("u1", "account", "")],
         f"the configured key was not bound: {statement.calls}",
     )
 
@@ -362,7 +362,7 @@ async def test_the_postgres_store_defaults_to_principal() -> None:
 
     _, statement = database.statements["wreath_session_delete_for_wreath_session"]
     _require(
-        statement.calls == [("u1", "principal")],
+        statement.calls == [("u1", "principal", "")],
         f"the default key changed: {statement.calls}",
     )
 

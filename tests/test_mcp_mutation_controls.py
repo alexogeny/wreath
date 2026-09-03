@@ -87,9 +87,7 @@ async def _initialize_direct(mcp: MCP, params: dict[str, object]) -> tuple[dict[
     )
     body = json.loads(response.body)
     session_id = next(
-        value.decode()
-        for name, value in response.headers
-        if name == b"mcp-session-id"
+        value.decode() for name, value in response.headers if name == b"mcp-session-id"
     )
     session = mcp._sessions.get(session_id)
     assert session is not None
@@ -252,6 +250,7 @@ async def test_late_client_response_without_an_outbound_channel_is_dropped(
         _self: MCP,
         _request: Request,
         _identity: Any,
+        _session_id: str | None,
         *,
         identifier: Any,
     ) -> tuple[Session, None]:

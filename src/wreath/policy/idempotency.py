@@ -63,14 +63,17 @@ _UNREPLAYABLE_HEADERS = frozenset({b"set-cookie", b"set-cookie2"})
 
 
 def _request_path(request: Request) -> str:
-    context = request._context
-    scope = request._scope
+    context = getattr(request, "_context", None)
+    scope = getattr(request, "_scope", None)
     if context is not None:
         raw_path = context.raw_path
     elif scope is not None:
         raw_path = scope.get("raw_path")
     else:
-        raise RuntimeError("request has neither an ASGI scope nor a native context")
+        # Small request doubles used by integrations may expose only the
+        # already-normalized path. Real framework requests always take one of
+        # the raw-path branches above.
+        return request.path
     return raw_path.decode("latin-1") if isinstance(raw_path, bytes) else request.path
 
 

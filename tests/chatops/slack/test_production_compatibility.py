@@ -190,7 +190,7 @@ async def test_enterprise_event_uses_nested_authorization_facts() -> None:
 async def test_local_replay_owner_stays_at_its_hard_capacity() -> None:
     slack = Slack(signing_secret=SIGNING_SECRET, clock=lambda: NOW, replay_entries=4)
     chat = ChatOps(name="operations", providers=(slack,))
-    for number in range(12):
+    for number in range(4):
         inbound = _Inbound(
             "event",
             "app_mention",
@@ -201,6 +201,11 @@ async def test_local_replay_owner_stays_at_its_hard_capacity() -> None:
             {"api_app_id": "A123"},
         )
         assert await slack._claim(chat, inbound)
+    for number in range(4, 12):
+        inbound = _Inbound(
+            "event", "app_mention", "T123", "U123", "C123", f"Ev{number}", {"api_app_id": "A123"}
+        )
+        assert not await slack._claim(chat, inbound)
     assert slack._replay.size == 4
 
 
