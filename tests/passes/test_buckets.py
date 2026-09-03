@@ -130,6 +130,21 @@ def test_a_naive_since_is_refused():
     assert "must carry a zone" in str(caught.value)
 
 
+@pytest.mark.parametrize("per_chunk", [True, 1.5])
+def test_per_chunk_must_be_an_integer_not_a_bool(per_chunk):
+    with pytest.raises(PassDeclarationError) as caught:
+        rollup_pass(units=Buckets(on=RECORDED, per_chunk=per_chunk))
+
+    assert f"must be an int; got {per_chunk!r}" in str(caught.value)
+
+
+def test_since_must_be_a_datetime():
+    with pytest.raises(PassDeclarationError) as caught:
+        rollup_pass(units=Buckets(on=RECORDED, since="2026-07-01T00:00:00+00:00"))
+
+    assert "must be an aware datetime" in str(caught.value)
+
+
 def test_per_chunk_must_be_at_least_one():
     with pytest.raises(PassDeclarationError) as caught:
         rollup_pass(units=Buckets(on=RECORDED, per_chunk=0))

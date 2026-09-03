@@ -49,6 +49,8 @@ kind:
 
 from __future__ import annotations
 
+import sys
+from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -110,3 +112,14 @@ def __getattr__(name: str) -> Any:
 
 def __dir__() -> list[str]:
     return sorted({*globals(), *__all__})
+
+
+class _EdgePackage(ModuleType):
+    def __getattribute__(self, name: str) -> Any:
+        value = super().__getattribute__(name)
+        if name == "serve" and isinstance(value, ModuleType):
+            return value.serve
+        return value
+
+
+sys.modules[__name__].__class__ = _EdgePackage

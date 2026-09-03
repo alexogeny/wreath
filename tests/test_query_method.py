@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 import pytest
 
@@ -16,6 +16,7 @@ from wreath.http_client import (
     RetryPolicy,
 )
 from wreath.openapi import generate_openapi
+from wreath.router import _query_media_range
 from wreath.testing import TestClient
 from wreath.typegen import build_api_model, render_typescript
 
@@ -115,6 +116,66 @@ def test_query_declaration_refuses_an_invalid_accept_query_media_range(
 
     with pytest.raises(ValueError, match="invalid Accept-Query"):
         app.query("/search", accept_query=(media_range,))
+
+
+@pytest.mark.parametrize(
+    "media_range",
+    [
+        "application/json;format",
+        "application/json;=compact",
+        "application/json;format=",
+    ],
+)
+def test_query_declaration_requires_complete_accept_query_parameters(
+    media_range: str,
+) -> None:
+    app = Wreath()
+
+    with pytest.raises(ValueError, match="parameters must be name=value"):
+        app.query("/search", accept_query=(media_range,))
+
+
+@pytest.mark.parametrize(
+    "media_range",
+    [
+        "/json",
+        "application/",
+        "application/json/extra",
+        "app@/json",
+        "application/json@",
+        "*/json",
+    ],
+)
+def test_accept_query_refuses_each_malformed_type_or_subtype(media_range: str) -> None:
+    with pytest.raises(ValueError, match="use type/subtype"):
+        _query_media_range(media_range)
+
+
+def test_accept_query_refuses_non_string_ranges() -> None:
+    value: Any = 7
+    with pytest.raises(TypeError, match="must be str, not int"):
+        _query_media_range(value)
+
+
+@pytest.mark.parametrize(
+    "media_range",
+    [
+        "application/json;bad@=value",
+        'application/json;format="',
+        'application/json;format="unterminated',
+        "application/json;format=hello world",
+    ],
+)
+def test_accept_query_refuses_malformed_parameter_names_and_values(media_range: str) -> None:
+    with pytest.raises(ValueError, match="invalid Accept-Query"):
+        _query_media_range(media_range)
+
+
+def test_accept_query_accepts_both_wildcard_shapes_and_parameter_forms() -> None:
+    assert _query_media_range("*/*")[0] == "*/*"
+    assert _query_media_range("application/*")[0] == "application/*"
+    assert _query_media_range("application/json;format=compact")[0] == "application/json"
+    assert _query_media_range('application/json;format="pretty print"')[0] == "application/json"
 
 
 def test_openapi_uses_an_extension_for_query_and_keeps_its_request_body() -> None:

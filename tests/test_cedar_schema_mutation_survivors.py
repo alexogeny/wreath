@@ -4,12 +4,22 @@ import pytest
 
 from wreath._auth.cedar_schema import (
     CedarSchema,
+    _parts,
     _Record,
     _Set,
     _statements,
     _type,
     validate_context_expression,
 )
+
+
+def test_part_parser_keeps_quoted_escaped_and_nested_commas_together() -> None:
+    assert _parts('a, "x,y", c') == ("a", '"x,y"', "c")
+    assert _parts('"a\\\",b", c') == ('"a\\\",b"', "c")
+    assert _parts("outer: {left: String, right: Long}, tail: Bool") == (
+        "outer: {left: String, right: Long}",
+        "tail: Bool",
+    )
 
 
 def test_statement_parser_keeps_nested_and_escaped_semicolons_together() -> None:

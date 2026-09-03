@@ -258,14 +258,30 @@ def test_redirect_canonicalization_never_leaves_the_configured_origin(
 
 
 @pytest.mark.parametrize(
+    "location",
+    (
+        b"/next",
+        b"../next",
+        b"https://example.com/next",
+        b"https://example.com:443/next?q=1",
+    ),
+)
+def test_redirect_canonicalization_never_leaves_the_configured_base_path(
+    location: bytes,
+) -> None:
+    client = HTTPClient("redirect-policy", base_url="https://example.com/base")
+    with pytest.raises(RedirectError, match="redirect"):
+        client._redirect_target("/base/start", location)
+
+
+@pytest.mark.parametrize(
     ("location", "expected"),
     (
-        (b"/next", "/next"),
+        (b"/base/next", "/base/next"),
         (b"next", "/base/next"),
-        (b"../next", "/next"),
         (b"?page=2", "/base/start?page=2"),
-        (b"https://example.com/next", "/next"),
-        (b"https://example.com:443/next?q=1", "/next?q=1"),
+        (b"https://example.com/base/next", "/base/next"),
+        (b"https://example.com:443/base/next?q=1", "/base/next?q=1"),
     ),
 )
 def test_redirect_canonicalization_preserves_same_origin_controls(

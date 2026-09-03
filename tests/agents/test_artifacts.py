@@ -8,7 +8,7 @@ from typing import Any, cast
 
 import pytest
 
-from wreath._agents.artifacts import AgentArtifactManager, ArtifactLimitExceeded
+from wreath._agents.artifacts import AgentArtifactManager, ArtifactLimitExceeded, _digest_parts
 from wreath.objects import MemoryObjectStore, ObjectStat
 from wreath.provenance import Provenance
 
@@ -59,6 +59,12 @@ def context(
         principal=SimpleNamespace(id=principal),
         conversation=conversation,
     )
+
+
+@pytest.mark.parametrize("part", ["", cast(str, 1)])
+def test_artifact_digest_refuses_invalid_identity_parts(part: str) -> None:
+    with pytest.raises(ValueError, match="non-empty strings"):
+        _digest_parts("tenant", part)
 
 
 @pytest.mark.asyncio
@@ -138,7 +144,7 @@ async def test_byte_and_count_ceilings_refuse_before_writing() -> None:
         await manager.write(context(), artifact_id="bad", ordinal=0, body=b"1", media_type="")
 
     assert store.writes == []
-    assert manager.key(context(), "first-name", ordinal=0) == manager.key(
+    assert manager.key(context(), "first-name", ordinal=0) != manager.key(
         context(), "replacement-name", ordinal=0
     )
 
@@ -159,6 +165,33 @@ async def test_oversized_mutable_body_refuses_before_snapshotting() -> None:
         await manager.write(context(), artifact_id="large", ordinal=0, body=body)
 
     assert body.snapshots == 0
+
+
+@pytest.mark.asyncio
+async def test_write_refuses_non_buffer_body_before_storage() -> None:
+    store = Store()
+    manager = AgentArtifactManager(store, max_bytes=4, max_artifacts=1)
+
+    with pytest.raises(TypeError, match="body must be bytes"):
+        await manager.write(
+            context(), artifact_id="invalid", ordinal=0, body=cast(Any, object())
+        )
+
+    assert store.writes == []
+
+
+@pytest.mark.asyncio
+async def test_memoryview_ceiling_counts_bytes_not_elements() -> None:
+    store = Store()
+    manager = AgentArtifactManager(store, max_bytes=3, max_artifacts=1)
+    body = memoryview(bytearray(b"1234")).cast("H")
+
+    with pytest.raises(ArtifactLimitExceeded, match="byte ceiling"):
+        await manager.write(context(), artifact_id="large", ordinal=0, body=body)
+
+    assert len(body) == 2
+    assert body.nbytes == 4
+    assert store.writes == []
 
 
 @pytest.mark.asyncio
@@ -261,7 +294,7 @@ def test_artifact_configuration_and_scope_refuse_invalid_facts() -> None:
     with pytest.raises(TypeError, match="max_bytes"):
         AgentArtifactManager(store, max_bytes=True, max_artifacts=1)
     with pytest.raises(TypeError, match="max_artifacts"):
-        AgentArtifactManager(store, max_bytes=1, max_artifacts=1.5)
+        AgentArtifactManager(store, max_bytes=1, max_artifacts=cast(Any, 1.5))
     manager = AgentArtifactManager(store, max_bytes=8, max_artifacts=2)
 
     invalid = (

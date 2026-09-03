@@ -213,7 +213,7 @@ async def _ws(port: int, path: str) -> None:
     )
     await writer.drain()
     try:
-        await asyncio.wait_for(reader.read(4096), timeout=2.0)
+        await asyncio.wait_for(reader.read(), timeout=2.0)
     except TimeoutError:
         pass
     writer.close()

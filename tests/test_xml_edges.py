@@ -294,8 +294,24 @@ def test_canonicalize_span_refuses_a_span_that_does_not_address_the_source(
         canonicalize_span(b"<a/>", start, end)
 
 
+def test_an_invalid_span_is_refused_before_entering_the_native_canonicalizer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_native_call(*args: object) -> bytes:
+        raise AssertionError("an invalid span must be refused at the Python boundary")
+
+    monkeypatch.setattr("wreath.xml._core.xml_c14n", unexpected_native_call)
+    with pytest.raises(ValueError, match="span does not address the source"):
+        canonicalize_span(b"<a/>", 0, 0)
+
+
 def test_canonicalize_span_defaults_its_limits() -> None:
     assert canonicalize_span(b"<a/>", 0, 4, (), (), None) == b"<a></a>"
+
+
+def test_canonicalize_span_enforces_supplied_limits() -> None:
+    with pytest.raises(XMLRefusal, match="3-byte limit"):
+        canonicalize_span(b"<a><b/></a>", 0, 11, limits=Limits(max_bytes=3))
 
 
 def test_an_undeclared_default_namespace_is_rendered_in_the_canonical_form() -> None:

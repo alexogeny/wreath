@@ -190,7 +190,7 @@ def test_a_lookup_with_no_nameserver_reports_that_it_could_not_tell(
     monkeypatch.setattr("wreath._dns._nameservers", lambda: [])
     answer = resolve_txt("example.com")
     assert not answer.resolved
-    assert "no nameserver" in (answer.error or "")
+    assert answer.error == "no nameserver configured (set WREATH_DNS_SERVER)"
 
 
 def test_an_over_long_name_is_refused_without_a_socket() -> None:
@@ -229,11 +229,39 @@ def test_a_truncated_udp_answer_is_retried_over_tcp(monkeypatch: pytest.MonkeyPa
         return full[:2].replace(full[:2], packet[:2]) + full[2:]
 
     monkeypatch.setattr(socket, "socket", FakeUdp)
+    monkeypatch.setattr(
+        _dns,
+        "_nameservers",
+        lambda: pytest.fail("an explicit server must bypass resolver discovery"),
+    )
     monkeypatch.setattr(_dns, "_over_tcp", fake_tcp)
     answer = _dns.resolve_txt("example.com", server="203.0.113.1")
 
     assert asked_over_tcp, "a truncated answer must be re-asked over TCP"
     assert answer.records == ("v=DKIM1; k=rsa; p=" + "A" * 200,)
+
+
+def test_a_response_shorter_than_the_dns_header_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import socket
+
+    class FakeUdp:
+        def __init__(self, *args: object, **kwargs: object) -> None: ...
+        def __enter__(self) -> FakeUdp:
+            return self
+
+        def __exit__(self, *exc: object) -> None: ...
+        def settimeout(self, timeout: float) -> None: ...
+        def sendto(self, packet: bytes, address: tuple[str, int]) -> None: ...
+        def recvfrom(self, size: int) -> tuple[bytes, tuple[str, int]]:
+            return b"", ("", 53)
+
+    monkeypatch.setattr(socket, "socket", FakeUdp)
+    answer = resolve_txt("example.com", server="203.0.113.1")
+
+    assert not answer.resolved
+    assert "203.0.113.1" in (answer.error or "")
 
 
 def test_an_untruncated_answer_is_not_re_asked_over_tcp(monkeypatch: pytest.MonkeyPatch) -> None:

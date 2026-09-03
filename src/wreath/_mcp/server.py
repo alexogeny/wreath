@@ -182,18 +182,29 @@ def _text_result(text: str, *, is_error: bool) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": text}], "isError": is_error}
 
 
-def _render_result(value: Any) -> dict[str, Any]:
+def _render_result(value: Any, *, max_bytes: int | None = None) -> dict[str, Any]:
     """Turn a tool's return value into an MCP `tools/call` result."""
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         value = dataclasses.asdict(value)
     if isinstance(value, str):
-        return _text_result(value, is_error=False)
-    result = _text_result(_json_dumps(value).decode("utf-8"), is_error=False)
+        result = _text_result(value, is_error=False)
+        _enforce_result_limit(result, max_bytes)
+        return result
+    encoded = _json_dumps(value)
+    if max_bytes is not None and len(encoded) > max_bytes:
+        raise ValueError(f"MCP result exceeds the {max_bytes}-byte serialized result limit")
+    result = _text_result(encoded.decode("utf-8"), is_error=False)
     if isinstance(value, Mapping):
         # A mapping is the one return shape a client can consume without
         # re-parsing the text block, so it travels as both.
         result["structuredContent"] = value
+    _enforce_result_limit(result, max_bytes)
     return result
+
+
+def _enforce_result_limit(result: Mapping[str, Any], max_bytes: int | None) -> None:
+    if max_bytes is not None and len(_json_dumps(result)) > max_bytes:
+        raise ValueError(f"MCP result exceeds the {max_bytes}-byte serialized result limit")
 
 
 def _origin(url: str) -> str:
@@ -1395,7 +1406,7 @@ class MCP:
                 INTERNAL_ERROR,
                 f"reading {resource.uri} raised {type(error).__name__}",
             ) from error
-        return read_result(resource, value)
+        return read_result(resource, value, max_bytes=self._limits.max_result_bytes)
 
     def _resource_named(self, params: Mapping[str, Any]) -> Resource:
         uri = params.get("uri")
@@ -1871,7 +1882,13 @@ class MCP:
     ) -> tuple[Any, str]:
         self.tool_calls += 1
         try:
-            return _render_result(await tool.handler(request, **kwargs)), _record.OUTCOME_OK
+            return (
+                _render_result(
+                    await tool.handler(request, **kwargs),
+                    max_bytes=self._limits.max_result_bytes,
+                ),
+                _record.OUTCOME_OK,
+            )
         except ToolError as error:
             self.tool_errors += 1
             return _text_result(str(error), is_error=True), _record.OUTCOME_TOOL_ERROR

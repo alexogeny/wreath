@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import importlib.util
 import json
 import re
 import subprocess
@@ -684,6 +685,64 @@ def test_a_value_patch_does_not_follow_an_interned_value_across_the_interpreter(
     assert crud._MAX_PAGE_SIZE == 100
 
 
+def test_a_value_mutation_updates_and_restores_captured_defaults(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = textwrap.dedent(
+        """\
+        LIMIT = 8192
+
+        def current(value=LIMIT):
+            return value
+
+        def unrelated(value=8192):
+            return value
+
+        class Bucket:
+            def __init__(self, *, capacity=LIMIT):
+                self.capacity = capacity
+        """
+    )
+    module_name = "_wreath_mutant_captured_default_fixture"
+    fixture_path = tmp_path / f"{module_name}.py"
+    fixture_path.write_text(source, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(module_name, fixture_path)
+    assert spec is not None and spec.loader is not None
+    fixture = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, module_name, fixture)
+    spec.loader.exec_module(fixture)
+    tree = ast.parse(source, filename=str(fixture_path))
+    operators.tag(tree)
+    candidate = next(
+        item for item in operators.scan(tree, module_name) if item.operator == "value.widen-bound"
+    )
+    mutation = mutant_runner._build(
+        candidate,
+        tree,
+        module_name,
+        "fixture.py",
+        str(fixture_path),
+        "value.widen-bound@fixture.py:1",
+    )
+    assert isinstance(mutation, Mutation)
+    patch = mutation.patch
+    assert patch is not None
+
+    patch.apply()
+    try:
+        assert fixture.LIMIT == 1 << 40
+        assert fixture.current() == 1 << 40
+        assert fixture.unrelated() == 8192
+        assert fixture.Bucket().capacity == 1 << 40
+    finally:
+        patch.undo()
+
+    assert fixture.LIMIT == 8192
+    assert fixture.current() == 8192
+    assert fixture.unrelated() == 8192
+    assert fixture.Bucket().capacity == 8192
+
+
 def test_a_mutation_that_compiles_to_the_same_bytecode_is_not_a_finding() -> None:
     source = "def f(a, b):\n    return a and b\n"
     tree = ast.parse(source)
@@ -739,6 +798,83 @@ def test_planning_declines_a_mutation_it_cannot_build_and_says_why(tmp_path: Pat
     plan = build_plan([broken], tmp_path)
     assert plan.mutations == []
     assert any("unreadable" in reason for _, reason in plan.errors)
+
+
+def test_planning_imports_a_module_before_discovering_live_value_controls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / "live_values"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    target = package / "policy.py"
+    target.write_text("MAX_UPLOAD_SIZE = 1024\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(tmp_path)
+    sys.modules.pop("live_values.policy", None)
+
+    plan = build_plan([target], tmp_path, operators=("value",))
+
+    assert [mutation.operator for mutation in plan.mutations] == ["value.widen-bound"]
+
+
+def test_planning_declines_an_application_import_failure_without_ending_the_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / "broken_import"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    target = package / "policy.py"
+    target.write_text(
+        "raise RuntimeError('missing deployment setting')\nMAX_UPLOAD_SIZE = 1024\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(tmp_path)
+    sys.modules.pop("broken_import.policy", None)
+
+    plan = build_plan([target], tmp_path)
+    selection = mutant_runner.select_sample([target], tmp_path, 1)
+
+    assert plan.mutations == []
+    assert plan.errors == [
+        (
+            "broken_import.policy",
+            "not importable: RuntimeError: missing deployment setting",
+        )
+    ]
+    assert selection.identifiers == ()
+    assert selection.errors == tuple(plan.errors)
+
+
+def test_top_level_declaration_is_declined_with_the_supported_form(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / "top_level_declaration"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    target = package / "routes.py"
+    target.write_text(
+        "def route(path, *, permissions=()):\n"
+        "    return permissions\n"
+        "DECLARED = route('/', permissions=('read',))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(tmp_path)
+    sys.modules.pop("top_level_declaration.routes", None)
+
+    plan = build_plan([target], tmp_path, operators=("declaration",))
+
+    assert plan.mutations == []
+    assert any(
+        "module-level declaration" in reason
+        and "application factory function" in reason
+        for _, reason in plan.errors
+    )
+    selection = mutant_runner.select_sample(
+        [target], tmp_path, 1, operators=("declaration",)
+    )
+    assert selection.identifiers == ()
+    assert selection.unsupported_declarations == (
+        "declaration.drop-keyword@top_level_declaration/routes.py:3",
+    )
 
 
 def test_the_report_separates_a_control_nobody_watches_from_one_nobody_reaches() -> None:
@@ -1472,6 +1608,418 @@ def test_sample_is_stable_bounded_and_drawn_across_the_corpus(
     assert {mutation.identifier for mutation in plan.mutations} == set(first)
 
 
+def test_sample_represents_every_operator_family_before_filling_remaining_slots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / "sample_families"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    for index in range(4):
+        (package / f"module_{index}.py").write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(tmp_path)
+
+    families = {
+        "sample_families.module_0": "cedar.flip-effect",
+        "sample_families.module_1": "value.widen-bound",
+        "sample_families.module_2": "guard.never-fires",
+        "sample_families.module_3": "predicate.drop-operand",
+    }
+
+    def scan(_tree: ast.Module, module_name: str | None) -> list[operators.Candidate]:
+        assert module_name is not None
+        if module_name == "sample_families":
+            return []
+        operator = families[module_name]
+        amount = 1 if operator.startswith(("cedar", "value")) else 6
+        return [
+            operators.Candidate(operator, f"control {index}", 1, ("check",))
+            for index in range(amount)
+        ]
+
+    monkeypatch.setattr(mutant_runner, "scan", scan)
+
+    selection = mutant_runner.select_sample([package], tmp_path, 4)
+
+    assert {identifier.split("@", 1)[0] for identifier in selection.identifiers} == set(
+        families.values()
+    )
+    assert selection.eligible_candidates == 14
+    assert selection.candidate_files == 4
+    assert selection.selected_files == 4
+    assert selection.missing_operators == ()
+    assert selection.candidate_counts_by_operator == {
+        "cedar.flip-effect": 1,
+        "guard.never-fires": 6,
+        "predicate.drop-operand": 6,
+        "value.widen-bound": 1,
+    }
+    assert selection.selected_counts_by_operator == {
+        operator: 1 for operator in sorted(families.values())
+    }
+
+
+def test_sample_reports_operator_families_a_smaller_budget_cannot_represent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / "small_sample"
+    package.mkdir()
+    (package / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(tmp_path)
+
+    def scan(_tree: ast.Module, _module_name: str | None) -> list[operators.Candidate]:
+        return [
+            operators.Candidate("cedar.flip-effect", "rare", 1, ("check",)),
+            operators.Candidate("guard.never-fires", "common one", 2, ("check",)),
+            operators.Candidate("guard.never-fires", "common two", 3, ("check",)),
+        ]
+
+    monkeypatch.setattr(mutant_runner, "scan", scan)
+
+    selection = mutant_runner.select_sample([package], tmp_path, 1)
+
+    assert selection.identifiers[0].startswith("cedar.flip-effect@")
+    assert selection.missing_operators == ("guard.never-fires",)
+
+
+def test_differential_fuzz_kills_a_survivor_and_keeps_a_minimized_artifact(
+    tmp_path: Path,
+) -> None:
+    from wreath._fuzz import FuzzTarget
+    from wreath._mutant.differential import DifferentialFuzzConfig, apply_differential_fuzz
+    from wreath._mutant.patch import AttributePatch
+
+    class Subject:
+        enabled = False
+
+    subject = Subject()
+    mutation = Mutation(
+        "guard.never-fires@policy.py:4",
+        "guard.never-fires",
+        "the guard",
+        Site("policy.py", 4, "authorize"),
+        "policy",
+        AttributePatch(subject, "enabled", True),
+    )
+    verdict = Verdict(mutation, Outcome.SURVIVED)
+    report = Report(verdicts=[verdict])
+    target = FuzzTarget(
+        "policy-probe",
+        lambda data: (f"enabled:{subject.enabled}", f"size:{len(data)}"),
+        seeds=(b"distinguish me",),
+        source_files=("policy.py",),
+        operator_names=("guard.never-fires",),
+    )
+
+    apply_differential_fuzz(
+        report,
+        DifferentialFuzzConfig(
+            tmp_path / "corpus",
+            tmp_path / "artifacts",
+            seed=7,
+            max_cases=8,
+            max_seconds=2,
+            targets=(target,),
+        ),
+        workdir=tmp_path,
+    )
+
+    assert verdict.outcome is Outcome.KILLED
+    assert verdict.killers[0].startswith("fuzz:policy-probe:")
+    finding = verdict.fuzz_evidence[0]["finding"]
+    assert Path(finding["input_path"]).is_file()
+    assert Path(finding["metadata_path"]).is_file()
+    assert subject.enabled is False
+    assert report.differential_fuzz is not None
+    assert report.differential_fuzz["master_seed"] == 7
+    assert "differential fuzz:" in render(report)
+    assert "master seed 7" in render(report)
+
+
+def test_differential_fuzz_preserves_the_target_structured_strategy() -> None:
+    from wreath._fuzz import FuzzTarget, StructuredStrategy
+    from wreath._mutant.differential import _differential_target
+    from wreath._mutant.patch import AttributePatch
+
+    class Subject:
+        enabled = False
+
+    subject = Subject()
+    mutation = Mutation(
+        "guard.never-fires@policy.py:4",
+        "guard.never-fires",
+        "the guard",
+        Site("policy.py", 4, "authorize"),
+        "policy",
+        AttributePatch(subject, "enabled", True),
+    )
+    strategy = StructuredStrategy("policy", 1, generate=lambda rng, size: b"generated")
+    target = FuzzTarget(
+        "policy-probe",
+        lambda data: (f"size:{len(data)}",),
+        source_files=("policy.py",),
+        operator_names=("guard.never-fires",),
+        strategy=strategy,
+    )
+
+    wrapped = _differential_target(target, Verdict(mutation, Outcome.SURVIVED))
+
+    assert wrapped.strategy is strategy
+
+
+def test_differential_fuzz_observations_start_from_equivalent_process_state() -> None:
+    from wreath._fuzz import FuzzTarget
+    from wreath._mutant.differential import _differential_target
+    from wreath._mutant.patch import AttributePatch
+
+    class Subject:
+        enabled = False
+
+    subject = Subject()
+    calls = 0
+
+    def observe(_data: bytes) -> tuple[str, ...]:
+        nonlocal calls
+        calls += 1
+        return (f"calls:{calls}",)
+
+    mutation = Mutation(
+        "guard.never-fires@policy.py:4",
+        "guard.never-fires",
+        "the guard",
+        Site("policy.py", 4, "authorize"),
+        "policy",
+        AttributePatch(subject, "enabled", True),
+    )
+    wrapped = _differential_target(
+        FuzzTarget("stateful", observe), Verdict(mutation, Outcome.SURVIVED)
+    )
+
+    assert tuple(wrapped.run(b"input")) == ("differential:return", "calls:1")
+    assert calls == 0
+
+
+def test_differential_fuzz_is_only_bounded_evidence_when_outputs_match(
+    tmp_path: Path,
+) -> None:
+    from wreath._fuzz import FuzzTarget
+    from wreath._mutant.differential import DifferentialFuzzConfig, apply_differential_fuzz
+    from wreath._mutant.patch import AttributePatch
+
+    class Subject:
+        enabled = False
+
+    subject = Subject()
+    mutation = Mutation(
+        "guard.never-fires@policy.py:4",
+        "guard.never-fires",
+        "the guard",
+        Site("policy.py", 4, "authorize"),
+        "policy",
+        AttributePatch(subject, "enabled", True),
+    )
+    verdict = Verdict(mutation, Outcome.SURVIVED)
+    report = Report(verdicts=[verdict])
+    target = FuzzTarget(
+        "policy-probe",
+        lambda data: (f"size:{len(data)}",),
+        seeds=(b"same",),
+        source_files=("policy.py",),
+        operator_names=("guard.never-fires",),
+    )
+
+    apply_differential_fuzz(
+        report,
+        DifferentialFuzzConfig(
+            tmp_path / "corpus",
+            tmp_path / "artifacts",
+            seed=11,
+            max_cases=3,
+            max_seconds=2,
+            targets=(target,),
+        ),
+        workdir=tmp_path,
+    )
+
+    assert verdict.outcome is Outcome.SURVIVED
+    assert verdict.killers == ()
+    assert verdict.fuzz_evidence[0]["cases"] == 3
+    assert verdict.fuzz_evidence[0]["comparison"] == "semantic-features-and-exception"
+    assert report.as_dict()["differential_fuzz"]["cases_executed"] == 3
+
+
+def test_differential_fuzz_shares_one_global_case_budget_across_survivors(
+    tmp_path: Path,
+) -> None:
+    from wreath._fuzz import FuzzTarget
+    from wreath._mutant.differential import DifferentialFuzzConfig, apply_differential_fuzz
+    from wreath._mutant.patch import AttributePatch
+
+    class Subject:
+        enabled = False
+
+    subject = Subject()
+
+    def surviving(index: int) -> Verdict:
+        mutation = Mutation(
+            f"guard.never-fires@policy.py:{index}",
+            "guard.never-fires",
+            f"guard {index}",
+            Site("policy.py", index, "authorize"),
+            "policy",
+            AttributePatch(subject, "enabled", True),
+        )
+        return Verdict(mutation, Outcome.SURVIVED)
+
+    report = Report(verdicts=[surviving(4), surviving(8)])
+    target = FuzzTarget(
+        "policy-probe",
+        lambda data: (f"size:{len(data)}",),
+        seeds=(b"one", b"two"),
+        source_files=("policy.py",),
+        operator_names=("guard.never-fires",),
+    )
+
+    apply_differential_fuzz(
+        report,
+        DifferentialFuzzConfig(
+            tmp_path / "corpus",
+            tmp_path / "artifacts",
+            seed=13,
+            max_cases=4,
+            max_seconds=2,
+            targets=(target,),
+        ),
+        workdir=tmp_path,
+    )
+
+    assert report.differential_fuzz is not None
+    assert report.differential_fuzz["cases_executed"] == 4
+    assert [verdict.fuzz_evidence[0]["cases"] for verdict in report.verdicts] == [2, 2]
+
+
+def test_differential_fuzz_counts_each_remaining_target_in_its_fair_share(
+    tmp_path: Path,
+) -> None:
+    from wreath._fuzz import FuzzTarget
+    from wreath._mutant.differential import DifferentialFuzzConfig, apply_differential_fuzz
+    from wreath._mutant.patch import AttributePatch
+
+    class Subject:
+        enabled = False
+
+    subject = Subject()
+    mutation = Mutation(
+        "guard.never-fires@policy.py:4",
+        "guard.never-fires",
+        "the guard",
+        Site("policy.py", 4, "authorize"),
+        "policy",
+        AttributePatch(subject, "enabled", True),
+    )
+    verdict = Verdict(mutation, Outcome.SURVIVED)
+    report = Report(verdicts=[verdict])
+    targets = tuple(
+        FuzzTarget(
+            f"policy-probe-{index}",
+            lambda data: (f"size:{len(data)}",),
+            seeds=(b"one",),
+            source_files=("policy.py",),
+            operator_names=("guard.never-fires",),
+        )
+        for index in range(2)
+    )
+
+    apply_differential_fuzz(
+        report,
+        DifferentialFuzzConfig(
+            tmp_path / "corpus",
+            tmp_path / "artifacts",
+            seed=17,
+            max_cases=4,
+            max_seconds=2,
+            targets=targets,
+        ),
+        workdir=tmp_path,
+    )
+
+    assert [item["cases"] for item in verdict.fuzz_evidence] == [2, 2]
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [("signal", "signal"), ("exit", "worker-exit"), ("timeout", "timeout")],
+)
+def test_differential_fuzz_retains_active_input_and_stderr_when_worker_dies(
+    tmp_path: Path,
+    failure: str,
+    expected: str,
+) -> None:
+    import os
+    import signal
+    import time
+
+    from wreath._fuzz import FuzzTarget
+    from wreath._mutant.differential import DifferentialFuzzConfig, apply_differential_fuzz
+    from wreath._mutant.patch import AttributePatch
+
+    class Subject:
+        enabled = False
+
+    subject = Subject()
+    mutation = Mutation(
+        "guard.never-fires@policy.py:4",
+        "guard.never-fires",
+        "the guard",
+        Site("policy.py", 4, "authorize"),
+        "policy",
+        AttributePatch(subject, "enabled", True),
+    )
+    verdict = Verdict(mutation, Outcome.SURVIVED)
+
+    def crash(_data: bytes) -> tuple[str, ...]:
+        os.write(2, b"exact worker diagnostic\n")
+        if failure == "signal":
+            os.kill(os.getpid(), signal.SIGKILL)
+        if failure == "exit":
+            os._exit(7)
+        time.sleep(1)
+        return ()
+
+    target = FuzzTarget(
+        "crash-probe",
+        crash,
+        seeds=(b"exact-active-input",),
+        source_files=("policy.py",),
+        operator_names=("guard.never-fires",),
+    )
+    report = Report(verdicts=[verdict])
+
+    apply_differential_fuzz(
+        report,
+        DifferentialFuzzConfig(
+            tmp_path / "corpus",
+            tmp_path / "artifacts",
+            seed=19,
+            max_cases=1,
+            max_seconds=0.05,
+            targets=(target,),
+        ),
+        workdir=tmp_path,
+    )
+
+    evidence = verdict.fuzz_evidence[0]
+    finding = evidence["crash_finding"]
+    input_path = Path(finding["input_path"])
+    assert verdict.outcome is Outcome.SURVIVED
+    assert evidence["worker_failure"] == expected
+    assert input_path.read_bytes() == b"exact-active-input"
+    assert input_path.with_name("diagnostic.log").read_bytes() == b"exact worker diagnostic\n"
+    assert finding["deterministic"] is False
+    assert report.differential_fuzz is not None
+    assert report.differential_fuzz["failures"] == 1
+    assert mutant_cli._exit_status(report, fail_on_survivor=False) == 1
+
+
 def test_live_mutant_completed_at_baseline_seal_keeps_its_kill(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1643,6 +2191,120 @@ def test_native_baseline_retry_preserves_order_dependent_failures(tmp_path: Path
     assert baseline.failed[0].endswith("test_ordered_baseline.py::test_second_observes_the_change")
 
 
+def test_native_baseline_retry_accepts_a_fresh_parameter_id(tmp_path: Path) -> None:
+    test_file = tmp_path / "test_dynamic_parameter.py"
+    test_file.write_text(
+        "import sys\n"
+        "import time\n"
+        "import pytest\n"
+        "@pytest.mark.parametrize('stamp', [time.time_ns()])\n"
+        "def test_monitoring_is_not_a_semantic_requirement(stamp):\n"
+        "    assert stamp > 0\n"
+        "    assert sys.monitoring.get_tool(4) is None\n",
+        encoding="utf-8",
+    )
+    watched = tmp_path / "watched.py"
+    watched.write_text("VALUE = 1\n", encoding="utf-8")
+
+    baseline = mutant_runner.run_native_baseline(
+        (str(test_file),),
+        mutant_runner.Plan(watched={str(watched): {1}}),
+        workdir=tmp_path,
+    )
+
+    assert baseline.failed == ()
+    assert len(baseline.passed) == 1
+
+
+def test_native_baseline_retry_accepts_parameter_family_cardinality_drift(
+    tmp_path: Path,
+) -> None:
+    test_file = tmp_path / "test_dynamic_family.py"
+    test_file.write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('value', [1, 2])\n"
+        "def test_dynamic(value):\n"
+        "    assert value > 0\n"
+        "def test_stable():\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    collection = mutant_runner.prepare_native_collection((str(test_file),))
+    try:
+        dynamic = next(
+            case.node_id for case in collection.cases if "::test_dynamic[" in case.node_id
+        )
+        stable = next(
+            case.node_id
+            for case in collection.cases
+            if case.node_id.endswith("::test_stable")
+        )
+    finally:
+        mutant_runner.release_native_collection(collection)
+    stale_dynamic = f"{dynamic.partition('[')[0]}[stale]"
+
+    assert mutant_runner._retry_native_results((stale_dynamic, stable)) == {
+        stale_dynamic: "passed",
+        stable: "passed",
+    }
+
+
+def test_native_baseline_retry_streams_the_case_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    node_ids = (
+        "tests/test_one.py::test_one",
+        "tests/test_two.py::test_two",
+    )
+
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        payload = json.loads(kwargs["input"])
+        assert len(command) == 3
+        assert payload == {
+            "files": ["tests/test_one.py", "tests/test_two.py"],
+            "node_ids": list(node_ids),
+        }
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps([[node_id, "passed"] for node_id in node_ids]),
+            stderr="",
+        )
+
+    monkeypatch.setattr(mutant_runner.subprocess, "run", run)
+
+    assert mutant_runner._retry_native_results(node_ids) == {
+        node_id: "passed" for node_id in node_ids
+    }
+
+
+def test_native_baseline_reports_a_retry_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_file = tmp_path / "test_monitoring_failure.py"
+    test_file.write_text(
+        "import sys\n"
+        "def test_monitoring_slot_is_free():\n"
+        "    assert sys.monitoring.get_tool(4) is None\n",
+        encoding="utf-8",
+    )
+    watched = tmp_path / "watched.py"
+    watched.write_text("VALUE = 1\n", encoding="utf-8")
+
+    def fail(_node_ids: tuple[str, ...]) -> dict[str, str]:
+        raise RuntimeError("retry broke")
+
+    monkeypatch.setattr(mutant_runner, "_retry_native_results", fail)
+
+    with pytest.raises(RuntimeError, match="retry broke"):
+        mutant_runner.run_native_baseline(
+            (str(test_file),),
+            mutant_runner.Plan(watched={str(watched): {1}}),
+            workdir=tmp_path,
+        )
+
+
 def test_completed_test_blocks_shift_cpu_from_tests_to_mutation() -> None:
     def jobs(completed: int) -> int:
         return mutant_runner._progressive_live_jobs(8, completed, 100, max_live=3)
@@ -1733,6 +2395,13 @@ def test_budget_ceiling_reports_undecided_without_failing_the_pipeline(
     document = json.loads(completed.stdout)
     assert document["counts"]["timeout"] == 1
     assert document["rating"]["label"] == "FINISH THE SAMPLE"
+    selection = document["selection"]
+    assert selection["eligible_candidates"] >= selection["selected_candidates"] == 1
+    assert selection["candidate_files"] == selection["selected_files"] == 1
+    assert sum(item["eligible"] for item in selection["by_operator"].values()) == selection[
+        "eligible_candidates"
+    ]
+    assert sum(item["selected"] for item in selection["by_operator"].values()) == 1
 
 
 def test_changed_outside_a_repository_says_so(

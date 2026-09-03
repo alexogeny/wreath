@@ -117,7 +117,9 @@ def test_a_strenum_action_is_the_route_s_wire_vocabulary() -> None:
     async def documents(request: Any) -> list[Any]:
         return []
 
-    assert requirement_for(documents).policies[0].action == "Document::read"
+    action = requirement_for(documents).policies[0].action
+    assert action == "Document::read"
+    assert type(action) is str
 
 
 def test_strict_access_declarations_cover_websockets() -> None:

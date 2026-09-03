@@ -41,7 +41,7 @@ def _mounted(**options):
     store = MemoryObjectStore()
     uploads = resumable(store, **options)
     app = Wreath()
-    app.include_router(uploads.router("/uploads"))
+    app.include_router(uploads.router("/uploads", public=True))
     return store, uploads, app
 
 
@@ -54,14 +54,13 @@ def test_a_limit_dictionary_renders_only_what_is_set() -> None:
 
 
 @pytest.mark.asyncio
-async def test_upload_limit_is_absent_when_nothing_is_limited() -> None:
+async def test_ordinary_upload_resource_advertises_its_finite_default_size() -> None:
     _, _, app = _mounted()
     async with TestClient(app) as client:
         response = await client.post("/uploads", headers={"upload-complete": "?0"})
-    # `max-age` always applies, so the header is present; the assertion that
-    # matters is that an unset limit contributes nothing to it.
     limit = _header(response, "upload-limit")
-    assert "max-size" not in limit
+    assert limit is not None
+    assert "max-size=536870912" in limit
     assert "min-append-size" not in limit
 
 
@@ -355,7 +354,7 @@ async def test_a_declared_type_the_bytes_agree_with_is_accepted() -> None:
 async def test_the_resource_can_be_mounted_at_the_root() -> None:
     store = MemoryObjectStore()
     app = Wreath()
-    app.include_router(resumable(store).router("/"))
+    app.include_router(resumable(store).router("/", public=True))
 
     async with TestClient(app) as client:
         response = await client.post("/", headers={"upload-complete": "?1"}, content=b"x")
@@ -396,22 +395,84 @@ async def test_the_memory_store_expires_only_what_is_stale() -> None:
 @pytest.mark.asyncio
 async def test_losing_the_conditional_advance_refuses_rather_than_rewinds() -> None:
     class LosingStore(MemoryUploadStore):
+        lose = False
+
         async def advance(self, state, *, expected):
-            return False
+            if self.lose:
+                return False
+            return await super().advance(state, expected=expected)
 
     store = MemoryObjectStore()
-    uploads = resumable(store, uploads=LosingStore())
+    states = LosingStore()
+    uploads = resumable(store, uploads=states)
     app = Wreath()
-    app.include_router(uploads.router("/uploads"))
+    app.include_router(uploads.router("/uploads", public=True))
 
     async with TestClient(app) as client:
-        created = await client.post("/uploads", headers={"upload-complete": "?0"}, content=b"abcd")
+        created = await client.post("/uploads", headers={"upload-complete": "?0"})
+        states.lose = True
+        response = await client.patch(
+            _location(created),
+            headers={**PART, "upload-offset": "0", "upload-complete": "?0"},
+            content=b"abcd",
+        )
 
-    assert created.status == 409
-    assert _header(created, "upload-offset") == "0"
-    # The bytes went to this attempt's own part key and are assembled into
-    # nothing; the sweeper is what reclaims them.
-    assert [s.key async for s in store.list(prefix="uploads/")] == []
+    assert response.status == 409
+    assert _header(response, "upload-offset") == "0"
+    assert [s.key async for s in store.list(prefix=".uploads/") if s.key.endswith(".part")] == []
+
+
+@pytest.mark.asyncio
+async def test_losing_an_s3_style_advance_aborts_the_new_multipart_upload() -> None:
+    class LosingStore(MemoryUploadStore):
+        lose = False
+
+        async def advance(self, state, *, expected):
+            if self.lose:
+                return False
+            return await super().advance(state, expected=expected)
+
+    class MultipartStore(MemoryObjectStore):
+        _part_size = 1
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.aborted = []
+
+        def _resumable_backend(self, _prefix):
+            return _S3UploadBackend(self)
+
+        def _obj_path(self, key):
+            return f"/{key}"
+
+        async def _initiate(self, _path, _content_type):
+            return "attempt-1"
+
+        async def _put_part(self, _path, _upload_id, _number, _data):
+            return '"etag"'
+
+        async def _abort(self, path, upload_id):
+            self.aborted.append((path, upload_id))
+
+    objects = MultipartStore()
+    states = LosingStore()
+    uploads = resumable(objects, uploads=states)
+    app = Wreath()
+    app.include_router(uploads.router("/uploads", public=True))
+
+    async with TestClient(app) as client:
+        created = await client.post("/uploads", headers={"upload-complete": "?0"})
+        upload_id = _location(created).rsplit("/", 1)[-1]
+        states.lose = True
+        response = await client.patch(
+            _location(created),
+            headers={**PART, "upload-offset": "0", "upload-complete": "?0"},
+            content=b"abcd",
+        )
+
+    assert response.status == 409
+    assert objects.aborted == [(f"/uploads/{upload_id}", "attempt-1")]
+    assert await states.read(upload_id) is None
 
 
 @pytest.mark.asyncio

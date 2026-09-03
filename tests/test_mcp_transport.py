@@ -500,3 +500,8 @@ def test_a_limit_that_is_not_a_limit_is_refused() -> None:
         MCPLimits(max_sessions=0)
     with pytest.raises(ValueError, match="session_idle_seconds"):
         MCPLimits(session_idle_seconds=0)
+    with pytest.raises(ValueError, match="stream_keepalive_seconds"):
+        MCPLimits(stream_keepalive_seconds=0)
+    with pytest.raises(ValueError, match="client_request_seconds"):
+        MCPLimits(client_request_seconds=0)
+    assert MCPLimits(session_idle_seconds=None).session_idle_seconds is None

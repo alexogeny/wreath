@@ -19,6 +19,7 @@ def test_percentage_is_deterministic():
     assert a == b
     assert evaluate_rule("0%", "beta", ctx) is False
     assert evaluate_rule("100%", "beta", ctx) is True
+    assert evaluate_rule("1000", "beta", ctx) is False
 
 
 def test_percentage_spreads_subjects():

@@ -78,6 +78,53 @@ async def test_a_store_hands_out_independent_copies(factory: str) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("factory", ["memory", "object"])
+async def test_expiration_fences_the_state_before_returning_it(factory: str) -> None:
+    objects = MemoryObjectStore()
+    store = MemoryUploadStore() if factory == "memory" else ObjectUploadStore(objects)
+    await store.create(_state(updated=1.0))
+
+    stale = await store.expired(2.0)
+    advanced = stale[0].copy()
+    advanced.claim = ""
+    advanced.offset = 4
+
+    assert await store.advance(advanced, expected=0) is False
+
+
+@pytest.mark.asyncio
+async def test_expiration_does_not_claim_a_record_advanced_after_enumeration() -> None:
+    class AdvancingStore(MemoryObjectStore):
+        race = False
+
+        async def _upload_compare_and_swap(self, key, data, **options):
+            if self.race and key == ".uploads/abc.json":
+                self.race = False
+                versioned = await super()._upload_read_versioned(key)
+                assert versioned is not None
+                current = UploadState.from_json(versioned[0])
+                current.offset = 4
+                current.updated = 3.0
+                await super()._upload_compare_and_swap(
+                    key,
+                    current.to_json(),
+                    expected_etag=versioned[1],
+                    content_type="application/json",
+                )
+            return await super()._upload_compare_and_swap(key, data, **options)
+
+    objects = AdvancingStore()
+    store = ObjectUploadStore(objects)
+    await store.create(_state(updated=1.0))
+    objects.race = True
+
+    assert await store.expired(2.0) == []
+    current = await store.read("abc")
+    assert current is not None
+    assert current.offset == 4
+
+
+@pytest.mark.asyncio
 async def test_creating_the_same_upload_twice_is_refused() -> None:
     store = MemoryUploadStore()
     await store.create(_state())
@@ -92,8 +139,8 @@ async def test_object_store_records_survive_a_second_worker() -> None:
     worker_b = resumable(objects, uploads=ObjectUploadStore(objects))
 
     app_a, app_b = Wreath(), Wreath()
-    app_a.include_router(worker_a.router("/uploads"))
-    app_b.include_router(worker_b.router("/uploads"))
+    app_a.include_router(worker_a.router("/uploads", public=True))
+    app_b.include_router(worker_b.router("/uploads", public=True))
 
     async with TestClient(app_a) as a, TestClient(app_b) as b:
         created = await a.post("/uploads", headers={"upload-complete": "?0"}, content=b"half")
@@ -118,8 +165,8 @@ async def test_object_store_records_survive_a_second_worker() -> None:
 async def test_memory_store_fails_closed_on_a_second_worker() -> None:
     objects = MemoryObjectStore()
     app_a, app_b = Wreath(), Wreath()
-    app_a.include_router(resumable(objects).router("/uploads"))
-    app_b.include_router(resumable(objects).router("/uploads"))
+    app_a.include_router(resumable(objects).router("/uploads", public=True))
+    app_b.include_router(resumable(objects).router("/uploads", public=True))
 
     async with TestClient(app_a) as a, TestClient(app_b) as b:
         created = await a.post("/uploads", headers={"upload-complete": "?0"}, content=b"half")
@@ -131,7 +178,7 @@ async def test_a_second_append_in_flight_is_refused_not_interleaved() -> None:
     objects = MemoryObjectStore()
     uploads = resumable(objects)
     app = Wreath()
-    app.include_router(uploads.router("/uploads"))
+    app.include_router(uploads.router("/uploads", public=True))
 
     async with TestClient(app) as client:
         created = await client.post("/uploads", headers={"upload-complete": "?0"}, content=b"ab")
@@ -157,7 +204,7 @@ async def test_concurrent_appends_do_not_both_land() -> None:
     objects = MemoryObjectStore()
     uploads = resumable(objects)
     app = Wreath()
-    app.include_router(uploads.router("/uploads"))
+    app.include_router(uploads.router("/uploads", public=True))
 
     async with TestClient(app) as client:
         location = _location(await client.post("/uploads", headers={"upload-complete": "?0"}))
@@ -188,7 +235,7 @@ async def test_the_quota_predicate_refuses_before_the_bytes() -> None:
 
     objects = MemoryObjectStore()
     app = Wreath()
-    app.include_router(resumable(objects, quota=quota).router("/uploads"))
+    app.include_router(resumable(objects, quota=quota).router("/uploads", public=True))
 
     async with TestClient(app) as client:
         response = await client.post(
@@ -205,7 +252,9 @@ async def test_key_for_chooses_the_final_object_key() -> None:
     objects = MemoryObjectStore()
     app = Wreath()
     app.include_router(
-        resumable(objects, key_for=lambda request, upload_id: "fixed/name.bin").router("/uploads")
+        resumable(objects, key_for=lambda request, upload_id: "fixed/name.bin").router(
+            "/uploads", public=True
+        )
     )
 
     async with TestClient(app) as client:
@@ -236,7 +285,9 @@ async def test_completion_enqueues_one_durable_job_keyed_by_the_upload() -> None
     objects = MemoryObjectStore()
     app = Wreath()
     app.include_router(
-        resumable(objects, jobs=FakeRunner(), on_complete="process").router("/uploads")
+        resumable(objects, jobs=FakeRunner(), on_complete="process").router(
+            "/uploads", public=True
+        )
     )
 
     async with TestClient(app) as client:
@@ -262,7 +313,9 @@ async def test_an_incomplete_upload_enqueues_nothing() -> None:
     objects = MemoryObjectStore()
     app = Wreath()
     app.include_router(
-        resumable(objects, jobs=FakeRunner(), on_complete="process").router("/uploads")
+        resumable(objects, jobs=FakeRunner(), on_complete="process").router(
+            "/uploads", public=True
+        )
     )
 
     async with TestClient(app) as client:
@@ -294,7 +347,7 @@ def test_sniff_recognises_only_unambiguous_signatures(prefix: bytes, expected) -
 async def test_a_declared_type_the_bytes_contradict_is_refused() -> None:
     objects = MemoryObjectStore()
     app = Wreath()
-    app.include_router(resumable(objects).router("/uploads"))
+    app.include_router(resumable(objects).router("/uploads", public=True))
 
     async with TestClient(app) as client:
         response = await client.post(
@@ -311,7 +364,7 @@ async def test_a_declared_type_the_bytes_contradict_is_refused() -> None:
 async def test_the_sniffed_type_is_what_gets_stored() -> None:
     objects = MemoryObjectStore()
     app = Wreath()
-    app.include_router(resumable(objects).router("/uploads"))
+    app.include_router(resumable(objects).router("/uploads", public=True))
 
     async with TestClient(app) as client:
         await client.post("/uploads", headers={"upload-complete": "?1"}, content=PNG)
@@ -324,7 +377,7 @@ async def test_the_sniffed_type_is_what_gets_stored() -> None:
 async def test_sniffing_can_be_turned_off() -> None:
     objects = MemoryObjectStore()
     app = Wreath()
-    app.include_router(resumable(objects, sniff=False).router("/uploads"))
+    app.include_router(resumable(objects, sniff=False).router("/uploads", public=True))
 
     async with TestClient(app) as client:
         response = await client.post(
@@ -341,7 +394,7 @@ async def test_sweep_reclaims_an_abandoned_upload_and_its_parts() -> None:
     objects = MemoryObjectStore()
     uploads = resumable(objects, uploads=ObjectUploadStore(objects), expire=60.0)
     app = Wreath()
-    app.include_router(uploads.router("/uploads"))
+    app.include_router(uploads.router("/uploads", public=True))
 
     async with TestClient(app) as client:
         created = await client.post(
@@ -379,7 +432,7 @@ async def test_sweep_counts_an_abort_it_could_not_finish() -> None:
     objects = BrokenStore()
     uploads = resumable(objects, uploads=ObjectUploadStore(objects), expire=1.0)
     app = Wreath()
-    app.include_router(uploads.router("/uploads"))
+    app.include_router(uploads.router("/uploads", public=True))
 
     async with TestClient(app) as client:
         await client.post("/uploads", headers={"upload-complete": "?0"}, content=b"abandoned")
@@ -393,7 +446,7 @@ async def test_refused_appends_are_counted() -> None:
     objects = MemoryObjectStore()
     uploads = resumable(objects)
     app = Wreath()
-    app.include_router(uploads.router("/uploads"))
+    app.include_router(uploads.router("/uploads", public=True))
 
     async with TestClient(app) as client:
         location = _location(await client.post("/uploads", headers={"upload-complete": "?0"}))
@@ -492,7 +545,7 @@ def test_a_declared_floor_cannot_go_below_the_backend_floor() -> None:
 async def test_s3_assembly_uses_multipart_and_transfers_nothing_at_completion() -> None:
     store, client = _s3(_s3_handler)
     app = Wreath()
-    app.include_router(resumable(store).router("/uploads"))
+    app.include_router(resumable(store).router("/uploads", public=True))
     first, last = b"A" * _floor(store), b"tail"
 
     async with TestClient(app) as http:
@@ -522,7 +575,7 @@ async def test_s3_assembly_uses_multipart_and_transfers_nothing_at_completion() 
 async def test_a_short_non_final_append_is_refused_by_the_s3_floor() -> None:
     store, client = _s3(_s3_handler)
     app = Wreath()
-    app.include_router(resumable(store).router("/uploads"))
+    app.include_router(resumable(store).router("/uploads", public=True))
 
     async with TestClient(app) as http:
         response = await http.post(
@@ -537,7 +590,7 @@ async def test_a_short_non_final_append_is_refused_by_the_s3_floor() -> None:
 async def test_cancelling_an_s3_upload_aborts_the_multipart() -> None:
     store, client = _s3(_s3_handler)
     app = Wreath()
-    app.include_router(resumable(store).router("/uploads"))
+    app.include_router(resumable(store).router("/uploads", public=True))
 
     async with TestClient(app) as http:
         created = await http.post(
@@ -556,7 +609,7 @@ async def test_cancelling_an_s3_upload_aborts_the_multipart() -> None:
 async def test_an_empty_s3_upload_is_a_plain_put() -> None:
     store, client = _s3(_s3_handler)
     app = Wreath()
-    app.include_router(resumable(store).router("/uploads"))
+    app.include_router(resumable(store).router("/uploads", public=True))
 
     async with TestClient(app) as http:
         response = await http.post("/uploads", headers={"upload-complete": "?1"})

@@ -204,6 +204,8 @@ class WebSocket:
         Raises:
             RuntimeError: The first message from the peer was not `websocket.connect`.
         """
+        if subprotocol is not None and subprotocol not in self.subprotocols:
+            raise ValueError(f"WebSocket subprotocol {subprotocol!r} was not offered by the client")
         await self._ensure_connect()
         message: Message = {"type": "websocket.accept", "subprotocol": subprotocol}
         if headers:

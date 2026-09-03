@@ -764,7 +764,11 @@ class RecordingSink:
         # Open owner-only (0600), truncating. Failure to open leaves the sink
         # degraded from the start -- it still drains and drops, never raising.
         try:
-            fd = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            fd = os.open(
+                self._path,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
             self._fh = os.fdopen(fd, "wb")
             self._writer = WFR1Writer(self._fh, self._image)
         except OSError:

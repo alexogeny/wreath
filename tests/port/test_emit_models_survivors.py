@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import ast
+
 import pytest
+
+from wreath._port.analyzer.imports import _Imports
 
 port = pytest.importorskip("wreath.port")
 
@@ -9,6 +13,21 @@ def _emit(source: str, *, opinionated: bool = False) -> str:
     emitted = port.emit_module(source, opinionated=opinionated)
     compile(emitted, "<ported>", "exec", dont_inherit=True)
     return emitted
+
+
+def _rewrite_config(extra: str, *, opinionated: bool = False) -> str:
+    from wreath._port.emit import models as model_emitter
+
+    source = (
+        "from pydantic import ConfigDict\n"
+        f"model_config = ConfigDict(extra={extra!r})\n"
+    )
+    tree = ast.parse(source)
+    imports = _Imports()
+    imports.visit(tree)
+    rewrite = model_emitter._ModelRewrite(source, imports, opinionated=opinionated)
+    rewrite._rewrite_pydantic_field(tree.body[1])
+    return rewrite.buf.render()
 
 
 def test_settings_rewrite_preserves_every_non_settings_shape() -> None:
@@ -321,8 +340,36 @@ def test_opinionated_mode_keeps_unknown_extra_and_only_drops_ignore() -> None:
         "from pydantic import BaseModel, ConfigDict\n\n\n"
         "class Model(BaseModel):\n"
         "    model_config = ConfigDict(extra='ignore')\n"
+        "    value: int\n",
+        opinionated=True,
+    )
+    default_ignored = _emit(
+        "from pydantic import BaseModel, ConfigDict\n\n\n"
+        "class Model(BaseModel):\n"
+        "    model_config = ConfigDict(extra='ignore')\n"
         "    value: int\n"
     )
 
     assert "ConfigDict(extra='allow')" in allowed
-    assert "[pydantic.config_ignore]" in ignored
+    assert "extra='ignore' dropped" in ignored
+    assert "[pydantic.config_ignore]" in default_ignored
+
+
+def test_extra_forbid_is_removed_as_the_wreath_default() -> None:
+    emitted = _emit(
+        "from pydantic import BaseModel, ConfigDict\n\n\n"
+        "class Model(BaseModel):\n"
+        "    model_config = ConfigDict(extra='forbid')\n"
+        "    value: int\n"
+    )
+
+    assert "extra='forbid' is wreath's default" in emitted
+    assert "ConfigDict(extra='forbid')" not in emitted
+
+    assert "extra='forbid' is wreath's default" in _rewrite_config("forbid")
+
+
+def test_config_extra_ignore_is_dropped_only_in_opinionated_mode() -> None:
+    assert "extra='ignore' dropped" in _rewrite_config("ignore", opinionated=True)
+    assert "ConfigDict(extra='ignore')" in _rewrite_config("ignore")
+    assert "ConfigDict(extra='allow')" in _rewrite_config("allow", opinionated=True)

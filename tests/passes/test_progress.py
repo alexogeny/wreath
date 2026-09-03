@@ -192,6 +192,62 @@ def test_a_keyspace_walk_that_has_not_started_is_at_zero():
     assert _progress.percent_of(row, ()) == 0.0
 
 
+def test_a_keyspace_percentage_needs_its_floor():
+    row = _row(
+        denominator_kind="keyspace",
+        keyspace_from=None,
+        ceiling=[100],
+        cursor=[50],
+    )
+
+    assert _progress.percent_of(row, ()) is None
+
+
+def test_a_keyspace_percentage_needs_its_ceiling():
+    row = _row(
+        denominator_kind="keyspace",
+        keyspace_from=[0],
+        ceiling=None,
+        cursor=[50],
+    )
+
+    assert _progress.percent_of(row, ()) is None
+
+
+def test_a_keyspace_percentage_needs_a_placeable_cursor():
+    row = _row(
+        denominator_kind="keyspace",
+        keyspace_from=[0],
+        ceiling=[100],
+        cursor=["not-a-date"],
+    )
+
+    assert _progress.percent_of(row, ()) is None
+
+
+def test_a_descending_keyspace_measures_from_high_to_low():
+    row = _row(
+        denominator_kind="keyspace",
+        keyspace_from=[100],
+        ceiling=[0],
+        cursor=[75],
+    )
+    key = Key("id", "bigint", descending=True)
+
+    assert _progress.percent_of(row, (key,)) == pytest.approx(25.0)
+
+
+def test_a_keyspace_with_no_span_is_complete():
+    row = _row(
+        denominator_kind="keyspace",
+        keyspace_from=[100],
+        ceiling=[100],
+        cursor=[100],
+    )
+
+    assert _progress.percent_of(row, ()) == 100.0
+
+
 def test_keyspace_is_refused_on_a_key_it_cannot_place_on_a_line():
     with pytest.raises(PassDeclarationError) as caught:
         purge_pass(

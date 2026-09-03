@@ -13,6 +13,10 @@ def _b64u(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
+def _unexpected_native(*_args: object) -> bool:
+    raise AssertionError("invalid width reached native verification")
+
+
 def test_rfc6979_p256_sha256_known_answer() -> None:
     # RFC 6979 §A.2.5 — P-256/SHA-256, message "sample".
     ux = 0x60FED4BA255A9D31C961EB74C6356D68C049B8923B61FA6CE669622E60F29FB6
@@ -23,6 +27,46 @@ def test_rfc6979_p256_sha256_known_answer() -> None:
     assert verify_es256(ux, uy, b"sample", sig)
     assert not verify_es256(ux, uy, b"samplE", sig)  # message tamper
     assert not verify_es256(ux, uy, b"sample", bytes(64))  # zero signature
+
+
+@pytest.mark.parametrize("size", [0, 63, 65])
+def test_es256_refuses_every_noncanonical_signature_width(
+    size: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wreath._auth import _ecverify
+
+    monkeypatch.setattr(
+        _ecverify._core,
+        "curve_p256_verify",
+        _unexpected_native,
+    )
+    assert not _ecverify.verify_es256(1, 1, b"message", bytes(size))
+
+
+@pytest.mark.parametrize(
+    ("public", "signature"),
+    [
+        (bytes(31), bytes(64)),
+        (bytes(33), bytes(64)),
+        (bytes(32), bytes(63)),
+        (bytes(32), bytes(65)),
+    ],
+    ids=("short-key", "long-key", "short-signature", "long-signature"),
+)
+def test_ed25519_refuses_every_noncanonical_key_or_signature_width(
+    public: bytes,
+    signature: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wreath._auth import _ecverify
+
+    monkeypatch.setattr(
+        _ecverify._core,
+        "curve_ed_verify",
+        _unexpected_native,
+    )
+    assert not _ecverify.verify_ed25519(public, b"message", signature)
 
 
 @pytest.mark.parametrize(

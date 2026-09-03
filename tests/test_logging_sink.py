@@ -202,6 +202,19 @@ def test_pipeline_hands_records_to_the_sink(runtime: log.LogRuntime) -> None:
     assert len(written) == 1
 
 
+def test_pipeline_uses_the_supplied_renderer(runtime: log.LogRuntime) -> None:
+    written: list[str] = []
+
+    def renderer(_registry, _record) -> str:
+        return "custom-rendering"
+
+    pipeline = LogPipeline(runtime.registry, write=written.append, renderer=renderer)
+    pipeline.on_log(_projected())
+    pipeline.flush()
+
+    assert written == ["custom-rendering"]
+
+
 def test_a_full_queue_drops_and_counts_rather_than_blocking(
     runtime: log.LogRuntime,
 ) -> None:

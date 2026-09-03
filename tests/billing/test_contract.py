@@ -121,6 +121,30 @@ def catalog() -> PlanCatalog:
     )
 
 
+def billing_facade(
+    capabilities: BillingCapabilities,
+    *,
+    customer_for: Any = None,
+    payment_for: Any = None,
+) -> tuple[Backend, Billing]:
+    backend = Backend(capabilities)
+    options = (
+        {"topology": ConnectedMerchants(account_for=lambda subject: "acct_acme")}
+        if capabilities.connect
+        else {}
+    )
+    return backend, Billing(
+        "commerce",
+        backend=backend,
+        catalog=catalog(),
+        merchant=DeploymentMerchant(),
+        capture=HostedRedirect(),
+        customer_for=customer_for,
+        payment_for=payment_for,
+        **options,
+    )
+
+
 def test_money_is_integer_minor_units_in_an_uppercase_currency() -> None:
     assert Money(currency="USD", minor=2900).minor == 2900
     floating_minor: Any = 29.0
@@ -542,6 +566,165 @@ async def test_billing_refuses_unknown_customer_and_payment_before_provider_io()
             reference="01JWRONGTENANTREFUND",
         )
     assert backend.portal_requests == []
+    assert backend.refund_requests == []
+
+
+@pytest.mark.asyncio
+async def test_billing_portal_refuses_each_missing_capability_and_mapping() -> None:
+    unsupported_backend, unsupported = billing_facade(
+        BillingCapabilities(hosted_checkout=True, subscriptions=True),
+        customer_for=lambda subject: "cus_acme",
+    )
+    with pytest.raises(BillingConfigurationError, match="does not support hosted portal"):
+        await unsupported.portal(
+            subject="organization:acme",
+            return_url="https://app.example/billing",
+            reference="portal:unsupported",
+        )
+    assert unsupported_backend.portal_requests == []
+
+    missing_backend, missing = billing_facade(
+        BillingCapabilities(hosted_checkout=True, hosted_portal=True, subscriptions=True)
+    )
+    with pytest.raises(BillingConfigurationError, match="requires customer_for"):
+        await missing.portal(
+            subject="organization:acme",
+            return_url="https://app.example/billing",
+            reference="portal:missing",
+        )
+    assert missing_backend.portal_requests == []
+
+    for customer in ("", 1):
+        backend, invalid = billing_facade(
+            BillingCapabilities(hosted_checkout=True, hosted_portal=True, subscriptions=True),
+            customer_for=lambda subject, value=customer: value,
+        )
+        with pytest.raises(KeyError, match="no provider customer mapping"):
+            await invalid.portal(
+                subject="organization:acme",
+                return_url="https://app.example/billing",
+                reference="portal:invalid",
+            )
+        assert backend.portal_requests == []
+
+
+@pytest.mark.asyncio
+async def test_billing_refund_refuses_each_invalid_control_boundary() -> None:
+    unsupported_backend, unsupported = billing_facade(
+        BillingCapabilities(hosted_checkout=True, subscriptions=True),
+        payment_for=lambda subject, payment: ProviderPayment("pi_1", "USD"),
+    )
+    with pytest.raises(BillingConfigurationError, match="does not support refunds"):
+        await unsupported.refund(
+            subject="organization:acme",
+            payment="payment:1",
+            reference="refund:unsupported",
+        )
+    assert unsupported_backend.refund_requests == []
+
+    for subject in ("", 1):
+        backend, invalid = billing_facade(
+            BillingCapabilities(hosted_checkout=True, subscriptions=True, refunds=True),
+            payment_for=lambda owner, payment: ProviderPayment("pi_1", "USD"),
+        )
+        with pytest.raises(ValueError, match="subject must be a non-empty string"):
+            await invalid.refund(
+                subject=subject,
+                payment="payment:1",
+                reference="refund:invalid-subject",
+            )
+        assert backend.refund_requests == []
+
+    missing_backend, missing = billing_facade(
+        BillingCapabilities(hosted_checkout=True, subscriptions=True, refunds=True)
+    )
+    with pytest.raises(BillingConfigurationError, match="requires payment_for"):
+        await missing.refund(
+            subject="organization:acme",
+            payment="payment:1",
+            reference="refund:missing",
+        )
+    assert missing_backend.refund_requests == []
+
+    invalid_backend, invalid_mapping = billing_facade(
+        BillingCapabilities(hosted_checkout=True, subscriptions=True, refunds=True),
+        payment_for=lambda subject, payment: object(),
+    )
+    with pytest.raises(TypeError, match="must return ProviderPayment"):
+        await invalid_mapping.refund(
+            subject="organization:acme",
+            payment="payment:1",
+            reference="refund:invalid-mapping",
+        )
+    assert invalid_backend.refund_requests == []
+
+
+@pytest.mark.asyncio
+async def test_billing_refund_preserves_connect_merchant_ownership() -> None:
+    connected_backend, connected = billing_facade(
+        BillingCapabilities(
+            hosted_checkout=True,
+            subscriptions=True,
+            connect=True,
+            refunds=True,
+        ),
+        payment_for=lambda subject, payment: ProviderPayment("pi_1", "USD"),
+    )
+    with pytest.raises(ValueError, match="must retain its original merchant account"):
+        await connected.refund(
+            subject="organization:acme",
+            payment="payment:1",
+            reference="refund:missing-account",
+        )
+    assert connected_backend.refund_requests == []
+
+    retained_backend, retained = billing_facade(
+        BillingCapabilities(
+            hosted_checkout=True,
+            subscriptions=True,
+            connect=True,
+            refunds=True,
+        ),
+        payment_for=lambda subject, payment: ProviderPayment("pi_1", "USD", "acct_acme"),
+    )
+    await retained.refund(
+        subject="organization:acme",
+        payment="payment:1",
+        reference="refund:retained-account",
+    )
+    assert retained_backend.refund_requests[0][0].merchant_account == "acct_acme"
+
+    ordinary_backend, ordinary = billing_facade(
+        BillingCapabilities(hosted_checkout=True, subscriptions=True, refunds=True),
+        payment_for=lambda subject, payment: ProviderPayment("pi_1", "USD", "acct_acme"),
+    )
+    with pytest.raises(ValueError, match="must not carry a merchant account"):
+        await ordinary.refund(
+            subject="organization:acme",
+            payment="payment:1",
+            reference="refund:unexpected-account",
+        )
+    assert ordinary_backend.refund_requests == []
+
+
+@pytest.mark.asyncio
+async def test_projected_refund_rechecks_the_refund_capability() -> None:
+    backend, billing = billing_facade(
+        BillingCapabilities(hosted_checkout=True, subscriptions=True)
+    )
+
+    with pytest.raises(BillingConfigurationError, match="does not support refunds"):
+        await billing._refund_projected(
+            PaymentSnapshot(
+                provider="test",
+                id="pi_1",
+                subject="organization:acme",
+                reference="order:1",
+                amount=Money("USD", 100),
+                state=PaymentState.SUCCEEDED,
+            ),
+            reference="refund:projected",
+        )
     assert backend.refund_requests == []
 
 

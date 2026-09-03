@@ -9,6 +9,7 @@ from wreath import Wreath
 from wreath.policy import HttpPolicy
 from wreath.policy.sessions import SessionPolicy, rotate_session
 from wreath.session_store import PostgresSessionStore
+from wreath.state import State
 from wreath.testing import TestClient
 
 pytestmark = pytest.mark.asyncio
@@ -21,6 +22,7 @@ class MemoryStore:
         self.rows: dict[str, dict[str, Any]] = {}
         self.saves = 0
         self.loads = 0
+        self.deletes: list[str] = []
 
     async def load(self, sid: str) -> dict[str, Any] | None:
         self.loads += 1
@@ -30,8 +32,33 @@ class MemoryStore:
         self.saves += 1
         self.rows[sid] = dict(data)
 
+    async def save_if_present(
+        self, sid: str, data: dict[str, Any], max_age: int
+    ) -> bool:
+        if sid not in self.rows:
+            return False
+        await self.save(sid, data, max_age)
+        return True
+
     async def delete(self, sid: str) -> None:
+        self.deletes.append(sid)
         self.rows.pop(sid, None)
+
+
+class StateRequest:
+    def __init__(self) -> None:
+        self.state = State()
+
+
+class CookieResponse:
+    def __init__(self) -> None:
+        self.cookies: list[tuple[str, tuple, dict]] = []
+
+    def set_cookie(self, name: str, *args: Any, **kwargs: Any) -> None:
+        self.cookies.append((f"set:{name}", args, kwargs))
+
+    def delete_cookie(self, name: str, *args: Any, **kwargs: Any) -> None:
+        self.cookies.append((f"delete:{name}", args, kwargs))
 
 
 @pytest.mark.parametrize(
@@ -198,6 +225,33 @@ async def test_without_a_store_the_session_still_travels_in_the_cookie() -> None
     }
 
 
+def test_cookie_session_loader_rejects_expiry_and_non_object_json() -> None:
+    import time
+
+    middleware = SessionPolicy(secret="s" * 32, max_age=60)
+    expired = middleware._sign(b'{"user":"ada"}', int(time.time()) - 61)
+    sequence = middleware._sign(b"[]", int(time.time()))
+    assert middleware._load(expired) is None
+    assert middleware._load(sequence) is None
+
+
+def test_cookie_session_loader_marks_only_previous_secret_payloads_for_resigning() -> None:
+    import time
+
+    payload = b'{"user":"ada"}'
+    current = SessionPolicy(secret="n" * 32, previous_secrets=("o" * 32,))
+    old = SessionPolicy(secret="o" * 32)
+    now = int(time.time())
+    assert current._load(current._sign(payload, now)) == ({"user": "ada"}, payload)
+    assert current._load(old._sign(payload, now)) == ({"user": "ada"}, b"")
+
+
+def test_session_policy_schema_owners_follow_store_presence() -> None:
+    store = MemoryStore()
+    assert SessionPolicy(secret="s" * 32).schema_owners == ()
+    assert SessionPolicy(secret="s" * 32, store=store).schema_owners == (store,)
+
+
 class FakeStatement:
     def __init__(self, sql: str, workload: str, results: dict[str, Any]) -> None:
         self.calls: list[tuple] = []
@@ -213,7 +267,7 @@ class FakeStatement:
     async def execute(self, *args: Any) -> str:
         check_for(self, self.sql, args)
         self.calls.append(args)
-        return "OK"
+        return self._results.get(self.sql, "OK")
 
 
 class FakeDatabase:
@@ -277,6 +331,38 @@ async def test_load_decodes_jsonb_handed_back_as_text() -> None:
     assert await store.load("sid") == {"user": "ada"}
 
 
+async def test_load_accepts_decoded_objects_and_refuses_other_json_shapes() -> None:
+    database = FakeDatabase()
+    store = PostgresSessionStore(database)
+    await store.load("sid")
+    sql = database.statements["wreath_session_read_live_wreath_session"].sql
+
+    database.results[sql] = [{"user": "ada"}]
+    assert await store.load("sid") == {"user": "ada"}
+
+    database.results[sql] = [["not", "an", "object"]]
+    assert await store.load("sid") is None
+
+
+@pytest.mark.parametrize(
+    ("session_key", "expected_key"),
+    [(None, "principal"), ("account", "account")],
+)
+async def test_delete_for_uses_the_selected_session_key_and_returns_zero_for_unknown_status(
+    session_key: str | None,
+    expected_key: str,
+) -> None:
+    database = FakeDatabase()
+    store = PostgresSessionStore(database, session_key="principal")
+
+    assert await store.delete_for("ada", session_key=session_key) == 0
+    statement = database.statements["wreath_session_delete_for_wreath_session"]
+    assert statement.calls == [("ada", expected_key)]
+
+    database.results[statement.sql] = "DELETE 3"
+    assert await store.delete_for("ada", session_key=session_key) == 3
+
+
 async def test_expiry_is_pushed_to_the_database_clock() -> None:
     database = FakeDatabase()
     store = PostgresSessionStore(database)
@@ -324,6 +410,98 @@ async def test_after_degrades_when_before_did_not_publish_a_baseline() -> None:
     response2 = Response()
     assert await plain.after(request2, response2) is response2
     assert response2.cookies == []
+
+
+async def test_after_stored_with_no_session_does_not_clear_or_delete_anything() -> None:
+    store = MemoryStore()
+    middleware = SessionPolicy(secret="s" * 32, store=store)
+    request = StateRequest()
+    request.state._session_loaded = b"{}"
+    response = CookieResponse()
+    assert await middleware._after_stored(request, response) is response
+    assert response.cookies == []
+    assert store.deletes == []
+
+
+async def test_empty_new_stored_session_needs_no_delete_cookie_capability() -> None:
+    store = MemoryStore()
+    middleware = SessionPolicy(secret="s" * 32, store=store)
+    request = StateRequest()
+    request.state.session = {}
+    request.state._session_loaded = b"{}"
+    request.state._session_sid = None
+    request.state._session_rotate = False
+    response = object()
+    assert await middleware._after_stored(request, response) is response
+    assert store.deletes == []
+
+
+async def test_rotating_an_unchanged_session_neither_touches_nor_double_deletes() -> None:
+    store = TouchableStore()
+    store.rows["sid"] = {"user": "ada"}
+    middleware = SessionPolicy(secret="s" * 32, store=store)
+    request = StateRequest()
+    request.state.session = {"user": "ada"}
+    request.state._session_loaded = b'{"user":"ada"}'
+    request.state._session_sid = "sid"
+    request.state._session_rotate = True
+    await middleware._after_stored(request, CookieResponse())
+    assert store.touches == []
+    assert store.deletes == ["sid"]
+
+
+async def test_a_new_stored_session_never_touches_or_deletes_a_missing_id() -> None:
+    store = TouchableStore()
+    middleware = SessionPolicy(secret="s" * 32, store=store)
+    request = StateRequest()
+    request.state.session = {"user": "ada"}
+    request.state._session_loaded = b'{"user":"ada"}'
+    request.state._session_sid = None
+    request.state._session_rotate = True
+    await middleware._after_stored(request, CookieResponse())
+    assert store.touches == []
+    assert store.deletes == []
+
+
+async def test_an_unchanged_new_session_does_not_touch_a_missing_id() -> None:
+    store = TouchableStore()
+    middleware = SessionPolicy(secret="s" * 32, store=store)
+    request = StateRequest()
+    request.state.session = {"user": "ada"}
+    request.state._session_loaded = b'{"user":"ada"}'
+    request.state._session_sid = None
+    request.state._session_rotate = False
+    await middleware._after_stored(request, CookieResponse())
+    assert store.touches == []
+
+
+async def test_a_changed_stored_session_tolerates_a_response_without_cookies() -> None:
+    store = MemoryStore()
+    store.rows["sid"] = {}
+    middleware = SessionPolicy(secret="s" * 32, store=store)
+    request = StateRequest()
+    request.state.session = {"user": "ada"}
+    request.state._session_loaded = b"{}"
+    request.state._session_sid = "sid"
+    request.state._session_rotate = False
+    response = object()
+    assert await middleware._after_stored(request, response) is response
+    assert store.saves == 1
+
+
+async def test_cookie_only_after_tolerates_missing_session_or_cookie_capability() -> None:
+    middleware = SessionPolicy(secret="s" * 32)
+    missing = StateRequest()
+    missing.state._session_loaded = b"{}"
+    response = CookieResponse()
+    assert await middleware.after(missing, response) is response
+    assert response.cookies == []
+
+    changed = StateRequest()
+    changed.state.session = {"user": "ada"}
+    changed.state._session_loaded = b"{}"
+    bare = object()
+    assert await middleware.after(changed, bare) is bare
 
 
 async def test_a_session_that_cannot_be_serialized_publishes_no_state() -> None:

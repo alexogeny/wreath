@@ -4,7 +4,13 @@ import json
 
 import pytest
 
-from wreath.crud import Access, crud_router, sensitive_fields
+from wreath.crud import Access, sensitive_fields
+from wreath.crud import crud_router as _crud_router
+
+
+def crud_router(*args, **kwargs):
+    kwargs.setdefault("authorize", Access.public())
+    return _crud_router(*args, **kwargs)
 
 
 def _model():
@@ -236,14 +242,20 @@ async def test_rule_resolution_prefers_specific_over_group_over_default() -> Non
     assert _rule_for(authorize, "retrieve").kind == "public"  # via "read" group
     assert _rule_for(authorize, "update").kind == "roles"  # specific op wins
     assert _rule_for(authorize, "create").kind == "authenticated"  # "*" default
-    assert _rule_for(None, "delete").kind == "public"  # no rules → public
+    with pytest.raises(ValueError, match="delete"):
+        _rule_for({}, "delete")
     assert _rule_for(Access.deny(), "list").kind == "deny"  # single rule for all
 
 
 async def test_deny_operation_answers_403_without_touching_db() -> None:
     Account = _model()
     session = _FakeSession({1: Account(id=1, name="A", email="e")})
-    router = crud_router(Account, lambda request: session, authorize={"delete": Access.deny()})
+    router = crud_router(
+        Account,
+        lambda request: session,
+        operations=("delete",),
+        authorize={"delete": Access.deny()},
+    )
     routes = _routes(router)
     assert ("DELETE", "/account/{id}") in routes  # route still exists
     resp = await routes[("DELETE", "/account/{id}")](_Req(path_params={"id": "1"}))
@@ -354,6 +366,7 @@ async def test_authorize_attaches_enforceable_metadata() -> None:
             "read": Access.public(),
             "create": Access.permissions("account:create"),
             "update": Access.roles("admin"),
+            "delete": Access.deny(),
         },
     )
     routes = _routes(router)
@@ -388,6 +401,7 @@ async def test_end_to_end_role_enforcement_through_the_app() -> None:
             lambda request: session,
             authorize={
                 "read": Access.public(),
+                "create": Access.deny(),
                 "update": Access.roles("admin"),
                 "delete": Access.deny(),
             },
@@ -430,6 +444,7 @@ async def test_within_composes_step_up_with_the_rule_rather_than_replacing_it() 
         lambda request: _FakeSession(),
         authorize={
             "read": Access.authenticated(),
+            "write": Access.deny(),
             "delete": Access.roles("admin").within(300),
         },
     )
@@ -490,6 +505,7 @@ async def test_step_up_on_a_generated_delete_is_enforced_through_the_app() -> No
             lambda request: session,
             authorize={
                 "read": Access.public(),
+                "write": Access.deny(),
                 "delete": Access.roles("admin").within(300),
             },
         )
@@ -525,7 +541,7 @@ async def test_crud_is_off_until_enabled_at_the_app_level() -> None:
     with pytest.raises(RuntimeError, match="enable_crud"):
         app.crud(Account, lambda request: _FakeSession())
     app.enable_crud()
-    app.crud(Account, lambda request: _FakeSession())  # now allowed
+    app.crud(Account, lambda request: _FakeSession(), authorize=Access.public())
 
 
 # `wreath.crud` predates `Vector` and `TsVector`. Its defaults -- serialize every

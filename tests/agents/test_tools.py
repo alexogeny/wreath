@@ -14,8 +14,9 @@ from wreath._agents.core import (
     AgentRuntime,
     ModelResponseEvent,
 )
-from wreath._agents.tools import MCPToolCatalog
+from wreath._agents.tools import MCPToolCatalog, _SelectedMCPTools
 from wreath._auth.models import Identity
+from wreath._mcp.executor import ToolExecutionResult
 from wreath.mcp import MCP
 
 
@@ -62,6 +63,32 @@ async def test_agent_catalog_adapts_shared_context_to_direct_mcp_executor() -> N
         "conversation": "thread-9",
         "metadata": {"job": "job-7"},
         "correlation": "trace-3",
+    }
+
+
+async def test_selected_tools_omit_absent_structured_content() -> None:
+    class Executor:
+        specifications: tuple[object, ...] = ()
+
+        async def invoke(self, *_args: Any, **_kwargs: Any) -> ToolExecutionResult:
+            return ToolExecutionResult(
+                content=({"type": "text", "text": "plain"},),
+                is_error=False,
+                effect_id="effect-1",
+            )
+
+    selected = _SelectedMCPTools(Executor())
+    result = await selected.invoke(
+        "plain",
+        {},
+        call_id="call-1",
+        context=InvocationContext("tenant-a", Identity("user-1"), "thread-1"),
+    )
+
+    assert result == {
+        "content": [{"type": "text", "text": "plain"}],
+        "isError": False,
+        "effectId": "effect-1",
     }
 
 

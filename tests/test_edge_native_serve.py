@@ -10,7 +10,7 @@ import pytest
 
 from wreath._native import _reactor
 from wreath.edge import Upstream, UpstreamPool
-from wreath.edge.serve import EdgeHandle
+from wreath.edge.serve import EdgeHandle, _endpoint
 
 _WORKER = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
 _SLOT = int("".join(c for c in _WORKER if c.isdigit()) or 0)
@@ -18,6 +18,21 @@ _SLOT = int("".join(c for c in _WORKER if c.isdigit()) or 0)
 #: proxy makes an outbound connection per request and the kernel draws its
 #: source ports from there -- a listener inside that range can lose its own bind.
 _PORT = 27800 + _SLOT * 40
+
+
+@pytest.mark.parametrize(
+    ("url", "endpoint"),
+    [
+        ("http://example.test", ("example.test", 80, b"example.test", False)),
+        ("https://example.test", ("example.test", 443, b"example.test", True)),
+        ("http://example.test:8080", ("example.test", 8080, b"example.test:8080", False)),
+        ("https://example.test:8443", ("example.test", 8443, b"example.test:8443", True)),
+    ],
+)
+def test_native_endpoint_preserves_explicit_ports_and_scheme_defaults(
+    url: str, endpoint: tuple[str, int, bytes, bool]
+) -> None:
+    assert _endpoint(url) == endpoint
 
 
 @pytest.mark.parametrize(

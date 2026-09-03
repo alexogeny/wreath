@@ -674,7 +674,10 @@ class CedarAuthorizer:
         # none can, the second evaluation below is provably identical to the
         # first and is skipped; a request with no delegation never makes it.
         reads = getattr(engine, "reads_context", None)
-        self._delegation_visible = bool(callable(reads) and (reads("delegated") or reads("actor")))
+        self._delegation_visible = bool(
+            callable(reads)
+            and (reads("delegated") or reads("actor") or reads("delegation_depth"))
+        )
         self._reads_now = None if not callable(reads) else bool(reads("now"))
         _validate_org_roles(self._facts[3].vocabulary, organizations)
 

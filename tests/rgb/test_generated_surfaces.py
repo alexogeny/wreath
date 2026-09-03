@@ -100,15 +100,16 @@ class TestCrudListRowAuthorization:
     `list`, so rows protected per-row are readable in bulk from `GET /`."""
 
     def _router(self, **kwargs):
-        from wreath.crud import crud_router
+        from wreath.crud import Access, crud_router
 
         def open_session(request):  # pragma: no cover - replaced per test
             raise AssertionError("unused")
 
+        kwargs.setdefault("authorize", Access.public())
         return crud_router(Person, open_session, **kwargs)
 
     async def test_list_applies_the_row_authorizer(self):
-        from wreath.crud import crud_router
+        from wreath.crud import Access, crud_router
 
         rows = [
             _Row(id=1, email="a@example.com"),
@@ -130,6 +131,7 @@ class TestCrudListRowAuthorization:
             lambda request: _Session(),
             operations=("list",),
             object_authorizer=only_row_one,
+            authorize=Access.public(),
         )
         handler = router.routes[0].endpoint
         response = await handler(_ListRequest())

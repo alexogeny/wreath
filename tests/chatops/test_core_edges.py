@@ -6,10 +6,14 @@ from typing import Any, Literal
 
 import pytest
 
+import wreath.chat._core as chat_core
+from wreath import logging as log
 from wreath.auth import Identity
 from wreath.authorization import AuthorizationDecision
+from wreath.binding import ValidationError as BindingValidationError
 from wreath.chat import (
     AgentEvent,
+    ChatAdmissionError,
     ChatConfigurationError,
     ChatContext,
     ChatOps,
@@ -21,6 +25,8 @@ from wreath.chat import (
     IdentityResolutionError,
     PrincipalBinding,
 )
+from wreath.policy import ConcurrencyPolicy
+from wreath.response import ProblemDetail
 
 
 def context(**values: Any) -> ChatContext:
@@ -85,6 +91,68 @@ async def test_identity_resolver_refuses_a_non_binding_result() -> None:
         await resolver.resolve(key)
 
 
+def test_identity_resolver_refuses_a_federation_without_resolve() -> None:
+    key = ExternalIdentityKey(provider="slack", installation="T1", subject="U1")
+    binding = PrincipalBinding(identity=Identity("user-1"), external=key)
+
+    class Store:
+        async def lookup(self, _key: ExternalIdentityKey) -> tuple[PrincipalBinding]:
+            return (binding,)
+
+    with pytest.raises(TypeError, match="federation.*resolve"):
+        ExternalIdentityResolver(store=Store(), federation=object())
+
+
+@pytest.mark.parametrize("federated", [object(), None])
+async def test_identity_resolver_refuses_invalid_federated_binding(
+    federated: object | None,
+) -> None:
+    key = ExternalIdentityKey(provider="slack", installation="T1", subject="U1")
+    local = PrincipalBinding(identity=Identity("user-1"), external=key)
+
+    class Store:
+        async def lookup(self, _key: ExternalIdentityKey) -> tuple[PrincipalBinding]:
+            return (local,)
+
+    class Federation:
+        async def resolve(
+            self, _key: ExternalIdentityKey, _binding: PrincipalBinding
+        ) -> object | None:
+            return federated
+
+    resolver = ExternalIdentityResolver(store=Store(), federation=Federation())
+    with pytest.raises(IdentityResolutionError, match="mismatched-federated-identity"):
+        await resolver.resolve(key)
+
+
+async def test_identity_resolver_refuses_federated_binding_for_another_key() -> None:
+    key = ExternalIdentityKey(provider="slack", installation="T1", subject="U1")
+    other = ExternalIdentityKey(provider="slack", installation="T2", subject="U1")
+    local = PrincipalBinding(identity=Identity("user-1"), external=key)
+
+    class Store:
+        async def lookup(self, _key: ExternalIdentityKey) -> tuple[PrincipalBinding]:
+            return (local,)
+
+    class Federation:
+        async def resolve(
+            self, _key: ExternalIdentityKey, _binding: PrincipalBinding
+        ) -> PrincipalBinding:
+            return PrincipalBinding(identity=Identity("user-1"), external=other)
+
+    resolver = ExternalIdentityResolver(store=Store(), federation=Federation())
+    with pytest.raises(IdentityResolutionError, match="mismatched-federated-identity"):
+        await resolver.resolve(key)
+
+
+def test_chat_admission_error_uses_detail_title_and_final_fallback() -> None:
+    assert str(ChatAdmissionError(ProblemDetail(503, detail="capacity reached"))) == (
+        "capacity reached"
+    )
+    assert str(ChatAdmissionError(ProblemDetail(503, title="Overloaded"))) == "Overloaded"
+    assert str(ChatAdmissionError(ProblemDetail(503))) == "chat request refused"
+
+
 def test_progress_coalescer_refuses_invalid_or_empty_flushes() -> None:
     with pytest.raises(ValueError, match="positive"):
         ChatProgressCoalescer(interval=0)
@@ -127,6 +195,37 @@ def test_conversation_store_requires_positive_retention() -> None:
     store = SimpleNamespace(retention_days=0, erase=lambda _conversation: None)
     with pytest.raises(ChatConfigurationError, match="conversation_store"):
         ChatOps(name="ops", conversation_store=store)
+
+
+@pytest.mark.parametrize("option", ["admission", "rate_limit"])
+def test_chat_policies_require_their_runtime_contract(option: str) -> None:
+    with pytest.raises(TypeError, match=option.replace("_", "[- ]")):
+        ChatOps(name="ops", **{option: object()})
+
+
+async def test_startup_refuses_a_stream_owner_without_writer() -> None:
+    chat = ChatOps(name="ops")
+
+    @chat.command("stream", streams=object())
+    async def stream() -> None:
+        pass
+
+    with pytest.raises(ChatConfigurationError, match="stream.*writer"):
+        await chat._startup()
+
+
+async def test_startup_accepts_a_stream_owner_with_writer() -> None:
+    class Streams:
+        async def writer(self) -> None:
+            pass
+
+    chat = ChatOps(name="ops")
+
+    @chat.command("stream", streams=Streams())
+    async def stream() -> None:
+        pass
+
+    await chat._startup()
 
 
 def test_conversation_store_requires_erasure() -> None:
@@ -321,6 +420,30 @@ async def test_resolution_skips_context_without_external_identity() -> None:
     assert owner.calls == 0
 
 
+async def test_resolution_preserves_context_when_owner_returns_no_binding() -> None:
+    key = ExternalIdentityKey(provider="slack", installation="T1", subject="U1")
+    owner = IdentityOwner(None)
+    chat = ChatOps(name="ops", identity=owner)
+    current = context(external_identity=key)
+
+    assert await chat._resolve(current) is None
+    assert owner.calls == 1
+    assert current.identity is None
+
+
+async def test_resolution_refuses_a_non_binding_owner_result() -> None:
+    key = ExternalIdentityKey(provider="slack", installation="T1", subject="U1")
+
+    class Owner:
+        async def resolve(self, _key: ExternalIdentityKey) -> object:
+            return object()
+
+    chat = ChatOps(name="ops", identity=Owner())
+
+    with pytest.raises(IdentityResolutionError, match="mismatched-identity-link"):
+        await chat._resolve(context(external_identity=key))
+
+
 async def test_resolution_supports_plain_principal_and_preserves_unmapped_tenant() -> None:
     key = ExternalIdentityKey(provider="slack", installation="T1", subject="U1")
     identity = Identity("user-1")
@@ -389,6 +512,28 @@ async def test_dispatch_handles_unknown_sync_string_and_invalid_results() -> Non
         )
 
 
+async def test_binding_error_without_field_details_uses_generic_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject(*_args: Any, **_kwargs: Any) -> Any:
+        raise BindingValidationError([])
+
+    monkeypatch.setattr(chat_core, "convert_parameter", reject)
+    chat = ChatOps(name="ops")
+
+    @chat.command("deploy")
+    async def deploy(environment: int) -> None:
+        pass
+
+    with pytest.raises(ValueError, match="environment: has an invalid value"):
+        await chat._dispatch(
+            kind="command",
+            name="deploy",
+            context=context(),
+            arguments={"environment": "production"},
+        )
+
+
 async def test_context_and_identity_injection_work_by_annotation_and_reserved_name() -> None:
     chat = ChatOps(name="ops")
     current = context(identity=Identity("user-1"))
@@ -444,6 +589,73 @@ async def test_authorization_uses_default_refusal_and_static_resource() -> None:
     assert authorizer.resources == [resource]
 
 
+@pytest.mark.parametrize(
+    ("identity", "actor", "expected_actor"),
+    [
+        (None, "channel-user", "channel-user"),
+        (Identity("member-7"), "channel-user", "member-7"),
+    ],
+)
+async def test_rate_limit_key_prefers_identity_then_channel_actor(
+    identity: Identity | None, actor: str, expected_actor: str
+) -> None:
+    class RateLimit:
+        def __init__(self) -> None:
+            self.keys: list[str] = []
+
+        async def admit_key(self, key: str) -> None:
+            self.keys.append(key)
+
+    rate_limit = RateLimit()
+    chat = ChatOps(name="ops", rate_limit=rate_limit)
+
+    @chat.command("deploy")
+    async def deploy() -> None:
+        pass
+
+    await chat._dispatch(
+        kind="command",
+        name="deploy",
+        context=context(identity=identity, actor=actor),
+    )
+    assert rate_limit.keys == [f"chat:test:tenant-1:{expected_actor}:deploy"]
+
+
+async def test_chat_admission_holds_and_releases_a_successful_permit() -> None:
+    admission = ConcurrencyPolicy(1)
+    chat = ChatOps(name="ops", admission=admission)
+
+    @chat.command("deploy")
+    async def deploy() -> str:
+        assert admission.stats().active == 1
+        return "done"
+
+    assert await chat._dispatch(
+        kind="command", name="deploy", context=context()
+    ) == ChatReply.text("done")
+    assert admission.stats().active == 0
+
+
+async def test_chat_admission_refuses_when_every_permit_is_held() -> None:
+    admission = ConcurrencyPolicy(1, detail="Chat is busy")
+    assert admission.try_acquire()
+    chat = ChatOps(name="ops", admission=admission)
+    ran = False
+
+    @chat.command("deploy")
+    async def deploy() -> None:
+        nonlocal ran
+        ran = True
+
+    with pytest.raises(ChatAdmissionError) as refused:
+        await chat._dispatch(kind="command", name="deploy", context=context())
+
+    assert refused.value.problem.status == 503
+    assert refused.value.problem.detail == "Chat is busy"
+    assert ran is False
+    admission.release()
+
+
 async def test_second_factor_requires_identity_and_enforces_maximum_age() -> None:
     now = 1_000.0
     chat = ChatOps(name="ops", clock=lambda: now)
@@ -461,6 +673,64 @@ async def test_second_factor_requires_identity_and_enforces_maximum_age() -> Non
     assert await chat._dispatch(kind="command", name="deploy", context=fresh) == ChatReply.text(
         "deployed"
     )
+
+
+def test_problem_maps_identity_permission_and_empty_request_errors() -> None:
+    chat = ChatOps(name="ops")
+
+    identity = chat.problem(IdentityResolutionError("missing"))
+    permission = chat.problem(PermissionError())
+    request = chat.problem(ValueError())
+    detailed_request = chat.problem(ValueError("invalid environment"))
+
+    assert (identity.status, identity.detail) == (401, "Link your identity to continue")
+    assert (permission.status, permission.detail) == (403, "Forbidden")
+    assert (request.status, request.detail) == (400, "Bad Request")
+    assert (detailed_request.status, detailed_request.detail) == (
+        400,
+        "invalid environment",
+    )
+
+
+async def test_unknown_provider_uses_generic_structured_dispatch_log() -> None:
+    chat = ChatOps(name="ops")
+
+    @chat.command("status")
+    async def status() -> None:
+        pass
+
+    with log.testing_runtime(level=log.INFO) as records:
+        await chat._dispatch(kind="command", name="status", context=context())
+
+    assert len(records) == 1
+    assert len(records[0].args) == 2
+
+
+async def test_dispatch_log_prefers_declared_action_then_command_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logged: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(chat_core.log, "active", lambda: True)
+    monkeypatch.setattr(
+        chat_core.log,
+        "info",
+        lambda template, **values: logged.append((template, values)),
+    )
+    chat = ChatOps(name="ops")
+
+    @chat.command("status")
+    async def status() -> None:
+        pass
+
+    @chat.command("deploy", action="Release::deploy")
+    async def deploy() -> None:
+        pass
+
+    current = context(provider="slack")
+    await chat._audit(current, chat.commands["status"], outcome="succeeded")
+    await chat._audit(current, chat.commands["deploy"], outcome="failed")
+
+    assert [values["action"] for _, values in logged] == ["status", "Release::deploy"]
 
 
 @dataclass

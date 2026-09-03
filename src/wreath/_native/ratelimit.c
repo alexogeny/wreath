@@ -150,7 +150,8 @@ bucket_rebuild(WreathTokenBucket *self, size_t target, double now, Py_ssize_t dr
  * the table still full, scanned again for the fullest, then rebuilt a second
  * time -- ~3x O(slots) and two allocations per new key under a key flood.
  * Now the same scan refills, counts reclaimable (refilled-to-capacity) buckets
- * and tracks the fullest, so exactly one rebuild runs: grow, reclaim, or evict.
+ * so exactly one rebuild runs when growth or reclamation is possible. At the
+ * ceiling with only live buckets, admission is refused without eviction.
  */
 static int
 bucket_ensure_room(WreathTokenBucket *self, double now)
@@ -158,9 +159,6 @@ bucket_ensure_room(WreathTokenBucket *self, double now)
     size_t slots = self->mask + 1;
     size_t survivors = 0;      /* buckets a compaction would keep */
     size_t reclaimable = 0;    /* buckets refilled back to capacity (droppable) */
-    size_t fullest = 0;
-    double most_tokens = -1.0;
-    int found_any = 0;
     size_t target;
 
     if (WREATH_HAS_ROOM(self)) {
@@ -179,27 +177,16 @@ bucket_ensure_room(WreathTokenBucket *self, double now)
         } else {
             reclaimable++;
         }
-        if (slot->tokens > most_tokens) {
-            most_tokens = slot->tokens;
-            fullest = i;
-            found_any = 1;
-        }
     }
     target = slots;
     while (!WREATH_FITS(survivors, target) && target < self->max_slots) {
         target <<= 1;
     }
-    /* Skip a rebuild that provably reclaims nothing: at the ceiling (no growth)
-     * with no bucket refilled to capacity, a keep-all rebuild is a pure copy
-     * that leaves the table just as full. Evict the fullest directly -- it is
-     * the closest to idle, so its owner loses the least by starting over, and
-     * the table stays inside its configured bound. This is the saturated
-     * key-flood path; collapsing it to one rebuild is the whole point. */
+    /* Refuse an untracked key when every admitted bucket is still live. Evicting
+     * one resets that caller's allowance, so a spray of new keys could choose a
+     * throttled victim and bypass the limit. */
     if (target == slots && reclaimable == 0) {
-        if (!found_any) {
-            return 0;
-        }
-        return bucket_rebuild(self, slots, now, (Py_ssize_t)fullest);
+        return 1;
     }
     /* Grow and/or drop reclaimable buckets. */
     if (bucket_rebuild(self, target, now, -1) < 0) {
@@ -208,22 +195,7 @@ bucket_ensure_room(WreathTokenBucket *self, double now)
     if (WREATH_HAS_ROOM(self)) {
         return 0;
     }
-    /* Growth capped out and survivors alone exceed the load factor: evict the
-     * fullest survivor. The pre-rebuild scan's `fullest` may have been dropped
-     * as reclaimable, so re-select among what remains. */
-    most_tokens = -1.0;
-    found_any = 0;
-    for (size_t i = 0; i <= self->mask; i++) {
-        if (self->slots[i].key != NULL && self->slots[i].tokens > most_tokens) {
-            most_tokens = self->slots[i].tokens;
-            fullest = i;
-            found_any = 1;
-        }
-    }
-    if (!found_any) {
-        return 0;
-    }
-    return bucket_rebuild(self, self->mask + 1, now, (Py_ssize_t)fullest);
+    return 1;
 }
 
 static PyObject *
@@ -273,22 +245,28 @@ token_bucket_acquire(WreathTokenBucket *self, PyObject *args, PyObject *kwargs)
             retry_after = (cost - slot->tokens) / self->rate;
         }
     }
-    else if (bucket_ensure_room(self, now) < 0) {
-        failed = 1;
-    }
     else {
-        /* ensure_room may have rebuilt the table, so the earlier index is stale. */
-        index = bucket_find(self, key, hash, &found);
-        if (index < 0) {
+        int room = bucket_ensure_room(self, now);
+        if (room < 0) {
             failed = 1;
         }
+        else if (room > 0) {
+            retry_after = self->capacity / self->rate;
+        }
         else {
-            WreathBucket *slot = &self->slots[index];
-            slot->key = Py_NewRef(key);
-            slot->hash = hash;
-            slot->tokens = self->capacity - cost;
-            slot->updated = now;
-            self->used++;
+            /* ensure_room may have rebuilt the table, so the earlier index is stale. */
+            index = bucket_find(self, key, hash, &found);
+            if (index < 0) {
+                failed = 1;
+            }
+            else {
+                WreathBucket *slot = &self->slots[index];
+                slot->key = Py_NewRef(key);
+                slot->hash = hash;
+                slot->tokens = self->capacity - cost;
+                slot->updated = now;
+                self->used++;
+            }
         }
     }
     Py_END_CRITICAL_SECTION();

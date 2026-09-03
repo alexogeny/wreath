@@ -22,6 +22,7 @@ because a hero that quietly links to a page you deleted is worse than no hero.
 from __future__ import annotations
 
 from . import _fenced
+from .markdown import _safe_href
 
 __all__ = ["extract", "restore", "title_of"]
 
@@ -83,7 +84,7 @@ def _render(config: list[str]) -> str:
     if actions:
         links = "".join(
             f'<a class="hero-action{" primary" if index == 0 else ""}" '
-            f'href="{_esc(href)}">{_esc(label)}</a>'
+            f'href="{_safe_href(href)}">{_esc(label)}</a>'
             for index, (label, href) in enumerate(actions)
         )
         parts.append(f'<p class="hero-actions">{links}</p>')

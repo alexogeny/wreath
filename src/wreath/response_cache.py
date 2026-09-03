@@ -73,6 +73,7 @@ _CACHE_GROUPS: Final = b"cache-groups"
 _CACHE_GROUP_INVALIDATION: Final = b"cache-group-invalidation"
 _CACHE_STATUS: Final = b"cache-status"
 _SAFE_METHODS: Final = frozenset({"GET", "HEAD", "OPTIONS", "QUERY", "TRACE"})
+_CACHEABLE_METHODS: Final = frozenset({"GET", "HEAD", "OPTIONS", "QUERY"})
 
 #: Digest bytes carried in each surrogate key.
 _TAG_BYTES: Final = 8
@@ -560,6 +561,14 @@ def cached(
         raise TypeError(f"cached(cache_status=...) must be str, got {type(cache_status).__name__}")
     status_values = _cache_status_values(cache_status) if cache_status is not None else None
     public_key = key is default_cache_key or getattr(key, "_wreath_public", False)
+    refused_methods = tuple(method for method in methods if method not in _CACHEABLE_METHODS)
+    if refused_methods:
+        names = ", ".join(refused_methods)
+        raise ValueError(
+            f"cached methods {names} can depend on a request body or expose request "
+            "headers; cache only GET, HEAD, OPTIONS or QUERY (whose body is part of "
+            "the key)"
+        )
     cached_methods = frozenset(methods) if len(methods) >= 8 else methods
 
     window = None if ttl is None else Duration.of(ttl).total_seconds()
@@ -624,11 +633,19 @@ def cached(
                 _apply_header(result, _CACHE_STATUS, status_values[state])
             return result
 
-        def invalidate(request: Any = None) -> None:
+        def invalidate(request: Any = None) -> Any:
             if request is None:
                 the_store.clear()
-            else:
-                the_store.delete(key(request))
+                return None
+            base = key(request)
+            if request.method != "QUERY":
+                the_store.delete(base)
+                return None
+
+            async def invalidate_query() -> None:
+                the_store.delete(await _query_cache_key(request, base))
+
+            return invalidate_query()
 
         if watched:
 

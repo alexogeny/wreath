@@ -22,6 +22,32 @@ from wreath._cli import (
     load_application,
     options_from_namespace,
 )
+from wreath._target import Target, parse_target
+
+
+def test_target_parser_preserves_explicit_and_default_attributes() -> None:
+    assert parse_target(
+        "package.module", label="application", default_attribute="app"
+    ) == Target("package.module", "app")
+    assert parse_target(
+        "package.module:create", label="application", default_attribute="app"
+    ) == Target("package.module", "create")
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "package:app:extra",
+        ":app",
+        ".package:app",
+        "bad-name:app",
+        "package:",
+        "package:bad-name",
+    ],
+)
+def test_target_parser_refuses_each_malformed_component(target: str) -> None:
+    with pytest.raises(ValueError, match="module:attribute"):
+        parse_target(target, label="application")
 
 
 def test_flight_replay_turns_a_replay_refusal_into_a_stable_cli_error(

@@ -232,6 +232,33 @@ def test_oversize_single_use_issue_releases_its_registered_nonce() -> None:
     assert ledger.consumed == ledger.registered
 
 
+def test_single_use_issue_refuses_if_its_declared_ledger_is_lost() -> None:
+    tokens = ActionTokens(
+        {"active": KEY_A},
+        current="active",
+        purposes=[TokenPurpose("reset", 60, single_use=True)],
+        ledger=MemoryTokenLedger(),
+    )
+    tokens._ledger = None
+
+    with pytest.raises(RuntimeError, match="lost its declared ledger"):
+        tokens.issue("reset", "subject", now=100)
+
+
+def test_single_use_verify_refuses_if_its_declared_ledger_is_lost() -> None:
+    tokens = ActionTokens(
+        {"active": KEY_A},
+        current="active",
+        purposes=[TokenPurpose("reset", 60, single_use=True)],
+        ledger=MemoryTokenLedger(),
+    )
+    token = tokens.issue("reset", "subject", now=100)
+    tokens._ledger = None
+
+    with pytest.raises(RuntimeError, match="lost its declared ledger"):
+        tokens.verify("reset", token, now=101)
+
+
 @pytest.mark.parametrize(
     "token",
     [None, "x" * 4097, "w2.eA.eA"],
@@ -251,6 +278,18 @@ def test_verify_refuses_a_well_formed_token_with_the_wrong_prefix() -> None:
     token = tokens.issue("invite", "subject", now=100)
     _, body, mac = token.split(".")
     assert tokens.verify("invite", f"w2.{body}.{mac}", now=100) is None
+
+
+def test_verify_refuses_a_valid_token_over_its_own_wire_limit() -> None:
+    purpose = TokenPurpose("invite", 60)
+    issuer = ActionTokens({"active": KEY_A}, current="active", purposes=[purpose])
+    verifier = ActionTokens(
+        {"active": KEY_A}, current="active", purposes=[purpose], max_token_bytes=128
+    )
+    token = issuer.issue("invite", "subject", now=100)
+    assert len(token.encode("utf-8")) > verifier.max_token_bytes
+
+    assert verifier.verify("invite", token, now=100) is None
 
 
 def test_verify_refuses_non_object_and_wrong_field_set_payloads() -> None:

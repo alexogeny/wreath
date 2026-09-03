@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from wreath import Wreath
 from wreath._auth.cedar import (
+    _bound_entitlement_resolution,
     _default_context,
     _default_entities,
+    _resolve_entitlements,
     _resolve_flags,
 )
 from wreath._auth.cedar_engine import CedarEntity, CedarPolicies, EntityUid
+from wreath._auth.principal import Limits
 from wreath.auth import BearerTokenBackend, Identity
 from wreath.authorization import CedarAuthorizer, authorize
 from wreath.flags import FeatureFlags
@@ -116,6 +120,34 @@ def test_legacy_flag_providers_are_normalized_once_at_startup() -> None:
 
     assert authorizer._flags is not provider
     assert callable(authorizer._flags.resolve)
+
+
+def test_entitlements_use_a_request_aware_resolver_when_it_is_the_only_resolver() -> None:
+    class Provider:
+        def resolve_request(self, request: Request) -> SimpleNamespace:
+            assert request.identity is not None
+            return SimpleNamespace(plan="pro", entitlements=("exports",))
+
+    assert _resolve_entitlements(
+        _request(Identity("alice")), Provider(), frozenset({"exports"})
+    ) == frozenset({"exports"})
+
+
+def test_legacy_entitlements_use_the_request_aware_provider_method() -> None:
+    class Provider:
+        def for_request(self, request: Request) -> tuple[str, ...]:
+            assert request.identity is not None
+            return ("exports",)
+
+    assert _resolve_entitlements(
+        _request(Identity("alice")), Provider(), frozenset({"exports"})
+    ) == frozenset({"exports"})
+
+
+def test_entitlement_resolution_refuses_a_provider_plan_outside_the_claimed_plan() -> None:
+    resolution = SimpleNamespace(plan="free", entitlements=("exports",))
+
+    assert _bound_entitlement_resolution(resolution, Limits(plan="pro")) == frozenset()
 
 
 class _SelectiveEngine:

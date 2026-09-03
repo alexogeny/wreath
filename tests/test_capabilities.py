@@ -54,6 +54,11 @@ def test_an_unknown_word_matches_nothing_rather_than_guessing() -> None:
     assert lookup("thumbnail-generation") == ()
 
 
+def test_an_empty_or_whitespace_only_term_matches_nothing() -> None:
+    assert lookup("") == ()
+    assert lookup(" \t") == ()
+
+
 def test_the_index_is_not_empty() -> None:
     rows = index()
     assert len(rows) > 30

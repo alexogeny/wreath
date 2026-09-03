@@ -40,6 +40,30 @@ static PyObject *broken(void) {
 """)
 
 
+def test_blank_lines_do_not_erase_the_previous_error_operation() -> None:
+    assert "NE003" in codes("""
+static PyObject *broken(void) {
+    PyErr_Clear();
+
+    return NULL;
+}
+""")
+
+
+def test_pyobject_return_type_is_found_beyond_the_nearby_signature_window() -> None:
+    assert "NE003" in codes("""
+static PyObject *broken(void) {
+    int one = 1;
+    int two = 2;
+    int three = 3;
+    int four = 4;
+    int five = one + two + three + four;
+    PyErr_Clear();
+    return NULL;
+}
+""")
+
+
 def test_success_return_with_exception_set_is_reported() -> None:
     assert "NE004" in codes("""
 static PyObject *broken(void) {
@@ -54,6 +78,29 @@ def test_ambiguous_conversion_without_error_check_is_reported() -> None:
 static PyObject *broken(PyObject *value) {
     long result = PyLong_AsLong(value);
     return PyLong_FromLong(result + 1);
+}
+""")
+
+
+def test_a_later_function_cannot_supply_the_conversion_error_check() -> None:
+    assert "NE005" in codes("""
+static long broken(PyObject *value) {
+    long result = PyLong_AsLong(value);
+    return 0;
+}
+static int unrelated(void) {
+    return PyErr_Occurred() ? -1 : 0;
+}
+""")
+
+
+def test_using_a_conversion_result_before_the_error_check_is_reported() -> None:
+    assert "NE005" in codes("""
+static long broken(PyObject *value) {
+    long result = PyLong_AsLong(value);
+    consume(result);
+    if (PyErr_Occurred()) return -1;
+    return result;
 }
 """)
 

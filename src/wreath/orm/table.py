@@ -239,7 +239,7 @@ def one_of(column: str, values: object) -> InValues:
     `eq`, which is what that means anyway.
     """
     name = _check_predicate_column(column, "one_of()")
-    if isinstance(values, (str, bytes)) or not isinstance(values, (list, tuple)):
+    if not isinstance(values, (list, tuple)):
         raise DeclarationError(f"one_of() takes a list of values, got {values!r}")
     items = tuple(values)
     if len(items) < 2:

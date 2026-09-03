@@ -358,6 +358,13 @@ async def test_a_stage_one_scrypt_recovery_code_still_verifies() -> None:
     assert await verify_second_factor(store, "user-1", "ABCD-EFGH ") is not None
 
 
+def test_a_current_recovery_digest_uses_the_current_verifier() -> None:
+    stored = hash_recovery_code("ABCD-EFGH")
+
+    assert verify_recovery_code("abcd-efgh", stored)
+    assert not verify_recovery_code("abcd-efgi", stored)
+
+
 async def test_a_legacy_recovery_hash_is_verified_off_the_event_loop(
     monkeypatch,
 ) -> None:

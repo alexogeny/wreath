@@ -72,9 +72,10 @@ def test_a_single_element_in_is_refused_because_postgres_rewrites_it() -> None:
         one_of("state", ["only"])
 
 
-def test_one_of_needs_a_list_not_a_bare_string() -> None:
+@pytest.mark.parametrize("values", ["ready", {"ready", "retry"}])
+def test_one_of_needs_a_list_or_tuple(values: object) -> None:
     with pytest.raises(DeclarationError, match="takes a list"):
-        one_of("state", "ready")
+        one_of("state", values)
 
 
 def test_all_of_does_not_nest() -> None:
@@ -90,6 +91,12 @@ def test_all_of_needs_two_predicates() -> None:
 def test_where_takes_a_predicate_not_a_string() -> None:
     with pytest.raises(DeclarationError, match="takes a predicate"):
         index("id", where="state = 'ready'")
+
+
+def test_renderer_refuses_an_unsupported_predicate_shape_by_name() -> None:
+    unsupported = object()
+    with pytest.raises(DeclarationError, match="unsupported shape"):
+        render_predicate(unsupported, COLUMNS, "Sample")
 
 
 def test_an_unknown_column_is_refused() -> None:

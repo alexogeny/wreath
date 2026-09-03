@@ -7,6 +7,7 @@ import pytest
 from wreath import Wreath
 from wreath.exceptions import Forbidden, Unauthorized
 from wreath.middleware import MiddlewareHooks, MiddlewareTape
+from wreath.middleware.base import compile_middleware
 from wreath.response import TextResponse
 
 
@@ -32,6 +33,65 @@ async def invoke(app: Wreath, path: str = "/") -> list[dict[str, Any]]:
         send,
     )
     return sent
+
+
+def test_route_agnostic_compilation_does_not_evaluate_route_predicates() -> None:
+    class Scoped:
+        def applies_to(self, _route: Any) -> bool:
+            raise AssertionError("route=None applies every middleware")
+
+        async def __call__(self, request: Any, call_next: Any) -> Any:
+            return await call_next(request)
+
+    async def endpoint(_request: Any) -> str:
+        return "ok"
+
+    assert compile_middleware(endpoint, [Scoped()], route=None) is not endpoint
+
+
+def test_a_matching_route_predicate_keeps_the_middleware() -> None:
+    class Scoped:
+        def applies_to(self, route: Any) -> bool:
+            return route.path == "/kept"
+
+        async def __call__(self, request: Any, call_next: Any) -> Any:
+            return await call_next(request)
+
+    async def endpoint(_request: Any) -> str:
+        return "ok"
+
+    route = type("Route", (), {"path": "/kept"})()
+    assert compile_middleware(endpoint, [Scoped()], route=route) is not endpoint
+
+
+def test_a_static_miss_returns_the_endpoint_without_a_wrapper() -> None:
+    class Scoped:
+        def applies_to(self, _route: Any) -> bool:
+            return False
+
+    async def endpoint(_request: Any) -> str:
+        return "ok"
+
+    assert compile_middleware(endpoint, [Scoped()], route=object()) is endpoint
+
+
+async def test_a_fused_hook_is_adapted_inside_a_mixed_chain() -> None:
+    events: list[str] = []
+
+    def before(_request: Any) -> None:
+        events.append("hook")
+
+    async def legacy(request: Any, call_next: Any) -> Any:
+        events.append("legacy")
+        return await call_next(request)
+
+    async def endpoint(_request: Any) -> str:
+        events.append("endpoint")
+        return "ok"
+
+    compiled = compile_middleware(endpoint, [MiddlewareHooks(before_sync=before), legacy])
+    assert await compiled(object()) == "ok"
+    assert events == ["hook", "legacy", "endpoint"]
 
 
 @pytest.mark.asyncio

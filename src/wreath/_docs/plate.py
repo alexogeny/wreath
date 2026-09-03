@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import _fenced
 from .capabilities import MANIFEST, aliases
+from .markdown import _safe_href
 
 __all__ = ["extract", "restore", "title_of"]
 
@@ -83,7 +84,7 @@ def _render(config: list[str], source_dir: Path, sink: list[str] | None) -> str:
     if actions:
         links = "".join(
             f'<a class="plate-action{" primary" if index == 0 else ""}" '
-            f'href="{_esc(href)}">{_esc(label)}</a>'
+            f'href="{_safe_href(href)}">{_esc(label)}</a>'
             for index, (label, href) in enumerate(actions)
         )
         parts.append(f'<p class="plate-actions">{links}</p>')

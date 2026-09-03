@@ -176,6 +176,16 @@ def test_sql_masker_stops_at_a_closed_or_unclosed_dollar_region() -> None:
     assert _sql_code("$tag$unterminated ; content") == " "
 
 
+def test_sql_masker_handles_nested_comments_and_escape_string_boundaries() -> None:
+    assert _sql_code("SELECT /* outer /* inner */ outer */ $1") == "SELECT   $1"
+    assert _sql_code(r"SELECT E'one\' $1' , $2") == "SELECT E  , $2"
+    assert _sql_code(r"SELECT e'one\' $1' , $2") == "SELECT e  , $2"
+    assert _sql_code(r"SELECT 'one\' $1' , $2") == "SELECT   $1 "
+    assert _sql_code(r"SELECT _E'one\' $1' , $2") == "SELECT _E  $1 "
+    assert _sql_code(r"SELECT xE'one\' $1' , $2") == "SELECT xE  $1 "
+    assert _sql_code(r"SELECT 9E'one\' $1' , $2") == "SELECT 9E  $1 "
+
+
 def test_a_line_comment_ends_at_newline_before_the_next_command() -> None:
     with pytest.raises(PostgresError, match="multiple commands"):
         refuse_multiple_commands("SELECT 1 -- hidden ;\n; SELECT 2")

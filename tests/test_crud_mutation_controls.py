@@ -8,9 +8,15 @@ import pytest
 
 from wreath._auth.requirements import requirement_for
 from wreath.authorization import EntityUid
-from wreath.crud import Access, crud_router
+from wreath.crud import Access
+from wreath.crud import crud_router as _crud_router
 from wreath.orm import Mapped, Model, column
 from wreath.orm.types import Int64, Text
+
+
+def crud_router(*args, **kwargs):
+    kwargs.setdefault("authorize", Access.public())
+    return _crud_router(*args, **kwargs)
 
 
 class Record(Model, table="crud_mutation_records"):
@@ -165,7 +171,14 @@ async def test_retrieve_deny_short_circuits_before_opening_a_session() -> None:
         opened = True
         return _Session()
 
-    retrieve = _routes(crud_router(Record, open_session, authorize={"retrieve": Access.deny()}))[
+    retrieve = _routes(
+        crud_router(
+            Record,
+            open_session,
+            operations=("retrieve",),
+            authorize={"retrieve": Access.deny()},
+        )
+    )[
         ("GET", "/record/{id}")
     ]
 
@@ -264,6 +277,7 @@ def test_authenticated_and_cedar_rules_attach_their_distinct_metadata() -> None:
         crud_router(
             Record,
             lambda _request: _Session(),
+            operations=("list", "retrieve"),
             authorize={
                 "list": Access.authenticated(),
                 "retrieve": Access.cedar(action="record:read", resource='Record::"{id}"'),

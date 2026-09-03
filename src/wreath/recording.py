@@ -1008,7 +1008,11 @@ def _write_recording(
     if image is None:
         image = MetadataImage(SCHEMA_VERSION, *([()] * 11))
     try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
         with os.fdopen(descriptor, "wb") as handle:
             writer = WFR1Writer(handle, image)
             if isinstance(record, AttemptRecord):

@@ -76,6 +76,45 @@ def test_standard_signature_rotation_hashes_each_secret_once(monkeypatch) -> Non
     assert calls == len(secrets)
 
 
+def test_standard_profile_refuses_non_v1_signatures_before_computing_a_mac(
+    monkeypatch,
+) -> None:
+    original = webhook_module.hmac.digest
+    calls = 0
+
+    def counted_digest(key, message, digest):
+        nonlocal calls
+        calls += 1
+        return original(key, message, digest)
+
+    monkeypatch.setattr(webhook_module.hmac, "digest", counted_digest)
+    with pytest.raises(ValueError, match="invalid Standard Webhooks signature"):
+        StandardWebhookVerifier(b"standard-secret").verify(
+            body=BODY,
+            headers={
+                b"webhook-id": b"evt_1",
+                b"webhook-timestamp": SECONDS,
+                b"webhook-signature": b"v2,AAAA",
+            },
+            now=NOW,
+        )
+    assert calls == 0
+
+
+def test_standard_profile_refuses_a_malformed_v1_signature() -> None:
+    with pytest.raises(ValueError, match="invalid Standard Webhooks signature") as exc_info:
+        StandardWebhookVerifier(b"standard-secret").verify(
+            body=BODY,
+            headers={
+                b"webhook-id": b"evt_1",
+                b"webhook-timestamp": SECONDS,
+                b"webhook-signature": b"v1,not-base64!",
+            },
+            now=NOW,
+        )
+    assert isinstance(exc_info.value.__cause__, ValueError)
+
+
 def test_stripe_signature_rotation_hashes_each_secret_once(monkeypatch) -> None:
     secrets = tuple(f"secret-{index}".encode() for index in range(8))
     signed = SECONDS + b"." + BODY
@@ -124,6 +163,17 @@ def test_standard_webhooks_refuses_an_empty_secret_collection() -> None:
 def test_provider_profiles_normalize_out_of_range_timestamps(verifier, headers) -> None:
     with pytest.raises(ValueError, match="invalid webhook Unix timestamp"):
         verifier.verify(body=BODY, headers=headers, now=NOW)
+
+
+def test_stripe_profile_refuses_a_signature_without_a_timestamp() -> None:
+    verifier = StripeWebhookVerifier(b"stripe-secret")
+
+    with pytest.raises(ValueError, match="needs one t and at least one v1"):
+        verifier.verify(
+            body=BODY,
+            headers={b"stripe-signature": b"v1=not-a-signature"},
+            now=NOW,
+        )
 
 
 def test_github_profile_uses_delivery_and_event_headers() -> None:

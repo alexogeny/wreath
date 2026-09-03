@@ -45,6 +45,35 @@
  * what keeps parsing a single pass with no allocation. */
 #define EDGE_MAX_HEAD 65536
 #define EDGE_MAX_HEADERS 128
+#define EDGE_MAX_CHUNK_LINE 8192
+#define EDGE_MAX_BODY_CHUNKS 4096
+
+static int
+edge_field_name_normalize(char *p, Py_ssize_t n)
+{
+    if (n <= 0) return 0;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)p[i];
+        if (c == 0 || !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z')
+              || (c >= 'a' && c <= 'z') || strchr("!#$%&'*+-.^_`|~", c))) {
+            return 0;
+        }
+        if (c >= 'A' && c <= 'Z') p[i] = (char)(c + 32);
+    }
+    return 1;
+}
+
+static int
+edge_field_value_valid(const char *p, Py_ssize_t n)
+{
+    for (Py_ssize_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)p[i];
+        if (c == 0 || c == '\r' || c == '\n' || (c < 0x20 && c != '\t') || c == 0x7f) {
+            return 0;
+        }
+    }
+    return 1;
+}
 
 /* Selection policies, compiled from `UpstreamPool.policy` once. */
 #define EDGE_POLICY_EWMA 0
@@ -167,6 +196,23 @@ ebuf_add(EdgeBuf *b, const char *data, Py_ssize_t size)
     }
     memcpy(b->data + b->len, data, (size_t)size);
     b->len += size;
+    return 0;
+}
+
+static int
+ebuf_add_quoted(EdgeBuf *b, const char *data, Py_ssize_t size)
+{
+    Py_ssize_t escapes = 0;
+    for (Py_ssize_t i = 0; i < size; i++) {
+        escapes += data[i] == '"' || data[i] == '\\';
+    }
+    if (size > PY_SSIZE_T_MAX - escapes || ebuf_reserve(b, size + escapes) < 0) {
+        return -1;
+    }
+    for (Py_ssize_t i = 0; i < size; i++) {
+        if (data[i] == '"' || data[i] == '\\') b->data[b->len++] = '\\';
+        b->data[b->len++] = data[i];
+    }
     return 0;
 }
 
@@ -354,6 +400,9 @@ struct EdgeTable {
     double eject_seconds;
     double eject_cap;
     Py_ssize_t max_body;
+    Py_ssize_t max_waiting;
+    double queue_timeout;
+    PyObject *loop_call_later;
     PyObject *via;          /* bytes, e.g. b"1.1 wreath" */
     PyObject *scheme;       /* bytes, b"http" or b"https" */
     PyObject *on_lost;      /* called with an upstream index, or None */
@@ -376,12 +425,16 @@ struct EdgeClient {
     Py_ssize_t head_start;  /* a pinned head's first octet, while chunked */
     Py_ssize_t head_end;    /* offset of the CRLF that ends the head */
     Py_ssize_t body_need;   /* octets still expected */
+    Py_ssize_t body_chunks;
+    Py_ssize_t trailer_bytes;
+    Py_ssize_t trailer_count;
     int state;
     int close_after;        /* the client asked for `Connection: close` */
     int no_body_expected;   /* HEAD: the response carries no body */
     int keep_alive;
     EdgeConn *conn;         /* the upstream connection serving this request */
     EdgeClient *wait_next;
+    PyObject *wait_timer;
     Py_ssize_t queued_on;   /* upstream index this is queued against, or -1 */
     char peer[64];
     Py_ssize_t peer_len;
@@ -400,6 +453,9 @@ struct EdgeConn {
     int exports;
     Py_ssize_t head_scan;
     Py_ssize_t body_need;
+    Py_ssize_t body_chunks;
+    Py_ssize_t trailer_bytes;
+    Py_ssize_t trailer_count;
     int state;
     int upstream_close;     /* the origin asked for `Connection: close` */
     int response_chunked;
@@ -423,6 +479,17 @@ static int edge_client_drive(EdgeClient *self);
 static int edge_conn_drive(EdgeConn *self);
 static int edge_dispatch(EdgeClient *self);
 static void edge_release_conn(EdgeConn *conn, int reusable);
+static void edge_client_unqueue(EdgeClient *self);
+
+static void
+edge_cancel_wait_timer(EdgeClient *self)
+{
+    if (self->wait_timer == NULL) return;
+    PyObject *result = PyObject_CallMethod(self->wait_timer, "cancel", NULL);
+    if (result == NULL) PyErr_Clear();
+    else Py_DECREF(result);
+    Py_CLEAR(self->wait_timer);
+}
 
 
 /* --- upstream selection --------------------------------------------------- */
@@ -565,6 +632,7 @@ edge_refuse_error(EdgeClient *self, int status, const char *error)
     case 431: line = "HTTP/1.1 431 Request Header Fields Too Large\r\n"; break;
     case 501: line = "HTTP/1.1 501 Not Implemented\r\n"; break;
     case 502: line = "HTTP/1.1 502 Bad Gateway\r\n"; break;
+    case 503: line = "HTTP/1.1 503 Service Unavailable\r\n"; break;
     default:  line = "HTTP/1.1 500 Internal Server Error\r\n"; break;
     }
     static const char tail[] =
@@ -1133,7 +1201,7 @@ edge_build_request(EdgeClient *self, EdgeUpstream *up, const EdgeSlice *fields,
     }
     if (self->peer_len > 0) {
         if (EBUF_LIT(out, "for=\"") < 0
-            || ebuf_add(out, self->peer, self->peer_len) < 0
+            || ebuf_add_quoted(out, self->peer, self->peer_len) < 0
             || EBUF_LIT(out, "\"; ") < 0) {
             return -1;
         }
@@ -1143,7 +1211,7 @@ edge_build_request(EdgeClient *self, EdgeUpstream *up, const EdgeSlice *fields,
     }
     if (host_len > 0) {
         if (EBUF_LIT(out, "; host=\"") < 0
-            || ebuf_add(out, base + host, host_len) < 0
+            || ebuf_add_quoted(out, base + host, host_len) < 0
             || EBUF_LIT(out, "\"") < 0) {
             return -1;
         }
@@ -1192,6 +1260,9 @@ edge_parse_request(EdgeClient *self)
         return found == 0 ? 0 : edge_refuse(self, status);
     }
     self->head_end = end;
+    self->body_chunks = 0;
+    self->trailer_bytes = 0;
+    self->trailer_count = 0;
 
     char *base = self->in.data;
     Py_ssize_t p = self->in.start;
@@ -1254,7 +1325,8 @@ edge_parse_request(EdgeClient *self)
         }
         Py_ssize_t name = p;
         Py_ssize_t name_len = (Py_ssize_t)(colon - base) - p;
-        if (name_len == 0 || edge_is_space(base[name + name_len - 1])) {
+        if (!edge_field_name_normalize(base + name, name_len)
+            || edge_is_space(base[name + name_len - 1])) {
             /* Whitespace between the field name and the colon: RFC 9112 5.1
              * requires a 400 exactly because the alternatives disagree, which is
              * a desync waiting for two hops that chose differently. */
@@ -1265,15 +1337,8 @@ edge_parse_request(EdgeClient *self)
         while (value < value_end && edge_is_space(base[value])) value++;
         while (value_end > value && edge_is_space(base[value_end - 1])) value_end--;
         Py_ssize_t value_len = value_end - value;
-
-        for (Py_ssize_t i = 0; i < name_len; i++) {
-            char c = base[name + i];
-            if (c >= 'A' && c <= 'Z') {
-                base[name + i] = (char)(c + 32);
-            }
-            else if ((unsigned char)c <= ' ' || c == 0x7f) {
-                return edge_refuse(self, 400);
-            }
+        if (!edge_field_value_valid(base + value, value_len)) {
+            return edge_refuse(self, 400);
         }
 
         if (edge_token_eq(base + name, name_len, "host", 4)) {
@@ -1503,6 +1568,9 @@ edge_dispatch(EdgeClient *self)
 
     EdgeConn *conn = up->free_head;
     if (conn == NULL) {
+        if (up->waiting >= table->max_waiting) {
+            return edge_refuse_error(self, 503, "connection_limit_reached");
+        }
         if (up->wait_tail != NULL) {
             up->wait_tail->wait_next = self;
         }
@@ -1513,6 +1581,21 @@ edge_dispatch(EdgeClient *self)
         self->wait_next = NULL;
         up->waiting++;
         Py_INCREF(self);
+        if (table->loop_call_later != NULL) {
+            PyObject *callback = PyObject_GetAttrString(
+                (PyObject *)self, "_on_queue_timeout");
+            if (callback == NULL) {
+                edge_client_unqueue(self);
+                return -1;
+            }
+            self->wait_timer = PyObject_CallFunction(
+                table->loop_call_later, "dO", table->queue_timeout, callback);
+            Py_DECREF(callback);
+            if (self->wait_timer == NULL) {
+                edge_client_unqueue(self);
+                return -1;
+            }
+        }
         return 1;
     }
     up->free_head = conn->free_next;
@@ -1567,6 +1650,7 @@ edge_release_conn(EdgeConn *conn, int reusable)
         }
         waiter->wait_next = NULL;
         up->waiting--;
+        edge_cancel_wait_timer(waiter);
         Py_INCREF(waiter);
         Py_XSETREF(conn->client, waiter);
         Py_INCREF(conn);
@@ -1632,9 +1716,16 @@ edge_client_drive(EdgeClient *self)
             char *nl = avail > 0
                 ? memchr(base + self->in.start, '\n', (size_t)avail) : NULL;
             if (nl == NULL) {
+                if (avail > EDGE_MAX_CHUNK_LINE) {
+                    return edge_refuse(self, 413);
+                }
                 return 0;
             }
             Py_ssize_t line_len = (Py_ssize_t)(nl - (base + self->in.start));
+            if (line_len > EDGE_MAX_CHUNK_LINE || line_len < 1
+                || base[self->in.start + line_len - 1] != '\r') {
+                return edge_refuse(self, 400);
+            }
             Py_ssize_t size = 0;
             Py_ssize_t i = 0;
             const char *p = base + self->in.start;
@@ -1658,6 +1749,10 @@ edge_client_drive(EdgeClient *self)
                 self->state = EC_BODY_TRAILER;
                 break;
             }
+            if (self->body_chunks >= EDGE_MAX_BODY_CHUNKS) {
+                return edge_refuse(self, 413);
+            }
+            self->body_chunks++;
             if (self->body.len + size > self->table->max_body) {
                 return edge_refuse(self, 413);
             }
@@ -1684,6 +1779,10 @@ edge_client_drive(EdgeClient *self)
             if (avail < 2) {
                 return 0;
             }
+            if (self->in.data[self->in.start] != '\r'
+                || self->in.data[self->in.start + 1] != '\n') {
+                return edge_refuse(self, 400);
+            }
             self->in.start += 2;
             self->state = EC_BODY_SIZE;
             break;
@@ -1693,15 +1792,27 @@ edge_client_drive(EdgeClient *self)
             char *nl = avail > 0
                 ? memchr(base + self->in.start, '\n', (size_t)avail) : NULL;
             if (nl == NULL) {
+                if (self->trailer_bytes > EDGE_MAX_HEAD - avail) {
+                    return edge_refuse(self, 413);
+                }
                 return 0;
             }
             Py_ssize_t line_len = (Py_ssize_t)(nl - (base + self->in.start));
+            if (line_len < 1 || base[self->in.start + line_len - 1] != '\r'
+                || self->trailer_bytes > EDGE_MAX_HEAD - (line_len + 1)) {
+                return edge_refuse(self, 400);
+            }
+            self->trailer_bytes += line_len + 1;
             int blank = line_len == 0
                 || (line_len == 1 && base[self->in.start] == '\r');
             self->in.start += line_len + 1;
             if (blank) {
                 return edge_finish_chunked(self) < 0 ? -1 : 0;
             }
+            if (self->trailer_count >= EDGE_MAX_HEADERS) {
+                return edge_refuse(self, 413);
+            }
+            self->trailer_count++;
             break;
         }
         default:
@@ -1731,12 +1842,27 @@ edge_client_unqueue(EdgeClient *self)
             }
             self->wait_next = NULL;
             up->waiting--;
+            edge_cancel_wait_timer(self);
             Py_DECREF(self);
             return;
         }
         prev = *link;
         link = &(*link)->wait_next;
     }
+}
+
+
+static PyObject *
+edge_client_queue_timeout(EdgeClient *self, PyObject *Py_UNUSED(ignored))
+{
+    Py_CLEAR(self->wait_timer);
+    if (self->conn != NULL || self->queued_on < 0 || self->table == NULL) {
+        Py_RETURN_NONE;
+    }
+    edge_client_unqueue(self);
+    self->queued_on = -1;
+    if (edge_refuse_error(self, 503, "connection_timeout") < 0) return NULL;
+    Py_RETURN_NONE;
 }
 
 
@@ -1967,6 +2093,7 @@ edge_client_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(Py_TYPE(self));
     Py_VISIT(self->table);
     Py_VISIT(self->conn);
+    Py_VISIT(self->wait_timer);
     Py_VISIT(self->sink.transport);
     Py_VISIT(self->sink.write_fn);
     return 0;
@@ -1979,6 +2106,7 @@ edge_client_clear(PyObject *op)
     EdgeClient *self = (EdgeClient *)op;
     Py_CLEAR(self->table);
     Py_CLEAR(self->conn);
+    edge_cancel_wait_timer(self);
     sink_clear(&self->sink);
     return 0;
 }
@@ -2002,6 +2130,7 @@ edge_client_dealloc(PyObject *op)
 static PyMethodDef edge_client_methods[] = {
     {"connection_made", (PyCFunction)edge_client_connection_made, METH_O, NULL},
     {"connection_lost", (PyCFunction)edge_client_connection_lost, METH_O, NULL},
+    {"_on_queue_timeout", (PyCFunction)edge_client_queue_timeout, METH_NOARGS, NULL},
     {"data_received", (PyCFunction)edge_client_data_received, METH_O, NULL},
     {"get_buffer", (PyCFunction)edge_client_get_buffer, METH_O, NULL},
     {"buffer_updated", (PyCFunction)edge_client_buffer_updated, METH_O, NULL},
@@ -2103,8 +2232,10 @@ edge_relay_response_head(EdgeConn *self)
 
     Py_ssize_t declared = -1;
     int chunked = 0;
+    int content_lengths = 0, transfer_encodings = 0;
     int upstream_close = 0;
-    Py_ssize_t connection = 0, connection_len = 0;
+    EdgeSlice connections[EDGE_MAX_HEADERS];
+    Py_ssize_t nconnections = 0;
 
     /* Two passes, because `Connection` may name a field that appeared before
      * it. The first records framing and the connection options; the second
@@ -2126,30 +2257,38 @@ edge_relay_response_head(EdgeConn *self)
         Py_ssize_t value_end = field_end;
         while (value < value_end && edge_is_space(base[value])) value++;
         while (value_end > value && edge_is_space(base[value_end - 1])) value_end--;
-        for (Py_ssize_t k = 0; k < name_len; k++) {
-            char c = base[name + k];
-            if (c >= 'A' && c <= 'Z') {
-                base[name + k] = (char)(c + 32);
-            }
+        if (!edge_field_name_normalize(base + name, name_len)
+            || !edge_field_value_valid(base + value, value_end - value)) {
+            return -2;
         }
         if (edge_token_eq(base + name, name_len, "content-length", 14)) {
+            content_lengths++;
             if (edge_parse_decimal(base + value, value_end - value, &declared) < 0) {
                 return -2;
             }
         }
         else if (edge_token_eq(base + name, name_len, "transfer-encoding", 17)) {
+            transfer_encodings++;
             chunked = edge_ieq(base + value, value_end - value, "chunked", 7);
             if (!chunked) {
                 return -2;
             }
         }
         else if (edge_token_eq(base + name, name_len, "connection", 10)) {
-            connection = value;
-            connection_len = value_end - value;
-            upstream_close = edge_connection_has(base + connection,
-                                                 connection_len, "close", 5);
+            if (nconnections >= EDGE_MAX_HEADERS) return -2;
+            connections[nconnections].value = value;
+            connections[nconnections].value_len = value_end - value;
+            nconnections++;
+            if (edge_connection_has(base + value, value_end - value,
+                                    "close", 5)) {
+                upstream_close = 1;
+            }
         }
         p = field_end + 2;
+    }
+    if (content_lengths > 1 || transfer_encodings > 1
+        || (content_lengths > 0 && transfer_encodings > 0)) {
+        return -2;
     }
 
     p = line_end + 2;
@@ -2167,11 +2306,16 @@ edge_relay_response_head(EdgeConn *self)
         if (wreath_edge_is_response_drop(base + name, name_len)) {
             continue;
         }
-        if (connection_len > 0
-            && wreath_edge_connection_names(base + connection, connection_len,
-                                            base + name, name_len)) {
-            continue;
+        int connection_named = 0;
+        for (Py_ssize_t i = 0; i < nconnections; i++) {
+            if (wreath_edge_connection_names(
+                    base + connections[i].value, connections[i].value_len,
+                    base + name, name_len)) {
+                connection_named = 1;
+                break;
+            }
         }
+        if (connection_named) continue;
         if (ebuf_add(out, base + name, name_len) < 0
             || EBUF_LIT(out, ": ") < 0
             || ebuf_add(out, base + value, value_end - value) < 0
@@ -2189,6 +2333,9 @@ edge_relay_response_head(EdgeConn *self)
 
     self->upstream_close = upstream_close;
     self->response_chunked = 0;
+    self->body_chunks = 0;
+    self->trailer_bytes = 0;
+    self->trailer_count = 0;
     if (bodyless) {
         self->state = EU_DONE;
         self->body_need = 0;
@@ -2346,9 +2493,27 @@ edge_conn_drive(EdgeConn *self)
             char *nl = avail > 0
                 ? memchr(base + self->in.start, '\n', (size_t)avail) : NULL;
             if (nl == NULL) {
+                if (avail > EDGE_MAX_CHUNK_LINE) {
+                    if (client != NULL) {
+                        client->state = EC_CLOSED;
+                        sink_close(&client->sink);
+                    }
+                    edge_release_conn(self, 0);
+                    sink_close(&self->sink);
+                }
                 return 0;
             }
             Py_ssize_t line_len = (Py_ssize_t)(nl - (base + self->in.start)) + 1;
+            if (line_len > EDGE_MAX_CHUNK_LINE || line_len < 2
+                || base[self->in.start + line_len - 2] != '\r') {
+                if (client != NULL) {
+                    client->state = EC_CLOSED;
+                    sink_close(&client->sink);
+                }
+                edge_release_conn(self, 0);
+                sink_close(&self->sink);
+                return 0;
+            }
             Py_ssize_t size = 0;
             Py_ssize_t i = 0;
             const char *p = base + self->in.start;
@@ -2373,6 +2538,16 @@ edge_conn_drive(EdgeConn *self)
                 sink_close(&self->sink);
                 return 0;
             }
+            if (size > 0 && self->body_chunks >= EDGE_MAX_BODY_CHUNKS) {
+                if (client != NULL) {
+                    client->state = EC_CLOSED;
+                    sink_close(&client->sink);
+                }
+                edge_release_conn(self, 0);
+                sink_close(&self->sink);
+                return 0;
+            }
+            if (size > 0) self->body_chunks++;
             /* Chunk framing is relayed verbatim, sizes and all: re-encoding a
              * body this proxy did not change would be inventing a message. */
             if (client != NULL
@@ -2405,6 +2580,16 @@ edge_conn_drive(EdgeConn *self)
             if (avail < 2) {
                 return 0;
             }
+            if (self->in.data[self->in.start] != '\r'
+                || self->in.data[self->in.start + 1] != '\n') {
+                if (client != NULL) {
+                    client->state = EC_CLOSED;
+                    sink_close(&client->sink);
+                }
+                edge_release_conn(self, 0);
+                sink_close(&self->sink);
+                return 0;
+            }
             if (client != NULL
                 && sink_write(&client->sink, self->in.data + self->in.start, 2) < 0) {
                 return -1;
@@ -2418,10 +2603,39 @@ edge_conn_drive(EdgeConn *self)
             char *nl = avail > 0
                 ? memchr(base + self->in.start, '\n', (size_t)avail) : NULL;
             if (nl == NULL) {
+                if (self->trailer_bytes > EDGE_MAX_HEAD - avail) {
+                    if (client != NULL) {
+                        client->state = EC_CLOSED;
+                        sink_close(&client->sink);
+                    }
+                    edge_release_conn(self, 0);
+                    sink_close(&self->sink);
+                }
                 return 0;
             }
             Py_ssize_t line_len = (Py_ssize_t)(nl - (base + self->in.start)) + 1;
-            int blank = line_len <= 2;
+            if (line_len < 2 || base[self->in.start + line_len - 2] != '\r'
+                || self->trailer_bytes > EDGE_MAX_HEAD - line_len) {
+                if (client != NULL) {
+                    client->state = EC_CLOSED;
+                    sink_close(&client->sink);
+                }
+                edge_release_conn(self, 0);
+                sink_close(&self->sink);
+                return 0;
+            }
+            self->trailer_bytes += line_len;
+            int blank = line_len == 2;
+            if (!blank && self->trailer_count >= EDGE_MAX_HEADERS) {
+                if (client != NULL) {
+                    client->state = EC_CLOSED;
+                    sink_close(&client->sink);
+                }
+                edge_release_conn(self, 0);
+                sink_close(&self->sink);
+                return 0;
+            }
+            if (!blank) self->trailer_count++;
             if (client != NULL
                 && sink_write(&client->sink, base + self->in.start, line_len) < 0) {
                 return -1;
@@ -2756,14 +2970,23 @@ edge_table_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     int eject_failures = 3;
     double eject_seconds = 5.0, eject_cap = 60.0;
     Py_ssize_t max_body = 8 * 1024 * 1024;
+    Py_ssize_t max_waiting = 1024;
+    double queue_timeout = 30.0;
+    PyObject *loop = Py_None;
     static char *kwlist[] = {
         "entries", "via", "scheme", "policy", "eject_failures",
-        "eject_seconds", "eject_cap", "max_body", "on_lost", NULL,
+        "eject_seconds", "eject_cap", "max_body", "on_lost", "max_waiting",
+        "queue_timeout", "loop", NULL,
     };
     if (!PyArg_ParseTupleAndKeywords(
-            args, kwargs, "OSS|siddnO", kwlist, &entries, &via, &scheme,
+            args, kwargs, "OSS|siddnOndO", kwlist, &entries, &via, &scheme,
             &policy, &eject_failures, &eject_seconds, &eject_cap, &max_body,
-            &on_lost)) {
+            &on_lost, &max_waiting, &queue_timeout, &loop)) {
+        return NULL;
+    }
+    if (max_waiting < 1 || queue_timeout <= 0.0) {
+        PyErr_SetString(PyExc_ValueError,
+                        "max_waiting and queue_timeout must be positive");
         return NULL;
     }
     int policy_id;
@@ -2810,6 +3033,15 @@ edge_table_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     self->eject_seconds = eject_seconds;
     self->eject_cap = eject_cap;
     self->max_body = max_body;
+    self->max_waiting = max_waiting;
+    self->queue_timeout = queue_timeout;
+    self->loop_call_later = loop == Py_None
+        ? NULL : PyObject_GetAttrString(loop, "call_later");
+    if (loop != Py_None && self->loop_call_later == NULL) {
+        Py_DECREF(fast);
+        Py_DECREF(self);
+        return NULL;
+    }
     self->cursor = 0;
     self->via = Py_NewRef(via);
     self->scheme = Py_NewRef(scheme);
@@ -2898,6 +3130,7 @@ edge_table_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(Py_TYPE(self));
     Py_VISIT(self->live);
     Py_VISIT(self->on_lost);
+    Py_VISIT(self->loop_call_later);
     return 0;
 }
 
@@ -2908,6 +3141,7 @@ edge_table_clear(PyObject *op)
     EdgeTable *self = (EdgeTable *)op;
     Py_CLEAR(self->live);
     Py_CLEAR(self->on_lost);
+    Py_CLEAR(self->loop_call_later);
     return 0;
 }
 

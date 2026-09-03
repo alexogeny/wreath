@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from wreath import Depends, Wreath
@@ -119,6 +121,41 @@ def test_mapping_provider_satisfies_both_public_provider_protocols() -> None:
 
     assert isinstance(provider, FlagProvider)
     assert isinstance(provider, TypedFlagProvider)
+
+
+def test_flag_view_keeps_the_exact_mapping_provider_boolean_fast_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = FeatureFlags({"live": "on"})
+
+    def unexpected_resolve(*_args, **_kwargs):
+        raise AssertionError("the exact mapping provider should use enabled()")
+
+    monkeypatch.setattr(FeatureFlags, "resolve", unexpected_resolve)
+    assert FlagView(provider).enabled("live") is True
+
+
+def test_flags_dependency_binds_only_a_present_identity_subject() -> None:
+    class RecordingProvider:
+        def __init__(self) -> None:
+            self.contexts: list[dict[str, object]] = []
+
+        def resolve(self, flag: Flag, context=None):
+            self.contexts.append(dict(context or {}))
+            return flag.default
+
+    provider = RecordingProvider()
+    dependency = flags_dependency(provider)
+    requests = (
+        SimpleNamespace(identity=None),
+        SimpleNamespace(identity=SimpleNamespace(id=None)),
+        SimpleNamespace(identity=SimpleNamespace(id="ada")),
+    )
+
+    for request in requests:
+        assert dependency(request).enabled("live") is False
+
+    assert provider.contexts == [{}, {}, {"id": "ada"}]
 
 
 def test_mapping_fast_paths_preserve_subclass_resolution_overrides() -> None:

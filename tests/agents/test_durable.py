@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -135,6 +135,27 @@ def test_turn_and_tool_ids_are_stable_and_domain_separated() -> None:
     assert tool_call.arguments == {"nested": {"version": 3}}
 
 
+@pytest.mark.parametrize(
+    ("turn_id", "name"),
+    [("", "release"), ("turn", "")],
+)
+def test_tool_call_ids_refuse_each_empty_identity_part(turn_id: str, name: str) -> None:
+    with pytest.raises(ValueError, match="require a turn ID and tool name"):
+        stable_tool_call_id(turn_id, 0, name, {})
+
+
+def test_tool_call_ids_refuse_negative_indexes() -> None:
+    with pytest.raises(ValueError, match="index must be non-negative"):
+        stable_tool_call_id("turn", -1, "release", {})
+
+
+def test_tool_calls_refuse_empty_names_and_non_object_arguments() -> None:
+    with pytest.raises(ValueError, match="name must be non-empty"):
+        ToolCall("", {})
+    with pytest.raises(TypeError, match="arguments must be a JSON object"):
+        ToolCall("release", cast(Any, []))
+
+
 @pytest.mark.parametrize("empty", range(4))
 def test_turn_ids_refuse_each_empty_identity_component(empty: int) -> None:
     parts = ["tenant-a", "user-7", "conversation-2", "message-4"]
@@ -257,6 +278,28 @@ async def test_adapter_refuses_recovery_attempts_until_effect_claims_are_atomic(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("attempt", [None, True])
+async def test_adapter_refuses_non_integer_recovery_attempts(attempt: object) -> None:
+    jobs = Jobs()
+    tools = Tools()
+    DurableAgent(
+        name="releaser",
+        jobs=jobs,
+        backend=Backend(ModelResult()),
+        tools=tools,
+        checkpoints=Checkpoints(),
+    )
+    payload = DurableTurn.from_invocation(
+        invocation(), prompt="release", message_id="message-4"
+    ).as_payload()
+
+    with pytest.raises(UnknownModelOutcome, match="recovery attempt"):
+        await jobs.handler(replace(job_context(), attempt=cast(Any, attempt)), payload)
+
+    assert tools.calls == []
+
+
+@pytest.mark.asyncio
 async def test_duplicate_explicit_call_ids_refuse_before_any_effect() -> None:
     jobs = Jobs()
     tools = Tools()
@@ -285,7 +328,16 @@ async def test_duplicate_explicit_call_ids_refuse_before_any_effect() -> None:
 
 
 @pytest.mark.asyncio
-async def test_misbound_checkpoint_cannot_suppress_an_effect() -> None:
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("turn_id", "another-turn"),
+        ("call_id", "another-call"),
+        ("tenant", "tenant-b"),
+        ("principal_id", "user-8"),
+    ],
+)
+async def test_misbound_checkpoint_cannot_suppress_an_effect(field: str, value: str) -> None:
     class MisboundCheckpoints(Checkpoints):
         async def completed(
             self,
@@ -295,7 +347,8 @@ async def test_misbound_checkpoint_cannot_suppress_an_effect() -> None:
             tenant: str,
             principal_id: str,
         ) -> EffectCheckpoint | None:
-            return EffectCheckpoint("another-turn", call_id, tenant, principal_id, 7)
+            checkpoint = EffectCheckpoint(turn_id, call_id, tenant, principal_id, 7)
+            return replace(checkpoint, **{field: value})
 
     jobs = Jobs()
     tools = Tools()

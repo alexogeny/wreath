@@ -2,12 +2,22 @@ from __future__ import annotations
 
 import pytest
 
-from wreath._series.compile import compile_series
+from wreath._series.compile import compile_aggregate, compile_events, compile_series
 from wreath.queries import Param
-from wreath.series import Range, Series, SeriesError, _instant, avg, count, reconcile, sum_
+from wreath.series import (
+    Aggregate,
+    Range,
+    Series,
+    SeriesError,
+    _instant,
+    avg,
+    count,
+    reconcile,
+    sum_,
+)
 from wreath.temporal import Day, Month, zone
 
-from .conftest import Herd, Trek, utc
+from .conftest import Deploy, Herd, Trek, utc
 
 
 def series(**kwargs):
@@ -28,6 +38,100 @@ async def run(view, session, database, rows, **kwargs):
 
 def sql_of(database):
     return database.connection.calls[-1][0]
+
+
+def compile_view(view, registry):
+    return compile_series(
+        registry,
+        view,
+        view._bind({}),
+        start=_instant(WEEK.start),
+        end=_instant(WEEK.end),
+        zone_name="UTC",
+        compare=view._compare,
+    )[0]
+
+
+def test_grouped_aggregate_projects_its_key(session) -> None:
+    view = Aggregate(Trek).measure(n=count()).by(Trek.paddock_id, limit=3)
+
+    sql, args, _oids = compile_aggregate(session.registry, view, ())
+
+    assert sql.startswith('SELECT "t0"."paddock_id" AS "g", COUNT(*) AS "m0"')
+    assert " GROUP BY 1 ORDER BY 2 DESC NULLS LAST, 1 ASC" in sql
+    assert args == (4,)
+
+
+def test_series_windows_use_where_without_filters_and_and_with_filters(session) -> None:
+    plain = series().measure(n=count())
+    filtered = plain.where(Trek.grade == "open")
+
+    plain_agg = compile_view(plain, session.registry).split('"agg" AS', 1)[1].split('"spine"', 1)[0]
+    filtered_agg = (
+        compile_view(filtered, session.registry).split('"agg" AS', 1)[1].split('"spine"', 1)[0]
+    )
+
+    assert ' FROM "public"."treks" AS "t0" WHERE ("t0"."started_at" >=' in plain_agg
+    assert ' WHERE "t0"."grade" = ' in filtered_agg
+    assert ' AND ("t0"."started_at" >=' in filtered_agg
+
+
+def test_series_outer_shape_tracks_comparison_and_grouping(session) -> None:
+    plain = compile_view(series().measure(n=count()), session.registry)
+    compared = compile_view(series().measure(n=count()).compare(previous=Month), session.registry)
+    grouped = compile_view(series().measure(n=count()).by(Trek.paddock_id), session.registry)
+
+    plain_outer = plain.rsplit("SELECT ", 1)[1]
+    compared_outer = compared.rsplit("SELECT ", 1)[1]
+    grouped_outer = grouped.rsplit("SELECT ", 1)[1]
+
+    assert '"s"."period"' not in plain_outer
+    assert '"a"."g"' not in plain_outer
+    assert plain_outer.endswith(" ORDER BY 1")
+    assert ', "s"."period"' in compared_outer
+    assert '"a"."period" = "s"."period"' in compared_outer
+    assert compared_outer.endswith(" ORDER BY 2, 1")
+    assert ', "a"."g", "a"."other"' in grouped_outer
+
+
+def test_comparison_spine_shifts_only_the_previous_arm(session) -> None:
+    sql = compile_view(series().measure(n=count()).compare(previous=Month), session.registry)
+    spine = sql.split('"spine" AS (', 1)[1].split(") SELECT ", 1)[0]
+    current, previous = spine.split(" UNION ALL ", 1)
+
+    assert "interval 'None'" not in current
+    assert "interval '1 month'" not in current
+    assert previous.count("interval '1 month'") == 2
+
+
+def test_event_windows_use_where_without_filters_and_and_with_filters(session) -> None:
+    options = {
+        "start": _instant(WEEK.start),
+        "end": _instant(WEEK.end),
+        "zone_name": "UTC",
+        "trunc": "day",
+        "limit": 10,
+    }
+    plain = compile_events(
+        session.registry,
+        Deploy,
+        Deploy.happened_at,
+        Deploy.version,
+        (),
+        **options,
+    )[0]
+    filtered = compile_events(
+        session.registry,
+        Deploy,
+        Deploy.happened_at,
+        Deploy.version,
+        (Deploy.environment == "production",),
+        **options,
+    )[0]
+
+    assert ' FROM "public"."deploys" AS "t0" WHERE ("t0"."happened_at" >=' in plain
+    assert ' WHERE "t0"."environment" = ' in filtered
+    assert ' AND ("t0"."happened_at" >=' in filtered
 
 
 class TestTheSpine:

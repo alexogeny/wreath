@@ -521,12 +521,11 @@ async def test_mapping_stream_accepts_a_matching_deferred_digest() -> None:
 
 
 @pytest.mark.asyncio
-async def test_form_without_content_type_uses_urlencoded_rules() -> None:
+async def test_form_without_content_type_is_refused() -> None:
     request = Request(
         {"type": "http", "headers": []},
         _messages({"type": "http.request", "body": b"name=wreath", "more_body": False}),
     )
 
-    form = await request.form()
-
-    assert form["name"] == "wreath"
+    with pytest.raises(ValueError, match=r"form\(\) requires"):
+        await request.form()

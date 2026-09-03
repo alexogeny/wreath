@@ -8,7 +8,7 @@ async `Verifier` for `wreath.auth.BearerTokenBackend`; the resulting
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -28,6 +28,22 @@ __all__ = ["OidcProvider"]
 
 _MAX_DISCOVERY_BYTES = 64 * 1024
 _USE_PROVIDER_AUDIENCES = object()
+
+
+def _matches_token_class(
+    token_type: object,
+    claims: object,
+    *,
+    login_token: bool,
+) -> bool:
+    if not isinstance(claims, Mapping):
+        return False
+    use = claims.get("token_use", claims.get("token_type"))
+    if login_token:
+        return token_type in (None, "JWT") and use != "access"
+    if token_type == "at+jwt":
+        return use in (None, "access")
+    return token_type in (None, "JWT") and use == "access"
 
 
 def _default_ports(scheme: str) -> int:
@@ -165,6 +181,7 @@ class OidcProvider:
     def bearer_verifier(self, *, audience: Any = _USE_PROVIDER_AUDIENCES):
         """Return an async `Verifier` closing over this provider's JWKS cache."""
 
+        login_token = audience is not _USE_PROVIDER_AUDIENCES
         audiences = (
             self._audiences if audience is _USE_PROVIDER_AUDIENCES else compile_audiences(audience)
         )
@@ -180,7 +197,7 @@ class OidcProvider:
             key = await cache.resolve(kid if isinstance(kid, str) else None)
             if key is None:
                 return None
-            return verify_jwt(
+            resolved = verify_jwt(
                 token,
                 key_resolver=lambda _header: key,
                 algorithms=self._algorithms,
@@ -190,5 +207,12 @@ class OidcProvider:
                 required=self._required,
                 identity=self._identity,
             )
+            if not _matches_token_class(
+                header.get("typ"),
+                getattr(resolved, "claims", None),
+                login_token=login_token,
+            ):
+                return None
+            return resolved
 
         return verify

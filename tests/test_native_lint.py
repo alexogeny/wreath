@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import random
 import subprocess
 import sys
@@ -290,3 +291,90 @@ def test_cli_entrypoint_runs(args: list[str], needs_source: bool, tmp_path: Path
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip()
+
+
+def test_forward_loop_detection_does_not_leak_past_the_loop() -> None:
+    assert "NC002" not in _codes("""
+static int drain(Foo *self, Py_ssize_t index) {
+    for (Py_ssize_t i = 0; i < 2; i++) {
+        inspect(i);
+    }
+    return PySequence_DelItem(self->q, index);
+}
+""")
+
+
+def test_additive_arithmetic_without_reallocation_is_not_growth() -> None:
+    assert "NC003" not in _codes("""
+static Py_ssize_t next_capacity(Buf *b) {
+    Py_ssize_t capacity = b->capacity + 64;
+    return capacity;
+}
+""")
+
+
+def test_module_scope_import_is_not_a_per_value_import() -> None:
+    assert "NC004" not in _codes('PyObject *json = PyImport_ImportModule("json");\n')
+
+
+def test_static_import_cache_requires_its_null_guard() -> None:
+    assert "NC004" in _codes("""
+static PyObject *loads = NULL;
+static PyObject *decode(PyObject *arg) {
+    PyObject *module = PyImport_ImportModule("json");
+    loads = PyObject_GetAttrString(module, "loads");
+    return PyObject_CallOneArg(loads, arg);
+}
+""")
+
+
+def test_cli_list_rules_is_a_distinct_mode(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["--list-rules"]) == 0
+    output = capsys.readouterr()
+
+    assert "NC001  front deletion from a list" in output.out
+    assert "finding(s) across" not in output.out
+    assert output.err == ""
+
+
+def test_cli_refuses_an_empty_source_selection(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main([str(tmp_path)]) == 1
+    output = capsys.readouterr()
+
+    assert output.out == ""
+    assert "no C sources found" in output.err
+
+
+def test_cli_json_shape_and_clean_text_guidance(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    clean = tmp_path / "clean.c"
+    clean.write_text("static int clean(void) { return 0; }\n", encoding="utf-8")
+
+    assert main(["--format", "json", str(clean)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"scanned": 1, "findings": []}
+
+    assert main([str(clean)]) == 0
+    output = capsys.readouterr().out
+    assert "0 finding(s) across 1 file(s)" in output
+    assert "native-lint: allow NC001" in output
+
+
+def test_cli_findings_set_failure_without_clean_guidance(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    broken = tmp_path / "broken.c"
+    broken.write_text(
+        "static int drain(PyObject *q) { return PySequence_DelItem(q, 0); }\n",
+        encoding="utf-8",
+    )
+
+    assert main([str(broken)]) == 1
+    output = capsys.readouterr().out
+    assert "NC001" in output
+    assert "native-lint: allow NC001" not in output

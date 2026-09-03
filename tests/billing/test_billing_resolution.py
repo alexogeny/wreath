@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 
@@ -71,15 +72,56 @@ def topology(*, inverse: bool = True) -> ConnectedMerchants:
 
 
 def billing(backend: Backend, **options: object) -> Billing:
+    selected_topology = options.pop("topology", topology())
     return Billing(
         "marketplace",
         backend=backend,
         catalog=PlanCatalog(Plan("pro", "price_shared_pro")),
         merchant=ConnectedMerchant(),
         capture=HostedRedirect(),
-        topology=topology(),
+        topology=selected_topology,
         **options,
     )
+
+
+def test_billing_capability_configuration_is_exact() -> None:
+    assert BillingCapabilities().merchant == "deployment"
+    for name in (
+        "hosted_checkout",
+        "hosted_portal",
+        "subscriptions",
+        "connect",
+        "refunds",
+        "account_scoped_prices",
+    ):
+        with pytest.raises(TypeError, match=f"billing capability {name} must be bool"):
+            BillingCapabilities(**{name: 1})
+    with pytest.raises(ValueError, match="merchant must be"):
+        BillingCapabilities(merchant="platform")
+
+
+def test_connected_merchant_callbacks_and_pairing_are_exact() -> None:
+    def resolve(*values: object) -> str:
+        return "resolved"
+
+    assert ConnectedMerchants(resolve).price_for is None
+
+    with pytest.raises(TypeError, match="account_for must be callable"):
+        ConnectedMerchants(None)
+    for name in ("price_for", "sku_for_price"):
+        options: dict[str, Any] = {
+            "price_for": resolve,
+            "sku_for_price": resolve,
+            name: 1,
+        }
+        with pytest.raises(TypeError, match=f"{name} must be callable"):
+            ConnectedMerchants(resolve, **options)
+    for options in (
+        {"price_for": resolve},
+        {"sku_for_price": resolve},
+    ):
+        with pytest.raises(BillingConfigurationError, match="require both"):
+            ConnectedMerchants(resolve, **options)
 
 
 @pytest.mark.asyncio
@@ -140,6 +182,88 @@ def test_account_scoped_price_inverse_rejects_contradictory_tenant_account() -> 
             provider_price="price_globex_pro",
             merchant_account="acct_globex",
         )
+
+
+@pytest.mark.parametrize("sku", [None, "", 1])
+def test_account_scoped_price_lookup_refuses_a_missing_inverse_mapping(
+    sku: object,
+) -> None:
+    backend = Backend()
+    commerce = billing(
+        backend,
+        topology=ConnectedMerchants(
+            account_for=lambda subject: "acct_acme",
+            price_for=lambda subject, plan, account: "price_acme_pro",
+            sku_for_price=lambda subject, price, account: sku,
+        ),
+    )
+
+    with pytest.raises(KeyError, match="no billing plan mapping"):
+        commerce.plan_for_provider_price(
+            subject="organization:acme",
+            provider_price="price_acme_pro",
+            merchant_account="acct_acme",
+        )
+
+
+def test_account_scoped_price_lookup_refuses_a_non_inverse_mapping() -> None:
+    backend = Backend()
+    commerce = billing(
+        backend,
+        topology=ConnectedMerchants(
+            account_for=lambda subject: "acct_acme",
+            price_for=lambda subject, plan, account: "price_other",
+            sku_for_price=lambda subject, price, account: "pro",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="price inverse contradicts plan"):
+        commerce.plan_for_provider_price(
+            subject="organization:acme",
+            provider_price="price_acme_pro",
+            merchant_account="acct_acme",
+        )
+
+
+@pytest.mark.parametrize("price", [None, "", 1])
+@pytest.mark.asyncio
+async def test_checkout_refuses_an_invalid_account_scoped_price(price: object) -> None:
+    backend = Backend()
+    commerce = billing(
+        backend,
+        topology=ConnectedMerchants(
+            account_for=lambda subject: "acct_acme",
+            price_for=lambda subject, plan, account: price,
+            sku_for_price=lambda subject, provider_price, account: "pro",
+        ),
+    )
+
+    with pytest.raises(KeyError, match="no provider price mapping"):
+        await commerce.checkout(
+            subject="organization:acme",
+            plan="pro",
+            success_url="https://app.example/success",
+            cancel_url="https://app.example/cancel",
+            reference="checkout:invalid-price",
+        )
+    assert backend.checkout_requests == []
+
+
+@pytest.mark.parametrize("customer", ["", 1])
+@pytest.mark.asyncio
+async def test_checkout_refuses_an_invalid_customer_mapping(customer: object) -> None:
+    backend = Backend()
+    commerce = billing(backend, customer_for=lambda subject: customer)
+
+    with pytest.raises(ValueError, match="customer_for must return"):
+        await commerce.checkout(
+            subject="organization:acme",
+            plan="pro",
+            success_url="https://app.example/success",
+            cancel_url="https://app.example/cancel",
+            reference="checkout:invalid-customer",
+        )
+    assert backend.checkout_requests == []
 
 
 @pytest.mark.asyncio

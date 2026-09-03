@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from wreath.organizations import (
     InMemoryOrganizationStore,
     Invitation,
     Membership,
+    Memberships,
     Organization,
     OrganizationFederation,
     OrganizationFederationError,
@@ -37,6 +40,52 @@ async def test_chat_federation_reads_the_scim_owned_membership_each_time() -> No
     await store.remove_member("acme", "alice")
     with pytest.raises(OrganizationFederationError, match="not.*member"):
         await federation.resolve(external, binding)
+
+
+@pytest.mark.parametrize(
+    "external",
+    [
+        SimpleNamespace(provider="", installation="T1"),
+        SimpleNamespace(provider="slack", installation=""),
+    ],
+)
+async def test_chat_federation_requires_both_installation_coordinates(external) -> None:
+    federation = OrganizationFederation(_store(), _InstallationOrganizations())
+    with pytest.raises(OrganizationFederationError, match="requires provider and installation"):
+        await federation.resolve(external, SimpleNamespace(identity=SimpleNamespace(id="alice")))
+
+
+async def test_chat_federation_requires_an_installation_mapping() -> None:
+    federation = OrganizationFederation(_store(), _InstallationOrganizations())
+    external = SimpleNamespace(provider="slack", installation="missing")
+    with pytest.raises(OrganizationFederationError, match="no organization mapping"):
+        await federation.resolve(external, SimpleNamespace(identity=SimpleNamespace(id="alice")))
+
+
+@pytest.mark.parametrize("user_id", [None, "", 7])
+async def test_chat_federation_requires_a_nonempty_string_user_id(user_id) -> None:
+    federation = OrganizationFederation(_store(), _InstallationOrganizations())
+    external = SimpleNamespace(provider="slack", installation="T1")
+    binding = SimpleNamespace(identity=SimpleNamespace(id=user_id))
+    with pytest.raises(OrganizationFederationError, match="non-empty Wreath identity id"):
+        await federation.resolve(external, binding)
+
+
+async def test_chat_federation_accepts_a_matching_tenant_and_refuses_another() -> None:
+    store = _store()
+    await store.add_member("acme", "alice", roles={"member"})
+    federation = OrganizationFederation(store, _InstallationOrganizations())
+    external = SimpleNamespace(provider="slack", installation="T1")
+    identity = SimpleNamespace(id="alice")
+
+    from wreath.chat import ExternalIdentityKey, PrincipalBinding
+
+    key = ExternalIdentityKey(provider="slack", installation="T1", subject="U1")
+    matching = PrincipalBinding(identity=identity, external=key, tenant="acme")
+    assert (await federation.resolve(external, matching)).tenant == "acme"
+    mismatch = PrincipalBinding(identity=identity, external=key, tenant="other")
+    with pytest.raises(OrganizationFederationError, match="does not match"):
+        await federation.resolve(external, mismatch)
 
 ROLES = frozenset({"admin", "member", "billing"})
 
@@ -86,6 +135,11 @@ async def test_an_undeclared_role_is_refused() -> None:
 def test_a_store_with_no_declared_roles_is_refused() -> None:
     with pytest.raises(ValueError, match="non-empty role vocabulary"):
         InMemoryOrganizationStore(roles=())
+
+
+def test_a_postgres_store_with_no_declared_roles_is_refused() -> None:
+    with pytest.raises(ValueError, match="non-empty role vocabulary"):
+        PostgresOrganizationStore(object(), roles=())
 
 
 @pytest.mark.asyncio
@@ -327,6 +381,19 @@ async def test_postgres_statements_are_lazy_and_reads_use_the_read_pool() -> Non
     assert statement.calls == [("missing",)]
 
 
+async def test_postgres_statement_prefix_can_differ_from_the_table() -> None:
+    database = _Database()
+    store = PostgresOrganizationStore(
+        database,
+        roles=ROLES,
+        table="org",
+        prefix="custom",
+    )
+    assert await store.organization("missing") is None
+    assert "custom_organization" in database.statements
+    assert "org_organization" not in database.statements
+
+
 async def test_acceptance_consumes_and_writes_membership_in_one_statement() -> None:
     database = _Database()
     database.rows["wreath_organization_accept"] = (
@@ -358,6 +425,26 @@ async def test_an_accepted_postgres_invitation_stays_consumed_for_a_new_store() 
 
     statement = database.statements["wreath_organization_invitation_state"]
     assert statement.workload == "write"
+
+
+async def test_postgres_accept_distinguishes_missing_and_changed_invitations() -> None:
+    missing = _Database()
+    with pytest.raises(ValueError, match="no such invitation"):
+        await _postgres(missing).accept("missing", "alice")
+
+    changed = _Database()
+    changed.rows["wreath_organization_invitation_state"] = (None, False)
+    with pytest.raises(RuntimeError, match="changed while it was being accepted"):
+        await _postgres(changed).accept("raced", "alice")
+
+
+def test_membership_schema_owners_require_a_component_provider() -> None:
+    class Roleless:
+        pass
+
+    assert Memberships(Roleless()).schema_owners == ()
+    store = _postgres()
+    assert Memberships(store).schema_owners == (store,)
 
 
 @pytest.mark.parametrize("roles", ["{}", '["member", 1]', '["undeclared"]'])

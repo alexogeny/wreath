@@ -249,6 +249,7 @@ class TenantHeader:
     """
 
     header: str
+    trusted: bool = False
 
     def name_for(self, request: Any) -> str | None:
         # `request.header(name)`, never `request.headers.get(...)`: `headers` is
@@ -373,6 +374,12 @@ class Tenancy:
                 "TenantSessionClaim(...) -- guessing at a subdomain is how a service "
                 "that was never multi-tenant on its apex starts resolving 'www' as a "
                 "customer."
+            )
+        if isinstance(source, TenantHeader) and not source.trusted:
+            raise TenancyError(
+                "TenantHeader requires trusted=True after a trusted gateway has "
+                "authenticated the caller and replaced the header; use "
+                "TenantSessionClaim for an end-user supplied request"
             )
         self._directory = directory
         self._source = source

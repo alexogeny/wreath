@@ -19,15 +19,18 @@ import hashlib
 import importlib.util
 import json
 import math
+import multiprocessing
 import os
+import secrets
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
 import tempfile
 import time
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
@@ -50,6 +53,7 @@ _MIN_SHARD_MODULES_PER_WORKER = 4
 _SHARD_HISTORY_COVERAGE = 0.8
 _LIVE_FUZZ_GOLD_RATIO = 0.05
 _FUZZ_SCHEDULE_SEED = "wreath-fuzz-v1"
+_FUZZ_WORKER_WALL_CLOCK_GRACE_SECONDS = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +241,12 @@ class FuzzActivity:
     incomplete_files: frozenset[str] = frozenset()
     schedule_only_files: frozenset[str] = frozenset()
     counts: dict[str, int] = field(default_factory=dict)
+    campaign_targets: tuple[str, ...] = ()
+    campaign_cases: int = 0
+    campaign_corpus_added: int = 0
+    campaign_findings: int = 0
+    campaign_errors: int = 0
+    campaign_seed: int | None = None
 
 
 def _path_from_nodeid(nodeid: str) -> str:
@@ -764,9 +774,9 @@ def _fuzz_lines(fuzz: FuzzActivity) -> list[str]:
             f"{len(fuzz.active_files)} active · "
             f"{len(fuzz.passed_files)} complete"
         ]
-    if fuzz.state == "no_gold":
+    if fuzz.state == "no_gold" and not fuzz.campaign_targets:
         return ["  Fuzz       not run · no mutation-passing test files"]
-    if fuzz.state == "no_tests":
+    if fuzz.state == "no_tests" and not fuzz.campaign_targets:
         return ["  Fuzz       no runnable tests in mutation-passing files"]
     passed = len(fuzz.passed_files)
     failed = len(fuzz.failed_files)
@@ -774,11 +784,24 @@ def _fuzz_lines(fuzz: FuzzActivity) -> list[str]:
     schedule_only = len(fuzz.schedule_only_files)
     incomplete_text = f" · {incomplete} incomplete" if incomplete else ""
     schedule_text = f" · {schedule_only} schedule-fuzzed" if schedule_only else ""
-    return [
-        f"  Fuzz       {_legend_tile('complete')} "
+    label = "Gold replay" if fuzz.campaign_targets else "Fuzz      "
+    lines = [
+        f"  {label} {_legend_tile('complete')} "
         f"{passed} files passed · {failed} failed"
         f"{incomplete_text}{schedule_text}"
     ]
+    if fuzz.campaign_targets:
+        finding_label = "finding" if fuzz.campaign_findings == 1 else "findings"
+        error_text = f" · {fuzz.campaign_errors} errors" if fuzz.campaign_errors else ""
+        seed = "random" if fuzz.campaign_seed is None else str(fuzz.campaign_seed)
+        outcome = "fuzz_failed" if fuzz.campaign_findings or fuzz.campaign_errors else "complete"
+        lines.append(
+            f"  Fuzz       {_legend_tile(outcome)} {len(fuzz.campaign_targets)} targets · "
+            f"{fuzz.campaign_cases:,} cases · "
+            f"{fuzz.campaign_corpus_added} corpus additions · "
+            f"{fuzz.campaign_findings} {finding_label}{error_text} · seed {seed}"
+        )
+    return lines
 
 
 def render_activity(
@@ -1902,6 +1925,26 @@ def _mutation_arguments(namespace: Any) -> list[str]:
         arguments.extend(("--suite-workers", str(_resolve_workers(str(namespace.workers)))))
     if mode in {"auto", "sample"}:
         arguments.extend(("--budget", str(namespace.mutant_budget)))
+    if namespace.fuzz == "on":
+        arguments.extend(
+            (
+                "--differential-fuzz",
+                "--fuzz-cases",
+                str(namespace.fuzz_cases),
+                "--fuzz-seconds",
+                str(float(namespace.fuzz_budget) / 2),
+                "--fuzz-corpus-root",
+                str(namespace.fuzz_corpus),
+                "--fuzz-artifact-root",
+                str(namespace.fuzz_artifacts),
+            )
+        )
+        if namespace.fuzz_seed is not None:
+            arguments.extend(("--fuzz-seed", str(namespace.fuzz_seed)))
+        for target in namespace.fuzz_target:
+            arguments.extend(("--fuzz-target", str(target)))
+        if namespace.fuzz_replay_only:
+            arguments.append("--fuzz-replay-only")
     return arguments
 
 
@@ -1927,14 +1970,30 @@ class MutationTraceSpec:
     selected: frozenset[str]
     watched: dict[str, frozenset[int]]
     whole_files: frozenset[str]
+    selection: dict[str, Any]
     output_dir: Path
+
+
+def _mutation_source_fingerprint(paths: Sequence[Path]) -> str:
+    fingerprint = hashlib.blake2b(digest_size=20)
+    for path in paths:
+        fingerprint.update(str(path).encode())
+        fingerprint.update(b"\0")
+        try:
+            with path.open("rb") as source:
+                while chunk := source.read(1 << 20):
+                    fingerprint.update(chunk)
+        except OSError as error:
+            fingerprint.update(f"unreadable:{type(error).__name__}:{error}".encode())
+        fingerprint.update(b"\0")
+    return fingerprint.hexdigest()
 
 
 def _prepare_mutation_trace(namespace: Any, directory: Path) -> MutationTraceSpec | None:
     if namespace.mutant not in {"auto", "sample"}:
         return None
     from ._mutant.cli import default_sources
-    from ._mutant.runner import discover, sample_identifiers, watch_selected_identifiers
+    from ._mutant.runner import discover, select_sample, watch_selected_identifiers
 
     repo = Path.cwd()
     roots = [Path(value).resolve() for value in namespace.mutant_path]
@@ -1942,16 +2001,10 @@ def _prepare_mutation_trace(namespace: Any, directory: Path) -> MutationTraceSpe
     missing = [str(root) for root in roots if not root.exists()]
     if missing:
         raise ValueError(f"no such mutation source path: {', '.join(missing)}")
-    fingerprint = hashlib.blake2b(digest_size=20)
-    for path in discover(roots):
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        fingerprint.update(str(path).encode())
-        fingerprint.update(f"\0{stat.st_mtime_ns}\0{stat.st_size}\0".encode())
+    source_paths = discover(roots)
     cache_key = {
-        "fingerprint": fingerprint.hexdigest(),
+        "fingerprint": _mutation_source_fingerprint(source_paths),
+        "schema": 2,
         "roots": [str(root) for root in roots],
         "samples": namespace.mutant_samples,
         "operators": list(namespace.mutant_operator),
@@ -1961,36 +2014,55 @@ def _prepare_mutation_trace(namespace: Any, directory: Path) -> MutationTraceSpe
     if history_path is not None:
         cached = _read_mutation_sample_cache(history_path, cache_key)
         if cached is not None:
-            selected, watched, whole_files = cached
+            selected, watched, whole_files, selection = cached
             if not selected:
                 return None
             output_dir = directory / "mutation-trace"
             output_dir.mkdir()
-            return MutationTraceSpec(selected, watched, whole_files, output_dir)
-    selected = frozenset(
-        sample_identifiers(
-            roots,
-            repo,
-            namespace.mutant_samples,
-            operators=tuple(namespace.mutant_operator),
-            only=tuple(namespace.mutant_only),
-        )
+            return MutationTraceSpec(selected, watched, whole_files, selection, output_dir)
+    sample = select_sample(
+        roots,
+        repo,
+        namespace.mutant_samples,
+        operators=tuple(namespace.mutant_operator),
+        only=tuple(namespace.mutant_only),
     )
+    selected = frozenset(sample.identifiers)
+    selection = sample.as_dict()
     if not selected:
         if history_path is not None:
-            _write_mutation_sample_cache(history_path, cache_key, selected, {}, frozenset())
+            _write_mutation_sample_cache(
+                history_path,
+                cache_key,
+                selected,
+                {},
+                frozenset(),
+                selection,
+            )
         return None
     watched, whole_files = watch_selected_identifiers(roots, repo, selected)
     if history_path is not None:
-        _write_mutation_sample_cache(history_path, cache_key, selected, watched, whole_files)
+        _write_mutation_sample_cache(
+            history_path,
+            cache_key,
+            selected,
+            watched,
+            whole_files,
+            selection,
+        )
     output_dir = directory / "mutation-trace"
     output_dir.mkdir()
-    return MutationTraceSpec(selected, watched, whole_files, output_dir)
+    return MutationTraceSpec(selected, watched, whole_files, selection, output_dir)
 
 
 def _read_mutation_sample_cache(
     path: Path, key: dict[str, Any]
-) -> tuple[frozenset[str], dict[str, frozenset[int]], frozenset[str]] | None:
+) -> tuple[
+    frozenset[str],
+    dict[str, frozenset[int]],
+    frozenset[str],
+    dict[str, Any],
+] | None:
     try:
         history = json.loads(path.read_text(encoding="utf-8"))
     except OSError, ValueError:
@@ -2003,7 +2075,12 @@ def _read_mutation_sample_cache(
     selected = cached.get("selected")
     watched = cached.get("watched")
     whole_files = cached.get("whole_files")
-    if not isinstance(selected, list | tuple) or not isinstance(watched, dict):
+    selection = cached.get("selection")
+    if (
+        not isinstance(selected, list | tuple)
+        or not isinstance(watched, dict)
+        or not isinstance(selection, dict)
+    ):
         return None
     if not isinstance(whole_files, list | tuple):
         return None
@@ -2015,6 +2092,7 @@ def _read_mutation_sample_cache(
             if isinstance(lines, list | tuple)
         },
         frozenset(str(value) for value in whole_files),
+        selection,
     )
 
 
@@ -2024,6 +2102,7 @@ def _write_mutation_sample_cache(
     selected: frozenset[str],
     watched: dict[str, frozenset[int]],
     whole_files: frozenset[str],
+    selection: dict[str, Any],
 ) -> None:
     history: dict[str, Any] = {
         "version": 1,
@@ -2042,6 +2121,7 @@ def _write_mutation_sample_cache(
         "selected": sorted(selected),
         "watched": {source: sorted(lines) for source, lines in watched.items()},
         "whole_files": sorted(whole_files),
+        "selection": selection,
     }
     try:
         _atomic_json(path, history)
@@ -2058,6 +2138,14 @@ def _trace_environment(spec: MutationTraceSpec) -> str:
         },
         separators=(",", ":"),
     )
+
+
+def _mutation_selection_payload(spec: MutationTraceSpec) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "identifiers": sorted(spec.selected),
+        "metadata": spec.selection,
+    }
 
 
 def _write_reused_baseline(
@@ -2268,6 +2356,562 @@ def _mutation_gold_tests(report: dict[str, Any], selected_files: Iterable[str]) 
             if selected_lookup.get(_path_from_nodeid(rendered), False):
                 killers.append(rendered)
     return tuple(sorted(set(killers)))
+
+
+def _select_fuzz_targets(
+    mutation_report: dict[str, Any],
+    requested: Sequence[str],
+) -> tuple[tuple[Any, ...], str]:
+    from ._fuzz_targets import TARGETS, by_name, for_mutation
+
+    if requested:
+        selected: list[Any] = []
+        seen: set[str] = set()
+        for name in requested:
+            target = by_name(str(name))
+            if target.name not in seen:
+                selected.append(target)
+                seen.add(target.name)
+        return tuple(selected), "explicit"
+
+    matched: dict[str, Any] = {}
+    mutants = mutation_report.get("mutants")
+    if isinstance(mutants, list):
+        ordered = sorted(
+            (mutant for mutant in mutants if isinstance(mutant, dict)),
+            key=lambda mutant: {
+                "survived": 0,
+                "unreached": 1,
+                "killed": 2,
+            }.get(str(mutant.get("outcome")), 3),
+        )
+        for mutant in ordered:
+            path = mutant.get("path")
+            operator = mutant.get("operator")
+            if not isinstance(path, str) or not isinstance(operator, str):
+                continue
+            for target in for_mutation(path, operator):
+                matched.setdefault(target.name, target)
+    if matched:
+        return tuple(matched.values()), "mutation-metadata"
+    return tuple(TARGETS), "fallback-all"
+
+
+def _digest_manifest(values: Sequence[str]) -> str:
+    digest = hashlib.sha256()
+    for value in values:
+        digest.update(value.encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _fuzz_finding_dict(finding: Any) -> dict[str, Any]:
+    return {
+        "digest": finding.digest,
+        "deterministic": finding.deterministic,
+        "exception_type": finding.exception_type,
+        "exception_message": finding.exception_message,
+        "original_size": finding.original_size,
+        "minimized_size": finding.minimized_size,
+        "input_path": str(finding.input_path),
+        "metadata_path": str(finding.metadata_path),
+    }
+
+
+def _fuzz_campaign_dict(report: Any) -> dict[str, Any]:
+    return {
+        "backend": "python",
+        "name": report.target,
+        "seed": report.seed,
+        "cases": report.cases_executed,
+        "corpus_size": report.corpus_size,
+        "corpus_added": report.corpus_added,
+        "coverage_features": report.coverage_features,
+        "semantic_features": report.semantic_features,
+        "generated_manifest_sha256": _digest_manifest(report.generated_digests),
+        "initial_corpus_manifest_sha256": _digest_manifest(
+            getattr(report, "initial_corpus_digests", ())
+        ),
+        "corpus_manifest_sha256": _digest_manifest(report.corpus_digests),
+        "findings": [_fuzz_finding_dict(finding) for finding in report.findings],
+        "stop_reason": report.stop_reason,
+        "seconds": round(report.elapsed_seconds, 3),
+        "structured_strategy": getattr(report, "structured_strategy", None),
+    }
+
+
+def _native_corpus_evidence(
+    report: Any,
+) -> tuple[int, int, tuple[str, ...], tuple[str, ...]]:
+    counts = []
+    for name in ("corpus_size", "corpus_added"):
+        value = getattr(report, name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"native fuzz report {name} must be a non-negative integer")
+        counts.append(value)
+    corpus_size, corpus_added = counts
+    if corpus_added > corpus_size:
+        raise ValueError("native fuzz report corpus_added cannot exceed corpus_size")
+
+    digest_groups = []
+    for name in ("corpus_addition_digests", "corpus_digests"):
+        values = getattr(report, name)
+        if not isinstance(values, tuple):
+            raise ValueError(f"native fuzz report {name} must be a tuple of SHA-256 digests")
+        previous = None
+        for index, value in enumerate(values):
+            if (
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise ValueError(
+                    f"native fuzz report {name}[{index}] must be a lowercase SHA-256 digest"
+                )
+            if previous is not None:
+                if value == previous:
+                    raise ValueError(
+                        f"native fuzz report {name} must not contain duplicate digests"
+                    )
+                if value < previous:
+                    raise ValueError(f"native fuzz report {name} must be sorted")
+            previous = value
+        digest_groups.append(values)
+    corpus_addition_digests, corpus_digests = digest_groups
+    if corpus_size != len(corpus_digests):
+        raise ValueError("native fuzz report corpus_size must equal the corpus digest count")
+    if corpus_added != len(corpus_addition_digests):
+        raise ValueError(
+            "native fuzz report corpus_added must equal the corpus addition digest count"
+        )
+    corpus_index = 0
+    for digest in corpus_addition_digests:
+        while corpus_index < corpus_size and corpus_digests[corpus_index] < digest:
+            corpus_index += 1
+        if corpus_index == corpus_size or corpus_digests[corpus_index] != digest:
+            raise ValueError(
+                f"native fuzz report corpus addition digest {digest} "
+                "must be present in corpus_digests"
+            )
+    return corpus_size, corpus_added, corpus_addition_digests, corpus_digests
+
+
+def _native_fuzz_campaign_dict(report: Any) -> dict[str, Any]:
+    corpus_size, corpus_added, corpus_addition_digests, corpus_digests = (
+        _native_corpus_evidence(report)
+    )
+    findings = []
+    for directory in report.findings:
+        metadata_path = directory / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        findings.append(
+            {
+                "digest": metadata["input_sha256"],
+                "deterministic": metadata["deterministic"],
+                "exception_type": metadata["exception_type"],
+                "exception_message": metadata["exception_message"],
+                "original_size": metadata["original_size"],
+                "minimized_size": metadata["minimized_size"],
+                "input_path": str(directory / "input"),
+                "metadata_path": str(metadata_path),
+            }
+        )
+    return {
+        "backend": "native",
+        "name": report.target,
+        "seed": report.seed,
+        "cases": report.cases_executed,
+        "corpus_size": corpus_size,
+        "corpus_added": corpus_added,
+        "coverage_features": report.coverage_features,
+        "semantic_features": None,
+        "fuzzer_features": report.fuzzer_features,
+        "peak_rss_mb": report.peak_rss_mb,
+        "generated_manifest_sha256": None,
+        "corpus_addition_manifest_sha256": _digest_manifest(corpus_addition_digests),
+        "corpus_manifest_sha256": _digest_manifest(corpus_digests),
+        "findings": findings,
+        "stop_reason": "finding" if findings else "completed",
+        "seconds": round(float(getattr(report, "elapsed_seconds", 0.0)), 3),
+        "command": list(report.command),
+        "exit_code": report.exit_code,
+    }
+
+
+def _target_campaign_seed(master_seed: int, name: str) -> int:
+    digest = hashlib.blake2b(
+        f"{master_seed}:{name}".encode(),
+        digest_size=8,
+        person=b"wreathfz",
+    ).digest()
+    return int.from_bytes(digest)
+
+
+def _fuzz_campaign_worker(
+    target: Any,
+    config: Any,
+    result_path: Path,
+    diagnostic_path: Path,
+) -> None:
+    import resource
+
+    with diagnostic_path.open("wb", buffering=0) as diagnostic:
+        os.dup2(diagnostic.fileno(), sys.stderr.fileno())
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        from ._fuzz import run_campaign
+
+        campaign = run_campaign(target, config)
+        _atomic_json(
+            result_path,
+            {"version": 1, "report": _fuzz_campaign_dict(campaign)},
+        )
+
+
+def _fuzz_infrastructure_report(
+    target_name: str,
+    seed: int,
+    elapsed: float,
+    message: str,
+) -> dict[str, Any]:
+    return {
+        "name": target_name,
+        "seed": seed,
+        "cases": 0,
+        "corpus_size": 0,
+        "corpus_added": 0,
+        "coverage_features": 0,
+        "semantic_features": 0,
+        "generated_manifest_sha256": _digest_manifest(()),
+        "corpus_manifest_sha256": _digest_manifest(()),
+        "findings": [],
+        "stop_reason": "infrastructure-error",
+        "seconds": round(elapsed, 3),
+        "error": message,
+    }
+
+
+def _fuzz_worker_diagnostic(path: Path) -> str:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return ""
+    if not data:
+        return ""
+    return data[-4_096:].decode(errors="replace").strip()
+
+
+def _fuzz_worker_wall_clock_timeout(max_seconds: float) -> float:
+    return max_seconds + _FUZZ_WORKER_WALL_CLOCK_GRACE_SECONDS
+
+
+def _fuzz_worker_failure(
+    exit_code: int | None,
+    timed_out: bool,
+    max_seconds: float,
+) -> tuple[str, str, str]:
+    if exit_code is not None and exit_code < 0 and (
+        not timed_out or -exit_code != signal.SIGKILL
+    ):
+        signal_number = -exit_code
+        try:
+            signal_name = signal.Signals(signal_number).name
+        except ValueError:
+            signal_name = f"SIG{signal_number}"
+        return (
+            f"signal.{signal_name}",
+            f"fuzz target terminated by {signal_name}",
+            "signal",
+        )
+    if timed_out:
+        return (
+            "builtins.TimeoutError",
+            f"fuzz target exceeded its {max_seconds:g}s deadline",
+            "timeout",
+        )
+    return (
+        "builtins.RuntimeError",
+        f"fuzz worker exited with status {exit_code}",
+        "worker-error",
+    )
+
+
+def _run_fuzz_target_isolated(target: Any, config: Any) -> tuple[dict[str, Any], int]:
+    from ._fuzz import publish_crash_finding
+
+    if "fork" not in multiprocessing.get_all_start_methods():
+        raise RuntimeError("fuzz campaigns require a platform with multiprocessing fork support")
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix="wreath-fuzz-worker-") as raw_directory:
+        directory = Path(raw_directory)
+        result_path = directory / "result.json"
+        diagnostic_path = directory / "diagnostic.log"
+        journal_path = directory / "active-input.json"
+        child_config = replace(config, journal_path=journal_path)
+        process = multiprocessing.get_context("fork").Process(
+            target=_fuzz_campaign_worker,
+            args=(target, child_config, result_path, diagnostic_path),
+            name=f"wreath-fuzz-{target.name}",
+        )
+        timed_out = False
+        process.start()
+        try:
+            process.join(_fuzz_worker_wall_clock_timeout(float(config.max_seconds)))
+            if process.is_alive():
+                timed_out = True
+                process.kill()
+                process.join()
+            exit_code = process.exitcode
+        except BaseException:
+            if process.is_alive():
+                process.kill()
+                process.join()
+            raise
+        finally:
+            process.close()
+        elapsed = time.monotonic() - started
+
+        if exit_code == 0:
+            try:
+                document = json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as error:
+                return (
+                    _fuzz_infrastructure_report(
+                        target.name,
+                        int(config.seed),
+                        elapsed,
+                        f"worker returned no valid report: {error}",
+                    ),
+                    2,
+                )
+            report = document.get("report") if isinstance(document, dict) else None
+            if (
+                not isinstance(document, dict)
+                or document.get("version") != 1
+                or not isinstance(report, dict)
+                or report.get("name") != target.name
+                or report.get("seed") != config.seed
+            ):
+                return (
+                    _fuzz_infrastructure_report(
+                        target.name,
+                        int(config.seed),
+                        elapsed,
+                        "worker returned a mismatched campaign report",
+                    ),
+                    2,
+                )
+            findings = report.get("findings")
+            return report, 1 if isinstance(findings, list) and findings else 0
+
+        if not journal_path.exists():
+            reason = "deadline expired" if timed_out else f"worker exited {exit_code}"
+            diagnostic = _fuzz_worker_diagnostic(diagnostic_path)
+            detail = f": {diagnostic}" if diagnostic else ""
+            return (
+                _fuzz_infrastructure_report(
+                    target.name,
+                    int(config.seed),
+                    elapsed,
+                    f"{reason} before recording an active input{detail}",
+                ),
+                2,
+            )
+
+        try:
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            case_ordinal = int(journal["case_ordinal"])
+            exception_type, exception_message, stop_reason = _fuzz_worker_failure(
+                exit_code,
+                timed_out,
+                float(config.max_seconds),
+            )
+            finding = publish_crash_finding(
+                journal_path,
+                config.artifact_root,
+                target,
+                int(config.seed),
+                exception_type=exception_type,
+                exception_message=exception_message,
+                diagnostic=diagnostic_path,
+            )
+        except (KeyError, OSError, TypeError, ValueError) as error:
+            return (
+                _fuzz_infrastructure_report(
+                    target.name,
+                    int(config.seed),
+                    elapsed,
+                    f"worker crash journal could not be recovered: {error}",
+                ),
+                2,
+            )
+        report = _fuzz_infrastructure_report(target.name, int(config.seed), elapsed, "")
+        report.update(
+            {
+                "cases": case_ordinal + 1,
+                "findings": [_fuzz_finding_dict(finding)],
+                "stop_reason": stop_reason,
+                "crash_case_ordinal": case_ordinal,
+            }
+        )
+        report.pop("error")
+        return report, 1
+
+
+def _run_fuzz_campaigns(
+    namespace: Any,
+    mutation_report: dict[str, Any],
+) -> tuple[dict[str, Any], int]:
+    from ._fuzz import CampaignConfig
+
+    requested_targets = tuple(str(name) for name in getattr(namespace, "fuzz_target", ()))
+    targets, selection = _select_fuzz_targets(mutation_report, requested_targets)
+    master_seed_value = getattr(namespace, "fuzz_seed", None)
+    master_seed = secrets.randbits(64) if master_seed_value is None else int(master_seed_value)
+    maximum_cases = int(getattr(namespace, "fuzz_cases", 1_000))
+    total_budget = float(getattr(namespace, "fuzz_budget", 10.0))
+    differential = mutation_report.get("differential_fuzz")
+    differential_seconds = (
+        differential.get("seconds", 0.0) if isinstance(differential, dict) else 0.0
+    )
+    spent = (
+        max(0.0, float(differential_seconds))
+        if isinstance(differential_seconds, int | float)
+        and math.isfinite(float(differential_seconds))
+        else 0.0
+    )
+    started = time.monotonic()
+    reports: list[dict[str, Any]] = []
+    status = 0
+    backend = str(getattr(namespace, "fuzz_backend", "python"))
+    python_targets = targets if backend in {"python", "all"} else ()
+    native_targets: tuple[Any, ...] = ()
+    native_campaign_config: Any = None
+    run_native_campaign: Any = None
+    if backend in {"native", "all"}:
+        from ._fuzz.native import NATIVE_TARGETS, NativeCampaignConfig
+        from ._fuzz.native import run_native_campaign as run_native
+
+        selected_names = {target.name for target in targets}
+        native_targets = tuple(target for target in NATIVE_TARGETS if target.name in selected_names)
+        native_names = {target.name for target in native_targets}
+        unsupported = selected_names - native_names
+        if backend == "native" and requested_targets and unsupported:
+            rendered = ", ".join(sorted(unsupported))
+            raise ValueError(
+                f"fuzz targets {rendered} have no native harness; "
+                "use --fuzz-backend python or all"
+            )
+        native_campaign_config = NativeCampaignConfig
+        run_native_campaign = run_native
+        if backend == "native" and not native_targets:
+            rendered = ", ".join(sorted(selected_names))
+            raise ValueError(
+                f"selected fuzz targets {rendered} have no native harness; "
+                "register a native harness or use --fuzz-backend python"
+            )
+    campaign_count = len(python_targets) + len(native_targets)
+    completed_campaigns = 0
+    if python_targets:
+        for target in python_targets:
+            remaining = (
+                total_budget - spent
+            )
+            if remaining <= 0:
+                break
+            fair_share = remaining / (campaign_count - completed_campaigns)
+            campaign_started = time.monotonic()
+            campaign, campaign_status = _run_fuzz_target_isolated(
+                target,
+                CampaignConfig(
+                    corpus_root=Path(
+                        getattr(namespace, "fuzz_corpus", ".wreath/fuzz/corpus")
+                    ),
+                    artifact_root=Path(
+                        getattr(namespace, "fuzz_artifacts", ".wreath/fuzz/artifacts")
+                    ),
+                    seed=_target_campaign_seed(master_seed, target.name),
+                    max_cases=maximum_cases,
+                    max_seconds=fair_share,
+                    generate=not bool(getattr(namespace, "fuzz_replay_only", False)),
+                ),
+            )
+            spent += time.monotonic() - campaign_started
+            reports.append(campaign)
+            status = max(status, campaign_status)
+            completed_campaigns += 1
+    if backend in {"native", "all"}:
+        for target in native_targets:
+            remaining = total_budget - spent
+            fair_share = math.floor(remaining / (campaign_count - completed_campaigns))
+            if fair_share < 1:
+                raise ValueError(
+                    "--fuzz-budget must leave at least one whole second for each "
+                    "selected native campaign; increase the budget or select fewer targets"
+                )
+            replay_only = bool(getattr(namespace, "fuzz_replay_only", False))
+            native_report = run_native_campaign(
+                target,
+                native_campaign_config(
+                    project_root=Path.cwd(),
+                    build_root=Path(
+                        getattr(namespace, "fuzz_native_build", ".wreath/fuzz/native-build")
+                    ),
+                    corpus_root=Path(
+                        getattr(namespace, "fuzz_corpus", ".wreath/fuzz/corpus")
+                    ),
+                    artifact_root=Path(
+                        getattr(namespace, "fuzz_artifacts", ".wreath/fuzz/artifacts")
+                    ),
+                    max_seconds=fair_share,
+                    max_runs=0 if replay_only else maximum_cases,
+                    seed=_target_campaign_seed(master_seed, target.name) & 0xFFFFFFFF,
+                    rebuild=not bool(
+                        getattr(namespace, "fuzz_native_reuse_build", False)
+                    ),
+                    replay_only=replay_only,
+                ),
+            )
+            spent += float(getattr(native_report, "elapsed_seconds", 0.0))
+            reports.append(_native_fuzz_campaign_dict(native_report))
+            status = max(status, 1 if native_report.findings else 0)
+            completed_campaigns += 1
+    counts = {
+        "targets": len(reports),
+        "cases": sum(int(report["cases"]) for report in reports),
+        "corpus_added": sum(int(report["corpus_added"]) for report in reports),
+        "findings": sum(len(report["findings"]) for report in reports),
+        "errors": sum("error" in report for report in reports),
+    }
+    document = {
+        "version": 1,
+        "kind": "wreath-fuzz-campaigns",
+        "seed": master_seed,
+        "selection": selection,
+        "backend": backend,
+        "replay_only": bool(getattr(namespace, "fuzz_replay_only", False)),
+        "counts": counts,
+        "targets": reports,
+        "seconds": round(time.monotonic() - started, 3),
+    }
+    return document, status
+
+
+def _attach_fuzz_campaign(
+    replay_report: dict[str, Any],
+    activity: FuzzActivity,
+    campaigns: dict[str, Any],
+) -> FuzzActivity:
+    replay_report["campaign"] = campaigns
+    counts = campaigns["counts"]
+    return replace(
+        activity,
+        campaign_targets=tuple(target["name"] for target in campaigns["targets"]),
+        campaign_cases=int(counts["cases"]),
+        campaign_corpus_added=int(counts["corpus_added"]),
+        campaign_findings=int(counts["findings"]),
+        campaign_errors=int(counts["errors"]),
+        campaign_seed=int(campaigns["seed"]),
+    )
 
 
 def _live_fuzz_ready(gold_files: int, passed_files: int) -> bool:
@@ -2597,27 +3241,34 @@ def _fuzz_confidence(
     *,
     renderer: ActivityRenderer | None,
     selected: Sequence[str] | None = None,
+    campaigns: bool = True,
 ) -> tuple[dict[str, Any], FuzzActivity, int]:
-    """Run each gold file's killers and explicit fuzz cases in a fresh pass."""
+    """Replay gold evidence, then evolve inputs for mutation-relevant targets."""
     chosen = tuple(selected) if selected is not None else _mutation_gold_files(mutation_report)
-    if not chosen:
-        report, activity = _no_gold_fuzz()
-        return report, activity, 0
-    with tempfile.TemporaryDirectory(prefix="wreath-fuzz-") as directory:
-        fuzz = _start_fuzz_process(
-            namespace,
-            chosen,
-            directory=Path(directory),
-            case_ids=_mutation_gold_tests(mutation_report, chosen),
-        )
-        try:
-            return _finish_fuzz_process(
-                fuzz,
-                mutation_activity,
-                renderer=renderer,
+    if chosen:
+        with tempfile.TemporaryDirectory(prefix="wreath-fuzz-") as directory:
+            fuzz = _start_fuzz_process(
+                namespace,
+                chosen,
+                directory=Path(directory),
+                case_ids=_mutation_gold_tests(mutation_report, chosen),
             )
-        finally:
-            _stop_fuzz_process(fuzz)
+            try:
+                report, activity, replay_status = _finish_fuzz_process(
+                    fuzz,
+                    mutation_activity,
+                    renderer=renderer,
+                )
+            finally:
+                _stop_fuzz_process(fuzz)
+    else:
+        report, activity = _no_gold_fuzz()
+        replay_status = 0
+    if not campaigns:
+        return report, activity, replay_status
+    campaign_report, campaign_status = _run_fuzz_campaigns(namespace, mutation_report)
+    activity = _attach_fuzz_campaign(report, activity, campaign_report)
+    return report, activity, max(replay_status, campaign_status)
 
 
 def _no_gold_fuzz() -> tuple[dict[str, Any], FuzzActivity]:
@@ -2729,7 +3380,7 @@ def _finish_mutation_process(
                 renderer=renderer,
             )
     raw_report = mutation.output_path.read_text(encoding="utf-8")
-    if returncode != 0:
+    if returncode not in {0, 1}:
         raise ValueError("mutation confidence phase failed; its diagnostic is printed above")
     try:
         report = json.loads(raw_report)
@@ -2742,7 +3393,10 @@ def _finish_mutation_process(
     activity = _mutation_activity_from_report(str(namespace.mutant), report)
     survived = activity.counts.get("survived", 0)
     unreached = activity.counts.get("unreached", 0)
-    status = 1 if namespace.mutant_fail_on_survivor and (survived or unreached) else 0
+    status = max(
+        returncode,
+        1 if namespace.mutant_fail_on_survivor and (survived or unreached) else 0,
+    )
     return report, status
 
 
@@ -2818,7 +3472,10 @@ class _PytestMutationState:
         if trace_spec is None:
             return state
         state.selection_path = directory / "mutation-selection.json"
-        state.selection_path.write_text(json.dumps(sorted(trace_spec.selected)), encoding="utf-8")
+        state.selection_path.write_text(
+            json.dumps(_mutation_selection_payload(trace_spec)),
+            encoding="utf-8",
+        )
         state.baseline_wait_path = directory / "mutation-baseline.json"
         state.prepared = _start_mutation_process(
             namespace,
@@ -3005,7 +3662,7 @@ class _PytestOutcome:
             self.plugin.finish_pipeline(activity, fuzz_activity)
         if self.pytest_status != 0:
             return self.pytest_status
-        return mutation_status if mutation_status != 0 else fuzz_status
+        return max(mutation_status, fuzz_status)
 
 
 def _dispatch_test_engine(namespace: Any) -> int | None:
@@ -3019,6 +3676,19 @@ def _dispatch_test_engine(namespace: Any) -> int | None:
         namespace.fuzz = "off" if namespace.mutant == "off" else "on"
     if namespace.fuzz == "on" and namespace.mutant == "off":
         raise ValueError("--fuzz on requires mutation evidence; use --mutant on")
+    if namespace.fuzz == "on" and "fork" not in multiprocessing.get_all_start_methods():
+        raise ValueError("--fuzz on requires a platform with multiprocessing fork support")
+    fuzz_cases = int(getattr(namespace, "fuzz_cases", 1_000))
+    fuzz_budget = float(getattr(namespace, "fuzz_budget", 10.0))
+    fuzz_seed = getattr(namespace, "fuzz_seed", None)
+    if fuzz_cases < 1:
+        raise ValueError("--fuzz-cases must be at least 1")
+    if not math.isfinite(fuzz_budget) or fuzz_budget <= 0:
+        raise ValueError("--fuzz-budget must be greater than zero")
+    if fuzz_seed is not None and not 0 <= int(fuzz_seed) < 2**64:
+        raise ValueError("--fuzz-seed must be between 0 and 2**64 - 1")
+    if namespace.fuzz == "on" and fuzz_seed is None:
+        namespace.fuzz_seed = secrets.randbits(64)
     engine = str(getattr(namespace, "engine", "pytest"))
     if engine == "native":
         from ._native_test_runner import execute as execute_native

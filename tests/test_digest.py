@@ -71,6 +71,14 @@ def test_response_can_emit_content_and_selected_representation_digests() -> None
     assert [value for name, value in response.headers if name == b"repr-digest"] == [RFC_SHA512]
 
 
+def test_response_content_digest_can_cover_explicit_transmitted_bytes() -> None:
+    response = Response(b"different bytes")
+
+    response.set_content_digest("sha-256", content=RFC_BODY)
+
+    assert [value for name, value in response.headers if name == b"content-digest"] == [RFC_SHA256]
+
+
 def test_partial_response_requires_the_complete_selected_representation() -> None:
     response = Response(b'"world"}\n', status=206)
 
@@ -105,6 +113,21 @@ async def test_request_verifies_a_required_content_digest() -> None:
     assert b"does not match" in changed.body
     assert missing.status == 400
     assert b"Content-Digest is required" in missing.body
+
+
+@pytest.mark.asyncio
+async def test_optional_repr_digest_is_absent_without_the_header() -> None:
+    app = Wreath()
+
+    @app.post("/upload")
+    async def upload(request: Request) -> dict[str, str | None]:
+        return {"algorithm": await request.verify_repr_digest()}
+
+    async with TestClient(app) as client:
+        response = await client.post("/upload", content=RFC_BODY)
+
+    assert response.status == 200
+    assert response.json() == {"algorithm": None}
 
 
 @pytest.mark.asyncio

@@ -123,6 +123,12 @@ def append_forwarded(
     `ProxyPolicy`, which is the thing behind this proxy. Emitting
     only the standard one would mean wreath could not sit behind itself.
     """
+    if host is not None and any(octet < 0x20 or octet == 0x7F for octet in host):
+        raise ValueError("host must be a valid HTTP field value")
+
+    def quoted(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+
     if client:
         forwarded.append((b"x-forwarded-for", client.encode("latin-1")))
     forwarded.append((b"x-forwarded-proto", scheme.encode("latin-1")))
@@ -130,9 +136,9 @@ def append_forwarded(
         forwarded.append((b"x-forwarded-host", host))
     parts = [f"proto={scheme}"]
     if client:
-        parts.insert(0, f'for="{client}"')
+        parts.insert(0, f'for="{quoted(client)}"')
     if host:
-        parts.append(f'host="{host.decode("latin-1")}"')
+        parts.append(f'host="{quoted(host.decode("latin-1"))}"')
     forwarded.append((b"forwarded", "; ".join(parts).encode("latin-1")))
 
 

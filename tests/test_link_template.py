@@ -123,6 +123,15 @@ def test_link_template_refuses_invalid_parameters() -> None:
         LinkTemplate("/{id}", rel="")
 
 
+@pytest.mark.parametrize("name", ["rel", "anchor", "var-base"])
+def test_link_template_named_parameters_cannot_be_redeclared_as_attributes(name: str) -> None:
+    with pytest.raises(ValueError) as caught:
+        LinkTemplate("/{id}", attributes={name: "duplicate"})
+    assert str(caught.value) == (
+        f"attribute {name!r} is reserved; pass it through its named argument"
+    )
+
+
 def test_link_template_refuses_an_empty_response_field() -> None:
     response = Response(b"ok")
 

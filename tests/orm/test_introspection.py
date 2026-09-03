@@ -11,6 +11,8 @@ import pytest
 from wreath.orm import Mapped, Model, column, introspection
 from wreath.orm.errors import SchemaMismatchError
 from wreath.orm.introspection import (
+    SchemaDiff,
+    SchemaIssue,
     _validate_constraints,
     _validate_model,
     probe_extension_types,
@@ -33,6 +35,17 @@ live = pytest.mark.skipif(
     _DSN is None,
     reason="set WREATH_TEST_POSTGRES_DSN to validate against a real pg_catalog",
 )
+
+
+async def test_schema_diff_report_marks_only_the_issues_past_its_limit() -> None:
+    issues = tuple(
+        SchemaIssue("app", "items", str(index), "mismatch", f"issue {index}")
+        for index in range(3)
+    )
+    diff = SchemaDiff(issues)
+
+    assert "and" not in diff.report(limit=3)
+    assert diff.report(limit=2).endswith("... and 1 more")
 
 
 class Account(Model, table="accounts"):

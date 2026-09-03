@@ -2,7 +2,9 @@ import ast
 
 import pytest
 
+from wreath._port.analyzer.imports import _Imports
 from wreath._port.analyzer.routes import _names_crossing
+from wreath._port.analyzer.settings import settings_field_shape
 
 port = pytest.importorskip("wreath.port")
 
@@ -22,6 +24,20 @@ def test_lifespan_crossing_names_keep_first_binding_order() -> None:
     after = ast.parse("print(third, first)").body
 
     assert _names_crossing(before, after) == ["first", "third"]
+
+
+def test_lifespan_crossing_ignores_names_only_read_before_the_yield() -> None:
+    before = ast.parse("candidate\nactual = 1").body
+    after = ast.parse("print(candidate, actual)").body
+
+    assert _names_crossing(before, after) == ["actual"]
+
+
+def test_lifespan_crossing_ignores_names_only_rebound_after_the_yield() -> None:
+    before = ast.parse("candidate = 1\nactual = 2").body
+    after = ast.parse("candidate = 3\nprint(actual)").body
+
+    assert _names_crossing(before, after) == ["actual"]
 
 
 def _one(tmp_path, source: str, prefix: str):
@@ -106,6 +122,15 @@ def test_the_translated_settings_message_names_the_required_variables(tmp_path) 
     assert "LOG_LEVEL" not in finding.message
 
 
+def test_the_required_settings_message_truncates_after_eight_names(tmp_path) -> None:
+    fields = "".join(f"    field_{index}: str\n" for index in range(9))
+    source = _SETTINGS_HEAD + "class Settings(BaseSettings):\n" + fields
+    finding = _one(tmp_path, source, "settings.class")
+
+    assert "FIELD_7, ...]" in finding.message
+    assert "FIELD_8" not in finding.message
+
+
 def test_a_literal_env_prefix_is_carried_into_the_message(tmp_path) -> None:
     source = _SETTINGS_HEAD + (
         "class Settings(BaseSettings):\n"
@@ -133,6 +158,24 @@ def test_a_non_scalar_field_holds_its_class_back(tmp_path, body, why) -> None:
     assert "settings.class" in ids, why
     assert "settings.class_env" not in ids, why
     assert "settings.field_complex" in ids, why
+
+
+def test_a_bytes_literal_is_not_a_scalar_string_default(tmp_path) -> None:
+    source = _SETTINGS_HEAD + "class Settings(BaseSettings):\n    token: str = b'secret'\n"
+
+    ids = _rule_ids(tmp_path, source)
+
+    assert "settings.class" in ids
+    assert "settings.class_env" not in ids
+    assert "settings.field_complex" in ids
+
+
+def test_field_shape_without_a_settings_index_still_handles_scalars() -> None:
+    tree = ast.parse("count: int")
+    stmt = tree.body[0]
+    assert isinstance(stmt, ast.AnnAssign)
+
+    assert settings_field_shape(_Imports(), stmt) == "scalar"
 
 
 def test_a_validator_in_a_settings_class_holds_it_back(tmp_path) -> None:
@@ -170,6 +213,34 @@ def test_a_composed_sub_group_still_needs_a_decision(tmp_path) -> None:
     assert findings["settings.nested"].tag == port.NEEDS_REVIEW
     assert "flatten" in findings["settings.nested"].message
     assert findings["settings.class"].tag == port.NEEDS_REVIEW
+
+
+def test_a_sub_group_annotation_is_enough_to_make_a_field_nested(tmp_path) -> None:
+    source = _SETTINGS_HEAD + (
+        "class Twilio(BaseSettings):\n"
+        "    sid: str = ''\n"
+        "\n"
+        "class Settings(BaseSettings):\n"
+        "    twilio: Twilio\n"
+    )
+
+    findings = _analyze(tmp_path, source)
+
+    assert any(finding.rule_id == "settings.nested" for finding in findings)
+
+
+def test_a_sub_group_default_is_enough_to_make_a_field_nested(tmp_path) -> None:
+    source = _SETTINGS_HEAD + (
+        "class Twilio(BaseSettings):\n"
+        "    sid: str = ''\n"
+        "\n"
+        "class Settings(BaseSettings):\n"
+        "    twilio: object = Twilio()\n"
+    )
+
+    findings = _analyze(tmp_path, source)
+
+    assert any(finding.rule_id == "settings.nested" for finding in findings)
 
 
 _ROUTE_HEAD = "from fastapi import APIRouter\nrouter = APIRouter()\n"
@@ -302,6 +373,28 @@ def test_an_independent_lifespan_splits_at_the_yield(tmp_path) -> None:
     assert finding.rule_id == "lifespan.split"
     assert finding.tag == port.TRANSLATED
     assert "on_startup" in finding.message and "on_shutdown" in finding.message
+
+
+def test_a_lifespan_named_by_convention_needs_no_application_registration(tmp_path) -> None:
+    source = _LIFESPAN_HEAD + (
+        "@asynccontextmanager\n"
+        "async def lifespan():\n"
+        "    await connect()\n"
+        "    yield\n"
+        "    await disconnect()\n"
+    )
+
+    assert _one(tmp_path, source, "lifespan.").rule_id == "lifespan.split"
+
+
+def test_an_annotated_lifespan_candidate_requires_exactly_one_parameter(tmp_path) -> None:
+    source = _LIFESPAN_HEAD + (
+        "@asynccontextmanager\n"
+        "async def service(app: FastAPI, mode: str):\n"
+        "    yield\n"
+    )
+
+    assert not any(rule_id.startswith("lifespan.") for rule_id in _rule_ids(tmp_path, source))
 
 
 def test_a_name_crossing_the_yield_is_named_in_the_message(tmp_path) -> None:

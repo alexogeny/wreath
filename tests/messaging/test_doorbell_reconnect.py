@@ -9,6 +9,7 @@ import pytest
 from _pgfidelity import check_for
 
 import wreath._doorbell as doorbell_module
+from wreath._doorbell import Doorbell
 from wreath.messaging import Message, MessageBus, _doorbell_delay
 
 
@@ -98,6 +99,7 @@ class FakeDatabase:
         self.acquires = 0
         #: When set, `acquire` raises it -- the database is unreachable.
         self.acquire_error: Exception | None = None
+        self.releases: list[FakeListenConnection | None] = []
 
     async def acquire(self, workload: str) -> FakeListenConnection:
         self.acquires += 1
@@ -108,6 +110,7 @@ class FakeDatabase:
         return connection
 
     async def release(self, workload: str, connection: FakeListenConnection) -> None:
+        self.releases.append(connection)
         connection.released = True
 
     @property
@@ -151,6 +154,19 @@ async def _until(predicate: Any, *, within: float = 2.0) -> bool:
 
 def _bus(database: FakeDatabase, **kwargs: Any) -> MessageBus:
     return MessageBus(database, name="events", **kwargs)
+
+
+async def test_releasing_an_unopened_doorbell_does_not_touch_the_pool() -> None:
+    database = FakeDatabase()
+
+    async def pump(_connection: Any) -> None:
+        return None
+
+    doorbell = Doorbell(database=database, workload="write", pump=pump)
+
+    await doorbell.release()
+
+    assert database.releases == []
 
 
 async def _started(database: FakeDatabase, handler: Any) -> tuple[MessageBus, RunningSupervisor]:

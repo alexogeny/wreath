@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 import subprocess
@@ -206,6 +207,31 @@ _CRASH_SCRIPT = (
 )
 
 
+def _real_replay_child(ring_path: str) -> None:
+    ring = read_ring_file(ring_path)
+    reproduced = _reproduce(_app((CHARGE, SETTLE)), ring)
+    diverged = _reproduce(_app((CHARGE, REFUND)), ring)
+    print(
+        json.dumps(
+            {
+                "request_id": reproduced.request_id,
+                "expected": reproduced.expected,
+                "observed": reproduced.observed,
+                "sites": (CHARGE.site_id, SETTLE.site_id),
+                "reproduced": reproduced.reproduced,
+                "diverged": diverged.reproduced,
+                "diverged_at": diverged.diverged_at,
+            }
+        )
+    )
+
+
+_REPLAY_SCRIPT = (
+    "from tests.test_flight_reproduce import _real_replay_child; "
+    "import sys; _real_replay_child(sys.argv[1])"
+)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="needs POSIX signals")
 @pytest.mark.skipif("ASAN_OPTIONS" in os.environ, reason="ASan intercepts SIGSEGV")
 def test_a_real_crash_file_drives_a_real_reproduction(tmp_path) -> None:
@@ -221,18 +247,19 @@ def test_a_real_crash_file_drives_a_real_reproduction(tmp_path) -> None:
     ring = read_ring_file(ring_path)
     assert ring.in_flight() == (2,), "the doomed request is the one with no completion"
 
-    outcome = _reproduce(_app((CHARGE, SETTLE)), ring)
-    assert outcome.request_id == 2
-    assert outcome.expected == (CHARGE.site_id, SETTLE.site_id)
-    assert outcome.reproduced, (
-        f"the replay did not retrace the crash: {outcome.observed} against {outcome.expected}"
+    replay = subprocess.run(
+        [sys.executable, "-c", _REPLAY_SCRIPT, ring_path],
+        capture_output=True,
+        text=True,
+        check=False,
     )
-
-    # And the negative, against the same real file: a build that takes a
-    # different turn is reported rather than passing.
-    diverged = _reproduce(_app((CHARGE, REFUND)), ring)
-    assert not diverged.reproduced
-    assert diverged.diverged_at == 1
+    assert replay.returncode == 0, replay.stderr
+    outcome = json.loads(replay.stdout)
+    assert outcome["request_id"] == 2
+    assert outcome["expected"] == outcome["sites"] == outcome["observed"]
+    assert outcome["reproduced"]
+    assert not outcome["diverged"]
+    assert outcome["diverged_at"] == 1
 
 
 def test_the_replay_publishes_nothing_into_the_installed_runtime() -> None:

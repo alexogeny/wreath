@@ -6,9 +6,10 @@ from typing import Any
 import pytest
 
 from wreath.orm import DeclarationError, Mapped, Model, column
+from wreath.orm._generated import render_generation
 from wreath.orm.compiler import compile_select, shape_of
 from wreath.orm.registry import Registry
-from wreath.orm.types import Int64, Text, TsVector
+from wreath.orm.types import GeneratedType, Int64, Text, TsVector
 from wreath.postgres import PostgresError, connect
 from wreath.queries import Param, Queries, query
 
@@ -40,6 +41,12 @@ class Documents(Queries[Document]):
     matching = query(Document.search.matches(Param("terms"))).order_by(
         Document.search.rank(Param("terms")).desc()
     )
+
+
+def test_an_unknown_generated_type_is_refused_before_expression_rendering() -> None:
+    unknown = GeneratedType("unknown", 0, "unknown", lambda value: value)
+    with pytest.raises(DeclarationError, match="cannot render an expression"):
+        render_generation(unknown, {}, "Document")
 
 
 @pytest.fixture(scope="module")

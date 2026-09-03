@@ -1171,7 +1171,8 @@ async def push_stream(
     since: StreamCursor | str | None = None,
     idle: float | None = None,
     poll: float | None = None,
-) -> None:
+    authorize: Callable[[str], bool] | None = None,
+) -> bool:
     """Push `key`'s events as JSON text frames over an accepted WebSocket.
 
     The same reader as `attach`, framed for a socket that already exists --
@@ -1180,6 +1181,9 @@ async def push_stream(
     connection for no reason. Each frame carries `id`, so a client that
     reconnects resumes exactly as an `EventSource` would.
     """
+    if authorize is not None and not authorize(key):
+        return False
+
     from ._json import dumps as _dumps
 
     async for event in streams.follow(key, since=since, idle=idle, poll=poll):
@@ -1187,6 +1191,7 @@ async def push_stream(
         await websocket.send_text(
             encoded.decode("utf-8") if isinstance(encoded, bytes) else encoded
         )
+    return True
 
 
 def check_stream_attachment(streams: Streams, *, ratio: float = 0.5) -> list[str]:

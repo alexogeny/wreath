@@ -96,6 +96,17 @@ def test_wfr1_round_trips_metadata_and_slabs() -> None:
     assert len(decoded.recording_uuid) == 16
 
 
+def test_wfr1_empty_capture_batch_writes_nothing() -> None:
+    import io
+
+    buffer = io.BytesIO()
+    writer = WFR1Writer(buffer, _image())
+    before = buffer.tell()
+
+    assert writer.write_captures([]) == 0
+    assert buffer.tell() == before
+
+
 def test_wfr1_recovers_a_torn_tail() -> None:
     image = _image()
     slabs = _capture_slabs(_recorder(), 4)
@@ -132,6 +143,10 @@ def test_wfr1_rejects_bad_versions_and_hash() -> None:
     bad_container[4] = 9  # container_ver byte
     with pytest.raises(fs.SchemaError):
         read_recording(bytes(bad_container))
+    bad_schema = bytearray(good)
+    bad_schema[5] = fs.SCHEMA_VERSION + 1
+    with pytest.raises(fs.SchemaError, match="unsupported schema version"):
+        read_recording(bytes(bad_schema))
     bad_hash = bytearray(good)
     bad_hash[8] ^= 0xFF  # corrupt the header image_hash -> mismatch vs META
     with pytest.raises(fs.SchemaError):
@@ -152,6 +167,73 @@ def test_wfr1_rejects_an_event_cell_from_an_unsupported_schema() -> None:
 
     with pytest.raises(fs.SchemaError, match="event cell.*schema version"):
         read_recording(bytes(blob))
+
+
+def test_wfr1_recovers_before_a_chunk_whose_payload_is_missing() -> None:
+    import io
+
+    from wreath._recording_format import _CHUNK
+
+    buffer = io.BytesIO()
+    WFR1Writer(buffer, _image())
+    buffer.write(_CHUNK.pack(b"FOOT", 1, 0))
+
+    assert not read_recording(buffer.getvalue()).clean
+
+
+def test_wfr1_stops_at_a_partial_event_cell() -> None:
+    import io
+
+    from wreath._recording_format import _chunk
+
+    buffer = io.BytesIO()
+    WFR1Writer(buffer, _image())
+    buffer.write(_chunk(b"EVNT", b"partial"))
+
+    decoded = read_recording(buffer.getvalue())
+    assert not decoded.clean
+    assert decoded.events == ()
+
+
+def test_wfr1_unknown_chunk_does_not_hide_later_events() -> None:
+    import io
+
+    from wreath._recording_format import _chunk
+
+    buffer = io.BytesIO()
+    writer = WFR1Writer(buffer, _image())
+    buffer.write(_chunk(b"XTRA", bytes(24)))
+    writer.write_events(bytes((fs.SCHEMA_VERSION,)) + bytes(fs.CELL_SIZE - 1))
+    writer.close()
+
+    decoded = read_recording(buffer.getvalue())
+    assert decoded.clean
+    assert len(decoded.events) == 1
+
+
+def test_wfr1_accepts_a_short_legacy_footer() -> None:
+    import io
+
+    from wreath._recording_format import _chunk
+
+    buffer = io.BytesIO()
+    WFR1Writer(buffer, _image())
+    buffer.write(_chunk(b"FOOT", b""))
+
+    assert read_recording(buffer.getvalue()).clean
+
+
+@pytest.mark.parametrize("used", [0, fs.CAPTURE_SLAB_HEADER_SIZE + 1])
+def test_wfr1_stops_before_an_invalid_slab_boundary(used) -> None:
+    from wreath._recording_format import _split_slabs
+
+    payload = bytearray(fs.CAPTURE_SLAB_HEADER_SIZE)
+    payload[8:12] = used.to_bytes(4, "little")
+    slabs = []
+
+    _split_slabs(bytes(payload), slabs)
+
+    assert slabs == []
 
 
 def test_wfr1_requires_a_metadata_chunk() -> None:
@@ -200,6 +282,43 @@ def test_recording_sink_writes_owner_only_wfr1(tmp_path: object) -> None:
     assert {s.request_id for s in decoded.slabs} == {1, 2, 3, 4, 5}
     # The recorder's slabs all returned to the pool after draining.
     assert rec.capture_committed == 0
+
+
+def test_recording_sink_restarts_at_an_existing_recording_path(tmp_path: object) -> None:
+    path = str(tmp_path / "flight.wfr1")
+    first = _recorder(capture_slabs=2)
+    _commit(first, 2)
+    first_sink = RecordingSink(first, _image(), path, interval=0.02)
+    first_sink.start()
+    first_sink.stop()
+
+    second = _recorder(capture_slabs=2)
+    _commit(second, 1)
+    second_sink = RecordingSink(second, _image(), path, interval=0.02)
+    second_sink.start()
+    second_sink.stop()
+
+    assert second_sink.stats["degraded"] is False
+    with open(path, "rb") as handle:
+        decoded = read_recording(handle.read())
+    assert decoded.clean
+    assert len(decoded.slabs) == 1
+
+
+def test_recording_sink_refuses_a_symlinked_recording_path(tmp_path: object) -> None:
+    destination = tmp_path / "destination"
+    destination.write_bytes(b"preserve")
+    path = tmp_path / "flight.wfr1"
+    path.symlink_to(destination)
+    recorder = _recorder(capture_slabs=2)
+    _commit(recorder, 1)
+
+    sink = RecordingSink(recorder, _image(), str(path), interval=0.02)
+    sink.start()
+    sink.stop()
+
+    assert sink.stats["degraded"] is True
+    assert destination.read_bytes() == b"preserve"
 
 
 def test_recording_sink_degrades_on_open_failure_without_raising(

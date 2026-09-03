@@ -1789,6 +1789,22 @@ http_wreath_file_finish(WreathHttpProtocol *self, PyObject *Py_UNUSED(ignored))
 
 /* --- ASGI send ----------------------------------------------------------- */
 
+static int
+wreath_ws_subprotocol_valid(const char *data, Py_ssize_t size)
+{
+    return wreath_field_name_valid(data, size);
+}
+
+static int
+wreath_ws_accept_header_allowed(const char *name, Py_ssize_t size)
+{
+    return !wreath_ascii_equal_ci(name, size, "upgrade", 7)
+        && !wreath_ascii_equal_ci(name, size, "connection", 10)
+        && !wreath_ascii_equal_ci(name, size, "sec-websocket-accept", 20)
+        && !wreath_ascii_equal_ci(name, size, "sec-websocket-protocol", 22)
+        && !wreath_ascii_equal_ci(name, size, "sec-websocket-extensions", 24);
+}
+
 static PyObject *ws_asgi_send(WreathHttpProtocol *self, PyObject *message, PyObject *type);
 
 
@@ -1950,7 +1966,13 @@ ws_asgi_send(WreathHttpProtocol *self, PyObject *message, PyObject *type)
                 return NULL;
             }
             data = PyUnicode_AsUTF8AndSize(subprotocol, &size);
-            if (data == NULL ||
+            if (data == NULL) return NULL;
+            if (!wreath_ws_subprotocol_valid(data, size)) {
+                PyErr_SetString(PyExc_RuntimeError,
+                                "invalid websocket subprotocol");
+                return NULL;
+            }
+            if (
                 out_append(self, "sec-websocket-protocol: ", 24) < 0 ||
                 out_append(self, data, size) < 0 || out_append(self, "\r\n", 2) < 0) {
                 return NULL;
@@ -1990,6 +2012,7 @@ ws_asgi_send(WreathHttpProtocol *self, PyObject *message, PyObject *type)
                     lname[j] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
                 }
                 if (!wreath_field_name_valid(lname, name_size) ||
+                    !wreath_ws_accept_header_allowed(lname, name_size) ||
                     !wreath_field_value_valid(PyBytes_AS_STRING(value),
                                         PyBytes_GET_SIZE(value))) {
                     Py_DECREF(items);

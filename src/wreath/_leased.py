@@ -23,7 +23,7 @@ def claim_sql(
     candidate: str = "claimable",
 ) -> str:
     """Compile one atomic `SKIP LOCKED` claim and fenced update."""
-    alias_name = alias.rsplit(maxsplit=1)[-1]
+    alias_name = alias.rsplit()[-1]
     return (
         f"WITH {candidate} AS ( SELECT {key} FROM {table} WHERE {predicate} "
         f"ORDER BY {order} FOR UPDATE SKIP LOCKED LIMIT {limit} ) "

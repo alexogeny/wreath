@@ -372,6 +372,87 @@ async def test_non_http_work_can_share_the_same_keyed_bucket() -> None:
     assert policy.throttled == 1
 
 
+@pytest.mark.parametrize("key", ["", None, 0, object()])
+async def test_non_http_work_refuses_invalid_bucket_keys(key: Any) -> None:
+    policy = RateLimitPolicy(limit=1, window=60.0)
+
+    with pytest.raises(ValueError, match="non-empty string"):
+        await policy.admit_key(key)
+
+
+class _DualPathStore:
+    def __init__(self) -> None:
+        self.sync_calls = 0
+        self.async_calls = 0
+
+    def configure(self, _capacity: float, _rate: float) -> None:
+        pass
+
+    def try_acquire(self, _key: str, _cost: float, _now: float) -> float:
+        self.sync_calls += 1
+        return 0.0
+
+    async def acquire(self, _key: str, _cost: float, _now: float) -> float:
+        self.async_calls += 1
+        return 10.0
+
+
+class _AsyncOnlyStore:
+    def __init__(self) -> None:
+        self.async_calls = 0
+
+    def configure(self, _capacity: float, _rate: float) -> None:
+        pass
+
+    async def acquire(self, _key: str, _cost: float, _now: float) -> float:
+        self.async_calls += 1
+        return 0.0
+
+
+async def test_non_http_work_uses_the_store_path_bound_at_construction() -> None:
+    local = _DualPathStore()
+    local_policy = RateLimitPolicy(limit=1, window=60.0, store=local)
+    assert await local_policy.admit_key("local") is None
+    assert (local.sync_calls, local.async_calls) == (1, 0)
+
+    remote = _AsyncOnlyStore()
+    remote_policy = RateLimitPolicy(limit=1, window=60.0, store=remote)
+    assert await remote_policy.admit_key("remote") is None
+    assert remote.async_calls == 1
+
+
+def test_exempt_local_work_never_touches_the_bucket_store() -> None:
+    from wreath.request import Request
+
+    store = _DualPathStore()
+    policy = RateLimitPolicy(
+        limit=1,
+        window=60.0,
+        store=store,
+        exempt=lambda _request: True,
+    )
+    request = Request(_scope(("203.0.113.7", 5000)), _receive_body)
+
+    assert policy._before_local_sync(request) is None
+    assert store.sync_calls == 0
+
+
+async def test_exempt_remote_work_never_touches_the_bucket_store() -> None:
+    from wreath.request import Request
+
+    store = _AsyncOnlyStore()
+    policy = RateLimitPolicy(
+        limit=1,
+        window=60.0,
+        store=store,
+        exempt=lambda _request: True,
+    )
+    request = Request(_scope(("203.0.113.7", 5000)), _receive_body)
+
+    assert await policy._before_remote(request) is None
+    assert store.async_calls == 0
+
+
 # `wreath mutant` survived three controls here. Two are the same scenario from
 # both ends: a request the key function cannot name. `principal_key` returns
 # None for one with no identity and no client address, and `_identify` turns

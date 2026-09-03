@@ -223,7 +223,13 @@ wreath-http3 = { workspace = true }
 package-dir = { "" = "src" }
 
 [tool.setuptools.package-data]
-wreath = ["py.typed", "_data/*.wgd", "_data/*.wua", "_data/FORMAT.md"]
+wreath = [
+  "py.typed",
+  "_data/*.wgd",
+  "_data/*.wua",
+  "_data/FORMAT.md",
+  "_fuzz_targets/corpus/v1/*/*.hex",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -298,6 +304,12 @@ extend-immutable-calls = ["wreath.binding.Depends", "Depends"]
 # owned case. KeyboardInterrupt/SystemExit remain outside `Exception` and are not
 # swallowed; the controller also treats a missing payload as a crashed worker.
 "src/wreath/_native_test_runner.py" = ["BLE001"]
+# Mutation children are process fault boundaries. Arbitrary application imports,
+# patch application, and tests can raise any ordinary Exception; each must become
+# a serialized declined/error verdict so one broken mutant cannot end the sweep.
+# Process-control exceptions remain outside Exception, and missing payloads are
+# classified by the parent as crashes rather than swallowed.
+"src/wreath/_mutant/runner.py" = ["BLE001"]
 # Agent observation runs after model and tool effects. Any ordinary recorder
 # failure must be counted rather than escape and invite an at-least-once replay;
 # cancellation and process-control exceptions remain outside `Exception`.

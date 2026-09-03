@@ -5,8 +5,9 @@ import ast
 import pytest
 
 from wreath import port
-from wreath._port.analyzer import _Imports
+from wreath._port.analyzer import _Imports, parent_map
 from wreath._port.emit.emitter import _Emitter
+from wreath._port.emit.state import _EmitterState
 
 
 def _walk(source: str, *, settings: frozenset[str] = frozenset()) -> _Emitter:
@@ -724,3 +725,181 @@ def test_django_import_removal_is_per_bound_name_and_preserves_live_aliases() ->
     assert "DjangoModel" not in body
     assert "CharField" not in body
     assert "kept = Kept" in body
+
+
+def test_enclosing_async_walk_reaches_the_module_boundary() -> None:
+    source = "value = call()\nasync def run():\n    return call()\n"
+    tree = ast.parse(source)
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    state = _EmitterState(source, _Imports())
+    state._parents = parent_map(tree)
+    function = next(node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef))
+    state._parents[id(None)] = function
+
+    assert state._enclosing_is_async(calls[0]) is False
+    assert state._enclosing_is_async(calls[1]) is True
+
+
+def test_emitter_state_owns_a_mapping_when_primary_key_types_are_absent() -> None:
+    state = _EmitterState("", _Imports())
+
+    assert state.pk_types == {}
+    assert isinstance(state.pk_types, dict)
+
+
+def test_dependency_collection_requires_depends_with_one_named_target() -> None:
+    source = (
+        "from fastapi import Depends\n"
+        "def dependency(): pass\n"
+        "valid = Depends(dependency)\n"
+        "empty = Depends()\n"
+        "attribute = Depends(module.dependency)\n"
+        "def other_dependency(): pass\n"
+        "foreign = factory(other_dependency)\n"
+    )
+    tree = ast.parse(source)
+    state = _EmitterState(source, _Imports().visit(tree))
+
+    state.collect_dep_targets(tree)
+
+    assert state._dep_targets == {"dependency"}
+
+
+def test_reference_tracking_respects_replaced_spans_and_exact_origins() -> None:
+    source = (
+        "from custom import value\n"
+        "from fastapi import HTTPException\n"
+        "kept = value\n"
+        "error = HTTPException\n"
+    )
+    tree = ast.parse(source)
+    state = _EmitterState(source, _Imports().visit(tree))
+    value = next(
+        node for node in ast.walk(tree) if isinstance(node, ast.Name) and node.id == "value"
+    )
+    error = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == "HTTPException"
+    )
+    state._replaced.append((state.buf.start_of(error), state.buf.end_of(error)))
+
+    state._track_reference(value, state.imports.origin(value))
+    state._track_reference(error, state.imports.origin(error))
+
+    assert state._retain == set()
+
+
+def test_reference_tracking_distinguishes_names_attributes_and_status_constants() -> None:
+    source = (
+        "import fastapi\n"
+        "import strawberry as berries\n"
+        "from fastapi import HTTPException as Error, status\n"
+        "first = Error\n"
+        "second = fastapi.status\n"
+        "third = berries\n"
+        "code = status.HTTP_404_NOT_FOUND\n"
+    )
+    tree = ast.parse(source)
+    emitter = _Emitter(source, _Imports().visit(tree))
+
+    emitter.visit(tree)
+
+    assert emitter._retain >= {"Error", "status", "berries"}
+    assert "code = 404" in emitter.buf.render()
+
+
+def test_nested_replacement_does_not_make_its_statement_disappear() -> None:
+    source = "class Example:\n    first = call()\n    second = other()\n"
+    tree = ast.parse(source)
+    owner = tree.body[0]
+    assert isinstance(owner, ast.ClassDef)
+    first, second = owner.body
+    state = _EmitterState(source, _Imports())
+    state._parents = parent_map(tree)
+    nested = next(node for node in ast.walk(first) if isinstance(node, ast.Call))
+    state._replaced.append((state.buf.start_of(nested), state.buf.end_of(nested)))
+
+    assert state._would_empty_a_block(second) is False
+
+
+def test_wholly_replaced_sibling_does_not_keep_a_class_body_nonempty() -> None:
+    source = "class Example:\n    first = call()\n    second = other()\n"
+    tree = ast.parse(source)
+    owner = tree.body[0]
+    assert isinstance(owner, ast.ClassDef)
+    first, second = owner.body
+    state = _EmitterState(source, _Imports())
+    state._parents = parent_map(tree)
+    state._replaced.append((state.buf.start_of(first), state.buf.end_of(first)))
+
+    assert state._would_empty_a_block(second) is True
+
+
+def test_class_decorator_is_not_a_statement_in_the_class_body() -> None:
+    source = "@decorate()\nclass Example:\n    removed = value\n"
+    tree = ast.parse(source)
+    owner = tree.body[0]
+    assert isinstance(owner, ast.ClassDef)
+    decorator = owner.decorator_list[0]
+    statement = owner.body[0]
+    state = _EmitterState(source, _Imports())
+    state._parents = parent_map(tree)
+    state._replaced.append((state.buf.start_of(statement), state.buf.end_of(statement)))
+
+    assert state._would_empty_a_block(decorator) is False
+
+
+def test_annotated_http_response_keeps_its_async_owner() -> None:
+    source = (
+        "import httpx\n"
+        "async def fetch(url):\n"
+        "    async with httpx.AsyncClient(base_url='https://example.test') as client:\n"
+        "        response: object = await client.get(url)\n"
+    )
+    tree = ast.parse(source)
+    function = next(node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef))
+    emitter = _Emitter(source, _Imports().visit(tree))
+
+    emitter.visit(tree)
+
+    assert emitter._http_responses == {(id(function), "response")}
+
+
+def test_module_transport_is_visible_only_to_a_module_client() -> None:
+    source = (
+        "import httpx\n"
+        "transport = httpx.AsyncHTTPTransport(retries=4)\n"
+        "async with httpx.AsyncClient(transport=transport) as client:\n"
+        "    response = await client.get('/status')\n"
+    )
+
+    emitter = _walk(source)
+
+    assert [ast.unparse(value) for value in emitter._http_retries.values()] == ["4"]
+
+
+def test_celery_assignment_target_must_be_a_name() -> None:
+    source = "from celery import Celery\nholder.runner = Celery('jobs')\n"
+
+    emitter = _walk(source)
+
+    assert emitter._celery_runners == set()
+
+
+def test_timeout_annotation_rewrite_requires_opinionated_mode_and_exact_target() -> None:
+    source = (
+        "import httpx\n"
+        "deadline: httpx.Timeout = httpx.Timeout(5)\n"
+        "holder.deadline: httpx.Timeout = httpx.Timeout(6)\n"
+        "plain: object = httpx.Timeout(7)\n"
+    )
+
+    default = _body(source, opinionated=False)
+    opinionated = _body(source, opinionated=True)
+
+    assert "deadline: httpx.Timeout = httpx.Timeout(5)" in default
+    assert "deadline: ClientTimeout = ClientTimeout(total=5)" in opinionated
+    assert "holder.deadline: httpx.Timeout = ClientTimeout(total=6)" in opinionated
+    assert "plain: object = ClientTimeout(total=7)" in opinionated
+    assert "[ext.httpx]" not in opinionated

@@ -1,23 +1,35 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from wreath import Wreath
 from wreath.bff import (
     BFFResource,
+    _csrf_header,
+    _query_suffix,
+    _validate_access_token,
+    _validate_target_prefix,
     bff_access_token,
     bff_router,
     bff_session_policy,
     set_bff_tokens,
 )
+from wreath.exceptions import BadRequest
 from wreath.policy import HttpPolicy
 from wreath.request import Request
 from wreath.testing import TestClient
 
 pytestmark = pytest.mark.asyncio
+
+
+def _request(*, headers: list[tuple[bytes, bytes]] | None = None) -> Request:
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    return Request({"type": "http", "headers": headers or []}, receive)
 
 
 class MemoryStore:
@@ -110,6 +122,308 @@ def test_bff_session_cookie_has_the_rfc_10017_security_attributes() -> None:
     assert policy._store is not None
 
 
+@pytest.mark.parametrize("max_age", [True, False, 0, -1, 1.5, "1"])
+def test_bff_session_refuses_each_invalid_max_age(max_age: object) -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        bff_session_policy("s" * 32, store=MemoryStore(), max_age=cast(Any, max_age))
+
+
+@pytest.mark.parametrize("value", [None, 0, b"token", "", "a token", "token!"])
+def test_access_token_validation_refuses_each_invalid_shape(value: object) -> None:
+    with pytest.raises(ValueError, match="non-empty RFC 6750 bearer token"):
+        _validate_access_token(value, source="candidate")
+
+
+def test_access_token_validation_preserves_valid_token() -> None:
+    assert _validate_access_token("abc-._~+/=", source="candidate") == "abc-._~+/="
+
+
+@pytest.mark.parametrize("refresh_token", ["", 0, b"refresh"])
+def test_set_bff_tokens_refuses_each_invalid_refresh_token(refresh_token: object) -> None:
+    request = _request()
+    request.state.session = {}
+    request.state._session_server_side = True
+
+    with pytest.raises(ValueError, match="non-empty string or None"):
+        set_bff_tokens(
+            request,
+            access_token="access",
+            refresh_token=cast(Any, refresh_token),
+        )
+
+
+@pytest.mark.parametrize("expires_at", [True, False, "1", b"1", object()])
+def test_set_bff_tokens_refuses_each_invalid_expiry_type(expires_at: object) -> None:
+    request = _request()
+    request.state.session = {}
+    request.state._session_server_side = True
+
+    with pytest.raises(TypeError, match="int, float, or None"):
+        set_bff_tokens(request, access_token="access", expires_at=cast(Any, expires_at))
+
+
+def test_set_bff_tokens_omits_absent_optional_values_and_rotates() -> None:
+    request = _request()
+    request.state.session = {}
+    request.state._session_server_side = True
+
+    set_bff_tokens(request, access_token="access")
+
+    assert request.state.session == {"_wreath_bff": {"access_token": "access"}}
+    assert request.state._session_rotate is True
+
+
+def test_set_bff_tokens_preserves_finite_float_expiry() -> None:
+    request = _request()
+    request.state.session = {}
+    request.state._session_server_side = True
+
+    set_bff_tokens(request, access_token="access", expires_at=4_102_444_800.5)
+
+    assert request.state.session["_wreath_bff"]["expires_at"] == 4_102_444_800.5
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        {"_session_server_side": True, "session": None},
+        {"_session_server_side": True, "session": []},
+        {"_session_server_side": True, "session": {}},
+        {"_session_server_side": True, "session": {"_wreath_bff": None}},
+        {"_session_server_side": True, "session": {"_wreath_bff": []}},
+        {"_session_server_side": True, "session": {"_wreath_bff": {}}},
+        {
+            "_session_server_side": True,
+            "session": {"_wreath_bff": {"access_token": 1}},
+        },
+        {
+            "_session_server_side": True,
+            "session": {"_wreath_bff": {"access_token": "bad token"}},
+        },
+        {
+            "_session_server_side": True,
+            "session": {"_wreath_bff": {"access_token": "access", "expires_at": True}},
+        },
+        {
+            "_session_server_side": True,
+            "session": {"_wreath_bff": {"access_token": "access", "expires_at": "soon"}},
+        },
+        {
+            "_session_server_side": True,
+            "session": {"_wreath_bff": {"access_token": "access", "expires_at": float("inf")}},
+        },
+        {
+            "_session_server_side": True,
+            "session": {"_wreath_bff": {"access_token": "access", "expires_at": 1}},
+        },
+    ],
+)
+def test_bff_access_token_refuses_each_invalid_session_shape(state: dict[str, object]) -> None:
+    request = _request()
+    for name, value in state.items():
+        setattr(request.state, name, value)
+
+    assert bff_access_token(request) is None
+
+
+@pytest.mark.parametrize("expires_at", [None, 4_102_444_800, 4_102_444_800.5])
+def test_bff_access_token_accepts_each_unexpired_expiry_shape(
+    expires_at: int | float | None,
+) -> None:
+    request = _request()
+    token_set: dict[str, object] = {"access_token": "access"}
+    if expires_at is not None:
+        token_set["expires_at"] = expires_at
+    request.state._session_server_side = True
+    request.state.session = {"_wreath_bff": token_set}
+
+    assert bff_access_token(request) == "access"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        1,
+        "",
+        "relative",
+        "//api.example/v1",
+        "https://api.example/v1",
+        "/v1?admin=1",
+        "/v1#admin",
+        "/café",
+        "/v1/%",
+        "/v1/%2",
+        "/v1/%GG",
+        "/v1/%2e/admin",
+        "/v1/%2E%2E/admin",
+        "/v1/%5cadmin",
+    ],
+)
+def test_target_prefix_refuses_each_invalid_shape(value: object) -> None:
+    error = TypeError if not isinstance(value, str) else ValueError
+    with pytest.raises(error):
+        _validate_target_prefix(cast(Any, value))
+
+
+@pytest.mark.parametrize("value", ["/", "/v1", "/v1/", "/v1/%20space"])
+def test_target_prefix_normalizes_each_valid_shape(value: str) -> None:
+    assert _validate_target_prefix(value) == value.rstrip("/")
+
+
+@pytest.mark.parametrize(
+    ("origin", "message"),
+    [
+        (None, "origin as text"),
+        (1, "origin as text"),
+        ("https://", "origin"),
+        ("https://user@api.example", "origin"),
+        ("https://user:password@api.example", "origin"),
+        ("https://api.example?admin=1", "origin"),
+        ("https://api.example#admin", "origin"),
+    ],
+)
+def test_resource_configuration_refuses_each_invalid_origin(
+    origin: object,
+    message: str,
+) -> None:
+    client = type("Client", (), {"origin": origin, "request": RecordingClient.request})()
+    error = TypeError if not isinstance(origin, str) else ValueError
+
+    with pytest.raises(error, match=message):
+        BFFResource(client)
+
+
+@pytest.mark.parametrize("request", [None, 1, "request"])
+def test_resource_configuration_requires_callable_request(request: object) -> None:
+    client = type("Client", (), {"origin": "https://api.example", "request": request})()
+
+    with pytest.raises(TypeError, match="async request method"):
+        BFFResource(client)
+
+
+@pytest.mark.parametrize("method", [None, 1, b"GET"])
+def test_resource_configuration_refuses_non_text_method(method: object) -> None:
+    with pytest.raises(TypeError, match="methods must be str"):
+        BFFResource(RecordingClient(), methods=cast(Any, {method}))
+
+
+@pytest.mark.parametrize("method", ["", "GET SPACE", "GET\n"])
+def test_resource_configuration_refuses_invalid_method_token(method: str) -> None:
+    with pytest.raises(ValueError, match="HTTP token"):
+        BFFResource(RecordingClient(), methods={method})
+
+
+@pytest.mark.parametrize(
+    ("methods", "expected"),
+    [
+        ({"get", "HEAD"}, frozenset({"GET"})),
+        ({"head"}, frozenset({"HEAD"})),
+        ({"post"}, frozenset({"POST"})),
+    ],
+)
+def test_resource_configuration_normalizes_methods(
+    methods: set[str],
+    expected: frozenset[str],
+) -> None:
+    assert BFFResource(RecordingClient(), methods=methods).methods == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [
+        ([], TypeError),
+        ((b"x-csrf",), TypeError),
+        ((b"x-csrf", b"1", b"extra"), TypeError),
+        (("x-csrf", b"1"), TypeError),
+        ((b"x-csrf", "1"), TypeError),
+        ((b"x-\xff", b"1"), ValueError),
+        ((b"x csrf", b"1"), ValueError),
+        ((b"x-csrf", b""), ValueError),
+        ((b"x-csrf", b"one\rtwo"), ValueError),
+        ((b"x-csrf", b"one\ntwo"), ValueError),
+        ((b"content-type", b"1"), ValueError),
+    ],
+)
+def test_csrf_header_refuses_each_invalid_shape(value: object, error: type[Exception]) -> None:
+    with pytest.raises(error):
+        _csrf_header(cast(Any, value))
+
+
+def test_csrf_header_refuses_list_even_when_it_has_two_bytes_values() -> None:
+    with pytest.raises(TypeError, match="one .* bytes tuple"):
+        _csrf_header(cast(Any, [b"x-csrf", b"1"]))
+
+
+def test_csrf_header_names_the_non_bytes_value() -> None:
+    with pytest.raises(TypeError, match="name and value must be bytes"):
+        _csrf_header(cast(Any, (b"x-csrf", "1")))
+
+
+def test_csrf_header_normalizes_valid_name() -> None:
+    assert _csrf_header((b"X-BFF-CSRF", b"yes")) == (b"x-bff-csrf", b"yes")
+
+
+def test_empty_query_has_no_suffix() -> None:
+    assert _query_suffix(b"") == ""
+
+
+@pytest.mark.parametrize("resources", [None, [], {}, "catalog"])
+def test_bff_router_requires_nonempty_resource_mapping(resources: object) -> None:
+    with pytest.raises(ValueError, match="map at least one"):
+        bff_router(cast(Any, resources))
+
+
+def test_bff_router_refuses_non_resource_value() -> None:
+    with pytest.raises(TypeError, match=r"resources\['catalog'\] must be BFFResource"):
+        bff_router({"catalog": cast(Any, RecordingClient())})
+
+
+@pytest.mark.parametrize("token", [None, 1, "token"])
+def test_bff_router_requires_callable_token_resolver(token: object) -> None:
+    with pytest.raises(TypeError, match="callable BFF token resolver"):
+        bff_router({"catalog": BFFResource(RecordingClient())}, token=cast(Any, token))
+
+
+async def test_bff_router_awaits_async_token_resolver() -> None:
+    async def token(_request: Request) -> str:
+        return "access"
+
+    app = Wreath()
+    app.include_router(bff_router({"catalog": BFFResource(RecordingClient())}, token=token))
+
+    response = await TestClient(app).get("/bff/session")
+
+    assert response.json() == {"active": True}
+
+
+async def test_bff_router_awaits_value_from_sync_token_resolver() -> None:
+    async def resolved() -> str:
+        return "access"
+
+    def token(_request: Request) -> Any:
+        return resolved()
+
+    app = Wreath()
+    app.include_router(bff_router({"catalog": BFFResource(RecordingClient())}, token=token))
+
+    response = await TestClient(app).get("/bff/session")
+
+    assert response.json() == {"active": True}
+
+
+async def test_logout_handler_clears_and_rotates_session_directly() -> None:
+    router = bff_router({"catalog": BFFResource(RecordingClient())})
+    logout = next(route.endpoint for route in router.routes if route.path == "/bff/logout")
+    request = _request(headers=[(b"x-wreath-bff", b"1")])
+    request.state.session = {"private": "value"}
+
+    response = await logout(request)
+
+    assert response.status == 204
+    assert request.state.session == {}
+    assert request.state._session_rotate is True
+
+
 def test_tokens_cannot_be_put_in_or_read_from_a_client_side_session() -> None:
     async def receive() -> dict[str, Any]:
         return {"type": "http.request", "body": b"", "more_body": False}
@@ -135,6 +449,22 @@ def test_token_expiry_must_be_a_finite_timestamp(expires_at: float) -> None:
 
     with pytest.raises(ValueError, match="finite timestamp"):
         set_bff_tokens(request, access_token="access-token", expires_at=expires_at)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"filter=%2",
+        b"filter=public#private",
+        b"filter=public\nprivate",
+    ],
+)
+async def test_query_suffix_refuses_each_unsafe_query_shape(raw: bytes) -> None:
+    with pytest.raises(BadRequest) as caught:
+        _query_suffix(raw)
+    assert str(caught.value) == (
+        "BFF query strings must use valid percent escapes and contain no controls"
+    )
 
 
 @pytest.mark.parametrize(

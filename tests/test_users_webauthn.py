@@ -984,6 +984,14 @@ class _MemorySessionStore:
     async def save(self, sid: str, data: dict[str, Any], max_age: int) -> None:
         self.rows[sid] = dict(data)
 
+    async def save_if_present(
+        self, sid: str, data: dict[str, Any], max_age: int
+    ) -> bool:
+        if sid not in self.rows:
+            return False
+        await self.save(sid, data, max_age)
+        return True
+
     async def delete(self, sid: str) -> None:
         self.rows.pop(sid, None)
 

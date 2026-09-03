@@ -90,6 +90,15 @@ def test_countersign_refuses_a_changed_artifact() -> None:
         provenance.countersign(ARTIFACT + b"!", SIGNER)
 
 
+def test_countersign_names_an_unnamed_changed_artifact() -> None:
+    provenance = Provenance.for_artifact(ARTIFACT)
+
+    with pytest.raises(ArtifactChanged) as raised:
+        provenance.countersign(ARTIFACT + b"!", SIGNER)
+
+    assert str(raised.value) == "artifact '<unnamed>' changed after provenance was created"
+
+
 def test_countersign_refuses_a_duplicate_signatory() -> None:
     signed = Provenance.for_artifact(ARTIFACT).countersign(ARTIFACT, SIGNER)
 
@@ -130,6 +139,17 @@ def test_countersign_reports_a_non_bytes_signer_result_type() -> None:
 
     assert str(raised.value) == (
         "signer 'broken' returned bytearray; Ed25519 signatures must be 64 bytes"
+    )
+
+
+def test_countersign_reports_the_wrong_byte_count() -> None:
+    key = ProvenanceKey("broken", SIGNER.public, lambda _statement: b"s" * 63)
+
+    with pytest.raises(InvalidProvenance) as raised:
+        Provenance.for_artifact(ARTIFACT).countersign(ARTIFACT, key)
+
+    assert str(raised.value) == (
+        "signer 'broken' returned 63; Ed25519 signatures must be 64 bytes"
     )
 
 

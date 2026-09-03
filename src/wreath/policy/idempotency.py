@@ -34,6 +34,7 @@ Compose the two and the guarantee holds end to end; see the
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable
 from typing import Any, Protocol
 
@@ -366,6 +367,27 @@ def _idempotency_scope(*parts: str) -> str:
     return "".join(f"{len(part.encode('utf-8'))}:{part}" for part in parts)
 
 
+def _idempotency_request_scope(
+    method: str,
+    path: str,
+    principal_type: str,
+    principal_id: str,
+    tenant: str,
+    query: str,
+    body: bytes,
+) -> str:
+    body_digest = hashlib.blake2s(body, digest_size=16).hexdigest()
+    return _idempotency_scope(
+        method,
+        path,
+        principal_type,
+        principal_id,
+        tenant,
+        query,
+        body_digest,
+    )
+
+
 class IdempotencyPolicy:
     """Replay the stored response for a repeated `Idempotency-Key`.
 
@@ -533,7 +555,7 @@ class IdempotencyPolicy:
             behaviours=frozenset({"idempotency-key"}),
         )
 
-    def _key(self, request: Request) -> str | None:
+    def _key(self, request: Request, body: bytes = b"") -> str | None:
         """The store key for this request, or None to leave it unguarded.
 
         **Idempotency requires an authenticated principal.** The key is scoped
@@ -561,11 +583,23 @@ class IdempotencyPolicy:
         # in the principal id shift the boundary and replay across identities.
         # Principal type participates too: `User:42` and `Service:42` are not
         # the same authenticated principal.
-        scope = _idempotency_scope(
+        tenant = request.state.get("tenant") if hasattr(request, "state") else None
+        tenant_value = getattr(tenant, "key", tenant)
+        tenant_key = "" if tenant_value is None else str(tenant_value)
+        query_bytes = getattr(request, "query_string", b"")
+        query = (
+            query_bytes.decode("latin-1")
+            if isinstance(query_bytes, bytes)
+            else str(query_bytes)
+        )
+        scope = _idempotency_request_scope(
             request.method,
             request.path,
             str(getattr(identity, "type", "User")),
             str(identity.id),
+            tenant_key,
+            query,
+            body,
         )
         return dedup_key(scope, value)
 
@@ -586,6 +620,10 @@ class IdempotencyPolicy:
         must.
         """
         key = self._key(request)
+        if key is not None:
+            read_body = getattr(request, "body", None)
+            body = await read_body() if callable(read_body) else b""
+            key = self._key(request, body)
         if key is None:
             if request.method in self._methods and request.header(self._header):
                 # A key was sent and is not being honoured. Counted here and

@@ -170,6 +170,17 @@ def test_memory_times_must_be_finite(value: float) -> None:
         ContextAssembler(Store([], retention_seconds=value))
 
 
+@pytest.mark.parametrize("value", [True, cast(float, "1")])
+def test_memory_times_refuse_boolean_and_non_numeric_values(value: float) -> None:
+    with pytest.raises(ValueError, match="created_at.*finite"):
+        record("memory", "content", created_at=value)
+
+
+def test_memory_retention_refuses_boolean_values() -> None:
+    with pytest.raises(ValueError, match="bounded positive retention"):
+        ContextAssembler(Store([], retention_seconds=cast(float, True)))
+
+
 @pytest.mark.asyncio
 async def test_empty_memory_scope_refuses_before_store_access() -> None:
     store = Store([])
@@ -186,5 +197,34 @@ async def test_empty_memory_scope_refuses_before_store_access() -> None:
                 principal_id=values[1],
                 conversation=values[2],
             )
+
+    assert store.reads == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_erase_scope_refuses_before_store_access() -> None:
+    store = Store([])
+    assembler = ContextAssembler(store)
+
+    with pytest.raises(ValueError, match="non-empty"):
+        await assembler.erase(tenant="", principal_id="user", conversation="conversation")
+
+    assert store.erased == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("position", range(3))
+async def test_non_string_memory_scope_refuses_before_store_access(position: int) -> None:
+    store = Store([])
+    assembler = ContextAssembler(store)
+    values = ["tenant", "user", "conversation"]
+    values[position] = cast(str, 1)
+
+    with pytest.raises(ValueError, match="non-empty"):
+        await assembler.assemble(
+            tenant=values[0],
+            principal_id=values[1],
+            conversation=values[2],
+        )
 
     assert store.reads == []

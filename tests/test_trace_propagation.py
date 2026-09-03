@@ -121,6 +121,24 @@ def test_binding_carries_tracestate_when_the_request_had_one(unpropagated):
     assert telemetry.outbound_context.get(None)[1] == "vendor=abc"
 
 
+def test_binding_ignores_a_non_callable_header_attribute(unpropagated):
+    class Context:
+        @staticmethod
+        def _flight_server_span():
+            return (0x4BF92F3577B34DA6, 0xA3CE929D0E0E4736, 0x00F067AA0BA902B7)
+
+    class Request:
+        _context = Context()
+        header = "not-callable"
+
+    telemetry.propagates()
+    token = telemetry.bind_propagation(Request())
+    assert token is not None
+    parent, state = telemetry.outbound_context.get(None)
+    assert parent == PARENT
+    assert state == ""
+
+
 def test_an_unpropagated_request_binds_nothing(unpropagated):
     telemetry.propagates()
     telemetry.bind_propagation(_Traced(parent=None))

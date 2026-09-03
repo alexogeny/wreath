@@ -45,11 +45,15 @@ else is a finding.
 from __future__ import annotations
 
 import argparse
+import errno
+import hashlib
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -96,7 +100,11 @@ TARGETS: tuple[Target, ...] = (
     ),
     Target(
         "server",
-        ("tests/test_server_protocol.py", "tests/http2"),
+        (
+            "tests/test_server_protocol.py",
+            "tests/http2",
+            "tests/test_fuzz_targets.py::test_http_versioned_seeds_satisfy_target_invariants",
+        ),
         "HTTP/1 and HTTP/2 protocol handling and HPACK",
     ),
     Target(
@@ -147,6 +155,14 @@ _SANITIZER_ERROR = re.compile(
 )
 _LEAK_HEADER = re.compile(r"^(Direct|Indirect) leak of ", re.MULTILINE)
 _FRAME = re.compile(r"^\s+#\d+ 0x[0-9a-f]+ in (?P<symbol>\S+) (?P<module>\S+)", re.M)
+_IMPORT_MARKER = "WREATH_SANITIZER_EXTENSION="
+_IMPORT_RUNNER = (
+    "import importlib,runpy,sys;"
+    "module=importlib.import_module(sys.argv[1]);"
+    f"print('{_IMPORT_MARKER}'+module.__file__,flush=True);"
+    "sys.argv=['pytest',*sys.argv[2:]];"
+    "runpy.run_module('pytest',run_name='__main__')"
+)
 
 
 @dataclass
@@ -161,6 +177,8 @@ class Outcome:
     leak_records: int = 0
     attributed: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    finding_bundle: str = ""
+    instrumented_extensions: list[str] = field(default_factory=list)
 
     @property
     def clean(self) -> bool:
@@ -216,8 +234,147 @@ def _build(root: Path, target: str) -> Path | None:
     return root / ".sanitizers" / f"native-{target}" / "lib"
 
 
+def _preserve_finding(
+    artifact_root: Path,
+    *,
+    root: Path,
+    target: Target,
+    command: list[str],
+    environment: dict[str, str],
+    result: subprocess.CompletedProcess[str],
+    library: Path,
+    leaks: bool,
+    instrumented_extensions: list[str],
+    imported_extension: str,
+) -> Path:
+    stdout = result.stdout.encode(errors="surrogateescape")
+    stderr = result.stderr.encode(errors="surrogateescape")
+    metadata: dict[str, object] = {
+        "schema": 1,
+        "target": target.name,
+        "instrumented": True,
+        "instrumented_extensions": instrumented_extensions,
+        "imported_extension": imported_extension,
+        "library": str(library),
+        "command": command,
+        "exit_code": result.returncode,
+        "leak_detection": leaks,
+        "reproduction": {
+            "cwd": str(root),
+            "command": command,
+            "environment": {
+                name: environment[name]
+                for name in ("ASAN_OPTIONS", "LD_PRELOAD", "LSAN_OPTIONS", "PYTHONPATH")
+                if name in environment
+            },
+        },
+        "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
+    }
+    digest = hashlib.sha256()
+    digest.update(json.dumps(metadata, sort_keys=True).encode())
+    digest.update(b"\0")
+    digest.update(stdout)
+    digest.update(b"\0")
+    digest.update(stderr)
+    artifact_digest = digest.hexdigest()
+    metadata["artifact_sha256"] = artifact_digest
+    target_root = artifact_root / target.name
+    bundle = target_root / artifact_digest
+    if bundle.exists():
+        _validate_finding(bundle, metadata, stdout, stderr)
+        return bundle
+
+    target_root.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=".tmp-", dir=target_root))
+    try:
+        _write_flushed(temporary / "stdout.txt", stdout)
+        _write_flushed(temporary / "stderr.txt", stderr)
+        _write_flushed(
+            temporary / "metadata.json",
+            (json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode(),
+        )
+        _flush_directory(temporary)
+        try:
+            os.rename(temporary, bundle)
+        except OSError as error:
+            if error.errno not in {errno.EEXIST, errno.ENOTEMPTY} or not bundle.exists():
+                raise
+            _validate_finding(bundle, metadata, stdout, stderr)
+        else:
+            _flush_directory(target_root)
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+    return bundle
+
+
+def _write_flushed(path: Path, data: bytes) -> None:
+    with path.open("wb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _flush_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _validate_finding(
+    bundle: Path, expected_metadata: dict[str, object], stdout: bytes, stderr: bytes
+) -> None:
+    try:
+        stored_stdout = (bundle / "stdout.txt").read_bytes()
+        stored_stderr = (bundle / "stderr.txt").read_bytes()
+        stored_metadata = json.loads((bundle / "metadata.json").read_bytes())
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ValueError(f"corrupted sanitizer finding bundle {bundle}: {error}") from error
+    if (
+        stored_stdout != stdout
+        or stored_stderr != stderr
+        or stored_metadata != expected_metadata
+    ):
+        raise ValueError(
+            f"corrupted sanitizer finding bundle {bundle}: content does not match its digest"
+        )
+
+
+def _instrumented_extensions(library: Path, module_name: str) -> list[str]:
+    instrumented = []
+    for extension in sorted(library.rglob(f"{module_name}*.so")):
+        has_asan = False
+        has_ubsan = False
+        overlap = b""
+        with extension.open("rb") as stream:
+            while chunk := stream.read(1 << 20):
+                searchable = overlap + chunk
+                has_asan = has_asan or b"libasan.so" in searchable
+                has_ubsan = has_ubsan or b"libubsan.so" in searchable
+                if has_asan and has_ubsan:
+                    instrumented.append(str(extension))
+                    break
+                overlap = searchable[-16:]
+    return instrumented
+
+
+def _imported_extension(output: str) -> Path | None:
+    for line in output.splitlines():
+        if line.startswith(_IMPORT_MARKER):
+            return Path(line.removeprefix(_IMPORT_MARKER)).resolve()
+    return None
+
+
 def run_target(
-    root: Path, target: Target, tests: tuple[str, ...], leaks: bool, rebuild: bool
+    root: Path,
+    target: Target,
+    tests: tuple[str, ...],
+    leaks: bool,
+    rebuild: bool,
+    artifact_root: Path | None = None,
 ) -> Outcome:
     outcome = Outcome(target.name)
     runtime = _asan_runtime()
@@ -237,6 +394,23 @@ def run_target(
             outcome.reason = f"tools/sanitizers/build_{target.name}.py did not build"
             return outcome
         lib = built
+
+    module_name = f"_{target.name}"
+    outcome.instrumented_extensions = _instrumented_extensions(lib, module_name)
+    if not outcome.instrumented_extensions:
+        outcome.reason = (
+            f"{lib} contains no ASan/UBSan-instrumented extension for selected "
+            f"{module_name}; rebuild it "
+            "with tools/sanitizers/build_<target>.py"
+        )
+        return outcome
+    if len(outcome.instrumented_extensions) != 1:
+        outcome.reason = (
+            f"{lib} contains multiple instrumented selected {module_name} extensions; "
+            "rebuild it with tools/sanitizers/build_<target>.py"
+        )
+        return outcome
+    expected_extension = Path(outcome.instrumented_extensions[0]).resolve()
 
     environment = dict(os.environ)
     environment["LD_PRELOAD"] = runtime
@@ -269,14 +443,32 @@ def run_target(
     # the quiet reporter omits its final count line entirely, and a run that
     # reports "0 passed, clean" is exactly the false success this tool exists
     # to prevent. `--tb=no` keeps the volume down instead.
+    import_name = f"wreath._native.{module_name}"
+    command = [
+        sys.executable,
+        "-c",
+        _IMPORT_RUNNER,
+        import_name,
+        *tests,
+        "--tb=no",
+        "-p",
+        "no:randomly",
+    ]
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", *tests, "--tb=no", "-p", "no:randomly"],
+        command,
         cwd=root,
         env=environment,
         capture_output=True,
         text=True,
     )
     text = result.stdout + result.stderr
+    imported_extension = _imported_extension(text)
+    if imported_extension != expected_extension:
+        outcome.reason = (
+            f"sanitizer run imported {imported_extension or 'no extension'}; expected selected "
+            f"{expected_extension}"
+        )
+        return outcome
     outcome.ran = True
     outcome.exit_code = result.returncode
     if not re.search(r"\d+ (passed|failed|error)", text):
@@ -304,6 +496,20 @@ def run_target(
     outcome.errors = [
         e for e in outcome.errors if "LeakSanitizer:" not in e and "byte(s) leaked" not in e
     ]
+    if outcome.errors or result.returncode < 0:
+        bundle = _preserve_finding(
+            artifact_root or root / ".wreath" / "sanitizer-artifacts",
+            root=root,
+            target=target,
+            command=command,
+            environment=environment,
+            result=result,
+            library=lib,
+            leaks=leaks,
+            instrumented_extensions=outcome.instrumented_extensions,
+            imported_extension=str(imported_extension),
+        )
+        outcome.finding_bundle = str(bundle)
     return outcome
 
 
@@ -339,6 +545,8 @@ def _report(outcome: Outcome, target: Target) -> None:
         print(f"    RETAINED IN WREATH C: {frame}")
     for error in outcome.errors[:10]:
         print(f"    SANITIZER: {error}")
+    if outcome.finding_bundle:
+        print(f"    reproduction artifact: {outcome.finding_bundle}")
     if outcome.clean:
         print("    clean")
 
@@ -366,6 +574,11 @@ def main(argv: list[str] | None = None) -> int:
         metavar="PATH",
         help="test paths to run instead of the target's defaults",
     )
+    parser.add_argument(
+        "--artifact-root",
+        type=Path,
+        help="finding artifact directory (default: .wreath/sanitizer-artifacts)",
+    )
     args = parser.parse_args(argv)
     selected_tests = tuple(args.tests or ())
 
@@ -386,7 +599,14 @@ def main(argv: list[str] | None = None) -> int:
     for name in names:
         target = by_name[name]
         tests = selected_tests or target.tests
-        outcome = run_target(root, target, tests, args.leaks, rebuild=not args.reuse)
+        outcome = run_target(
+            root,
+            target,
+            tests,
+            args.leaks,
+            rebuild=not args.reuse,
+            artifact_root=args.artifact_root,
+        )
         outcomes.append(outcome)
         _report(outcome, target)
 

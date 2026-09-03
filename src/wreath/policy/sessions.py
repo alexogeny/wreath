@@ -347,7 +347,16 @@ class SessionPolicy:
             sid = token_urlsafe(32)
             changed = True
         if changed:
-            await self._store.save(sid, session, self._max_age)
+            save_if_present = getattr(self._store, "save_if_present", None)
+            if state.get("_session_sid") is not None and not rotate:
+                if save_if_present is None or not await save_if_present(
+                    sid, session, self._max_age
+                ):
+                    if hasattr(response, "delete_cookie"):
+                        response.delete_cookie(self._cookie)
+                    return response
+            else:
+                await self._store.save(sid, session, self._max_age)
         if changed and hasattr(response, "set_cookie"):
             response.set_cookie(
                 self._cookie,

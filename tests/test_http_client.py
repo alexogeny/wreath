@@ -5,6 +5,7 @@ import socket
 import ssl
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -1250,7 +1251,7 @@ async def test_redirects_resolve_against_effective_base_path_once() -> None:
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         for response in (
-            b"HTTP/1.1 302 Found\r\nlocation: /final\r\ncontent-length: 0\r\n\r\n",
+            b"HTTP/1.1 302 Found\r\nlocation: /api/final\r\ncontent-length: 0\r\n\r\n",
             b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok",
         ):
             head = await reader.readuntil(b"\r\n\r\n")
@@ -1275,7 +1276,44 @@ async def test_redirects_resolve_against_effective_base_path_once() -> None:
         server.close()
         await server.wait_closed()
 
-    assert targets == [b"/api/start", b"/final"]
+    assert targets == [b"/api/start", b"/api/final"]
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        b"/../admin",
+        b"/%2e%2e/admin",
+        b"/api/%2E%2E/admin",
+        b"../admin",
+        b"/admin",
+        b"/apiary",
+        b"https://example.com/../admin",
+        b"https://example.com/%2e%2e/admin",
+        b"https://example.com/admin",
+    ],
+)
+def test_redirect_target_cannot_escape_configured_base_path(location: bytes) -> None:
+    client = HTTPClient("redirect-base", base_url="https://example.com/api")
+
+    with pytest.raises(RedirectError, match="redirect"):
+        client._redirect_target("/api/start", location)
+
+
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [
+        (b"next", "/api/next"),
+        (b"/api/final", "/api/final"),
+        (b"https://example.com/api/final?ok=1", "/api/final?ok=1"),
+    ],
+)
+def test_redirect_target_preserves_same_origin_base_path(
+    location: bytes, expected: str
+) -> None:
+    client = HTTPClient("redirect-base", base_url="https://example.com/api")
+
+    assert client._redirect_target("/api/start", location) == expected
 
 
 @pytest.mark.asyncio
@@ -1427,6 +1465,20 @@ async def test_client_rejects_malformed_response_trailers(trailer: bytes) -> Non
 def test_destination_policy_rejects_non_global_addresses(address: str, reason: str) -> None:
     with pytest.raises(DestinationRejected, match=reason):
         DestinationPolicy().validate_address(address)
+
+
+@pytest.mark.parametrize(
+    ("url", "message"),
+    [
+        ("ftp://example.com", "scheme 'ftp' is not allowed"),
+        ("https://user@example.com", "URL credentials are not allowed"),
+        ("https:///path", "destination host is required"),
+    ],
+)
+def test_destination_policy_refuses_each_invalid_url_boundary(url: str, message: str) -> None:
+    with pytest.raises(DestinationRejected) as caught:
+        DestinationPolicy().validate_url(urlsplit(url))
+    assert str(caught.value) == message
 
 
 @pytest.mark.parametrize(

@@ -170,6 +170,15 @@ def test_selection_refuses_child_drift_and_collisions(
     assert child.selections == [("lookup",)]
 
 
+def test_non_string_child_name_reports_the_specific_drift() -> None:
+    child = Catalog((ToolSpecification(cast(Any, 7), "Invalid.", {"type": "object"}),))
+
+    with pytest.raises(ValueError) as caught:
+        FederatedToolCatalog({"local": child}).select(("local__lookup",))
+
+    assert str(caught.value) == "federated tool selection drift in namespace 'local'"
+
+
 async def test_selected_catalog_refuses_unknown_or_malformed_invocation() -> None:
     selected = FederatedToolCatalog({"local": Catalog()}).select(("local__lookup",))
 

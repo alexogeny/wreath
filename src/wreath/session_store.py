@@ -44,6 +44,10 @@ class SessionStore(Protocol):
         """Store `data` under `sid`, expiring `max_age` seconds from now."""
         ...
 
+    async def save_if_present(self, sid: str, data: dict[str, Any], max_age: int) -> bool:
+        """Replace a live session, returning false if it was revoked meanwhile."""
+        ...
+
     async def delete(self, sid: str) -> None:
         """Drop `sid`. Must not fail when it is already gone."""
         ...
@@ -116,6 +120,12 @@ class PostgresSessionStore:
                 values={"sid": "$1", "data": "$2::jsonb", "expires": self._store.window("$3")},
                 update={"data": Sql("excluded.data"), "expires": Sql("excluded.expires")},
             ),
+        )
+        self._store.define(
+            "save_if_present",
+            f"UPDATE {self._store.table} SET data = $2::jsonb, "
+            f"expires = {self._store.window('$3')} "
+            "WHERE sid = $1 AND expires > clock_timestamp()",
         )
 
     def component(self) -> Any:
@@ -196,6 +206,15 @@ class PostgresSessionStore:
         cookie-only session cannot do.
         """
         await self._store.delete(sid)
+
+    async def save_if_present(self, sid: str, data: dict[str, Any], max_age: int) -> bool:
+        """Replace only a still-live row, atomically preserving revocation."""
+        from ._json import dumps as _json_dumps
+
+        status = await self._store.statement("save_if_present").execute(
+            sid, _json_dumps(data).decode("utf-8"), float(max_age)
+        )
+        return bool(rows_affected(status))
 
     async def delete_for(self, subject: str, session_key: str | None = None) -> int:
         """Drop every session whose principal is `subject`.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 from wreath.app import Wreath
 from wreath.doctor import preflight
 from wreath.hardening import audit_source_for_tenancy
@@ -42,9 +44,12 @@ def test_preflight_blocks_a_tenant_registry_with_no_middleware() -> None:
 def test_preflight_is_quiet_once_the_middleware_is_installed() -> None:
     app = _isolated_app()
     app.add_global_middleware(
-        TenancyMiddleware(
-            Tenancy(directory=InMemoryTenantDirectory([ACME]), source=TenantHeader("X-Tenant"))
-        )
+        cast(Any, TenancyMiddleware(
+            Tenancy(
+                directory=InMemoryTenantDirectory([ACME]),
+                source=TenantHeader("X-Tenant", trusted=True),
+            )
+        ))
     )
     assert [f for f in preflight(app).findings if f.source == TENANCY_PREFLIGHT_SOURCE] == []
 

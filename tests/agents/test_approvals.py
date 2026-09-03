@@ -19,8 +19,9 @@ def store(clock: list[float]) -> InMemoryApprovalStore:
 
 
 def test_approval_configuration_refuses_unbounded_capacity() -> None:
-    with pytest.raises(ValueError, match="max_entries"):
+    with pytest.raises(ValueError) as caught:
         InMemoryApprovalStore(max_entries=0)
+    assert str(caught.value) == "approval max_entries must be positive"
 
 
 @pytest.mark.asyncio
@@ -64,7 +65,7 @@ async def test_issue_refuses_invalid_identity_ttl_and_duplicate_id() -> None:
                 action=values["action"],
                 ttl=30.0,
             )
-    with pytest.raises(ValueError, match="ttl"):
+    with pytest.raises(ValueError) as caught:
         await approvals.issue(
             approval_id="approval-1",
             tenant="tenant-a",
@@ -72,6 +73,7 @@ async def test_issue_refuses_invalid_identity_ttl_and_duplicate_id() -> None:
             action="release",
             ttl=0,
         )
+    assert str(caught.value) == "approval ttl must be positive"
 
     issued = await approvals.issue(
         approval_id="approval-1",
@@ -348,8 +350,13 @@ class _PostgresSession:
         return _PostgresResult(self)
 
 
-def _approval_row(*, state: str = "pending", require_fresh_auth: bool = False) -> dict[str, object]:
-    return {
+def _approval_row(
+    *,
+    state: str = "pending",
+    require_fresh_auth: bool = False,
+    **changes: object,
+) -> dict[str, object]:
+    row = {
         "approval_id": "approval-1",
         "tenant": "tenant-a",
         "principal_id": "user-7",
@@ -360,6 +367,8 @@ def _approval_row(*, state: str = "pending", require_fresh_auth: bool = False) -
         "require_fresh_auth": require_fresh_auth,
         "state": state,
     }
+    row.update(changes)
+    return row
 
 
 def _postgres_store(session: _PostgresSession) -> PostgresApprovalStore:
@@ -431,6 +440,58 @@ async def test_postgres_issue_refuses_a_live_duplicate_atomically() -> None:
 
 
 @pytest.mark.asyncio
+async def test_postgres_issue_refuses_each_invalid_declaration_before_sql() -> None:
+    for name in ("approval_id", "tenant", "principal_id", "action"):
+        values = {
+            "approval_id": "approval-1",
+            "tenant": "tenant-a",
+            "principal_id": "user-7",
+            "action": "release",
+        }
+        values[name] = ""
+        session = _PostgresSession()
+        with pytest.raises(ValueError, match="require non-empty"):
+            await _postgres_store(session).issue(**values, ttl=30.0)
+        assert session.calls == []
+
+    for issued_at, ttl, message in (
+        (None, 0.0, "ttl must be positive"),
+        (101.0, 30.0, "cannot be in the future"),
+        (60.0, 30.0, "already expired"),
+    ):
+        session = _PostgresSession()
+        with pytest.raises(ValueError, match=message):
+            await _postgres_store(session).issue(
+                approval_id="approval-1",
+                tenant="tenant-a",
+                principal_id="user-7",
+                action="release",
+                ttl=ttl,
+                issued_at=issued_at,
+            )
+        assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_postgres_issue_preserves_an_explicit_historical_time() -> None:
+    session = _PostgresSession(
+        _approval_row(issued_at=90.0, expires_at=120.0),
+    )
+
+    request = await _postgres_store(session).issue(
+        approval_id="approval-1",
+        tenant="tenant-a",
+        principal_id="user-7",
+        action="release",
+        ttl=30.0,
+        issued_at=90.0,
+    )
+
+    assert request.issued_at == 90.0
+    assert session.calls[0][1][5:7] == (90.0, 120.0)
+
+
+@pytest.mark.asyncio
 async def test_postgres_claim_is_one_bound_conditional_transition() -> None:
     session = _PostgresSession(_approval_row())
     approvals = _postgres_store(session)
@@ -492,6 +553,52 @@ async def test_postgres_claim_fresh_auth_is_checked_by_the_atomic_update() -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("require_fresh_auth", "authenticated_at", "message"),
+    [
+        (True, None, "requires fresh authentication"),
+        (True, 101.0, "could not be claimed"),
+        (False, 99.0, "could not be claimed"),
+    ],
+)
+async def test_postgres_claim_distinguishes_each_fresh_auth_refusal(
+    require_fresh_auth: bool,
+    authenticated_at: float | None,
+    message: str,
+) -> None:
+    session = _PostgresSession(
+        None,
+        _approval_row(require_fresh_auth=require_fresh_auth),
+    )
+    approvals = _postgres_store(session)
+
+    with pytest.raises(ApprovalMismatch, match=message):
+        await approvals.claim(
+            "approval-1",
+            tenant="tenant-a",
+            principal_id="user-7",
+            authenticated_at=authenticated_at,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authenticated_at", [float("nan"), float("inf")])
+async def test_postgres_claim_refuses_non_finite_authentication_before_sql(
+    authenticated_at: float,
+) -> None:
+    session = _PostgresSession()
+
+    with pytest.raises(ApprovalMismatch, match="finite authentication time"):
+        await _postgres_store(session).claim(
+            "approval-1",
+            tenant="tenant-a",
+            principal_id="user-7",
+            authenticated_at=authenticated_at,
+        )
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
 async def test_postgres_deny_is_one_bound_conditional_transition() -> None:
     session = _PostgresSession({"approval_id": "approval-1"})
     approvals = _postgres_store(session)
@@ -504,6 +611,59 @@ async def test_postgres_deny_is_one_bound_conditional_transition() -> None:
     assert "state='pending'" in sql
     assert "expires_at > $4::float8" in sql
     assert parameters == ("approval-1", "tenant-a", "user-7", 100.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored", "tenant", "principal", "error", "message"),
+    [
+        (None, "tenant-a", "user-7", ApprovalExpired, "unknown or expired"),
+        (
+            _approval_row(expires_at=100.0),
+            "tenant-a",
+            "user-7",
+            ApprovalExpired,
+            "expired",
+        ),
+        (
+            _approval_row(),
+            "tenant-b",
+            "user-7",
+            ApprovalMismatch,
+            "tenant does not match",
+        ),
+        (
+            _approval_row(),
+            "tenant-a",
+            "user-8",
+            ApprovalMismatch,
+            "principal does not match",
+        ),
+        (
+            _approval_row(state="denied"),
+            "tenant-a",
+            "user-7",
+            ApprovalDenied,
+            "already denied",
+        ),
+    ],
+)
+async def test_postgres_deny_reports_each_stored_refusal(
+    stored: object,
+    tenant: str,
+    principal: str,
+    error: type[Exception],
+    message: str,
+) -> None:
+    session = _PostgresSession(None, stored)
+
+    with pytest.raises(error, match=message):
+        await _postgres_store(session).deny(
+            "approval-1",
+            tenant=tenant,
+            principal_id=principal,
+        )
+    assert len(session.calls) == 2
 
 
 def test_postgres_configuration_refuses_invalid_factory_and_schema() -> None:

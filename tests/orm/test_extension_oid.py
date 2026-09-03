@@ -130,6 +130,11 @@ def test_the_column_spec_reads_the_live_oid() -> None:
 def test_rebinding_to_a_different_oid_is_refused(monkeypatch: Any) -> None:
     from wreath.orm import types as orm_types
 
+    registered: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(
+        "wreath.postgres.register_extension_codec",
+        lambda name, oid, kind: registered.append((name, oid, kind)),
+    )
     monkeypatch.setitem(orm_types._EXTENSION_KINDS, "twinkind", EXT_KIND_VECTOR)
     declared = ExtensionType(
         "twin", "twinkind", "twinkind(2)", lambda value: value, kind=EXT_KIND_VECTOR
@@ -137,6 +142,7 @@ def test_rebinding_to_a_different_oid_is_refused(monkeypatch: Any) -> None:
     try:
         bind_extension_oid("twinkind", 700001)
         assert declared.oid == 700001
+        assert registered == [("twinkind", 700001, EXT_KIND_VECTOR)]
         with pytest.raises(ValueError, match="already bound"):
             bind_extension_oid("twinkind", 700002)
     finally:

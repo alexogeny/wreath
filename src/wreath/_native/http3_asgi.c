@@ -725,6 +725,12 @@ static PyObject *
 h3_stream_done(PyObject *op, PyObject *task)
 {
     WreathH3Stream *s = (WreathH3Stream *)op;
+    if (s->timeout_handle != NULL) {
+        PyObject *cancelled = PyObject_CallMethod(s->timeout_handle, "cancel", NULL);
+        if (cancelled == NULL) PyErr_Clear();
+        else Py_DECREF(cancelled);
+        Py_CLEAR(s->timeout_handle);
+    }
     PyObject *exc = PyObject_CallMethod(task, "exception", NULL);
     uint8_t nfr_terminal = WREATH_NFR_TERM_OK;
     if (exc == NULL) {
@@ -787,6 +793,35 @@ h3_stream_done(PyObject *op, PyObject *task)
     Py_RETURN_NONE;
 }
 
+static PyObject *
+h3_stream_timeout(PyObject *op, PyObject *Py_UNUSED(ignored))
+{
+    WreathH3Stream *s = (WreathH3Stream *)op;
+    Py_CLEAR(s->timeout_handle);
+    if (s->conn == NULL || s->disconnected) Py_RETURN_NONE;
+    if (!s->response_started) {
+        PyObject *status = PyLong_FromLong(408);
+        PyObject *headers = PyList_New(0);
+        PyObject *body = PyBytes_FromStringAndSize("", 0);
+        PyObject *started = status != NULL && headers != NULL
+            ? h3_response_start(s, status, headers) : NULL;
+        PyObject *finished = started != NULL && body != NULL
+            ? h3_response_body(s, body, 0) : NULL;
+        Py_XDECREF(status);
+        Py_XDECREF(headers);
+        Py_XDECREF(body);
+        Py_XDECREF(started);
+        if (finished == NULL) return NULL;
+        Py_DECREF(finished);
+    }
+    if (s->task != NULL) {
+        PyObject *cancelled = PyObject_CallMethod(s->task, "cancel", NULL);
+        if (cancelled == NULL) return NULL;
+        Py_DECREF(cancelled);
+    }
+    Py_RETURN_NONE;
+}
+
 /* Resolve a blocked receive() with http.disconnect, exactly once. Safe when no
  * receiver is waiting or when the future was already resolved or cancelled. */
 static void
@@ -817,6 +852,11 @@ h3_release_receiver(WreathH3Stream *s)
 void
 wreath_h3_stream_disconnect(WreathH3Stream *s)
 {
+    if (s->timeout_handle != NULL) {
+        PyObject *cancelled = PyObject_CallMethod(s->timeout_handle, "cancel", NULL);
+        Py_XDECREF(cancelled);
+        Py_CLEAR(s->timeout_handle);
+    }
     s->disconnected = 1;
     WreathH3Conn *c = s->conn;
     h3_cancel_send_waiter(s);
@@ -862,6 +902,7 @@ h3_stream_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(s->receive_callable);
     Py_VISIT(s->send_callable);
     Py_VISIT(s->done_callable);
+    Py_VISIT(s->timeout_handle);
     Py_VISIT(s->header_list);
     Py_VISIT(s->body_buffer);
     Py_VISIT(s->receive_waiter);
@@ -888,6 +929,11 @@ h3_stream_clear(PyObject *op)
     Py_CLEAR(s->receive_callable);
     Py_CLEAR(s->send_callable);
     Py_CLEAR(s->done_callable);
+    if (s->timeout_handle != NULL) {
+        PyObject *cancelled = PyObject_CallMethod(s->timeout_handle, "cancel", NULL);
+        Py_XDECREF(cancelled);
+        Py_CLEAR(s->timeout_handle);
+    }
     Py_CLEAR(s->header_list);
     Py_CLEAR(s->body_buffer);
     Py_CLEAR(s->receive_waiter);
@@ -1001,6 +1047,7 @@ static PyMethodDef h3_stream_methods[] = {
     {"_wreath_stream_body", (PyCFunction)(void (*)(void))h3_stream_wreath_body,
      METH_FASTCALL, NULL},
     {"_done", h3_stream_done, METH_O, NULL},
+    {"_on_timeout", h3_stream_timeout, METH_NOARGS, NULL},
     {NULL, NULL, 0, NULL},
 };
 
@@ -1033,6 +1080,7 @@ begin_headers_cb(nghttp3_conn *conn, int64_t stream_id, void *cu, void *su)
     s->scope = NULL;
     s->task = NULL;
     s->receive_callable = s->send_callable = s->done_callable = NULL;
+    s->timeout_handle = NULL;
     s->header_list = wreath_header_block_new_objects(16);
     s->body_buffer = PyByteArray_FromStringAndSize(NULL, 0);
     s->body_received = 0;
@@ -1497,7 +1545,16 @@ start_request(WreathH3Stream *s)
     s->task = task;
     PyObject *cb = PyObject_CallMethod(task, "add_done_callback", "O", s->done_callable);
     Py_XDECREF(cb);
-    return cb == NULL ? -1 : 0;
+    if (cb == NULL) return -1;
+    if (c->endpoint->request_timeout > 0.0) {
+        PyObject *timeout_cb = PyObject_GetAttrString((PyObject *)s, "_on_timeout");
+        if (timeout_cb == NULL) return -1;
+        s->timeout_handle = PyObject_CallMethod(
+            s->loop, "call_later", "dO", c->endpoint->request_timeout, timeout_cb);
+        Py_DECREF(timeout_cb);
+        if (s->timeout_handle == NULL) return -1;
+    }
+    return 0;
 
 message_err:
     Py_XDECREF(context_headers);
@@ -1570,13 +1627,13 @@ recv_data_cb(nghttp3_conn *conn, int64_t stream_id, const uint8_t *data,
     if (s == NULL || s->disconnected || s->request_refused) return 0;
     WreathH3Conn *c = s->conn;
 
-    if (datalen > 0) {
-        if (s->body_frames >= c->endpoint->max_body_chunks) {
-            h3_reject_stream(s, NGHTTP3_H3_EXCESSIVE_LOAD);
-            return 0;
-        }
-        s->body_frames++;
+    /* Empty DATA consumes no flow-control credit but still costs parsing and
+     * can wake a blocked ASGI receiver. Count callbacks, not only payload. */
+    if (s->body_frames >= c->endpoint->max_body_chunks) {
+        h3_reject_stream(s, NGHTTP3_H3_EXCESSIVE_LOAD);
+        return 0;
     }
+    s->body_frames++;
 
     /* Enforce the limit before narrowing size_t and before allocating: a chunk
      * that breaks the bound must never become a Python object. The bound counts

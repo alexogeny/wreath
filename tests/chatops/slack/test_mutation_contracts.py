@@ -484,6 +484,31 @@ def test_only_durable_commands_register_jobs_and_registration_is_idempotent() ->
     assert jobs.registered.keys() == {"chat_ops_durable"}
 
 
+def test_durable_command_registration_preserves_an_explicit_retry_limit() -> None:
+    class OptionJobs(RecordingJobs):
+        def __init__(self) -> None:
+            super().__init__()
+            self.options: dict[str, object] = {}
+
+        def task(self, name: str, **options: object):
+            self.options = options
+            return super().task(name)
+
+    jobs = OptionJobs()
+    chat = ChatOps(
+        name="ops",
+        providers=(Slack(signing_secret=SIGNING_SECRET),),
+        jobs=jobs,
+        inbox=MemoryInbox(),
+    )
+
+    @chat.command("durable", execution="durable", retries=2)
+    async def durable() -> None:
+        pass
+
+    assert jobs.options == {"retries": 2}
+
+
 def test_duplicate_durable_registration_does_not_touch_the_job_registry_twice() -> None:
     class CountingJobs(RecordingJobs):
         def __init__(self) -> None:

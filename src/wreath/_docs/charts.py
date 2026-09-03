@@ -38,6 +38,8 @@ def extract(
     text: str,
     base_dir: Path,
     sources: set[Path] | None = None,
+    *,
+    source_root: Path | None = None,
 ) -> tuple[str, dict[str, str]]:
     """Replace each ```chart block with a token; return (text, {token: svg-html}).
 
@@ -45,7 +47,10 @@ def extract(
     so the caller can publish the raw JSON alongside the rendered chart.
     """
     return _fenced.extract(
-        text, _OPEN, lambda body: _render(_parse(body), base_dir, sources), "CHART"
+        text,
+        _OPEN,
+        lambda body: _render(_parse(body), base_dir, sources, source_root=source_root),
+        "CHART",
     )
 
 
@@ -67,9 +72,19 @@ def _esc(text: str) -> str:
     )
 
 
-def _render(config: dict[str, str], base_dir: Path, sources: set[Path] | None = None) -> str:
+def _render(
+    config: dict[str, str],
+    base_dir: Path,
+    sources: set[Path] | None = None,
+    *,
+    source_root: Path | None = None,
+) -> str:
     source = config.get("source", "")
-    path = base_dir / source
+    requested = Path(source)
+    root = (base_dir if source_root is None else source_root).resolve()
+    path = (base_dir / requested).resolve()
+    if requested.is_absolute() or not path.is_relative_to(root):
+        return f'<div class="chart-error">chart: source escapes build root: {_esc(source)}</div>'
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:

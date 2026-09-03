@@ -77,6 +77,7 @@ class MCPLimits:
             A resource read is a JSON-RPC result held whole in memory and then
             base64-encoded, so the ceiling is on what one answer may cost rather
             than on what the filesystem happens to hold.
+        max_result_bytes: Largest serialized tool or resource result.
 
     Raises:
         ValueError: A bound is not positive.
@@ -94,6 +95,7 @@ class MCPLimits:
     max_pending_requests: int = 4
     client_request_seconds: float = 30.0
     max_file_bytes: int = 1 << 20
+    max_result_bytes: int = 1 << 20
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -106,6 +108,7 @@ class MCPLimits:
             "max_pending_notifications",
             "max_pending_requests",
             "max_file_bytes",
+            "max_result_bytes",
         ):
             value = getattr(self, field_name)
             if value < 1:

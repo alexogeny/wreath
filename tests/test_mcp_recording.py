@@ -141,6 +141,22 @@ async def test_the_arguments_of_a_refused_call_are_recorded_too() -> None:
     assert PASSWORD not in repr(attached)
 
 
+async def test_unrecognized_argument_shapes_are_bounded_and_deny_by_default() -> None:
+    _, attached = await drive(
+        "sign_in",
+        {
+            "nothing": None,
+            "items": [1, 2],
+            "metadata": {"nested": {"value": "private"}},
+        },
+    )
+
+    assert attached["mcp.arg.nothing"] == "?"
+    assert attached["mcp.arg.items"] == "<list>"
+    assert attached["mcp.arg.metadata.nested"] == "<dict>"
+    assert "mcp.arg.metadata.nested.value" not in attached
+
+
 async def test_each_outcome_is_named_on_the_marker() -> None:
     for tool, outcome in (("refuse", "tool_error"), ("explode", "raised")):
         seen, _ = await drive(tool, {})

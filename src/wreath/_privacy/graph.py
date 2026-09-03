@@ -202,18 +202,13 @@ def order_children_first(
 def _cycles(graph: Graph, members: set[type]) -> list[tuple[type, ...]]:
     components: list[tuple[type, ...]] = []
     seen: set[type] = set()
-    traversal_limit = 1 + sum(
-        len(graph.inbound.get(model, ())) + len(graph.outbound.get(model, ())) for model in members
-    )
     for start in sorted(members, key=lambda model: graph.nodes[model].qualified):
         if start in seen:
             continue
         component: list[type] = []
         stack = [start]
         local: set[type] = set()
-        for _ in range(traversal_limit):
-            if not stack:
-                break
+        while stack:
             model = stack.pop()
             if model in local:
                 continue
@@ -225,8 +220,6 @@ def _cycles(graph: Graph, members: set[type]) -> list[tuple[type, ...]]:
             for _edge, parent in graph.outbound.get(model, ()):
                 if parent in members:
                     stack.append(parent)
-        if stack:
-            raise RuntimeError("privacy graph traversal exceeded its edge bound")
         seen |= local
         # No size test, and no self-reference test beside it. This is called
         # with the *residue* of the topological sort, and a model reaches the

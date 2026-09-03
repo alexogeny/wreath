@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from collections.abc import Mapping
 from typing import Any
 
+from ..http_client import ClientError
 from .jwt import JwtError, JwtKey, key_from_jwk
 
 __all__ = ["JwksCache"]
@@ -44,6 +46,7 @@ class JwksCache:
         "_keys",
         "_last_refresh",
         "_lock",
+        "_max_stale",
         "_min_refresh",
         "_ttl",
     )
@@ -55,7 +58,16 @@ class JwksCache:
         jwks_path: str,
         ttl: float = 600.0,
         min_refresh_interval: float = 30.0,
+        max_stale: float = 3600.0,
     ) -> None:
+        if ttl < 0 or not math.isfinite(ttl):
+            raise ValueError("JWKS ttl must be non-negative and finite")
+        if min_refresh_interval < 0 or not math.isfinite(min_refresh_interval):
+            raise ValueError(
+                "JWKS min_refresh_interval must be non-negative and finite"
+            )
+        if max_stale < 0 or not math.isfinite(max_stale):
+            raise ValueError("JWKS max_stale must be non-negative and finite")
         self._client = http_client
         self._jwks_path = jwks_path
         self._keys: dict[str, JwtKey] = {}
@@ -64,7 +76,8 @@ class JwksCache:
         self._last_refresh = 0.0
         self._ttl = ttl
         self._min_refresh = min_refresh_interval
-        #: Fetches that produced no usable document (too large, unparseable).
+        self._max_stale = max_stale
+        #: Fetches that failed in transport or produced no usable document.
         self.fetch_errors = 0
         #: JWKs skipped for reusing a `kid` already seen in the same document.
         self.duplicate_kids = 0
@@ -95,6 +108,8 @@ class JwksCache:
         if key is not None and now < self._expires_at:
             return key
         await self._maybe_refresh(kid)
+        if self._now() >= self._expires_at + self._max_stale:
+            return None
         return self._lookup(kid)
 
     async def prefetch(self) -> None:
@@ -115,7 +130,12 @@ class JwksCache:
             await self._fetch()
 
     async def _fetch(self) -> None:
-        response = await self._client.get(self._jwks_path)
+        try:
+            response = await self._client.get(self._jwks_path)
+        except ClientError, OSError, TimeoutError:
+            self.fetch_errors += 1
+            self._last_refresh = self._now()
+            return
         if response.status != 200:
             # Leave the existing keys in place; a transient IdP error must not
             # wipe a working cache. The attempt still counts as a refresh, so

@@ -33,7 +33,7 @@ arguments supported by the installed version.
 | `docs` | build or strictly check this dependency-free documentation format |
 | `port` | report on or emit a FastAPI-to-Wreath port |
 | `mutant` | remove declared controls and see whether tests object |
-| `fuzz` | prove controls, then fuzz the tests that killed them |
+| `fuzz` | prove controls, replay their killers and evolve inputs for relevant targets |
 | `test` | run tests with the Wreath runner or pytest compatibility |
 | `audit` | inspect static HTML, live responses or source for defects |
 | `inspect` | query a running server's read-only Inspector socket |
@@ -272,7 +272,53 @@ output, while Bun, Vite or another renderer owns browser bundles.
 | check documentation without publishing | `wreath docs check` |
 | inspect a port before emitting it | `wreath port --report-only legacy` |
 | run mutation confidence | `wreath mutant --help` |
-| fuzz tests with proved controls | `wreath fuzz --help` |
+| run mutation-guided fuzz campaigns | `wreath fuzz --help` |
+
+`wreath fuzz` first runs the ordinary and mutation suites. It then replays exact
+mutation killers in a fresh process and runs both Python-guided and standalone
+Clang libFuzzer campaigns for targets matching the mutated source and operator.
+The native harnesses compile Wreath's C extension with ASan, UBSan and
+SanitizerCoverage comparison feedback; they do not add coverage state to the
+importable production extension. When no target matches, every registered target
+runs so a successful command cannot mean that only the replay stage executed.
+
+Campaign corpora persist under `.wreath/fuzz/corpus`; minimized findings and
+their reproduction metadata persist under `.wreath/fuzz/artifacts`. A fresh seed
+is recorded in the JSON report by default, together with the initial corpus
+manifest. Supply the seed against that same corpus snapshot to reproduce the
+generated sequence, or replay the stored corpus without generation:
+
+```bash
+wreath fuzz --fuzz-seed 8675309 --fuzz-target http1-parser
+wreath fuzz --fuzz-backend native --fuzz-target xml-parser
+wreath fuzz --fuzz-backend python --fuzz-replay-only
+wreath fuzz --fuzz-replay-only
+```
+
+`--fuzz-cases` bounds executed inputs per target. `--fuzz-budget` is shared fuzz
+execution time; native builds are excluded and have a separate bounded build
+timeout. Native campaigns receive whole-second allocations without rounding the
+budget upward and also enforce a separate bounded timeout for one input.
+`wreath test` keeps the lighter Python backend by default;
+the explicit `wreath fuzz` command selects both backends. A source checkout with
+Clang and the CPython embedding library is required to build native harnesses.
+`--fuzz-native-reuse-build` accepts an existing executable only when its binary
+digests, instrumentation contract, source-input fingerprint, Python ABI and
+platform, and Clang executable and version match the current environment. The
+six maintained targets cover
+HTTP/1, HTTP/2 frames, XML, GraphQL, multipart bodies and recorded HTTP exchanges;
+each has both Python feedback and a compiler-native harness, and the target
+inventory records its boundary and oracle.
+
+LibFuzzer findings and their bounded minimization diagnostics use the fuzz
+artifact root. A minimized input is retained only after replay confirms that it
+still produces the native failure; artifact metadata records whether repeated
+replay was deterministic. Full-suite sanitized-extension findings are retained separately
+by `wreath-sanitize --artifact-root PATH`; sanitizer runs verify that the
+selected extension is instrumented before describing their output as sanitizer
+evidence.
+The integrated crash-isolated campaign runner requires `fork` support and
+refuses the command before collection on unsupported platforms.
 
 The [tooling API reference](../reference/tooling.md) documents the Python owners
 behind infrastructure inference, type generation, porting and mutation. The CLI

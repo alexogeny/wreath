@@ -342,6 +342,30 @@ def test_a_hostile_index_option_is_refused_at_declaration(options: dict) -> None
         column(Vector(3), index="hnsw", index_with=options)
 
 
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"not valid": 16}, "index_with option name 'not valid' is not a PostgreSQL identifier"),
+        ({1: 16}, "index_with option name 1 is not a PostgreSQL identifier"),
+        ({"m": object()}, "index_with['m'] must be a number, string, or bool"),
+    ],
+)
+def test_index_options_name_the_invalid_name_or_value(
+    options: dict[object, object], message: str
+) -> None:
+    with pytest.raises(DeclarationError) as caught:
+        column(Vector(3), index="hnsw", index_with=options)
+    assert message in str(caught.value)
+
+
+@pytest.mark.parametrize(("value", "text"), [(True, "on"), (False, "off")])
+def test_boolean_index_options_are_rendered_as_postgres_switches(
+    value: bool, text: str
+) -> None:
+    resolved = column(Vector(3), index="hnsw", index_with={"m": value})
+    assert resolved.index_with == (("m", text),)
+
+
 @pytest.mark.parametrize("value", [16, 0.5, -1, 1e-05, True, "on", "off", "auto"])
 def test_a_real_index_option_value_still_declares(value: Any) -> None:
     resolved = column(Vector(3), index="hnsw", index_with={"m": value})

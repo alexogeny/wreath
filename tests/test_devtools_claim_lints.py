@@ -146,6 +146,15 @@ def test_an_ordinary_column_is_not_a_catalog_column() -> None:
     assert _sql_findings("SELECT 1 FROM llamas WHERE paddock_id = $1") == []
 
 
+def test_owned_table_qualification_distinguishes_all_three_reference_shapes() -> None:
+    owned = frozenset({"jobs"})
+    scan = sql_lint._scan_qualification
+
+    assert [item.code for item in scan("q.py", 1, "SELECT * FROM jobs", owned)] == ["SQL003"]
+    assert scan("q.py", 1, 'SELECT * FROM "wreath"."jobs"', owned) == []
+    assert scan("q.py", 1, "SELECT * FROM llamas", owned) == []
+
+
 def test_docstrings_are_not_sql() -> None:
     source = '"""Explains SELECT ... WHERE oid = $1::regclass and why it fails."""\n'
     assert sql_lint._sql_literals(source) == []

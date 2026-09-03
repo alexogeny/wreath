@@ -5,6 +5,7 @@ from typing import Any
 
 from wreath import Wreath
 from wreath._audit.contrast import (
+    _resolve_expr,
     contrast_findings,
     contrast_ratio,
     nontext_contrast_findings,
@@ -51,12 +52,71 @@ def test_contrast_resolves_tokens_per_theme() -> None:
     assert themes["dark"]["--ink"] == "#eee"
 
 
+def test_contrast_resolves_token_chains_and_stops_cycles() -> None:
+    chained = parse_tokens(":root{--ink:var(--alias);--alias:#123456}")
+    cyclic = parse_tokens(":root{--first:var(--second);--second:var(--first)}")
+
+    assert chained["light"]["--ink"] == "#123456"
+    assert cyclic["light"] == {
+        "--first": "var(--second)",
+        "--second": "var(--first)",
+    }
+
+
 def test_contrast_flags_bad_pair_and_is_silent_on_good() -> None:
     bad = "body{color:var(--fg);background:#fff}:root{--fg:#999}"
     fired = list(contrast_findings(bad, "test"))
     assert fired and fired[0].rule_id == "contrast" and fired[0].severity is Severity.WARN
     good = "body{color:var(--fg);background:#fff}:root{--fg:#222}"
     assert list(contrast_findings(good, "test")) == []
+
+
+def test_contrast_expression_resolution_refuses_invalid_colours() -> None:
+    tokens = {"--valid": "#abc", "--invalid": "not-a-colour"}
+
+    assert _resolve_expr("var(--valid)", tokens) == "#abc"
+    assert _resolve_expr("var(--invalid)", tokens) is None
+    assert _resolve_expr("var(--missing)", tokens) is None
+    assert _resolve_expr("WHITE", tokens) == "#ffffff"
+    assert _resolve_expr("#123456", tokens) == "#123456"
+    assert _resolve_expr("#12", tokens) is None
+
+
+def test_contrast_findings_distinguish_both_failure_bands_and_deduplicate() -> None:
+    normal_only = (
+        ":root{--fg:#777;--bg:#fff}"
+        "body{color:var(--fg);background:var(--bg)}"
+        "p{color:var(--fg);background:var(--bg)}"
+    )
+    severe = ":root{--fg:#999;--bg:#fff}body{color:var(--fg);background:var(--bg)}"
+
+    normal_findings = list(contrast_findings(normal_only, "test"))
+    severe_findings = list(contrast_findings(severe, "test"))
+
+    assert len(normal_findings) == 1
+    assert "fails normal text" in normal_findings[0].message
+    assert len(severe_findings) == 1
+    assert "fails even large text" in severe_findings[0].message
+
+
+def test_text_contrast_without_design_tokens_is_not_guessed() -> None:
+    css = "body{color:#999;background:#fff}"
+
+    assert list(contrast_findings(css, "test")) == []
+
+
+def test_text_contrast_ignores_either_unresolvable_colour() -> None:
+    missing_foreground = (
+        ":root{--surface:#fff}"
+        "body{color:var(--missing);background:var(--surface)}"
+    )
+    missing_background = (
+        ":root{--ink:#999}"
+        "body{color:var(--ink);background:var(--missing)}"
+    )
+
+    assert list(contrast_findings(missing_foreground, "test")) == []
+    assert list(contrast_findings(missing_background, "test")) == []
 
 
 def test_contrast_rule_runs_via_style_element() -> None:
@@ -91,6 +151,24 @@ def test_nontext_contrast_ignores_an_unresolvable_colour() -> None:
     css = "body{background:#fff}input{border-color:var(--missing)}"
 
     assert list(nontext_contrast_findings(css, "test")) == []
+
+
+def test_nontext_contrast_ignores_an_unresolvable_surface() -> None:
+    css = (
+        ":root{--border:#ddd}"
+        "body{background:var(--missing)}"
+        "input{border-color:var(--border)}"
+    )
+
+    assert list(nontext_contrast_findings(css, "test")) == []
+
+
+def test_nontext_contrast_deduplicates_the_same_boundary_pair() -> None:
+    css = "body{background:#fff}input{border-color:#ddd}button{border-color:#ddd}"
+
+    findings = list(nontext_contrast_findings(css, "test"))
+
+    assert len(findings) == 1
 
 
 def test_render_blocking_fires_and_defer_is_clean() -> None:
@@ -145,6 +223,21 @@ def test_viewport_without_content_is_left_intact() -> None:
 
     assert '<meta name="viewport">' in fixed
     assert not any(item.startswith("viewport-scale") for item in applied)
+
+
+def test_fixing_ignores_similar_but_inapplicable_attributes() -> None:
+    source = (
+        '<html lang="en"><head>'
+        '<meta content="user-scalable=no">'
+        '<meta name="description" content="user-scalable=no">'
+        '</head><body><div name="viewport" content="user-scalable=no"></div>'
+        '<button tabindex="later">x</button></body></html>'
+    )
+
+    fixed, applied = apply_fixes(source)
+
+    assert fixed == source
+    assert applied == []
 
 
 def test_runtime_audit_response_flags_html_and_headers() -> None:

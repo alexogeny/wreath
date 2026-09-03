@@ -24,8 +24,11 @@ uploads = resumable(
 )
 
 app = Wreath()
-app.include_router(uploads.router("/uploads"))
+app.include_router(uploads.router("/uploads", public=True))
 ```
+
+`public=True` is an explicit choice for this self-contained example. In an
+authenticated application, pass `permissions=("uploads::write",)` instead.
 
 ```python title="test_upload.py"
 from wreath.objects import PARTIAL_UPLOAD

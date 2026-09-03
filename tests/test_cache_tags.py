@@ -261,6 +261,25 @@ async def test_close_stops_watching_for_writes(_drop_subscriptions):
     assert purge.watching == set()
 
 
+def test_a_closed_purger_cannot_be_watched_again(_drop_subscriptions):
+    purge = CDNPurge(FakeQueue(), tags=Tags(secret=SECRET))
+    _drop_subscriptions.append(purge)
+    purge.close()
+
+    with pytest.raises(RuntimeError, match="purger was closed"):
+        purge.watch(Report)
+
+
+def test_watching_no_models_does_not_subscribe(_drop_subscriptions):
+    purge = CDNPurge(FakeQueue(), tags=Tags(secret=SECRET))
+    _drop_subscriptions.append(purge)
+
+    purge.watch()
+
+    assert purge.watching == frozenset()
+    assert purge._subscribed is False
+
+
 async def test_unwatch_keeps_other_models_subscribed(_drop_subscriptions):
     queue = FakeQueue()
     tags = Tags(secret=SECRET)
@@ -355,6 +374,44 @@ async def test_the_dedup_key_makes_a_burst_of_writes_one_purge(_drop_subscriptio
     await asyncio.sleep(0)
 
     assert {call[2] for call in queue.calls} == {f"purge:{tags.key(Report)}"}
+
+
+async def test_start_runner_needs_pending_work(_drop_subscriptions):
+    purge = CDNPurge(FakeQueue(), tags=Tags(secret=SECRET))
+    _drop_subscriptions.append(purge)
+
+    purge._start_runner()
+
+    assert purge._runner is None
+
+
+async def test_start_runner_does_not_replace_a_live_runner(_drop_subscriptions):
+    queue = BlockingQueue()
+    purge = CDNPurge(queue, tags=Tags(secret=SECRET))
+    _drop_subscriptions.append(purge)
+    purge._pending.add("tag")
+    purge._start_runner()
+    runner = purge._runner
+
+    purge._start_runner()
+
+    assert purge._runner is runner
+    queue.release.set()
+    assert runner is not None
+    await runner
+
+
+async def test_a_stale_done_callback_does_not_clear_the_live_runner(_drop_subscriptions):
+    purge = CDNPurge(FakeQueue(), tags=Tags(secret=SECRET))
+    _drop_subscriptions.append(purge)
+    live = asyncio.current_task()
+    stale = asyncio.create_task(asyncio.sleep(0))
+    await stale
+    purge._runner = live
+
+    purge._runner_done(stale)
+
+    assert purge._runner is live
 
 
 async def test_a_purge_is_enqueued_and_not_awaited_on_the_write(_drop_subscriptions):

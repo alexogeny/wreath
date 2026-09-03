@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+import wreath.grpc as grpc_module
 from wreath.exceptions import Forbidden, NotFound, TooManyRequests, UnprocessableEntity
 from wreath.grpc import (
     DEFAULT_MAX_MESSAGE_BYTES,
@@ -137,6 +138,13 @@ class TestFraming:
         assert caught.value.status is Status.INTERNAL
         assert "identity" in caught.value.message
 
+    def test_an_identity_unframer_does_not_allocate_a_gzip_workspace(self, monkeypatch):
+        def unexpected_workspace():
+            raise AssertionError("identity must not create a gzip decoder")
+
+        monkeypatch.setattr(grpc_module, "_gzip_decoder_new", unexpected_workspace)
+        Unframer(encoding="identity")
+
 
 class TestTimeouts:
     @pytest.mark.parametrize(
@@ -158,6 +166,35 @@ class TestTimeouts:
         with pytest.raises(GrpcError) as caught:
             parse_timeout(value)
         assert caught.value.status is Status.INVALID_ARGUMENT
+
+    @pytest.mark.asyncio
+    async def test_streaming_without_a_deadline_does_not_arm_a_timer(self, monkeypatch):
+        import asyncio
+
+        def unexpected_timeout(_delay):
+            raise AssertionError("an absent deadline must not arm a timer")
+
+        async def no_results():
+            if False:
+                yield Pong(text="unused")
+
+        monkeypatch.setattr(asyncio, "timeout", unexpected_timeout)
+        assert [item async for item in grpc_module._frames(no_results(), None, "identity")] == []
+
+    @pytest.mark.asyncio
+    async def test_streaming_deadline_covers_waiting_for_the_next_result(self):
+        import asyncio
+
+        async def delayed_result():
+            await asyncio.sleep(0.01)
+            yield Pong(text="late")
+
+        with pytest.raises(GrpcError) as caught:
+            [
+                item
+                async for item in grpc_module._frames(delayed_result(), 0.001, "identity")
+            ]
+        assert caught.value.status is Status.DEADLINE_EXCEEDED
 
 
 class TestStatusMapping:

@@ -182,6 +182,13 @@ def test_inclusive_prefixes_ignores_other_children_and_reads_one_holder() -> Non
     )
     assert saml._inclusive_prefixes(declared) == ("a", "b")
 
+    ambiguous = _element(
+        f'<ds:Transform xmlns:ds="{DS_NS}" xmlns:ec="{EXC_C14N}">'
+        '<ec:InclusiveNamespaces PrefixList="a"/>'
+        '<ec:InclusiveNamespaces PrefixList="b"/></ds:Transform>'
+    )
+    _reason("prefix-list-ambiguous", saml._inclusive_prefixes, ambiguous)
+
 
 def test_canonical_digest_input_handles_no_exclusion_and_rejects_each_partial_overlap() -> None:
     document = parse(b"<root><target><cut/></target><outside/></root>")
@@ -406,6 +413,26 @@ def test_any_key_verifies_uses_the_declared_family_before_optional_storage(
     rsa_provider = SimpleNamespace(keys=(saml._PublicKey("RSA", point=(1, 2)),))
     assert not saml._any_key_verifies(rsa_provider, "RSA", "sha256", b"input", b"signature")
     assert calls == ["ec"]
+
+
+def test_any_key_verifies_requires_an_ec_point_and_retains_an_earlier_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, int]] = []
+
+    def verify(x: int, y: int, *_args: object) -> bool:
+        calls.append((x, y))
+        return x == 1
+
+    monkeypatch.setattr(saml, "verify_es256", verify)
+    missing = SimpleNamespace(keys=(saml._PublicKey("EC"),))
+    assert not saml._any_key_verifies(missing, "EC", "sha256", b"input", b"signature")
+
+    provider = SimpleNamespace(
+        keys=(saml._PublicKey("EC", point=(1, 2)), saml._PublicKey("EC", point=(3, 4)))
+    )
+    assert saml._any_key_verifies(provider, "EC", "sha256", b"input", b"signature")
+    assert calls == [(1, 2), (3, 4)]
 
 
 def _conditions(

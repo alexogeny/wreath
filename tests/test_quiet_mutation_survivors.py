@@ -265,6 +265,28 @@ def test_tier_one_plan_freezes_named_apps_only_when_requested(
     assert freeze[0].change == quiet.Change("freeze", str(named / "cgroup.freeze"), "0", "1")
 
 
+@pytest.mark.parametrize(("raw", "expected"), [("", "0"), ("1", "1")])
+def test_named_app_plan_preserves_or_defaults_its_freeze_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+    expected: str,
+) -> None:
+    _isolate_plan(monkeypatch, tmp_path)
+    named = tmp_path / "app-firefox.scope"
+    named.mkdir()
+    monkeypatch.setattr(quiet, "named_app_targets", lambda _pid=None: (named,))
+    monkeypatch.setattr(quiet, "_read", lambda _path: raw)
+
+    changes = [
+        step.change
+        for step in quiet.plan(1)
+        if step.change is not None and step.change.kind == "freeze"
+    ]
+
+    assert [change.previous for change in changes] == [expected]
+
+
 @pytest.mark.parametrize(
     ("values", "expected_targets"),
     [
@@ -417,6 +439,14 @@ def test_arm_watchdog_tolerates_a_missing_error_stream(
         == ""
     )
     assert reason[0].endswith("exited 1")
+
+
+def test_arm_watchdog_failure_needs_no_reason_sink(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(quiet.shutil, "which", lambda _name: "/usr/bin/systemd-run")
+
+    assert quiet.arm_watchdog(run=lambda *_args, **_kwargs: _result(returncode=1)) == ""
 
 
 def test_arm_watchdog_returns_the_unit_after_a_success(
@@ -707,7 +737,44 @@ def test_main_restore_reports_empty_and_restored_journals(
 
     monkeypatch.setattr(quiet, "restore", lambda _path: ["restored sysfs /knob -> 0"])
     assert quiet.main(["--restore", "--journal", "/journal"]) == 0
-    assert "restored sysfs /knob -> 0" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "restored sysfs /knob -> 0" in output
+    assert "nothing to restore" not in output
+
+
+def test_print_plan_distinguishes_information_from_privileged_changes(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    informational = quiet.Step(0, "pin cores", "affinity")
+    privileged = quiet.Step(
+        1,
+        "set governor",
+        "write performance",
+        quiet.Change("sysfs", "/governor", "powersave", "performance"),
+    )
+
+    quiet._print_plan([informational, privileged], 1)
+    output = capsys.readouterr().out
+    assert "  [tier 0] pin cores" in output
+    assert "* [tier 1] set governor" in output
+    assert "1 of these need root" in output
+
+    quiet._print_plan([informational], 0)
+    assert "need root" not in capsys.readouterr().out
+
+
+def test_main_without_explicit_argv_uses_the_process_arguments(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(quiet.sys, "argv", ["wreath-bench-quiet", "--measure-noise"])
+    monkeypatch.setattr(
+        quiet,
+        "measure_noise",
+        lambda: {"spread_pct": 1.0, "median_ops": 2.0},
+    )
+
+    assert quiet.main() == 0
+    assert "A/A spread: 1.00%" in capsys.readouterr().out
 
 
 def test_main_covers_measure_plan_refusal_and_apply(
@@ -744,3 +811,13 @@ def test_main_covers_measure_plan_refusal_and_apply(
     output = capsys.readouterr().out
     assert "applied 1 change(s)" in output
     assert "watchdog unit restores in 45s" in output
+
+    monkeypatch.setattr(
+        quiet,
+        "apply",
+        lambda *_args, **_kwargs: quiet.Journal(
+            changes=[quiet.Change("sysfs", "/knob", "0", "1")], watchdog=""
+        ),
+    )
+    assert quiet.main(["--tier", "0", "--apply"]) == 0
+    assert "watchdog (none needed)" in capsys.readouterr().out

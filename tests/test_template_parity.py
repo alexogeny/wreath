@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from wreath._native import _core
-from wreath._template_tape import Markup, TemplateRenderError, compile_tape
+from wreath._template_tape import Markup, TemplateRenderError, _tokenize, compile_tape
 from wreath.templates import (
     Template,
     TemplateDirectory,
@@ -211,6 +211,11 @@ def test_a_brace_that_opens_no_tag_is_literal_text(source: str, expected: str) -
 
 def test_text_on_both_sides_of_a_tag_survives() -> None:
     assert render(compile_tape("before {{ a }} after"), {"a": "X"}) == b"before X after"
+
+
+def test_a_tag_at_the_start_does_not_emit_empty_text() -> None:
+    assert _tokenize("{{ value }}") == [("var", " value ", 1)]
+    assert _tokenize("plain") == [("text", "plain", 1)]
 
 
 def test_a_lone_brace_does_not_swallow_a_later_tag() -> None:

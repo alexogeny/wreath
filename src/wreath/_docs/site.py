@@ -23,7 +23,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from functools import cache
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from wreath._native import _docs as _native_docs
 
@@ -268,8 +268,37 @@ class _RenderedPage:
 def build(site: Site, root: Path | None = None) -> BuildReport:
     """Render `site` to its output directory. Returns a `BuildReport`."""
     base = Path(root or ".")
-    source_dir = base / site.source
-    output_dir = base / site.output
+    lexical_errors = []
+    for label, value in (("site source", site.source), ("site output", site.output)):
+        path = Path(value)
+        if value in ("", ".") or path.is_absolute() or ".." in path.parts:
+            lexical_errors.append(
+                f"{label} must be a root-relative path without '..': {value!r}"
+            )
+    for page in site.nav.pages():
+        path = PurePosixPath(page.source)
+        if (
+            path.is_absolute()
+            or ".." in path.parts
+            or "\\" in page.source
+        ):
+            lexical_errors.append(
+                f"page source must be a root-relative URL path without '..' or backslashes: "
+                f"{page.source!r}"
+            )
+    if lexical_errors:
+        return BuildReport(0, site.output, errors=tuple(lexical_errors))
+    build_root = base.resolve()
+    source_dir = (build_root / site.source).resolve()
+    output_dir = (build_root / site.output).resolve()
+    containment_errors = []
+    for label, directory in (("site source", source_dir), ("site output", output_dir)):
+        if not directory.is_relative_to(build_root):
+            containment_errors.append(
+                f"{label} escapes the build root through a symlink: {directory}"
+            )
+    if containment_errors:
+        return BuildReport(0, site.output, errors=tuple(containment_errors))
     pages = site.nav.pages()
     navigation = _compile_navigation(site) if site.layout == "docs" else _NavigationImage((), {})
     known = {_output_path(p.source) for p in pages}
@@ -306,7 +335,10 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
     queue = [(page, False) for page in pages] + [(page, True) for page in orphans]
     command_checker = commands.Checker()
     for page, orphan in queue:
-        src = source_dir / page.source
+        src = (source_dir / page.source).resolve()
+        if not src.is_relative_to(source_dir):
+            errors.append(f"page source escapes the source root through a symlink: {page.source}")
+            continue
         if not src.is_file():
             # An orphan was listed by rglob moments ago, so this only fires if it
             # was deleted mid-build (`docs serve` rebuilds on every change).
@@ -328,7 +360,10 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
         (errors if site.strict else warnings).extend(str(f) for f in command_findings)
         # ```chart -> SVG; note any data files read so we can publish them.
         text, chart_tokens = charts.extract(
-            text, source_dir, unpublished_chart_sources if orphan else chart_sources
+            text,
+            source_dir,
+            unpublished_chart_sources if orphan else chart_sources,
+            source_root=source_dir,
         )
         text, figure_tokens = figures.extract(text)
         text, hero_tokens = hero.extract(text)
@@ -472,7 +507,10 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
             theme=site.theme,
         )
         html = _render_page(context)
-        out_file = output_dir / rp.out_rel
+        out_file = (output_dir / rp.out_rel).resolve()
+        if not out_file.is_relative_to(output_dir):
+            errors.append(f"page output escapes the output root through a symlink: {rp.out_rel}")
+            continue
         out_file.parent.mkdir(parents=True, exist_ok=True)
         out_file.write_text(html, encoding="utf-8")
         page_id = len(index_pages)
@@ -505,7 +543,7 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
     if site.base_url:
         _write_sitemap(output_dir, site, rendered_pages)
 
-    return BuildReport(len(rendered_pages), str(output_dir), tuple(errors), tuple(warnings))
+    return BuildReport(len(rendered_pages), site.output, tuple(errors), tuple(warnings))
 
 
 def _breadcrumbs(site: Site) -> dict[str, str]:

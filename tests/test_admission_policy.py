@@ -101,6 +101,18 @@ async def test_a_handlers_own_timeout_error_is_not_mislabeled_as_the_deadline() 
     assert response.json()["detail"] != "Request handler exceeded its deadline"
 
 
+@pytest.mark.parametrize("seconds", [True, "1"])
+def test_deadline_policy_refuses_non_numeric_seconds(seconds) -> None:
+    with pytest.raises(ValueError, match="seconds must be positive"):
+        DeadlinePolicy(seconds)
+
+
+@pytest.mark.parametrize("detail", ["", 1])
+def test_deadline_policy_refuses_invalid_detail(detail) -> None:
+    with pytest.raises(ValueError, match="detail must not be empty"):
+        DeadlinePolicy(1, detail=detail)
+
+
 @pytest.mark.asyncio
 async def test_deadline_policy_measures_a_synchronous_handler_after_it_returns() -> None:
     app = Wreath(http_policy=HttpPolicy(deadline=DeadlinePolicy(0.005)))
@@ -157,6 +169,35 @@ def test_maintenance_policy_keeps_the_native_policy_program_available() -> None:
     assert descriptor is not None
     assert descriptor[0] == "wreath.http-policy.v5"
     assert descriptor[-1] is not None
+
+
+@pytest.mark.parametrize("path", [object(), "relative"])
+def test_maintenance_policy_refuses_invalid_exempt_paths(path) -> None:
+    with pytest.raises(ValueError, match="absolute paths beginning with '/'"):
+        MaintenancePolicy(exempt_paths=(path,))
+
+
+@pytest.mark.parametrize("retry_after", [True, "1", -1])
+def test_maintenance_policy_refuses_invalid_retry_after(retry_after) -> None:
+    with pytest.raises(ValueError, match="retry_after must be a non-negative integer"):
+        MaintenancePolicy(retry_after=retry_after)
+
+
+@pytest.mark.parametrize("detail", ["", 1])
+def test_maintenance_policy_refuses_invalid_detail(detail) -> None:
+    with pytest.raises(ValueError, match="detail must not be empty"):
+        MaintenancePolicy(detail=detail)
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "expected_header"),
+    [(None, None), (0, b"0")],
+)
+def test_maintenance_refusal_only_advertises_configured_retry_after(
+    retry_after, expected_header
+) -> None:
+    response = MaintenancePolicy(retry_after=retry_after)._refusal_response()
+    assert dict(response.headers).get(b"retry-after") == expected_header
 
 
 @pytest.mark.parametrize("limit", [True, 1.0, 0, -1])

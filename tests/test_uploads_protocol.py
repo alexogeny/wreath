@@ -17,7 +17,7 @@ PART = {"content-type": PARTIAL_UPLOAD}
 
 def _app(uploads: ResumableUploads) -> Wreath:
     app = Wreath()
-    app.include_router(uploads.router("/uploads"))
+    app.include_router(uploads.router("/uploads", public=True))
     return app
 
 

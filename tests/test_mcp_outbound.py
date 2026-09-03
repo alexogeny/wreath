@@ -10,6 +10,7 @@ import pytest
 from wreath import Wreath
 from wreath._fsguard import ContainmentError
 from wreath._mcp import roots as mcp_roots
+from wreath._mcp.outbound import ClientChannel
 from wreath.mcp import MCP, PROTOCOL_VERSION, ClientRequestError, MCPLimits, ToolError
 from wreath.testing import TestClient, TestResponse
 
@@ -119,6 +120,43 @@ def tool_call(identifier: int, name: str, arguments: dict | None = None) -> dict
     if arguments is not None:
         params["arguments"] = arguments
     return {"jsonrpc": "2.0", "id": identifier, "method": "tools/call", "params": params}
+
+
+async def test_client_responses_require_the_exact_pending_text_identifier() -> None:
+    class EqualToPending:
+        def __hash__(self) -> int:
+            return hash("pending")
+
+        def __eq__(self, other: object) -> bool:
+            return other == "pending"
+
+    channel = ClientChannel(lambda _message: True, max_pending=1, timeout=1)
+    future = asyncio.get_running_loop().create_future()
+    channel._pending["pending"] = future
+
+    assert channel.resolve(EqualToPending(), "wrong answer", None) is False
+    assert future.done() is False
+
+
+async def test_client_responses_ignore_unknown_and_completed_requests() -> None:
+    channel = ClientChannel(lambda _message: True, max_pending=1, timeout=1)
+    completed = asyncio.get_running_loop().create_future()
+    completed.set_result("first answer")
+    channel._pending["completed"] = completed
+
+    assert channel.resolve("unknown", "answer", None) is False
+    assert channel.resolve("completed", "second answer", None) is False
+    assert completed.result() == "first answer"
+
+
+async def test_client_errors_fail_the_matching_request_with_the_reason() -> None:
+    channel = ClientChannel(lambda _message: True, max_pending=1, timeout=1)
+    future = asyncio.get_running_loop().create_future()
+    channel._pending["pending"] = future
+
+    assert channel.resolve("pending", "not a result", {"message": "not today"}) is True
+    with pytest.raises(ClientRequestError, match="not today"):
+        future.result()
 
 
 async def test_a_tool_may_ask_the_client_s_model_to_generate() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -92,3 +93,12 @@ def test_elapsed_without_the_middleware_is_an_error() -> None:
 
     with pytest.raises(RuntimeError, match="has not timed"):
         elapsed(Request({"type": "http", "headers": []}, None))
+
+
+def test_elapsed_prefers_the_native_policy_measurement() -> None:
+    request = SimpleNamespace(
+        _context=SimpleNamespace(policy_elapsed=1.25),
+        state={"_wreath_timing_elapsed": 9.0},
+    )
+
+    assert elapsed(request) == 1.25

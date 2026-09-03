@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from wreath._pgname import quote_identifier, validate_identifier
 from wreath.store import CLAIMED, Column, Keyed, MemoryStore, PostgresStore, Sql, sql_identifier
 
 
@@ -54,6 +55,21 @@ def test_identifiers_are_checked_rather_than_quoted() -> None:
             sql_identifier(bad)
     with pytest.raises(ValueError, match="key .* is not a plain SQL identifier"):
         sql_identifier("a-b", what="key")
+
+
+def test_a_non_string_sql_identifier_is_refused_by_the_identifier_contract() -> None:
+    value: Any = object()
+    with pytest.raises(ValueError, match="plain SQL identifier"):
+        sql_identifier(value)
+
+
+def test_quoted_identifier_validation_refuses_each_invalid_shape() -> None:
+    with pytest.raises(ValueError, match="must be 1..63 bytes"):
+        validate_identifier(object(), "channel")
+
+    for value in (object(), "", "bad\x00name"):
+        with pytest.raises(ValueError, match="unusable SQL identifier"):
+            quote_identifier(value)
 
 
 def test_every_name_in_the_declaration_is_checked_not_only_the_table() -> None:

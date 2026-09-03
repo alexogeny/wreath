@@ -340,6 +340,34 @@ async def test_durable_command_acknowledges_before_handler_execution() -> None:
     assert seen == ["activity-1"]
 
 
+async def test_durable_command_is_authorized_before_it_is_enqueued() -> None:
+    class Authorizer:
+        def __init__(self) -> None:
+            self.actions: list[str] = []
+
+        async def authorize(self, _context: Any, requirement: Any) -> Any:
+            from wreath.authorization import AuthorizationDecision
+
+            self.actions.append(requirement.action)
+            return AuthorizationDecision(True)
+
+    authorizer = Authorizer()
+    jobs = RecordingJobs()
+    app, chat, _, _ = mounted(
+        jobs=jobs,
+        inbox=MemoryInbox(),
+        authorizer=authorizer,
+    )
+
+    @chat.command("deploy", execution="durable", action="Release::deploy")
+    async def deploy(request: Any) -> None:
+        raise AssertionError("durable command ran inline")
+
+    assert (await post(app, activity())).status == 200
+    assert authorizer.actions == ["Release::deploy"]
+    assert len(jobs.pending) == 1
+
+
 async def test_durable_command_refuses_a_tampered_verified_envelope() -> None:
     jobs = RecordingJobs()
     app, chat, _, _ = mounted(jobs=jobs, inbox=MemoryInbox())
@@ -668,6 +696,18 @@ def test_durable_registration_has_bounded_retry_and_dead_letter_policy() -> None
     _, options = next(iter(jobs.handlers.values()))
     assert options["retries"] == 4
     assert options["backoff"] == "exp"
+
+
+def test_durable_registration_preserves_an_explicit_retry_limit() -> None:
+    jobs = RecordingJobs()
+    _, chat, _, _ = mounted(jobs=jobs, inbox=MemoryInbox())
+
+    @chat.command("deploy", execution="durable", retries=2)
+    async def deploy(request: Any) -> None:
+        return None
+
+    _, options = next(iter(jobs.handlers.values()))
+    assert options["retries"] == 2
 
 
 def test_durable_registration_is_duplicate_safe() -> None:

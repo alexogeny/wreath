@@ -48,6 +48,7 @@ nav = Nav(
         Page("Operations and deployment", "guides/operations.md"),
         Page("Deploy Wreath", "guides/deployment.md"),
         Page("Command-line tasks", "guides/cli.md"),
+        Page("Continuous fuzzing", "guides/fuzzing.md"),
         Page("Testing and evidence", "guides/testing.md"),
     ),
     Section(

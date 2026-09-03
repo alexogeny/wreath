@@ -259,6 +259,38 @@ async def test_retrieved_checkout_fields_are_strictly_validated() -> None:
             await projector(current_session(**changes)).project(event)
 
 
+@pytest.mark.parametrize("currency", [None, "us", "usd1", "üsd", "u$d", "USD"])
+@pytest.mark.asyncio
+async def test_checkout_currency_requires_three_lowercase_ascii_letters(
+    currency: object,
+) -> None:
+    event = envelope("checkout.session.completed", {"id": "cs_1"})
+
+    with pytest.raises(ValueError) as caught:
+        await projector(current_session(currency=currency)).project(event)
+    assert str(caught.value) == "Stripe Checkout currency must be three lowercase ASCII letters"
+
+
+@pytest.mark.parametrize("customer", ["", 1])
+@pytest.mark.asyncio
+async def test_checkout_customer_requires_non_empty_text_or_null(customer: object) -> None:
+    event = envelope("checkout.session.completed", {"id": "cs_1"})
+
+    with pytest.raises(ValueError) as caught:
+        await projector(current_session(customer=customer)).project(event)
+    assert str(caught.value) == "Stripe Checkout customer must be a non-empty string or null"
+
+
+@pytest.mark.asyncio
+async def test_checkout_customer_may_be_null() -> None:
+    event = envelope("checkout.session.completed", {"id": "cs_1"})
+
+    payment = await projector(current_session(customer=None)).project(event)
+
+    assert payment is not None
+    assert payment.customer is None
+
+
 @pytest.mark.asyncio
 async def test_zero_total_checkout_is_a_succeeded_checkout_fact() -> None:
     payment = await projector(

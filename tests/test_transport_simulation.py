@@ -357,17 +357,17 @@ async def test_rejected_upgrade_names_status_and_unoffered_selection_is_refused(
     async def reject(socket: WebSocket) -> None:
         await socket.close()
 
-    @app.websocket("/wrong-protocol")
-    async def wrong_protocol(socket: WebSocket) -> None:
-        await socket.accept(subprotocol="not-offered.v1")
-        await socket.close()
+    async def wrong_protocol(scope, receive, send) -> None:
+        await receive()
+        await send({"type": "websocket.accept", "subprotocol": "not-offered.v1"})
+        await send({"type": "websocket.close", "code": 1000, "reason": ""})
 
     rejected = WebSocketSimulator(app, "/reject")
     with pytest.raises(SimulationError, match="HTTP/1.1 403"):
         await rejected.start()
 
     wrong = WebSocketSimulator(
-        app,
+        wrong_protocol,
         "/wrong-protocol",
         subprotocols=("camera-trap.v1",),
     )

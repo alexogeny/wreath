@@ -6,6 +6,7 @@ import ast
 import asyncio
 import configparser
 import contextvars
+import enum
 import fnmatch
 import hashlib
 import importlib.util
@@ -1257,7 +1258,12 @@ def _fixture_parameter_ids(definition: FixtureDef) -> tuple[str, ...]:
     params = definition.params or ()
     declared = definition.param_ids
     if callable(declared):
-        return tuple(declared(value) or _value_id(value) for value in params)
+        return _unique_ids(
+            tuple(
+                str(declared(value) or _value_id(value, definition.name, index))
+                for index, value in enumerate(params)
+            )
+        )
     if declared is not None:
         ids = tuple(declared)
         if len(ids) != len(params):
@@ -1265,11 +1271,17 @@ def _fixture_parameter_ids(definition: FixtureDef) -> tuple[str, ...]:
                 f"{definition.source}: fixture {definition.name!r} ids must match "
                 "the number of params"
             )
-        return tuple(
-            _value_id(value) if item is None else str(item)
-            for item, value in zip(ids, params, strict=True)
+        return _unique_ids(
+            tuple(
+                _value_id(value, definition.name, index) if item is None else str(item)
+                for index, (item, value) in enumerate(zip(ids, params, strict=True))
+            )
         )
-    return tuple(_value_id(value) for value in params)
+    return _unique_ids(
+        tuple(
+            _value_id(value, definition.name, index) for index, value in enumerate(params)
+        )
+    )
 
 
 def _collect_module(
@@ -1476,15 +1488,23 @@ def _expand_function(
     ]
     for declaration in declarations:
         expanded: list[tuple[dict[str, Any], list[str], tuple[Any, ...]]] = []
+        parameters = tuple(declaration.values)
+        case_ids = _unique_ids(
+            tuple(
+                parameter.id
+                if parameter.id is not None
+                else _case_id(declaration.names, parameter.values, index)
+                for index, parameter in enumerate(parameters)
+            )
+        )
         for assigned, ids, marks in combinations:
-            for parameter in declaration.values:
+            for parameter, case_id in zip(parameters, case_ids, strict=True):
                 if len(parameter.values) != len(declaration.names):
                     raise ValueError(
                         f"{display_path}: test {name!r} parametrized value must contain "
                         f"{len(declaration.names)} values"
                     )
                 values = dict(zip(declaration.names, parameter.values, strict=True))
-                case_id = parameter.id or _case_id(parameter.values)
                 expanded.append(
                     ({**assigned, **values}, [*ids, case_id], (*marks, *parameter.marks))
                 )
@@ -1590,16 +1610,56 @@ def _skip_exception(marks: Sequence[facade.Mark]) -> facade.Skipped | None:
     return None
 
 
-def _case_id(values: Sequence[Any]) -> str:
-    return "-".join(_value_id(value) for value in values)
+def _case_id(names: Sequence[str], values: Sequence[Any], index: int) -> str:
+    return "-".join(
+        _value_id(value, name, index) for name, value in zip(names, values, strict=True)
+    )
 
 
-def _value_id(value: Any) -> str:
+def _value_id(value: Any, name: str, index: int) -> str:
     if value is None:
         return "None"
-    if isinstance(value, (str, int, float, bool)):
+    if isinstance(value, bytes):
+        return value.decode("ascii", "backslashreplace")
+    if isinstance(value, (str, int, float, bool, complex)):
         return str(value)
-    return type(value).__name__
+    if isinstance(value, re.Pattern):
+        pattern = value.pattern
+        return (
+            pattern.decode("ascii", "backslashreplace")
+            if isinstance(pattern, bytes)
+            else pattern
+        )
+    if isinstance(value, enum.Enum):
+        return str(value)
+    declared_name = getattr(value, "__name__", None)
+    if isinstance(declared_name, str):
+        return declared_name
+    return f"{name}{index}"
+
+
+def _unique_ids(values: Sequence[str]) -> tuple[str, ...]:
+    counts: dict[str, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    if all(count == 1 for count in counts.values()):
+        return tuple(values)
+    resolved = list(values)
+    occupied = set(values)
+    suffixes: dict[str, int] = {}
+    for index, value in enumerate(values):
+        if counts[value] == 1:
+            continue
+        suffix = suffixes.get(value, 0)
+        separator = "_" if value and value[-1].isdigit() else ""
+        candidate = f"{value}{separator}{suffix}"
+        while candidate in occupied:
+            suffix += 1
+            candidate = f"{value}{separator}{suffix}"
+        resolved[index] = candidate
+        occupied.add(candidate)
+        suffixes[value] = suffix + 1
+    return tuple(resolved)
 
 
 def _display_path(path: Path) -> str:
@@ -2118,8 +2178,13 @@ class _ParallelRun:
                 test_workers=state.test_workers,
                 mutant_workers=state.mutant_workers,
             )
-        gold = tuple(sorted(state.verified_files))
-        passed = sum(file_state.outcome == "passed" for file_state in self.activity.files.values())
+        passed_files = frozenset(
+            path
+            for path, file_state in self.activity.files.items()
+            if file_state.outcome == "passed"
+        )
+        gold = tuple(sorted(state.verified_files.intersection(passed_files)))
+        passed = len(passed_files)
         if (
             not self.live_fuzz_started
             and self.fuzz_namespace is not None
@@ -2568,7 +2633,11 @@ class _NativeRunState:
         state = cls(temporary, Path(temporary.name))
         if namespace.mutant not in {"auto", "sample"}:
             return state
-        from ._test_runner import _prepare_mutation_trace, _start_mutation_process
+        from ._test_runner import (
+            _mutation_selection_payload,
+            _prepare_mutation_trace,
+            _start_mutation_process,
+        )
 
         state.trace_spec = _prepare_mutation_trace(namespace, state.directory)
         if namespace.mutant == "sample" and state.trace_spec is None:
@@ -2578,7 +2647,8 @@ class _NativeRunState:
             return state
         state.selection_path = state.directory / "mutation-selection.json"
         state.selection_path.write_text(
-            json.dumps(sorted(state.trace_spec.selected)), encoding="utf-8"
+            json.dumps(_mutation_selection_payload(state.trace_spec)),
+            encoding="utf-8",
         )
         if not options.collect_only:
             state.baseline_wait_path = state.directory / "mutation-baseline.json"
@@ -2609,18 +2679,38 @@ def _select_native_cases(
         isinstance(nodeid, str) for nodeid in selected_value
     ):
         raise ValueError("--case-selection must contain a JSON list of test node IDs")
-    selected_ids = dict.fromkeys(selected_value, True)
+    selected_ids = dict.fromkeys((str(node_id) for node_id in selected_value), True)
     missing = set(selected_ids).difference(collection.index)
-    if missing:
+    resolved_ids = set(selected_ids).intersection(collection.index)
+    fresh_by_family: dict[str, list[str]] = {}
+    for case in collection.cases:
+        path, separator, suffix = case.node_id.rpartition("::")
+        name, parameter_separator, _parameter = suffix.partition("[")
+        if separator and parameter_separator:
+            fresh_by_family.setdefault(f"{path}::{name}", []).append(case.node_id)
+    unresolved: set[str] = set()
+    for node_id in missing:
+        path, separator, suffix = node_id.rpartition("::")
+        name, parameter_separator, _parameter = suffix.partition("[")
+        fresh = (
+            fresh_by_family.get(f"{path}::{name}")
+            if separator and parameter_separator
+            else None
+        )
+        if fresh is None:
+            unresolved.add(node_id)
+        else:
+            resolved_ids.update(fresh)
+    if unresolved:
         raise ValueError(
             "--case-selection names uncollected test "
-            f"{min(missing)!r}; select its test file and use its exact node ID"
+            f"{min(unresolved)!r}; select its test file and use its exact node ID"
         )
     fuzz_ids = tuple(sorted(case.node_id for case in collection.cases if case.has_mark("fuzz")))
     selected_cases = tuple(
         case
         for case in collection.cases
-        if selected_ids.get(case.node_id, False) or case.has_mark("fuzz")
+        if case.node_id in resolved_ids or case.has_mark("fuzz")
     )
     schedule_seed = os.environ.get("WREATH_FUZZ_SCHEDULE_SEED")
     if schedule_seed is not None:
@@ -2734,7 +2824,7 @@ class _NativeOutcome:
         fuzz_status = self._finish_fuzz(mutation, mutation_activity, renderer)
         if self.status != 0:
             return self.status
-        return mutation_status if mutation_status != 0 else fuzz_status
+        return max(mutation_status, fuzz_status)
 
     def _attach_fuzz(self, fuzz: dict[str, Any]) -> None:
         if self.user_report is None:
@@ -2788,11 +2878,13 @@ class _NativeOutcome:
 
     def _finish_fuzz(self, mutation: dict[str, Any], mutation_activity: Any, renderer: Any) -> int:
         from ._test_runner import (
+            _attach_fuzz_campaign,
             _finish_fuzz_process,
             _fuzz_confidence,
             _merge_fuzz_batches,
             _mutation_gold_files,
             _no_gold_fuzz,
+            _run_fuzz_campaigns,
         )
 
         final_gold = _mutation_gold_files(mutation)
@@ -2817,6 +2909,7 @@ class _NativeOutcome:
                     mutation_activity,
                     renderer=renderer,
                     selected=remaining,
+                    campaigns=False,
                 )
             )
         if batches:
@@ -2824,6 +2917,9 @@ class _NativeOutcome:
         else:
             fuzz, fuzz_activity = _no_gold_fuzz()
             status = 0
+        campaign, campaign_status = _run_fuzz_campaigns(self.namespace, mutation)
+        fuzz_activity = _attach_fuzz_campaign(fuzz, fuzz_activity, campaign)
+        status = max(status, campaign_status)
         fuzz["live_started"] = self.state.live_fuzz_started
         self._attach_fuzz(fuzz)
         renderer.finish_pipeline(mutation_activity, fuzz_activity)

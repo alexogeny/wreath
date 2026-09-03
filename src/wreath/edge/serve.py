@@ -59,6 +59,8 @@ from .upstream import UpstreamPool
 #: next seven requests, few enough that a pool of origins does not open hundreds
 #: of sockets before serving anything.
 DEFAULT_CONNECTIONS = 8
+DEFAULT_MAX_WAITING = 1024
+DEFAULT_QUEUE_TIMEOUT = 30.0
 
 #: How long a lost upstream connection waits before it is replaced. Reconnection
 #: is the one place `serve()` schedules a task, and it is off the request path by
@@ -169,6 +171,8 @@ async def serve(
     via_name: str = DEFAULT_VIA_NAME,
     connections: int = DEFAULT_CONNECTIONS,
     max_body: int = DEFAULT_MAX_BODY,
+    max_waiting: int = DEFAULT_MAX_WAITING,
+    queue_timeout: float = DEFAULT_QUEUE_TIMEOUT,
     backlog: int = 2048,
     reuse_port: bool = False,
     ssl: Any = None,
@@ -189,6 +193,8 @@ async def serve(
         connections: Connections opened to each origin before the listener is
             bound. This is the per-upstream concurrency.
         max_body: Largest request body relayed; over it, 413.
+        max_waiting: Requests allowed to wait for a connection per upstream.
+        queue_timeout: Seconds a request may wait for an upstream connection.
         backlog: Listen backlog.
         reuse_port: Bind with `SO_REUSEPORT`, so several workers can share the
             port and each keep its own table.
@@ -214,6 +220,10 @@ async def serve(
         raise ValueError("connections must be at least 1")
     if max_body < 0:
         raise ValueError("max_body must be non-negative")
+    if max_waiting < 1:
+        raise ValueError("max_waiting must be at least 1")
+    if queue_timeout <= 0:
+        raise ValueError("queue_timeout must be positive")
     if backlog < 1:
         raise ValueError("backlog must be at least 1")
     endpoints = [_endpoint(u.url) for u in pool.upstreams]
@@ -280,6 +290,9 @@ async def serve(
         eject_cap=ejection.cap,
         max_body=max_body,
         on_lost=on_lost,
+        max_waiting=max_waiting,
+        queue_timeout=queue_timeout,
+        loop=loop,
     )
 
     try:

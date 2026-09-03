@@ -58,6 +58,7 @@ class Provisioned:
     def __init__(self, identity: Identity, **options: Any) -> None:
         self.users = InMemoryUserStore()
         self.organizations = InMemoryOrganizationStore(roles=ROLES)
+        self.revoked_session_users: list[str] = []
         self.app = Wreath()
         self.app.configure_auth(
             BearerTokenBackend(lambda token: _identity_for(token, identity)),
@@ -72,6 +73,7 @@ class Provisioned:
                 users=self.users,
                 organizations=self.organizations,
                 organization="acme",
+                revoke_sessions=self.revoke_sessions,
                 **options,
             )
         )
@@ -87,6 +89,9 @@ class Provisioned:
         @authorize(action="invite", resource=lambda request: 'Doc::"d"')
         async def invite(request: Any) -> str:
             return "ok"
+
+    async def revoke_sessions(self, user_id: str) -> None:
+        self.revoked_session_users.append(user_id)
 
     def client(self) -> TestClient:
         return TestClient(self.app)
@@ -469,6 +474,7 @@ async def test_a_password_sent_on_creation_is_hashed_and_usable() -> None:
     assert record is not None
     assert record.hashed_password.startswith("scrypt$")
     assert verify_password("correct horse", record.hashed_password)
+    assert fixture.revoked_session_users == ["1"]
 
 
 @pytest.mark.asyncio
@@ -961,6 +967,7 @@ async def test_deactivating_a_user_disables_the_account() -> None:
     record = await fixture.users.get_by_id("1")
     assert record is not None
     assert record.is_active is False
+    assert fixture.revoked_session_users == ["1"]
 
 
 @pytest.mark.asyncio
@@ -1008,6 +1015,7 @@ async def test_a_put_replaces_writable_attributes_and_ignores_the_rest() -> None
     assert body["active"] is False
     assert body["groups"] == []
     assert "externalId" not in body
+    assert fixture.revoked_session_users == ["1"]
 
 
 @pytest.mark.asyncio

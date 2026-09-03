@@ -226,9 +226,18 @@ async def test_the_readable_and_writable_caches_do_not_share_a_slot(
         entry.resource,
         id(entry),
     )
+    readable_authorizer = Authorizer("read_contact")
     readable = await resolve_readable(
         request,
-        Authorizer("read_contact"),
+        readable_authorizer,
+        entry.field_access,
+        entry.columns,
+        entry.resource,
+        id(entry),
+    )
+    cached = await resolve_readable(
+        request,
+        readable_authorizer,
         entry.field_access,
         entry.columns,
         entry.resource,
@@ -238,6 +247,8 @@ async def test_the_readable_and_writable_caches_do_not_share_a_slot(
     # `id` is shown and not editable, so the two sets must differ. Sharing a
     # slot would make the second call return the first's answer.
     assert "id" in readable
+    assert cached is readable
+    assert readable_authorizer.calls == ["read_contact"]
     assert "id" not in writable
     assert readable >= writable
 

@@ -1486,3 +1486,29 @@ def scan(tree: ast.Module, module_name: str | None) -> list[Candidate]:
     found.extend(_value_operators(context))
     found.sort(key=lambda c: (c.line, c.operator, c.control))
     return found
+
+
+def unsupported_module_declarations(
+    tree: ast.Module, module_name: str | None
+) -> list[Candidate]:
+    """Declarations that are real controls but have no safe live patch.
+
+    Re-executing a module-level constructor or route decorator can duplicate
+    registrations and other startup effects. A function-held declaration can
+    instead be recompiled and evaluated when the test calls its factory.
+    """
+    scopes = tag(tree)
+    module_calls = {node_id for node_id, scope in scopes.items() if not scope}
+    diagnostic_scopes = {
+        node_id: (("<module>",) if node_id in module_calls else scope)
+        for node_id, scope in scopes.items()
+    }
+    module = sys.modules.get(module_name) if module_name else None
+    context = _Context(module=module, tree=tree, scopes=diagnostic_scopes)
+    found = [
+        candidate
+        for candidate in _declaration_operators(context)
+        if candidate.node_id in module_calls
+    ]
+    found.sort(key=lambda candidate: (candidate.line, candidate.operator, candidate.control))
+    return found

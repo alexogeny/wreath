@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -62,6 +63,42 @@ def test_fuzz_schedule_is_seeded_reproducible_and_not_collection_order() -> None
     assert set(first) == set(cases)
     assert first != cases
     assert first != other
+
+
+def test_fuzz_selection_accepts_fresh_parameter_ids(tmp_path: Path) -> None:
+    selected_path = tmp_path / "selected.json"
+    selected_path.write_text(
+        json.dumps(["tests/test_policy.py::test_dynamic[old-value]"]),
+        encoding="utf-8",
+    )
+    fresh = tuple(
+        native_runner.Case(
+            f"tests/test_policy.py::test_dynamic[{value}]",
+            lambda: None,
+            (),
+            None,
+            frozenset(),
+        )
+        for value in ("new-value", "other-new-value")
+    )
+    unrelated = native_runner.Case(
+        "tests/test_policy.py::test_unrelated",
+        lambda: None,
+        (),
+        None,
+        frozenset(),
+    )
+    collection = native_runner.Collection(
+        (*fresh, unrelated),
+        (),
+        index={case.node_id: case for case in (*fresh, unrelated)},
+    )
+    namespace = Namespace(case_selection=str(selected_path))
+
+    selected, fuzz_ids = native_runner._select_native_cases(namespace, collection)
+
+    assert selected.cases == fresh
+    assert fuzz_ids == ()
 
 
 def test_native_core_classifies_pass_skip_and_failure() -> None:
@@ -239,6 +276,56 @@ def test_finished_worker_keeps_ownership_until_buffered_progress_is_drained(
 
     assert [result.outcome for result in results] == ["passed"] * 4
     assert live_fuzz is None
+
+
+def test_live_fuzz_replays_only_gold_files_green_in_the_current_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    passed = "tests/test_passed.py"
+    pending = "tests/test_pending.py"
+    activity = test_runner.RunActivity(workers=1)
+    activity.collect((f"{passed}::test_contract", f"{pending}::test_contract"))
+    activity.add_native_result(f"{passed}::test_contract", "passed", 0.001)
+    event_state = Namespace(
+        processed=0,
+        total=2,
+        mutating_files=set(),
+        verified_files={passed, pending},
+        test_workers=1,
+        mutant_workers=1,
+        killer_tests=set(),
+    )
+
+    class Renderer:
+        mutation = None
+
+        def mutation_progress(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+    selected: list[tuple[str, ...]] = []
+    monkeypatch.setattr(test_runner, "_consume_mutation_events", lambda *_args: None)
+    monkeypatch.setattr(test_runner, "_live_fuzz_ready", lambda gold, green: True)
+    monkeypatch.setattr(
+        test_runner,
+        "_start_fuzz_process",
+        lambda _namespace, files, **_kwargs: selected.append(tuple(files)),
+    )
+    run = native_runner._ParallelRun(
+        native_runner.Collection((), ()),
+        shards=(),
+        max_failures=0,
+        renderer=Renderer(),
+        activity=activity,
+        mutation_process=Namespace(event_state=event_state, activity_path=tmp_path / "events"),
+        fuzz_namespace=Namespace(engine="native", workers="1"),
+        fuzz_directory=tmp_path,
+    )
+    try:
+        run.sync_mutation_activity()
+    finally:
+        run.temporary.cleanup()
+
+    assert selected == [(passed,)]
 
 
 def test_worker_reaper_never_waits_for_an_unowned_mutation_or_fuzz_child(
@@ -576,6 +663,36 @@ def test_skipped():
     assert "test_math.py::test_positive[2]" in output
     assert "test_math.py::test_skipped" in output
     assert "2 passed, 1 skipped" in output
+
+
+def test_native_fallback_parameter_ids_match_pytest_and_stay_unique(
+    tmp_path: Path,
+    capsys: Any,
+) -> None:
+    test_file = tmp_path / "test_parameters.py"
+    test_file.write_text(
+        """\
+import pytest
+
+class Choice:
+    pass
+
+@pytest.mark.parametrize("choice", [Choice(), Choice()])
+def test_choice(choice):
+    assert isinstance(choice, Choice)
+""",
+        encoding="utf-8",
+    )
+
+    assert native_runner.execute(_namespace(str(test_file))) == 0
+    output = capsys.readouterr().out
+    assert "test_choice[choice0]" in output
+    assert "test_choice[choice1]" in output
+    assert "2 passed" in output
+
+
+def test_native_parameter_id_normalizes_a_bytes_regular_expression() -> None:
+    assert native_runner._value_id(re.compile(b"a\\xff"), "pattern", 0) == r"a\xff"
 
 
 def test_native_fixture_dependencies_and_yield_teardown_run_per_case(

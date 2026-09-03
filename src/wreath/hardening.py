@@ -235,11 +235,10 @@ def application_sources(app: Any) -> list[Path]:
         handler = route_handler
         while (wrapped := getattr(handler, "__wrapped__", None)) is not None:
             handler = wrapped
-        # Coalesced rather than guarded: a handler with no `__module__` finds no
-        # module under `""`, and a missing module has no `__file__`, so the
-        # `origin is None` check below already skips it. Written as a second
-        # guard it was redundant, and a mutant removing it went unnoticed.
-        module_name = getattr(handler, "__module__", "") or ""
+        # A handler with no `__module__` finds no module under `""`, and a
+        # missing module has no `__file__`, so the `origin is None` check below
+        # already skips it.
+        module_name = getattr(handler, "__module__", "")
         if module_name == "__main__":
             # Its `__file__` is the script that was run, and that directory is a
             # scripts folder or a home directory far more often than it is the

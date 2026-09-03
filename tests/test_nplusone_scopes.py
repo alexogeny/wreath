@@ -144,6 +144,13 @@ def test_request_findings_still_describe_a_route():
     assert "GET /llamas" in finding.explain()
 
 
+def test_query_ledger_route_uses_the_explicit_route_then_the_origin_label():
+    origin = Origin(kind="job", label="origin-label")
+
+    assert QueryLedger(limit=2, route="GET /explicit", origin=origin).route == "GET /explicit"
+    assert QueryLedger(limit=2, origin=origin).route == "origin-label"
+
+
 def test_a_trace_scan_threshold_below_one_is_refused():
     from wreath._nplusone import find_n_plus_one
 
@@ -198,6 +205,20 @@ def test_trace_scan_output_is_unchanged_and_gains_an_origin():
     assert finding.worst.count == 12
     assert "GET /llamas" in finding.explain()
     assert finding.origin.kind == "request"
+
+
+def test_trace_scan_ignores_phases_that_are_not_orm_hydration():
+    from wreath._nplusone import find_n_plus_one
+
+    traces = [
+        {
+            "request_id": 7,
+            "route_id": 1,
+            "phases": [{"phase": "handler", "dependency_id": 2, "duration_us": 5}] * 12,
+        }
+    ]
+
+    assert find_n_plus_one(traces, threshold=10) == []
 
 
 def test_job_finding_describes_the_task_not_a_route():
