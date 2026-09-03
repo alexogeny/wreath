@@ -10,6 +10,7 @@ import subprocess
 import sys
 import sysconfig
 import tempfile
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,6 +98,7 @@ class NativeCampaignReport:
     corpus_digests: tuple[str, ...]
     stdout: str
     stderr: str
+    elapsed_seconds: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -869,6 +871,7 @@ def run_native_campaign(
     environment["ASAN_OPTIONS"] = "detect_leaks=0:abort_on_error=1:symbolize=1"
     environment["UBSAN_OPTIONS"] = "halt_on_error=1:print_stacktrace=1"
     try:
+        campaign_started = time.monotonic()
         try:
             result = subprocess.run(
                 command,
@@ -885,6 +888,7 @@ def run_native_campaign(
                 "campaign\n"
             )
             result = subprocess.CompletedProcess(command, 124, _timeout_text(error.stdout), stderr)
+        campaign_elapsed = time.monotonic() - campaign_started
         corpus_digests = _normalize_corpus(corpus, config.max_input_size)
         corpus_addition_digests = tuple(
             digest for digest in corpus_digests if digest not in before_digests
@@ -939,6 +943,7 @@ def run_native_campaign(
             corpus_digests=corpus_digests,
             stdout=result.stdout,
             stderr=result.stderr,
+            elapsed_seconds=campaign_elapsed,
         )
     finally:
         shutil.rmtree(pending)

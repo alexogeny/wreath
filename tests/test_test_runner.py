@@ -1555,6 +1555,60 @@ def test_native_fuzz_backend_runs_every_explicit_target(
     assert report["counts"]["corpus_added"] == 3
 
 
+def test_native_fuzz_budget_excludes_slow_build_time_between_targets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wreath._fuzz import native
+
+    clock = [0.0]
+    allocations: list[int] = []
+
+    def run_native_campaign(target: Any, config: Any) -> SimpleNamespace:
+        allocations.append(config.max_seconds)
+        clock[0] += 30.0
+        return SimpleNamespace(
+            target=target.name,
+            seed=config.seed,
+            exit_code=0,
+            command=("harness",),
+            findings=(),
+            cases_executed=1,
+            coverage_features=1,
+            fuzzer_features=1,
+            peak_rss_mb=1,
+            corpus_size=1,
+            corpus_added=0,
+            corpus_addition_digests=(),
+            corpus_digests=("a" * 64,),
+            stdout="",
+            stderr="",
+            elapsed_seconds=0.1,
+        )
+
+    monkeypatch.setattr(native, "run_native_campaign", run_native_campaign)
+    monkeypatch.setattr(runner.time, "monotonic", lambda: clock[0])
+    namespace = SimpleNamespace(
+        fuzz_target=["graphql-parser", "http1-parser"],
+        fuzz_seed=41,
+        fuzz_cases=1,
+        fuzz_budget=2.0,
+        fuzz_corpus=str(tmp_path / "corpus"),
+        fuzz_artifacts=str(tmp_path / "artifacts"),
+        fuzz_backend="native",
+        fuzz_native_build=str(tmp_path / "native-build"),
+        fuzz_native_reuse_build=False,
+        fuzz_replay_only=False,
+    )
+
+    report, status = runner._run_fuzz_campaigns(namespace, {})
+
+    assert status == 0
+    assert allocations == [1, 1]
+    assert report["counts"]["targets"] == 2
+    assert [target["seconds"] for target in report["targets"]] == [0.1, 0.1]
+
+
 def test_native_fuzz_budget_refuses_less_than_one_whole_campaign_second(
     tmp_path: Path,
 ) -> None:

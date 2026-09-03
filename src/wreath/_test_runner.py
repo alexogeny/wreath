@@ -2531,7 +2531,7 @@ def _native_fuzz_campaign_dict(report: Any) -> dict[str, Any]:
         "corpus_manifest_sha256": _digest_manifest(corpus_digests),
         "findings": findings,
         "stop_reason": "finding" if findings else "completed",
-        "seconds": None,
+        "seconds": round(float(getattr(report, "elapsed_seconds", 0.0)), 3),
         "command": list(report.command),
         "exit_code": report.exit_code,
     }
@@ -2755,7 +2755,6 @@ def _run_fuzz_campaigns(
         and math.isfinite(float(differential_seconds))
         else 0.0
     )
-    budget = max(0.001, total_budget - spent)
     started = time.monotonic()
     reports: list[dict[str, Any]] = []
     status = 0
@@ -2791,13 +2790,12 @@ def _run_fuzz_campaigns(
     if python_targets:
         for target in python_targets:
             remaining = (
-                budget
-                if completed_campaigns == 0
-                else budget - (time.monotonic() - started)
+                total_budget - spent
             )
             if remaining <= 0:
                 break
             fair_share = remaining / (campaign_count - completed_campaigns)
+            campaign_started = time.monotonic()
             campaign, campaign_status = _run_fuzz_target_isolated(
                 target,
                 CampaignConfig(
@@ -2813,16 +2811,13 @@ def _run_fuzz_campaigns(
                     generate=not bool(getattr(namespace, "fuzz_replay_only", False)),
                 ),
             )
+            spent += time.monotonic() - campaign_started
             reports.append(campaign)
             status = max(status, campaign_status)
             completed_campaigns += 1
     if backend in {"native", "all"}:
         for target in native_targets:
-            remaining = (
-                budget
-                if completed_campaigns == 0
-                else budget - (time.monotonic() - started)
-            )
+            remaining = total_budget - spent
             fair_share = math.floor(remaining / (campaign_count - completed_campaigns))
             if fair_share < 1:
                 raise ValueError(
@@ -2852,6 +2847,7 @@ def _run_fuzz_campaigns(
                     replay_only=replay_only,
                 ),
             )
+            spent += float(getattr(native_report, "elapsed_seconds", 0.0))
             reports.append(_native_fuzz_campaign_dict(native_report))
             status = max(status, 1 if native_report.findings else 0)
             completed_campaigns += 1

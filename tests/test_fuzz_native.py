@@ -561,6 +561,8 @@ def test_run_reuses_wreath_corpus_and_imports_libfuzzer_artifact(
         "_compiler_build_identity",
         lambda compiler, timeout: compiler_identity,
     )
+    campaign_clock = iter((10.0, 10.25))
+    monkeypatch.setattr(native_module.time, "monotonic", lambda: next(campaign_clock))
 
     report = run_native_campaign(native_target("http1-parser"), config)
 
@@ -570,6 +572,7 @@ def test_run_reuses_wreath_corpus_and_imports_libfuzzer_artifact(
     assert all(path.suffix == ".input" and len(path.stem) == 64 for path in corpus.iterdir())
     assert (corpus / f"{hashlib.sha256(discovered).hexdigest()}.input").read_bytes() == discovered
     assert len(report.findings) == 1
+    assert report.elapsed_seconds == 0.25
     finding = report.findings[0]
     assert finding.name == digest
     assert len(finding.parent.name) == 64
