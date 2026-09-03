@@ -1827,9 +1827,16 @@ def test_fuzz_campaign_recovers_a_native_signal_with_exact_input_and_diagnostics
     from wreath._fuzz import FuzzTarget
 
     crashing_input = b"native-crash-vector"
+    core_limit_path = tmp_path / "core-limit.json"
 
     def crash(data: bytes) -> None:
+        import resource
+
         assert data == crashing_input
+        core_limit_path.write_text(
+            json.dumps(resource.getrlimit(resource.RLIMIT_CORE)),
+            encoding="utf-8",
+        )
         os.write(sys.stderr.fileno(), b"AddressSanitizer: deliberate test diagnostic\n")
         os.kill(os.getpid(), signal.SIGABRT)
 
@@ -1862,6 +1869,7 @@ def test_fuzz_campaign_recovers_a_native_signal_with_exact_input_and_diagnostics
     campaign = report["targets"][0]
     assert campaign["stop_reason"] == "signal"
     assert campaign["crash_case_ordinal"] == 0
+    assert json.loads(core_limit_path.read_text(encoding="utf-8")) == [0, 0]
     finding = campaign["findings"][0]
     assert Path(finding["input_path"]).read_bytes() == crashing_input
     diagnostic = Path(finding["metadata_path"]).with_name("diagnostic.log")

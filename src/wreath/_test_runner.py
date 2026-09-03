@@ -2552,8 +2552,11 @@ def _fuzz_campaign_worker(
     result_path: Path,
     diagnostic_path: Path,
 ) -> None:
+    import resource
+
     with diagnostic_path.open("wb", buffering=0) as diagnostic:
         os.dup2(diagnostic.fileno(), sys.stderr.fileno())
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         from ._fuzz import run_campaign
 
         campaign = run_campaign(target, config)
