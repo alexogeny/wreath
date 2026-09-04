@@ -14,6 +14,7 @@ native = pytest.mark.skipif(_core is None, reason="native extension not built")
 
 @native
 def test_json_fallback_does_not_retain_an_ended_interpreter() -> None:
+    pytest.importorskip("_testcapi", reason="CPython test support module unavailable")
     snippet = (
         "from wreath._native import _core; "
         "value = chr(34) + chr(0xd800) + chr(34); "
