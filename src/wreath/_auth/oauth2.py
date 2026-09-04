@@ -13,8 +13,9 @@ import asyncio
 import hashlib
 import hmac
 import json
+import math
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlencode
 
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
 __all__ = ["ClientCredentials", "bearer_challenge", "register_oauth2_login"]
 
 _TOKEN_SKEW = 30.0
+_MAX_CALLBACK_FIELDS = 16
 
 
 def _quote(value: str) -> str:
@@ -191,13 +193,27 @@ class ClientCredentials:
         )
         if response.status != 200:
             raise RuntimeError(f"client-credentials token request failed: HTTP {response.status}")
-        document = json.loads(response.body)
+        try:
+            document = json.loads(response.body)
+        except ValueError as error:
+            raise RuntimeError("token response must be a JSON object") from error
+        if not isinstance(document, Mapping):
+            raise RuntimeError("token response must be a JSON object")
         access = document.get("access_token")
-        if not isinstance(access, str):
-            raise RuntimeError("token response missing 'access_token'")
+        if not isinstance(access, str) or not access:
+            raise RuntimeError("token response 'access_token' must be a non-empty string")
         ttl = document.get("expires_in", 3600)
+        if (
+            isinstance(ttl, bool)
+            or not isinstance(ttl, (int, float))
+            or not math.isfinite(ttl)
+            or ttl < 0
+        ):
+            raise RuntimeError(
+                "token response 'expires_in' must be a non-negative finite JSON number"
+            )
         self._token = access
-        self._expires_at = loop.time() + float(ttl)
+        self._expires_at = loop.time() + ttl
 
 
 def _pkce_pair() -> tuple[str, str]:
@@ -222,6 +238,21 @@ def register_oauth2_login(
 ) -> None:
     """Register the login + callback routes for `provider` on `app`."""
 
+    if (
+        not isinstance(post_login_redirect, str)
+        or not post_login_redirect.startswith("/")
+        or post_login_redirect.startswith("//")
+        or "\\" in post_login_redirect
+        or any(
+            ord(character) < 0x21 or 0x7F <= ord(character) <= 0x9F
+            for character in post_login_redirect
+        )
+    ):
+        raise ValueError(
+            "OAuth post_login_redirect must be an origin-relative path without "
+            "controls or backslashes"
+        )
+    scopes = tuple(scopes)
     state_key = f"_oidc_state_{name}"
     verifier_key = f"_oidc_verifier_{name}"
     nonce_key = f"_oidc_nonce_{name}"
@@ -261,11 +292,19 @@ def register_oauth2_login(
         # the issuer in `OidcProvider.discover`, which is why there is no second
         # check here -- one that could never fire would be a check with nothing
         # to check (a check that has nothing to check).
-        return RedirectResponse(f"{provider.authorization_endpoint}?{params}", status=302)
+        authorization_endpoint = provider.authorization_endpoint
+        separator = "&" if "?" in authorization_endpoint else "?"
+        return RedirectResponse(f"{authorization_endpoint}{separator}{params}", status=302)
 
     @app.get(callback_path)
     async def callback(request: Request):
-        query = parse_qs(request.query_string.decode("ascii", "replace"))
+        try:
+            query = parse_qs(
+                request.query_string.decode("ascii", "replace"),
+                max_num_fields=_MAX_CALLBACK_FIELDS,
+            )
+        except ValueError:
+            return JSONResponse({"error": "invalid_state"}, status=400)
         session = getattr(request.state, "session", None)
         if session is None:
             return JSONResponse({"error": "session_middleware_required"}, status=500)
@@ -275,16 +314,24 @@ def register_oauth2_login(
             return JSONResponse({"error": "invalid_state"}, status=400)
         code = codes[0]
         state = states[0]
-        expected_state = session.pop(state_key, None)
-        verifier = session.pop(verifier_key, None)
-        expected_nonce = session.pop(nonce_key, None)
+        expected_state = session.get(state_key)
         state_matches = (
             isinstance(state, str)
             and bool(state)
             and isinstance(expected_state, str)
             and hmac.compare_digest(state, expected_state)
         )
-        if not code or not state_matches or not verifier:
+        if not state_matches:
+            return JSONResponse({"error": "invalid_state"}, status=400)
+        session.pop(state_key, None)
+        verifier = session.pop(verifier_key, None)
+        expected_nonce = session.pop(nonce_key, None)
+        if (
+            not isinstance(verifier, str)
+            or not verifier
+            or not isinstance(expected_nonce, str)
+            or not expected_nonce
+        ):
             return JSONResponse({"error": "invalid_state"}, status=400)
         if provider.token_endpoint is None:
             return JSONResponse({"error": "provider_not_discovered"}, status=503)
@@ -305,7 +352,12 @@ def register_oauth2_login(
         )
         if response.status != 200:
             return JSONResponse({"error": "token_exchange_failed"}, status=502)
-        document = json.loads(response.body)
+        try:
+            document = json.loads(response.body)
+        except ValueError:
+            return JSONResponse({"error": "token_exchange_failed"}, status=502)
+        if not isinstance(document, Mapping):
+            return JSONResponse({"error": "token_exchange_failed"}, status=502)
         id_token = document.get("id_token")
         if not isinstance(id_token, str):
             return _bearer_401("missing_id_token")
@@ -314,7 +366,8 @@ def register_oauth2_login(
             return _bearer_401("invalid_id_token")
         # The verifier checked the signature and the registered claims; the
         # nonce is this flow's own binding and has to be checked here.
-        if expected_nonce and identity.claims.get("nonce") != expected_nonce:
+        token_nonce = identity.claims.get("nonce")
+        if not isinstance(token_nonce, str) or not hmac.compare_digest(token_nonce, expected_nonce):
             return _bearer_401("nonce_mismatch")
         # The caller's privileges change here, so the id they arrived with must
         # not survive: an attacker who fixed a session id beforehand would

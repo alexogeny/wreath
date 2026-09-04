@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from threading import get_ident
+from typing import Any, cast
 
 import pytest
 
@@ -128,7 +129,9 @@ def test_field_fallback_runs_only_when_native_publish_refuses() -> None:
 
 def test_current_scope_respects_runtime_activity_and_binding() -> None:
     buffer_token = log._SCRATCH.set(log.RequestLogBuffer(8, 1))
-    bound = log.RequestScope(log._SCRATCH.get(), 1)
+    buffer = log._SCRATCH.get()
+    assert buffer is not None
+    bound = log.RequestScope(buffer, 1)
     scope_token = log._SCOPE.set(bound)
     try:
         with installed_runtime(log.LogRuntime()):
@@ -153,6 +156,122 @@ def test_request_scope_uses_explicit_and_runtime_scratch_budgets() -> None:
             log.debug("two")
             assert explicit_scope.held == 1
             assert explicit_scope.dropped == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "maximum"),
+    [
+        ("limiter_capacity", float("inf"), 1_048_576),
+        ("limiter_capacity", 1_048_577, 1_048_576),
+        ("scratch_budget", float("nan"), 65_536),
+        ("scratch_budget", 65_537, 65_536),
+        ("off_loop_capacity", True, 4_194_304),
+        ("off_loop_capacity", 4_194_305, 4_194_304),
+    ],
+)
+def test_runtime_refuses_invalid_or_unbounded_resource_controls(
+    field: str, value: object, maximum: int
+) -> None:
+    with pytest.raises(ValueError, match=rf"{field} must be an integer between 0 and {maximum}"):
+        log.LogRuntime(**cast(Any, {field: value}))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "correct_form"),
+    [
+        ("level", float("nan"), "Severity"),
+        ("capture_level", int(log.DEBUG), "Severity"),
+        ("sampling", object(), "LogSamplingPolicy or None"),
+        ("sink", object(), "callable or None"),
+        ("native", object(), "callable or None"),
+    ],
+)
+def test_runtime_refuses_malformed_runtime_controls(
+    field: str, value: object, correct_form: str
+) -> None:
+    with pytest.raises(ValueError, match=rf"{field}.*{correct_form}"):
+        log.LogRuntime(**cast(Any, {field: value}))
+
+
+def test_runtime_refuses_a_capture_floor_above_the_publish_level() -> None:
+    with pytest.raises(ValueError, match="capture_level must not exceed level"):
+        log.LogRuntime(level=log.DEBUG, capture_level=log.INFO)
+
+
+def test_runtime_refuses_an_integer_publish_level_even_with_a_valid_floor() -> None:
+    with pytest.raises(ValueError, match="level must be a Severity"):
+        log.LogRuntime(level=cast(Any, int(log.INFO)), capture_level=log.INFO)
+
+
+@pytest.mark.parametrize("field_budget", [True, 1.5, float("nan"), float("inf"), -1, 65537])
+def test_request_scope_refuses_an_invalid_or_unbounded_field_budget(
+    field_budget: object,
+) -> None:
+    with log.testing_runtime():
+        with pytest.raises(
+            ValueError, match="field_budget must be an integer between 0 and 65536"
+        ):
+            log.begin_request(1, field_budget=cast(Any, field_budget))
+
+
+def test_request_fields_require_an_exact_raw_opt_in() -> None:
+    with log.testing_runtime():
+        with log.request_scope(1) as scope:
+            with pytest.raises(ValueError, match="raw must be a boolean"):
+                scope.set("credential", "secret", raw=cast(Any, 1))
+
+
+def test_request_finish_requires_an_exact_promotion_verdict() -> None:
+    with log.testing_runtime(level=log.INFO, capture_level=log.DEBUG):
+        with log.request_scope(1) as scope:
+            log.debug("secret {value}", value="credential")
+            with pytest.raises(ValueError, match="promoted must be a boolean"):
+                scope.finish(promoted=cast(Any, 1))
+
+
+def test_a_finished_scope_cannot_publish_late_fields_into_a_reused_request_id() -> None:
+    with log.testing_runtime() as records:
+        scope = log.begin_request(41)
+        assert scope is not None
+        assert scope.finish(promoted=False) == 0
+        scope.set("tenant", "other", raw=True)
+        assert scope.fields == 0
+        assert scope.finish(promoted=False) == 0
+    assert records == []
+
+
+def test_stdlib_bridge_requires_an_exact_raw_message_opt_in() -> None:
+    with pytest.raises(ValueError, match="raw_messages must be a boolean"):
+        log.StdlibBridge(raw_messages=cast(Any, 1))
+
+
+def test_field_refuses_a_non_disposition_that_would_fall_through_to_raw() -> None:
+    with pytest.raises(ValueError, match="disposition must be a CaptureDisposition or None"):
+        log.field("credential", str, cast(Any, 1))
+
+
+def test_event_refuses_a_malformed_severity_or_mutable_field_declaration() -> None:
+    credential = log.field("credential", str)
+    with log.testing_runtime():
+        with pytest.raises(ValueError, match="level must be a Severity"):
+            log.event(
+                "malformed.level",
+                "credential {credential}",
+                level=cast(Any, float("nan")),
+                fields=(credential,),
+            )
+        with pytest.raises(ValueError, match="fields must be a tuple of LogField values"):
+            log.event(
+                "mutable.fields",
+                "credential {credential}",
+                fields=cast(Any, [credential]),
+            )
+        with pytest.raises(ValueError, match="fields must be a tuple of LogField values"):
+            log.event(
+                "invalid.field",
+                "credential {credential}",
+                fields=cast(Any, (object(),)),
+            )
 
 
 def test_seeded_request_requires_an_active_runtime_and_an_exact_int() -> None:

@@ -595,10 +595,6 @@ static PyMethodDef core_methods[] = {
      "template_record_configure(record_c_api) -> None"},
     {"html_response_configure", wreath_html_response_configure, METH_VARARGS,
      "Install the exact HTMLResponse constructor fast path."},
-    {"http_parse_request", wreath_http_parse_request, METH_O,
-     "http_parse_request(data) -> (method, target, minor, headers, consumed) | None"},
-    {"http_parse_response", wreath_http_parse_response, METH_O,
-     "http_parse_response(data) -> (minor, status, reason, headers, consumed) | None"},
     {"http_response_framing", wreath_http_response_framing, METH_VARARGS,
      "http_response_framing(method, status, headers) -> (mode, length)"},
     {"http_response_keeps_alive", wreath_http_response_keeps_alive, METH_VARARGS,
@@ -618,6 +614,8 @@ static PyMethodDef core_methods[] = {
      "origin_matches(origin, allowed) -> bool"},
     {"append_missing_headers", wreath_append_missing_headers, METH_VARARGS,
      "append_missing_headers(headers, additions) -> None"},
+    {"validate_response_headers", wreath_validate_response_headers, METH_O,
+     "validate_response_headers(headers) -> (has_content_type, content_length)"},
     {"append_vary", wreath_append_vary, METH_VARARGS,
      "append_vary(headers, token) -> None"},
     {"replace_content_length", wreath_replace_content_length, METH_VARARGS,
@@ -667,7 +665,9 @@ PyInit__core(void)
     if (module == NULL) {
         return NULL;
     }
-    if (wreath_security_ready() < 0 || wreath_jose_ready() < 0 ||
+    if (wreath_http_register_request_parser(module) < 0 ||
+        wreath_http_register_response_parser(module) < 0 ||
+        wreath_security_ready() < 0 || wreath_jose_ready() < 0 ||
         wreath_observability_ready() < 0 || wreath_protobuf_ready() < 0 ||
         wreath_graphql_parser_ready() < 0 || wreath_graphql_ready() < 0 ||
         wreath_scim_ready() < 0 || wreath_http_replay_ready() < 0 ||

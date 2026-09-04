@@ -313,6 +313,14 @@ def test_bytes_after_the_member_are_refused() -> None:
         gzip_decompress(gzip_compress(b"abc") + b"junk", max_output_bytes=1 << 20)
 
 
+def test_a_second_gzip_member_is_refused_as_trailing_data() -> None:
+    first = gzip_compress(b"first")
+    second = gzip_compress(b"second")
+
+    with pytest.raises(ValueError, match="trailing bytes"):
+        gzip_decompress(first + second, max_output_bytes=1 << 20)
+
+
 def test_something_that_is_not_gzip_at_all_raises_value_error() -> None:
     with pytest.raises(ValueError, match="not a readable gzip member"):
         gzip_decompress(b"nowhere near a gzip member", max_output_bytes=1 << 20)

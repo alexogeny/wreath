@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from sys import maxsize
 from typing import Any
 
 from .._native import _core
@@ -45,6 +46,7 @@ class RequestDecompressionPolicy:
             isinstance(max_output_bytes, bool)
             or not isinstance(max_output_bytes, int)
             or max_output_bytes < 1
+            or max_output_bytes > maxsize
         ):
             raise ValueError(
                 "RequestDecompressionPolicy max_output_bytes must be a positive integer or None"

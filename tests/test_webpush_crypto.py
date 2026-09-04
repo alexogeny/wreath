@@ -21,6 +21,7 @@ from wreath._webpush import (
     PushSubscription,
     VapidKeys,
     _ecdsa_sign,
+    _endpoint_parts,
     _mul,
     aes128gcm_encrypt,
     declarative_payload,
@@ -148,15 +149,35 @@ def test_vapid_lifetime_over_24_hours_is_refused() -> None:
         vapid_headers(keys, "https://push.example.net/x", lifetime=25 * 3600)
 
 
-def test_vapid_subject_must_be_contactable() -> None:
+@pytest.mark.parametrize(
+    "subject",
+    (
+        "example.com",
+        "mailto:",
+        "mailto:ops@example.com#fragment",
+        "mailto:ops@example.com\r\nignored",
+        "https:///contact",
+        "https://operator@example.com/contact",
+        "https://example.com:0/contact",
+        "https://example.com:invalid/contact",
+        "https://example.com/contact#fragment",
+    ),
+)
+def test_vapid_subject_must_be_contactable(subject: str) -> None:
     with pytest.raises(PushError, match="mailto: or https: URL"):
-        VapidKeys.generate("example.com")
+        VapidKeys.generate(subject)
 
 
 def test_vapid_keys_round_trip_through_bytes() -> None:
     keys = VapidKeys.generate("mailto:ops@example.com")
     restored = VapidKeys.from_bytes(keys.private_bytes, keys.subject)
     assert restored.public_bytes == keys.public_bytes
+
+
+def test_vapid_keys_repr_does_not_expose_private_scalar() -> None:
+    private = 123456789012345678901234567890
+
+    assert str(private) not in repr(VapidKeys(private, "mailto:ops@example.com"))
 
 
 def _receiver() -> tuple[ec.EllipticCurvePrivateKey, bytes, PushSubscription]:
@@ -197,6 +218,13 @@ def test_rfc8291_payload_decrypts_under_an_independent_receiver() -> None:
     private, public, subscription = _receiver()
     body = encrypt(subscription, RFC8291_PLAINTEXT)
     assert _decrypt(private, public, body).rstrip(b"\x02") == RFC8291_PLAINTEXT
+
+
+def test_subscription_repr_does_not_expose_auth_secret() -> None:
+    secret = "webpush-auth-secret"
+    subscription = PushSubscription("https://push.example.net/x", "public-key", secret)
+
+    assert secret not in repr(subscription)
 
 
 def test_rfc8291_section_5_is_reproduced_byte_for_byte() -> None:
@@ -258,6 +286,13 @@ def test_an_off_curve_subscription_key_is_refused() -> None:
         RFC8291_AUTH,
     )
     with pytest.raises(PushError, match="not a point on P-256"):
+        PushSubscription.from_json(
+            {
+                "endpoint": subscription.endpoint,
+                "keys": {"p256dh": subscription.p256dh, "auth": subscription.auth},
+            }
+        )
+    with pytest.raises(PushError, match="not a point on P-256"):
         encrypt(subscription, b"x")
 
 
@@ -277,6 +312,74 @@ def test_a_short_auth_secret_is_refused() -> None:
 def test_subscription_from_json_requires_an_https_endpoint() -> None:
     with pytest.raises(PushError, match="https endpoint"):
         PushSubscription.from_json({"endpoint": "http://push.example.net/x", "keys": {}})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("p256dh", ["not text"] * 87),
+        ("p256dh", "A" * 88),
+        ("p256dh", "!" * 87),
+        ("auth", ["not text"] * 22),
+        ("auth", "A" * 23),
+        ("auth", "!" * 22),
+    ),
+)
+def test_subscription_from_json_refuses_malformed_key_material(field: str, value: object) -> None:
+    _, _, subscription = _receiver()
+    keys: dict[str, object] = {
+        "p256dh": subscription.p256dh,
+        "auth": subscription.auth,
+    }
+    keys[field] = value
+    with pytest.raises(PushError, match=field):
+        PushSubscription.from_json({"endpoint": subscription.endpoint, "keys": keys})
+
+
+def test_subscription_from_json_refuses_a_non_text_endpoint() -> None:
+    with pytest.raises(PushError, match="https endpoint"):
+        PushSubscription.from_json({"endpoint": 7, "keys": {}})
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    (
+        "http://push.example.net/x",
+        "https:///x",
+        "https://operator@push.example.net/x",
+        "https://push.example.net:0/x",
+        "https://push.example.net:invalid/x",
+        "https://push.example.net/x#fragment",
+        "https://push.\nexample.net/x",
+        "https://push.example.net/x\x7f",
+    ),
+)
+def test_malformed_push_endpoint_is_refused_before_signing_or_storage(endpoint: str) -> None:
+    keys = VapidKeys.generate("mailto:ops@example.com")
+    with pytest.raises(PushError, match="absolute https endpoint"):
+        vapid_headers(keys, endpoint)
+    with pytest.raises(PushError, match="absolute https endpoint"):
+        PushSubscription.from_json({"endpoint": endpoint, "keys": {}})
+
+
+def test_push_endpoint_refuses_a_hostname_that_cannot_be_idna_encoded() -> None:
+    endpoint = "https://" + chr(0xD800) + ".example.net/x"
+    with pytest.raises(PushError, match="absolute https endpoint"):
+        _endpoint_parts(endpoint)
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected"),
+    (
+        ("https://push.example.net", ("https://push.example.net", "/")),
+        (
+            "https://[2001:db8::1]:8443/send?tenant=one",
+            ("https://[2001:db8::1]:8443", "/send?tenant=one"),
+        ),
+    ),
+)
+def test_push_endpoint_keeps_one_normalized_origin_and_request_target(endpoint, expected) -> None:
+    assert _endpoint_parts(endpoint) == expected
 
 
 def test_declarative_payload_carries_the_web_push_marker() -> None:

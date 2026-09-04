@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import enum
+from typing import Any, cast
 
 import pytest
 
@@ -100,6 +101,10 @@ class NoZero(enum.IntEnum):
     ONE = 1
 
 
+class MapKeyEnum(enum.IntEnum):
+    ZERO = 0
+
+
 def test_an_enum_without_a_zero_member_is_refused() -> None:
     with pytest.raises(ProtobufDeclarationError) as caught:
 
@@ -118,6 +123,156 @@ def test_a_field_without_a_number_is_refused() -> None:
             n: int = 0
 
     assert "n" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "correct_form"),
+    [
+        ("kind", ["int32"], "string"),
+        ("packed", 1, "boolean"),
+        ("oneof", 7, "non-empty string"),
+        ("oneof", "", "non-empty string"),
+    ],
+)
+def test_field_options_refuse_inexact_types_at_declaration(
+    option: str, value: object, correct_form: str
+) -> None:
+    kwargs = {option: value}
+    unsafe_field = cast(Any, field)
+    with pytest.raises(ProtobufDeclarationError) as caught:
+
+        @message
+        class InvalidOption:
+            value: int | None = unsafe_field(1, **kwargs)
+
+    text = str(caught.value)
+    assert option in text
+    assert correct_form in text
+
+
+def test_packed_is_refused_on_a_singular_field() -> None:
+    with pytest.raises(ProtobufDeclarationError, match="packed.*repeated"):
+
+        @message
+        class SingularPacked:
+            value: int = field(1, packed=True)
+
+
+@message
+class PackedChild:
+    value: int = field(1)
+
+
+@pytest.mark.parametrize("annotation", [list[str], list[bytes], list[PackedChild]])
+def test_packed_is_refused_on_a_non_packable_repeated_field(annotation: object) -> None:
+    namespace = {
+        "__annotations__": {"values": annotation},
+        "values": field(1, packed=False),
+    }
+    with pytest.raises(ProtobufDeclarationError, match="packed.*repeated"):
+        message(type("InvalidPacked", (), namespace))
+
+
+def test_an_explicit_packed_option_is_valid_on_a_repeated_scalar() -> None:
+    namespace = {
+        "__annotations__": {"values": list[int]},
+        "values": field(1, packed=False),
+    }
+    message(type("ValidPacked", (), namespace))
+
+
+@pytest.mark.parametrize("annotation", [list[str], list[PackedChild]])
+def test_non_packable_repeated_fields_compile_without_a_packed_option(
+    annotation: object,
+) -> None:
+    namespace = {
+        "__annotations__": {"values": annotation},
+        "values": field(1),
+    }
+    message(type("ValidRepeated", (), namespace))
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [list[int | None], list[list[int]], list[dict[str, int]]],
+)
+def test_a_repeated_item_must_be_a_non_container_non_optional_value(
+    annotation: object,
+) -> None:
+    namespace = {
+        "__annotations__": {"values": annotation},
+        "values": field(1),
+    }
+    with pytest.raises(ProtobufDeclarationError, match="repeated item"):
+        message(type("InvalidRepeatedItem", (), namespace))
+
+
+@pytest.mark.parametrize("annotation", [dict[bytes, int], dict[MapKeyEnum, int]])
+def test_a_map_key_must_be_a_protobuf_legal_key_type(annotation: object) -> None:
+    namespace = {
+        "__annotations__": {"values": annotation},
+        "values": field(1),
+    }
+    with pytest.raises(ProtobufDeclarationError, match="map key"):
+        message(type("InvalidMapKey", (), namespace))
+
+
+@pytest.mark.parametrize("annotation", [dict[list[int], int], dict[int | None, int]])
+def test_a_map_key_cannot_be_repeated_or_optional(annotation: object) -> None:
+    namespace = {
+        "__annotations__": {"values": annotation},
+        "values": field(1),
+    }
+    with pytest.raises(ProtobufDeclarationError, match="map key"):
+        message(type("InvalidMapKeyShape", (), namespace))
+
+
+@pytest.mark.parametrize("option", [{"kind": "int32"}, {"packed": False}])
+def test_scalar_field_options_are_refused_on_a_map(option: dict[str, object]) -> None:
+    unsafe_field = cast(Any, field)
+    namespace = {
+        "__annotations__": {"values": dict[str, int]},
+        "values": unsafe_field(1, **option),
+    }
+    with pytest.raises(
+        ProtobufDeclarationError,
+        match=(
+            "kind is not valid on a map"
+            if "kind" in option
+            else "packed is only valid for a repeated scalar field"
+        ),
+    ):
+        message(type("InvalidMapOption", (), namespace))
+
+
+def test_legal_map_key_types_still_compile() -> None:
+    for index, annotation in enumerate((dict[int, int], dict[bool, int], dict[str, int])):
+        namespace = {
+            "__annotations__": {"values": annotation},
+            "values": field(1),
+        }
+        message(type(f"ValidMap{index}", (), namespace))
+
+
+def test_a_valid_oneof_group_name_still_compiles() -> None:
+    namespace = {
+        "__annotations__": {"value": int | None},
+        "value": field(1, oneof="choice"),
+    }
+    message(type("ValidOneof", (), namespace))
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [dict[str, list[int]], dict[str, dict[str, int]], dict[str, int | None]],
+)
+def test_a_map_value_cannot_be_repeated_nested_or_optional(annotation: object) -> None:
+    namespace = {
+        "__annotations__": {"values": annotation},
+        "values": field(1),
+    }
+    with pytest.raises(ProtobufDeclarationError, match="map value"):
+        message(type("InvalidMapValue", (), namespace))
 
 
 @message

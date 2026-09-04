@@ -313,8 +313,16 @@ def test_parse_timestamp_refuses_a_naive_value() -> None:
 
 def test_signature_base_distinguishes_plain_and_relay_profiles() -> None:
     plain = _signature_base(SECONDS, "evt", "created", b"body")
-    relayed = _signature_base(SECONDS, "evt", "created", b"body", ("api",))
+    relayed = _signature_base(
+        SECONDS,
+        "evt",
+        "created",
+        b"body",
+        correlation_id="correlation",
+        causation_id="cause",
+        relay_path=("api",),
+    )
 
-    assert plain.startswith(b"wreath-v1\n")
-    assert relayed.startswith(b"wreath-v1-relay\n")
-    assert b"\napi\nbody" in relayed
+    assert plain.startswith(b"wreath-v2\n")
+    assert relayed.startswith(b"wreath-v2\n")
+    assert b"\ncorrelation\ncause\napi\nbody" in relayed

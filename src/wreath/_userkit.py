@@ -27,6 +27,7 @@ from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
+from urllib.parse import urlsplit
 
 from ._b64 import b64url_decode, b64url_encode
 from ._dkim import DkimSigner
@@ -63,12 +64,14 @@ _SCRYPT_R = 8
 _SCRYPT_P = 1
 _SCRYPT_DKLEN = 32
 _SCRYPT_MAXMEM = 64 * 1024 * 1024
+_SCRYPT_MAX_WORK = _SCRYPT_N * _SCRYPT_R * 4
 
 #: Longest password accepted, in UTF-8 bytes. scrypt hashes the whole input, so
 #: an unbounded one is a CPU amplifier any anonymous caller can pull -- and no
 #: human password is near this. Refused on hash, and rejected without spending
 #: the CPU on verify.
 MAX_PASSWORD_BYTES = 1024
+_MAX_TOKEN_BYTES = 4096
 
 
 #: Named locally because `_unb64` below is its inverse and the pair reads as
@@ -104,25 +107,40 @@ def hash_password(
 
 def verify_password(password: str, encoded: str) -> bool:
     """Constant-time verify `password` against a stored `encoded` hash."""
-    if len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:
-        # Refused before scrypt: a password this long cannot be the one that was
-        # stored, so hashing it is work an attacker chose for us.
+    if not isinstance(password, str) or not isinstance(encoded, str) or len(encoded) > 512:
         return False
     try:
+        password_bytes = password.encode("utf-8")
+        if len(password_bytes) > MAX_PASSWORD_BYTES:
+            return False
         scheme, n, r, p, salt_b64, hash_b64 = encoded.split("$")
         if scheme != "scrypt":
             return False
+        n_value = int(n)
+        r_value = int(r)
+        p_value = int(p)
+        salt = _unb64(salt_b64)
         expected = _unb64(hash_b64)
+        if (
+            n_value < 2
+            or n_value & (n_value - 1)
+            or r_value < 1
+            or p_value < 1
+            or n_value * r_value * p_value > _SCRYPT_MAX_WORK
+            or len(salt) != 16
+            or len(expected) != _SCRYPT_DKLEN
+        ):
+            return False
         dk = hashlib.scrypt(
-            password.encode("utf-8"),
-            salt=_unb64(salt_b64),
-            n=int(n),
-            r=int(r),
-            p=int(p),
-            dklen=len(expected),
+            password_bytes,
+            salt=salt,
+            n=n_value,
+            r=r_value,
+            p=p_value,
+            dklen=_SCRYPT_DKLEN,
             maxmem=_SCRYPT_MAXMEM,
         )
-    except ValueError, TypeError:
+    except ValueError, TypeError, UnicodeError:
         return False
     return hmac.compare_digest(dk, expected)
 
@@ -173,6 +191,8 @@ def verify_token(
     secret: str, purpose: str, token: str, *, bound: str = "", now: float | None = None
 ) -> str | None:
     """Return the token `subject` if valid/unexpired/purpose-and-bound-matched, else None."""
+    if not isinstance(token, str) or len(token) > _MAX_TOKEN_BYTES:
+        return None
     try:
         encoded, mac = token.split(".")
         expected = hmac.new(secret.encode("utf-8"), encoded.encode("ascii"), "sha256").hexdigest()
@@ -183,7 +203,7 @@ def verify_token(
         return None
     if got_purpose != purpose or got_bound != bound:
         return None
-    if int(expires) < int(time.time() if now is None else now):
+    if int(expires) <= int(time.time() if now is None else now):
         return None
     return subject
 
@@ -192,7 +212,7 @@ def verify_token(
 class UserRecord:
     id: str
     email: str
-    hashed_password: str
+    hashed_password: str = field(repr=False)
     is_active: bool = True
     is_verified: bool = False
     created_at: float = 0.0
@@ -382,29 +402,35 @@ class EmailSender(Protocol):
 
 
 class LogEmailSender:
-    """Default dev sender — prints the link instead of delivering it.
+    """Development sender that logs delivery without exposing tokens by default.
 
-    The default so that a freshly wired application works end to end with no
-    SMTP server: the verification link appears wherever `printer` writes, and
-    can be pasted into a browser. That also means **every link is printed in
-    clear text**, which is exactly what you do not want in production; put
-    `SmtpEmailSender` (or your own transport) in front of it there.
+    Pass `expose_tokens=True` only for a local development process when a link
+    must be copied into a browser. The safe default records that delivery would
+    have happened without putting a bearer token into logs.
 
     Args:
         printer: Where a line goes. `print` by default; pass a logger's method
             to route it somewhere durable.
+        expose_tokens: Include bearer-token links in output. Disabled by default.
     """
 
-    def __init__(self, printer: Callable[[str], None] = print) -> None:
+    def __init__(
+        self, printer: Callable[[str], None] = print, *, expose_tokens: bool = False
+    ) -> None:
         self._print = printer
+        self._expose_tokens = expose_tokens
+
+    def _delivery(self, purpose: str, email: str, link: str) -> None:
+        suffix = f": {link}" if self._expose_tokens else " (link redacted)"
+        self._print(f"[wreath.users] {purpose} {email}{suffix}")
 
     async def send_verification(self, email: str, link: str) -> None:
-        """Print one `[wreath.users] verify <email>: <link>` line."""
-        self._print(f"[wreath.users] verify {email}: {link}")
+        """Log verification delivery, redacting the link unless opted in."""
+        self._delivery("verify", email, link)
 
     async def send_password_reset(self, email: str, link: str) -> None:
-        """Print one `[wreath.users] reset <email>: <link>` line."""
-        self._print(f"[wreath.users] reset {email}: {link}")
+        """Log reset delivery, redacting the link unless opted in."""
+        self._delivery("reset", email, link)
 
     async def send(self, message: Message) -> None:
         """Print one line for `message`, including its class. Nothing is sent."""
@@ -494,15 +520,52 @@ class Unsubscribe:
     requirement. The headers are the requirement.
     """
 
-    url: str
+    url: str = field(repr=False)
     mailto: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.url.startswith("https://"):
+        invalid = any(ord(char) <= 0x20 or 0x7F <= ord(char) <= 0x9F for char in self.url)
+        try:
+            parsed = urlsplit(self.url)
+            port = parsed.port
+            if parsed.hostname is not None:
+                parsed.hostname.encode("idna")
+        except (UnicodeError, ValueError) as error:
             raise ValueError(
-                "a one-click unsubscribe URL must be https, because the provider "
-                f"POSTs to it unattended; got {self.url!r}"
+                "a one-click unsubscribe URL must be https, absolute, and contain "
+                f"no credentials, controls, or fragment; got {self.url!r}"
+            ) from error
+        if (
+            invalid
+            or port == 0
+            or parsed.scheme != "https"
+            or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "a one-click unsubscribe URL must be https, absolute, and contain "
+                f"no credentials, controls, or fragment; got {self.url!r}"
             )
+        if self.mailto is not None:
+            mailto = urlsplit(self.mailto)
+            invalid_mailto = any(
+                ord(char) <= 0x20
+                or 0x7F <= ord(char) <= 0x9F
+                or char in "<>"
+                for char in self.mailto
+            )
+            if (
+                invalid_mailto
+                or mailto.scheme != "mailto"
+                or mailto.netloc
+                or not mailto.path
+                or mailto.fragment
+            ):
+                raise ValueError(
+                    "a mailto unsubscribe target must use mailto:, name a recipient, "
+                    f"and contain no controls, angle brackets, or fragment; got {self.mailto!r}"
+                )
 
     def header(self) -> str:
         targets = [f"<{self.url}>"]
@@ -517,7 +580,7 @@ class Message:
 
     to: str
     subject: str
-    body: str
+    body: str = field(repr=False)
     #: No default, on purpose. See `MailClass`.
     mail_class: MailClass
     unsubscribe: Unsubscribe | None = None
@@ -614,7 +677,7 @@ class SmtpEmailSender:
     from_addr: str
     port: int = 587
     username: str | None = None
-    password: str | None = None
+    password: str | None = field(default=None, repr=False)
     use_tls: bool = True
     timeout: float = 30.0
     verify_subject: str = "Verify your email"
@@ -909,28 +972,45 @@ async def reset_password(
     verify the token against the user's CURRENT fingerprint — a token minted
     before the latest password change fails, giving single-use semantics.
     """
+    prepared = await _prepare_password_reset(
+        store, secret=secret, token=token, new_password=new_password, now=now
+    )
+    if prepared is None:
+        return False
+    return await _commit_password_reset(store, prepared)
+
+
+async def _prepare_password_reset(
+    store: UserStore, *, secret: str, token: str, new_password: str, now: float | None = None
+) -> tuple[str, str, str] | None:
     subject = _token_subject(token)
     if subject is None:
-        return False
+        return None
     user = await store.get_by_id(subject)
     if user is None:
-        return False
+        return None
     if (
         verify_token(secret, _RESET, token, now=now, bound=fingerprint(user.hashed_password))
         != user.id
     ):
-        return False
+        return None
     try:
         hashed = await _hash_password_off_loop(new_password)
     except ValueError:
-        return False
+        return None
     compare_and_set = getattr(store, "compare_and_set_password", None)
     if compare_and_set is None:
         raise RuntimeError(
             "password reset requires "
             "UserStore.compare_and_set_password(user_id, expected, replacement)"
         )
-    return bool(await compare_and_set(user.id, user.hashed_password, hashed))
+    return user.id, user.hashed_password, hashed
+
+
+async def _commit_password_reset(
+    store: UserStore, prepared: tuple[str, str, str]
+) -> bool:
+    return bool(await store.compare_and_set_password(*prepared))
 
 
 def _token_subject(token: str) -> str | None:

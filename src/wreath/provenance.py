@@ -119,6 +119,15 @@ def _json(value: Any) -> bytes:
     )
 
 
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate provenance field {key!r}")
+        result[key] = value
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class Provenance:
     """An immutable approval chain bound to one exact stored artifact."""
@@ -287,16 +296,28 @@ class Provenance:
     def load(cls, data: bytes | bytearray | memoryview) -> Self:
         """Parse a serialized sidecar, refusing unknown or malformed shapes."""
         try:
-            document = json.loads(bytes(data))
+            document = json.loads(bytes(data), object_pairs_hook=_unique_object)
             if (
                 set(document)
                 != {"attestations", "digest", "media_type", "name", "quorum", "version"}
                 or document["version"] != 1
             ):
                 raise ValueError("unknown provenance fields or version")
+            raw_attestations = document["attestations"]
+            if not isinstance(raw_attestations, list):
+                raise ValueError("provenance attestations must be an array")
+            if len(raw_attestations) > _MAX_SIGNATORIES:
+                raise ValueError(
+                    f"provenance supports at most {_MAX_SIGNATORIES} signatories"
+                )
+            if any(
+                not isinstance(item, dict) or set(item) != {"key_id", "signature"}
+                for item in raw_attestations
+            ):
+                raise ValueError("unknown attestation fields")
             attestations = tuple(
                 Attestation(item["key_id"], b64url_decode(item["signature"]))
-                for item in document["attestations"]
+                for item in raw_attestations
             )
             return cls(
                 b64url_decode(document["digest"]),

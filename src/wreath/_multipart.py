@@ -32,6 +32,13 @@ def parse(
     copied out of the body, and behave identically in the C and Python
     parsers.
     """
+    for name, value in (
+        ("max_parts", max_parts),
+        ("max_part_header_bytes", max_part_header_bytes),
+        ("max_part_bytes", max_part_bytes),
+    ):
+        if type(value) is not int:
+            raise TypeError(f"{name} must be an integer")
     return _raw_parse(
         body,
         boundary,

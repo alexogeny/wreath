@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import random
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -16,15 +17,20 @@ from wreath.http_client import ClientResponse, ConnectError
 from wreath.policy import CsrfPolicy, HttpPolicy
 from wreath.testing import TestClient
 from wreath.webhooks import (
+    GitHubWebhookVerifier,
     HMACWebhookSigner,
     HMACWebhookVerifier,
     LocalReplayStore,
     PostgresWebhookInbox,
     PostgresWebhookOutbox,
+    StandardWebhookVerifier,
+    StripeWebhookVerifier,
     WebhookContext,
     WebhookDispatcher,
     WebhookEnvelope,
     WebhookLimits,
+    WebhookSource,
+    _legacy_signature_base,
     _outbox_delivery,
     _retention_purge_pass,
 )
@@ -78,6 +84,30 @@ def _envelope(body: bytes = b'{"value":1}') -> WebhookEnvelope:
     )
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("body", "not-bytes", "webhook body must be bytes-like"),
+        ("relay_path", "not-a-sequence", "relay_path must be a tuple or list"),
+    ],
+)
+def test_webhook_envelope_refuses_invalid_container_types(
+    field: str, value: object, message: str
+) -> None:
+    values: Any = {
+        "id": "evt-1",
+        "type": "widget.changed",
+        "version": "1",
+        "timestamp": datetime(2026, 7, 16, 10, 0, tzinfo=UTC),
+        "content_type": "application/json",
+        "body": b"{}",
+    }
+    values[field] = value
+
+    with pytest.raises(TypeError, match=message):
+        WebhookEnvelope(**values)
+
+
 def test_hmac_signer_and_verifier_cover_exact_body() -> None:
     signer = HMACWebhookSigner(KEYS, key_id="current")
     verifier = HMACWebhookVerifier(KEYS, max_age=300)
@@ -121,7 +151,7 @@ def test_invalid_signature_uses_constant_time_comparison(
             now=envelope.timestamp,
         )
     assert len(compared) == 1
-    assert compared[0][0].startswith(b"v1=")
+    assert compared[0][0].startswith(b"v2=")
 
 
 def test_verifier_rejects_stale_timestamp_and_unknown_key() -> None:
@@ -175,6 +205,12 @@ def test_webhook_signer_validates_every_rotation_key() -> None:
         HMACWebhookSigner({"current": b"c" * 32, "previous": b""}, key_id="current")
 
 
+@pytest.mark.parametrize("key_id", ["forged\r\nheader", "forged\x7fheader"])
+def test_webhook_verifier_refuses_control_characters_in_key_ids(key_id: str) -> None:
+    with pytest.raises(ValueError, match="control character"):
+        HMACWebhookVerifier({key_id: b"k" * 32})
+
+
 @pytest.mark.parametrize(
     "missing",
     [
@@ -217,6 +253,15 @@ async def test_local_replay_store_is_bounded_and_expires() -> None:
     assert not await store.claim("source", "three", now=2)
     assert store.size == 2
     assert await store.claim("source", "one", now=20)
+
+
+@pytest.mark.asyncio
+async def test_local_replay_store_covers_the_exact_verifier_window_boundary() -> None:
+    store = LocalReplayStore(max_entries=1, ttl=10)
+
+    assert await store.claim("source", "event", now=0)
+    assert not await store.claim("source", "event", now=10)
+    assert await store.claim("source", "event", now=10.000001)
 
 
 @pytest.mark.asyncio
@@ -310,6 +355,164 @@ async def test_inbound_source_refuses_duplicate_signature_headers() -> None:
 
     assert sent[0]["status"] == 401
     assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_replay_is_claimed_before_payload_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validation_calls = 0
+
+    def compile_validator(_payload: object):
+        def validate(value: object, _path: tuple[str, ...]) -> object:
+            nonlocal validation_calls
+            validation_calls += 1
+            return value
+
+        return validate
+
+    monkeypatch.setattr("wreath.webhooks._body_validator", compile_validator)
+    app = Wreath()
+    source = app.webhooks("partners").source(
+        "sender", path="/hooks/sender", verifier=HMACWebhookVerifier(KEYS)
+    )
+
+    @source.event("widget.changed", payload=dict)
+    async def changed(_context: WebhookContext, _event: object) -> None:
+        pass
+
+    envelope = WebhookEnvelope(
+        id="evt-replayed",
+        type="widget.changed",
+        version="1",
+        timestamp=datetime.now(UTC),
+        content_type="application/json",
+        body=b"{}",
+    )
+    headers = list(HMACWebhookSigner(KEYS, key_id="current").headers(envelope))
+
+    first = await _raw_post(app, "/hooks/sender", envelope.body, headers)
+    duplicate = await _raw_post(app, "/hooks/sender", envelope.body, headers)
+
+    assert first[0]["status"] == 204
+    assert duplicate[0]["status"] == 409
+    assert validation_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_replay_identity_is_scoped_to_its_hub() -> None:
+    app = Wreath()
+    replay = LocalReplayStore(max_entries=8, ttl=300)
+    calls: list[str] = []
+    for hub_name in ("tenant-a", "tenant-b"):
+        source = app.webhooks(hub_name).source(
+            "provider",
+            path=f"/hooks/{hub_name}",
+            verifier=HMACWebhookVerifier(KEYS),
+            replay=replay,
+        )
+
+        @source.event("widget.changed", payload=WidgetChanged)
+        async def changed(context: WebhookContext, _event: WidgetChanged) -> None:
+            calls.append(context.source)
+
+    envelope = WebhookEnvelope(
+        id="provider-event-id",
+        type="widget.changed",
+        version="1",
+        timestamp=datetime.now(UTC),
+        content_type="application/json",
+        body=b'{"value":1}',
+    )
+    headers = list(HMACWebhookSigner(KEYS, key_id="current").headers(envelope))
+
+    first = await _raw_post(app, "/hooks/tenant-a", envelope.body, headers)
+    second = await _raw_post(app, "/hooks/tenant-b", envelope.body, headers)
+
+    assert first[0]["status"] == 204
+    assert second[0]["status"] == 204
+    assert calls == ["provider", "provider"]
+
+
+@pytest.mark.asyncio
+async def test_direct_sources_retain_distinct_default_replay_namespaces() -> None:
+    app = Wreath()
+    replay = LocalReplayStore(max_entries=8, ttl=300)
+    calls: list[str] = []
+    for name in ("provider-a", "provider-b"):
+        source = WebhookSource(
+            app,
+            name,
+            path=f"/hooks/{name}",
+            verifier=HMACWebhookVerifier(KEYS),
+            replay=replay,
+            limits=WebhookLimits(),
+            inbox=None,
+            session_factory=None,
+            lease_owner="receiver",
+            lease_seconds=30,
+        )
+
+        @source.event("widget.changed", payload=WidgetChanged)
+        async def changed(context: WebhookContext, _event: WidgetChanged) -> None:
+            calls.append(context.source)
+
+    envelope = WebhookEnvelope(
+        id="provider-event-id",
+        type="widget.changed",
+        version="1",
+        timestamp=datetime.now(UTC),
+        content_type="application/json",
+        body=b'{"value":1}',
+    )
+    headers = list(HMACWebhookSigner(KEYS, key_id="current").headers(envelope))
+
+    first = await _raw_post(app, "/hooks/provider-a", envelope.body, headers)
+    second = await _raw_post(app, "/hooks/provider-b", envelope.body, headers)
+
+    assert first[0]["status"] == 204
+    assert second[0]["status"] == 204
+    assert calls == ["provider-a", "provider-b"]
+
+
+@pytest.mark.asyncio
+async def test_github_replay_cannot_change_its_unsigned_delivery_id() -> None:
+    secret = b"github webhook secret"
+    body = b'{"value":7}'
+    signature = b"sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest().encode("ascii")
+    app = Wreath()
+    source = app.webhooks("github").source(
+        "github",
+        path="/hooks/github",
+        verifier=GitHubWebhookVerifier(secret),
+    )
+    calls = 0
+
+    @source.event("widget.changed", payload=WidgetChanged)
+    async def changed(_context: WebhookContext, _event: WidgetChanged) -> None:
+        nonlocal calls
+        calls += 1
+
+    common = [
+        (b"x-hub-signature-256", signature),
+        (b"x-github-event", b"widget.changed"),
+    ]
+    first = await _raw_post(
+        app,
+        "/hooks/github",
+        body,
+        [*common, (b"x-github-delivery", b"delivery-1")],
+    )
+    replay = await _raw_post(
+        app,
+        "/hooks/github",
+        body,
+        [*common, (b"x-github-delivery", b"attacker-changed-it")],
+    )
+
+    assert first[0]["status"] == 204
+    assert replay[0]["status"] == 409
+    assert calls == 1
 
 
 @pytest.mark.asyncio
@@ -654,6 +857,44 @@ def test_webhook_limits_are_positive_and_hubs_are_unique() -> None:
         app.webhooks("partners")
 
 
+@pytest.mark.parametrize("value", [True, 1.5, float("nan"), float("inf")])
+def test_webhook_limits_require_positive_integers(value: Any) -> None:
+    for field in (
+        "max_body_bytes",
+        "max_headers",
+        "max_header_bytes",
+        "max_event_id_bytes",
+    ):
+        with pytest.raises(ValueError, match=f"webhook limit {field} must be a positive integer"):
+            WebhookLimits(**{field: value})
+
+
+def test_source_refuses_a_replay_store_shorter_than_the_signature_window() -> None:
+    app = Wreath()
+
+    @asynccontextmanager
+    async def session_factory():
+        yield object()
+
+    with pytest.raises(ValueError, match="replay store ttl must cover"):
+        app.webhooks("partners").source(
+            "sender",
+            path="/hooks/sender",
+            verifier=HMACWebhookVerifier(KEYS, max_age=300),
+            replay=LocalReplayStore(max_entries=10, ttl=299),
+        )
+
+    durable_app = Wreath()
+    with pytest.raises(ValueError, match="inbox retention must cover"):
+        durable_app.webhooks("partners").source(
+            "sender",
+            path="/hooks/sender",
+            verifier=HMACWebhookVerifier(KEYS, max_age=300),
+            inbox=PostgresWebhookInbox(retention_seconds=299),
+            session_factory=session_factory,
+        )
+
+
 def test_webhook_hub_without_durable_stores_has_no_schema_owners() -> None:
     app = Wreath()
     hooks = app.webhooks("ephemeral")
@@ -788,6 +1029,217 @@ def test_relay_path_is_covered_by_signature_without_body_boundary_collision() ->
         )
 
 
+@pytest.mark.parametrize(
+    ("header", "replacement"),
+    (
+        (b"wreath-webhook-version", b"2"),
+        (b"wreath-correlation-id", b"attacker-correlation"),
+        (b"wreath-causation-id", b"attacker-cause"),
+    ),
+)
+def test_wreath_signature_authenticates_semantic_metadata(
+    header: bytes, replacement: bytes
+) -> None:
+    envelope = WebhookEnvelope(
+        id="evt-metadata",
+        type="widget.changed",
+        version="1",
+        timestamp=datetime.now(UTC),
+        content_type="application/json",
+        body=b"{}",
+        correlation_id="trusted-correlation",
+        causation_id="trusted-cause",
+    )
+    headers = dict(HMACWebhookSigner(KEYS, key_id="current").headers(envelope))
+    headers[header] = replacement
+
+    with pytest.raises(ValueError, match="invalid webhook signature"):
+        HMACWebhookVerifier(KEYS).verify(
+            body=envelope.body,
+            headers=headers,
+            now=envelope.timestamp,
+        )
+
+
+@pytest.mark.parametrize(
+    "header", [b"wreath-correlation-id", b"wreath-causation-id"]
+)
+def test_wreath_signature_refuses_empty_unsigned_lineage_metadata(header: bytes) -> None:
+    envelope = _envelope()
+    headers = dict(HMACWebhookSigner(KEYS, key_id="current").headers(envelope))
+    headers[header] = b""
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        HMACWebhookVerifier(KEYS).verify(
+            body=envelope.body,
+            headers=headers,
+            now=envelope.timestamp,
+        )
+
+
+def test_legacy_wreath_signature_is_limited_to_metadata_free_version_one() -> None:
+    envelope = _envelope()
+    headers = dict(HMACWebhookSigner(KEYS, key_id="current").headers(envelope))
+    timestamp = headers[b"wreath-webhook-timestamp"]
+    legacy_base = b"\n".join(
+        (b"wreath-v1", timestamp, b"evt-1", b"widget.changed", envelope.body)
+    )
+    assert (
+        _legacy_signature_base(timestamp, envelope.id, envelope.type, envelope.body, ())
+        == legacy_base
+    )
+    legacy = hmac.new(
+        KEYS["current"],
+        legacy_base,
+        hashlib.sha256,
+    ).hexdigest()
+    headers[b"wreath-webhook-signature"] = f"v1={legacy}".encode("ascii")
+
+    verified = HMACWebhookVerifier(KEYS).verify(
+        body=envelope.body,
+        headers=headers,
+        now=envelope.timestamp,
+    )
+    assert verified.version == "1"
+
+    unsigned_prefix = dict(headers)
+    unsigned_prefix[b"wreath-webhook-signature"] = legacy.encode("ascii")
+    wrong_version = dict(headers)
+    wrong_version[b"wreath-webhook-version"] = b"2"
+    unsigned_correlation = dict(headers)
+    unsigned_correlation[b"wreath-correlation-id"] = b"unsigned"
+    unsigned_causation = dict(headers)
+    unsigned_causation[b"wreath-causation-id"] = b"unsigned"
+    for refused in (
+        unsigned_prefix,
+        wrong_version,
+        unsigned_correlation,
+        unsigned_causation,
+    ):
+        with pytest.raises(ValueError, match="invalid webhook signature"):
+            HMACWebhookVerifier(KEYS).verify(
+                body=envelope.body,
+                headers=refused,
+                now=envelope.timestamp,
+            )
+
+    relay_headers = dict(headers)
+    relay_headers[b"wreath-webhook-relay-path"] = b"sender"
+    relay_base = b"\n".join(
+        (
+            b"wreath-v1-relay",
+            timestamp,
+            b"evt-1",
+            b"widget.changed",
+            b"sender",
+            envelope.body,
+        )
+    )
+    assert (
+        _legacy_signature_base(
+            timestamp, envelope.id, envelope.type, envelope.body, ("sender",)
+        )
+        == relay_base
+    )
+    relay_signature = hmac.new(
+        KEYS["current"],
+        relay_base,
+        hashlib.sha256,
+    ).hexdigest()
+    relay_headers[b"wreath-webhook-signature"] = f"v1={relay_signature}".encode("ascii")
+    relayed = HMACWebhookVerifier(KEYS).verify(
+        body=envelope.body,
+        headers=relay_headers,
+        now=envelope.timestamp,
+    )
+    assert relayed.relay_path == ("sender",)
+
+
+def test_signer_can_redeliver_a_stored_legacy_outbox_profile() -> None:
+    envelope = _envelope()
+    headers = dict(
+        HMACWebhookSigner(KEYS, key_id="current").headers(
+            envelope, signature_profile="wreath-v1-hmac-sha256"
+        )
+    )
+
+    assert headers[b"wreath-webhook-signature"].startswith(b"v1=")
+    assert HMACWebhookVerifier(KEYS).verify(
+        body=envelope.body, headers=headers, now=envelope.timestamp
+    ) == envelope
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        WebhookEnvelope(
+            id="evt-1",
+            type="widget.changed",
+            version="2",
+            timestamp=datetime(2026, 7, 16, 10, 0, tzinfo=UTC),
+            content_type="application/json",
+            body=b"{}",
+        ),
+        WebhookEnvelope(
+            id="evt-1",
+            type="widget.changed",
+            version="1",
+            timestamp=datetime(2026, 7, 16, 10, 0, tzinfo=UTC),
+            content_type="application/json",
+            body=b"{}",
+            correlation_id="correlation",
+        ),
+        WebhookEnvelope(
+            id="evt-1",
+            type="widget.changed",
+            version="1",
+            timestamp=datetime(2026, 7, 16, 10, 0, tzinfo=UTC),
+            content_type="application/json",
+            body=b"{}",
+            causation_id="causation",
+        ),
+    ],
+)
+def test_legacy_signer_refuses_envelopes_with_unsigned_fields(
+    envelope: WebhookEnvelope,
+) -> None:
+    with pytest.raises(ValueError, match="profile is unsupported"):
+        HMACWebhookSigner(KEYS, key_id="current").headers(
+            envelope, signature_profile="wreath-v1-hmac-sha256"
+        )
+
+
+def test_signer_refuses_an_unknown_stored_signature_profile() -> None:
+    with pytest.raises(ValueError, match="profile is unsupported"):
+        HMACWebhookSigner(KEYS, key_id="current").headers(
+            _envelope(), signature_profile="unknown-profile"
+        )
+
+
+@pytest.mark.asyncio
+async def test_inbox_claim_uses_the_authenticated_deduplication_identity() -> None:
+    envelope = WebhookEnvelope(
+        id="unsigned-provider-id",
+        type="widget.changed",
+        version="1",
+        timestamp=datetime.now(UTC),
+        content_type="application/json",
+        body=b"{}",
+        deduplication_id="authenticated-body-digest",
+    )
+    session = _FakeSession(rows=[{"fencing_token": 1}])
+
+    await PostgresWebhookInbox().claim(
+        session,
+        source="provider",
+        envelope=envelope,
+        lease_owner="worker",
+        lease_seconds=30,
+    )
+
+    assert session.calls[0][1][1] == "authenticated-body-digest"
+
+
 class _FakeRaw:
     def __init__(
         self,
@@ -844,6 +1296,62 @@ class _FakeSession:
     def raw(self, sql: str, *args: object) -> _FakeRaw:
         check_for(self, sql, args)
         return _FakeRaw(self, sql, args)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "deduplication_id", "status"),
+    [
+        (b'{"value":1}', "authenticated-body-digest", 204),
+        (b'{"value":1}', None, 204),
+        (b"not-json", "authenticated-body-digest", 400),
+        (b"not-json", None, 400),
+    ],
+)
+async def test_durable_source_completes_the_selected_replay_identity(
+    body: bytes, deduplication_id: str | None, status: int
+) -> None:
+    envelope = WebhookEnvelope(
+        id="provider-event-id",
+        type="widget.changed",
+        version="1",
+        timestamp=datetime.now(UTC),
+        content_type="application/json",
+        body=body,
+        deduplication_id=deduplication_id,
+    )
+
+    class Verifier:
+        max_age = 300.0
+
+        def verify(self, **_options: Any) -> WebhookEnvelope:
+            return envelope
+
+    app = Wreath()
+    session = _FakeSession(rows=[{"fencing_token": 7}], values=[1])
+
+    @asynccontextmanager
+    async def session_factory():
+        yield session
+
+    source = app.webhooks("durable").source(
+        "provider",
+        path="/hooks/durable-identity",
+        verifier=Verifier(),
+        inbox=PostgresWebhookInbox(),
+        session_factory=session_factory,
+        lease_owner="receiver-a",
+    )
+
+    @source.event("widget.changed", payload=WidgetChanged)
+    async def changed(_context: WebhookContext, _event: WidgetChanged) -> None:
+        pass
+
+    response = await _raw_post(app, "/hooks/durable-identity", body, [])
+
+    assert response[0]["status"] == status
+    completion = next(args for sql, args in session.calls if "SET state='completed'" in sql)
+    assert completion[1] == (deduplication_id or envelope.id)
 
 
 @pytest.mark.asyncio
@@ -1157,8 +1665,16 @@ async def test_inbox_refuses_message_id_reuse_for_a_different_event_identity(
     stored_body: bytes,
 ) -> None:
     envelope = _envelope()
-    stored_hash = hashlib.sha256(stored_body).digest()
-    payload_hash = hashlib.sha256(envelope.body).digest()
+    def identity_hash(event_type: str, body: bytes) -> bytes:
+        identity = hashlib.sha256()
+        identity.update(b"wreath-webhook-inbox-v2\0")
+        identity.update(event_type.encode("utf-8"))
+        identity.update(b"\0")
+        identity.update(body)
+        return identity.digest()
+
+    stored_hash = identity_hash(envelope.type, stored_body)
+    payload_hash = identity_hash(envelope.type, envelope.body)
     session = _FakeSession(
         rows=[
             None,
@@ -1195,6 +1711,34 @@ async def test_inbox_refuses_message_id_reuse_for_a_different_event_identity(
 
 
 @pytest.mark.asyncio
+async def test_inbox_event_identity_includes_the_authenticated_event_type() -> None:
+    inbox = PostgresWebhookInbox()
+    original = _envelope()
+    changed_type = WebhookEnvelope(
+        id=original.id,
+        type="widget.deleted",
+        version=original.version,
+        timestamp=original.timestamp,
+        content_type=original.content_type,
+        body=original.body,
+    )
+    session = _FakeSession(rows=[{"fencing_token": 1}, {"fencing_token": 2}])
+
+    for envelope in (original, changed_type):
+        await inbox.claim(
+            session,
+            source="sender",
+            envelope=envelope,
+            lease_owner="worker",
+            lease_seconds=30,
+        )
+
+    first_identity_hash = session.calls[0][1][3]
+    second_identity_hash = session.calls[1][1][3]
+    assert first_identity_hash != second_identity_hash
+
+
+@pytest.mark.asyncio
 async def test_inbox_completion_requires_current_fencing_token() -> None:
     inbox = PostgresWebhookInbox()
     current = _FakeSession(values=[1])
@@ -1218,6 +1762,62 @@ async def test_inbox_completion_requires_current_fencing_token() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_settled_webhook_rows_receive_a_bounded_retention_deadline() -> None:
+    inbox = PostgresWebhookInbox(retention_seconds=60)
+    inbox_session = _FakeSession(values=[1])
+    await inbox.complete(
+        inbox_session,
+        source="sender",
+        message_id="evt-1",
+        fencing_token=2,
+        result_status=204,
+    )
+
+    delivery = _outbox_delivery(_delivery_row())
+    outbox = PostgresWebhookOutbox(retention_seconds=120)
+    outbox_sessions = [_FakeSession(values=[1]) for _ in range(3)]
+    await outbox.mark_delivered(outbox_sessions[0], delivery, status=204)
+    await outbox.mark_unknown(outbox_sessions[1], delivery, failure="timeout")
+    await outbox.mark_failed(outbox_sessions[2], delivery, status=400, failure="refused")
+
+    assert "retention_until" in inbox_session.calls[0][0]
+    assert inbox_session.calls[0][1][-1] == 60
+    for session in outbox_sessions:
+        assert "retention_until" in session.calls[0][0]
+        assert session.calls[0][1][-1] == 120
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [(True, TypeError), ("204", TypeError), (99, ValueError), (600, ValueError)],
+)
+async def test_inbox_refuses_an_invalid_replay_response_status(
+    status: Any, error: type[Exception]
+) -> None:
+    session = _FakeSession()
+
+    with pytest.raises(error, match="result_status must be an HTTP status"):
+        await PostgresWebhookInbox().complete(
+            session,
+            source="sender",
+            message_id="evt-1",
+            fencing_token=2,
+            result_status=status,
+        )
+
+    assert session.calls == []
+
+
+@pytest.mark.parametrize("retention", [True, "60", 0, -1, float("nan"), float("inf")])
+def test_webhook_storage_retention_must_be_positive_and_finite(retention: Any) -> None:
+    with pytest.raises(ValueError, match="retention_seconds must be positive and finite"):
+        PostgresWebhookInbox(retention_seconds=retention)
+    with pytest.raises(ValueError, match="retention_seconds must be positive and finite"):
+        PostgresWebhookOutbox(retention_seconds=retention)
+
+
 def _delivery_row(*, attempts: int = 1, destination: str = "receiver") -> dict[str, object]:
     return {
         "delivery_id": "delivery-1",
@@ -1236,6 +1836,13 @@ def _delivery_row(*, attempts: int = 1, destination: str = "receiver") -> dict[s
         "causation_id": None,
         "relay_path": "",
     }
+
+
+def test_outbox_delivery_preserves_the_stored_signature_profile() -> None:
+    row = _delivery_row()
+    row["signature_profile"] = "wreath-v1-hmac-sha256"
+
+    assert _outbox_delivery(row).signature_profile == "wreath-v1-hmac-sha256"
 
 
 @pytest.mark.asyncio
@@ -1691,6 +2298,12 @@ def test_a_signer_refuses_missing_or_malformed_key_configuration() -> None:
         HMACWebhookSigner(keys, key_id="current")
 
 
+@pytest.mark.parametrize("key_id", ["line\nbreak", "carriage\rreturn", "delete\x7f"])
+def test_signer_refuses_a_key_id_that_cannot_be_a_header_value(key_id: str) -> None:
+    with pytest.raises(ValueError, match="key id contains a control character"):
+        HMACWebhookSigner({key_id: b"s" * 32}, key_id=key_id)
+
+
 def test_a_verifier_with_no_usable_key_is_refused_at_construction() -> None:
     with pytest.raises(ValueError, match="non-empty webhook verification key"):
         HMACWebhookVerifier({})
@@ -1712,11 +2325,83 @@ def test_a_verifier_refuses_malformed_key_ids_and_secret_types() -> None:
         HMACWebhookVerifier(keys)
 
 
+@pytest.mark.parametrize("field", ["correlation_id", "causation_id"])
+def test_an_envelope_refuses_control_characters_in_outbound_headers(field: str) -> None:
+    values: dict[str, Any] = {field: "trusted\r\nx-forged: yes"}
+
+    with pytest.raises(ValueError, match=f"webhook {field} contains a control character"):
+        WebhookEnvelope(
+            id="evt-1",
+            type="widget.changed",
+            version="1",
+            timestamp=datetime.now(UTC),
+            content_type="application/json",
+            body=b"{}",
+            **values,
+        )
+
+
+@pytest.mark.parametrize("field", ["correlation_id", "causation_id", "deduplication_id"])
+def test_an_envelope_refuses_empty_optional_security_identifiers(field: str) -> None:
+    with pytest.raises(ValueError, match=f"webhook {field} must not be empty"):
+        WebhookEnvelope(
+            id="evt-1",
+            type="widget.changed",
+            version="1",
+            timestamp=datetime.now(UTC),
+            content_type="application/json",
+            body=b"{}",
+            **{field: ""},
+        )
+
+
+@pytest.mark.parametrize(
+    "content_type", ["application/json\r\nx-forged: yes", "text/☃", "text/plain\x7f"]
+)
+def test_an_envelope_refuses_an_unsafe_content_type_header(content_type: str) -> None:
+    with pytest.raises(ValueError, match="webhook content_type must be a Latin-1 header value"):
+        WebhookEnvelope(
+            id="evt-1",
+            type="widget.changed",
+            version="1",
+            timestamp=datetime.now(UTC),
+            content_type=content_type,
+            body=b"{}",
+        )
+
+
+def test_webhook_envelope_snapshots_mutable_body_and_relay_inputs() -> None:
+    body = bytearray(b"trusted")
+    relay_path = ["origin"]
+    envelope = WebhookEnvelope(
+        id="evt-1",
+        type="widget.changed",
+        version="1",
+        timestamp=datetime.now(UTC),
+        content_type="application/json",
+        body=body,
+        relay_path=relay_path,
+    )
+
+    body[:] = b"forged!"
+    relay_path[0] = "attacker"
+
+    assert envelope.body == b"trusted"
+    assert envelope.relay_path == ("origin",)
+
+
 def test_a_verifier_replay_window_that_can_never_hold_is_refused() -> None:
     with pytest.raises(ValueError, match="max_age must be positive"):
         HMACWebhookVerifier(KEYS, max_age=0)
     with pytest.raises(ValueError, match="max_age must be positive"):
         HMACWebhookVerifier(KEYS, max_age=-1)
+
+
+def test_wreath_verifier_replay_window_is_immutable() -> None:
+    verifier = HMACWebhookVerifier(KEYS)
+
+    with pytest.raises(AttributeError):
+        verifier.max_age = 3600
 
 
 @pytest.mark.parametrize("window", [float("nan"), float("inf")])
@@ -1785,6 +2470,42 @@ def test_webhook_dispatcher_windows_must_be_finite(window: float) -> None:
         WebhookDispatcher(outbox, {}, worker_id="w", max_attempts=window)
 
 
+@pytest.mark.parametrize("window", [True, "1"])
+def test_webhook_time_windows_require_numeric_nonboolean_values(window: Any) -> None:
+    builders = (
+        lambda: HMACWebhookVerifier(KEYS, max_age=window),
+        lambda: StandardWebhookVerifier(b"secret", max_age=window),
+        lambda: StripeWebhookVerifier(b"secret", max_age=window),
+        lambda: GitHubWebhookVerifier(b"secret", replay_ttl=window),
+        lambda: WebhookDispatcher(
+            PostgresWebhookOutbox(), {}, worker_id="worker", lease_seconds=window
+        ),
+    )
+    for build in builders:
+        with pytest.raises(ValueError, match="positive.*finite"):
+            build()
+
+
+@pytest.mark.parametrize("window", [True, "1"])
+def test_dispatcher_retry_windows_require_numeric_nonboolean_values(window: Any) -> None:
+    outbox = PostgresWebhookOutbox()
+    with pytest.raises(ValueError, match="limits are invalid"):
+        WebhookDispatcher(outbox, {}, worker_id="worker", retry_delay=window)
+    with pytest.raises(ValueError, match="limits are invalid"):
+        WebhookDispatcher(outbox, {}, worker_id="worker", retry_cap=window)
+
+
+def test_dispatcher_snapshots_retry_statuses() -> None:
+    statuses = {429, 503}
+    dispatcher = WebhookDispatcher(
+        PostgresWebhookOutbox(), {}, worker_id="worker", retry_statuses=statuses
+    )
+
+    statuses.clear()
+
+    assert dispatcher._retry_statuses == frozenset({429, 503})
+
+
 def test_a_dispatcher_with_impossible_limits_is_refused() -> None:
     outbox = PostgresWebhookOutbox()
     with pytest.raises(ValueError, match="limits are invalid"):
@@ -1797,3 +2518,9 @@ def test_a_dispatcher_with_impossible_limits_is_refused() -> None:
         WebhookDispatcher(outbox, {}, worker_id="")
     # Zero delay is not negative: retrying immediately is a choice, not a typo.
     assert WebhookDispatcher(outbox, {}, worker_id="w", retry_delay=0.0) is not None
+
+
+@pytest.mark.parametrize("worker_id", [True, 1, b"worker"])
+def test_dispatcher_worker_id_must_be_a_nonempty_string(worker_id: Any) -> None:
+    with pytest.raises(ValueError, match="worker_id.*non-empty string"):
+        WebhookDispatcher(PostgresWebhookOutbox(), {}, worker_id=worker_id)

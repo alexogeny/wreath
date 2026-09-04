@@ -53,7 +53,40 @@ async def test_a_principal_id_cannot_collide_with_an_address() -> None:
         client = ("10.0.0.1", 5000)
 
     assert principal_key(_Anonymous()) == "ip:testclient"
-    assert principal_key(_Named()) == "User:testclient"
+    assert principal_key(_Named()) == "4:User0:testclient"
+
+
+async def test_identity_type_and_id_boundaries_cannot_collide() -> None:
+    class _First:
+        identity = Identity("c", type="a:b")
+        client = None
+
+    class _Second:
+        identity = Identity("b:c", type="a")
+        client = None
+
+    assert principal_key(_First()) != principal_key(_Second())
+
+
+async def test_empty_identity_components_cannot_mimic_framed_components() -> None:
+    class _EmptyType:
+        identity = Identity("0:b", type="", namespace="a")
+        client = None
+
+    class _Typed:
+        identity = Identity("b", type="a")
+        client = None
+
+    class _EmptyNamespace:
+        identity = Identity("1:ab", type="x")
+        client = None
+
+    class _Namespaced:
+        identity = Identity("b", type="x", namespace="a")
+        client = None
+
+    assert principal_key(_EmptyType()) != principal_key(_Typed())
+    assert principal_key(_EmptyNamespace()) != principal_key(_Namespaced())
 
 
 async def test_an_anonymous_caller_falls_back_to_its_address() -> None:

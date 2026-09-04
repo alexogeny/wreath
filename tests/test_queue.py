@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from typing import Any, cast
 
 import pytest
 
@@ -600,6 +601,11 @@ class TestRoundRobin:
             RoundRobin(capacity=0)
         with pytest.raises(ValueError, match="max_lanes must be positive"):
             RoundRobin(capacity=4, max_lanes=0)
+
+    @pytest.mark.parametrize("max_lanes", [float("nan"), float("inf")])
+    def test_lane_ceiling_must_be_finite(self, max_lanes: float) -> None:
+        with pytest.raises(ValueError, match="max_lanes.*positive.*integer"):
+            RoundRobin(capacity=4, max_lanes=cast(Any, max_lanes))
 
 
 # These are about *consistency* rather than about any one container. Each was

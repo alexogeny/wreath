@@ -248,11 +248,25 @@ class BFFResource:
         origin = getattr(self.client, "origin", None)
         if not isinstance(origin, str):
             raise TypeError("client must expose its HTTPS origin as text")
-        parsed = urlsplit(origin)
+        if "\\" in origin or any(
+            ord(character) <= 0x20 for character in origin
+        ):
+            raise ValueError("client origin must contain only an HTTPS scheme, host, and port")
+        try:
+            parsed = urlsplit(origin)
+            port = parsed.port
+            hostname = parsed.hostname
+            if hostname is not None:
+                hostname.encode("idna")
+        except (UnicodeError, ValueError) as error:
+            raise ValueError(
+                "client origin must contain only an HTTPS scheme, host, and port"
+            ) from error
         if parsed.scheme != "https":
             raise ValueError("BFF resource clients must use an HTTPS origin")
         if (
-            parsed.hostname is None
+            hostname is None
+            or port == 0
             or parsed.username is not None
             or parsed.password is not None
             or parsed.path not in {"", "/"}
@@ -262,6 +276,8 @@ class BFFResource:
             raise ValueError("client origin must contain only an HTTPS scheme, host, and port")
         if not callable(getattr(self.client, "request", None)):
             raise TypeError("client must expose an async request method")
+        if not isinstance(self.methods, Set):
+            raise TypeError("BFF resource methods must be a set of strings")
         normalized_methods: set[str] = set()
         for method in self.methods:
             if not isinstance(method, str):
@@ -312,6 +328,8 @@ def _validate_resource_name(name: str) -> str:
 
 
 def _validate_dynamic_path(path: str) -> str:
+    if path.startswith("/"):
+        raise BadRequest("BFF resource paths must not begin with a slash")
     if "\\" in path or any(segment in {".", ".."} for segment in path.split("/")):
         raise BadRequest("BFF resource paths cannot contain backslashes or dot segments")
     return quote(path, safe="/!$&'()*+,-.:;=@_~")
@@ -324,7 +342,11 @@ def _query_suffix(raw: bytes) -> str:
         value = raw.decode("ascii")
     except UnicodeDecodeError as error:
         raise BadRequest("BFF query strings must be ASCII and percent-encoded") from error
-    if _INVALID_PERCENT.search(value) or "#" in value or any(ord(char) < 32 for char in value):
+    if (
+        _INVALID_PERCENT.search(value)
+        or "#" in value
+        or any(ord(char) <= 32 or ord(char) == 127 for char in value)
+    ):
         raise BadRequest("BFF query strings must use valid percent escapes and contain no controls")
     return "?" + value
 

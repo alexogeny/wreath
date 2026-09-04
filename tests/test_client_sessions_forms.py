@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pytest
@@ -144,7 +145,7 @@ async def test_session_cleared_deletes_cookie() -> None:
         request.state.session.clear()
         return {"ok": True}
 
-    token = middleware._sign(b'{"user":"a"}', 2_000_000_000)
+    token = middleware._sign(b'{"user":"a"}', int(time.time()))
 
     client = TestClient(app)
     response = await client.get("/logout", headers={"cookie": f"wreath_session={token}"})
@@ -162,7 +163,7 @@ async def test_legacy_unbound_session_is_loaded_and_reissued_for_this_host() -> 
     async def read(request: Any) -> Any:
         return {"user": request.state.session.get("user")}
 
-    token = middleware._sign(_json_dumps({"user": "ada", "n": 3}), 2_000_000_000)
+    token = middleware._sign(_json_dumps({"user": "ada", "n": 3}), int(time.time()))
 
     client = TestClient(app)
     response = await client.get("/read", headers={"cookie": f"wreath_session={token}"})
@@ -181,7 +182,7 @@ async def test_session_mutation_still_reissues_the_cookie() -> None:
         request.state.session["n"] = request.state.session.get("n", 0) + 1
         return {"n": request.state.session["n"]}
 
-    token = middleware._sign(_json_dumps({"user": "ada", "n": 3}), 2_000_000_000)
+    token = middleware._sign(_json_dumps({"user": "ada", "n": 3}), int(time.time()))
 
     client = TestClient(app)
     response = await client.get("/bump", headers={"cookie": f"wreath_session={token}"})
@@ -199,7 +200,7 @@ async def test_session_payload_that_does_not_round_trip_is_reissued() -> None:
     async def read(request: Any) -> Any:
         return {"user": request.state.session.get("user")}
 
-    token = middleware._sign(b'{"user": "ada"}', 2_000_000_000)  # note the space
+    token = middleware._sign(b'{"user": "ada"}', int(time.time()))  # note the space
 
     client = TestClient(app)
     response = await client.get("/read", headers={"cookie": f"wreath_session={token}"})

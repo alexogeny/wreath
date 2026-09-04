@@ -335,7 +335,11 @@ class TestSsoSession:
             ),
             (
                 "code=c&state=issued",
-                {"_oidc_state_idp": "issued", "_oidc_verifier_idp": "v"},
+                {
+                    "_oidc_state_idp": "issued",
+                    "_oidc_verifier_idp": "v",
+                    "_oidc_nonce_idp": "nonce",
+                },
                 (502, {"error": "token_exchange_failed"}, 1),
             ),
         ],

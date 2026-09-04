@@ -127,6 +127,64 @@ def test_report_only_flag_must_be_a_real_boolean() -> None:
         SecurityHeadersPolicy(csp_report_only=1)
 
 
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"content_type_options": 1},
+        {"hsts_include_subdomains": 1},
+        {"hsts_preload": 1},
+    ],
+)
+def test_security_header_flags_must_be_real_booleans(settings: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="must be a bool"):
+        SecurityHeadersPolicy(**settings)
+
+
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [
+        ("content_security_policy", "default-src 'self'\r\nx-injected: yes"),
+        ("frame_options", "DENY\rx-injected: yes"),
+        ("referrer_policy", "no-referrer\nx-injected: yes"),
+        ("permissions_policy", "camera=()\x00x-injected"),
+        ("strict_transport_security", "max-age=10\r\nx-injected: yes"),
+    ],
+)
+def test_security_header_values_refuse_control_characters(setting: str, value: str) -> None:
+    with pytest.raises(ValueError, match=setting):
+        SecurityHeadersPolicy(**{setting: value})
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        "content_security_policy",
+        "frame_options",
+        "referrer_policy",
+        "permissions_policy",
+        "strict_transport_security",
+    ],
+)
+def test_security_header_values_refuse_non_strings(setting: str) -> None:
+    with pytest.raises(ValueError, match=setting):
+        SecurityHeadersPolicy(**{setting: 1})
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        "content_security_policy",
+        "frame_options",
+        "referrer_policy",
+        "permissions_policy",
+        "strict_transport_security",
+    ],
+)
+def test_security_header_values_refuse_empty_directives(setting: str) -> None:
+    with pytest.raises(ValueError, match=setting):
+        SecurityHeadersPolicy(**{setting: " "})
+
+
 @pytest.mark.parametrize("line_break", ["\r", "\n"])
 def test_csp_refuses_each_header_line_break(line_break: str) -> None:
     with pytest.raises(ValueError, match="must not contain a line break"):

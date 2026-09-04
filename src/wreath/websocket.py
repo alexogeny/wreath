@@ -57,7 +57,9 @@ _SENDABLE_CLOSE_CODES = frozenset(
 
 
 def _valid_close_code(code: int) -> bool:
-    return code in _SENDABLE_CLOSE_CODES or 3000 <= code <= 4999
+    return type(code) is int and (
+        code in _SENDABLE_CLOSE_CODES or 3000 <= code <= 4999
+    )
 
 
 class WebSocketDisconnect(Exception):
@@ -328,12 +330,18 @@ class WebSocket:
         Raises:
             ValueError: `code` is not a code an endpoint may send.
         """
+        if type(code) is not int:
+            raise ValueError("WebSocket close code must be an integer")
         if not _valid_close_code(code):
             raise ValueError(
                 f"invalid WebSocket close code {code!r}: send an assigned 1000-range "
                 "code (not 1004/1005/1006/1015) or a 3000-4999 application code "
                 "(RFC 6455 7.4.1)"
             )
+        if not isinstance(reason, str):
+            raise ValueError("WebSocket close reason must be a string")
+        if len(reason.encode("utf-8")) > 123:
+            raise ValueError("WebSocket close reason must be at most 123 UTF-8 bytes")
         await self._ensure_connect()
         await self._send({"type": "websocket.close", "code": code, "reason": reason})
 
@@ -454,6 +462,8 @@ class Calls:
         return handler
 
     async def __aenter__(self) -> Calls:
+        if self._task is not None:
+            raise RuntimeError("this Calls is already active")
         self._task = asyncio.create_task(self._read())
         return self
 
@@ -555,6 +565,8 @@ class Heartbeat:
         resolved_timeout = Duration.of(timeout).total_seconds()
         if resolved_interval <= 0 or resolved_timeout <= 0:
             raise ValueError("heartbeat interval and timeout must be positive")
+        if type(consume) is not bool:
+            raise ValueError("heartbeat consume must be a bool")
         self.frame = frame
         self.acknowledge = acknowledge
         self.interval = resolved_interval
@@ -687,8 +699,12 @@ class WebSocketService:
         enqueue_timeout: Any = 5.0,
         heartbeat: Heartbeat | None = None,
     ) -> None:
+        if type(max_connections) is not int:
+            raise ValueError("max_connections must be a positive integer")
         if max_connections < 1:
             raise ValueError("max_connections must be at least one")
+        if type(queue_capacity) is not int:
+            raise ValueError("queue_capacity must be a positive integer")
         if queue_capacity < 1:
             raise ValueError("queue_capacity must be at least one")
         if overflow not in {"reject", "backpressure", "disconnect"}:
@@ -876,7 +892,7 @@ class WebSocketService:
         try:
             async for frame in connection.websocket:
                 heartbeat = self._heartbeat
-                if heartbeat is not None and heartbeat.acknowledge(frame):
+                if heartbeat is not None and heartbeat.acknowledge(frame) is True:
                     connection.heartbeat_ack.set()
                     if heartbeat.consume:
                         continue

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from .._native import _core
 from .ast import (
     Argument,
@@ -33,6 +35,12 @@ class GraphQLSyntaxError(Exception):
 class Limits:
     """Read-only safety bounds for one parse."""
 
+    max_aliases: int
+    max_complexity: int
+    max_depth: int
+    max_document_bytes: int
+    max_steps: int
+
     __slots__ = (
         "max_aliases",
         "max_complexity",
@@ -57,13 +65,19 @@ class Limits:
             ("max_steps", max_steps),
             ("max_document_bytes", max_document_bytes),
         ):
-            if value < 1:
-                raise ValueError(f"{name} must be positive")
-        self.max_depth = max_depth
-        self.max_complexity = max_complexity
-        self.max_aliases = max_aliases
-        self.max_steps = max_steps
-        self.max_document_bytes = max_document_bytes
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ValueError(f"{name} must be positive integer")
+        object.__setattr__(self, "max_depth", max_depth)
+        object.__setattr__(self, "max_complexity", max_complexity)
+        object.__setattr__(self, "max_aliases", max_aliases)
+        object.__setattr__(self, "max_steps", max_steps)
+        object.__setattr__(self, "max_document_bytes", max_document_bytes)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError("GraphQL parser limits are immutable")
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError("GraphQL parser limits are immutable")
 
 
 DEFAULT_LIMITS = Limits()

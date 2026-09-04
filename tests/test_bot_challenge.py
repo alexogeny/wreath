@@ -93,8 +93,26 @@ def test_turnstile_refuses_each_invalid_secret(secret: object) -> None:
 
 @pytest.mark.parametrize(
     "target",
-    [None, "relative", "//other.example/path"],
-    ids=("non-string", "relative", "scheme-relative"),
+    [
+        None,
+        "relative",
+        "//other.example/path",
+        "/verify?next=x",
+        "/verify#part",
+        "/verify\nnext",
+        "/verify\\next",
+        "/verify\x80next",
+    ],
+    ids=(
+        "non-string",
+        "relative",
+        "scheme-relative",
+        "query",
+        "fragment",
+        "control",
+        "backslash",
+        "non-ascii",
+    ),
 )
 def test_turnstile_refuses_each_non_origin_relative_target(target: object) -> None:
     with pytest.raises(ValueError, match="origin-relative path string"):
@@ -121,6 +139,18 @@ async def test_turnstile_refuses_an_empty_token_and_non_success_status() -> None
         await Turnstile(Client({}), secret="secret").verify("", request)
     with pytest.raises(ChallengeRefused, match="answered 503"):
         await Turnstile(Client({}, status=503), secret="secret").verify("token", request)
+
+
+@pytest.mark.parametrize("token", [1, "\ud800", "x" * 4097], ids=("typed", "surrogate", "long"))
+async def test_turnstile_refuses_invalid_token_shapes_without_an_outbound_call(
+    token: object,
+) -> None:
+    client = Client({"success": True})
+    request = Request({"type": "http", "headers": []}, receive)
+
+    with pytest.raises(ChallengeRefused, match="ASCII string of at most 4096 bytes"):
+        await Turnstile(client, secret="secret").verify(cast("str", token), request)
+    assert client.calls == []
 
 
 @pytest.mark.asyncio
@@ -150,6 +180,39 @@ async def test_turnstile_rejection_message_preserves_provider_detail(
     with pytest.raises(ChallengeRefused) as caught:
         await Turnstile(Client(payload), secret="secret").verify("token", request)
     assert str(caught.value) == message
+
+
+async def test_turnstile_does_not_render_malformed_provider_error_codes() -> None:
+    request = Request({"type": "http", "headers": []}, receive)
+    client = Client({"success": False, "error-codes": "bad-input"})
+
+    with pytest.raises(ChallengeRefused) as caught:
+        await Turnstile(client, secret="secret").verify("token", request)
+    assert str(caught.value) == "Turnstile rejected the token"
+
+
+@pytest.mark.parametrize(
+    "codes",
+    [[1], ["bad\ninput"], ["x" * 65]],
+    ids=("typed-entry", "control-entry", "long-entry"),
+)
+async def test_turnstile_does_not_render_unsafe_provider_error_code_entries(
+    codes: list[object],
+) -> None:
+    request = Request({"type": "http", "headers": []}, receive)
+    client = Client({"success": False, "error-codes": codes})
+
+    with pytest.raises(ChallengeRefused) as caught:
+        await Turnstile(client, secret="secret").verify("token", request)
+    assert str(caught.value) == "Turnstile rejected the token"
+
+
+async def test_turnstile_refuses_an_oversized_provider_response_before_json_parsing() -> None:
+    request = Request({"type": "http", "headers": []}, receive)
+    client = Client({"success": True, "cdata": "x" * 65_536})
+
+    with pytest.raises(ChallengeRefused, match="response is too large"):
+        await Turnstile(client, secret="secret").verify("token", request)
 
 
 @pytest.mark.asyncio
@@ -212,6 +275,16 @@ def test_challenge_dependency_refuses_invalid_declarations() -> None:
     for header in (1, ""):
         with pytest.raises(ValueError, match="non-empty string"):
             challenge_dependency(Challenge(), header=cast("str", header))
+
+
+@pytest.mark.parametrize("header", ["x:token", "x token", "x\ntoken", "x-tokén"])
+def test_challenge_dependency_refuses_invalid_header_names(header: str) -> None:
+    class Challenge:
+        async def verify(self, token: str, request: Request) -> ChallengeResult:
+            return ChallengeResult(provider="custom")
+
+    with pytest.raises(ValueError, match="valid HTTP field name"):
+        challenge_dependency(Challenge(), header=header)
 
 
 @pytest.mark.asyncio

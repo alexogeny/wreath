@@ -477,6 +477,9 @@ def test_hmac_authorization_server_refuses_a_short_signing_secret() -> None:
         "https://user:password@app.example",
         "https://app.example?tenant=acme",
         "https://app.example#issuer",
+        "https://app.example:invalid",
+        "https://app.example/iss\tuer",
+        "https://app.example/issuer\x7f",
     ],
 )
 def test_authorization_server_refuses_an_insecure_issuer(issuer: str) -> None:
@@ -569,6 +572,16 @@ def test_a_token_carries_the_tenant_it_was_minted_in(server) -> None:
         ).tenant
         == "acme"
     )
+
+
+@pytest.mark.parametrize("issuer", ["access", "refresh"])
+def test_direct_token_issuance_refuses_scope_token_splitting(server, issuer: str) -> None:
+    issue = server.issue_access if issuer == "access" else server.issue_refresh
+
+    with pytest.raises(OAuthRefusal, match="scope.*scope-token") as raised:
+        issue(subject="u", audience="api", scope=("read admin",))
+
+    assert raised.value.reason == "invalid-scope"
 
 
 def test_a_minted_token_is_accepted_by_wreaths_own_verifier(server) -> None:

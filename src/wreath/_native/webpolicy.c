@@ -415,6 +415,102 @@ validate_headers(PyObject *headers)
     return 0;
 }
 
+PyObject *
+wreath_validate_response_headers(PyObject *Py_UNUSED(self), PyObject *headers)
+{
+    int has_type = 0, has_length = 0;
+    PyObject *content_length = Py_None;
+    if (!PyList_Check(headers)) {
+        PyErr_SetString(PyExc_TypeError, "response headers must be a list");
+        return NULL;
+    }
+    for (Py_ssize_t index = 0; index < PyList_GET_SIZE(headers); index++) {
+        PyObject *pair = PyList_GET_ITEM(headers, index), *name, *value;
+        if (PyTuple_Check(pair) && PyTuple_GET_SIZE(pair) == 2) {
+            name = PyTuple_GET_ITEM(pair, 0);
+            value = PyTuple_GET_ITEM(pair, 1);
+        } else if (PyList_Check(pair) && PyList_GET_SIZE(pair) == 2) {
+            name = PyList_GET_ITEM(pair, 0);
+            value = PyList_GET_ITEM(pair, 1);
+        } else {
+            PyErr_Format(PyExc_TypeError,
+                         "header at index %zd must be a two-item pair", index);
+            return NULL;
+        }
+        if (!PyBytes_Check(name)) {
+            PyErr_Format(PyExc_TypeError,
+                         "header name at index %zd must be bytes, not %.100s",
+                         index, Py_TYPE(name)->tp_name);
+            return NULL;
+        }
+        const unsigned char *name_data =
+            (const unsigned char *)PyBytes_AS_STRING(name);
+        Py_ssize_t name_size = PyBytes_GET_SIZE(name);
+        if (name_size == 0) {
+            PyErr_Format(PyExc_ValueError,
+                         "header name at index %zd is not an HTTP token: %R",
+                         index, name);
+            return NULL;
+        }
+        for (Py_ssize_t offset = 0; offset < name_size; offset++) {
+            if (!wreath_ascii_token[name_data[offset]]) {
+                PyErr_Format(PyExc_ValueError,
+                             "header name at index %zd is not an HTTP token: %R",
+                             index, name);
+                return NULL;
+            }
+        }
+        if (!PyBytes_Check(value)) {
+            PyErr_Format(PyExc_TypeError,
+                         "header value for %R must be bytes, not %.100s",
+                         name, Py_TYPE(value)->tp_name);
+            return NULL;
+        }
+        const unsigned char *value_data =
+            (const unsigned char *)PyBytes_AS_STRING(value);
+        Py_ssize_t value_size = PyBytes_GET_SIZE(value);
+        for (Py_ssize_t offset = 0; offset < value_size; offset++) {
+            unsigned char byte = value_data[offset];
+            if ((byte < 0x20 && byte != '\t') || byte == 0x7f) {
+                PyErr_Format(PyExc_ValueError,
+                             "header value for %R contains a control character", name);
+                return NULL;
+            }
+        }
+        if (wreath_ascii_equal_ci_str((const char *)name_data, name_size,
+                                      "content-type")) {
+            if (has_type) {
+                PyErr_SetString(PyExc_ValueError,
+                                "headers contain duplicate content-type");
+                return NULL;
+            }
+            has_type = 1;
+        } else if (wreath_ascii_equal_ci_str((const char *)name_data, name_size,
+                                             "content-length")) {
+            if (has_length) {
+                PyErr_SetString(PyExc_ValueError,
+                                "headers contain duplicate content-length");
+                return NULL;
+            }
+            for (Py_ssize_t offset = 0; offset < value_size; offset++) {
+                if (value_data[offset] < '0' || value_data[offset] > '9') {
+                    PyErr_SetString(PyExc_ValueError,
+                                    "content-length must contain only decimal digits");
+                    return NULL;
+                }
+            }
+            if (value_size == 0) {
+                PyErr_SetString(PyExc_ValueError,
+                                "content-length must contain only decimal digits");
+                return NULL;
+            }
+            has_length = 1;
+            content_length = value;
+        }
+    }
+    return PyTuple_Pack(2, has_type ? Py_True : Py_False, content_length);
+}
+
 static int
 header_keys_equal_ci(PyObject *left, PyObject *right)
 {

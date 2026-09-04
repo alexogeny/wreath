@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from wreath import Wreath
-from wreath.auth import BearerTokenBackend, Identity, authenticated, public
+from wreath.auth import BearerTokenBackend, Credentials, Identity, authenticated, public
 from wreath.authorization import AuthorizationVocabulary, authorize, roles
 from wreath.policy import HttpPolicy
 from wreath.request import Request
@@ -29,6 +29,12 @@ async def invoke(
         send,
     )
     return sent
+
+
+def test_credentials_repr_does_not_expose_bearer_value() -> None:
+    secret = "bearer-credential-secret"
+
+    assert secret not in repr(Credentials("Bearer", secret))
 
 
 @pytest.mark.asyncio
@@ -291,6 +297,24 @@ def test_the_correct_registration_is_not_refused() -> None:
     app._compile_routes()
 
 
+def test_a_protected_session_websocket_requires_an_origin_policy() -> None:
+    from wreath.auth import SessionIdentityBackend
+    from wreath.policy import SessionPolicy
+
+    app = Wreath(
+        http_policy=HttpPolicy(session=SessionPolicy(secret="x" * 32, secure=False))
+    )
+    app.configure_auth(SessionIdentityBackend())
+
+    @app.websocket("/private")
+    @authenticated()
+    async def private(websocket: Any) -> None:
+        await websocket.accept()
+
+    with pytest.raises(RuntimeError, match=r"WEBSOCKET /private.*WebSocketOriginPolicy"):
+        app._compile_routes()
+
+
 def test_a_composite_backend_propagates_the_session_requirement() -> None:
     from wreath.auth import CompositeBackend, SessionIdentityBackend
 
@@ -354,6 +378,100 @@ async def test_a_boolean_expiry_is_not_an_expiry() -> None:
         _SessionRequest({"principal": {"sub": "ada", "exp": time.time() - 1}})
     )
     assert expired is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expires", [float("nan"), float("inf"), float("-inf")])
+async def test_a_non_finite_session_expiry_is_refused(expires: float) -> None:
+    from wreath.auth import SessionIdentityBackend
+
+    identity = await SessionIdentityBackend().authenticate(
+        _SessionRequest({"principal": {"sub": "ada", "exp": expires}})
+    )
+
+    assert identity is None
+
+
+@pytest.mark.asyncio
+async def test_a_finite_future_session_expiry_remains_valid() -> None:
+    import time
+
+    from wreath.auth import SessionIdentityBackend
+
+    identity = await SessionIdentityBackend().authenticate(
+        _SessionRequest({"principal": {"sub": "ada", "exp": time.time() + 60}})
+    )
+
+    assert identity is not None and identity.id == "ada"
+
+
+@pytest.mark.asyncio
+async def test_an_arbitrarily_large_integer_session_expiry_remains_valid() -> None:
+    from wreath.auth import SessionIdentityBackend
+
+    identity = await SessionIdentityBackend().authenticate(
+        _SessionRequest({"principal": {"sub": "ada", "exp": 10**1_000}})
+    )
+
+    assert identity is not None and identity.id == "ada"
+
+
+@pytest.mark.asyncio
+async def test_session_identity_keeps_string_grants_whole() -> None:
+    from wreath.auth import SessionIdentityBackend
+
+    identity = await SessionIdentityBackend().authenticate(
+        _SessionRequest(
+            {
+                "principal": {
+                    "sub": "ada",
+                    "roles": "admin auditor",
+                    "permissions": "reports:read reports:write",
+                }
+            }
+        )
+    )
+
+    assert identity is not None
+    assert identity.roles == frozenset({"admin", "auditor"})
+    assert identity.permissions == frozenset({"reports:read", "reports:write"})
+
+    collection_identity = await SessionIdentityBackend().authenticate(
+        _SessionRequest(
+            {
+                "principal": {
+                    "sub": "grace",
+                    "roles": ["admin"],
+                    "permissions": ("reports:read",),
+                }
+            }
+        )
+    )
+    assert collection_identity is not None
+    assert collection_identity.roles == frozenset({"admin"})
+    assert collection_identity.permissions == frozenset({"reports:read"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("claim", "value"),
+    [
+        ("roles", ["admin", 1]),
+        ("roles", {"admin": True}),
+        ("permissions", ["reports:read", 1]),
+        ("permissions", {"reports:read": True}),
+    ],
+)
+async def test_session_identity_refuses_malformed_grants(claim: str, value: object) -> None:
+    from wreath.auth import SessionIdentityBackend
+
+    principal = {"sub": "ada", claim: value}
+    assert (
+        await SessionIdentityBackend().authenticate(
+            _SessionRequest({"principal": principal})
+        )
+        is None
+    )
 
 
 class _Answering:

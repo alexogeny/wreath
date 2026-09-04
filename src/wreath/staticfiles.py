@@ -23,9 +23,10 @@ from __future__ import annotations
 import asyncio
 import os
 import stat as _stat
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from email.utils import formatdate
 from typing import TYPE_CHECKING
+from urllib.parse import quote, quote_from_bytes
 
 from ._conditional import etag_matches as _etag_matches
 from ._fsguard import ContainmentError, open_beneath, open_root
@@ -41,6 +42,17 @@ from .response import (
 
 if TYPE_CHECKING:
     from .request import Request
+
+
+type _Resolution = tuple[int | str, os.stat_result, str] | None
+
+
+def _discard_resolution(future: Future[_Resolution]) -> None:
+    if future.cancelled() or future.exception() is not None:
+        return
+    resolved = future.result()
+    if resolved is not None and isinstance(resolved[0], int):
+        os.close(resolved[0])
 
 
 class StaticFiles:
@@ -100,6 +112,12 @@ class StaticFiles:
         cache_control: CacheControl | None = None,
         max_workers: int = 8,
     ) -> None:
+        if type(html_index) is not bool:
+            raise TypeError("html_index must be a bool")
+        if cache_control is not None and not isinstance(cache_control, CacheControl):
+            raise TypeError("cache_control must be CacheControl or None")
+        if type(max_workers) is not int or max_workers <= 0:
+            raise ValueError("max_workers must be a positive integer")
         root = os.path.realpath(os.fspath(directory))
         if not os.path.isdir(root):
             raise ValueError(f"static directory does not exist: {directory!r}")
@@ -122,9 +140,12 @@ class StaticFiles:
     async def __call__(self, request: Request) -> Response | FileResponse:
         rest = request.path_params.get("path", "")
         async with self._lookup_slots:
-            resolved = await asyncio.get_running_loop().run_in_executor(
-                self._executor, self._resolve, rest
-            )
+            lookup = self._executor.submit(self._resolve, rest)
+            try:
+                resolved = await asyncio.wrap_future(lookup)
+            except asyncio.CancelledError:
+                lookup.add_done_callback(_discard_resolution)
+                raise
         if resolved is None:
             raise NotFound("Not Found")
         fd, stat, name = resolved
@@ -136,11 +157,15 @@ class StaticFiles:
             # so reflecting a doubled path from an ASGI server into Location
             # would turn this canonicalisation into an open redirect.
             raw_path = request.scope.get("raw_path")
-            path = raw_path.decode("ascii") if isinstance(raw_path, bytes) else request.path
+            path = (
+                quote_from_bytes(raw_path, safe="/%")
+                if isinstance(raw_path, bytes)
+                else quote(request.path, safe="/%")
+            )
             canonical = "/" + path.lstrip("/") + "/"
             return RedirectResponse(canonical, status=308)
 
-        etag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
+        etag = f'"{stat.st_mtime_ns:x}-{stat.st_ctime_ns:x}-{stat.st_size:x}"'
         headers = [
             (b"etag", etag.encode("ascii")),
             (b"last-modified", formatdate(stat.st_mtime, usegmt=True).encode("ascii")),
@@ -216,7 +241,7 @@ class StaticFiles:
         if root_fd >= 0:
             os.close(root_fd)
 
-    def _resolve(self, rest: str) -> tuple[int | str, os.stat_result, str] | None:
+    def _resolve(self, rest: str) -> _Resolution:
         """Open a servable file beneath the root, or `None`.
 
         Runs in a worker thread. Closes any descriptor it will not return, so a
@@ -226,24 +251,26 @@ class StaticFiles:
             fd, stat = open_beneath(self._root_fd, rest)
         except ContainmentError, OSError:
             return None
-        if not _stat.S_ISDIR(stat.st_mode):
+        if _stat.S_ISREG(stat.st_mode):
             return fd, stat, rest
+        if not _stat.S_ISDIR(stat.st_mode):
+            os.close(fd)
+            return None
         os.close(fd)
         if not self.html_index:
             return None
-        if rest and not rest.endswith("/"):
-            # Signals "redirect to the canonical path" to the caller; see
-            # `__call__`. Returned rather than raised because this is an
-            # ordinary outcome, not an error.
-            return "redirect", stat, rest
+        redirect = bool(rest and not rest.endswith("/"))
         index = (rest.rstrip("/") + "/index.html").lstrip("/")
         try:
             fd, stat = open_beneath(self._root_fd, index)
         except ContainmentError, OSError:
             return None
-        if _stat.S_ISDIR(stat.st_mode):
+        if not _stat.S_ISREG(stat.st_mode):
             os.close(fd)
             return None
+        if redirect:
+            os.close(fd)
+            return "redirect", stat, rest
         return fd, stat, index
 
 

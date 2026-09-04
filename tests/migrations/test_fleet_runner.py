@@ -140,6 +140,24 @@ def test_invalid_tenant_state_is_rejected(kwargs: dict) -> None:
         TenantState(**base)
 
 
+@pytest.mark.parametrize(
+    "field",
+    ["tenant_id", "migration", "checksum", "generation", "status"],
+)
+def test_tenant_state_refuses_boolean_integer_fields(field: str) -> None:
+    values = {
+        "tenant_id": 1,
+        "migration": TARGET_MIGRATION,
+        "checksum": TARGET_CHECKSUM,
+        "generation": GENERATION,
+        "status": HISTORY_VERIFIED,
+    }
+    values[field] = True
+
+    with pytest.raises(ValueError, match=f"TenantState.{field}"):
+        TenantState(**values)
+
+
 @pytest.mark.parametrize("bad", [-1, "x", 1.5])
 def test_resolve_fleet_validates_targets(bad: object) -> None:
     with pytest.raises((ValueError, TypeError)):
@@ -149,3 +167,65 @@ def test_resolve_fleet_validates_targets(bad: object) -> None:
             target_checksum=TARGET_CHECKSUM,
             directory_generation=GENERATION,
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("target_migration", True),
+        ("target_migration", 2**64),
+        ("target_checksum", True),
+        ("target_checksum", 2**64),
+        ("directory_generation", True),
+        ("directory_generation", 2**32),
+    ],
+)
+def test_resolve_fleet_refuses_values_native_fields_cannot_represent(
+    field: str, bad: object
+) -> None:
+    values = {
+        "target_migration": TARGET_MIGRATION,
+        "target_checksum": TARGET_CHECKSUM,
+        "directory_generation": GENERATION,
+    }
+    values[field] = bad
+
+    with pytest.raises(ValueError, match=field):
+        resolve_fleet([], **values)
+
+
+def test_resolve_fleet_validates_targets_before_reading_the_directory() -> None:
+    def hostile_directory():
+        raise AssertionError("directory was consumed before scalar validation")
+        yield
+
+    with pytest.raises(ValueError, match="target_migration"):
+        resolve_fleet(
+            hostile_directory(),
+            target_migration=True,
+            target_checksum=TARGET_CHECKSUM,
+            directory_generation=GENERATION,
+        )
+
+
+def test_pack_tenant_directory_refuses_duplicate_tenant_identity() -> None:
+    state = TenantState(7, TARGET_MIGRATION, TARGET_CHECKSUM, GENERATION, HISTORY_VERIFIED)
+
+    with pytest.raises(ValueError, match="tenant_id 7 appears more than once"):
+        pack_tenant_directory([state, state])
+
+
+def test_pack_tenant_directory_refuses_unvalidated_row_shapes() -> None:
+    with pytest.raises(ValueError, match="entries must be TenantState instances"):
+        pack_tenant_directory([object()])
+
+
+def test_pack_tenant_directory_refuses_tenant_state_subclasses() -> None:
+    class UnvalidatedState(TenantState):
+        pass
+
+    state = UnvalidatedState(
+        1, TARGET_MIGRATION, TARGET_CHECKSUM, GENERATION, HISTORY_VERIFIED
+    )
+    with pytest.raises(ValueError, match="entries must be TenantState instances"):
+        pack_tenant_directory([state])

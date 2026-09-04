@@ -41,6 +41,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from math import isfinite
 from typing import Final
 
 from ._flight_schema import LogCell, Severity
@@ -59,6 +60,15 @@ DEFAULT_LIMITER_CAPACITY: Final = 4096
 #: the writer queue: enough to absorb a burst from a job worker between drains,
 #: small enough that a loop which has stopped draining is bounded.
 DEFAULT_OFF_LOOP_CAPACITY: Final = 4096
+
+MAX_LIMITER_CAPACITY: Final = 1 << 20
+MAX_SCRATCH_BUDGET: Final = 1 << 16
+MAX_OFF_LOOP_CAPACITY: Final = 1 << 22
+
+
+def _bounded_integer(name: str, value: object, maximum: int) -> None:
+    if type(value) is not int or not 0 <= value <= maximum:
+        raise ValueError(f"{name} must be an integer between 0 and {maximum}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,12 +91,20 @@ class LogSamplingPolicy:
     ceiling: Severity = Severity.INFO
 
     def __post_init__(self) -> None:
-        if self.first < 0:
-            raise ValueError("first must not be negative")
-        if self.thereafter < 1:
-            raise ValueError("thereafter must be at least 1")
-        if self.interval <= 0:
-            raise ValueError("interval must be positive")
+        if type(self.enabled) is not bool:
+            raise ValueError("enabled must be a boolean")
+        if type(self.first) is not int or self.first < 0:
+            raise ValueError("first must be a non-negative integer")
+        if type(self.thereafter) is not int or self.thereafter < 1:
+            raise ValueError("thereafter must be a positive integer")
+        if (
+            type(self.interval) not in (int, float)
+            or not isfinite(self.interval)
+            or self.interval <= 0
+        ):
+            raise ValueError("interval must be a finite positive number")
+        if type(self.ceiling) is not Severity:
+            raise ValueError("ceiling must be a Severity")
 
 
 @dataclass(slots=True)
@@ -111,6 +129,7 @@ class SiteLimiter:
         clock: Callable[[], float] = time.monotonic,
         capacity: int = DEFAULT_LIMITER_CAPACITY,
     ) -> None:
+        _bounded_integer("capacity", capacity, MAX_LIMITER_CAPACITY)
         self._policy = policy if policy is not None else LogSamplingPolicy()
         self._clock = clock
         self._capacity = capacity
@@ -184,8 +203,7 @@ class OffLoopStage:
     __slots__ = ("_capacity", "_dropped", "_lock", "_records", "_staged")
 
     def __init__(self, capacity: int = DEFAULT_OFF_LOOP_CAPACITY) -> None:
-        if capacity < 0:
-            raise ValueError("capacity must not be negative")
+        _bounded_integer("capacity", capacity, MAX_OFF_LOOP_CAPACITY)
         self._capacity = capacity
         self._records: list[LogCell] = []
         self._lock = threading.Lock()
@@ -239,6 +257,9 @@ class RequestLogBuffer:
     __slots__ = ("_buffer",)
 
     def __init__(self, request_id: int, budget: int = DEFAULT_SCRATCH_BUDGET) -> None:
+        if type(request_id) is not int or not 0 <= request_id < 1 << 64:
+            raise ValueError("request_id must be an unsigned 64-bit integer")
+        _bounded_integer("budget", budget, MAX_SCRATCH_BUDGET)
         self._buffer = _core.LogBuffer(request_id=request_id, budget=budget)
 
     def add(self, cell: LogCell) -> None:
@@ -292,6 +313,8 @@ class RequestLogBuffer:
         Returns the number published. Emptying unconditionally is what makes an
         escaped scope inert rather than a leak.
         """
+        if type(promoted) is not bool:
+            raise ValueError("promoted must be a boolean")
         records = self._buffer.finish(promoted)
         for encoded in records:
             emit(LogCell.decode(encoded))

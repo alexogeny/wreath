@@ -12,6 +12,8 @@ import urllib.parse
 import zipfile
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
+from math import isfinite
+from types import MappingProxyType
 from typing import Any, ClassVar
 
 from .._auth import jwt as _jwt
@@ -34,6 +36,7 @@ _CONTEXT_PARAMETERS = frozenset(
 )
 _DURABLE_TEXT_LIMIT = 28_000
 _JWKS_REFRESH_INTERVAL = 300
+_MAX_CONNECTOR_RESPONSE_BYTES = 1 << 20
 _TOKEN_REFRESH_SKEW = 60
 
 
@@ -58,7 +61,7 @@ class TeamsConnectorError(Exception):
 @dataclass(frozen=True, slots=True)
 class TeamsBotConfig:
     app_id: str
-    app_secret: str
+    app_secret: str = field(repr=False)
     messaging_endpoint: str
     allowed_tenants: frozenset[str]
     login_issuers: Mapping[str, str] = field(default_factory=dict)
@@ -70,20 +73,22 @@ class TeamsBotConfig:
         if not self.app_secret:
             raise ValueError("Teams app_secret must be non-empty")
         _require_https(self.messaging_endpoint, "messaging_endpoint")
-        if not self.allowed_tenants:
+        allowed_tenants = frozenset(self.allowed_tenants)
+        if not allowed_tenants:
             raise ValueError("Teams allowed_tenants must contain at least one tenant")
-        if any(not tenant for tenant in self.allowed_tenants):
+        if any(not tenant for tenant in allowed_tenants):
             raise ValueError("Teams allowed_tenants may not contain an empty tenant")
         if not 0 < self.max_token_lifetime <= 86_400:
             raise ValueError("Teams max_token_lifetime must be between 1 and 86400 seconds")
         copied = dict(self.login_issuers)
         for tenant, issuer in copied.items():
-            if tenant not in self.allowed_tenants:
+            if tenant not in allowed_tenants:
                 raise ValueError(
                     f"login issuer tenant {tenant!r} is not present in allowed_tenants"
                 )
             _require_https(issuer, f"login issuer for tenant {tenant!r}")
-        object.__setattr__(self, "login_issuers", copied)
+        object.__setattr__(self, "allowed_tenants", allowed_tenants)
+        object.__setattr__(self, "login_issuers", MappingProxyType(copied))
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,7 +243,7 @@ class TeamsInstallation:
 class ConnectorRequest:
     method: str
     url: str
-    headers: Mapping[str, str]
+    headers: Mapping[str, str] = field(repr=False)
     json: Mapping[str, Any]
 
 
@@ -410,8 +415,15 @@ class TeamsConnectorVerifier:
                 "Bot Connector JWT exceeds Teams max_token_lifetime",
             )
         not_before = claims.get("nbf")
-        if isinstance(not_before, int) and now + _CLOCK_SKEW < not_before:
-            raise TeamsRefusal("token-not-yet-valid", "Bot Connector JWT is not valid yet")
+        if not_before is not None:
+            if type(not_before) is not int:
+                raise TeamsRefusal(
+                    "token-not-yet-valid", "Bot Connector JWT nbf must be an integer"
+                )
+            if now + _CLOCK_SKEW < not_before:
+                raise TeamsRefusal(
+                    "token-not-yet-valid", "Bot Connector JWT is not valid yet"
+                )
         channel = activity.get("channelId")
         if not isinstance(channel, str):
             raise TeamsRefusal(
@@ -1175,6 +1187,8 @@ def _require_https(url: str, label: str) -> None:
 
 
 def _same_origin(url: str, origin: tuple[str, str, int]) -> bool:
+    if any(ord(character) <= 0x20 or 0x7F <= ord(character) <= 0x9F for character in url):
+        return False
     parsed = urllib.parse.urlsplit(url)
     hostname = parsed.hostname
     if hostname is None:
@@ -1197,6 +1211,9 @@ def _bearer_token(header: str | None) -> str:
 
 
 def _trusted_service_url(url: str) -> None:
+    has_control = any(
+        ord(character) < 0x21 or 0x7F <= ord(character) <= 0x9F for character in url
+    )
     parsed = urllib.parse.urlsplit(url)
     hostname = parsed.hostname
     if hostname is None:
@@ -1211,7 +1228,8 @@ def _trusted_service_url(url: str) -> None:
     except ValueError:
         port = -1
     if (
-        parsed.scheme != "https"
+        has_control
+        or parsed.scheme != "https"
         or parsed.username is not None
         or host != "smba.trafficmanager.net"
         or port not in (None, 443)
@@ -1391,16 +1409,24 @@ class _UrlConnector:
                 headers=dict(request.headers),
             )
             response = connection.getresponse()
-            raw = response.read()
+            if response.status >= 400:
+                raise TeamsConnectorError(
+                    status=response.status,
+                    retry_after=_retry_delay(response.getheader("retry-after")),
+                )
+            raw = response.read(_MAX_CONNECTOR_RESPONSE_BYTES + 1)
+            if len(raw) > _MAX_CONNECTOR_RESPONSE_BYTES:
+                raise TeamsConnectorError(status=502)
         finally:
             connection.close()
-        if response.status >= 400:
-            retry = response.getheader("retry-after")
-            raise TeamsConnectorError(
-                status=response.status,
-                retry_after=float(retry) if retry and retry.isdigit() else None,
-            )
         return json.loads(raw) if raw else None
+
+
+def _retry_delay(value: str | None) -> float | None:
+    if value is None or len(value) > 5 or not value.isascii() or not value.isdigit():
+        return None
+    seconds = int(value)
+    return float(seconds) if seconds <= 86_400 else None
 
 
 def _fetch_connector_token(config: TeamsBotConfig) -> tuple[str, float]:
@@ -1421,17 +1447,24 @@ def _fetch_connector_token(config: TeamsBotConfig) -> tuple[str, float]:
             headers={"content-type": "application/x-www-form-urlencoded"},
         )
         response = connection.getresponse()
-        raw = response.read()
+        if response.status != 200:
+            raise TeamsConnectorError(status=response.status)
+        raw = response.read(_MAX_CONNECTOR_RESPONSE_BYTES + 1)
+        if len(raw) > _MAX_CONNECTOR_RESPONSE_BYTES:
+            raise TeamsConnectorError(status=502)
     finally:
         connection.close()
-    if response.status != 200:
-        raise TeamsConnectorError(status=response.status)
     payload = json.loads(raw)
     token = payload.get("access_token") if isinstance(payload, Mapping) else None
     if not isinstance(token, str) or not token:
         raise TeamsConnectorError(status=502)
     expires_in = payload.get("expires_in")
-    if isinstance(expires_in, bool) or not isinstance(expires_in, int | float) or expires_in <= 0:
+    if (
+        isinstance(expires_in, bool)
+        or not isinstance(expires_in, int | float)
+        or not isfinite(expires_in)
+        or not 0 < expires_in <= 86_400
+    ):
         raise TeamsConnectorError(status=502)
     return token, float(expires_in)
 

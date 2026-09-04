@@ -32,9 +32,12 @@ what makes the scan decidable.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
+from .._pgname import validate_unquoted_identifier
 from ..passes import Ceiling, ChunkedPass, DutyCycle, Rewrite, Rows, Sql, column_fact
 from .scan import ScanReport, _column_key, scan
 
@@ -129,6 +132,9 @@ class Recode:
                 "a Recode -- it forfeits the scan, and the framework says so "
                 "rather than pretending."
             )
+        for old, new in self.mapping.items():
+            _literal(old)
+            _literal(new)
         targets = list(self.mapping.values())
         if len(set(targets)) != len(targets):
             raise DeferredDeclarationError(
@@ -143,6 +149,7 @@ class Recode:
                 f"a row holding it is indistinguishable from converted and "
                 f"unconverted; the walk could not tell when it had finished."
             )
+        object.__setattr__(self, "mapping", MappingProxyType(dict(self.mapping)))
         if not isinstance(self.chunk, int) or isinstance(self.chunk, bool) or self.chunk < 1:
             raise DeferredDeclarationError(f"chunk must be a positive int; got {self.chunk!r}")
         _model_of(self.column)
@@ -230,10 +237,15 @@ class Retype:
     name: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.into or not str(self.into).replace("_", "").isalnum():
+        if type(self.into) is not str:
             raise DeferredDeclarationError(
                 f"Retype(into=...) must be a plain column name; got {self.into!r}"
             )
+        validate_unquoted_identifier(
+            self.into,
+            "Retype(into=...) plain column name",
+            error=DeferredDeclarationError,
+        )
         inner = getattr(self.column, "column", self.column)
         if self.into == inner.database_name:
             raise DeferredDeclarationError(
@@ -241,9 +253,16 @@ class Retype:
                 f"whole point of the two-column form is that the old column "
                 f"survives the window so old code keeps working."
             )
-        if self.using is None:
+        if type(self.using) is Sql:
+            expression = self.using.text
+        elif type(self.using) is str:
+            expression = self.using
+        else:
+            expression = None
+        if not isinstance(expression, str) or not expression or "\x00" in expression:
             raise DeferredDeclarationError(
-                "Retype(using=...) needs the expression that produces the new value"
+                "Retype(using=...) needs the expression that produces the new value: "
+                "use a non-empty SQL string or Sql without NUL bytes"
             )
         if not isinstance(self.chunk, int) or isinstance(self.chunk, bool) or self.chunk < 1:
             raise DeferredDeclarationError(f"chunk must be a positive int; got {self.chunk!r}")
@@ -278,7 +297,7 @@ class Retype:
         from ..passes import Constraint, Gate  # avoids a cycle at import
 
         model = _model_of(self.column)
-        expression = self.using if isinstance(self.using, Sql) else Sql(str(self.using), ())
+        expression = self.using if type(self.using) is Sql else Sql(self.using, ())
         return ChunkedPass(
             self.pass_name,
             over=model,
@@ -311,15 +330,20 @@ def _literal(value: Any) -> str:
     so this is a declaration-time rendering rather than a value binding path.
     Anything that is not a string or a number is refused rather than guessed at.
     """
-    if isinstance(value, bool) or value is None:
+    if type(value) is float and not math.isfinite(value):
         raise DeferredDeclarationError(
-            f"a Recode mapping entry must be a string or a number; got {value!r}"
+            f"a Recode mapping number must be finite; got {value!r}"
         )
-    if isinstance(value, (int, float)):
+    if type(value) in (int, float):
         return repr(value)
-    if isinstance(value, str):
+    if type(value) is str:
+        if "\x00" in value:
+            raise DeferredDeclarationError(
+                f"a Recode mapping string cannot contain a PostgreSQL NUL byte; got {value!r}"
+            )
         escaped = value.replace("'", "''")
         return f"'{escaped}'"
     raise DeferredDeclarationError(
-        f"a Recode mapping entry must be a string or a number; got {value!r}"
+        "a Recode mapping entry must be a string or a number using the built-in "
+        f"str, int, or float types; got {value!r}"
     )

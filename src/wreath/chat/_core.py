@@ -16,7 +16,7 @@ from typing import (
 )
 
 from wreath import logging as log
-from wreath._auth.models import qualified_identity_value
+from wreath._auth.models import qualified_identity_key, qualified_identity_value
 from wreath._auth.requirements import second_factor_age
 from wreath._capability_map import CapabilityMap
 from wreath._json import dumps as json_dumps
@@ -134,8 +134,8 @@ class PrincipalBinding:
 
 @dataclass(frozen=True, slots=True)
 class IdentityLinkChallenge:
-    url: str
-    state: str
+    url: str = field(repr=False)
+    state: str = field(repr=False)
 
 
 class ExternalIdentityResolver:
@@ -382,7 +382,7 @@ class ChatContext:
     command: str | None = None
     action: str | None = None
     inputs: Mapping[str, Any] = field(default_factory=dict)
-    response_url: str | None = None
+    response_url: str | None = field(default=None, repr=False)
     identity: Identity | None = None
     principal: Any = None
     external_identity: ExternalIdentityKey | None = None
@@ -651,8 +651,13 @@ class ChatOps:
             raise ValueError(f"duplicate chat declaration {name!r}")
         if execution not in ("inline", "durable"):
             raise ValueError("chat execution must be 'inline' or 'durable'")
-        if second_factor is not None and (isinstance(second_factor, bool) or second_factor <= 0):
-            raise ValueError("chat second_factor must be a positive duration")
+        if second_factor is not None and (
+            isinstance(second_factor, bool)
+            or not isinstance(second_factor, int | float)
+            or not math.isfinite(second_factor)
+            or second_factor <= 0
+        ):
+            raise ValueError("chat second_factor must be a positive finite duration")
         if retries is not None and (
             isinstance(retries, bool) or not isinstance(retries, int) or retries < 0
         ):
@@ -1043,17 +1048,18 @@ class ChatOps:
             identity = getattr(context, "identity", None)
             identity_id = getattr(identity, "id", None)
             actor = (
-                qualified_identity_value(str(getattr(identity, "namespace", "")), str(identity_id))
+                qualified_identity_key(
+                    str(getattr(identity, "type", "")),
+                    str(getattr(identity, "namespace", "")),
+                    str(identity_id),
+                )
                 if identity_id
                 else getattr(context, "actor", "anonymous")
             )
-            key = ":".join(
-                (
-                    "chat",
-                    str(getattr(context, "tenant", "")),
-                    str(actor),
-                    declaration.name,
-                )
+            key = qualified_identity_key(
+                f"chat:{declaration.name}",
+                str(getattr(context, "tenant", "")),
+                str(actor),
             )
             refusal = await self.rate_limit.admit_key(key)
             if refusal is not None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -402,8 +402,13 @@ async def test_map_rejects_bad_arguments(postgres: Any, database: tuple[FakePost
     try:
         with pytest.raises(ValueError):
             await conn.map("bogus", "select 1", [()])
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="max_in_flight must be >= 1"):
             await conn.map("fetchval", "select 1", [()], max_in_flight=0)
+        for max_in_flight in (True, 1.5, float("nan"), float("inf")):
+            with pytest.raises(ValueError, match="max_in_flight must be a positive integer"):
+                await conn.map(
+                    "fetchval", "select 1", [()], max_in_flight=cast(Any, max_in_flight)
+                )
     finally:
         await conn.close()
 

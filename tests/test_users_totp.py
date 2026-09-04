@@ -105,6 +105,15 @@ def _factor(**overrides: Any) -> SecondFactor:
     return SecondFactor(**fields)
 
 
+def test_second_factor_snapshots_mutable_credential_material() -> None:
+    source = bytearray(SECRET)
+    factor = _factor(material=source)
+
+    source[:] = b"x" * len(source)
+
+    assert factor.material == SECRET
+
+
 @pytest.mark.parametrize(("moment", "expected"), RFC6238_SHA1_VECTORS)
 def test_rfc6238_sha1_test_vectors(moment: int, expected: str) -> None:
     assert totp_code(RFC_SECRET, totp_counter(moment), digits=8) == expected
@@ -960,6 +969,19 @@ def test_the_router_refuses_impossible_parameters() -> None:
         second_factor_router(users, factors, period=0)
     with pytest.raises(ValueError):
         second_factor_router(users, factors, digits=4)
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        {"period": True},
+        {"skew": True},
+        {"recovery_codes": True},
+    ],
+)
+def test_the_router_refuses_boolean_integer_security_parameters(option: dict[str, object]) -> None:
+    with pytest.raises(TypeError, match="integer"):
+        second_factor_router(InMemoryUserStore(), InMemorySecondFactorStore(), **option)
 
 
 class _RawStatement:

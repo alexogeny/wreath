@@ -872,13 +872,124 @@ async def test_malformed_input_status_is_the_same_at_every_split(payload: bytes)
 
 @impl
 @pytest.mark.asyncio
-async def test_chunk_extensions_ignored(protocol_cls: type) -> None:
+@pytest.mark.parametrize("extension", [b"ext=1", b'ext="a\\\"b"; second'])
+async def test_chunk_extensions_ignored(protocol_cls: type, extension: bytes) -> None:
     body = (
         b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
-        b"5;ext=1\r\nhello\r\n0\r\n\r\n"
+        + b"5;"
+        + extension
+        + b"\r\nhello\r\n0\r\n\r\n"
     )
     transport = await drive(protocol_cls, echo_ok, [body])
     assert transport.buffer.endswith(b"hello")
+
+
+@impl
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extension", [b"=value", b"name value", b'name="unterminated'])
+async def test_invalid_chunk_extension_is_refused(protocol_cls: type, extension: bytes) -> None:
+    called = []
+
+    async def app(scope: dict, receive: Any, send: Any) -> None:
+        called.append(scope)
+
+    request = (
+        b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+        + b"5;"
+        + extension
+        + b"\r\nhello\r\n0\r\n\r\n"
+    )
+    transport = await drive(protocol_cls, app, [request])
+    assert transport.buffer.startswith(b"HTTP/1.1 400")
+    assert not called
+
+
+@impl
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "host",
+    [
+        b"",
+        b"user@example.test",
+        b"example.test/path",
+        b"example.test:bad",
+        b"2001:db8::1",
+        b"[::::]",
+        b"[gggg::1]",
+        b"[vXYZ.address]",
+        b"[1:2:3:4:5:6:7]",
+        b"[1:2:3:4:5:6:7:8:9]",
+        b"[1::2::3]",
+        b"[::ffff:192.0.2.999]",
+        b"[::ffff:192.000.2.1]",
+        b"[::1%25eth0]",
+    ],
+)
+async def test_malformed_host_authority_is_refused(protocol_cls: type, host: bytes) -> None:
+    called = []
+
+    async def app(scope: dict, receive: Any, send: Any) -> None:
+        called.append(scope)
+
+    request = b"GET / HTTP/1.1\r\nHost: " + host + b"\r\n\r\n"
+    transport = await drive(protocol_cls, app, [request])
+    assert transport.buffer.startswith(b"HTTP/1.1 400")
+    assert not called
+
+
+@impl
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "host",
+    [
+        b"example.test:8443",
+        b"[2001:db8::1]",
+        b"[::1]:8443",
+        b"[::]",
+        b"[::ffff:192.0.2.128]",
+        b"[1:2:3:4:5:6:192.0.2.1]",
+        b"[v1.alpha:beta]:65535",
+    ],
+)
+async def test_valid_host_authority_reaches_app(protocol_cls: type, host: bytes) -> None:
+    called = []
+
+    async def app(scope: dict, receive: Any, send: Any) -> None:
+        called.append(scope)
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    request = b"GET / HTTP/1.1\r\nHost: " + host + b"\r\n\r\n"
+    transport = await drive(protocol_cls, app, [request])
+    assert transport.buffer.startswith(b"HTTP/1.1 204")
+    assert len(called) == 1
+
+
+@impl
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "target",
+    [
+        b"//attacker.test/private",
+        b"/safe\\private",
+        b"/safe/../private",
+        b"/safe/%2e%2e/private",
+        b"/safe/%GG/private",
+        b"/safe?query=\xff",
+    ],
+)
+async def test_ambiguous_request_target_is_refused(
+    protocol_cls: type, target: bytes
+) -> None:
+    called = []
+
+    async def app(scope: dict, receive: Any, send: Any) -> None:
+        called.append(scope)
+
+    request = b"GET " + target + b" HTTP/1.1\r\nHost: example.test\r\n\r\n"
+    transport = await drive(protocol_cls, app, [request])
+    assert transport.buffer.startswith(b"HTTP/1.1 400")
+    assert not called
 
 
 @impl

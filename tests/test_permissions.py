@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from wreath import Wreath
+from wreath._auth.permissions import _decide, _principal_key
 from wreath._orm_events import publish_write
 from wreath.auth import Identity
 from wreath.authorization import (
@@ -89,6 +90,52 @@ def _app(*, mount: bool = True) -> Wreath:
     if mount:
         app.include_router(permissions_router(app))
     return app
+
+
+@pytest.mark.parametrize("option", ["max_ids", "max_concurrency"])
+@pytest.mark.parametrize("value", [None, True, 0, -1, 1.5])
+def test_permission_router_refuses_invalid_work_limits(option: str, value: Any) -> None:
+    with pytest.raises((TypeError, ValueError), match=option):
+        permissions_router(_app(mount=False), **{option: value})
+
+
+def test_permission_principal_keys_cannot_alias_identity_types() -> None:
+    left = Identity("C", type="A::B")
+    right = Identity("B::C", type="A")
+
+    assert _principal_key(left) != _principal_key(right)
+
+
+def test_permission_principal_keys_frame_an_empty_identity_type() -> None:
+    empty_type = Identity("1:ab", type="")
+    typed = Identity("b", type="a")
+
+    assert _principal_key(empty_type) != _principal_key(typed)
+
+
+@pytest.mark.asyncio
+async def test_permission_batch_cancels_siblings_after_an_authorizer_failure() -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class Authorizer:
+        async def authorize(self, request: Any, requirement: Any) -> Any:
+            if requirement.action == "fail":
+                await started.wait()
+                raise RuntimeError("provider failed")
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    with pytest.raises(ExceptionGroup) as captured:
+        await _decide(object(), Authorizer(), ((object(), "fail"), (object(), "wait")), limit=2)
+
+    assert isinstance(captured.value.exceptions[0], RuntimeError)
+    await asyncio.sleep(0)
+    assert cancelled.is_set()
 
 
 # Testing authorization means running the same request as several people. Doing
@@ -952,6 +999,24 @@ async def test_the_manifest_evaluates_its_actions_concurrently() -> None:
     assert counter.calls == 4
     # The finding: this was 1, so four round trips ran end to end.
     assert counter.peak > 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allowed", ["false", 1, object()])
+async def test_permission_answers_require_an_exact_boolean_permit(allowed: Any) -> None:
+    class MalformedAuthorizer:
+        async def authorize(self, request: Any, requirement: Any) -> Any:
+            return type("Decision", (), {"allowed": allowed})()
+
+    app = _app(mount=False)
+    app.configure_auth(_Backend(), MalformedAuthorizer())
+    app.include_router(permissions_router(app))
+
+    async with TestClient(app) as client:
+        response = await client.acting_as("root", roles=["admin"]).get("/permissions/manifest")
+
+    assert response.status == 200
+    assert response.json()["allowed"] == {}
 
 
 @pytest.mark.asyncio

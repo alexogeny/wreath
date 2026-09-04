@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+from collections.abc import Mapping
 from typing import Any
 
 import pytest
@@ -19,6 +20,78 @@ from wreath._auth.principal import (
 from wreath.auth import BearerTokenBackend, Identity
 from wreath.authorization import AuthorizationDecision, CedarAuthorizer, authorize
 from wreath.testing import TestClient
+
+
+def test_identity_and_restrictions_snapshot_mutable_authority_inputs() -> None:
+    roles = {"reader"}
+    permissions = {"documents:read"}
+    attributes = {"status": "active"}
+    organizations = {"acme"}
+    scope = {"documents:read"}
+    limits = Limits(organizations=organizations)
+    narrowing = Narrowing(actor="agent", scope=scope)
+    identity = Identity(
+        "alice",
+        roles=roles,
+        permissions=permissions,
+        attributes=attributes,
+        limits=limits,
+        narrowing=narrowing,
+    )
+
+    roles.add("admin")
+    permissions.add("documents:delete")
+    attributes["status"] = "admin"
+    organizations.add("other")
+    scope.add("documents:delete")
+
+    assert identity.roles == frozenset({"reader"})
+    assert identity.permissions == frozenset({"documents:read"})
+    assert identity.attributes == {"status": "active"}
+    assert limits.organizations == frozenset({"acme"})
+    assert narrowing.scope == frozenset({"documents:read"})
+
+    with pytest.raises(TypeError):
+        identity.attributes["status"] = "admin"
+
+
+def test_default_identity_attributes_share_the_immutable_empty_value() -> None:
+    assert Identity("first").attributes is Identity("second").attributes
+
+
+def test_identity_deeply_snapshots_mutable_authority_attributes() -> None:
+    attributes = {
+        "profile": {"status": "active"},
+        "groups": ["reader"],
+        "regions": {"au"},
+    }
+    identity = Identity("alice", attributes=attributes)
+
+    attributes["profile"]["status"] = "admin"
+    attributes["groups"].append("admin")
+
+    profile = identity.attributes["profile"]
+    groups = identity.attributes["groups"]
+    assert isinstance(profile, Mapping)
+    assert profile == {"status": "active"}
+    assert groups == ("reader",)
+    assert identity.attributes["regions"] == frozenset({"au"})
+    with pytest.raises(TypeError):
+        profile["status"] = "admin"
+
+
+def test_identity_refuses_cyclic_authority_attributes() -> None:
+    cycle: list[object] = []
+    cycle.append(cycle)
+
+    with pytest.raises(ValueError, match="Identity attributes must not contain cycles"):
+        Identity("alice", attributes={"cycle": cycle})
+
+
+@pytest.mark.parametrize("expires_at", [float("nan"), float("inf"), float("-inf")])
+def test_narrowing_refuses_non_finite_absolute_expiry(expires_at: float) -> None:
+    with pytest.raises(ValueError, match="expires_at must be finite"):
+        Narrowing(actor="agent", scope=None, expires_at=expires_at)
 
 
 def test_narrowing_a_narrowing_intersects_the_scopes() -> None:

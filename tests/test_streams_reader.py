@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -241,6 +242,12 @@ def test_a_chunk_log_may_not_be_kept_forever() -> None:
     assert "no erasure path" in str(raised.value)
 
 
+@pytest.mark.parametrize("retain", [float("nan"), float("inf")])
+def test_a_chunk_log_retention_must_be_finite(retain: float) -> None:
+    with pytest.raises(ValueError, match="finite positive number of seconds"):
+        declaration(retain=retain)
+
+
 def test_a_streams_over_a_keep_forever_log_is_refused_too() -> None:
     from wreath.log import KEEP_FOREVER, Log
 
@@ -249,6 +256,15 @@ def test_a_streams_over_a_keep_forever_log_is_refused_too() -> None:
         Streams(jobs=_Runner(), log=log)  # type: ignore[arg-type]
     assert "retain=KEEP_FOREVER" in str(raised.value)
     assert "no erasure path" in str(raised.value)
+
+
+@pytest.mark.parametrize("retain", [float("nan"), float("inf")])
+def test_streams_refuses_a_custom_log_with_non_finite_retention(retain: float) -> None:
+    from wreath.log import Log
+
+    log = _Log(Log(table="t", retain=retain, schema=""))
+    with pytest.raises(ValueError, match="retain must be a finite positive number"):
+        Streams(jobs=_Runner(), log=log)
 
 
 def test_the_default_flush_policy_is_the_one_the_reference_page_states() -> None:
@@ -283,6 +299,24 @@ def test_a_non_positive_interval_is_refused(option: str) -> None:
     assert f"{option} must be a positive number of seconds" in str(raised.value)
 
 
+@pytest.mark.parametrize("option", ["poll", "idle"])
+@pytest.mark.parametrize("interval", [True, float("nan"), float("inf")])
+def test_a_stream_interval_must_be_a_finite_number(option: str, interval: Any) -> None:
+    declared = declaration(schema="")
+    options: dict[str, Any] = {option: interval}
+    with pytest.raises(ValueError, match=rf"{option} must be a positive number.*finite"):
+        Streams(jobs=_Runner(), log=_Log(declared), **options)
+
+
+@pytest.mark.parametrize("option", ["poll", "idle"])
+@pytest.mark.parametrize("interval", [True, float("nan"), float("inf")])
+async def test_follow_interval_overrides_must_be_finite(option: str, interval: Any) -> None:
+    streams, _, _ = _streams()
+    options: dict[str, Any] = {option: interval}
+    with pytest.raises(ValueError, match="idle and poll must be positive finite numbers"):
+        await anext(streams.follow("key", **options))
+
+
 def test_a_cursor_round_trips_through_its_encoding() -> None:
     cursor = StreamCursor(StreamCursor.start("k").token, 3, Cursor(9182, 44))
     decoded = StreamCursor.decode(cursor.encode(), key="k")
@@ -302,6 +336,14 @@ def test_a_cursor_for_another_stream_is_refused_by_that_name() -> None:
         StreamCursor.decode(borrowed, key="mine")
     assert "belongs to a different stream" in str(raised.value)
     assert "would skip rows rather than return them" in str(raised.value)
+
+
+async def test_a_stream_cursor_object_is_bound_to_the_stream_key() -> None:
+    streams, _, _ = _streams()
+    borrowed = StreamCursor.start("other")
+
+    with pytest.raises(ValueError, match="belongs to a different stream"):
+        await anext(streams.follow("mine", since=borrowed))
 
 
 #: Shapes that are not a cursor, spelled with **this** stream's token so the
@@ -753,6 +795,30 @@ async def test_an_unauthorized_attach_is_a_404_identical_to_an_unknown_stream() 
     assert b"unknown or expired stream" in refused.body
 
 
+def test_attach_requires_an_exact_authorization_decision() -> None:
+    streams, _log, _runner = _streams()
+
+    def ambiguous(_key: str) -> Any:
+        return "allow"
+
+    refused = streams.attach("k", authorize=ambiguous)
+    assert refused.status == 404
+
+
+def test_public_must_be_an_exact_boolean() -> None:
+    streams, _log, _runner = _streams()
+    options: dict[str, Any] = {"public": 1}
+    with pytest.raises(ValueError, match="public must be a boolean"):
+        streams.attach("k", **options)
+
+
+def test_attach_refuses_a_stream_cursor_object_for_another_key_synchronously() -> None:
+    streams, _log, _runner = _streams()
+    response = streams.attach("mine", since=StreamCursor.start("other"), public=True)
+    assert response.status == 400
+    assert b"belongs to a different stream" in response.body
+
+
 async def test_attach_returns_an_sse_response_that_frames_the_reader() -> None:
     from wreath.response import SSEResponse
 
@@ -800,6 +866,38 @@ async def test_push_stream_sends_one_json_frame_per_event() -> None:
     assert [frame["kind"] for frame in decoded] == ["chunk", "chunk", "end"]
     assert [frame["data"] for frame in decoded[:2]] == ["a", "b"]
     assert all(frame["id"].startswith(StreamCursor.start("k").token) for frame in decoded)
+
+
+@pytest.mark.parametrize("decision", [False, "allow"])
+async def test_push_stream_requires_an_exact_true_authorization(decision: Any) -> None:
+    from wreath.streams import push_stream
+
+    class _Socket:
+        async def send_text(self, text: str) -> None:
+            raise AssertionError(f"an unauthorized stream sent {text!r}")
+
+    streams, _log, _runner = _streams()
+
+    def authorize(_key: str) -> Any:
+        return decision
+
+    assert await push_stream(_Socket(), streams, "k", authorize=authorize) is False
+
+
+async def test_push_stream_accepts_an_exact_true_authorization() -> None:
+    from wreath.streams import push_stream
+
+    class _Socket:
+        async def send_text(self, text: str) -> None:
+            return None
+
+    streams, _log, _runner = _streams()
+    assert (
+        await push_stream(
+            _Socket(), streams, "k", authorize=lambda _key: True, idle=0.001, poll=0.001
+        )
+        is True
+    )
 
 
 async def test_a_writer_batches_rather_than_writing_a_row_per_token() -> None:

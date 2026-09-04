@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from wreath import _flight_schema as fs
 from wreath import logging as log
+from wreath._logsite import SiteRegistry
 from wreath.recording import CaptureDisposition
 
 
@@ -13,6 +16,25 @@ def sink() -> list[fs.LogCell]:
     records: list[fs.LogCell] = []
     with log.testing_runtime(records.append):
         yield records
+
+
+@pytest.mark.parametrize("capacity", [True, 1.5, float("nan"), float("inf")])
+def test_site_registry_capacity_requires_a_positive_integer(capacity: Any) -> None:
+    with pytest.raises(log.LogSiteError, match="site capacity must be a positive integer"):
+        SiteRegistry(capacity)
+
+
+@pytest.mark.parametrize("capacity", [0, True, 1.5, float("nan"), float("inf")])
+def test_site_registry_replacement_capacity_requires_a_positive_integer(capacity: Any) -> None:
+    registry = SiteRegistry(1)
+    with pytest.raises(log.LogSiteError, match="site capacity must be a positive integer"):
+        registry.set_capacity(capacity)
+
+
+def test_site_registry_accepts_a_positive_replacement_capacity() -> None:
+    registry = SiteRegistry(1)
+    registry.set_capacity(2)
+    assert registry.capacity == 2
 
 
 def test_event_registration_returns_a_callable_site(sink: list[fs.LogCell]) -> None:

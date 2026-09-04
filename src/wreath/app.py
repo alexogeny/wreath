@@ -4859,6 +4859,20 @@ class Wreath:
                     "authorization actions are absent from the configured vocabulary: "
                     + ", ".join(unknown)
                 )
+        if getattr(self._auth_backend, "requires_session", False):
+            policy = self._http_policy
+            if policy is None or policy.websocket_origin is None:
+                unguarded_websockets = [
+                    f"WEBSOCKET {path}"
+                    for path, handler in self._ws_routes
+                    if requirement_for(handler).needs_backend
+                ]
+                if unguarded_websockets:
+                    raise RuntimeError(
+                        ", ".join(unguarded_websockets)
+                        + " require WebSocketOriginPolicy because their authentication "
+                        "uses browser sessions"
+                    )
         self._compile_capabilities(requirements)
         # Middleware that scopes itself to some routes. Empty for almost every
         # application, and the emptiness is what keeps the per-route work off

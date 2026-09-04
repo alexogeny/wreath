@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import cast
 
 import pytest
 
@@ -75,6 +76,22 @@ def test_a_secret_is_required_and_says_why():
 def test_a_str_secret_is_refused_rather_than_encoded():
     with pytest.raises(TypeError, match="must be bytes"):
         Tags(secret="a-deployment-secret")  # ty: ignore[invalid-argument-type]
+
+
+def test_tags_repr_does_not_expose_hmac_secret():
+    secret = b"cache-hmac-secret-value"
+
+    assert secret.decode() not in repr(Tags(secret=secret))
+
+
+def test_tags_snapshot_mutable_secret_input():
+    source = bytearray(b"cache-hmac-secret-value")
+    tags = Tags(secret=cast(bytes, source))
+    expected = tags.key(Report)
+
+    source[:] = b"x" * len(source)
+
+    assert tags.key(Report) == expected
 
 
 def test_a_key_does_not_contain_the_model_name():

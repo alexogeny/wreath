@@ -9,6 +9,7 @@ without sharing sessions, identity objects, or cached plans.
 from __future__ import annotations
 
 import threading
+from math import isfinite
 from sys import getsizeof
 from typing import Any, Literal
 
@@ -94,21 +95,31 @@ class Registry:
         #: registry opens. None leaves it to the server's own setting, which in
         #: a default PostgreSQL is "forever" -- one pathological query then holds
         #: a pooled connection until somebody notices.
-        self.statement_timeout = statement_timeout
-        #: Default `identity_map_warn_at` for sessions this registry opens. Off
-        #: unless set; see `wreath.orm.session.Session`.
-        self.identity_map_warn_at = identity_map_warn_at
-        if statement_timeout is not None and statement_timeout <= 0:
-            raise RegistryError("statement_timeout must be positive")
+        if statement_timeout is not None:
+            if type(statement_timeout) not in (int, float):
+                raise RegistryError("statement_timeout must be a finite positive number")
+            if not isfinite(statement_timeout) or statement_timeout <= 0:
+                raise RegistryError("statement_timeout must be a finite positive number")
+        if identity_map_warn_at is not None:
+            if type(identity_map_warn_at) is not int or identity_map_warn_at < 1:
+                raise RegistryError("identity_map_warn_at must be a positive integer")
         if validate_schema not in _VALIDATE_MODES:
             raise RegistryError(
                 f"unknown validate_schema {validate_schema!r}; expected one of "
                 f"{', '.join(sorted(_VALIDATE_MODES))}"
             )
-        if not isinstance(query_cache_size, int) or query_cache_size < 1:
+        if type(query_cache_size) is not int:
             raise RegistryError("query_cache_size must be a positive integer")
-        if not isinstance(query_cache_bytes, int) or query_cache_bytes < 1:
+        if query_cache_size < 1:
+            raise RegistryError("query_cache_size must be a positive integer")
+        if type(query_cache_bytes) is not int:
             raise RegistryError("query_cache_bytes must be a positive integer")
+        if query_cache_bytes < 1:
+            raise RegistryError("query_cache_bytes must be a positive integer")
+        self.statement_timeout = statement_timeout
+        #: Default `identity_map_warn_at` for sessions this registry opens. Off
+        #: unless set; see `wreath.orm.session.Session`.
+        self.identity_map_warn_at = identity_map_warn_at
         self.database = database
         self.validate_schema: ValidateSchema = validate_schema
         self.schema_mode = schema_mode or SchemaMode.single("public")

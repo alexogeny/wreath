@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from os import urandom
+from typing import cast
 
 from .._http import _is_http_token
 from .._native import _core
@@ -32,6 +33,24 @@ from ..response import ProblemResponse
 
 _STATE_CSP_NONCE = "_wreath_csp_nonce"
 _STATE_CSP_POLICY = "_wreath_csp_policy"
+
+
+def _header_value(value: str | None, name: str) -> bytes | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a string or None")
+    if not value.strip():
+        raise ValueError(f"{name} must not be empty")
+    if "\r" in value or "\n" in value:
+        raise ValueError(f"{name} must not contain a line break")
+    try:
+        encoded = value.encode("latin-1")
+    except UnicodeEncodeError as error:
+        raise ValueError(f"{name} must be a Latin-1 header value") from error
+    if any(byte < 0x20 or byte == 0x7F for byte in encoded):
+        raise ValueError(f"{name} must not contain control characters")
+    return encoded
 
 
 def csp_nonce(request: Request) -> str:
@@ -98,7 +117,7 @@ class TrustedHostPolicy:
             raise ValueError("allowed_hosts must not be empty")
         patterns: list[str] = []
         for value in raw_patterns:
-            pattern = _normalize_host(value, pattern=True)
+            pattern = _normalize_host(value, pattern=True) if isinstance(value, str) else None
             if pattern is None:
                 raise ValueError(f"invalid trusted-host pattern: {value!r}")
             patterns.append(pattern)
@@ -257,6 +276,15 @@ class SecurityHeadersPolicy:
         hsts_preload: bool = False,
         strict_transport_security: str | None = None,
     ) -> None:
+        content_security_policy_bytes = _header_value(
+            content_security_policy, "content_security_policy"
+        )
+        frame_options_bytes = _header_value(frame_options, "frame_options")
+        referrer_policy_bytes = _header_value(referrer_policy, "referrer_policy")
+        permissions_policy_bytes = _header_value(permissions_policy, "permissions_policy")
+        strict_transport_security_bytes = _header_value(
+            strict_transport_security, "strict_transport_security"
+        )
         nonce_directives = tuple(csp_nonce_directives)
         for directive in nonce_directives:
             if not isinstance(directive, str) or not directive or not _is_http_token(directive):
@@ -267,6 +295,12 @@ class SecurityHeadersPolicy:
             raise ValueError("CSP nonce directives require content_security_policy")
         if not isinstance(csp_report_only, bool):
             raise ValueError("csp_report_only must be a bool")
+        if not isinstance(content_type_options, bool):
+            raise ValueError("content_type_options must be a bool")
+        if not isinstance(hsts_include_subdomains, bool):
+            raise ValueError("hsts_include_subdomains must be a bool")
+        if not isinstance(hsts_preload, bool):
+            raise ValueError("hsts_preload must be a bool")
         if hsts_max_age is not None and strict_transport_security is not None:
             raise ValueError("structured and raw HSTS settings are mutually exclusive")
         if hsts_max_age is not None and (
@@ -284,9 +318,10 @@ class SecurityHeadersPolicy:
             if hsts_preload:
                 directives.append("preload")
             strict_transport_security = "; ".join(directives)
+            strict_transport_security_bytes = strict_transport_security.encode("ascii")
         self.hsts_header = (
-            (b"strict-transport-security", strict_transport_security.encode("latin-1"))
-            if strict_transport_security is not None
+            (b"strict-transport-security", strict_transport_security_bytes)
+            if strict_transport_security_bytes is not None
             else None
         )
         headers: list[tuple[bytes, bytes]] = []
@@ -298,8 +333,6 @@ class SecurityHeadersPolicy:
         self._has_nonce = bool(nonce_directives)
         self._csp_template: bytes | None = None
         if content_security_policy is not None:
-            if "\r" in content_security_policy or "\n" in content_security_policy:
-                raise ValueError("content_security_policy must not contain a line break")
             csp = content_security_policy
             if nonce_directives:
                 segments = [item.strip() for item in csp.split(";") if item.strip()]
@@ -316,15 +349,15 @@ class SecurityHeadersPolicy:
                         segments.append(f"{directive} {addition}")
                 self._csp_template = "; ".join(segments).encode("latin-1")
             else:
-                headers.append((self._csp_header_name, csp.encode("latin-1")))
-        if frame_options is not None:
-            headers.append((b"x-frame-options", frame_options.encode("latin-1")))
+                headers.append((self._csp_header_name, cast(bytes, content_security_policy_bytes)))
+        if frame_options_bytes is not None:
+            headers.append((b"x-frame-options", frame_options_bytes))
         if content_type_options:
             headers.append((b"x-content-type-options", b"nosniff"))
-        if referrer_policy is not None:
-            headers.append((b"referrer-policy", referrer_policy.encode("latin-1")))
-        if permissions_policy is not None:
-            headers.append((b"permissions-policy", permissions_policy.encode("latin-1")))
+        if referrer_policy_bytes is not None:
+            headers.append((b"referrer-policy", referrer_policy_bytes))
+        if permissions_policy_bytes is not None:
+            headers.append((b"permissions-policy", permissions_policy_bytes))
         self.headers = tuple(headers)
         self.https_headers = (
             (*self.headers, self.hsts_header) if self.hsts_header is not None else self.headers

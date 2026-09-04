@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
+from math import isfinite
 from typing import Final
 
 from ._pgname import validate_identifier as validate_identifier
@@ -62,8 +63,20 @@ def compute_backoff(
     fraction of the computed delay added as bounded random jitter, so a thundering
     herd of same-age failures does not retry in lockstep.
     """
+    if isinstance(attempt, bool) or not isinstance(attempt, int):
+        raise ValueError("attempt must be an integer >= 1")
     if attempt < 1:
         raise ValueError("attempt must be >= 1")
+    for name, value in (("base", base), ("factor", factor), ("cap", cap), ("jitter", jitter)):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not isfinite(value)
+            or value < 0
+        ):
+            raise ValueError(f"{name} must be a non-negative finite number")
+    if jitter > 1:
+        raise ValueError("jitter must be between 0 and 1")
     if kind == "fixed":
         delay = base
     elif kind == "linear":
@@ -71,12 +84,22 @@ def compute_backoff(
     elif kind == "exp":
         # base * factor**(attempt-1), guarded against overflow at large attempts.
         exponent = min(attempt - 1, 32)
-        delay = base * (factor**exponent)
+        try:
+            delay = base * (factor**exponent)
+        except OverflowError:
+            delay = cap
     else:
         raise ValueError(f"unknown backoff kind: {kind!r}")
     delay = min(delay, cap)
     if jitter > 0.0:
         source = jitter_fn() if jitter_fn is not None else _default_jitter()
+        if (
+            isinstance(source, bool)
+            or not isinstance(source, (int, float))
+            or not isfinite(source)
+            or not 0 <= source <= 1
+        ):
+            raise ValueError("jitter source must return a finite number between 0 and 1")
         # source in [0,1); scale to +/- jitter fraction of the delay.
         delay += delay * jitter * (source * 2.0 - 1.0)
     return max(0.0, delay)
@@ -107,10 +130,11 @@ def dedup_key(scope: str, key: str) -> str:
 # envelope so an ephemeral publish that would be truncated is rejected up front
 # and routed to the durable path instead.
 MAX_NOTIFY_PAYLOAD: Final = 7000
+MAX_DURABLE_PAYLOAD: Final = 16 * 1024 * 1024
 
 
 class PayloadTooLarge(ValueError):
-    """An ephemeral publish payload exceeded the NOTIFY size bound."""
+    """A queue payload exceeded its transport or persistence bound."""
 
 
 def check_notify_payload(payload: bytes) -> None:
@@ -118,6 +142,14 @@ def check_notify_payload(payload: bytes) -> None:
         raise PayloadTooLarge(
             f"ephemeral payload is {len(payload)} bytes; "
             f"limit is {MAX_NOTIFY_PAYLOAD} — publish with durable=True instead"
+        )
+
+
+def check_durable_payload(size: int) -> None:
+    if size > MAX_DURABLE_PAYLOAD:
+        raise PayloadTooLarge(
+            f"durable payload is {size} bytes; limit is {MAX_DURABLE_PAYLOAD} — "
+            "store the body separately and enqueue its identifier instead"
         )
 
 

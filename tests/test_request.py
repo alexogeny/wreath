@@ -534,6 +534,25 @@ def test_request_limits_reject_a_non_positive_value() -> None:
         RequestLimits(max_body_bytes=0)
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "max_body_bytes",
+        "max_parts",
+        "max_part_header_bytes",
+        "max_part_bytes",
+        "max_form_memory_bytes",
+        "spool_max_bytes",
+        "max_cookie_bytes",
+        "max_form_fields",
+    ],
+)
+@pytest.mark.parametrize("value", [True, False])
+def test_request_limits_require_exact_integers(name: str, value: bool) -> None:
+    with pytest.raises(TypeError, match=rf"{name} must be an integer"):
+        RequestLimits(**{name: value})
+
+
 @pytest.mark.asyncio
 async def test_multipart_rejects_aggregate_retained_payload_limit() -> None:
     # Two parts, each within max_part_bytes and under max_parts, but together

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Annotated, Any
 
 import pytest
@@ -12,6 +12,8 @@ from wreath.pagination import Page
 from wreath.policy import HttpPolicy
 from wreath.temporal import Instant
 from wreath.typegen.inspect import build_api_model
+from wreath.typegen.model import STRING, Model, TypegenError
+from wreath.typegen.model import Field as ApiField
 from wreath.typegen.targets.python import render_python, spec_digest
 
 
@@ -84,6 +86,78 @@ def test_no_document_means_no_pinned_spec() -> None:
 def test_generated_modules_are_valid_python() -> None:
     for name, source in _rendered().items():
         compile(source, name, "exec")
+
+
+def test_python_client_class_name_must_be_an_identifier() -> None:
+    with pytest.raises(TypegenError, match="class_name must be a Python identifier"):
+        render_python(build_api_model(_app()), class_name="Safe:\n    injected = True")
+
+
+@pytest.mark.parametrize("class_name", [None, "class"])
+def test_python_client_class_name_refuses_non_strings_and_keywords(class_name) -> None:
+    with pytest.raises(TypegenError, match="class_name must be a Python identifier"):
+        render_python(build_api_model(_app()), class_name=class_name)
+
+
+def test_api_title_cannot_end_a_generated_python_docstring() -> None:
+    import ast
+
+    title = '"""\ninjected = True\npayload = """'
+    api = build_api_model(_app(), title=title)
+    source = render_python(api, class_name="LlamaClient")["models.py"]
+    module = ast.parse(source)
+
+    assigned = {
+        target.id
+        for statement in module.body
+        if isinstance(statement, ast.Assign)
+        for target in statement.targets
+        if isinstance(target, ast.Name)
+    }
+    assert "injected" not in assigned
+
+
+def test_handler_summary_cannot_end_a_generated_method_docstring() -> None:
+    app = Wreath()
+
+    @app.get("/safe")
+    async def safe(request: Any) -> str:
+        return "safe"
+
+    safe.__doc__ = '"""\ninjected = True\npayload = """'
+    source = render_python(build_api_model(app), class_name="SafeClient")["client.py"]
+
+    compile(source, "client.py", "exec")
+
+
+def test_python_model_field_names_must_be_identifiers() -> None:
+    api = build_api_model(_app())
+    unsafe = replace(
+        api,
+        models=(Model("Llama", (ApiField('safe: str\ninjected = True\n#', STRING, True),)),),
+    )
+
+    with pytest.raises(TypegenError, match="model field name must be a Python identifier"):
+        render_python(unsafe, class_name="SafeClient")
+
+
+def test_python_model_names_must_be_identifiers() -> None:
+    api = build_api_model(_app())
+    unsafe = replace(api, models=(replace(api.models[0], name="class"), *api.models[1:]))
+
+    with pytest.raises(TypegenError, match="model name must be a Python identifier"):
+        render_python(unsafe, class_name="SafeClient")
+
+
+def test_python_operation_ids_must_generate_identifiers() -> None:
+    api = build_api_model(_app())
+    unsafe = replace(
+        api,
+        operations=(replace(api.operations[0], id="async"), *api.operations[1:]),
+    )
+
+    with pytest.raises(TypegenError, match="generates unusable Python method"):
+        render_python(unsafe, class_name="SafeClient")
 
 
 def test_the_client_subclasses_service_client_and_adds_no_transport() -> None:

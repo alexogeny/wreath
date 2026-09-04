@@ -112,6 +112,15 @@ _ACCEPT_ENCODING = b"identity,gzip"
 #: clients expect to be refused rather than truncated past it.
 DEFAULT_MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 
+_SERVICE_NAME = re.compile(r"(?:[A-Za-z_][A-Za-z0-9_]*\.)*[A-Za-z_][A-Za-z0-9_]*\Z")
+_METHOD_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def _checked_max_message_bytes(value: object) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError("max_message_bytes must be a non-negative integer")
+    return value
+
 
 class Status(IntEnum):
     """The gRPC status codes, from the specification's status-codes table.
@@ -151,6 +160,10 @@ class GrpcError(Exception):
     """
 
     def __init__(self, status: Status, message: str = "") -> None:
+        if not isinstance(status, Status):
+            raise TypeError("status must be a Status member")
+        if not isinstance(message, str):
+            raise TypeError("message must be a string")
         super().__init__(f"{status.name}: {message}" if message else status.name)
         self.status = status
         self.message = message
@@ -202,6 +215,8 @@ def status_for(exc: BaseException) -> tuple[Status, str]:
 
 def frame_message(payload: bytes, *, compressed: bool = False) -> bytes:
     """Prefix one encoded message with its gRPC five-byte header."""
+    if type(compressed) is not bool:
+        raise TypeError("compressed must be a boolean")
     length = len(payload)
     if length > 0xFFFFFFFF:
         raise GrpcError(Status.RESOURCE_EXHAUSTED, "message exceeds the wire length field")
@@ -284,6 +299,7 @@ class Unframer:
         max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES,
         encoding: str = "identity",
     ) -> None:
+        max_message_bytes = _checked_max_message_bytes(max_message_bytes)
         self._max = max_message_bytes
         self._encoding = encoding
         self._gzip_workspace = _gzip_decoder_new() if encoding == "gzip" else None
@@ -497,12 +513,12 @@ class GrpcService:
     """
 
     def __init__(self, name: str, *, max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES) -> None:
-        if not name or name.startswith("/"):
+        if not isinstance(name, str) or _SERVICE_NAME.fullmatch(name) is None:
             raise ValueError(
                 f"service name must be a bare protobuf name like 'camera.Tracker', got {name!r}"
             )
         self.name = name
-        self.max_message_bytes = max_message_bytes
+        self.max_message_bytes = _checked_max_message_bytes(max_message_bytes)
         self._methods: list[tuple[str, int, type, type, Any, dict[str, Any]]] = []
 
     def _register(
@@ -530,9 +546,15 @@ class GrpcService:
             )
 
         def decorate(handler: Any) -> Any:
+            method_name = getattr(handler, "__name__", None)
+            if not isinstance(method_name, str) or _METHOD_NAME.fullmatch(method_name) is None:
+                raise ValueError(
+                    f"method name must be a single protobuf identifier like "
+                    f"'GetPosition', got {method_name!r}"
+                )
             if action is not None:
                 _authorize(action=action, resource=resource)(handler)
-            self._methods.append((handler.__name__, kind, request, response, handler, metadata))
+            self._methods.append((method_name, kind, request, response, handler, metadata))
             return handler
 
         return decorate
@@ -617,10 +639,12 @@ class GrpcService:
                 if kind in (_UNARY, _CLIENT_STREAM):
                     result = await _with_deadline(call, deadline)
                     return _GrpcResponse(
-                        _one(encode_frame(_protobuf.encode(result), outgoing)),
+                        _one(_encode_response(response_model, result, outgoing)),
                         encoding=outgoing,
                     )
-                return _GrpcResponse(_frames(call, deadline, outgoing), encoding=outgoing)
+                return _GrpcResponse(
+                    _frames(call, deadline, outgoing, response_model), encoding=outgoing
+                )
             except GeneratorExit, KeyboardInterrupt, SystemExit:
                 raise
             except Exception as exc:  # noqa: BLE001 - every failure becomes a status
@@ -762,7 +786,18 @@ async def _with_deadline(awaitable: Any, deadline: float | None) -> Any:
         raise
 
 
-async def _frames(results: Any, deadline: float | None, encoding: str) -> AsyncIterator[bytes]:
+def _encode_response(model: type, result: Any, encoding: str) -> bytes:
+    if type(result) is not model:
+        raise GrpcError(
+            Status.INTERNAL,
+            f"handler returned {type(result).__name__}; expected {model.__name__}",
+        )
+    return encode_frame(_protobuf.encode(result), encoding)
+
+
+async def _frames(
+    results: Any, deadline: float | None, encoding: str, model: type
+) -> AsyncIterator[bytes]:
     """Frame each yielded response message, under the call's deadline."""
     import asyncio
     import contextlib
@@ -771,6 +806,6 @@ async def _frames(results: Any, deadline: float | None, encoding: str) -> AsyncI
     try:
         async with limit:
             async for result in results:
-                yield encode_frame(_protobuf.encode(result), encoding)
+                yield _encode_response(model, result, encoding)
     except TimeoutError as exc:
         raise GrpcError(Status.DEADLINE_EXCEEDED, "deadline exceeded") from exc

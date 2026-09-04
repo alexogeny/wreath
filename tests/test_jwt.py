@@ -5,11 +5,13 @@ import hashlib
 import hmac
 import json
 import time
+from typing import cast
 
 import pytest
 
 import wreath._auth.jwt as jwt_module
 from wreath.auth import (
+    JwtError,
     JwtVerifier,
     RsaPublicKey,
     SymmetricKey,
@@ -61,6 +63,21 @@ def _verifier(**overrides) -> JwtVerifier:
     )
     kwargs.update(overrides)
     return JwtVerifier(**kwargs)
+
+
+def test_symmetric_key_repr_does_not_expose_secret() -> None:
+    secret = b"jwt-hmac-secret-value"
+
+    assert secret.decode() not in repr(SymmetricKey(secret))
+
+
+def test_symmetric_key_snapshots_mutable_input() -> None:
+    source = bytearray(b"jwt-hmac-secret-value")
+    key = SymmetricKey(cast(bytes, source))
+
+    source[:] = b"x" * len(source)
+
+    assert key.secret == b"jwt-hmac-secret-value"
 
 
 def test_an_unresolved_key_refuses_before_signature_verification(monkeypatch) -> None:
@@ -250,8 +267,9 @@ async def test_oidc_verifier_can_bind_a_login_token_to_the_client_id() -> None:
     )
     provider._cache = Cache()
     verify = provider.bearer_verifier(audience="login-client")
-    assert await verify(_hs(_claims(aud="login-client"))) is not None
-    assert await verify(_hs(_claims(aud="api-service"))) is None
+    issued = int(time.time())
+    assert await verify(_hs(_claims(aud="login-client", iat=issued))) is not None
+    assert await verify(_hs(_claims(aud="api-service", iat=issued))) is None
 
 
 def test_symmetric_key_rejects_rsa_algorithm():
@@ -348,6 +366,29 @@ def test_pem_and_jwk_agree(rsa_keypair):
     from_pem = key_from_pem(pem)
     from_jwk = key_from_jwk(jwk)
     assert (from_pem.n, from_pem.e) == (from_jwk.n, from_jwk.e)
+
+
+@pytest.mark.parametrize("exponent", (1, 2))
+def test_rsa_public_key_refuses_forgeable_exponents(exponent: int) -> None:
+    modulus = (1 << 2048) - 159
+    with pytest.raises(JwtError, match="RSA public exponent"):
+        RsaPublicKey(modulus, exponent)
+
+    with pytest.raises(JwtError, match="RSA public exponent"):
+        jwt_module.key_from_jwk(
+            {
+                "kty": "RSA",
+                "n": _b64u(modulus.to_bytes(256, "big")),
+                "e": _b64u(exponent.to_bytes(1, "big")),
+            }
+        )
+
+
+def test_rsa_jwk_refuses_an_exponent_not_smaller_than_its_modulus() -> None:
+    modulus = (1 << 2048) - 159
+    encoded = _b64u(modulus.to_bytes(256, "big"))
+    with pytest.raises(JwtError, match="RSA public exponent.*smaller"):
+        jwt_module.key_from_jwk({"kty": "RSA", "n": encoded, "e": encoded})
 
 
 def _jwks_cache(document: dict):

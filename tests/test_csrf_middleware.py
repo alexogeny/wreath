@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from wreath.policy import CsrfPolicy, csrf_token
+from wreath.policy._cookies import cookie_name_is_ambiguous
 from wreath.policy.csrf import _referer_origin, _request_origin
 from wreath.request import Request
 from wreath.response import Response
@@ -51,6 +52,26 @@ def _request_with_body(method: str, body: bytes, headers: list[tuple[bytes, byte
     )
 
 
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ([], False),
+        ([(b"x-cookie", b"wreath_csrf=one; wreath_csrf=two")], False),
+        ([(b"cookie", b"")], False),
+        ([(b"cookie", b"; \t ;")], False),
+        ([(b"cookie", b"other=one; another=two")], False),
+        ([(b"cookie", b"wreath_xsrf=one; wreath_xsrf=two")], False),
+        ([(b"cookie", b"wreath_csrf_extra=one; wreath_csrf_extra=two")], False),
+        ([(b"cookie", b"wreath_csrf=one; other=two")], False),
+        ([(b"Cookie", b" \twreath_csrf \t=one; wreath_csrf=two")], True),
+    ],
+)
+def test_security_cookie_ambiguity_scanner(
+    headers: list[tuple[bytes, bytes]], expected: bool
+) -> None:
+    assert cookie_name_is_ambiguous(headers, "wreath_csrf") is expected
+
+
 @pytest.mark.asyncio
 async def test_safe_request_issues_token_and_valid_unsafe_request_passes() -> None:
     middleware = CsrfPolicy("s" * 32)
@@ -61,6 +82,8 @@ async def test_safe_request_issues_token_and_valid_unsafe_request_passes() -> No
     cookie = next(value for name, value in response.headers if name == b"set-cookie")
     assert b"HttpOnly" not in cookie
     assert b"Secure" in cookie
+    assert b"Path=/" in cookie
+    assert b"SameSite=Lax" in cookie
     assert b"Domain=" not in cookie
 
     unsafe = _request(
@@ -73,6 +96,52 @@ async def test_safe_request_issues_token_and_valid_unsafe_request_passes() -> No
         ],
     )
     assert await middleware._ingress(unsafe) is None
+
+
+@pytest.mark.parametrize(
+    "cookie_headers",
+    [
+        [b"wreath_csrf={token}; wreath_csrf=invalid"],
+        [b"wreath_csrf={token}", b"wreath_csrf=invalid"],
+    ],
+    ids=["one-line", "split-lines"],
+)
+@pytest.mark.asyncio
+async def test_unsafe_request_refuses_duplicate_csrf_cookies(
+    cookie_headers: list[bytes],
+) -> None:
+    policy = CsrfPolicy("s" * 32)
+    safe = _request("GET")
+    await policy._ingress(safe)
+    token = csrf_token(safe)
+    unsafe = _request(
+        "POST",
+        [
+            (b"host", b"example.test"),
+            (b"origin", b"https://example.test"),
+            *((b"cookie", value.replace(b"{token}", token.encode())) for value in cookie_headers),
+            (b"x-csrf-token", token.encode()),
+        ],
+    )
+
+    refusal = await policy._ingress(unsafe)
+
+    assert refusal is not None and refusal.status == 403
+
+
+def test_cookie_less_submission_does_not_rescan_raw_cookie_headers() -> None:
+    class CookieLessRequest:
+        cookies: dict[str, str] = {}
+
+        @property
+        def headers(self) -> list[tuple[bytes, bytes]]:
+            raise AssertionError("no configured cookie means there is no ambiguity to scan")
+
+    refusal = CsrfPolicy("s" * 32)._validate_submission(
+        CookieLessRequest(), {}, b"submitted", 1_700_000_000
+    )
+
+    assert refusal is not None and refusal.status == 403
 
 
 @pytest.mark.asyncio
@@ -243,6 +312,62 @@ async def test_a_working_exempt_predicate_counts_nothing() -> None:
     assert strict.exempt_errors == 0
 
 
+async def test_a_truthy_non_boolean_exemption_cannot_bypass_csrf() -> None:
+    middleware = CsrfPolicy("s" * 32, exempt=lambda request: "false")
+
+    refusal = await middleware._ingress(_request("POST"))
+
+    assert refusal is not None and refusal.status == 403
+    assert middleware.exempt_errors == 1
+
+
+async def test_a_sync_wrapper_returning_a_coroutine_fails_closed_and_closes_it() -> None:
+    produced: list[Any] = []
+
+    async def decision() -> bool:
+        return True
+
+    def exempt(_request: Request) -> object:
+        result = decision()
+        produced.append(result)
+        return result
+
+    middleware = CsrfPolicy("s" * 32, exempt=exempt)
+    refusal = await middleware._ingress(_request("POST"))
+
+    assert refusal is not None and refusal.status == 403
+    assert produced[0].cr_frame is None
+
+
+async def test_a_non_coroutine_exemption_result_is_not_closed() -> None:
+    class Result:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    result = Result()
+    middleware = CsrfPolicy("s" * 32, exempt=lambda request: result)
+
+    refusal = await middleware._ingress(_request("POST"))
+
+    assert refusal is not None and refusal.status == 403
+    assert not result.closed
+
+
+def test_an_async_exemption_is_refused_at_construction() -> None:
+    async def exempt(_request: Request) -> bool:
+        return True
+
+    class AsyncExempt:
+        async def __call__(self, _request: Request) -> bool:
+            return True
+
+    for candidate in (exempt, AsyncExempt()):
+        with pytest.raises(TypeError, match="CSRF exempt must be a synchronous callable"):
+            CsrfPolicy("s" * 32, exempt=candidate)
+
+
 def test_csrf_configuration_validation() -> None:
     with pytest.raises(ValueError):
         CsrfPolicy("short")
@@ -255,7 +380,34 @@ def test_csrf_configuration_validation() -> None:
 def test_csrf_configuration_accepts_bytes_and_secure_cookie_modes() -> None:
     CsrfPolicy(b"s" * 32)
     CsrfPolicy("s" * 32, cookie_name="__Secure-csrf", secure=True)
+    CsrfPolicy("s" * 32, cookie_name="__Host-csrf", secure=True)
+    CsrfPolicy("s" * 32, secure=False)
     CsrfPolicy("s" * 32, same_site="none", secure=True)
+
+
+def test_csrf_configuration_refuses_integer_secrets() -> None:
+    with pytest.raises(TypeError, match="CSRF secret must be str or bytes-like"):
+        CsrfPolicy(32)
+
+
+@pytest.mark.parametrize("max_age", [True, 1.5, "60"])
+def test_csrf_configuration_requires_an_integer_expiry(max_age: object) -> None:
+    with pytest.raises(TypeError, match="CSRF max_age must be an integer number of seconds"):
+        CsrfPolicy("s" * 32, max_age=max_age)
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [("secure", None), ("allow_missing_origin", "false")],
+)
+def test_csrf_configuration_requires_boolean_security_flags(option: str, value: object) -> None:
+    with pytest.raises(TypeError, match=rf"CSRF {option} must be bool"):
+        CsrfPolicy("s" * 32, **{option: value})
+
+
+def test_csrf_configuration_refuses_a_non_callable_exemption() -> None:
+    with pytest.raises(TypeError, match="CSRF exempt must be a synchronous callable"):
+        CsrfPolicy("s" * 32, exempt=object())
 
 
 def test_csrf_configuration_refuses_a_non_string_form_field() -> None:
@@ -439,6 +591,7 @@ def test_the_shared_normaliser_names_the_setting_each_caller_configured() -> Non
         ({"cookie_name": "__Secure-csrf", "secure": False}, "__Secure- CSRF cookie"),
         ({"max_age": 0}, "max_age must be positive"),
         ({"max_age": -1}, "max_age must be positive"),
+        ({"max_age": 2**63}, "max_age must be at most"),
         ({"same_site": "sometimes"}, "strict, lax, or none"),
     ],
 )
@@ -501,6 +654,44 @@ async def test_csrf_refuses_duplicate_security_boundary_headers(duplicate: bytes
     assert await middleware._ingress(_request("POST", headers)) is not None
 
 
+async def test_csrf_refuses_duplicate_referer_headers() -> None:
+    middleware = CsrfPolicy("s" * 32, trusted_hosts=["example.test"])
+    safe = _request("GET")
+    await middleware._ingress(safe)
+    token = csrf_token(safe).encode()
+    headers = [
+        (b"host", b"example.test"),
+        (b"referer", b"https://example.test/form"),
+        (b"referer", b"https://evil.test/form"),
+        (b"cookie", b"wreath_csrf=" + token),
+        (b"x-csrf-token", token),
+    ]
+
+    assert await middleware._ingress(_request("POST", headers)) is not None
+
+
+async def test_form_enabled_csrf_refuses_duplicate_security_headers_before_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    middleware = CsrfPolicy("s" * 32, form_field="csrf")
+    headers = [
+        (b"host", b"example.test"),
+        (b"host", b"evil.test"),
+        (b"origin", b"https://example.test"),
+        (b"content-type", b"application/x-www-form-urlencoded"),
+    ]
+
+    request = _request("POST", headers)
+
+    def unexpected_index(_request: Request) -> dict[bytes, bytes]:
+        raise AssertionError("duplicate security headers must refuse before indexing")
+
+    monkeypatch.setattr(Request, "_index_headers", unexpected_index)
+    refusal = await middleware._ingress(request)
+
+    assert refusal is not None and refusal.status == 403
+
+
 async def test_with_no_trusted_hosts_the_host_check_defers_to_other_middleware() -> None:
     middleware = CsrfPolicy("s" * 32)
     assert await _admits(middleware, host=b"evil.test", origin=b"https://evil.test")
@@ -510,6 +701,14 @@ async def test_an_origin_cannot_be_valid_without_a_request_origin() -> None:
     middleware = CsrfPolicy("s" * 32)
     request = _request("POST", [(b"origin", b"https://example.test")])
     assert not middleware._origin_valid(request, {b"origin": b"https://example.test"})
+
+
+def test_missing_origin_and_referer_follow_the_explicit_policy() -> None:
+    request = _request("POST")
+    headers = {b"host": b"example.test"}
+
+    assert not CsrfPolicy("s" * 32)._origin_valid(request, headers)
+    assert CsrfPolicy("s" * 32, allow_missing_origin=True)._origin_valid(request, headers)
 
 
 def test_csrf_token_says_so_when_no_middleware_prepared_one() -> None:
@@ -701,10 +900,16 @@ async def test_a_form_exemption_returns_before_body_parsing(exemption: str) -> N
 
 
 @pytest.mark.asyncio
-async def test_a_form_policy_does_not_parse_a_non_form_body() -> None:
+async def test_a_form_policy_does_not_parse_a_non_form_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def unexpected_receive() -> dict[str, Any]:
         raise AssertionError("a non-form media type must not be parsed as a form")
 
+    async def unexpected_form(_request: Request) -> object:
+        raise AssertionError("a non-form media type must not call form()")
+
+    monkeypatch.setattr(Request, "form", unexpected_form)
     request = Request(
         {
             "type": "http",
@@ -728,3 +933,14 @@ async def test_egress_with_an_issue_marker_but_no_token_is_a_noop() -> None:
     response = Response(b"ok")
     assert await middleware._egress(request, response) is response
     assert all(name != b"set-cookie" for name, _value in response.headers)
+
+
+async def test_insecure_development_csrf_cookie_omits_secure() -> None:
+    middleware = CsrfPolicy("s" * 32, secure=False)
+    request = _request("GET")
+    await middleware._ingress(request)
+
+    response = await middleware._egress(request, Response(b"ok"))
+    cookie = next(value for name, value in response.headers if name == b"set-cookie")
+
+    assert b"Secure" not in cookie

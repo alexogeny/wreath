@@ -60,6 +60,16 @@ def test_the_header_declares_proto3_and_a_package() -> None:
     assert "package wreath;" in source, source
 
 
+def test_api_title_cannot_end_the_generated_proto_comment() -> None:
+    api = build_api_model(
+        _llama_app(),
+        title='Safe\noption java_package = "injected";',
+    )
+    source = render_proto(api)["api.proto"]
+
+    assert '\noption java_package = "injected";' not in source
+
+
 def test_the_header_warns_that_field_numbers_track_declaration_order() -> None:
     source = _rendered(_llama_app())
     assert "FIELD NUMBERS COME FROM DECLARATION ORDER" in source

@@ -49,11 +49,45 @@ def root_paths(payload: Any) -> tuple[str, ...]:
         uri = entry.get("uri") if isinstance(entry, Mapping) else None
         if not isinstance(uri, str):
             continue
-        parts = urlsplit(uri)
-        if parts.scheme != "file" or not parts.path:
+        if " " in uri or _has_uri_controls(uri) or not _percent_encoding_is_valid(uri):
             continue
-        found.append(os.path.normpath(unquote(parts.path)))
+        try:
+            parts = urlsplit(uri)
+            path = unquote(parts.path, errors="strict")
+        except (UnicodeError, ValueError):
+            continue
+        if (
+            parts.scheme != "file"
+            or parts.netloc
+            or parts.query
+            or parts.fragment
+            or path.startswith("//")
+            or not os.path.isabs(path)
+            or _has_uri_controls(path)
+        ):
+            continue
+        found.append(os.path.normpath(path))
     return tuple(found)
+
+
+def _has_uri_controls(value: str) -> bool:
+    return any(
+        (code := ord(character)) <= 31
+        or 127 <= code <= 159
+        or 0xD800 <= code <= 0xDFFF
+        for character in value
+    )
+
+
+def _percent_encoding_is_valid(value: str) -> bool:
+    index = value.find("%")
+    while index >= 0:
+        if index + 2 >= len(value) or not all(
+            character in "0123456789abcdefABCDEF" for character in value[index + 1 : index + 3]
+        ):
+            return False
+        index = value.find("%", index + 3)
+    return True
 
 
 def beneath_any(roots: tuple[str, ...], candidate: str) -> bool:
@@ -92,7 +126,14 @@ def read_beneath(root_fd: int, relative: str, *, max_bytes: int) -> bytes:
                 "on what one answer may cost."
             )
         with os.fdopen(handle, "rb", closefd=False) as stream:
-            return stream.read()
+            content = stream.read(max_bytes + 1)
+        if len(content) > max_bytes:
+            raise ContainmentError(
+                f"{relative!r} grew while it was being read and is over this "
+                f"server's `MCPLimits(max_file_bytes={max_bytes})`; the read "
+                "was stopped at that ceiling"
+            )
+        return content
     finally:
         os.close(handle)
 

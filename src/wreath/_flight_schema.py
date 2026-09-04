@@ -288,8 +288,10 @@ class CompletionCell:
 
     @classmethod
     def decode(cls, data: bytes) -> CompletionCell:
-        if len(data) < CELL_SIZE:
-            raise SchemaError(f"completion cell needs {CELL_SIZE} bytes, got {len(data)}")
+        if len(data) != CELL_SIZE:
+            raise SchemaError(
+                f"completion cell needs exactly {CELL_SIZE} bytes, got {len(data)}"
+            )
         (
             version,
             kind,
@@ -374,8 +376,10 @@ class CorrelationCell:
 
     @classmethod
     def decode(cls, data: bytes) -> CorrelationCell:
-        if len(data) < CELL_SIZE:
-            raise SchemaError(f"correlation cell needs {CELL_SIZE} bytes, got {len(data)}")
+        if len(data) != CELL_SIZE:
+            raise SchemaError(
+                f"correlation cell needs exactly {CELL_SIZE} bytes, got {len(data)}"
+            )
         version, kind, flags, _r, request_id, hi, lo, parent, span = _CORRELATION.unpack(
             data[:CELL_SIZE]
         )
@@ -432,8 +436,10 @@ class ClientFactsCell:
 
     @classmethod
     def decode(cls, data: bytes) -> ClientFactsCell:
-        if len(data) < CELL_SIZE:
-            raise SchemaError(f"client-facts cell needs {CELL_SIZE} bytes, got {len(data)}")
+        if len(data) != CELL_SIZE:
+            raise SchemaError(
+                f"client-facts cell needs exactly {CELL_SIZE} bytes, got {len(data)}"
+            )
         version, kind, flags, rule_id, raw_country, request_id = _CLIENT_FACTS.unpack(
             data[:CELL_SIZE]
         )
@@ -510,8 +516,10 @@ class PhaseRecord:
 
     @classmethod
     def decode(cls, data: bytes) -> PhaseRecord:
-        if len(data) < PHASE_CELL_SIZE:
-            raise SchemaError(f"phase record needs {PHASE_CELL_SIZE} bytes, got {len(data)}")
+        if len(data) != PHASE_CELL_SIZE:
+            raise SchemaError(
+                f"phase record needs exactly {PHASE_CELL_SIZE} bytes, got {len(data)}"
+            )
         phase_id, dep, coverage, seq, _r, start_off, dur = _PHASE_RECORD.unpack(
             data[:PHASE_CELL_SIZE]
         )
@@ -552,8 +560,10 @@ class PhaseBatchCell:
 
     @classmethod
     def decode(cls, data: bytes) -> PhaseBatchCell:
-        if len(data) < CELL_SIZE:
-            raise SchemaError(f"phase batch cell needs {CELL_SIZE} bytes, got {len(data)}")
+        if len(data) != CELL_SIZE:
+            raise SchemaError(
+                f"phase batch cell needs exactly {CELL_SIZE} bytes, got {len(data)}"
+            )
         version, kind, count, worker_id, _r, request_id = _PHASE_BATCH_HEADER.unpack(
             data[:PHASE_CELL_SIZE]
         )
@@ -1174,6 +1184,12 @@ class RingFileHeader:
 
 def ring_file_bytes(ring_records: int) -> int:
     """The size a ring file must be for this geometry, header included."""
+    if (
+        type(ring_records) is not int
+        or ring_records <= 0
+        or ring_records & (ring_records - 1)
+    ):
+        raise ValueError("ring_records must be a positive power of two")
     return RING_FILE_HEADER_BYTES + ring_records * CELL_SIZE
 
 

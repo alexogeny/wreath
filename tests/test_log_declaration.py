@@ -136,6 +136,24 @@ def test_a_flush_policy_that_never_flushes_is_refused(kwargs, message):
         Flush(**kwargs)
 
 
+@pytest.mark.parametrize("value", [True, 1.5, float("nan"), float("inf")])
+@pytest.mark.parametrize("field", ["bytes", "capacity"])
+def test_flush_item_bounds_require_a_positive_integer(field, value):
+    with pytest.raises(
+        ValueError,
+        match=rf"Flush\({field}=\.\.\.\) must be positive; expected a positive integer",
+    ):
+        Flush(**{field: value})
+
+
+@pytest.mark.parametrize("value", [True, float("nan"), float("inf")])
+def test_flush_interval_requires_a_finite_positive_number(value):
+    with pytest.raises(
+        ValueError, match=r"Flush\(every=\.\.\.\) must be a finite positive number of seconds"
+    ):
+        Flush(every=value)
+
+
 def test_the_table_carries_both_halves_of_the_cursor():
     ddl = _log().statements()[0]
     assert "seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY" in ddl

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -28,6 +29,12 @@ class InvocationContext:
     correlation_id: str | None = None
     delegation: Any = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@pytest.mark.parametrize("max_tools", [True, 1.5, float("nan"), float("inf")])
+def test_agent_tool_catalog_refuses_non_integer_limits(max_tools: object) -> None:
+    with pytest.raises(TypeError, match="max_tools must be an integer"):
+        MCPToolCatalog(object(), max_tools=cast(Any, max_tools))
 
 
 async def test_agent_catalog_adapts_shared_context_to_direct_mcp_executor() -> None:
@@ -107,6 +114,46 @@ def test_agent_catalog_selection_is_a_snapshot() -> None:
         return "later"
 
     assert [tool.name for tool in selected.specifications] == ["first"]
+
+
+async def test_selected_tools_snapshot_nested_context_metadata_before_suspending() -> None:
+    class Executor:
+        specifications: tuple[object, ...] = ()
+
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.resume = asyncio.Event()
+            self.observed_role: str | None = None
+
+        async def invoke(self, *_args: Any, **kwargs: Any) -> ToolExecutionResult:
+            self.started.set()
+            await self.resume.wait()
+            self.observed_role = kwargs["metadata"]["authority"]["role"]
+            return ToolExecutionResult((), False, "effect")
+
+    executor = Executor()
+    selected = _SelectedMCPTools(executor)
+    authority = {"role": "reader"}
+    invocation = asyncio.create_task(
+        selected.invoke(
+            "inspect",
+            {},
+            call_id="call-1",
+            context=InvocationContext(
+                "tenant-a",
+                Identity("user-1"),
+                "thread-1",
+                metadata={"authority": authority},
+            ),
+        )
+    )
+    await executor.started.wait()
+    authority["role"] = "administrator"
+    executor.resume.set()
+
+    await invocation
+
+    assert executor.observed_role == "reader"
 
 
 class Backplane:

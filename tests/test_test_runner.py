@@ -1077,7 +1077,7 @@ def test_test_command_forwards_unknown_pytest_arguments_in_order(
             "1",
             "-k",
             "auth and not slow",
-            "tests/security",
+            "tests/auth",
             "--maxfail=2",
         ]
     )
@@ -1090,7 +1090,7 @@ def test_test_command_forwards_unknown_pytest_arguments_in_order(
     assert received[0].pytest_args == [
         "-k",
         "auth and not slow",
-        "tests/security",
+        "tests/auth",
         "--maxfail=2",
     ]
 

@@ -154,6 +154,16 @@ class PoolConfig:
     pipeline_depth: int = 4
 
     def __post_init__(self) -> None:
+        for name, value in (
+            ("min_size", self.min_size),
+            ("max_size", self.max_size),
+            ("max_queue", self.max_queue),
+            ("statement_cache_size", self.statement_cache_size),
+            ("statement_cache_bytes", self.statement_cache_bytes),
+            ("pipeline_depth", self.pipeline_depth),
+        ):
+            if type(value) is not int:
+                raise ValueError(f"pool {name} must be an integer")
         if self.min_size < 0:
             raise ValueError("pool min_size cannot be negative")
         if self.max_size < 1 or self.min_size > self.max_size:
@@ -161,12 +171,14 @@ class PoolConfig:
         if self.max_queue < 0:
             raise ValueError("pool max_queue cannot be negative")
         if (
-            self.acquire_timeout <= 0
+            type(self.acquire_timeout) not in (int, float)
+            or type(self.command_timeout) not in (int, float)
+            or self.acquire_timeout <= 0
             or self.command_timeout <= 0
             or not isfinite(self.acquire_timeout)
             or not isfinite(self.command_timeout)
         ):
-            raise ValueError("pool timeouts must be positive and finite")
+            raise ValueError("pool timeouts must be positive and finite numbers")
         if self.statement_cache_size < 1:
             raise ValueError("pool statement_cache_size must be positive")
         if self.statement_cache_bytes < 1:
@@ -1025,8 +1037,8 @@ class Database:
     ) -> None:
         if not name or not dsn:
             raise ValueError("database name and dsn are required")
-        if not isfinite(shutdown_timeout):
-            raise ValueError("database shutdown_timeout must be finite")
+        if type(shutdown_timeout) not in (int, float) or not isfinite(shutdown_timeout):
+            raise ValueError("database shutdown_timeout must be a finite number")
         configured = pools or {"read": PoolConfig(), "write": PoolConfig(min_size=0)}
         self._configs = {_workload(key): _pool_config(value) for key, value in configured.items()}
         self._workload_dsns = {
@@ -1369,6 +1381,10 @@ class Database:
         *held* is the handle when acquired or `None` otherwise. With *timeout*
         set, acquisition blocks up to that many seconds via `lock_timeout`.
         """
+        if timeout is not None and (
+            type(timeout) not in (int, float) or not isfinite(timeout)
+        ):
+            raise ValueError("lock timeout must be a finite number")
         return AdvisoryTryLock(
             self, key, timeout=timeout, namespace=namespace, mode=mode, workload=workload
         )
@@ -1388,6 +1404,12 @@ class Database:
         handle with `await handle.stop()`; wire it through `on_startup` /
         `on_shutdown`. The guarded critical section must be idempotent.
         """
+        if (
+            type(poll_interval) not in (int, float)
+            or not isfinite(poll_interval)
+            or poll_interval <= 0
+        ):
+            raise ValueError("run_singleton poll_interval must be a positive finite number")
         return SingletonRunner(
             self,
             key,

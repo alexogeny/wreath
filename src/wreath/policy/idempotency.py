@@ -77,6 +77,29 @@ def _request_path(request: Request) -> str:
     return raw_path.decode("latin-1") if isinstance(raw_path, bytes) else request.path
 
 
+def _request_authority(request: Request) -> str:
+    single_header = getattr(request, "_single_header", None)
+    if single_header is None:
+        authority_text = request.header("host")
+        if authority_text is not None:
+            return authority_text
+        scope = getattr(request, "_scope", None)
+        server = None if scope is None else scope.get("server")
+    else:
+        try:
+            authority = single_header(b"host")
+        except ValueError:
+            raise ValueError("Host must occur at most once") from None
+        if authority is not None:
+            return authority.decode("latin-1")
+        scope = getattr(request, "_scope", None)
+        server = request.scope.get("server") if scope is None else scope.get("server")
+    if server is None:
+        return ""
+    host, port = server
+    return str(host) if port is None else f"{host}:{port}"
+
+
 def _replayable_headers(
     headers: Iterable[tuple[bytes, bytes]],
 ) -> tuple[tuple[bytes, bytes], ...]:
@@ -396,10 +419,15 @@ def _idempotency_request_scope(
     tenant: str,
     query: str,
     body: bytes,
+    *,
+    scheme: str = "",
+    authority: str = "",
 ) -> str:
     body_digest = hashlib.blake2s(body, digest_size=16).hexdigest()
     return _idempotency_scope(
         method,
+        scheme,
+        authority,
         path,
         principal_type,
         principal_id,
@@ -486,6 +514,8 @@ class IdempotencyPolicy:
         store: IdempotencyStore | None = None,
         max_body_bytes: int = 256 * 1024,
     ) -> None:
+        if type(max_body_bytes) is not int:
+            raise ValueError("max_body_bytes must be an integer")
         if max_body_bytes < 0:
             raise ValueError("max_body_bytes must be non-negative")
         self._store: IdempotencyStore = (
@@ -635,6 +665,8 @@ class IdempotencyPolicy:
             tenant_key,
             query,
             body,
+            scheme=getattr(request, "scheme", "http"),
+            authority=_request_authority(request),
         )
         return dedup_key(scope, value)
 
@@ -675,9 +707,9 @@ class IdempotencyPolicy:
         """
         try:
             value = self._header_value(request)
+            key = None if value is None else self._key(request, header_value=value)
         except ValueError as error:
             return ProblemResponse(status=400, detail=str(error))
-        key = None if value is None else self._key(request, header_value=value)
         if key is not None:
             read_body = getattr(request, "body", None)
             body = await read_body() if callable(read_body) else b""

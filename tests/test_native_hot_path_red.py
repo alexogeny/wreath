@@ -102,6 +102,20 @@ def test_well_known_name_matching_does_not_strlen_constants_per_request() -> Non
     assert "strlen(" not in header, "header_name_object recomputes strlen on every header"
 
 
+def test_http_object_caches_are_not_process_global() -> None:
+    source = (_NATIVE / "http.c").read_text()
+    server = (_NATIVE / "server_http1.c").read_text()
+    client = (_NATIVE / "client_http1.c").read_text()
+
+    assert "static PyObject *cached_methods" not in source
+    assert "static PyObject *cached_header_names" not in source
+    assert "PyTuple_New(8)" in source
+    assert "PyTuple_New(16)" in source
+    assert "PyCFunction_NewEx(definition, cache, module_name)" in source
+    assert "self->http_object_cache" in server
+    assert "self->http_object_cache" in client
+
+
 def test_default_bitset_router_matches_literals_without_python_segment_objects() -> None:
     source = (_NATIVE / "policy_router.c").read_text()
     match = _function(source, "brt_match_impl", "brt_dispatch")

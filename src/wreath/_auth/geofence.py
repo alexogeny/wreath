@@ -361,14 +361,14 @@ async def resolve_precision(
     nothing about these actions withholds everything: default deny reaches the
     resolution as well as the verdict.
     """
-    slot = f"_precision_{id(ladder):x}_{resource!r}"
+    slot = f"_precision_{id(ladder):x}_{id(resource):x}"
 
     async def ask() -> float | None | _Withheld:
         for action, metres in ladder:
             decision = await authorizer.authorize(
                 request, PolicyRequirement(action=action, resource=resource)
             )
-            if getattr(decision, "allowed", False):
+            if getattr(decision, "allowed", False) is True:
                 return metres
         return WITHHELD
 

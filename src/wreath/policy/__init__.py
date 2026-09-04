@@ -549,6 +549,8 @@ class HttpPolicy:
                 frozenset(value.encode("ascii") for value in cors._allow_methods),
                 cors._preflight_headers,
                 cors._simple_headers,
+                frozenset(value.encode("ascii") for value in cors._allow_headers),
+                "*" in cors._allow_headers,
             )
 
         csrf = self.csrf

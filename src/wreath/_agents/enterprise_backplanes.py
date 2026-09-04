@@ -11,6 +11,7 @@ from .backplanes import (
     Transport,
     TransportResult,
     _chat_completions_request,
+    _header_value,
 )
 from .core import BackplaneError, ModelRequest, ModelResponseEvent
 
@@ -20,17 +21,20 @@ _DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
 
 def _endpoint(value: str) -> str:
-    if not isinstance(value, str):
-        raise ValueError("Azure OpenAI endpoint must be an absolute https origin")
+    message = (
+        "Azure OpenAI endpoint must be an absolute https origin without controls, "
+        "a path, query, fragment, or credentials"
+    )
+    if not isinstance(value, str) or any(
+        ord(character) <= 0x20 or 0x7F <= ord(character) <= 0x9F
+        for character in value
+    ):
+        raise ValueError(message)
     parsed = urlsplit(value)
     try:
         port = parsed.port
     except ValueError as error:
-        raise ValueError("Azure OpenAI endpoint must be an absolute https origin") from error
-    message = (
-        "Azure OpenAI endpoint must be an absolute https origin without a path, "
-        "query, fragment, or credentials"
-    )
+        raise ValueError(message) from error
     if parsed.scheme != "https" or not parsed.hostname:
         raise ValueError(message)
     if port is not None and port <= 0:
@@ -77,6 +81,14 @@ class _AzureTransport:
             if not isinstance(token, str) or not token:
                 raise BackplaneError(
                     "Azure OpenAI token_provider must return a non-empty bearer token"
+                )
+            if any(
+                ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F
+                for character in token
+            ):
+                raise BackplaneError(
+                    "Azure OpenAI token_provider bearer token must not contain HTTP "
+                    "header control characters"
                 )
             authenticated["authorization"] = f"Bearer {token}"
         status, response_headers, response_body = await self._transport(
@@ -136,6 +148,8 @@ class AzureOpenAIBackplane:
             raise ValueError("Azure OpenAI requires exactly one of api_key or token_provider")
         if api_key is not None and not api_key:
             raise ValueError("Azure OpenAI api_key must be non-empty")
+        if api_key is not None:
+            api_key = _header_value(api_key, label="Azure OpenAI api_key")
         if token_provider is not None and not callable(token_provider):
             raise TypeError("Azure OpenAI token_provider must be an async callable")
         if not callable(transport):

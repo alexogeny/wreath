@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 
@@ -34,6 +35,32 @@ SUBSCRIPTION = PushSubscription(
     "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
     "BTBZMqHH6r4Tts7J_aSIgg",
 )
+
+
+def test_smtp_sender_repr_does_not_expose_password() -> None:
+    password = "smtp-password-secret"
+    sender = SmtpEmailSender(
+        host="smtp.example.com",
+        from_addr="ops@example.com",
+        username="ops",
+        password=password,
+    )
+
+    assert password not in repr(sender)
+
+
+def test_email_value_reprs_do_not_expose_action_capabilities() -> None:
+    secret = "email-action-capability-secret"
+    unsubscribe = Unsubscribe(url=f"https://example.com/unsubscribe/{secret}")
+    message = Message(
+        to="user@example.com",
+        subject="Reset",
+        body=f"https://example.com/reset/{secret}",
+        mail_class=MailClass.TRANSACTIONAL,
+    )
+
+    assert secret not in repr(unsubscribe)
+    assert secret not in repr(message)
 
 
 @dataclass
@@ -257,6 +284,47 @@ def test_marketing_without_an_unsubscribe_target_is_refused_at_construction() ->
 def test_a_plain_http_unsubscribe_url_is_refused() -> None:
     with pytest.raises(ValueError, match="must be https"):
         Unsubscribe(url="http://example.com/u/1")
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https:///unsubscribe",
+        "https://operator@example.com/unsubscribe",
+        "https://example.com:0/unsubscribe",
+        "https://example.com:invalid/unsubscribe",
+        "https://example.com/unsubscribe#fragment",
+        "https://example.com/unsubscribe>\r\nBcc: victim@example.com",
+        "https://example.com/unsubscribe\x80suffix",
+        "https://trusted.example\\@evil.example/unsubscribe",
+    ),
+)
+def test_unsubscribe_url_cannot_escape_its_https_header_target(url: str) -> None:
+    with pytest.raises(ValueError, match="one-click unsubscribe URL"):
+        Unsubscribe(url=url)
+
+
+def test_unsubscribe_url_refuses_a_non_idna_hostname() -> None:
+    with pytest.raises(ValueError, match="one-click unsubscribe URL"):
+        Unsubscribe(url="https://" + "\ud800" + "/unsubscribe")
+
+
+@pytest.mark.parametrize(
+    "mailto",
+    (
+        "https://example.com/unsubscribe",
+        "sms:user@example.com",
+        "mailto:",
+        "mailto://example.com/user",
+        "mailto:user@example.com#fragment",
+        "mailto:user@example.com>,<https://evil.example/unsubscribe",
+        "mailto:user@example.com\r\nBcc:victim@example.com",
+        "mailto:user@example.com\x80suffix",
+    ),
+)
+def test_unsubscribe_mailto_cannot_escape_its_header_target(mailto: str) -> None:
+    with pytest.raises(ValueError, match="mailto unsubscribe target"):
+        Unsubscribe(url="https://example.com/unsubscribe", mailto=mailto)
 
 
 def test_marketing_mail_carries_both_rfc8058_headers() -> None:
@@ -756,6 +824,12 @@ async def test_rate_limit_zero_disables_the_cap() -> None:
     assert len(sender.messages) == 12
     assert notify.rate_limited == 0
     assert notify._counts == {}
+
+
+@pytest.mark.parametrize("rate_limit", [-1, True, 1.5, float("nan"), float("inf")])
+async def test_rate_limit_requires_a_non_negative_integer(rate_limit: Any) -> None:
+    with pytest.raises(ValueError, match="rate_limit must be a non-negative integer"):
+        Notifications(channels=[], rate_limit=rate_limit)
 
 
 async def test_expired_notification_state_is_swept_without_revisiting_recipients() -> None:

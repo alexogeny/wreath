@@ -27,6 +27,9 @@ level's object count, so a slow field is distinguishable from a wide one.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
+from dataclasses import dataclass
+from itertools import islice
 from time import monotonic_ns as _monotonic_ns
 from typing import Any
 
@@ -36,7 +39,7 @@ from .._flight_markers import COV_PYTHON as _COV_PYTHON
 from .._flight_markers import PH_RESOLVER as _PH_RESOLVER
 from .._flight_markers import phase_marker as _phase_marker
 from .._native import _core
-from .ast import Document, Field, FragmentSpread, InlineFragment, Operation, Variable
+from .ast import Document, Field, InlineFragment, Operation, Variable
 from .resolvers import ResolverInfo, order_fields
 from .schema import ObjectType, Schema, policy_resource
 
@@ -45,6 +48,24 @@ __all__ = ["ExecutionError", "execute", "execute_json"]
 #: Returned instead of a value when a field is denied under `on_denied="null"`.
 _DENIED = object()
 _RESOLVER_TASK_LIMIT = 32
+
+
+@dataclass(frozen=True, slots=True)
+class _CheckedDecision:
+    allowed: bool
+    reason: str | None
+
+
+def _checked_decision(decision: Any) -> _CheckedDecision:
+    reason = getattr(decision, "reason", None)
+    return _CheckedDecision(
+        getattr(decision, "allowed", None) is True,
+        reason if isinstance(reason, str) else None,
+    )
+
+
+def _bounded_values(value: Any, maximum: int) -> list[Any]:
+    return list(islice(iter(value), maximum + 1))
 
 
 async def _resolve_wave(awaitables: tuple[Any, ...]) -> list[Any]:
@@ -79,9 +100,9 @@ def _resolve_value(value: Any, variables: dict[str, Any]) -> Any:
         if value.name not in variables:
             raise ExecutionError(f"variable ${value.name} was not provided")
         return variables[value.name]
-    if isinstance(value, list):
+    if isinstance(value, tuple | list):
         return [_resolve_value(item, variables) for item in value]
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {key: _resolve_value(item, variables) for key, item in value.items()}
     return value
 
@@ -105,30 +126,30 @@ def _flatten(
     would duplicate work rather than loop.
     """
     fields: list[Field] = []
-    for selection in selections:
-        if isinstance(selection, Field):
-            fields.append(selection)
-        elif isinstance(selection, InlineFragment):
-            if selection.type_condition in (None, type_name):
-                fields.extend(
-                    _flatten(selection.selection_set.selections, document, type_name, seen)
-                )
-        elif isinstance(selection, FragmentSpread):
-            if selection.name in seen:
+    expanded = set(seen)
+    levels = [iter(selections)]
+    while levels:
+        for selection in levels[-1]:
+            if isinstance(selection, Field):
+                fields.append(selection)
+                continue
+            if isinstance(selection, InlineFragment):
+                if selection.type_condition in (None, type_name):
+                    levels.append(iter(selection.selection_set.selections))
+                    break
+                continue
+            if selection.name in expanded:
                 continue
             definition = document.fragments.get(selection.name)
             if definition is None:
                 raise ExecutionError(f"unknown fragment {selection.name!r}")
+            expanded.add(selection.name)
             if definition.type_condition != type_name:
                 continue
-            fields.extend(
-                _flatten(
-                    definition.selection_set.selections,
-                    document,
-                    type_name,
-                    seen | {selection.name},
-                )
-            )
+            levels.append(iter(definition.selection_set.selections))
+            break
+        else:
+            levels.pop()
     return fields
 
 
@@ -210,11 +231,12 @@ class _Run:
                 resource=_core.graphql_policy_resource(self._policy_schema, resource),
             ),
         )
-        allowed = bool(getattr(decision, "allowed", False))
+        checked = _checked_decision(decision)
+        allowed = checked.allowed
         _core.graphql_policy_store(self._policy_schema, self._policy_state, resource, allowed)
         if not allowed and self._on_denied == "error":
             raise ExecutionError(
-                getattr(decision, "reason", None) or f"not authorized to read {resource}",
+                checked.reason or f"not authorized to read {resource}",
                 path=path,
             )
         return allowed
@@ -264,20 +286,25 @@ class _Run:
                 **({"native": True} if native else {}),
             )
         elif len(resources) > 1 and callable(authorize_many):
-            decisions = await authorize_many(
-                self._request,
-                tuple(
-                    PolicyRequirement(action=self._action, resource=resource)
-                    for resource in resources
-                ),
-                stop_on_denied=self._on_denied == "error",
+            decisions = tuple(
+                _checked_decision(decision)
+                for decision in await authorize_many(
+                    self._request,
+                    tuple(
+                        PolicyRequirement(action=self._action, resource=resource)
+                        for resource in resources
+                    ),
+                    stop_on_denied=self._on_denied == "error",
+                )
             )
         elif resources:
             boundary = _core.graphql_policy_items(plan, self._action, PolicyRequirement)
             scalar_decisions = []
             for requirement, _path in boundary:
                 scalar_decisions.append(
-                    await self._authorizer.authorize(self._request, requirement)
+                    _checked_decision(
+                        await self._authorizer.authorize(self._request, requirement)
+                    )
                 )
                 if self._on_denied == "error" and not bool(
                     getattr(scalar_decisions[-1], "allowed", False)
@@ -316,7 +343,13 @@ class _Run:
             result = spec.fn(parents, info)
             if is_awaitable(result):
                 result = await result
-            values = list(result)
+            values = _bounded_values(result, len(parents))
+            if len(values) > len(parents):
+                raise ExecutionError(
+                    f"batch resolver {parent_type}.{spec.field_name} returned more than "
+                    f"{len(parents)} values",
+                    path=path,
+                )
             if len(values) != len(parents):
                 raise ExecutionError(
                     f"batch resolver {parent_type}.{spec.field_name} returned "
@@ -488,7 +521,13 @@ class _Run:
             if is_awaitable(result):
                 result = await result
             if root.is_list:
-                return list(result or ())
+                values = _bounded_values(() if result is None else result, self._max_page_size)
+                if len(values) > self._max_page_size:
+                    raise ExecutionError(
+                        f"list resolver {root.resolver.type_name}.{root.resolver.field_name} "
+                        f"returned more than {self._max_page_size} values"
+                    )
+                return values
             return [result] if result is not None else []
 
         query = root.spec.model_type.select()

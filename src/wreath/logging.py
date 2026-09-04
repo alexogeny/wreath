@@ -75,10 +75,14 @@ from ._logscratch import (
     DEFAULT_LIMITER_CAPACITY,
     DEFAULT_OFF_LOOP_CAPACITY,
     DEFAULT_SCRATCH_BUDGET,
+    MAX_LIMITER_CAPACITY,
+    MAX_OFF_LOOP_CAPACITY,
+    MAX_SCRATCH_BUDGET,
     LogSamplingPolicy,
     OffLoopStage,
     RequestLogBuffer,
     SiteLimiter,
+    _bounded_integer,
 )
 from ._logsite import (
     DEFAULT_SITE_CAPACITY,
@@ -209,6 +213,22 @@ class LogRuntime:
         native: NativeEmitter | None = None,
         off_loop_capacity: int = DEFAULT_OFF_LOOP_CAPACITY,
     ) -> None:
+        if sink is not None and not callable(sink):
+            raise ValueError("sink must be callable or None")
+        if type(level) is not Severity:
+            raise ValueError("level must be a Severity")
+        resolved_capture_level = level if capture_level is None else capture_level
+        if type(resolved_capture_level) is not Severity:
+            raise ValueError("capture_level must be a Severity")
+        if resolved_capture_level > level:
+            raise ValueError("capture_level must not exceed level")
+        if sampling is not None and not isinstance(sampling, LogSamplingPolicy):
+            raise ValueError("sampling must be a LogSamplingPolicy or None")
+        if native is not None and not callable(native):
+            raise ValueError("native must be callable or None")
+        _bounded_integer("limiter_capacity", limiter_capacity, MAX_LIMITER_CAPACITY)
+        _bounded_integer("scratch_budget", scratch_budget, MAX_SCRATCH_BUDGET)
+        _bounded_integer("off_loop_capacity", off_loop_capacity, MAX_OFF_LOOP_CAPACITY)
         self.registry = SiteRegistry(site_capacity)
         #: The native emitter, when a recorder provides one. Packing a record in
         #: Python and encoding it costs ~2.5us before the ring ever sees it; the
@@ -221,7 +241,7 @@ class LogRuntime:
         #: Below this, a call does nothing. Between the two a record is buffered
         #: for promotion. Defaults to `level`, which collapses the two into the
         #: single threshold a caller who did not ask for buffering expects.
-        self.capture_level = level if capture_level is None else capture_level
+        self.capture_level = resolved_capture_level
         self.sink = sink
         self.counters = SiteCounters()
         self.limiter = SiteLimiter(sampling, capacity=limiter_capacity)
@@ -243,7 +263,12 @@ class LogRuntime:
         (a test capture, a list, a file) and is why the check is not free-standing
         module state.
         """
-        self.writer_thread = _thread_id() if thread_id is None else thread_id
+        if self.off_loop is not None:
+            raise RuntimeError("writer thread is already bound")
+        resolved_thread_id = _thread_id() if thread_id is None else thread_id
+        if type(resolved_thread_id) is not int or resolved_thread_id < 1:
+            raise ValueError("thread_id must be a positive integer")
+        self.writer_thread = resolved_thread_id
         self.off_loop = OffLoopStage(self.off_loop_capacity)
 
     def _stage_off_loop(self, cell: LogCell) -> bool:
@@ -265,6 +290,8 @@ class LogRuntime:
         stage = self.off_loop
         if stage is None:
             return 0
+        if _thread_id() != self.writer_thread:
+            raise RuntimeError("off-loop records must be drained by the writer thread")
         records = stage.drain()
         sink = self.sink
         if sink is None:
@@ -410,7 +437,7 @@ def testing_runtime(
 #: with `.get(None)`: a record outside a request pays one ContextVar lookup and
 #: a predicted branch, which is the same shape `_flight_markers` uses for phase
 #: propagation.
-_SCRATCH: ContextVar[RequestLogBuffer] = ContextVar("wreath_log_scratch")
+_SCRATCH: ContextVar[RequestLogBuffer | None] = ContextVar("wreath_log_scratch")
 
 #: Names of the stdlib loggers a bridge is attached to, so `wreath.doctor` can
 #: tell a genuinely split stream from one that is already joined.
@@ -418,12 +445,13 @@ _BRIDGED: set[str] = set()
 
 #: The current request's scope, for `set_field`. Bound and reset alongside
 #: `_SCRATCH` so the two can never disagree about which request is current.
-_SCOPE: ContextVar[RequestScope] = ContextVar("wreath_log_scope")
+_SCOPE: ContextVar[RequestScope | None] = ContextVar("wreath_log_scope")
 
 #: Application fields attached per request before overflow. Wide events are the
 #: point, so this is generous; it is a ceiling against a loop that calls `set`,
 #: not a style guideline.
 DEFAULT_FIELD_BUDGET: Final = 64
+MAX_FIELD_BUDGET: Final = 1 << 16
 
 
 class RequestScope:
@@ -437,6 +465,7 @@ class RequestScope:
     __slots__ = ("_buffer", "_field_budget", "_fields", "_fields_dropped", "_finished")
 
     def __init__(self, buffer: RequestLogBuffer, field_budget: int) -> None:
+        _bounded_integer("field_budget", field_budget, MAX_FIELD_BUDGET)
         self._buffer = buffer
         self._finished = False
         self._fields: dict[str, tuple[object, bool]] = {}
@@ -478,6 +507,10 @@ class RequestScope:
         write wins -- which is how a request that refines its own description as
         it runs expects this to behave.
         """
+        if self._finished:
+            return
+        if type(raw) is not bool:
+            raise ValueError("raw must be a boolean")
         if key not in self._fields and len(self._fields) >= self._field_budget:
             self._fields_dropped += 1
             return
@@ -498,6 +531,10 @@ class RequestScope:
         completion cell already carries. Calling twice is harmless; the second
         call finds an empty buffer.
         """
+        if self._finished:
+            return 0
+        if type(promoted) is not bool:
+            raise ValueError("promoted must be a boolean")
         self._finished = True
         published = self._buffer.finish(promoted=promoted, emit=_RUNTIME.emit)
         self._publish_fields()
@@ -837,6 +874,8 @@ def field(name: str, type_: type, disposition: CaptureDisposition | None = None)
     together, so a reviewer reads one line to know what reaches disk. Omitting
     the disposition means deny-by-default: scalars raw, strings fingerprinted.
     """
+    if disposition is not None and type(disposition) is not CaptureDisposition:
+        raise ValueError("disposition must be a CaptureDisposition or None")
     return _declare(name, type_, disposition)
 
 
@@ -953,6 +992,10 @@ def event(
             be packed, more fields are declared than a record holds, or the
             event name is already registered.
     """
+    if type(level) is not Severity:
+        raise ValueError("level must be a Severity")
+    if type(fields) is not tuple or any(type(item) is not LogField for item in fields):
+        raise ValueError("fields must be a tuple of LogField values")
     site = _RUNTIME.registry.register(event_name, template, level, fields)
     return LogEvent(site)
 
@@ -1072,8 +1115,10 @@ class StdlibBridge(_stdlib.Handler):
     wrong one for anything that might interpolate a credential.
     """
 
-    def __init__(self, *, raw_messages: bool = True) -> None:
+    def __init__(self, *, raw_messages: bool = False) -> None:
         super().__init__()
+        if type(raw_messages) is not bool:
+            raise ValueError("raw_messages must be a boolean")
         self._raw = raw_messages
 
     def emit(self, record: _stdlib.LogRecord) -> None:
@@ -1095,7 +1140,7 @@ class StdlibBridge(_stdlib.Handler):
 
 @contextmanager
 def stdlib_bridge(
-    logger: _stdlib.Logger | None = None, *, raw_messages: bool = True
+    logger: _stdlib.Logger | None = None, *, raw_messages: bool = False
 ) -> Iterator[list[LogCell]]:
     """Attach a `StdlibBridge` to `logger` (the root by default) for a block.
 
@@ -1108,10 +1153,12 @@ def stdlib_bridge(
     Yields the records captured while attached, for tests and for a boot-time
     smoke check.
     """
+    global _ACTIVE
     captured: list[LogCell] = []
     target = logger if logger is not None else _stdlib.getLogger()
     handler = StdlibBridge(raw_messages=raw_messages)
     previous_sink = _RUNTIME.sink
+    already_bridged = target.name in _BRIDGED
 
     def tee(cell: LogCell) -> None:
         captured.append(cell)
@@ -1119,14 +1166,17 @@ def stdlib_bridge(
             previous_sink(cell)
 
     _RUNTIME.sink = tee
+    _ACTIVE = True
     _BRIDGED.add(target.name)
     target.addHandler(handler)
     try:
         yield captured
     finally:
         target.removeHandler(handler)
-        _BRIDGED.discard(target.name)
+        if not already_bridged:
+            _BRIDGED.discard(target.name)
         _RUNTIME.sink = previous_sink
+        _ACTIVE = previous_sink is not None
 
 
 def bridged_loggers() -> frozenset[str]:

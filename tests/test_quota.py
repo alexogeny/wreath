@@ -50,6 +50,27 @@ def test_an_unnamed_quota_is_refused() -> None:
         Quota(name="", limit=1.0, period=60.0)
 
 
+@pytest.mark.parametrize("name", ["_api", "api\r\nx-injected: yes", "café", "a" * 65, True])
+def test_a_quota_name_must_be_a_bounded_ascii_policy_token(name: Any) -> None:
+    with pytest.raises(ValueError, match="ASCII policy token"):
+        Quota(name=name, limit=1.0, period=60.0)
+
+
+@pytest.mark.parametrize("field", ["limit", "period", "cost"])
+@pytest.mark.parametrize("value", [True, False, "1"])
+def test_quota_authority_bounds_must_be_numbers(field: str, value: Any) -> None:
+    values = {"limit": 10.0, "period": 60.0, "cost": 1.0}
+    values[field] = value
+
+    with pytest.raises(ValueError, match="numbers"):
+        Quota(name="api", **values)
+
+
+def test_quota_authority_bounds_must_fit_the_float_store_domain() -> None:
+    with pytest.raises(ValueError, match="finite numbers"):
+        Quota(name="api", limit=10**1000, period=60.0)
+
+
 def test_two_quotas_cannot_share_a_name() -> None:
     quotas = Quotas()
     quotas.declare("api", limit=10.0, period=60.0)
@@ -112,6 +133,37 @@ def test_the_key_names_the_quota_the_principal_and_the_period() -> None:
     assert meter.key(_Requesting("ada")) != meter.key(_Requesting("bo"))
 
 
+def test_quota_identity_type_and_id_boundaries_cannot_collide() -> None:
+    meter = Quotas().declare("api", limit=1.0, period=10.0)
+
+    class First:
+        identity = Identity("c", type="a:b")
+
+    class Second:
+        identity = Identity("b:c", type="a")
+
+    assert meter.key(First()) != meter.key(Second())
+
+
+def test_quota_empty_identity_components_cannot_mimic_framed_components() -> None:
+    meter = Quotas().declare("api", limit=1.0, period=10.0)
+
+    class EmptyType:
+        identity = Identity("0:b", type="", namespace="a")
+
+    class Typed:
+        identity = Identity("b", type="a")
+
+    class EmptyNamespace:
+        identity = Identity("1:ab", type="x")
+
+    class Namespaced:
+        identity = Identity("b", type="x", namespace="a")
+
+    assert meter.key(EmptyType()) != meter.key(Typed())
+    assert meter.key(EmptyNamespace()) != meter.key(Namespaced())
+
+
 def test_an_unidentified_request_has_no_key() -> None:
     quotas = Quotas()
     meter = quotas.declare("api", limit=1.0, period=10.0)
@@ -160,6 +212,42 @@ def test_a_store_used_before_configure_says_so() -> None:
 def test_a_store_with_no_room_for_a_key_is_refused() -> None:
     with pytest.raises(ValueError, match="max_entries must be positive"):
         MemoryQuotaStore(max_entries=0)
+
+
+@pytest.mark.parametrize("max_entries", [True, 1.5, "10"])
+def test_a_quota_store_ceiling_must_be_an_integer(max_entries: Any) -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        MemoryQuotaStore(max_entries=max_entries)
+
+
+@pytest.mark.parametrize("decision", [-1.0, float("nan"), float("inf"), "1"])
+def test_an_invalid_store_decision_cannot_admit_quota_work(decision: Any) -> None:
+    class InvalidStore:
+        def configure(self, quota: Quota) -> None:
+            pass
+
+        def try_spend(self, key: str, now: float) -> Any:
+            return decision
+
+    meter = Quotas(store_factory=InvalidStore).declare("api", limit=1.0, period=60.0)
+
+    with pytest.raises(RuntimeError, match="non-negative finite"):
+        meter.spend_sync(_Requesting("ada"))
+
+
+@pytest.mark.parametrize("decision", [-1.0, float("nan"), float("inf"), "1"])
+async def test_an_invalid_async_store_decision_cannot_admit_quota_work(decision: Any) -> None:
+    class InvalidStore:
+        def configure(self, quota: Quota) -> None:
+            pass
+
+        async def spend(self, key: str, now: float) -> Any:
+            return decision
+
+    meter = Quotas(store_factory=InvalidStore).declare("api", limit=1.0, period=60.0)
+
+    with pytest.raises(RuntimeError, match="non-negative finite"):
+        await meter.spend(_Requesting("ada"))
 
 
 def test_spending_again_on_a_known_key_evicts_nothing() -> None:
@@ -217,6 +305,15 @@ def test_the_postgres_store_names_the_database_its_table_belongs_to() -> None:
     assert PostgresQuotaStore(database).schema_database is database
 
 
+@pytest.mark.parametrize("operation", ["spend", "used"])
+async def test_the_postgres_store_refuses_an_unframed_period_key(operation: str) -> None:
+    store = PostgresQuotaStore(object())
+    store.configure(Quota(name="api", limit=1.0, period=60.0))
+
+    with pytest.raises(ValueError, match="period index"):
+        await getattr(store, operation)("unframed", 0.0)
+
+
 def _pg_quota(monkeypatch: pytest.MonkeyPatch, rows: list[Any]) -> tuple[Any, Any, Any]:
     from wreath.postgres import Database, PoolConfig
 
@@ -242,16 +339,18 @@ async def test_the_postgres_store_translates_the_row_into_a_decision(
     store.configure(Quota(name="api", limit=2.0, period=100.0))
     await database.start()
 
-    assert await store.spend("k", 0.0) == 0.0
+    assert await store.spend("principal:0", 0.0) == 0.0
     # Refused: the answer is the time to the period edge, not a boolean.
-    assert await store.spend("k", 40.0) == pytest.approx(60.0)
+    assert await store.spend("principal:0", 40.0) == pytest.approx(60.0)
 
     sql, args = _spends(connection)[0]
-    assert args == ("k", 1.0, 2.0)  # key, cost, limit
+    assert args == ("principal", 1.0, 2.0, 100.0)  # base key, cost, limit, period
     # One statement: a read-then-write would race, and a raced quota overspends
     # in the direction that reaches an invoice.
     assert sql.count(";") == 0
     assert "ON CONFLICT (key) DO UPDATE" in sql
+    assert "clock_timestamp()" in sql
+    assert "floor" in sql.lower()
 
 
 async def test_the_postgres_store_reads_the_used_total_without_spending(
@@ -261,10 +360,10 @@ async def test_the_postgres_store_reads_the_used_total_without_spending(
     store.configure(Quota(name="api", limit=10.0, period=100.0))
     await database.start()
 
-    assert await store.used("k", 0.0) == 7.0
+    assert await store.used("principal:0", 0.0) == 7.0
     # A key nobody has written is nothing consumed, not an error: the first
     # request of a new period reads exactly this.
-    assert await store.used("k", 0.0) == 0.0
+    assert await store.used("principal:0", 0.0) == 0.0
     assert _spends(connection) == []
 
 
@@ -645,6 +744,14 @@ async def test_a_plain_callable_is_a_states_provider() -> None:
         status = await _status(READ_ONLY_POLICY, identity=Identity(id="ada"), quota=quotas)
 
     assert status == 403
+
+
+@pytest.mark.parametrize("states", ["read_only", {"read_only", 1}, {object()}, {""}])
+def test_authority_states_must_be_an_iterable_of_nonempty_strings(states: Any) -> None:
+    quotas = Quotas(states=lambda identity: states)
+
+    with pytest.raises(ValueError, match="iterable of non-empty strings"):
+        quotas.for_identity(Identity(id="ada"))
 
 
 def test_a_provider_that_cannot_enumerate_offers_no_vocabulary_at_all() -> None:

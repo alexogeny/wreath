@@ -88,6 +88,13 @@ async def _captured(awaitable: Awaitable[Any]) -> BaseException | None:
 
 
 def _origin(url: str) -> str:
+    if not isinstance(url, str) or any(
+        ord(character) <= 0x20 or 0x7F <= ord(character) <= 0x9F
+        for character in url
+    ):
+        raise ValueError(
+            "remote MCP endpoint must be an absolute HTTPS URL without controls"
+        )
     parsed = urlsplit(url)
     if parsed.scheme != "https" or not parsed.hostname:
         raise ValueError("remote MCP endpoint must be an absolute HTTPS URL")
@@ -95,8 +102,14 @@ def _origin(url: str) -> str:
         raise ValueError("remote MCP endpoint must not contain userinfo")
     if parsed.fragment:
         raise ValueError("remote MCP endpoint must not contain a fragment")
-    port = "" if parsed.port in (None, 443) else f":{parsed.port}"
-    return f"https://{parsed.hostname.lower()}{port}"
+    try:
+        port_number = parsed.port
+        host = parsed.hostname.encode("idna").decode("ascii").lower()
+    except (UnicodeError, ValueError) as error:
+        raise ValueError("remote MCP endpoint must be an absolute HTTPS URL") from error
+    display_host = f"[{host}]" if ":" in host else host
+    port = "" if port_number in (None, 443) else f":{port_number}"
+    return f"https://{display_host}{port}"
 
 
 def _header(headers: Mapping[str, str], name: str) -> str | None:
@@ -140,10 +153,16 @@ def _sse_objects(body: bytes, *, max_events: int) -> tuple[Mapping[str, Any], ..
         raise MCPRemoteError("remote MCP SSE response is not UTF-8") from error
     messages: list[Mapping[str, Any]] = []
     data: list[str] = []
-    for line in (*text.splitlines(), ""):
+    if "\r" in text:
+        lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    else:
+        lines = text.split("\n")
+    lines.append("")
+    for line in lines:
         if line == "":
             if not data:
                 continue
+            # complexity: allow SL-LINEAR-METHOD -- each data line is joined once before clear
             messages.append(_json_object("\n".join(data).encode()))
             if len(messages) > max_events:
                 raise MCPRemoteError(f"remote MCP SSE response exceeds event ceiling {max_events}")
@@ -170,7 +189,10 @@ def _response_message(
             f"text/event-stream, not {content_type!r}"
         )
     for message in messages:
-        if message.get("id") == request_id:
+        response_id = message.get("id")
+        if type(response_id) is int and response_id == request_id:
+            if message.get("jsonrpc") != "2.0":
+                raise MCPRemoteError("remote MCP response must use JSON-RPC 2.0")
             return message
     raise MCPRemoteError(f"remote MCP response did not contain request id {request_id}")
 
@@ -283,6 +305,12 @@ class RemoteMCPClient:
             token = await self._token_provider.token(self._origin)
             if not token:
                 raise MCPRemoteError("remote MCP token provider returned an empty token")
+            if not isinstance(token, str) or any(
+                ord(character) <= 0x20 or ord(character) >= 0x7F for character in token
+            ):
+                raise MCPRemoteError(
+                    "remote MCP token provider must return a visible ASCII bearer token"
+                )
             headers["authorization"] = f"Bearer {token}"
         return headers
 
@@ -304,7 +332,7 @@ class RemoteMCPClient:
             raise MCPRemoteError(
                 f"remote MCP response exceeds response byte ceiling {self._max_response_bytes}"
             )
-        if response.status >= 400:
+        if not 200 <= response.status < 300:
             raise MCPRemoteError(f"remote MCP HTTP request failed with status {response.status}")
         self._last_response = response
         return response
@@ -487,6 +515,8 @@ class RemoteMCPClient:
         call_id: str,
         context: Any,
     ) -> Mapping[str, Any]:
+        if not any(item.name == name for item in self.specifications):
+            raise LookupError(f"remote MCP client {self.name!r} has no tool {name!r}")
         tenant = getattr(context, "tenant", None)
         if not isinstance(tenant, str) or not tenant:
             raise MCPRemoteScopeError("remote MCP invocation requires a non-empty tenant")
@@ -500,9 +530,6 @@ class RemoteMCPClient:
                 f"{self._scope!r}, not {scope!r}; construct a separate client, "
                 "transport, and token provider for each tenant/principal"
             )
-        known = {item.name for item in self.specifications}
-        if name not in known:
-            raise LookupError(f"remote MCP client {self.name!r} has no tool {name!r}")
         effect_id = _effect_id(self._endpoint, name, call_id, tenant, resolved_principal)
         request_id = self._reserve_request_id()
         await self._audit_event(
@@ -578,6 +605,11 @@ class RemoteMCPClient:
             body=None,
             max_response_bytes=self._max_response_bytes,
         )
+        if response.url != self._endpoint:
+            raise MCPRemoteError(
+                f"remote MCP transport is origin-pinned to {self._endpoint!r}, "
+                f"not response URL {response.url!r}"
+            )
         if response.status not in (200, 202, 204, 405):
             raise MCPRemoteError(f"remote MCP session close failed with status {response.status}")
 

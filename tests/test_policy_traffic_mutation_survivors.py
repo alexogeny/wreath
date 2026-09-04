@@ -159,7 +159,7 @@ def test_ai_scope_reads_headers_from_object_scopes() -> None:
 
 @pytest.mark.parametrize("name", ["", "café"])
 def test_traffic_class_name_must_be_non_empty_ascii(name: str) -> None:
-    with pytest.raises(ValueError, match="name must be non-empty ASCII"):
+    with pytest.raises(ValueError, match="name must be non-empty printable ASCII"):
         TrafficClass(name, claimed_agent=True)
 
 
@@ -179,6 +179,62 @@ def test_traffic_class_ip_version_must_be_four_or_six(version: Any) -> None:
 def test_traffic_class_address_source_uses_the_bounded_vocabulary(source: str) -> None:
     with pytest.raises(ValueError, match="must be 'socket' or 'forwarded'"):
         TrafficClass("source", address_sources=(source,))
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "countries",
+        "browsers",
+        "ip_versions",
+        "address_sources",
+        "agent_identities",
+    ],
+)
+def test_traffic_class_match_collections_must_be_immutable_tuples(field: str) -> None:
+    values: dict[str, Any] = {
+        "countries": ["AU"],
+        "browsers": ["firefox"],
+        "ip_versions": [4],
+        "address_sources": ["socket"],
+        "agent_identities": ["trusted"],
+    }
+
+    with pytest.raises(TypeError, match=rf"{field} must be a tuple"):
+        TrafficClass("mutable", **{field: values[field]})
+
+
+@pytest.mark.parametrize("field", ["claimed_agent", "verified_agent", "mobile"])
+@pytest.mark.parametrize("value", [0, 1, "false"])
+def test_traffic_class_optional_flags_must_be_exact_booleans(
+    field: str, value: Any
+) -> None:
+    with pytest.raises(TypeError, match=rf"{field} must be bool or None"):
+        TrafficClass("flag", countries=("AU",), **{field: value})
+
+
+@pytest.mark.parametrize("value", [0, 1, "false"])
+def test_traffic_class_deny_must_be_an_exact_boolean(value: Any) -> None:
+    with pytest.raises(TypeError, match="deny must be a bool"):
+        TrafficClass("deny", countries=("AU",), deny=value)
+
+
+@pytest.mark.parametrize("version", [4.0, 6.0])
+def test_traffic_class_ip_versions_must_be_exact_integers(version: float) -> None:
+    with pytest.raises(ValueError, match="only 4 and 6 as integers"):
+        TrafficClass("version", ip_versions=(version,))
+
+
+@pytest.mark.parametrize("name", ["line\nfeed", "carriage\rreturn", "nul\0byte"])
+def test_traffic_class_name_must_not_contain_control_characters(name: str) -> None:
+    with pytest.raises(ValueError, match="printable ASCII"):
+        TrafficClass(name, claimed_agent=True)
+
+
+@pytest.mark.parametrize("field", ["browsers", "agent_identities"])
+def test_traffic_class_string_criteria_refuse_control_characters(field: str) -> None:
+    with pytest.raises(ValueError, match="without control characters"):
+        TrafficClass("controlled", **{field: ("value\n",)})
 
 
 def test_browser_condition_can_independently_refuse_an_otherwise_matching_request() -> None:
@@ -241,9 +297,23 @@ def test_traffic_policy_refuses_a_non_provider() -> None:
         TrafficPolicy(provider, (TrafficClass("bot", claimed_agent=True),))
 
 
-@pytest.mark.parametrize("default", ["", "café"])
+def test_traffic_policy_classes_must_be_an_immutable_tuple() -> None:
+    classes: Any = [TrafficClass("bot", claimed_agent=True)]
+
+    with pytest.raises(TypeError, match="classes must be a tuple"):
+        TrafficPolicy(ClientFactsProvider(), classes)
+
+
+def test_traffic_policy_names_a_non_traffic_class_declaration() -> None:
+    declaration: Any = object()
+
+    with pytest.raises(TypeError, match=r"classes\[0\] must be a TrafficClass"):
+        TrafficPolicy(ClientFactsProvider(), (declaration,))
+
+
+@pytest.mark.parametrize("default", ["", "café", "line\nfeed"])
 def test_traffic_policy_default_must_be_non_empty_ascii(default: str) -> None:
-    with pytest.raises(ValueError, match="default class must be non-empty ASCII"):
+    with pytest.raises(ValueError, match="default class must be non-empty printable ASCII"):
         TrafficPolicy(
             ClientFactsProvider(),
             (TrafficClass("bot", claimed_agent=True),),

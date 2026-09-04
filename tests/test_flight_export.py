@@ -295,6 +295,57 @@ def test_otlp_exporter_refuses_an_endpoint_without_an_http_origin(endpoint: str)
 
 
 @pytest.mark.parametrize(
+    "endpoint",
+    (
+        "https://user@collector.invalid",
+        "https://user:secret@collector.invalid",
+        "https://collector.invalid:0",
+        "https://collector.invalid:notaport",
+        "https://collector.invalid/path?tenant=other",
+        "https://collector.invalid/path#fragment",
+        " https://collector.invalid",
+        "https://collector.invalid\t.evil",
+        "https://collector.invalid/\x85",
+        f"https://{'a' * 64}.invalid",
+    ),
+)
+def test_otlp_exporter_refuses_ambiguous_endpoint_authority(endpoint: str) -> None:
+    with pytest.raises(ValueError, match="OTLP endpoint"):
+        OtlpHttpExporter(endpoint)
+
+
+def test_otlp_exporter_bounds_the_discarded_response_body() -> None:
+    class Response:
+        def __init__(self) -> None:
+            self.read_sizes: list[int] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, size: int = -1) -> bytes:
+            self.read_sizes.append(size)
+            return b""
+
+    class Opener:
+        def __init__(self, response: Response) -> None:
+            self.response = response
+
+        def open(self, *_args: object, **_kwargs: object) -> Response:
+            return self.response
+
+    response = Response()
+    exporter = OtlpHttpExporter("https://collector.invalid")
+    exporter._opener = Opener(response)
+
+    exporter.export_traces({"resourceSpans": [{}]})
+
+    assert response.read_sizes == [64 * 1024]
+
+
+@pytest.mark.parametrize(
     ("url", "origin"),
     (
         ("http://COLLECTOR.invalid/path", ("http", "collector.invalid", 80)),

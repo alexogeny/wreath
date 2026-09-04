@@ -57,3 +57,28 @@ def test_managed_snapshot_rejects_non_buffer_input() -> None:
             target_checksum=91,
             directory_generation=3,
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("target_migration", True),
+        ("target_migration", 2**64),
+        ("target_checksum", True),
+        ("target_checksum", 2**64),
+        ("directory_generation", True),
+        ("directory_generation", 2**32),
+    ],
+)
+def test_managed_snapshot_refuses_unrepresentable_native_arguments(
+    field: str, bad: object
+) -> None:
+    values = {
+        "target_migration": 7,
+        "target_checksum": 91,
+        "directory_generation": 3,
+    }
+    values[field] = bad
+
+    with pytest.raises(ValueError, match=field):
+        _resolve_managed_snapshot(b"", **values)

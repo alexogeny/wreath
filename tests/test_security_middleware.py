@@ -228,6 +228,12 @@ def test_a_trusted_host_pattern_that_is_not_a_host_is_refused(pattern: str) -> N
         TrustedHostPolicy([pattern])
 
 
+def test_a_trusted_host_pattern_must_be_text() -> None:
+    pattern: Any = None
+    with pytest.raises(ValueError, match="invalid trusted-host pattern.*None"):
+        TrustedHostPolicy([pattern])
+
+
 @pytest.mark.parametrize("pattern", ["ex*.com", "*example.com", "a.*.com", "**.com"])
 def test_a_wildcard_anywhere_but_a_leading_label_is_refused(pattern: str) -> None:
     with pytest.raises(ValueError, match="invalid trusted-host pattern"):

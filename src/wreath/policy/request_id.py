@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .._http import _is_http_token
 from .._native import _core
 from .._webpolicy import replace_response_header
 from ..request import Request
@@ -96,10 +97,14 @@ class RequestIdPolicy:
         echo: bool = True,
         max_length: int = 128,
     ) -> None:
-        if not header:
-            raise ValueError("header name must not be empty")
-        if max_length < 1:
-            raise ValueError("max_length must be at least 1")
+        if not isinstance(header, str) or not _is_http_token(header):
+            raise ValueError("header must be an ASCII HTTP token such as x-request-id")
+        if type(max_length) is not int or max_length < 1:
+            raise ValueError("max_length must be a positive integer")
+        if not isinstance(trust_inbound, bool):
+            raise TypeError("trust_inbound must be bool")
+        if not isinstance(echo, bool):
+            raise TypeError("echo must be bool")
         self._header = header
         self._header_bytes = header.encode("ascii").lower()
         self._trust_inbound = trust_inbound

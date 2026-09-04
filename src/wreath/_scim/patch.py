@@ -35,7 +35,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from .filters import Filter, FilterError, parse, select
+from .filters import MAX_LENGTH, Filter, FilterError, parse, select
 from .resources import Shape
 
 __all__ = [
@@ -93,6 +93,12 @@ def parse_path(source: str, *, shape: Shape) -> Path:
     Raises:
         PatchError: `invalidPath` for a malformed path or an unknown attribute.
     """
+    if len(source) > MAX_LENGTH:
+        raise PatchError(
+            "invalidPath",
+            f"a patch path may contain at most {MAX_LENGTH} characters "
+            f"({len(source)} were sent)",
+        )
     text = source.strip()
     if not text:
         raise PatchError("invalidPath", "a patch operation has an empty path")
@@ -146,6 +152,11 @@ def _operations(payload: Any) -> Sequence[Any]:
             "invalidSyntax",
             f"a patch body's schemas must contain {PATCH_OP_URN!r}",
         )
+    if "Operations" in payload and "operations" in payload:
+        raise PatchError(
+            "invalidSyntax",
+            "a patch body names Operations more than once ignoring case",
+        )
     operations = payload.get("Operations", payload.get("operations"))
     if not isinstance(operations, list) or not operations:
         raise PatchError("invalidSyntax", "a patch body must carry a non-empty Operations list")
@@ -158,7 +169,13 @@ def _operations(payload: Any) -> Sequence[Any]:
     return operations
 
 
-def apply(document: Mapping[str, Any], payload: Any, *, shape: Shape) -> dict[str, Any]:
+def apply(
+    document: Mapping[str, Any],
+    payload: Any,
+    *,
+    shape: Shape,
+    max_elements: int | None = None,
+) -> dict[str, Any]:
     """`document` after every operation in `payload`, or nothing at all.
 
     The operations are applied to a copy and the copy is returned, so a refusal
@@ -171,6 +188,9 @@ def apply(document: Mapping[str, Any], payload: Any, *, shape: Shape) -> dict[st
         shape: which attributes the resource type has, and which of them a
             client may write. Anything outside `shape.writable` is `readOnly`
             and refused with `mutability`.
+        max_elements: optional ceiling for one multi-valued attribute. Group
+            routes pass their configured materialization limit here so one
+            operation cannot hide an unbounded member list.
 
     Raises:
         PatchError: any refusal, carrying its `scimType`.
@@ -199,12 +219,34 @@ def apply(document: Mapping[str, Any], payload: Any, *, shape: Shape) -> dict[st
                     "invalidValue",
                     f"a pathless {op} operation's value must be an object of attributes to set",
                 )
+            if len(value) > len(shape.writable):
+                raise PatchError(
+                    "invalidValue",
+                    f"a pathless {op} operation may carry at most "
+                    f"{len(shape.writable)} attributes",
+                )
+            seen: set[str] = set()
             for name, sub_value in value.items():
-                _one(draft, op, parse_path(str(name), shape=shape), sub_value, True, shape)
+                path = parse_path(str(name), shape=shape)
+                if path.attribute in seen:
+                    raise PatchError(
+                        "invalidSyntax",
+                        f"a pathless {op} operation names {path.attribute!r} more than once",
+                    )
+                seen.add(path.attribute)
+                _one(draft, op, path, sub_value, True, shape, max_elements)
             continue
         if not isinstance(raw_path, str):
             raise PatchError("invalidPath", "a patch operation's path must be a string")
-        _one(draft, op, parse_path(raw_path, shape=shape), value, has_value, shape)
+        _one(
+            draft,
+            op,
+            parse_path(raw_path, shape=shape),
+            value,
+            has_value,
+            shape,
+            max_elements,
+        )
     return draft
 
 
@@ -215,6 +257,7 @@ def _one(
     value: Any,
     has_value: bool,
     shape: Shape,
+    max_elements: int | None,
 ) -> None:
     """Apply one operation to `draft` in place."""
     if path.attribute not in shape.writable:
@@ -226,7 +269,7 @@ def _one(
     if op != "remove" and not has_value:
         raise PatchError("invalidValue", f"a patch {op} operation needs a value")
     if path.attribute in shape.multi_valued:
-        _multi_valued(draft, op, path, value, shape)
+        _multi_valued(draft, op, path, value, shape, max_elements)
         return
     if path.predicate is not None or path.sub_attribute is not None:
         raise PatchError(
@@ -243,13 +286,19 @@ def _one(
     draft[shape.key(path.attribute)] = value
 
 
-def _elements(value: Any) -> list[dict[str, Any]]:
+def _elements(value: Any, max_elements: int | None = None) -> list[dict[str, Any]]:
     """A patch value for a multi-valued attribute as a list of member objects.
 
     A bare string is accepted as `{"value": ...}` because directories send both
     spellings for group membership, and the two mean the same thing.
     """
     items = value if isinstance(value, list) else [value]
+    if max_elements is not None and len(items) > max_elements:
+        raise PatchError(
+            "tooMany",
+            f"a multi-valued attribute may carry at most {max_elements} elements "
+            f"({len(items)} were sent)",
+        )
     out: list[dict[str, Any]] = []
     for item in items:
         if isinstance(item, Mapping):
@@ -265,12 +314,36 @@ def _elements(value: Any) -> list[dict[str, Any]]:
     return out
 
 
-def _multi_valued(draft: dict[str, Any], op: str, path: Path, value: Any, shape: Shape) -> None:
+def _multi_valued(
+    draft: dict[str, Any],
+    op: str,
+    path: Path,
+    value: Any,
+    shape: Shape,
+    max_elements: int | None,
+) -> None:
     key = shape.key(path.attribute)
     existing: list[Any] = list(draft.get(key) or [])
+    if op == "remove" and path.sub_attribute is not None:
+        raise PatchError(
+            "invalidValue",
+            f"{path.attribute!r}.{path.sub_attribute} cannot be removed without "
+            "removing a member's identity; remove the selected member instead",
+        )
+    if op == "add" and path.predicate is not None:
+        raise PatchError(
+            "invalidPath",
+            f"adding to {path.attribute!r} must name the whole multi-valued attribute",
+        )
+    if path.predicate is None and path.sub_attribute is not None:
+        raise PatchError(
+            "invalidPath",
+            f"replacing {path.attribute!r}.{path.sub_attribute} would ignore the "
+            "sub-attribute; name the whole multi-valued attribute or select one member",
+        )
     if op == "add":
         known = {_identity(item) for item in existing}
-        for element in _elements(value):
+        for element in _elements(value, max_elements):
             if _identity(element) not in known:
                 existing.append(element)
                 known.add(_identity(element))
@@ -285,7 +358,7 @@ def _multi_valued(draft: dict[str, Any], op: str, path: Path, value: Any, shape:
         draft[key] = select(path.predicate, existing, invert=True)
         return
     if path.predicate is None:
-        draft[key] = _elements(value)
+        draft[key] = _elements(value, max_elements)
         return
     selected = select(path.predicate, existing)
     if not selected:
@@ -294,11 +367,24 @@ def _multi_valued(draft: dict[str, Any], op: str, path: Path, value: Any, shape:
             f"no element of {path.attribute!r} matches the value filter, so there "
             "is nothing to replace",
         )
-    for item in selected:
-        if path.sub_attribute is None:
+    if path.sub_attribute is not None and path.sub_attribute != "value":
+        raise PatchError(
+            "mutability",
+            f"a selected member exposes only its 'value' as mutable; "
+            f"{path.sub_attribute!r} is derived",
+        )
+    if path.sub_attribute is None:
+        replacement = _elements(value, max_elements)
+        if len(replacement) != 1:
+            raise PatchError(
+                "invalidValue",
+                "replacing selected elements needs exactly one element as its value",
+            )
+        for item in selected:
             item.clear()
-            item.update(_elements(value)[0])
-        else:
+            item.update(replacement[0])
+    else:
+        for item in selected:
             item[path.sub_attribute] = value
     draft[key] = existing
 
@@ -325,7 +411,13 @@ def _identity(element: Mapping[str, Any]) -> tuple[str, str]:
     return "other", repr(marker)
 
 
-def replace(document: Mapping[str, Any], body: Any, *, shape: Shape) -> dict[str, Any]:
+def replace(
+    document: Mapping[str, Any],
+    body: Any,
+    *,
+    shape: Shape,
+    max_elements: int | None = None,
+) -> dict[str, Any]:
     """`document` with `body`'s writable attributes applied -- the `PUT` shape.
 
     Read-only and unknown attributes are **ignored rather than refused**, which
@@ -337,15 +429,33 @@ def replace(document: Mapping[str, Any], body: Any, *, shape: Shape) -> dict[str
     cleared. `PUT` nominally replaces the whole resource, but the attributes
     this provider writes are exactly the ones with no coherent absent state, so
     "omitted" can only mean "unchanged" here.
+
+    `max_elements` optionally bounds one multi-valued attribute before it is
+    copied. The group router passes its configured materialization ceiling.
     """
     if not isinstance(body, Mapping):
         raise PatchError("invalidSyntax", "a request body must be a JSON object")
+    if len(body) > MAX_OPERATIONS:
+        raise PatchError(
+            "invalidValue",
+            f"a replacement body may carry at most {MAX_OPERATIONS} attributes "
+            f"({len(body)} were sent)",
+        )
     draft = deepcopy(dict(document))
+    seen: set[str] = set()
     for name, value in body.items():
         if not isinstance(name, str):
             continue
         attribute = name.rpartition(":")[2].lower()
         if attribute not in shape.writable:
             continue
-        draft[shape.key(attribute)] = _elements(value) if attribute in shape.multi_valued else value
+        if attribute in seen:
+            raise PatchError(
+                "invalidSyntax",
+                f"a replacement body names {attribute!r} more than once",
+            )
+        seen.add(attribute)
+        draft[shape.key(attribute)] = (
+            _elements(value, max_elements) if attribute in shape.multi_valued else value
+        )
     return draft

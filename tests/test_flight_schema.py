@@ -168,6 +168,26 @@ def test_phase_batch_cell_rejects_bad_input() -> None:
         fs.PhaseBatchCell(request_id=1, records=()).encode()
 
 
+def test_fixed_cell_decoders_refuse_concatenated_or_tailed_records() -> None:
+    completion = fs.CompletionCell(1, 1, 1, 1, 1, 200, 0, 0).encode()
+    correlation = fs.CorrelationCell(1, 2, 3).encode()
+    facts = fs.ClientFactsCell(1).encode()
+    phase = fs.PhaseRecord(fs.PhaseKind.HANDLER, 1).encode()
+    batch = fs.PhaseBatchCell(
+        request_id=1, records=(fs.PhaseRecord(fs.PhaseKind.HANDLER, 1),)
+    ).encode()
+
+    for decode, encoded in (
+        (fs.CompletionCell.decode, completion),
+        (fs.CorrelationCell.decode, correlation),
+        (fs.ClientFactsCell.decode, facts),
+        (fs.PhaseRecord.decode, phase),
+        (fs.PhaseBatchCell.decode, batch),
+    ):
+        with pytest.raises(fs.SchemaError, match="exactly"):
+            decode(encoded + b"x")
+
+
 def test_histogram_bucket_is_monotonic_and_clamped() -> None:
     assert fs.histogram_bucket(0) == 0
     assert fs.histogram_bucket(1) == 0

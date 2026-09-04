@@ -99,8 +99,15 @@ class HealthCheck:
     timeout: float | None = 1.0
 
     def __post_init__(self) -> None:
-        if self.timeout is not None and (not isfinite(self.timeout) or self.timeout <= 0):
-            raise ValueError("health check timeout must be finite and positive, or None")
+        if not callable(self.probe):
+            raise ValueError("health check probe must be callable")
+        if type(self.critical) is not bool:
+            raise ValueError("health check critical must be a bool")
+        if self.timeout is not None:
+            if type(self.timeout) not in (int, float):
+                raise ValueError("health check timeout must be finite and positive, or None")
+            if not isfinite(self.timeout) or self.timeout <= 0:
+                raise ValueError("health check timeout must be finite and positive, or None")
 
 
 def callable_check(

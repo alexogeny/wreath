@@ -15,6 +15,7 @@ from collections import Counter
 from collections.abc import Iterable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
+from math import isfinite
 from string.templatelib import Template
 from time import monotonic_ns as _monotonic_ns
 from typing import Any
@@ -465,8 +466,14 @@ class Session:
         # registry's default so an application configures it once.
         if statement_timeout is None:
             statement_timeout = getattr(registry, "statement_timeout", None)
-        if statement_timeout is not None and statement_timeout <= 0:
-            raise SessionError("statement_timeout must be positive")
+        if statement_timeout is not None:
+            if type(statement_timeout) not in (int, float):
+                raise SessionError("statement_timeout must be a finite positive number")
+            if not isfinite(statement_timeout) or statement_timeout <= 0:
+                raise SessionError("statement_timeout must be a finite positive number")
+        if identity_map_warn_at is not None:
+            if type(identity_map_warn_at) is not int or identity_map_warn_at < 1:
+                raise SessionError("identity_map_warn_at must be a positive integer")
         self._statement_timeout = statement_timeout
         self._tenant = tenant
         # A `wreath.audit_log.AuditTrail`, or None. Typed loosely on purpose:
@@ -1417,6 +1424,14 @@ class Session:
             return None
         return getattr(type(instance), "__wreath_facets__", {}).get("audit")
 
+    def _audit_table_name(self, spec: Any) -> str:
+        if spec.sql_namespace == "tenant_search_path":
+            tenant = self._tenant
+            if tenant is None:
+                raise SessionError("a tenant audit record needs a bound tenant context")
+            return f"{tenant.schema}.{spec.qualified_name}"
+        return spec.qualified_name
+
     def _audit_write(
         self,
         instance: Any,
@@ -1461,11 +1476,12 @@ class Session:
             pending = self._audit_pending = []
         pending.append(
             Change(
-                table=spec.qualified_name,
+                table=self._audit_table_name(spec),
                 key="" if key is None else ":".join(str(part) for part in key),
                 operation=operation,
                 actor=self._audit.attribute(),
                 fields=fields,
+                key_parts=key,
             )
         )
 

@@ -97,6 +97,41 @@ async def test_nonempty_data_frames_share_the_body_chunk_budget(make_driver):
     assert int.from_bytes(resets[-1].payload, "big") == support.ENHANCE_YOUR_CALM
 
 
+async def test_data_flood_on_completed_stream_bounds_reset_reflection(make_driver):
+    d = make_driver(ok_app)
+    await d.preface()
+    await _open_stream(d, 1, end_stream=True)
+    d.frames()
+
+    frame_count = 1_000
+    d.feed(support.encode_frame(support.DATA, 0, 1, b"late") * frame_count)
+    await d.settle()
+
+    frames = d.frames()
+    resets = [
+        frame for frame in frames if frame.type == support.RST_STREAM and frame.stream_id == 1
+    ]
+    goaways = [frame for frame in frames if frame.type == support.GOAWAY]
+    assert goaways, (
+        f"closed-stream DATA did not consume the no-progress budget ({len(resets)} resets)"
+    )
+    assert len(resets) < frame_count, "closed-stream DATA produced one RST_STREAM per frame"
+
+
+async def test_goaway_flood_consumes_the_no_progress_budget(make_driver):
+    d = make_driver(ok_app)
+    await d.preface()
+    d.frames()
+
+    frame = support.encode_frame(support.GOAWAY, 0, 0, b"\x00" * 8)
+    d.feed(frame * 1_000)
+    await d.settle()
+
+    goaways = [item for item in d.frames() if item.type == support.GOAWAY]
+    assert goaways, "GOAWAY frames bypassed the no-progress budget"
+    assert support.parse_goaway(goaways[-1].payload)[1] == support.ENHANCE_YOUR_CALM
+
+
 async def test_ping_flood_is_throttled(make_driver):
     d = make_driver(ok_app)
     await d.preface()

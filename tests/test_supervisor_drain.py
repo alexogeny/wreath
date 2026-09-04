@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -12,6 +12,60 @@ from wreath.services import Supervisor
 def test_supervisor_drain_timeout_must_be_finite(drain_timeout: float) -> None:
     with pytest.raises(ValueError, match="finite"):
         Supervisor(drain_timeout=drain_timeout)
+
+
+@pytest.mark.parametrize("drain_timeout", [True, False, 0, -1, "1"])
+def test_supervisor_drain_timeout_must_be_a_positive_number(drain_timeout: object) -> None:
+    with pytest.raises(ValueError, match="positive finite number"):
+        Supervisor(drain_timeout=cast(float, drain_timeout))
+
+
+@pytest.mark.asyncio
+async def test_supervisor_refuses_tasks_while_it_is_inactive() -> None:
+    supervisor = Supervisor()
+    before_start = asyncio.sleep(0)
+    with pytest.raises(RuntimeError, match="only while it is running"):
+        supervisor.spawn("too-early", before_start)
+    before_start.close()
+
+    supervisor.add(_Service())
+    await supervisor.start()
+    await supervisor.stop()
+
+    after_stop = asyncio.sleep(0)
+    with pytest.raises(RuntimeError, match="only while it is running"):
+        supervisor.spawn("too-late", after_stop)
+    after_stop.close()
+
+
+@pytest.mark.asyncio
+async def test_service_can_spawn_during_start_but_not_during_drain() -> None:
+    class SpawningService:
+        def __init__(self) -> None:
+            self.supervisor: Supervisor | None = None
+            self.drain_refused = False
+
+        async def start(self, supervisor: Supervisor) -> None:
+            self.supervisor = supervisor
+            supervisor.spawn("started-worker", asyncio.sleep(3600))
+
+        async def drain(self, deadline: float) -> None:
+            assert self.supervisor is not None
+            during_drain = asyncio.sleep(0)
+            try:
+                self.supervisor.spawn("too-late", during_drain)
+            except RuntimeError:
+                self.drain_refused = True
+            finally:
+                during_drain.close()
+
+    service = SpawningService()
+    supervisor = Supervisor()
+    supervisor.add(service)
+    await supervisor.start()
+    await supervisor.stop()
+
+    assert service.drain_refused
 
 
 class _Service:

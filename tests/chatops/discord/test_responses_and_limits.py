@@ -77,6 +77,28 @@ async def test_followup_and_edits_use_discords_exact_webhook_routes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_webhook_identifiers_cannot_escape_their_path_segments() -> None:
+    api = discord()
+    client = HTTPClient()
+    responder = api.DiscordResponder(
+        application_id="app/../victim",
+        interaction_id="interaction-1",
+        token="token?admin=true#fragment",
+        received_at=1_000.0,
+        client=client,
+        clock=lambda: 1_010.0,
+        acknowledged=True,
+    )
+
+    await responder.edit_followup("../@original", content="bounded")
+
+    assert client.requests[0][1] == (
+        "/webhooks/app%2F..%2Fvictim/token%3Fadmin%3Dtrue%23fragment/"
+        "messages/..%2F%40original"
+    )
+
+
+@pytest.mark.asyncio
 async def test_expired_acknowledgement_and_interaction_token_refuse_locally() -> None:
     api = discord()
     client = HTTPClient()

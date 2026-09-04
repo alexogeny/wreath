@@ -101,7 +101,11 @@ async def test_a_handlers_own_timeout_error_is_not_mislabeled_as_the_deadline() 
     assert response.json()["detail"] != "Request handler exceeded its deadline"
 
 
-@pytest.mark.parametrize("seconds", [True, "1"])
+@pytest.mark.parametrize(
+    "seconds",
+    [True, "1", None, float("-inf"), 10**400],
+    ids=("bool", "string", "none", "negative-infinity", "overflowing-integer"),
+)
 def test_deadline_policy_refuses_non_numeric_seconds(seconds) -> None:
     with pytest.raises(ValueError, match="seconds must be positive"):
         DeadlinePolicy(seconds)
@@ -127,6 +131,24 @@ async def test_deadline_policy_measures_a_synchronous_handler_after_it_returns()
 
     assert response.status == 504
     assert response.json()["detail"] == "Request handler exceeded its deadline"
+
+
+@pytest.mark.asyncio
+async def test_external_cancellation_is_not_mislabeled_as_a_deadline() -> None:
+    entered = asyncio.Event()
+    app = Wreath(http_policy=HttpPolicy(deadline=DeadlinePolicy(60)))
+
+    @app.get("/")
+    async def wait_forever(request):
+        entered.set()
+        await asyncio.Event().wait()
+
+    async with TestClient(app) as client:
+        pending = asyncio.create_task(client.get("/"))
+        await entered.wait()
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
 
 
 @pytest.mark.asyncio
@@ -175,6 +197,11 @@ def test_maintenance_policy_keeps_the_native_policy_program_available() -> None:
 def test_maintenance_policy_refuses_invalid_exempt_paths(path) -> None:
     with pytest.raises(ValueError, match="absolute paths beginning with '/'"):
         MaintenancePolicy(exempt_paths=(path,))
+
+
+def test_maintenance_policy_refuses_a_string_instead_of_a_path_iterable() -> None:
+    with pytest.raises(ValueError, match="exempt_paths must be an iterable"):
+        MaintenancePolicy(exempt_paths="/")
 
 
 @pytest.mark.parametrize("retry_after", [True, "1", -1])

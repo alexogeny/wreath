@@ -293,6 +293,20 @@ class BillingSupport:
         cursor: InvoiceCursor | None = None,
         limit: int = 20,
     ) -> InvoicePage:
+        if subscription is not None and (
+            type(subscription) is not str or not subscription
+        ):
+            raise ValueError(
+                "billing support invoice subscription must be a non-empty string or None"
+            )
+        if cursor is not None and not isinstance(cursor, InvoiceCursor):
+            raise TypeError("billing support invoice cursor must be InvoiceCursor or None")
+        if type(limit) is not int:
+            raise TypeError(
+                "billing support invoice limit must be an integer from 1 through 100"
+            )
+        if not 1 <= limit <= 100:
+            raise ValueError("billing support invoice limit must be from 1 through 100")
         subject = await self._authorize_access(
             context,
             resource_suffix="invoices",
@@ -385,7 +399,7 @@ class BillingSupport:
             context,
             PolicyRequirement(money.action, EntityUid("BillingRefund", resource)),
         )
-        if not isinstance(decision, AuthorizationDecision) or not decision.allowed:
+        if not isinstance(decision, AuthorizationDecision) or decision.allowed is not True:
             reason = decision.reason if isinstance(decision, AuthorizationDecision) else None
             raise PermissionError(f"billing refund denied by Cedar: {reason or 'invalid decision'}")
         intent = _RefundIntent(
@@ -446,7 +460,7 @@ class BillingSupport:
             EntityUid("BillingRefund", intent.resource),
         )
         decision = await money.authorize(context, requirement)
-        if not isinstance(decision, AuthorizationDecision) or not decision.allowed:
+        if not isinstance(decision, AuthorizationDecision) or decision.allowed is not True:
             reason = decision.reason if isinstance(decision, AuthorizationDecision) else None
             raise PermissionError(f"billing refund denied by Cedar: {reason or 'invalid decision'}")
         consumed = self._intents.consume(
@@ -502,7 +516,7 @@ class BillingSupport:
             raise PermissionError(f"billing support requires {access.permission} permission")
         resource = EntityUid("BillingRecord", f"{subject}:{resource_suffix}")
         decision = await access.authorize(context, PolicyRequirement(access.action, resource))
-        if not isinstance(decision, AuthorizationDecision) or not decision.allowed:
+        if not isinstance(decision, AuthorizationDecision) or decision.allowed is not True:
             reason = decision.reason if isinstance(decision, AuthorizationDecision) else None
             raise PermissionError(
                 f"billing support read denied by Cedar: {reason or 'invalid decision'}"

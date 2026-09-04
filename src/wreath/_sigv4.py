@@ -12,6 +12,21 @@ from ._native import _core
 ALGORITHM = "AWS4-HMAC-SHA256"
 UNSIGNED_PAYLOAD = "UNSIGNED-PAYLOAD"
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+_MAX_PRESIGN_SECONDS = 7 * 24 * 60 * 60
+_PRESIGN_AUTH_PARAMS = frozenset(
+    {
+        "x-amz-algorithm",
+        "x-amz-credential",
+        "x-amz-date",
+        "x-amz-expires",
+        "x-amz-security-token",
+        "x-amz-signature",
+        "x-amz-signedheaders",
+    }
+)
+_HTTP_FIELD_NAME = frozenset(
+    "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+)
 
 __all__ = [
     "ALGORITHM",
@@ -33,6 +48,40 @@ def sha256_hex(data: bytes) -> str:
 
 def _hmac(key: bytes, msg: str) -> bytes:
     return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+
+
+def _check_header_field(name: str, value: str) -> None:
+    if "\r" in value or "\n" in value:
+        raise ValueError(f"{name} must not contain control characters")
+
+
+def _normalize_headers(values: dict[str, str], owner: str) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for name, value in values.items():
+        if not name or any(character not in _HTTP_FIELD_NAME for character in name):
+            raise ValueError(f"{owner} contains invalid HTTP field name {name!r}")
+        normalized_name = name.lower()
+        if normalized_name == "host":
+            raise ValueError(f"{owner} must not redefine host; pass it with the host parameter")
+        if normalized_name in normalized:
+            raise ValueError(f"{owner} contains duplicate case-insensitive name {name!r}")
+        if "\r" in value or "\n" in value:
+            raise ValueError(f"{owner} contains control characters in {name!r}")
+        normalized[normalized_name] = value
+    return normalized
+
+
+def _check_host(host: str) -> None:
+    if (
+        not host
+        or len(host) > 1024
+        or any(character.isspace() or character in "/\\?#@" for character in host)
+    ):
+        raise ValueError("host must be an HTTP authority without userinfo, paths, or controls")
+    try:
+        host.encode("ascii")
+    except UnicodeEncodeError:
+        raise ValueError("host must be an HTTP authority encoded as ASCII") from None
 
 
 def uri_encode(value: str, *, encode_slash: bool = True) -> str:
@@ -88,13 +137,27 @@ def sign(
     headers: dict[str, str] | None = None,
     payload_hash: str | None = None,
     session_token: str | None = None,
+    _prevalidated: bool = False,
 ) -> dict[str, str]:
     """Return the headers to add for a header-auth SigV4 request (`Authorization` etc.)."""
+    if not _prevalidated:
+        _check_host(host)
+        for name, value in (
+            ("access_key", access_key),
+            ("region", region),
+            ("service", service),
+            ("amz_date", amz_date),
+            ("session_token", session_token or ""),
+            ("payload_hash", payload_hash or ""),
+        ):
+            _check_header_field(name, value)
     date_stamp = amz_date[:8]
-    normalized_headers: dict[str, str] = {
-        name.lower(): value for name, value in (headers or {}).items()
-    }
-    normalized_headers.setdefault("host", host)
+    normalized_headers = (
+        {name.lower(): value for name, value in (headers or {}).items()}
+        if _prevalidated
+        else _normalize_headers(headers or {}, "headers")
+    )
+    normalized_headers["host"] = host
     normalized_headers["x-amz-date"] = amz_date
     if payload_hash is None:
         payload_hash = EMPTY_SHA256
@@ -142,11 +205,17 @@ def presign(
     scheme: str = "https",
 ) -> str:
     """Return a fully-formed SigV4 presigned URL (auth in the query string, no network)."""
+    if type(expires) is not int or not 1 <= expires <= _MAX_PRESIGN_SECONDS:
+        raise ValueError("expires must be an integer from 1 through 604800")
+    if scheme not in ("http", "https"):
+        raise ValueError("scheme must be 'http' or 'https'")
+    _check_host(host)
+    normalized_signed_headers = _normalize_headers(signed_headers or {}, "signed_headers")
     date_stamp = amz_date[:8]
     scope = _scope(date_stamp, region, service)
     headers = {
         "host": host,
-        **{name.lower(): value for name, value in (signed_headers or {}).items()},
+        **normalized_signed_headers,
     }
     _, canonical_header_names = _canonical_headers(headers)
     params: list[tuple[str, str]] = [
@@ -159,7 +228,10 @@ def presign(
     if session_token:
         params.append(("X-Amz-Security-Token", session_token))
     if extra_params:
-        params.extend(extra_params)
+        for name, value in extra_params:
+            if name.lower() in _PRESIGN_AUTH_PARAMS:
+                raise ValueError(f"extra_params contains reserved SigV4 query parameter {name!r}")
+            params.append((name, value))
     canonical, _ = canonical_request(method, path, params, headers, payload_hash)
     signing_value = string_to_sign(amz_date, scope, canonical)
     signature = hmac.new(

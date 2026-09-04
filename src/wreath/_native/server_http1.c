@@ -3258,7 +3258,7 @@ drive_head(WreathHttpProtocol *self)
 
     parsed = wreath_http_parse_request_parts(
         (const uint8_t *)p, n, head_end, &method, &target, &minor, &headers,
-        &consumed, self->max_header_count, &request_meta
+        &consumed, self->max_header_count, &request_meta, self->http_object_cache
     );
     if (parsed == -2) {
         return send_error(self, 431) < 0 ? -1 : 0;
@@ -3348,6 +3348,52 @@ parse_hex(const char *data, Py_ssize_t size, Py_ssize_t *out)
     return 0;
 }
 
+static int
+chunk_extensions_valid(const char *data, Py_ssize_t size)
+{
+    Py_ssize_t i = 0;
+    while (i < size) {
+        if (data[i++] != ';') return 0;
+        while (i < size && (data[i] == ' ' || data[i] == '\t')) i++;
+        Py_ssize_t name_start = i;
+        while (i < size && wreath_ascii_token[(unsigned char)data[i]]) i++;
+        if (i == name_start) return 0;
+        while (i < size && (data[i] == ' ' || data[i] == '\t')) i++;
+        if (i < size && data[i] == '=') {
+            i++;
+            while (i < size && (data[i] == ' ' || data[i] == '\t')) i++;
+            if (i < size && data[i] == '"') {
+                i++;
+                int closed = 0;
+                while (i < size) {
+                    unsigned char c = (unsigned char)data[i++];
+                    if (c == '"') {
+                        closed = 1;
+                        break;
+                    }
+                    if (c == '\\') {
+                        if (i == size) return 0;
+                        c = (unsigned char)data[i++];
+                        if (c != '\t' && (c < 0x20 || c == 0x7f)) return 0;
+                    }
+                    else if (c != '\t' && (c < 0x20 || c == 0x7f)) {
+                        return 0;
+                    }
+                }
+                if (!closed) return 0;
+            }
+            else {
+                Py_ssize_t value_start = i;
+                while (i < size && wreath_ascii_token[(unsigned char)data[i]]) i++;
+                if (i == value_start) return 0;
+            }
+            while (i < size && (data[i] == ' ' || data[i] == '\t')) i++;
+        }
+        if (i < size && data[i] != ';') return 0;
+    }
+    return 1;
+}
+
 
 static int
 drive_chunk_size(WreathHttpProtocol *self)
@@ -3356,7 +3402,9 @@ drive_chunk_size(WreathHttpProtocol *self)
     Py_ssize_t n = self->buf_len - self->cursor;
     Py_ssize_t line_end = find_sub_from(p, n, "\r\n", 2, &self->chunk_line_scan);
     const char *field;
+    const char *extensions = NULL;
     Py_ssize_t field_size;
+    Py_ssize_t extensions_size = 0;
     Py_ssize_t chunk_size;
 
     if (line_end < 0) {
@@ -3368,7 +3416,9 @@ drive_chunk_size(WreathHttpProtocol *self)
     field = p;
     field_size = line_end;
     for (Py_ssize_t i = 0; i < field_size; i++) {
-        if (field[i] == ';') {  /* chunk extensions are ignored */
+        if (field[i] == ';') {
+            extensions = field + i;
+            extensions_size = field_size - i;
             field_size = i;
             break;
         }
@@ -3377,7 +3427,8 @@ drive_chunk_size(WreathHttpProtocol *self)
     while (field_size > 0 && (field[field_size - 1] == ' ' || field[field_size - 1] == '\t')) {
         field_size--;
     }
-    if (parse_hex(field, field_size, &chunk_size) < 0) {
+    if (parse_hex(field, field_size, &chunk_size) < 0 ||
+        (extensions != NULL && !chunk_extensions_valid(extensions, extensions_size))) {
         return body_error(self, 400) < 0 ? -1 : 0;
     }
     do_consume(self, line_end + 2);
@@ -4309,6 +4360,7 @@ http_protocol_traverse(WreathHttpProtocol *self, visitproc visit, void *arg)
     Py_VISIT(self->http_version_10);
     Py_VISIT(self->http_version_11);
     Py_VISIT(self->root_path);
+    Py_VISIT(self->http_object_cache);
     Py_VISIT(self->default_response_headers);
     Py_VISIT(self->default_response_wire);
     Py_VISIT(self->response_header_cache_key);
@@ -4362,6 +4414,7 @@ http_protocol_clear(WreathHttpProtocol *self)
     Py_CLEAR(self->http_version_10);
     Py_CLEAR(self->http_version_11);
     Py_CLEAR(self->root_path);
+    Py_CLEAR(self->http_object_cache);
     Py_CLEAR(self->default_response_headers);
     Py_CLEAR(self->default_response_wire);
     Py_CLEAR(self->response_header_cache_key);
@@ -4426,6 +4479,11 @@ http_protocol_new(PyTypeObject *type, PyObject *Py_UNUSED(args), PyObject *Py_UN
 {
     WreathHttpProtocol *self = (WreathHttpProtocol *)type->tp_alloc(type, 0);
     if (self != NULL) {
+        self->http_object_cache = wreath_http_method_cache_new();
+        if (self->http_object_cache == NULL) {
+            Py_DECREF(self);
+            return NULL;
+        }
         wreath_policy_state_init(&self->policy_state);
         self->state = ST_READING_HEAD;
         self->accepting = 1;

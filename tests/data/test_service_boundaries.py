@@ -893,6 +893,17 @@ def test_resumable_upload_ownership_includes_identity_namespace() -> None:
     ) != ResumableUploads._request_principal(cast(Any, second))
 
 
+def test_resumable_upload_ownership_frames_identity_type() -> None:
+    from wreath._auth.models import Identity
+
+    first = SimpleNamespace(identity=Identity("b:c", type="a"))
+    second = SimpleNamespace(identity=Identity("c", type="a:b"))
+
+    assert ResumableUploads._request_principal(
+        cast(Any, first)
+    ) != ResumableUploads._request_principal(cast(Any, second))
+
+
 def test_quota_ownership_includes_identity_namespace() -> None:
     from wreath._auth.models import Identity
     from wreath.quota import Quotas
@@ -1859,6 +1870,57 @@ async def test_upload_resource_is_bound_to_the_creating_principal_and_tenant() -
     assert refused.value.status == 404
     with pytest.raises(_Refused, match="no such upload"):
         await uploads._require(wrong_tenant)
+
+    await states.create(
+        UploadState(
+            id="ambiguous",
+            key="uploads/ambiguous",
+            principal="a:b:c",
+            tenant="tenant-a",
+        )
+    )
+    ambiguous_legacy = cast(
+        Any,
+        SimpleNamespace(
+            path_params={"upload_id": "ambiguous"},
+            identity=SimpleNamespace(type="a", id="b:c"),
+            state=SimpleNamespace(tenant=SimpleNamespace(key="tenant-a")),
+        ),
+    )
+    with pytest.raises(_Refused, match="no such upload"):
+        await uploads._require(ambiguous_legacy)
+
+    namespaced = cast(
+        Any,
+        SimpleNamespace(
+            path_params={"upload_id": "namespaced"},
+            identity=SimpleNamespace(type="User", id="alice", namespace="issuer-a"),
+            state=SimpleNamespace(tenant=SimpleNamespace(key="tenant-a")),
+        ),
+    )
+    await states.create(
+        UploadState(
+            id="namespaced",
+            key="uploads/namespaced",
+            principal=uploads._request_principal(namespaced),
+            tenant="tenant-a",
+        )
+    )
+    assert (await uploads._require(namespaced)).id == "namespaced"
+    namespaced.path_params["upload_id"] = "owned"
+    with pytest.raises(_Refused, match="no such upload"):
+        await uploads._require(namespaced)
+
+    type_ambiguous = cast(
+        Any,
+        SimpleNamespace(
+            path_params={"upload_id": "ambiguous"},
+            identity=SimpleNamespace(type="a:b", id="c"),
+            state=SimpleNamespace(tenant=SimpleNamespace(key="tenant-a")),
+        ),
+    )
+    with pytest.raises(_Refused, match="no such upload"):
+        await uploads._require(type_ambiguous)
 
     await states.create(UploadState(id="public", key="uploads/public"))
     public_request = cast(

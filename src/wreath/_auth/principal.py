@@ -120,6 +120,12 @@ class Limits:
     active_organization: str | None = None
     plan: str | None = None
 
+    def __post_init__(self) -> None:
+        for name in ("organizations", "org_roles", "entitlements"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, frozenset(value))
+
     def merge(self, other: Limits) -> Limits:
         """Combine two limits by intersection, never by union.
 
@@ -189,6 +195,14 @@ class Narrowing:
     expires_at: float | None = None
     on_behalf_of: str = ""
     depth: int = 1
+
+    def __post_init__(self) -> None:
+        if self.expires_at is not None and not isfinite(self.expires_at):
+            raise ValueError(
+                f"Narrowing expires_at must be finite, got {self.expires_at!r}"
+            )
+        if self.scope is not None:
+            object.__setattr__(self, "scope", frozenset(self.scope))
 
     def expired(self, now: float) -> bool:
         """Whether this delegation has run out, at `now` (epoch seconds)."""

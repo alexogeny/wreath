@@ -39,11 +39,13 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
+from math import isfinite
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from ._auth.geofence import WITHHELD as _WITHHELD
 from ._auth.geofence import coarsen as _coarsen
 from ._auth.geofence import resolve_precision as _resolve_precision
+from ._auth.models import AuthorizationDecision
 from ._awaitable import is_awaitable
 from .binding import _jsonable_any as _jsonable
 from .pagination import DEFAULT_SIZE as _DEFAULT_PAGE_SIZE
@@ -111,6 +113,44 @@ class Access:
     #: two.
     second_factor: float | None = None
 
+    def __post_init__(self) -> None:
+        if self.kind not in (
+            "public",
+            "authenticated",
+            "roles",
+            "permissions",
+            "deny",
+            "cedar",
+        ):
+            raise ValueError(
+                f"Access kind {self.kind!r} is unknown; expected public, authenticated, "
+                "roles, permissions, deny, or cedar"
+            )
+        values = tuple(self.values)
+        if self.mode not in ("all", "any"):
+            raise ValueError(f"Access mode must be 'all' or 'any', not {self.mode!r}")
+        if self.kind in ("roles", "permissions"):
+            if not values or any(not isinstance(value, str) or not value for value in values):
+                raise ValueError(
+                    f"Access.{self.kind} values must be non-empty strings"
+                )
+        else:
+            if self.mode != "all":
+                raise ValueError(f"Access.{self.kind} does not accept a set matching mode")
+            if values:
+                raise ValueError(f"Access.{self.kind} does not accept role or permission values")
+        if self.kind == "cedar":
+            if not isinstance(self.action, str) or not self.action:
+                raise ValueError("Access.cedar action must be a non-empty string")
+            object.__setattr__(self, "resource", _checked_resource(self.resource))
+        elif self.action is not None or self.resource is not None:
+            raise ValueError(f"Access.{self.kind} does not accept a Cedar action or resource")
+        if self.second_factor is not None:
+            if self.kind in ("public", "deny"):
+                raise ValueError(f"Access.{self.kind} cannot require a second factor")
+            object.__setattr__(self, "second_factor", _freshness_window(self.second_factor))
+        object.__setattr__(self, "values", values)
+
     @classmethod
     def public(cls) -> Access:
         """Anyone, authenticated or not."""
@@ -164,7 +204,7 @@ class Access:
                 `CedarAuthorizer(resource=...)` mapper builds the reference
                 from something else.
         """
-        return cls("cedar", action=action, resource=_checked_resource(resource))
+        return cls("cedar", action=action, resource=resource)
 
     def within(self, seconds: float) -> Access:
         """This rule, and a second factor proved within the last `seconds`.
@@ -196,12 +236,7 @@ class Access:
             ValueError: `seconds` is not positive, or the rule is `public()` or
                 `deny()`.
         """
-        if seconds <= 0:
-            raise ValueError(
-                f"Access.within({seconds!r}) is a window no caller can satisfy. "
-                "Pass a positive number of seconds, or Access.deny() if the "
-                "intent is that nobody may perform this operation."
-            )
+        window = _freshness_window(seconds)
         if self.kind in ("public", "deny"):
             raise ValueError(
                 f"Access.{self.kind}().within(...) is a contradiction: step-up "
@@ -215,11 +250,27 @@ class Access:
                 + " Build it from authenticated(), roles(), permissions() or "
                 "cedar() instead."
             )
-        return replace(self, second_factor=seconds)
+        return replace(self, second_factor=window)
 
 
 #: A `{param}` placeholder in a resource template, filled from `path_params`.
-_TEMPLATE_PARAM = re.compile(r"\{[^{}]*\}")
+_TEMPLATE_PARAM = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _freshness_window(seconds: Any) -> float:
+    if isinstance(seconds, bool) or not isinstance(seconds, int | float):
+        raise TypeError("Access.within seconds must be a positive finite number")
+    try:
+        window = float(seconds)
+    except OverflowError as error:
+        raise ValueError("Access.within seconds must be a positive finite number") from error
+    if not isfinite(window) or window <= 0:
+        raise ValueError(
+            f"Access.within({seconds!r}) is not a positive finite number of seconds; "
+            "no caller can satisfy it. Pass a positive finite number, or "
+            "Access.deny() if the intent is that nobody may perform this operation."
+        )
+    return window
 
 
 def _checked_resource(resource: Any) -> Any:
@@ -232,7 +283,26 @@ def _checked_resource(resource: Any) -> Any:
         return resource
     from ._auth.cedar_engine import CedarParseError, EntityUid
 
+    placeholders = tuple(_TEMPLATE_PARAM.finditer(resource))
     probe = _TEMPLATE_PARAM.sub("x", resource)
+    identifier_start = resource.rfind('::"') + 3
+    if (
+        "{" in probe
+        or "}" in probe
+        or (
+            placeholders
+            and (
+                identifier_start < 3
+                or not resource.endswith('"')
+                or any(match.start() < identifier_start for match in placeholders)
+            )
+        )
+    ):
+        raise ValueError(
+            f"Access.cedar(resource={resource!r}) contains an invalid template; "
+            'each placeholder must be a simple path parameter inside the quoted '
+            'entity id, such as Type::"{id}"'
+        )
     try:
         EntityUid.parse(probe)
     except CedarParseError as error:
@@ -455,6 +525,27 @@ def crud_router(
     exclude_set = frozenset(exclude)
     readonly_set = frozenset(readonly)
     ops = frozenset(operations)
+    if isinstance(page_size, bool) or not isinstance(page_size, int):
+        raise TypeError(f"page_size must be an integer from 1 to {_MAX_PAGE_SIZE}")
+    if not 1 <= page_size <= _MAX_PAGE_SIZE:
+        raise ValueError(f"page_size must be from 1 to {_MAX_PAGE_SIZE}, not {page_size!r}")
+    for argument, names in (
+        ("expose", exposed),
+        ("readonly", readonly_set),
+        ("exclude", exclude_set),
+    ):
+        unknown = sorted(names - columns.keys())
+        if unknown:
+            raise ValueError(
+                f"{model.__name__} has no column(s) {', '.join(unknown)}; "
+                f"`{argument}` names model columns"
+            )
+    unknown_ops = sorted(ops - _OP_GROUP.keys())
+    if unknown_ops:
+        raise ValueError(
+            f"unknown CRUD operation(s) {', '.join(unknown_ops)}; expected list, "
+            "retrieve, create, update, or delete"
+        )
 
     # What leaves the server: every column minus the excluded, minus sensitive
     # or retrieval ones that were not explicitly exposed. A `tsvector` in a
@@ -558,6 +649,18 @@ def crud_router(
         return {key: value for key, value in body.items() if key in writable_fields}
 
     rules = {op: _rule_for(authorize, op) for op in ops}
+    prefix_params = frozenset(_TEMPLATE_PARAM.findall(resource))
+    for op, rule in rules.items():
+        if not isinstance(rule.resource, str):
+            continue
+        available = prefix_params | ({"id"} if op in ("retrieve", "update", "delete") else set())
+        missing = sorted(set(_TEMPLATE_PARAM.findall(rule.resource)) - available)
+        if missing:
+            raise ValueError(
+                f"CRUD operation {op!r} has no {', '.join(missing)} path parameter; "
+                "use a static Cedar resource or a callable for values not present "
+                "in this operation's path"
+            )
 
     async def object_denied(request: Any, op: str, instance: Any) -> bool:
         return object_authorizer is not None and not await _object_ok(
@@ -778,7 +881,23 @@ def _apply_requirement(handler: Any, rule: Access) -> Any:
 def _resource_fn(resource: Any) -> Any:
     """Normalize a Cedar `resource` into what `@authorize` accepts."""
     if isinstance(resource, str) and "{" in resource:
-        return lambda request: resource.format(**request.path_params)
+        names = tuple(dict.fromkeys(_TEMPLATE_PARAM.findall(resource)))
+        if len(names) == 1:
+            name = names[0]
+            token = "{" + name + "}"
+            return lambda request: resource.replace(
+                token,
+                str(request.path_params[name]).replace("\\", "\\\\").replace('"', '\\"'),
+            )
+
+        def render(request: Any) -> str:
+            rendered = resource
+            for name in names:
+                value = str(request.path_params[name]).replace("\\", "\\\\").replace('"', '\\"')
+                rendered = rendered.replace("{" + name + "}", value)
+            return rendered
+
+        return render
     return resource
 
 
@@ -798,8 +917,11 @@ async def _object_ok(
     result = authorizer(request, op, instance)
     if is_awaitable(result):
         result = await result
-    allowed = getattr(result, "allowed", None)
-    return bool(result) if allowed is None else bool(allowed)
+    if isinstance(result, bool):
+        return result
+    if isinstance(result, AuthorizationDecision) and isinstance(result.allowed, bool):
+        return result.allowed
+    return False
 
 
 def _not_found() -> Response:

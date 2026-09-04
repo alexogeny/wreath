@@ -161,7 +161,7 @@ async def run(iterations: int, trials: int) -> dict[str, Any]:
             "iterations": iterations,
             "trials": trials,
             "payload_bytes": len(_BODY),
-            "signature_profile": "wreath-v1-hmac-sha256",
+            "signature_profile": "wreath-v2-hmac-sha256",
             "gil_enabled": getattr(sys, "_is_gil_enabled", lambda: True)(),
             "implementation": "python-policy-stdlib-hmac",
         },

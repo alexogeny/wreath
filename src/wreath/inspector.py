@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import math
 import os
 import socket
 import stat
@@ -99,15 +100,23 @@ class InspectorConfig:
     #: Shared secret gating the mutating capture-control commands. When unset,
     #: capture control is disabled entirely (the commands are neither advertised
     #: nor answered), so a read-only Inspector can never arm capture.
-    capture_token: str | None = None
+    capture_token: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not self.path:
             raise ValueError("inspector socket path cannot be empty")
+        if type(self.max_payload_bytes) is not int:
+            raise ValueError("max_payload_bytes must be an integer")
         if self.max_payload_bytes <= 0 or self.max_payload_bytes > MAX_PAYLOAD_BYTES:
             raise ValueError("max_payload_bytes must be in (0, 64 KiB]")
-        if self.idle_timeout <= 0:
-            raise ValueError("idle_timeout must be positive")
+        if (
+            type(self.idle_timeout) not in (int, float)
+            or not math.isfinite(self.idle_timeout)
+            or self.idle_timeout <= 0
+        ):
+            raise ValueError(
+                "idle_timeout must be positive; expected a finite positive number of seconds"
+            )
         if self.capture_token is not None and len(self.capture_token) < 16:
             raise ValueError("capture_token must be at least 16 characters")
 

@@ -89,6 +89,7 @@ typedef struct {
     PyObject *http_version_10;
     PyObject *http_version_11;
     PyObject *root_path;
+    PyObject *http_object_cache;
     /* config._default_response_headers fields, resolved once per connection.
      * `wire` is a stable bytearray refreshed in place with the date cache. */
     PyObject *default_response_headers;

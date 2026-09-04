@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .._fsguard import ContainmentError, open_beneath, open_root
 from .inspect import build_api_model
 from .model import TypegenError
 from .targets.typescript import MANIFEST_NAME, render_typescript
@@ -74,7 +75,10 @@ def _generate(app: object, options: TypegenOptions) -> dict[str, str]:
         # The digest pins the *document*, not the model, because the document
         # is what `compare_openapi` reasons about.
         document = generate_openapi(app, title=options.title, version=options.version)
-        return render_python(api, document=document, class_name=options.class_name)
+        try:
+            return render_python(api, document=document, class_name=options.class_name)
+        except TypegenError as error:
+            raise TypegenCliError(str(error)) from error
     if options.target == "proto":
         from .targets.proto import ProtoTargetError, render_proto
 
@@ -90,19 +94,40 @@ def _generate(app: object, options: TypegenOptions) -> dict[str, str]:
 
 
 def _safe_target(output_dir: Path, name: str) -> Path:
-    # Generated names are fixed, but validate anyway: no path can escape output.
-    candidate = (output_dir / name).resolve()
-    if output_dir.resolve() not in candidate.parents:
+    if (
+        not isinstance(name, str)
+        or not name
+        or name in (".", "..")
+        or "/" in name
+        or "\\" in name
+    ):
         raise TypegenCliError(f"generated path {name!r} escapes the output directory")
     return output_dir / name
 
 
-def _previous_owned(output_dir: Path) -> set[str]:
-    manifest = output_dir / MANIFEST_NAME
-    if not manifest.exists():
-        return set()
+def _read_target(root_fd: int, output_dir: Path, name: str) -> bytes | None:
+    _safe_target(output_dir, name)
     try:
-        document = json.loads(manifest.read_text(encoding="utf-8"))
+        descriptor, metadata = open_beneath(root_fd, name)
+    except FileNotFoundError:
+        return None
+    except ContainmentError as error:
+        raise TypegenCliError(
+            f"generated path {name!r} escapes the output directory"
+        ) from error
+    if not stat.S_ISREG(metadata.st_mode):
+        os.close(descriptor)
+        raise TypegenCliError(f"generated path {name!r} is not a regular file")
+    with os.fdopen(descriptor, "rb") as handle:
+        return handle.read()
+
+
+def _previous_owned_at(root_fd: int, output_dir: Path) -> set[str]:
+    try:
+        raw = _read_target(root_fd, output_dir, MANIFEST_NAME)
+        if raw is None:
+            return set()
+        document = json.loads(raw)
     except OSError, ValueError:
         return set()
     files = document.get("files", [])
@@ -111,16 +136,36 @@ def _previous_owned(output_dir: Path) -> set[str]:
     return {name for name in files if isinstance(name, str)}
 
 
+def _previous_owned(output_dir: Path) -> set[str]:
+    try:
+        root_fd = open_root(output_dir)
+    except FileNotFoundError:
+        return set()
+    try:
+        return _previous_owned_at(root_fd, output_dir)
+    finally:
+        os.close(root_fd)
+
+
 def check(files: dict[str, str], output_dir: Path) -> list[str]:
     """Return the reasons `--check` should fail; empty means up to date."""
     problems: list[str] = []
-    for name, contents in files.items():
-        path = output_dir / name
-        if not path.exists():
-            problems.append(f"missing generated file: {name}")
-        elif path.read_bytes() != contents.encode("utf-8"):
-            problems.append(f"stale generated file: {name}")
-    stale = _previous_owned(output_dir) - set(files)
+    for name in files:
+        _safe_target(output_dir, name)
+    try:
+        root_fd = open_root(output_dir)
+    except FileNotFoundError:
+        return [f"missing generated file: {name}" for name in files]
+    try:
+        for name, contents in files.items():
+            current = _read_target(root_fd, output_dir, name)
+            if current is None:
+                problems.append(f"missing generated file: {name}")
+            elif current != contents.encode("utf-8"):
+                problems.append(f"stale generated file: {name}")
+        stale = _previous_owned_at(root_fd, output_dir) - set(files)
+    finally:
+        os.close(root_fd)
     for name in sorted(stale):
         problems.append(f"owned file no longer generated: {name}")
     return problems
@@ -137,15 +182,24 @@ def check_contract(current: dict[str, Any], output_dir: Path) -> tuple[Any, ...]
     from ..openapi import compare_openapi
     from .targets.python import SPEC_FILE
 
-    pinned = output_dir / SPEC_FILE
-    if not pinned.exists():
+    try:
+        root_fd = open_root(output_dir)
+    except FileNotFoundError:
+        root_fd = -1
+    try:
+        raw = None if root_fd < 0 else _read_target(root_fd, output_dir, SPEC_FILE)
+    finally:
+        if root_fd >= 0:
+            os.close(root_fd)
+    pinned = _safe_target(output_dir, SPEC_FILE)
+    if raw is None:
         raise TypegenCliError(
             f"no pinned document at {pinned}: generate the client first, so the "
             "gate has a baseline to compare against",
             exit_code=2,
         )
     try:
-        previous = json.loads(pinned.read_text(encoding="utf-8"))
+        previous = json.loads(raw)
     except (OSError, ValueError) as error:
         raise TypegenCliError(f"pinned document at {pinned} is unreadable") from error
     return compare_openapi(previous, current)
@@ -153,24 +207,44 @@ def check_contract(current: dict[str, Any], output_dir: Path) -> tuple[Any, ...]
 
 def write(files: dict[str, str], output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    for name in sorted(_previous_owned(output_dir) - set(files)):
-        target = _safe_target(output_dir, name)
-        if target.exists():
-            target.unlink()
-    for name, contents in files.items():
-        target = _safe_target(output_dir, name)
-        descriptor, temporary_name = tempfile.mkstemp(
-            dir=target.parent,
-            prefix=f".{target.name}.",
-            suffix=".tmp",
-        )
-        temporary = Path(temporary_name)
-        try:
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(contents.encode("utf-8"))
-            os.replace(temporary, target)
-        finally:
-            temporary.unlink(missing_ok=True)
+    root_fd = open_root(output_dir)
+    try:
+        stale = _previous_owned_at(root_fd, output_dir) - set(files)
+        names = sorted(stale | set(files))
+        for name in names:
+            _safe_target(output_dir, name)
+            try:
+                metadata = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(metadata.st_mode):
+                raise TypegenCliError(
+                    f"generated path {name!r} escapes the output directory"
+                )
+        for name in sorted(stale):
+            try:
+                os.unlink(name, dir_fd=root_fd)
+            except FileNotFoundError:
+                pass
+        for name, contents in files.items():
+            temporary = f".{name}.{os.urandom(8).hex()}.tmp"
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=root_fd,
+            )
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(contents.encode("utf-8"))
+                os.replace(temporary, name, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+            finally:
+                try:
+                    os.unlink(temporary, dir_fd=root_fd)
+                except FileNotFoundError:
+                    pass
+    finally:
+        os.close(root_fd)
 
 
 def run(app: object, options: TypegenOptions) -> int:

@@ -92,6 +92,19 @@ async def test_registration_scans_sensitive_names_once(
     assert calls == 1
 
 
+async def test_registered_field_authority_cannot_be_mutated_after_validation(
+    account_model: type,
+) -> None:
+    field_access = {"email": FieldAccess(read="read_contact")}
+    entry = _admin().register(account_model, field_access=field_access)
+
+    field_access.clear()
+
+    assert entry.field_access == {"email": FieldAccess(read="read_contact")}
+    with pytest.raises(TypeError):
+        entry.field_access["email"] = FieldAccess()
+
+
 async def test_the_primary_key_is_never_editable(account_model: type) -> None:
     entry = _admin().register(account_model)
     assert "id" not in entry.editable

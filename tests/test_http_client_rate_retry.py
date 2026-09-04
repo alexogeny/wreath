@@ -37,6 +37,8 @@ def test_rate_policy_requires_positive_when_enabled() -> None:
         RatePolicy(enabled=True, capacity=0, rate=1)
     with pytest.raises(ValueError):
         RatePolicy(enabled=True, capacity=1, rate=0)
+    with pytest.raises(ValueError):
+        RatePolicy(enabled=True, capacity=1, rate=1, max_wait=0)
     RatePolicy()  # disabled default is fine
     RatePolicy(enabled=True, capacity=10, rate=5)
 
@@ -66,6 +68,7 @@ def test_retry_after_honoured_and_clamped() -> None:
     assert client._retry_delay(0, _Resp(b"2")) == pytest.approx(2.0)
     # An absurd server value is clamped to cap*16 so one header can't hang us.
     assert client._retry_delay(0, _Resp(b"999999")) == pytest.approx(16.0)
+    assert client._retry_delay(0, _Resp(b"9" * 1_000)) == pytest.approx(16.0)
 
 
 def test_parse_retry_after() -> None:

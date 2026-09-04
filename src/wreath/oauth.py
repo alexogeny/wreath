@@ -56,7 +56,8 @@ import threading
 import time
 from base64 import urlsafe_b64encode
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, is_dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field, is_dataclass, replace
 from typing import Any, ClassVar, Final, cast
 from urllib.parse import urlsplit
 
@@ -75,6 +76,9 @@ __all__ = [
 ]
 
 TOKEN_INTROSPECTION_JWT_MEDIA_TYPE: Final = b"application/token-introspection+jwt"
+_MAX_AUTHORIZATION_DETAIL_FIELDS: Final = 64
+_MAX_SCOPES: Final = 256
+_MAX_SCOPE_LENGTH: Final = 1024
 
 
 class OAuthRefusal(Exception):
@@ -101,7 +105,7 @@ class ClientRegistration:
     #: A confidential client may use the client-credentials grant. A public one
     #: (a browser or a mobile app, which cannot keep a secret) may not.
     confidential: bool = False
-    client_secret: bytes | str | None = None
+    client_secret: bytes | str | None = field(default=None, repr=False)
     dpop_bound_access_tokens: bool = False
     authorization_detail_types: tuple[str, ...] = ()
     introspection_signed_response_alg: str | None = None
@@ -109,6 +113,66 @@ class ClientRegistration:
     introspection_encrypted_response_enc: str | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "redirect_uris", tuple(self.redirect_uris))
+        object.__setattr__(self, "scopes", tuple(self.scopes))
+        object.__setattr__(
+            self,
+            "authorization_detail_types",
+            tuple(self.authorization_detail_types),
+        )
+        if (
+            not isinstance(self.client_id, str)
+            or not self.client_id
+            or _has_url_controls(self.client_id)
+        ):
+            raise ValueError(
+                "OAuth client_id must be a non-empty string without spaces or controls"
+            )
+        if len(self.scopes) > _MAX_SCOPES:
+            raise ValueError(f"an OAuth client may register at most {_MAX_SCOPES} scopes")
+        for scope in self.scopes:
+            if not isinstance(scope, str):
+                raise ValueError(
+                    f"OAuth scope {scope!r} must be one RFC 6749 scope-token of at most "
+                    f"{_MAX_SCOPE_LENGTH} characters without spaces, quotes, backslashes, "
+                    "controls, or non-ASCII characters"
+                )
+            if len(scope) > _MAX_SCOPE_LENGTH:
+                raise ValueError(
+                    f"OAuth scope exceeds {_MAX_SCOPE_LENGTH} characters; expected one "
+                    "bounded RFC 6749 scope-token"
+                )
+            if not _is_scope_token(scope):
+                raise ValueError(
+                    f"OAuth scope {scope!r} must be one RFC 6749 scope-token without "
+                    "spaces, quotes, backslashes, controls, or non-ASCII characters"
+                )
+        for redirect_uri in self.redirect_uris:
+            message = (
+                "OAuth redirect_uri must be an absolute URI without "
+                "credentials, controls, backslashes, or a fragment"
+            )
+            if not isinstance(redirect_uri, str) or _has_url_controls(redirect_uri):
+                raise ValueError(message)
+            try:
+                parsed_redirect = urlsplit(redirect_uri)
+                _ = parsed_redirect.port
+            except ValueError as error:
+                raise ValueError(message) from error
+            if (
+                not parsed_redirect.scheme
+                or parsed_redirect.username is not None
+                or parsed_redirect.fragment
+                or "\\" in redirect_uri
+                or (
+                    parsed_redirect.scheme in ("http", "https")
+                    and (
+                        parsed_redirect.hostname is None
+                        or parsed_redirect.port == 0
+                    )
+                )
+            ):
+                raise ValueError(message)
         if (
             self.introspection_encrypted_response_enc is not None
             and self.introspection_encrypted_response_alg is None
@@ -122,11 +186,12 @@ class ClientRegistration:
             return
         if self.client_secret is None:
             raise ValueError("a confidential OAuth client requires a client secret")
-        material = (
-            self.client_secret.encode("utf-8")
-            if isinstance(self.client_secret, str)
-            else bytes(self.client_secret)
-        )
+        if isinstance(self.client_secret, str):
+            material = self.client_secret.encode("utf-8")
+        elif isinstance(self.client_secret, (bytes, bytearray, memoryview)):
+            material = bytes(self.client_secret)
+        else:
+            raise ValueError("an OAuth client secret must be bytes or text")
         if len(material) < 32:
             raise ValueError("an OAuth client secret must contain at least 32 bytes")
         object.__setattr__(self, "client_secret", material)
@@ -136,7 +201,7 @@ class ClientRegistration:
 class IssuedToken:
     """One access token and what it carries."""
 
-    access_token: str
+    access_token: str = field(repr=False)
     subject: str | None
     audience: str
     scope: tuple[str, ...]
@@ -145,7 +210,7 @@ class IssuedToken:
     #: `wreath.tenancy` rather than around it: a token minted inside one tenant
     #: must not read another's data, whatever roles the bearer holds.
     tenant: str = ""
-    refresh_token: str = ""
+    refresh_token: str = field(default="", repr=False)
     token_type: str = "Bearer"
     authorization_details: tuple[dict[str, Any], ...] = ()
 
@@ -163,12 +228,12 @@ class _Code:
     #: The access token this code produced, once redeemed. Kept so a second
     #: redemption can revoke it -- which is the only safe answer when two
     #: parties demonstrably hold the same code.
-    issued_token: str = ""
+    issued_token: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True, slots=True)
 class _Refresh:
-    token: str
+    token: str = field(repr=False)
     subject: str
     #: Every token in this rotation chain, so reuse revokes all of them rather
     #: than only the one presented.
@@ -192,6 +257,59 @@ def _b64(raw: bytes) -> str:
 #: refused here. Under S256 there is one length, and anything else is either a
 #: verifier sent in the challenge's place or a value nothing produced.
 _S256_CHALLENGE_LENGTH: Final = 43
+
+
+def _has_url_controls(value: str) -> bool:
+    return any(ord(character) < 0x21 or 0x7F <= ord(character) <= 0x9F for character in value)
+
+
+def _is_scope_token(value: str) -> bool:
+    return bool(value) and all(
+        code == 0x21 or 0x23 <= code <= 0x5B or 0x5D <= code <= 0x7E
+        for code in map(ord, value)
+    )
+
+
+def _validated_scopes(values: Iterable[str]) -> tuple[str, ...]:
+    scopes: list[str] = []
+    for scope in values:
+        if len(scopes) >= _MAX_SCOPES:
+            raise OAuthRefusal(
+                "invalid-scope",
+                f"an OAuth grant may request at most {_MAX_SCOPES} scopes",
+            )
+        if not isinstance(scope, str):
+            raise OAuthRefusal(
+                "invalid-scope",
+                f"scope {scope!r} is not one RFC 6749 scope-token of at most "
+                f"{_MAX_SCOPE_LENGTH} characters; spaces, quotes, backslashes, controls, "
+                "and non-ASCII characters are not allowed",
+            )
+        if len(scope) > _MAX_SCOPE_LENGTH:
+            raise OAuthRefusal(
+                "invalid-scope",
+                f"an OAuth scope-token may contain at most {_MAX_SCOPE_LENGTH} characters",
+            )
+        if not _is_scope_token(scope):
+            raise OAuthRefusal(
+                "invalid-scope",
+                f"scope {scope!r} is not one RFC 6749 scope-token; spaces, quotes, "
+                "backslashes, controls, and non-ASCII characters are not allowed",
+            )
+        scopes.append(scope)
+    return tuple(scopes)
+
+
+def _grant_time(now: float | None) -> float:
+    moment = time.time() if now is None else now
+    if (
+        isinstance(moment, bool)
+        or not isinstance(moment, (int, float))
+        or isinstance(moment, float)
+        and not math.isfinite(moment)
+    ):
+        raise ValueError("OAuth now must be finite")
+    return moment
 
 
 def _check_challenge(challenge: str) -> None:
@@ -225,7 +343,7 @@ class Es256Signer:
     publish the successor in `jwks()` alongside the incumbent before switching.
     """
 
-    private: int
+    private: int = field(repr=False)
     algorithm: ClassVar[str] = "ES256"
     #: Names this key in the JWS header and in the key set, so a verifier can
     #: pick during a rotation instead of trying every key.
@@ -348,11 +466,20 @@ class AuthorizationServer:
         max_pending_grants: int = 10000,
     ) -> None:
         normalized_issuer = issuer.rstrip("/")
-        parsed_issuer = urlsplit(normalized_issuer)
+        try:
+            parsed_issuer = urlsplit(normalized_issuer)
+            _ = parsed_issuer.port
+        except ValueError as error:
+            raise ValueError(
+                "OAuth issuer must be an absolute HTTPS URL without credentials, "
+                "a query, or a fragment"
+            ) from error
         if (
-            parsed_issuer.scheme != "https"
+            _has_url_controls(normalized_issuer)
+            or parsed_issuer.scheme != "https"
             or parsed_issuer.hostname is None
             or parsed_issuer.username is not None
+            or parsed_issuer.port == 0
             or parsed_issuer.query
             or parsed_issuer.fragment
         ):
@@ -360,11 +487,25 @@ class AuthorizationServer:
                 "OAuth issuer must be an absolute HTTPS URL without credentials, "
                 "a query, or a fragment"
             )
+        try:
+            parsed_issuer.hostname.encode("idna")
+        except UnicodeError as error:
+            raise ValueError(
+                "OAuth issuer must be an absolute HTTPS URL without credentials, "
+                "a query, or a fragment"
+            ) from error
         self._issuer = normalized_issuer
         # Generated when absent so a test or a single-process deployment needs
         # no ceremony. A fleet must pass one: two workers with different secrets
         # issue tokens neither can verify.
-        raw = secret.encode("utf-8") if isinstance(secret, str) else secret
+        if isinstance(secret, str):
+            raw = secret.encode("utf-8")
+        elif isinstance(secret, bytes):
+            raw = secret
+        elif isinstance(secret, (bytearray, memoryview)):
+            raw = bytes(secret)
+        else:
+            raise TypeError("OAuth HMAC signing secret must be bytes or text")
         if raw and len(raw) < 32:
             raise ValueError("OAuth HMAC signing secret must contain at least 32 bytes")
         self._secret = raw or secrets.token_bytes(32)
@@ -387,13 +528,21 @@ class AuthorizationServer:
             raise ValueError("OAuth lifetime must be finite")
         if not math.isfinite(code_ttl):
             raise ValueError("OAuth code_ttl must be finite")
+        if isinstance(code_ttl, bool) or not 0 < code_ttl <= 600:
+            raise ValueError("OAuth code_ttl must be positive and at most 600 seconds")
         if not math.isfinite(refresh_ttl):
             raise ValueError("OAuth refresh_ttl must be finite")
         self._lifetime = lifetime
         self._lock = threading.RLock()
         self._code_ttl = code_ttl
-        if max_pending_grants <= 0:
-            raise ValueError("OAuth max_pending_grants must be positive")
+        if (
+            isinstance(max_pending_grants, bool)
+            or not isinstance(max_pending_grants, int)
+            or max_pending_grants <= 0
+        ):
+            raise ValueError(
+                "OAuth max_pending_grants must be positive; expected a positive integer"
+            )
         self._max_pending_grants = max_pending_grants
         if refresh_ttl <= 0:
             raise ValueError("OAuth refresh_ttl must be positive")
@@ -497,6 +646,11 @@ class AuthorizationServer:
         return {"keys": list(self._signer.public_jwks())}
 
     def register(self, client: ClientRegistration) -> None:
+        if client.client_id in self._clients:
+            raise ValueError(
+                f"duplicate OAuth client {client.client_id!r}; each client_id must "
+                "identify exactly one registration"
+            )
         if client.introspection_encrypted_response_alg is not None:
             raise ValueError(
                 f"client {client.client_id!r} requests introspection response encryption, "
@@ -597,6 +751,12 @@ class AuthorizationServer:
                     "invalid-authorization-details",
                     f"authorization_details[{index}] must be an object",
                 )
+            if len(detail) > _MAX_AUTHORIZATION_DETAIL_FIELDS:
+                raise OAuthRefusal(
+                    "invalid-authorization-details",
+                    f"authorization_details[{index}] may contain at most "
+                    f"{_MAX_AUTHORIZATION_DETAIL_FIELDS} fields",
+                )
             detail_type = detail.get("type")
             if not isinstance(detail_type, str) or not detail_type:
                 raise OAuthRefusal(
@@ -609,7 +769,9 @@ class AuthorizationServer:
                     "invalid-authorization-details",
                     f"authorization_details[{index}] names unknown type {detail_type!r}",
                 )
-            body = {name: value for name, value in detail.items() if name != "type"}
+            body = deepcopy(
+                {name: value for name, value in detail.items() if name != "type"}
+            )
             try:
                 validate(model, body, ("authorization_details", index))
             except ValidationError as error:
@@ -770,7 +932,7 @@ class AuthorizationServer:
                 "redirect_uri-mismatch",
                 f"redirect_uri {redirect_uri!r} is not one this client registered",
             )
-        wanted = tuple(scope)
+        wanted = _validated_scopes(scope)
         outside = sorted(set(wanted) - set(client.scopes))
         if outside:
             raise OAuthRefusal(
@@ -779,7 +941,7 @@ class AuthorizationServer:
                 f"{', '.join(outside)}; a client cannot ask for more than it was "
                 "granted at registration",
             )
-        moment = time.time() if now is None else now
+        moment = _grant_time(now)
         self._reserve_pending_grant(moment)
         code = secrets.token_urlsafe(32)
         self._codes[code] = _Code(
@@ -858,7 +1020,7 @@ class AuthorizationServer:
                 "by the first redemption has been revoked, because two parties holding "
                 "one code means one of them is not the client",
             )
-        moment = time.time() if now is None else now
+        moment = _grant_time(now)
         if moment - record.issued_at > self._code_ttl:
             # An authorization code is a bearer credential that travels through
             # a browser redirect, so it reaches referrer headers, proxy logs and
@@ -888,6 +1050,16 @@ class AuthorizationServer:
         # challenge skipped PKCE altogether, and `issue_code` now refuses to mint
         # one -- but the check being unconditional is what makes that true for a
         # code minted by an older build, too.
+        if not isinstance(verifier, str) or not verifier.isascii():
+            raise OAuthRefusal(
+                "pkce-mismatch",
+                "code_verifier must be ASCII text and match this authorization code",
+            )
+        if len(verifier) > 128:
+            raise OAuthRefusal(
+                "pkce-mismatch",
+                "code_verifier must contain at most 128 characters",
+            )
         offered = _b64(hashlib.sha256(verifier.encode("ascii")).digest())
         if not hmac.compare_digest(offered, record.challenge):
             raise OAuthRefusal(
@@ -968,7 +1140,7 @@ class AuthorizationServer:
             if authorization_details not in (None, (), [])
             else ()
         )
-        moment = time.time() if now is None else now
+        moment = _grant_time(now)
         expires = moment + self._lifetime
         claims: dict[str, Any] = {
             "iss": self._issuer,
@@ -982,7 +1154,7 @@ class AuthorizationServer:
             claims["sub"] = subject
         if client_id:
             claims["client_id"] = client_id
-        wanted = tuple(scope)
+        wanted = _validated_scopes(scope)
         if wanted:
             claims["scope"] = " ".join(wanted)
         if tenant:
@@ -1052,7 +1224,7 @@ class AuthorizationServer:
         self._authenticate_client(client_id, client_secret)
         self._require_dpop(client_id, dpop_jkt)
         rich_details = self._client_authorization_details(client, authorization_details)
-        wanted = tuple(scope) or client.scopes
+        wanted = _validated_scopes(scope) or client.scopes
         outside = sorted(set(wanted) - set(client.scopes))
         if outside:
             raise OAuthRefusal(
@@ -1107,7 +1279,7 @@ class AuthorizationServer:
         now: float | None = None,
         _extra_entries: int = 0,
     ) -> _Refresh:
-        moment = time.time() if now is None else now
+        moment = _grant_time(now)
         self._reserve_pending_grant(moment, 2 + _extra_entries)
         chain = secrets.token_urlsafe(12)
         rich_details = (
@@ -1121,7 +1293,7 @@ class AuthorizationServer:
             chain=chain,
             issued_at=moment,
             audience=audience or self._issuer,
-            scope=tuple(scope),
+            scope=_validated_scopes(scope),
             tenant=tenant,
             client_id=client_id,
             dpop_jkt=dpop_jkt,
@@ -1129,7 +1301,10 @@ class AuthorizationServer:
         )
         self._refresh[record.token] = record
         self._chains[chain] = []
-        return record
+        return replace(
+            record,
+            authorization_details=deepcopy(record.authorization_details),
+        )
 
     def rotate(
         self,
@@ -1200,7 +1375,7 @@ class AuthorizationServer:
                 "audience-mismatch",
                 "a refresh token cannot change the audience of its original grant",
             )
-        moment = time.time() if now is None else now
+        moment = _grant_time(now)
         if moment - record.issued_at > self._refresh_ttl:
             del self._refresh[token]
             self.revoke_chain(record.chain)
@@ -1353,7 +1528,7 @@ class AuthorizationServer:
                 "invalid-client",
                 f"client {client_id!r} is not registered for JWT token introspection",
             )
-        moment = time.time() if now is None else now
+        moment = _grant_time(now)
         response = {
             "iss": self._issuer,
             "aud": client_id,
@@ -1415,6 +1590,8 @@ class AuthorizationServer:
             issuer != self._issuer
             or isinstance(expires, bool)
             or not isinstance(expires, (int, float))
+            or isinstance(expires, float)
+            and not math.isfinite(expires)
             or expires <= now
             or audience not in audiences
             or token in self._revoked

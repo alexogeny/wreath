@@ -7,8 +7,6 @@
 #include "wreathcore.h"
 
 static PyMethodDef client_methods[] = {
-    {"parse_response_head", wreath_http_parse_response, METH_O,
-     "parse_response_head(data) -> (minor, status, reason, headers, consumed) | None"},
     {"response_framing", wreath_http_response_framing, METH_VARARGS,
      "response_framing(method, status, headers) -> (mode, length)"},
     {"response_keeps_alive", wreath_http_response_keeps_alive, METH_VARARGS,
@@ -39,7 +37,8 @@ PyInit__client(void)
 {
     PyObject *module = PyModule_Create(&client_module);
     if (module == NULL) return NULL;
-    if (wreath_register_http_client_protocol(module) < 0) {
+    if (wreath_http_register_client_response_parser(module) < 0 ||
+        wreath_register_http_client_protocol(module) < 0) {
         Py_DECREF(module);
         return NULL;
     }

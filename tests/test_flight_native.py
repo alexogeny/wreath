@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import random
+import sys
+from typing import Any, cast
 
 import pytest
 
@@ -8,6 +10,49 @@ from wreath import _flight_schema as fs
 from wreath._flight_reference import ReferenceRecorder
 
 _flight = pytest.importorskip("wreath._native._flight")
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("mode", 1 << 32),
+        ("worker_id", 1 << 32),
+        ("ring_records", -(1 << 32)),
+        ("active_requests", 1 << 32),
+        ("histogram_count", 1 << 32),
+        ("phase_slots", 1 << 32),
+        ("detailed_slow_us", 1 << 64),
+        ("capture_slabs", 1 << 32),
+        ("slab_bytes", 1 << 32),
+    ],
+)
+def test_recorder_refuses_unsigned_constructor_wraparound(name: str, value: int) -> None:
+    with pytest.raises((OverflowError, ValueError), match=name):
+        if name == "mode":
+            _flight.Recorder(value)
+        else:
+            _flight.Recorder(_flight.MODE_OFF, **cast(Any, {name: value}))
+
+
+def test_recorder_refuses_nonfinite_sampling_rate() -> None:
+    for rate in (float("nan"), float("inf"), -float("inf")):
+        with pytest.raises(ValueError, match="detailed_sample_rate"):
+            _flight.Recorder(_flight.MODE_OFF, detailed_sample_rate=rate)
+
+
+def test_recorder_refuses_an_unknown_mode() -> None:
+    with pytest.raises(ValueError, match="mode"):
+        _flight.Recorder(4)
+
+
+def test_recorder_refuses_capture_hash_key_wraparound() -> None:
+    with pytest.raises((OverflowError, ValueError), match="capture_hash_key"):
+        _flight.Recorder(_flight.MODE_OFF, capture_hash_key=(-1, 0))
+
+
+def test_drain_clamps_an_absurd_request_to_the_bounded_ring() -> None:
+    recorder = _flight.Recorder(_flight.MODE_PULSE, ring_records=8)
+    assert recorder.drain(sys.maxsize) == b""
 
 
 def test_off_mode_does_nothing() -> None:

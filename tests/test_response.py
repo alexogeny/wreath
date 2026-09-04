@@ -5,11 +5,15 @@ from typing import Any, cast
 
 import pytest
 
+from wreath._headers import validate_response_headers
 from wreath.response import (
     FileResponse,
     HTMLResponse,
     JSONResponse,
     PreparedResponse,
+    ProblemDetail,
+    ProblemResponse,
+    RedirectResponse,
     Response,
     StreamingResponse,
     TextResponse,
@@ -82,6 +86,132 @@ def test_default_headers() -> None:
     ]
 
 
+@pytest.mark.parametrize("status", [True, False, 99, 600, "200"])
+def test_response_refuses_invalid_status_at_construction(status: Any) -> None:
+    with pytest.raises((TypeError, ValueError), match="status"):
+        Response(status=status)
+
+
+def test_response_refuses_non_bytes_body_at_construction() -> None:
+    with pytest.raises(TypeError, match="body must be bytes"):
+        Response(cast(Any, bytearray(b"mutable")))
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [(b"x evil", b"value")],
+        [(b"x:evil", b"value")],
+        [(b"", b"value")],
+        [(b"x-test", b"safe\r\nx-evil: injected")],
+        [(b"x-test", b"safe\x00evil")],
+        [("x-test", b"value")],
+        [(b"x-test", "value")],
+    ],
+)
+def test_response_refuses_invalid_wire_headers_at_construction(headers: Any) -> None:
+    with pytest.raises((TypeError, ValueError), match="header"):
+        Response(headers=headers)
+
+
+@pytest.mark.parametrize("name", [b"content-length", b"content-type"])
+def test_response_refuses_duplicate_singleton_headers(name: bytes) -> None:
+    with pytest.raises(ValueError, match=name.decode("ascii")):
+        Response(headers=[(name, b"0"), (name.upper(), b"0")])
+
+
+@pytest.mark.parametrize("value", [b"", b"+3", b"3, 3", b"three", b"4"])
+def test_response_refuses_ambiguous_content_length(value: bytes) -> None:
+    with pytest.raises(ValueError, match="content-length"):
+        Response(b"abc", headers=[(b"content-length", value)])
+
+
+def test_response_refuses_invalid_media_type_with_caller_headers() -> None:
+    with pytest.raises(TypeError, match="media_type must be bytes"):
+        Response(headers=[(b"x-test", b"value")], media_type=cast(Any, "text/plain"))
+
+
+@pytest.mark.parametrize("media_type", [bytearray(b"text/plain"), 1, b"text/plain\r\nx: y"])
+def test_response_refuses_invalid_generated_media_type(media_type: Any) -> None:
+    with pytest.raises((TypeError, ValueError), match="media_type"):
+        Response(media_type=media_type)
+
+
+@pytest.mark.parametrize("status", [200, 299, 400, True])
+def test_redirect_refuses_non_redirect_status(status: Any) -> None:
+    error = TypeError if type(status) is not int else ValueError
+    with pytest.raises(error, match="redirect status"):
+        RedirectResponse("/next", status=status)
+
+
+def test_redirect_accepts_the_full_redirect_status_range() -> None:
+    assert RedirectResponse("/next", status=300).status == 300
+    assert RedirectResponse("/next", status=399).status == 399
+
+
+def test_response_header_validator_preserves_valid_field_octets() -> None:
+    assert validate_response_headers([(b"x-test", b"\tvalue\x80")]) == (False, None)
+
+
+@pytest.mark.parametrize("name", [b"", b"x evil", b"x:evil"])
+def test_response_header_validator_refuses_each_non_token_name(name: bytes) -> None:
+    with pytest.raises(ValueError, match="HTTP token"):
+        validate_response_headers([(name, b"value")])
+
+
+def test_response_header_validator_refuses_non_bytes_fields_by_type() -> None:
+    with pytest.raises(TypeError, match="header name"):
+        validate_response_headers([(cast(Any, "x-test"), b"value")])
+    with pytest.raises(TypeError, match="header value"):
+        validate_response_headers([(b"x-test", cast(Any, "value"))])
+
+
+@pytest.mark.parametrize("value", [b"value\x00", b"value\x1f", b"value\x7f"])
+def test_response_header_validator_refuses_each_forbidden_value_octet(value: bytes) -> None:
+    with pytest.raises(ValueError, match="control character"):
+        validate_response_headers([(b"x-test", value)])
+
+
+@pytest.mark.parametrize("value", [b"", b"+3", b"3, 3", b"three"])
+def test_response_header_validator_refuses_non_decimal_content_length(value: bytes) -> None:
+    with pytest.raises(ValueError, match="decimal digits"):
+        validate_response_headers([(b"content-length", value)])
+
+
+def test_problem_detail_refuses_reserved_extensions() -> None:
+    with pytest.raises(ValueError, match="reserved.*status"):
+        ProblemDetail(400, extensions={"status": 200})
+
+
+def test_problem_detail_snapshots_extension_mapping() -> None:
+    extensions = {"request_id": "original"}
+    problem = ProblemDetail(400, extensions=extensions)
+
+    extensions["request_id"] = "attacker"
+
+    assert ProblemResponse(problem).body == (
+        b'{"type":"about:blank","title":"Bad Request","status":400,'
+        b'"request_id":"original"}'
+    )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"status": True},
+        {"status": 99},
+        {"status": 400, "title": 1},
+        {"status": 400, "detail": b"bad"},
+        {"status": 400, "type": 1},
+        {"status": 400, "instance": 1},
+        {"status": 400, "extensions": {1: "bad"}},
+    ],
+)
+def test_problem_detail_refuses_invalid_document_shape(kwargs: dict[str, Any]) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        ProblemDetail(**kwargs)
+
+
 def test_content_digest_uses_explicit_content_instead_of_the_response_body() -> None:
     response = Response(b"response body")
     expected = Response(b"transmitted content")
@@ -137,9 +267,41 @@ def test_media_type_override_and_empty() -> None:
 
 
 def test_status_without_body_omits_content_length() -> None:
-    for status in (204, 304):
-        response = Response(b"", status=status)
+    for status in (101, 199, 204, 205, 304):
+        response = Response(b"ignored", status=status)
+        assert response.body == b""
         assert not any(key == b"content-length" for key, _ in response.headers)
+
+
+@pytest.mark.parametrize("status", [101, 204, 205, 304])
+def test_streaming_response_refuses_status_that_forbids_content(status: int) -> None:
+    async def chunks():
+        yield b"content"
+
+    with pytest.raises(ValueError, match="must not carry a streaming body"):
+        StreamingResponse(chunks(), status=status)
+
+
+def test_streaming_response_validates_status_and_headers_at_construction() -> None:
+    async def chunks():
+        yield b"content"
+
+    with pytest.raises(TypeError, match="status"):
+        StreamingResponse(chunks(), status=True)
+    with pytest.raises(ValueError, match="header"):
+        StreamingResponse(chunks(), headers=[(b"x-test", b"ok\r\nx-evil: injected")])
+
+
+def test_file_response_validates_status_and_headers_at_construction(tmp_path) -> None:
+    target = tmp_path / "asset.bin"
+    with pytest.raises(TypeError, match="status"):
+        FileResponse(target, status=True)
+    with pytest.raises(ValueError, match="header"):
+        FileResponse(target, headers=[(b"x-test", b"ok\r\nx-evil: injected")])
+    with pytest.raises(ValueError, match="content-type"):
+        FileResponse(target, headers=[(b"content-type", b"text/plain")])
+    with pytest.raises(ValueError, match="content-length"):
+        FileResponse(target, headers=[(b"content-length", b"1")])
 
 
 def test_encoded_response_fast_shapes_preserve_non_default_status_semantics() -> None:
@@ -180,7 +342,7 @@ def test_caller_headers_are_preserved_and_deduplicated() -> None:
     assert response.headers[:2] == [(b"x-custom", b"1"), (b"Content-Type", b"text/html")]
     assert response.headers[2:] == [(b"content-length", b"3")]
 
-    response = Response(b"abc", headers=[(b"CONTENT-LENGTH", b"999")])
+    response = Response(b"abc", headers=[(b"CONTENT-LENGTH", b"3")])
     assert (b"content-type", b"application/octet-stream") in response.headers
     assert sum(key.lower() == b"content-length" for key, _ in response.headers) == 1
 
@@ -321,9 +483,15 @@ def test_prepared_json_and_html() -> None:
 
 
 def test_prepared_no_body_status_drops_length() -> None:
-    response = PreparedResponse(b"ignored", status=204)
-    assert response.body == b""
-    assert all(name != b"content-length" for name, _ in response.headers)
+    for status in (101, 199, 204, 205, 304):
+        response = PreparedResponse(b"ignored", status=status)
+        assert response.body == b""
+        assert all(name != b"content-length" for name, _ in response.headers)
+
+
+def test_prepared_response_refuses_ambiguous_content_length() -> None:
+    with pytest.raises(ValueError, match="content-length"):
+        PreparedResponse(b"abc", headers=[(b"content-length", b"4")])
 
 
 @pytest.mark.asyncio

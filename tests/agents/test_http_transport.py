@@ -88,11 +88,30 @@ def transport(client: Client, base_url: str = "https://api.example/v1") -> HTTPC
         "https://user:password@api.example/path",
         "https://api.example:0/path",
         "https://api.example/path#fragment",
+        "https://api.example:not-a-port/path",
     ],
 )
 def test_absolute_url_rejects_each_invalid_authority_part(value: str) -> None:
     with pytest.raises(ValueError, match="absolute HTTP URL"):
         _absolute_url(value, label="test URL")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://api.example\r.evil/path",
+        "https://api.example/path\t/../../admin",
+        "https://api.example/path\x7fadmin",
+    ],
+)
+def test_absolute_url_rejects_parser_control_ambiguity(value: str) -> None:
+    with pytest.raises(ValueError, match="absolute HTTP URL"):
+        _absolute_url(value, label="test URL")
+
+
+def test_absolute_url_requires_text() -> None:
+    with pytest.raises(ValueError, match="absolute HTTP URL"):
+        _absolute_url(cast(Any, 7), label="test URL")
 
 
 def test_origin_normalizes_ipv6_and_default_ports() -> None:
@@ -158,6 +177,99 @@ async def test_refuses_off_origin_and_outside_base_path_before_client() -> None:
         await adapter("POST", "https://api.example/v10/responses", {}, b"")
 
     assert client.requests == []
+
+
+@pytest.mark.parametrize(
+    "request_url",
+    [
+        "https://api.example/v1/../admin",
+        "https://api.example/v1/%2e%2e/admin",
+        "https://api.example/v1/..\\admin",
+    ],
+)
+async def test_refuses_ambiguous_base_path_escape_before_client(
+    request_url: str,
+) -> None:
+    client = Client()
+    adapter = transport(client)
+
+    with pytest.raises(ValueError, match="configured base URL"):
+        await adapter("POST", request_url, {}, b"")
+
+    assert client.requests == []
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://api.example/v1/../admin",
+        "https://api.example/v1/%2e%2e/admin",
+        "https://api.example/v1/..\\admin",
+    ],
+)
+def test_refuses_ambiguous_configured_base_path(base_url: str) -> None:
+    with pytest.raises(ValueError, match="base_url"):
+        transport(Client(), base_url)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("", "value"),
+        ("caf\N{LATIN SMALL LETTER E WITH ACUTE}", "value"),
+        ("x-safe\r\nx-injected", "value"),
+        ("x-safe", "value\r\nx-injected: yes"),
+        ("x-safe\x7f", "value"),
+        ("x-safe", "value\x7f"),
+    ],
+)
+async def test_refuses_request_header_framing_ambiguity_before_client(
+    name: str,
+    value: str,
+) -> None:
+    client = Client()
+    adapter = transport(client)
+
+    with pytest.raises(ValueError, match="header"):
+        await adapter(
+            "POST",
+            "https://api.example/v1/responses",
+            {name: value},
+            b"",
+        )
+
+    assert client.requests == []
+
+
+async def test_non_ascii_request_header_name_reports_the_token_form() -> None:
+    client = Client()
+    adapter = transport(client)
+
+    with pytest.raises(ValueError, match="not an HTTP token"):
+        await adapter(
+            "POST",
+            "https://api.example/v1/responses",
+            {"caf\N{LATIN SMALL LETTER E WITH ACUTE}": "value"},
+            b"",
+        )
+
+    assert client.requests == []
+
+
+async def test_request_header_horizontal_tab_remains_valid_field_whitespace() -> None:
+    context = StreamContext(Response())
+    client = Client(contexts=[context])
+    adapter = transport(client)
+
+    _status, _headers, body = await adapter(
+        "POST",
+        "https://api.example/v1/responses",
+        {"x-detail": "one\ttwo"},
+        b"",
+    )
+    await body.aclose()
+
+    assert client.requests[0][2] == ((b"x-detail", b"one\ttwo"),)
 
 
 async def test_early_body_close_exits_the_owned_stream_context() -> None:
@@ -321,6 +433,19 @@ def test_mcp_adapter_refuses_insecure_or_mismatched_origins() -> None:
             cast(HTTPClient, Client(origin="http://api.example")),
             endpoint="http://api.example/mcp",
         )
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://api.example/mcp/../admin",
+        "https://api.example/mcp/%2e%2e/admin",
+        "https://api.example/mcp/..\\admin",
+    ],
+)
+def test_mcp_adapter_refuses_ambiguous_endpoint_paths(endpoint: str) -> None:
+    with pytest.raises(ValueError, match="MCP endpoint"):
+        MCPHTTPClientTransport(cast(HTTPClient, Client()), endpoint=endpoint)
     with pytest.raises(ValueError, match="must match HTTPClient origin"):
         MCPHTTPClientTransport(
             cast(HTTPClient, Client(origin="https://other.example")),

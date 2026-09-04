@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 
 import pytest
 
@@ -27,8 +28,8 @@ def _runtime(sink: list[LogCell], *, capacity: int = 8) -> log.LogRuntime:
     return runtime
 
 
-def _emit_on_another_thread(fn: object) -> None:
-    thread = threading.Thread(target=fn)  # type: ignore[arg-type]
+def _emit_on_another_thread(fn: Callable[[], object]) -> None:
+    thread = threading.Thread(target=fn)
     thread.start()
     thread.join(timeout=5.0)
     assert not thread.is_alive()
@@ -139,6 +140,33 @@ def test_a_runtime_without_a_bound_writer_publishes_from_any_thread() -> None:
         log.install(previous)
     assert len(written) == 1
     assert not written[0].flags & LOG_FLAG_OFF_LOOP
+
+
+def test_writer_binding_refuses_a_malformed_or_second_owner() -> None:
+    runtime = log.LogRuntime(lambda _cell: None)
+    for thread_id in (True, 0):
+        with pytest.raises(ValueError, match="thread_id must be a positive integer"):
+            runtime.bind_writer(thread_id)
+    runtime.bind_writer()
+    with pytest.raises(RuntimeError, match="writer thread is already bound"):
+        runtime.bind_writer()
+
+
+def test_only_the_writer_thread_can_drain_the_stage() -> None:
+    runtime = log.LogRuntime(lambda _cell: None)
+    runtime.bind_writer()
+    errors: list[BaseException] = []
+
+    def drain() -> None:
+        try:
+            runtime.drain_off_loop()
+        except RuntimeError as exc:
+            errors.append(exc)
+
+    _emit_on_another_thread(drain)
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
+    assert str(errors[0]) == "off-loop records must be drained by the writer thread"
 
 
 def test_concurrent_threads_all_stage_without_losing_a_record() -> None:

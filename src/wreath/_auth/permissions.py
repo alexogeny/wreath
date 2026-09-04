@@ -53,7 +53,7 @@ from ..cache import BoundedCache
 from ..request import Request
 from ..response import JSONResponse, ProblemResponse, Response, SSEResponse
 from ..router import Router
-from .models import qualified_identity_value
+from .models import qualified_identity_key
 from .requirements import (
     AuthRequirement,
     add_authenticated,
@@ -292,10 +292,11 @@ def _distinct_identifiers(identifiers: list[Any]) -> list[str]:
 
 def _principal_key(identity: Any) -> str:
     """The subscription key. Typed, so two kinds of principal cannot collide."""
-    identity_id = qualified_identity_value(
-        str(getattr(identity, "namespace", "")), str(identity.id)
+    return qualified_identity_key(
+        str(identity.type),
+        str(getattr(identity, "namespace", "")),
+        str(identity.id),
     )
-    return f"{identity.type}::{identity_id}"
 
 
 async def _decide(
@@ -331,7 +332,7 @@ async def _decide(
         verdicts = []
         for resource, action in asks:
             decision = await authorizer.authorize(request, _Requirement(action, resource))
-            verdicts.append(bool(getattr(decision, "allowed", False)))
+            verdicts.append(getattr(decision, "allowed", False) is True)
         return verdicts
 
     gate = asyncio.Semaphore(limit)
@@ -339,9 +340,12 @@ async def _decide(
     async def one(resource: Any, action: str) -> bool:
         async with gate:
             decision = await authorizer.authorize(request, _Requirement(action, resource))
-            return bool(getattr(decision, "allowed", False))
+            return getattr(decision, "allowed", False) is True
 
-    return list(await asyncio.gather(*(one(r, a) for r, a in asks)))
+    tasks: list[asyncio.Task[bool]] = []
+    async with asyncio.TaskGroup() as group:
+        tasks.extend(group.create_task(one(resource, action)) for resource, action in asks)
+    return [task.result() for task in tasks]
 
 
 def permission_document(
@@ -441,6 +445,11 @@ def permissions_router(
     `permission_document`, which builds the document when you do not pass
     one.
     """
+    for name, value in (("max_ids", max_ids), ("max_concurrency", max_concurrency)):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"{name} must be a positive integer")
+        if value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
     if document is None:
         document = permission_document(app, bus=bus, roles_model=roles_model)
     live = document  # a non-optional name, so the endpoint's closure has one

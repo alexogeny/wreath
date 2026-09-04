@@ -8,7 +8,7 @@ from typing import Final
 #: RFC 9110 §15.3.5 (204) and §15.4.5 (304). The one-shot and streaming response paths
 #: both consult this, as does the porting analyzer's rule for a handler that
 #: returns one anyway.
-STATUS_WITHOUT_BODY: Final[frozenset[int]] = frozenset({204, 304})
+STATUS_WITHOUT_BODY: Final[frozenset[int]] = frozenset(range(100, 200)) | {204, 205, 304}
 
 
 def etag_matches(header: str | None, tag: str) -> bool:

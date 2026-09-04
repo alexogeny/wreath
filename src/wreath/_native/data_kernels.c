@@ -1231,10 +1231,13 @@ wreath_dns_parse_txt(PyObject *Py_UNUSED(self), PyObject *args)
             Py_ssize_t text_length = 0;
             while (offset < end) {
                 uint8_t size = data[offset++];
-                Py_ssize_t available = end - offset;
-                Py_ssize_t take = size < available ? size : available;
-                memcpy(text + text_length, data + offset, (size_t)take);
-                text_length += take;
+                if ((Py_ssize_t)size > end - offset) {
+                    PyMem_Free(text);
+                    PyErr_SetString(PyExc_ValueError, "truncated DNS TXT string");
+                    goto dns_error;
+                }
+                memcpy(text + text_length, data + offset, size);
+                text_length += size;
                 offset += size;
             }
             found[found_count] = PyUnicode_DecodeUTF8(text, text_length, "replace");
@@ -1935,8 +1938,8 @@ wreath_log_cell_decode(PyObject *Py_UNUSED(self), PyObject *args)
     if (!PyArg_ParseTuple(args, "y*OOOOO:log_cell_decode", &view, &error_type,
                           &arg_type, &kind_type, &severity_type, &cell_type)) return NULL;
     const uint8_t *data = view.buf;
-    if (view.len < WREATH_NFR_CELL_SIZE) {
-        PyErr_Format(error_type, "log cell needs %d bytes, got %zd",
+    if (view.len != WREATH_NFR_CELL_SIZE) {
+        PyErr_Format(error_type, "log cell needs exactly %d bytes, got %zd",
                      WREATH_NFR_CELL_SIZE, view.len);
         goto log_decode_error;
     }
@@ -1946,6 +1949,14 @@ wreath_log_cell_decode(PyObject *Py_UNUSED(self), PyObject *args)
     }
     if (data[1] != WREATH_NFR_KIND_LOG) {
         PyErr_Format(error_type, "expected log kind, got %u", data[1]);
+        goto log_decode_error;
+    }
+    uint16_t flags = wreath_load_u16_le(data + 2);
+    const uint16_t known_flags = WREATH_NFR_LOG_FLAG_PROMOTED |
+        WREATH_NFR_LOG_FLAG_TRUNCATED | WREATH_NFR_LOG_FLAG_REDACTED |
+        WREATH_NFR_LOG_FLAG_OFF_LOOP | WREATH_NFR_LOG_FLAG_EVENT_FIELDS;
+    if ((flags & (uint16_t)~known_flags) != 0) {
+        PyErr_Format(error_type, "unknown log flags 0x%x", flags & ~known_flags);
         goto log_decode_error;
     }
     uint8_t arg_count = data[26], arg_bytes = data[27];
@@ -2007,7 +2018,7 @@ wreath_log_cell_decode(PyObject *Py_UNUSED(self), PyObject *args)
                        : PyLong_FromUnsignedLong(severity),
         PyLong_FromUnsignedLong(wreath_load_u32_le(data + 16)),
         PyLong_FromUnsignedLong(data[25]), decoded,
-        PyLong_FromUnsignedLong(wreath_load_u16_le(data + 2)),
+        PyLong_FromUnsignedLong(flags),
         PyLong_FromUnsignedLong(wreath_load_u32_le(data + 20))
     };
     PyObject *result = NULL;
@@ -2047,8 +2058,30 @@ wreath_capture_slab_decode(PyObject *Py_UNUSED(self), PyObject *args)
         PyErr_Format(error_type, "expected capture kind, got %u", data[15]);
         goto capture_error;
     }
-    if (used > (uint64_t)view.len) {
-        PyErr_SetString(error_type, "capture slab used_bytes exceeds the buffer");
+    if (used < WREATH_NFR_CAPTURE_SLAB_HEADER_SIZE) {
+        PyErr_Format(error_type, "capture slab used_bytes must be at least %d bytes",
+                     WREATH_NFR_CAPTURE_SLAB_HEADER_SIZE);
+        goto capture_error;
+    }
+    if (used != (uint64_t)view.len) {
+        PyErr_Format(error_type,
+                     "capture slab used_bytes must equal the buffer length; got %u and %zd",
+                     used, view.len);
+        goto capture_error;
+    }
+    uint8_t flags = data[17];
+    if ((flags & (uint8_t)~WREATH_NFR_FLAG_BODY_TRUNCATED) != 0) {
+        PyErr_Format(error_type, "unknown capture flags 0x%x",
+                     flags & ~WREATH_NFR_FLAG_BODY_TRUNCATED);
+        goto capture_error;
+    }
+    uint32_t maximum_count =
+        (used - WREATH_NFR_CAPTURE_SLAB_HEADER_SIZE) /
+        WREATH_NFR_CAPTURE_FIELD_HEADER_SIZE;
+    if (count > maximum_count) {
+        PyErr_Format(error_type,
+                     "capture slab field_count %u exceeds the %u records its used_bytes can hold",
+                     count, maximum_count);
         goto capture_error;
     }
     PyObject *fields = PyTuple_New(count);
@@ -2071,12 +2104,41 @@ wreath_capture_slab_decode(PyObject *Py_UNUSED(self), PyObject *args)
                             "capture slab truncated reading a field payload");
             Py_DECREF(fields); goto capture_error;
         }
-        unsigned int class_value = field_class <= 9 ? field_class : 0;
-        unsigned int disposition_value = disposition <= 3 ? disposition : 3;
+        if (field_class > WREATH_NFR_CAP_CLASS_OUTBOUND_HTTP_EXCHANGE) {
+            PyErr_Format(error_type, "unknown capture field class %u", field_class);
+            Py_DECREF(fields); goto capture_error;
+        }
+        if (disposition > WREATH_NFR_CAP_LENGTH) {
+            PyErr_Format(error_type, "unknown capture disposition %u", disposition);
+            Py_DECREF(fields); goto capture_error;
+        }
+        if (disposition == WREATH_NFR_CAP_HASHED &&
+            stored != WREATH_NFR_CAPTURE_HASH_BYTES) {
+            PyErr_Format(error_type, "capture HASHED payload must be %d bytes, got %u",
+                         WREATH_NFR_CAPTURE_HASH_BYTES, stored);
+            Py_DECREF(fields); goto capture_error;
+        }
+        if ((disposition == WREATH_NFR_CAP_MASKED ||
+             disposition == WREATH_NFR_CAP_LENGTH) && stored != 0) {
+            PyErr_SetString(error_type,
+                            "capture MASKED and LENGTH fields must not store a payload");
+            Py_DECREF(fields); goto capture_error;
+        }
+        if (disposition == WREATH_NFR_CAP_RAW && stored > original) {
+            PyErr_SetString(error_type,
+                            "capture RAW payload exceeds original_length");
+            Py_DECREF(fields); goto capture_error;
+        }
+        uint32_t padded = (stored + 3U) & ~3U;
+        if (padded > used - (uint32_t)offset) {
+            PyErr_SetString(error_type,
+                            "capture slab truncated reading field padding");
+            Py_DECREF(fields); goto capture_error;
+        }
         PyObject *values[5] = {
-            PyObject_CallFunction(class_type, "I", class_value),
+            PyObject_CallFunction(class_type, "I", field_class),
             PyLong_FromUnsignedLong(descriptor),
-            PyObject_CallFunction(disposition_type, "I", disposition_value),
+            PyObject_CallFunction(disposition_type, "I", disposition),
             PyLong_FromUnsignedLong(original),
             PyBytes_FromStringAndSize((const char *)data + offset, stored)
         };
@@ -2088,11 +2150,17 @@ capture_values_done:
         for (int cell = 0; cell < 5; cell++) Py_XDECREF(values[cell]);
         if (field == NULL) { Py_DECREF(fields); goto capture_error; }
         PyTuple_SET_ITEM(fields, index, field);
-        offset += (stored + 3U) & ~3U;
+        offset += padded;
+    }
+    if (offset != (Py_ssize_t)used) {
+        PyErr_Format(error_type,
+                     "capture slab field records use %zd bytes, but used_bytes is %u",
+                     offset, used);
+        Py_DECREF(fields); goto capture_error;
     }
     PyObject *values[4] = {
         PyLong_FromUnsignedLongLong(wreath_load_u64_le(data)), fields,
-        PyLong_FromUnsignedLong(data[16]), PyLong_FromUnsignedLong(data[17])
+        PyLong_FromUnsignedLong(data[16]), PyLong_FromUnsignedLong(flags)
     };
     PyObject *result = NULL;
     for (int index = 0; index < 4; index++)

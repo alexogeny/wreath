@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlencode
 
+from ._http import _is_http_token
 from ._json import loads
 from .request import Request
 
@@ -17,6 +18,9 @@ __all__ = [
     "Turnstile",
     "challenge_dependency",
 ]
+
+_MAX_RESPONSE_BYTES = 64 * 1024
+_MAX_TOKEN_BYTES = 4096
 
 
 class ChallengeRefused(ValueError):
@@ -59,7 +63,15 @@ class Turnstile:
     ) -> None:
         if not isinstance(secret, str) or not secret:
             raise ValueError("Turnstile secret must be a non-empty string")
-        if not isinstance(target, str) or not target.startswith("/") or target.startswith("//"):
+        if (
+            not isinstance(target, str)
+            or not target.startswith("/")
+            or target.startswith("//")
+            or "?" in target
+            or "#" in target
+            or "\\" in target
+            or any(ord(character) <= 0x20 or ord(character) >= 0x7F for character in target)
+        ):
             raise ValueError(
                 "Turnstile target must be an origin-relative path string such as "
                 "'/turnstile/v0/siteverify'"
@@ -75,8 +87,22 @@ class Turnstile:
         self._target = target
 
     async def verify(self, token: str, request: Request) -> ChallengeResult:
-        if not token:
+        if token == "":
             raise ChallengeRefused("Turnstile token is required")
+        if not isinstance(token, str):
+            raise ChallengeRefused(
+                f"Turnstile token must be an ASCII string of at most {_MAX_TOKEN_BYTES} bytes"
+            )
+        try:
+            token_size = len(token.encode("ascii"))
+        except UnicodeError as exc:
+            raise ChallengeRefused(
+                f"Turnstile token must be an ASCII string of at most {_MAX_TOKEN_BYTES} bytes"
+            ) from exc
+        if token_size > _MAX_TOKEN_BYTES:
+            raise ChallengeRefused(
+                f"Turnstile token must be an ASCII string of at most {_MAX_TOKEN_BYTES} bytes"
+            )
         form = {"secret": self._secret, "response": token}
         if request.client is not None:
             form["remoteip"] = request.client[0]
@@ -87,13 +113,23 @@ class Turnstile:
         )
         if response.status != 200:
             raise ChallengeRefused(f"Turnstile verification endpoint answered {response.status}")
+        if len(response.body) > _MAX_RESPONSE_BYTES:
+            raise ChallengeRefused("Turnstile verification response is too large")
         try:
             payload = loads(response.body)
         except ValueError as exc:
             raise ChallengeRefused("Turnstile verification response is not JSON") from exc
         if not isinstance(payload, dict) or payload.get("success") is not True:
             codes = payload.get("error-codes", ()) if isinstance(payload, dict) else ()
-            detail = ",".join(str(value) for value in codes)
+            detail = (
+                ",".join(
+                    value
+                    for value in codes[:8]
+                    if isinstance(value, str) and len(value) <= 64 and _is_http_token(value)
+                )
+                if isinstance(codes, list)
+                else ""
+            )
             raise ChallengeRefused(
                 "Turnstile rejected the token" + (f": {detail}" if detail else "")
             )
@@ -127,6 +163,8 @@ def challenge_dependency(challenge: BotChallenge, *, header: str = "cf-turnstile
         raise TypeError("bot challenge must expose async verify(token, request)")
     if not isinstance(header, str) or not header:
         raise ValueError("bot-challenge token header must be a non-empty string")
+    if not _is_http_token(header):
+        raise ValueError("bot-challenge token header must be a valid HTTP field name")
     header_bytes = header.encode("latin-1").lower()
 
     async def verify(request: Request) -> ChallengeResult:

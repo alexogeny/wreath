@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from sys import maxsize
 from typing import Any
 
 import pytest
@@ -72,6 +73,37 @@ async def test_request_decompression_refuses_unsupported_and_bad_members() -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("damage", ["truncated", "trailing", "stacked-member"])
+async def test_request_decompression_refuses_an_incomplete_or_ambiguous_member(
+    damage: str,
+) -> None:
+    member = gzip_compress(b"authenticated payload")
+    damaged = {
+        "truncated": member[:-1],
+        "trailing": member + b"x",
+        "stacked-member": member + gzip_compress(b"second"),
+    }[damage]
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": damaged, "more_body": False}
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/",
+            "headers": [(b"content-encoding", b"gzip")],
+        },
+        receive,
+    )
+
+    response = await RequestDecompressionPolicy()._ingress(request)
+
+    assert response is not None
+    assert response.status == 400
+
+
+@pytest.mark.asyncio
 async def test_request_decompression_bounds_expansion() -> None:
     app = Wreath(
         http_policy=HttpPolicy(
@@ -140,6 +172,11 @@ async def test_duplicate_content_type_is_refused_before_format_aware_decoding() 
 def test_request_decompression_validates_its_expansion_bound(maximum: Any) -> None:
     with pytest.raises(ValueError, match="max_output_bytes"):
         RequestDecompressionPolicy(max_output_bytes=maximum)
+
+
+def test_request_decompression_refuses_a_native_unrepresentable_expansion_bound() -> None:
+    with pytest.raises(ValueError, match="max_output_bytes"):
+        RequestDecompressionPolicy(max_output_bytes=maxsize + 1)
 
 
 def test_request_decompression_validates_format_awareness() -> None:

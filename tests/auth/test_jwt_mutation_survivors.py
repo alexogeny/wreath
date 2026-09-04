@@ -49,7 +49,7 @@ def test_signature_verification_refuses_a_matching_family_impostor(algorithm: st
 
 
 def test_signature_verification_refuses_a_key_from_another_family() -> None:
-    assert not jwt._verify_signature("HS256", jwt.RsaPublicKey(3, 3), b"message", b"signature")
+    assert not jwt._verify_signature("HS256", jwt.RsaPublicKey(5, 3), b"message", b"signature")
 
 
 @pytest.mark.parametrize("subject", [None, "", 42])
@@ -186,7 +186,7 @@ def test_key_coercion_distinguishes_bytes_strings_and_pem(monkeypatch: pytest.Mo
         b"x" * jwt.MIN_HMAC_KEY_BYTES
     )
 
-    sentinel = jwt.RsaPublicKey(3, 3)
+    sentinel = jwt.RsaPublicKey(5, 3)
     monkeypatch.setattr(jwt, "key_from_pem", lambda value: sentinel)
     assert jwt._coerce_key("  -----BEGIN PUBLIC KEY-----\nbody") is sentinel
 

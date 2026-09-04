@@ -5,12 +5,14 @@ from collections.abc import AsyncIterator, Mapping
 from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import SplitResult, urlsplit
 
-from ..http_client import HTTPClient
+from ..http_client import HTTPClient, _validate_origin_path
 
 if TYPE_CHECKING:
     from .remote_mcp import MCPHTTPResponse
 
 __all__ = ["HTTPClientTransport", "MCPHTTPClientTransport"]
+
+_HEADER_TOKEN = frozenset("!#$%&'*+-.^_`|~")
 
 
 class _StreamingResponse(Protocol):
@@ -85,6 +87,7 @@ class HTTPClientTransport:
         parsed = _absolute_url(base_url, label="base_url")
         if parsed.query:
             raise ValueError("model transport base_url must not include a query")
+        _validate_origin_path(parsed.path, label="model transport base_url")
         origin = _origin(parsed)
         if client.origin != origin:
             raise ValueError(
@@ -107,6 +110,10 @@ class HTTPClientTransport:
             raise ValueError(
                 f"model transport request URL must use configured origin {self._origin!r}"
             )
+        _validate_origin_path(
+            parsed.path,
+            label="model transport request URL within its configured base URL",
+        )
         target = self._target(parsed)
         encoded_headers = _request_headers(headers)
         context = self._client.stream(
@@ -141,6 +148,7 @@ class MCPHTTPClientTransport:
         parsed = _absolute_url(endpoint, label="MCP endpoint")
         if parsed.scheme != "https":
             raise ValueError("MCP HTTP endpoint must use HTTPS")
+        _validate_origin_path(parsed.path, label="model transport MCP endpoint")
         origin = _origin(parsed)
         if client.origin != origin:
             raise ValueError(
@@ -193,11 +201,20 @@ class MCPHTTPClientTransport:
 
 
 def _absolute_url(value: str, *, label: str) -> SplitResult:
+    message = (
+        f"model transport {label} must be an absolute HTTP URL without credentials, "
+        "controls, or a fragment"
+    )
+    if not isinstance(value, str) or any(
+        ord(character) <= 0x20 or 0x7F <= ord(character) <= 0x9F
+        for character in value
+    ):
+        raise ValueError(message)
     parsed = urlsplit(value)
     try:
         port = parsed.port
     except ValueError as error:
-        raise ValueError(f"model transport {label} must be an absolute HTTP URL") from error
+        raise ValueError(message) from error
     if (
         parsed.scheme not in {"http", "https"}
         or parsed.hostname is None
@@ -207,7 +224,7 @@ def _absolute_url(value: str, *, label: str) -> SplitResult:
         and port <= 0
         or parsed.fragment
     ):
-        raise ValueError(f"model transport {label} must be an absolute HTTP URL")
+        raise ValueError(message)
     return parsed
 
 
@@ -227,6 +244,21 @@ def _origin(parsed: SplitResult) -> str:
 def _request_headers(headers: Mapping[str, str]) -> tuple[tuple[bytes, bytes], ...]:
     converted: list[tuple[bytes, bytes]] = []
     for name, value in headers.items():
+        if not name or any(
+            not (
+                character.isascii()
+                and (character.isalnum() or character in _HEADER_TOKEN)
+            )
+            for character in name
+        ):
+            raise ValueError(f"model transport header name {name!r} is not an HTTP token")
+        if any(
+            ord(character) < 0x20 and character != "\t" or ord(character) == 0x7F
+            for character in value
+        ):
+            raise ValueError(
+                f"model transport header {name!r} value must not contain control characters"
+            )
         try:
             encoded_name = name.encode("ascii")
             encoded_value = value.encode("latin-1")

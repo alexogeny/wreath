@@ -71,7 +71,13 @@ _REOPEN_DELAY = 0.25
 
 def _endpoint(url: str) -> tuple[str, int, bytes, bool]:
     """Split an upstream URL into what the connect and the `Host` header need."""
-    parts = urlsplit(url)
+    try:
+        parts = urlsplit(url)
+        explicit_port = parts.port
+    except ValueError as error:
+        raise ValueError(f"upstream URL has an invalid authority: {url!r}") from error
+    if any(ord(character) < 0x21 or 0x7F <= ord(character) <= 0x9F for character in url):
+        raise ValueError(f"upstream URL contains a control character or space: {url!r}")
     if parts.scheme not in ("http", "https"):
         raise ValueError(
             f"wreath.edge.serve() speaks http:// or https:// to upstreams, not "
@@ -81,7 +87,6 @@ def _endpoint(url: str) -> tuple[str, int, bytes, bool]:
         raise ValueError(f"upstream URL has no host: {url!r}")
     if (
         parts.username is not None
-        or parts.password is not None
         or parts.path not in ("", "/")
         or parts.query
         or parts.fragment
@@ -91,7 +96,9 @@ def _endpoint(url: str) -> tuple[str, int, bytes, bool]:
             f"without credentials, a path, query, or fragment; got {url!r}"
         )
     secure = parts.scheme == "https"
-    port = parts.port or (443 if secure else 80)
+    if explicit_port == 0:
+        raise ValueError(f"upstream URL port must be between 1 and 65535: {url!r}")
+    port = explicit_port if explicit_port is not None else (443 if secure else 80)
     authority = parts.netloc.encode("latin-1")
     return parts.hostname, port, authority, secure
 
@@ -217,14 +224,27 @@ async def serve(
             docstring for what is not supported yet. Raised here, at
             configuration time, rather than on the request that first selects it.
     """
+    if type(connections) is not int:
+        raise ValueError("connections must be an integer")
     if connections < 1:
         raise ValueError("connections must be at least 1")
+    if type(max_body) is not int:
+        raise ValueError("max_body must be an integer")
     if max_body < 0:
         raise ValueError("max_body must be non-negative")
+    if type(max_waiting) is not int:
+        raise ValueError("max_waiting must be an integer")
     if max_waiting < 1:
         raise ValueError("max_waiting must be at least 1")
+    if type(queue_timeout) not in (int, float):
+        raise ValueError(
+            "queue_timeout must be finite and positive; expected a finite positive "
+            "number of seconds"
+        )
     if not isfinite(queue_timeout) or queue_timeout <= 0:
         raise ValueError("queue_timeout must be finite and positive")
+    if type(backlog) is not int:
+        raise ValueError("backlog must be an integer")
     if backlog < 1:
         raise ValueError("backlog must be at least 1")
     endpoints = [_endpoint(u.url) for u in pool.upstreams]

@@ -63,6 +63,9 @@ def test_same_origin_refuses_each_independent_origin_difference(
         "https://:password@idp.example",
         "https://idp.example?tenant=acme",
         "https://idp.example#issuer",
+        "https://idp.example:invalid",
+        "https://idp.example/iss\tuer",
+        "https://idp.example/issuer\x7f",
     ],
 )
 def test_provider_refuses_each_invalid_issuer_form(issuer: str) -> None:
@@ -77,6 +80,18 @@ def test_same_origin_accepts_matching_explicit_non_default_ports() -> None:
     endpoint = "https://idp.example:8443/resource"
 
     assert oidc._require_same_origin("https://idp.example:8443", endpoint) == endpoint
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://idp.example:invalid/resource",
+        "https://idp.example/res\tource",
+    ],
+)
+def test_same_origin_refuses_invalid_ports_and_parser_controls(endpoint: str) -> None:
+    with pytest.raises(ValueError, match="not on the pinned issuer origin"):
+        oidc._require_same_origin("https://idp.example", endpoint)
 
 
 def test_same_origin_path_supplies_root_and_omits_an_empty_query_marker() -> None:
@@ -117,6 +132,30 @@ async def test_discovery_refuses_a_document_for_another_issuer() -> None:
         await provider.discover()
 
 
+async def test_discovery_refuses_a_token_endpoint_off_the_pinned_origin() -> None:
+    document = {
+        "issuer": "https://idp.example",
+        "jwks_uri": "https://idp.example/jwks",
+        "token_endpoint": "https://attacker.example/token",
+    }
+    provider = _provider(response=_Response(200, json.dumps(document).encode()))
+
+    with pytest.raises(ValueError, match="not on the pinned issuer origin"):
+        await provider.discover()
+
+
+async def test_discovery_allows_an_issuer_that_publishes_no_token_endpoint() -> None:
+    document = {
+        "issuer": "https://idp.example",
+        "jwks_uri": "https://idp.example/jwks",
+    }
+    provider = _provider(response=_Response(200, json.dumps(document).encode()))
+
+    await provider.discover()
+
+    assert provider.token_endpoint is None
+
+
 async def test_default_bearer_verifier_uses_the_provider_audience(monkeypatch) -> None:
     seen: dict[str, Any] = {}
 
@@ -134,6 +173,55 @@ async def test_default_bearer_verifier_uses_the_provider_audience(monkeypatch) -
 
     assert await provider.bearer_verifier()(_token({"kid": "key-1"})) is not None
     assert seen["audiences"] == frozenset({"api"})
+
+
+@pytest.mark.parametrize(
+    ("claims", "accepted"),
+    [
+        ({"aud": "client"}, True),
+        ({"aud": ["client"]}, True),
+        ({"aud": ["client", "other"], "azp": "client"}, True),
+        ({"aud": ["client", "other"]}, False),
+        ({"aud": ["client", "other"], "azp": "other"}, False),
+        ({"aud": ["client", "other"], "azp": ["client"]}, False),
+    ],
+)
+async def test_login_verifier_binds_multi_audience_tokens_to_the_authorized_party(
+    monkeypatch, claims: dict[str, object], accepted: bool
+) -> None:
+    class Cache:
+        async def resolve(self, kid: str | None) -> object:
+            return object()
+
+    provider = _provider()
+    provider._cache = Cache()
+    monkeypatch.setattr(
+        oidc,
+        "verify_jwt",
+        lambda *args, **kwargs: SimpleNamespace(claims=claims),
+    )
+
+    result = await provider.bearer_verifier(audience="client")(_token({"kid": "key-1"}))
+
+    assert (result is not None) is accepted
+
+
+async def test_access_token_does_not_inherit_id_token_authorized_party_rules(monkeypatch) -> None:
+    class Cache:
+        async def resolve(self, kid: str | None) -> object:
+            return object()
+
+    provider = _provider()
+    provider._cache = Cache()
+    monkeypatch.setattr(
+        oidc,
+        "verify_jwt",
+        lambda *args, **kwargs: SimpleNamespace(
+            claims={"aud": ["api", "other"], "token_use": "access"}
+        ),
+    )
+
+    assert await provider.bearer_verifier()(_token({"kid": "key-1"})) is not None
 
 
 async def test_bearer_verifier_fails_closed_before_discovery() -> None:
@@ -180,3 +268,15 @@ async def test_bearer_verifier_does_not_verify_without_a_resolved_key(monkeypatc
     monkeypatch.setattr(oidc, "verify_jwt", unexpected_verify)
 
     assert await provider.bearer_verifier()(_token({"kid": "missing"})) is None
+
+
+async def test_bearer_verifier_fails_closed_when_jwt_verification_refuses(monkeypatch) -> None:
+    class Cache:
+        async def resolve(self, kid: str | None) -> object:
+            return object()
+
+    provider = _provider()
+    provider._cache = Cache()
+    monkeypatch.setattr(oidc, "verify_jwt", lambda *args, **kwargs: None)
+
+    assert await provider.bearer_verifier()(_token({"kid": "key-1"})) is None

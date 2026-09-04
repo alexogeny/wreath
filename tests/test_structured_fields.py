@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from wreath._structured_fields import (
     Date,
     DisplayString,
     Item,
+    StructuredFieldError,
     Token,
     parse_boolean_item,
+    parse_dictionary,
     serialize_dictionary,
     serialize_item,
     serialize_list,
@@ -104,3 +108,66 @@ def test_invalid_structured_strings_are_refused(value: str) -> None:
 def test_invalid_parameter_names_are_refused() -> None:
     with pytest.raises(ValueError, match="parameter name"):
         serialize_list([Item(Token("Wreath"), {"Not-Lower": True})])
+
+
+def test_dictionary_member_limit_is_enforced_before_returning_members() -> None:
+    with pytest.raises(StructuredFieldError, match="too many members"):
+        parse_dictionary("a=:YQ==:, b=:Yg==:", max_members=1)
+
+
+def test_an_empty_byte_sequence_round_trips_through_a_dictionary() -> None:
+    assert parse_dictionary("a=::") == {"a": Item(b"")}
+
+
+@pytest.mark.parametrize("value", ["A=:YQ==:", "1a=:YQ==:", "a:b=:YQ==:"])
+def test_dictionary_member_names_follow_the_rfc_key_grammar(value: str) -> None:
+    with pytest.raises(StructuredFieldError, match="dictionary key"):
+        parse_dictionary(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "a=1000000000000000",
+        "a=-1000000000000000",
+        "a=1000000000000.0",
+        "a=-1000000000000.0",
+        "a=1.0000",
+    ],
+)
+def test_dictionary_numbers_follow_the_rfc_numeric_limits(value: str) -> None:
+    with pytest.raises(StructuredFieldError, match="number"):
+        parse_dictionary(value)
+
+
+@pytest.mark.parametrize("value", ["a;Bad", "a;1bad", "a;bad:name"])
+def test_dictionary_parameter_names_follow_the_rfc_key_grammar(value: str) -> None:
+    with pytest.raises(StructuredFieldError, match="parameter key"):
+        parse_dictionary(value)
+
+
+@pytest.mark.parametrize("value", [".dot", "_private", "/path"])
+def test_dictionary_tokens_require_an_rfc_token_initial(value: str) -> None:
+    with pytest.raises(StructuredFieldError, match="token"):
+        parse_dictionary(f"a={value}")
+
+
+def test_dictionary_tokens_accept_the_complete_rfc_token_alphabet() -> None:
+    value = "A!#$%&'*+-.^_`|~:/z09"
+    assert parse_dictionary(f"a={value}") == {"a": Item(value)}
+
+
+@pytest.mark.parametrize(
+    ("argument", "value", "error_type"),
+    [
+        ("max_bytes", True, TypeError),
+        ("max_bytes", 0, ValueError),
+        ("max_members", True, TypeError),
+        ("max_members", 0, ValueError),
+    ],
+)
+def test_dictionary_parser_limits_are_exact_positive_integers(
+    argument: str, value: object, error_type: type[Exception]
+) -> None:
+    with pytest.raises(error_type, match=argument.replace("_", " ")):
+        parse_dictionary("a=:YQ==:", **cast(Any, {argument: value}))

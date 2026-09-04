@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import Any, cast
+
 import pytest
 from _pgfidelity import check_statement
 
-from wreath import telemetry
+from wreath import _jobcore, telemetry
 from wreath._jobcore import dedup_key
-from wreath.jobs import JobRunner, JobVanished
+from wreath.jobs import JobRunner, JobVanished, read_jobs
 
 
 class FakeConnection:
@@ -66,6 +69,46 @@ def test_construction_validates():
         JobRunner(db, name="bad name")  # space is not identifier-safe
 
 
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [("concurrency", True), ("concurrency", 1.5), ("batch", True), ("batch", 1.5)],
+)
+def test_runner_work_bounds_must_be_positive_integers(option: str, value: object):
+    with pytest.raises(ValueError, match=f"{option} must be a positive integer"):
+        _runner(FakeDatabase(), **{option: value})
+
+
+async def test_job_reader_refuses_a_schema_that_is_not_a_sql_safe_identifier():
+    db = FakeDatabase()
+    with pytest.raises(ValueError, match="schema"):
+        await read_jobs(db.connection, schema='wreath"; DROP TABLE users; --')
+
+    assert db.connection.calls == []
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5, 10_001])
+async def test_job_reader_refuses_an_invalid_or_unbounded_limit_before_database_io(limit: object):
+    db = FakeDatabase()
+    with pytest.raises(ValueError, match="limit must be an integer from 1 to 10000"):
+        await read_jobs(db.connection, limit=cast(Any, limit))
+
+    assert db.connection.calls == []
+
+
+async def test_job_reader_accepts_a_bounded_limit():
+    db = FakeDatabase()
+    assert await read_jobs(db.connection, limit=10_000) == []
+
+
+@pytest.mark.parametrize("older_than", [float("nan"), float("inf"), True])
+async def test_job_retention_refuses_an_invalid_age_before_database_io(older_than: object):
+    db = FakeDatabase()
+    with pytest.raises(ValueError, match="finite"):
+        await _runner(db).purge(older_than=older_than)
+
+    assert db.connection.calls == []
+
+
 def test_duplicate_task_rejected():
     runner = _runner(FakeDatabase())
 
@@ -100,6 +143,20 @@ async def test_enqueue_unknown_task_raises():
     runner = _runner(FakeDatabase())
     with pytest.raises(KeyError):
         await runner.enqueue("nope")
+
+
+async def test_enqueue_refuses_arguments_above_the_durable_payload_bound():
+    db = FakeDatabase()
+    runner = _runner(db)
+
+    @runner.task("send")
+    async def send(ctx, body):
+        pass
+
+    with pytest.raises(ValueError, match="durable payload"):
+        await runner.enqueue("send", "x" * (_jobcore.MAX_DURABLE_PAYLOAD + 1))
+
+    assert db.connection.calls == []
 
 
 async def test_enqueue_key_passes_hashed_dedup_key():
@@ -666,6 +723,51 @@ def test_a_task_timeout_must_be_finite(timeout: float):
         runner.task("bounded", timeout=timeout)
 
 
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("backoff_base", float("nan")),
+        ("backoff_base", float("inf")),
+        ("backoff_base", -1.0),
+        ("backoff_base", True),
+        ("backoff_base", "1"),
+        ("backoff_factor", float("nan")),
+        ("backoff_factor", float("inf")),
+        ("backoff_factor", -1.0),
+        ("backoff_cap", float("nan")),
+        ("backoff_cap", float("inf")),
+        ("backoff_cap", -1.0),
+        ("backoff_jitter", float("nan")),
+        ("backoff_jitter", float("inf")),
+        ("backoff_jitter", -0.1),
+        ("backoff_jitter", 1.1),
+    ],
+)
+def test_a_task_refuses_an_invalid_retry_policy_at_declaration(option: str, value: object):
+    runner = _runner(FakeDatabase())
+    with pytest.raises(ValueError, match=option):
+        runner.task("bounded", **{option: value})
+
+
+def test_a_task_refuses_an_unknown_backoff_at_declaration():
+    runner = _runner(FakeDatabase())
+    with pytest.raises(ValueError, match="backoff"):
+        runner.task("bounded", backoff="quadratic")
+
+
+@pytest.mark.parametrize("retries", [True, 1.5])
+def test_a_task_retry_budget_must_be_an_integer(retries: object):
+    runner = _runner(FakeDatabase())
+    with pytest.raises(ValueError, match="retries must be a non-negative integer"):
+        runner.task("bounded", retries=retries)
+
+
+def test_a_task_retry_budget_must_fit_a_postgres_integer():
+    runner = _runner(FakeDatabase())
+    with pytest.raises(ValueError, match="retries must be a non-negative integer"):
+        runner.task("bounded", retries=2**31)
+
+
 def test_a_task_name_that_is_not_an_identifier_is_refused_at_declaration():
     runner = _runner(FakeDatabase())
     with pytest.raises(ValueError, match="task name"):
@@ -695,6 +797,36 @@ async def test_an_explicit_max_attempts_overrides_the_tasks_own():
     inserts = [args for sql, args in db.connection.calls if "INSERT INTO" in sql]
     # Index 5 is max_attempts; see the note on front-indexing above.
     assert [args[5] for args in inserts] == [5, 1]  # retries + 1, then the override
+
+
+@pytest.mark.parametrize("max_attempts", [0, -1, True, 1.5, 2**31])
+async def test_enqueue_refuses_an_invalid_attempt_budget_before_database_io(max_attempts: object):
+    db = FakeDatabase()
+    runner = _runner(db)
+
+    @runner.task("send")
+    async def send(ctx):
+        pass
+
+    with pytest.raises(ValueError, match="max_attempts must be a positive integer"):
+        await runner.enqueue("send", max_attempts=max_attempts)
+
+    assert db.connection.calls == []
+
+
+@pytest.mark.parametrize("priority", [True, 1.5, -(2**31) - 1, 2**31])
+async def test_enqueue_refuses_a_priority_outside_the_postgres_integer_domain(priority: object):
+    db = FakeDatabase()
+    runner = _runner(db)
+
+    @runner.task("send")
+    async def send(ctx):
+        pass
+
+    with pytest.raises(ValueError, match="priority must be a PostgreSQL integer"):
+        await runner.enqueue("send", priority=priority)
+
+    assert db.connection.calls == []
 
 
 async def test_a_failed_verdict_without_an_error_is_not_a_failure():
@@ -953,6 +1085,23 @@ def test_a_claim_row_with_no_args_becomes_an_empty_argument_list():
         }
     )
     assert text.args == ["a", 1]  # a driver that hands back JSON as text
+
+
+@pytest.mark.parametrize("args", [{"role": "admin"}, '"admin"', 7, True])
+def test_a_claim_refuses_a_persisted_argument_payload_that_is_not_an_array(args: object):
+    with pytest.raises(ValueError, match="job arguments must be a JSON array"):
+        JobRunner._row_to_claim(
+            {
+                "id": 3,
+                "task": "t",
+                "args": args,
+                "tenant": "",
+                "attempts": 0,
+                "max_attempts": 3,
+                "fence": 1,
+                "dedup_key": None,
+            }
+        )
 
 
 async def test_a_worker_with_nothing_to_claim_waits_instead_of_re_querying():
@@ -1270,6 +1419,20 @@ async def test_coalesce_without_a_key_is_refused():
         await runner.enqueue("send", coalesce=True)
 
 
+async def test_enqueue_refuses_a_truthy_non_boolean_coalesce_flag_before_database_io():
+    db = FakeDatabase()
+    runner = _runner(db)
+
+    @runner.task("send")
+    async def send(ctx):
+        pass
+
+    with pytest.raises(ValueError, match="coalesce must be a boolean"):
+        await runner.enqueue("send", key="order-1", coalesce="false")
+
+    assert db.connection.calls == []
+
+
 def test_the_claim_index_leads_with_priority():
     # An index on (queue, run_at) cannot serve an ORDER BY that leads with
     # priority, so the step replaces it rather than adding beside it.
@@ -1310,6 +1473,28 @@ def test_a_worker_id_still_names_its_queue():
     # a join, which is why the identity is prefixed rather than opaque.
     runner = _runner(FakeDatabase())
     assert runner._worker_id.startswith("work:")
+
+
+def test_attempt_capture_requires_an_exact_boolean_authorization():
+    class AmbiguousRecorder:
+        def __init__(self) -> None:
+            self.writes = 0
+
+        def captures(self, **values):
+            return "true"
+
+        def write(self, record, trace):
+            self.writes += 1
+
+    recorder = AmbiguousRecorder()
+    runner = _runner(FakeDatabase(), attempts=recorder)
+    record = SimpleNamespace(
+        task="send", outcome="raised", attempt=1, max_attempts=2, job_id=1
+    )
+
+    runner._write_attempt(record, None)
+
+    assert recorder.writes == 0
 
 
 async def test_the_claim_records_the_worker_that_took_it():

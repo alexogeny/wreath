@@ -37,8 +37,8 @@ default, because a schema dump is reconnaissance.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import Any, Never
 
 from ._auth.permissions import SURFACE_ACTIONS
 from ._graphql.cost import weigh
@@ -80,6 +80,20 @@ MAX_CACHED_QUERY_CHARS = 16 * 1024
 #: `multipart/form-data`), which is what keeps a simple request from reaching a
 #: mutation with the caller's cookies attached.
 _ACCEPTED_CONTENT_TYPES = frozenset({"application/json", "application/graphql+json"})
+
+
+class _FrozenDict(dict[Any, Any]):
+    def _immutable(self, *args: Any, **kwargs: Any) -> Never:
+        raise TypeError("validated GraphQL declarations are immutable")
+
+    __delitem__ = _immutable
+    __ior__ = _immutable
+    __setitem__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +172,14 @@ class GraphQL:
             raise ValueError("on_denied must be 'error' or 'null'")
         if not action:
             raise ValueError("authorization action is required")
+        if not isinstance(introspection, bool):
+            raise ValueError("introspection must be a boolean")
+        if (
+            not isinstance(max_page_size, int)
+            or isinstance(max_page_size, bool)
+            or max_page_size < 1
+        ):
+            raise ValueError("max_page_size must be a positive integer")
         self._action = action
         self._registry = registry
         self._schema = build_schema(registry, models, expose=expose, dataclasses=dataclasses)
@@ -386,6 +408,20 @@ class GraphQL:
             {name: set(type_info.fields) for name, type_info in self._schema.types.items()},
         )
         self._ensure_policy_schema()
+        self._schema = replace(
+            self._schema,
+            types=_FrozenDict(
+                {
+                    name: replace(
+                        object_type,
+                        fields=_FrozenDict(object_type.fields),
+                    )
+                    for name, object_type in self._schema.types.items()
+                }
+            ),
+            roots=_FrozenDict(self._schema.roots),
+            mutations=_FrozenDict(self._schema.mutations),
+        )
         self._frozen = True
 
     def _ensure_policy_schema(self) -> Any:
@@ -633,6 +669,8 @@ class GraphQL:
         An endpoint without the constructor's `authorizer=` must opt into an
         intentionally unauthorised surface with `public=True`.
         """
+        if not isinstance(public, bool):
+            raise ValueError("public must be a boolean")
         if self._authorizer is None and not public:
             raise ValueError(
                 "GraphQL.router() needs authorizer= on GraphQL(...) or public=True "

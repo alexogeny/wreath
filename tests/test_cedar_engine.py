@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -39,6 +39,20 @@ def test_cedar_tokenizer_keeps_integer_and_underscored_identifier_boundaries() -
         ("ident", "snake9"),
         ("eof", ""),
     ]
+
+
+def test_relation_parser_requires_the_in_keyword_token() -> None:
+    parser = cedar_engine._Parser(
+        [
+            cedar_engine._Token("keyword", "true", 1, 1),
+            cedar_engine._Token("ident", "in", 1, 6),
+            cedar_engine._Token("keyword", "true", 1, 9),
+            cedar_engine._Token("eof", "", 1, 13),
+        ]
+    )
+
+    assert parser._expression() == (cedar_engine._OP_CONST, True)
+    assert parser._peek().kind == "ident"
 
 
 def _request_for(identity: Identity | None) -> Request:
@@ -106,6 +120,14 @@ def test_parser_refusal_names_the_actual_token_value() -> None:
 )
 def test_malformed_string_escapes_are_refused(source: str) -> None:
     with pytest.raises(CedarParseError, match="string|escape"):
+        CedarPolicies(source)
+
+
+@pytest.mark.parametrize("escape", [r"\u{}", r"\u{110000}", r"\u{d800}", r"\u{zz}"])
+def test_invalid_unicode_scalar_escapes_are_cedar_parse_errors(escape: str) -> None:
+    source = f'permit(principal, action, resource) when {{ "{escape}" == "x" }};'
+
+    with pytest.raises(CedarParseError, match="Unicode escape"):
         CedarPolicies(source)
 
 
@@ -203,6 +225,29 @@ def test_extension_refusal_requires_both_a_known_name_and_a_call(
 def test_empty_policy_source_has_a_specific_refusal() -> None:
     with pytest.raises(CedarParseError, match="non-empty Cedar text"):
         CedarPolicies("   \n")
+
+
+def test_policy_source_refuses_excessive_nesting_as_a_parse_error() -> None:
+    source = (
+        "permit(principal, action, resource) when {"
+        + "(" * 200
+        + "true"
+        + ")" * 200
+        + "};"
+    )
+
+    with pytest.raises(CedarParseError, match="nesting"):
+        CedarPolicies(source)
+
+
+def test_policy_source_has_a_startup_size_ceiling() -> None:
+    with pytest.raises(CedarParseError, match="1048576 character limit"):
+        CedarPolicies(" " * 1_048_577)
+
+
+def test_policy_source_requires_text() -> None:
+    with pytest.raises(CedarParseError, match="non-empty Cedar text"):
+        CedarPolicies(cast(str, None))
 
 
 def test_route_fast_path_is_compiled_only_for_native_data_mappers() -> None:
@@ -327,6 +372,15 @@ def test_entity_uid_parses_cedar_and_bare_forms() -> None:
         EntityUid.parse("no-separator")
 
 
+@pytest.mark.parametrize(
+    "reference",
+    ['User::"alice"trailing', "Bad Type::alice", "User::alice smith", "User::alice\0"],
+)
+def test_entity_uid_bare_form_does_not_accept_malformed_cedar(reference: str) -> None:
+    with pytest.raises(CedarParseError, match='expected Type::"id"'):
+        EntityUid.parse(reference)
+
+
 _SCHEMA = """
 type RequestContext = { "seat": { "status": String } };
 entity User;
@@ -373,6 +427,24 @@ def test_schema_action_entities_cannot_be_overridden() -> None:
             'permit(principal, action == Action::"read", resource);',
             schema=_SCHEMA,
             entities=(CedarEntity(EntityUid("Action", "read")),),
+        )
+
+
+def test_schema_action_entities_cannot_be_overridden_per_request() -> None:
+    schema = _SCHEMA + '\naction "administrator";'
+    engine = CedarPolicies(
+        'permit(principal, action in Action::"administrator", resource);',
+        schema=schema,
+    )
+
+    with pytest.raises(ValueError, match="schema-declared action entities cannot be overridden"):
+        engine.is_authorized(
+            principal=ALICE,
+            action=READ,
+            resource=DOC,
+            entities=(
+                CedarEntity(READ, parents=(EntityUid("Action", "administrator"),)),
+            ),
         )
 
 
@@ -623,6 +695,119 @@ async def test_authorizer_batch_applies_delegation_scope_per_resource() -> None:
     assert len(decisions) == 1
     assert decisions[0].allowed is False
     assert decisions[0].reason == "delegation scope does not cover this action"
+
+
+@pytest.mark.asyncio
+async def test_opaque_engine_must_evaluate_the_delegate_specific_context() -> None:
+    class Engine:
+        def __init__(self) -> None:
+            self.delegated: list[bool] = []
+
+        def is_authorized(self, **arguments: object) -> bool:
+            context = cast(dict[str, object], arguments["context"])
+            delegated = context["delegated"]
+            assert isinstance(delegated, bool)
+            self.delegated.append(delegated)
+            return not delegated
+
+    engine = Engine()
+    identity = Identity(
+        "alice",
+        narrowing=Narrowing(actor="agent", scope=frozenset({"read"})),
+    )
+
+    decision = await CedarAuthorizer(engine=engine).authorize(
+        _request_for(identity), PolicyRequirement("read", DOC)
+    )
+
+    assert not decision.allowed
+    assert engine.delegated == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_engine_that_proves_delegation_unread_keeps_one_evaluation() -> None:
+    class Engine:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def reads_context(self, name: str) -> bool:
+            return False
+
+        def is_authorized(self, **arguments: object) -> bool:
+            self.calls += 1
+            return True
+
+    engine = Engine()
+    identity = Identity(
+        "alice",
+        narrowing=Narrowing(actor="agent", scope=frozenset({"read"})),
+    )
+
+    decision = await CedarAuthorizer(engine=engine).authorize(
+        _request_for(identity), PolicyRequirement("read", DOC)
+    )
+
+    assert decision.allowed
+    assert engine.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("visible", ["delegated", "actor", "delegation_depth"])
+async def test_each_declared_delegation_field_requires_the_conjunct(visible: str) -> None:
+    class Engine:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def reads_context(self, name: str) -> bool:
+            return name == visible
+
+        def is_authorized(self, **arguments: object) -> bool:
+            self.calls += 1
+            return True
+
+    engine = Engine()
+    identity = Identity(
+        "alice",
+        narrowing=Narrowing(actor="agent", scope=frozenset({"read"})),
+    )
+
+    decision = await CedarAuthorizer(engine=engine).authorize(
+        _request_for(identity), PolicyRequirement("read", DOC)
+    )
+
+    assert decision.allowed
+    assert engine.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_mutable_quota_provider_cannot_change_one_requests_cached_fact() -> None:
+    class Quota:
+        def __init__(self) -> None:
+            self.states: set[str] = set()
+
+        def names(self) -> frozenset[str]:
+            return frozenset({"read_only"})
+
+        def for_identity(self, identity: Identity) -> set[str]:
+            return self.states
+
+    quota = Quota()
+    authorizer = CedarAuthorizer(
+        engine=CedarPolicies(
+            "permit(principal, action, resource);"
+            'forbid(principal, action, resource) when { context.quota.contains("read_only") };'
+        ),
+        quota=quota,
+    )
+    request = _request_for(Identity("alice"))
+    requirement = PolicyRequirement("read", DOC)
+
+    first = await authorizer.authorize(request, requirement)
+    quota.states.add("read_only")
+    second = await authorizer.authorize(request, requirement)
+
+    assert first.allowed
+    assert second.allowed
 
 
 @pytest.mark.asyncio
@@ -1455,6 +1640,87 @@ async def test_a_route_resource_can_carry_attributes_and_hierarchy() -> None:
         return "allowed"
 
     assert (await invoke(app, "account"))[0]["status"] == 200
+
+
+@pytest.mark.asyncio
+async def test_a_resource_entity_cannot_redefine_the_authenticated_principal() -> None:
+    authorizer = CedarAuthorizer(
+        engine=CedarPolicies(
+            'permit(principal, action, resource) when { principal.admin == true };'
+        )
+    )
+    request = _request_for(Identity("alice", attributes={"admin": False}))
+    resource = CedarEntity(ALICE, attrs={"admin": True})
+
+    with pytest.raises(ValueError, match="cannot redefine authenticated principal"):
+        await authorizer.authorize(request, PolicyRequirement("read", resource))
+
+
+@pytest.mark.asyncio
+async def test_a_resource_entity_cannot_redefine_the_authorized_action() -> None:
+    administrator = EntityUid("Action", "administrator")
+    authorizer = CedarAuthorizer(
+        engine=CedarPolicies(
+            'permit(principal, action in Action::"administrator", resource);',
+            entities=(CedarEntity(READ), CedarEntity(administrator)),
+        )
+    )
+    resource = CedarEntity(READ, parents=(administrator,))
+
+    with pytest.raises(ValueError, match="cannot redefine authorized action"):
+        await authorizer.authorize(
+            _request_for(Identity("alice")), PolicyRequirement("read", resource)
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protected_uid", [ALICE, READ])
+async def test_resource_batch_cannot_redefine_query_entities(
+    protected_uid: EntityUid,
+) -> None:
+    authorizer = CedarAuthorizer(engine=CedarPolicies("permit(principal, action, resource);"))
+
+    with pytest.raises(ValueError, match="cannot redefine"):
+        await authorizer._authorize_resources(
+            _request_for(Identity("alice")),
+            "read",
+            (CedarEntity(protected_uid),),
+            stop_on_denied=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_resource_entity_expansion_cannot_redefine_the_authenticated_principal() -> None:
+    authorizer = CedarAuthorizer(
+        engine=CedarPolicies(
+            'permit(principal, action, resource) when { principal.admin == true };'
+        ),
+        resource_entities=lambda resource, request: CedarEntity(
+            ALICE, attrs={"admin": True}
+        ),
+    )
+    request = _request_for(Identity("alice", attributes={"admin": False}))
+
+    with pytest.raises(ValueError, match="cannot redefine authenticated principal"):
+        await authorizer.authorize(request, PolicyRequirement("read", DOC))
+
+
+@pytest.mark.asyncio
+async def test_identity_nested_attributes_are_snapshotted_before_cedar_authorization() -> None:
+    attributes = {"profile": {"admin": False}}
+    identity = Identity("alice", attributes=attributes)
+    attributes["profile"]["admin"] = True
+    authorizer = CedarAuthorizer(
+        engine=CedarPolicies(
+            'permit(principal, action, resource) when { principal.profile.admin == true };'
+        )
+    )
+
+    decision = await authorizer.authorize(
+        _request_for(identity), PolicyRequirement("read", DOC)
+    )
+
+    assert not decision.allowed
 
 
 @pytest.mark.asyncio

@@ -4,9 +4,11 @@ import json
 import math
 from dataclasses import fields
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
+from wreath import _jobcore
 from wreath import messaging as messaging_module
 from wreath._jobcore import PayloadTooLarge
 from wreath._replay_adapters import DatabaseDouble
@@ -59,6 +61,36 @@ async def test_an_envelope_is_opt_in_and_plain_payloads_keep_their_wire_shape():
     delivered = Message(payload=wire, channel="booking_created", group=None, tenant="")
     assert delivered.envelope() == envelope
     assert MessageEnvelope.decode({"id": 1}) is None
+
+
+def test_a_boolean_marker_does_not_turn_a_plain_payload_into_an_envelope():
+    value = {
+        "__wreath_message__": True,
+        "kind": "booking.created",
+        "version": 1,
+        "id": "event-1",
+        "correlation_id": None,
+        "causation_id": None,
+        "trace_context": None,
+        "payload": {"role": "admin"},
+    }
+
+    assert MessageEnvelope.decode(value) is None
+
+
+@pytest.mark.parametrize("identifier", [None, False, 0, []])
+def test_an_envelope_refuses_a_falsy_non_string_identifier(identifier: object):
+    with pytest.raises(ValueError, match="id must be a non-empty string"):
+        MessageEnvelope("booking.created", {}, id=cast(Any, identifier))
+
+
+def test_an_envelope_does_not_let_a_non_string_impersonate_the_empty_default():
+    class PretendsEmpty:
+        def __eq__(self, other: object) -> bool:
+            return other == ""
+
+    with pytest.raises(ValueError, match="id must be a non-empty string"):
+        MessageEnvelope("booking.created", {}, id=cast(Any, PretendsEmpty()))
 
 
 def test_an_envelope_serializes_once_without_changing_its_dataclass_shape(
@@ -124,6 +156,24 @@ async def test_publish_ephemeral_oversized_rejected():
         await bus.publish("booking_created", {"blob": "x" * 8000})
 
 
+async def test_publish_durable_refuses_a_payload_above_the_queue_bound():
+    db = DatabaseDouble()
+    bus = _bus(db)
+
+    @bus.subscribe("booking_created", group="billing", durable=True)
+    async def handler(message):
+        pass
+
+    with pytest.raises(PayloadTooLarge, match="durable payload"):
+        await bus.publish(
+            "booking_created",
+            "x" * (_jobcore.MAX_DURABLE_PAYLOAD + 1),
+            durable=True,
+        )
+
+    assert db.calls == []
+
+
 def test_durable_subscription_requires_group():
     bus = _bus(DatabaseDouble())
     with pytest.raises(ValueError):
@@ -138,6 +188,53 @@ def test_subscription_refuses_a_negative_retry_budget() -> None:
 
     with pytest.raises(ValueError, match="retries must be non-negative"):
         bus.subscribe("booking_created", retries=-1)
+
+
+@pytest.mark.parametrize("retries", [True, 1.5, 2**31])
+def test_subscription_retry_budget_must_fit_a_postgres_integer(retries: object) -> None:
+    bus = _bus(DatabaseDouble())
+    with pytest.raises(ValueError, match="retries must be a non-negative integer"):
+        bus.subscribe("booking_created", retries=retries)
+
+
+@pytest.mark.parametrize("concurrency", [True, 1.5])
+def test_subscription_concurrency_must_be_an_integer(concurrency: object) -> None:
+    bus = _bus(DatabaseDouble())
+    with pytest.raises(ValueError, match="concurrency must be a positive integer"):
+        bus.subscribe("booking_created", concurrency=concurrency)
+
+
+@pytest.mark.parametrize("option", ["durable", "require_group"])
+async def test_publish_refuses_a_truthy_non_boolean_delivery_flag(option: str) -> None:
+    db = DatabaseDouble()
+    bus = _bus(db)
+
+    with pytest.raises(ValueError, match=f"{option} must be a boolean"):
+        await bus.publish("booking_created", {}, **{option: "false"})
+
+    assert db.calls == []
+
+
+@pytest.mark.parametrize("option", ["durable"])
+def test_subscribe_refuses_a_truthy_non_boolean_delivery_flag(option: str) -> None:
+    bus = _bus(DatabaseDouble())
+    with pytest.raises(ValueError, match=f"{option} must be a boolean"):
+        bus.subscribe("booking_created", group="billing", **{option: "false"})
+
+
+@pytest.mark.parametrize("method", ["purge", "prune_groups"])
+@pytest.mark.parametrize("seconds", [float("nan"), float("inf"), True])
+async def test_retention_refuses_an_invalid_age_before_database_io(
+    method: str, seconds: object
+) -> None:
+    db = DatabaseDouble()
+    bus = _bus(db)
+
+    with pytest.raises(ValueError, match="finite"):
+        argument = {"older_than": seconds} if method == "purge" else {"unseen_for": seconds}
+        await getattr(bus, method)(**argument)
+
+    assert db.calls == []
 
 
 async def test_publish_durable_fans_out_per_group():
@@ -165,6 +262,11 @@ def test_schema_sql_has_messages_table():
     assert "CREATE TABLE IF NOT EXISTS" in sql and ".messages" in sql
     assert "messages_claim_idx" in sql
     assert "messages_dedup_idx" in sql
+
+
+def test_bus_refuses_a_schema_that_is_not_a_sql_safe_identifier():
+    with pytest.raises(ValueError, match="schema"):
+        MessageBus(DatabaseDouble(), name="events", schema='wreath"; DROP TABLE users; --')
 
 
 async def test_a_failing_reclaim_is_counted_rather_than_swallowed():

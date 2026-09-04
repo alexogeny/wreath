@@ -94,6 +94,124 @@ async def test_issue_refuses_invalid_identity_ttl_and_duplicate_id() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "approval_store",
+    [
+        lambda: InMemoryApprovalStore(max_entries=8, clock=lambda: 100.0),
+        lambda: PostgresApprovalStore(
+            lambda: _PostgresSession(),
+            clock=lambda: 100.0,
+        ),
+    ],
+)
+async def test_issue_refuses_unbounded_retained_fields_and_non_boolean_auth_policy(
+    approval_store: Any,
+) -> None:
+    for field in ("approval_id", "tenant", "principal_id", "action", "resource"):
+        values: dict[str, Any] = {
+            "approval_id": "approval-1",
+            "tenant": "tenant-a",
+            "principal_id": "user-7",
+            "action": "release",
+            "resource": "version:3",
+        }
+        values[field] = "x" * 20_000
+        with pytest.raises(ValueError, match=field):
+            await approval_store().issue(**values, ttl=30.0)
+
+    for field in ("approval_id", "tenant", "principal_id", "action", "resource"):
+        values = {
+            "approval_id": "approval-1",
+            "tenant": "tenant-a",
+            "principal_id": "user-7",
+            "action": "release",
+            "resource": "version:3",
+        }
+        values[field] = cast(Any, 1)
+        with pytest.raises(ValueError, match=field):
+            await approval_store().issue(**values, ttl=30.0)
+
+    for field, value, message in (
+        ("action", "é" * 300, "at most 512 UTF-8 bytes"),
+        ("tenant", "tenant\0alias", "must not contain NUL"),
+        ("principal_id", "user-\ud800", "must be valid UTF-8 text"),
+    ):
+        values = {
+            "approval_id": "approval-1",
+            "tenant": "tenant-a",
+            "principal_id": "user-7",
+            "action": "release",
+        }
+        values[field] = value
+        with pytest.raises(ValueError, match=message):
+            await approval_store().issue(**values, ttl=30.0)
+
+    with pytest.raises(TypeError, match="require_fresh_auth must be a boolean"):
+        await approval_store().issue(
+            approval_id="approval-1",
+            tenant="tenant-a",
+            principal_id="user-7",
+            action="release",
+            ttl=30.0,
+            require_fresh_auth=cast(Any, 0),
+        )
+
+
+@pytest.mark.asyncio
+async def test_postgres_decisions_refuse_unbounded_lookup_fields_before_sql() -> None:
+    session = _PostgresSession()
+    approvals = _postgres_store(session)
+
+    for operation in (approvals.claim, approvals.deny):
+        with pytest.raises(ValueError, match="approval_id"):
+            await operation(
+                "x" * 20_000,
+                tenant="tenant-a",
+                principal_id="user-7",
+            )
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_in_memory_decisions_refuse_unbounded_lookup_fields() -> None:
+    approvals = store([100.0])
+
+    for operation in (approvals.claim, approvals.deny):
+        with pytest.raises(ValueError, match="approval_id"):
+            await operation(
+                "x" * 20_000,
+                tenant="tenant-a",
+                principal_id="user-7",
+            )
+
+
+@pytest.mark.asyncio
+async def test_generic_store_preserves_empty_optional_resource_and_names_its_type() -> None:
+    approvals = store([100.0])
+
+    request = await approvals.issue(
+        approval_id="empty-resource",
+        tenant="tenant-a",
+        principal_id="user-7",
+        action="release",
+        resource="",
+        ttl=30.0,
+    )
+    assert request.resource == ""
+
+    with pytest.raises(ValueError) as caught:
+        await approvals.issue(
+            approval_id="wrong-resource",
+            tenant="tenant-a",
+            principal_id="user-7",
+            action="release",
+            resource=cast(Any, 1),
+            ttl=30.0,
+        )
+    assert str(caught.value) == "approval resource must be a string or None"
+
+
+@pytest.mark.asyncio
 async def test_approval_is_expiring_single_use_and_bound_to_tenant_and_principal() -> None:
     clock = [100.0]
     approvals = store(clock)
@@ -264,6 +382,28 @@ async def test_approval_time_facts_must_be_finite(value: float) -> None:
 
 
 @pytest.mark.asyncio
+async def test_approval_expiry_must_remain_finite_after_ttl_arithmetic() -> None:
+    def clock() -> float:
+        return 1e308
+
+    stores = (
+        InMemoryApprovalStore(max_entries=8, clock=clock),
+        PostgresApprovalStore(lambda: _PostgresSession(), clock=clock),
+    )
+
+    for approvals in stores:
+        with pytest.raises(ValueError, match="approval expiry must be a finite number"):
+            await approvals.issue(
+                approval_id="immortal",
+                tenant="tenant-a",
+                principal_id="user-7",
+                action="release",
+                ttl=1e308,
+                issued_at=1e308,
+            )
+
+
+@pytest.mark.asyncio
 async def test_explicit_issue_time_is_not_replaced_by_store_clock() -> None:
     approvals = store([110.0])
 
@@ -325,6 +465,23 @@ async def test_claim_refuses_if_approval_expires_during_atomic_transition() -> N
 
 
 @pytest.mark.asyncio
+async def test_claim_does_not_read_a_fallible_clock_after_consuming_the_approval() -> None:
+    readings = iter((100.0, 100.0, 101.0, 101.0, float("nan")))
+    approvals = InMemoryApprovalStore(max_entries=8, clock=lambda: next(readings))
+    await approvals.issue(
+        approval_id="edge",
+        tenant="tenant-a",
+        principal_id="user-7",
+        action="release",
+        ttl=10.0,
+    )
+
+    grant = await approvals.claim("edge", tenant="tenant-a", principal_id="user-7")
+
+    assert grant.approved_at == 101.0
+
+
+@pytest.mark.asyncio
 async def test_deny_refuses_if_approval_expires_during_atomic_transition() -> None:
     readings = iter((0.0, 0.0, 9.0, 11.0))
     approvals = InMemoryApprovalStore(max_entries=8, clock=lambda: next(readings))
@@ -367,6 +524,9 @@ class _PostgresResult:
         self._session = session
 
     async def fetchrow(self) -> object:
+        return self._session.rows.pop(0)
+
+    async def fetchval(self) -> object:
         return self._session.rows.pop(0)
 
 
@@ -426,6 +586,7 @@ def test_postgres_approval_store_declares_qualified_additive_schema() -> None:
     assert 'CREATE TABLE IF NOT EXISTS "private"."agent_approvals"' in sql
     assert "PRIMARY KEY (approval_id)" in sql
     assert "(tenant, approval_id)" in sql
+    assert "(expires_at,tenant,approval_id)" in sql
     assert "CHECK (state IN ('pending','denied','used'))" in sql
 
 
@@ -558,6 +719,30 @@ async def test_postgres_claim_is_one_bound_conditional_transition() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"expires_at": float("inf")},
+        {"issued_at": float("nan")},
+        {"require_fresh_auth": "false"},
+        {"principal_id": None},
+        {"state": "approved"},
+    ],
+)
+async def test_postgres_claim_refuses_malformed_returning_authority(
+    changes: dict[str, object],
+) -> None:
+    session = _PostgresSession(_approval_row(**changes))
+
+    with pytest.raises((TypeError, ValueError)):
+        await _postgres_store(session).claim(
+            "approval-1",
+            tenant="tenant-a",
+            principal_id="user-7",
+        )
+
+
+@pytest.mark.asyncio
 async def test_postgres_claim_reports_the_stored_refusal_after_losing_the_transition() -> None:
     session = _PostgresSession(None, _approval_row(state="used"))
     approvals = _postgres_store(session)
@@ -665,6 +850,34 @@ async def test_postgres_deny_is_one_bound_conditional_transition() -> None:
     assert "state='pending'" in sql
     assert "expires_at > $4::float8" in sql
     assert parameters == ("approval-1", "tenant-a", "user-7", 100.0)
+
+
+@pytest.mark.asyncio
+async def test_postgres_purge_deletes_one_indexed_bounded_expiry_chunk() -> None:
+    session = _PostgresSession(3)
+    approvals = _postgres_store(session)
+
+    assert await approvals.purge(limit=17) == 3
+
+    assert len(session.calls) == 1
+    sql, parameters = session.calls[0]
+    assert "ORDER BY expires_at,tenant,approval_id" in sql
+    assert "FOR UPDATE SKIP LOCKED LIMIT $2" in sql
+    assert "DELETE FROM" in sql
+    assert parameters == (100.0, 17)
+
+    empty = _postgres_store(_PostgresSession(None))
+    assert await empty.purge() == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [0, -1, True, 10_001])
+async def test_postgres_purge_refuses_unbounded_limits_before_sql(limit: int) -> None:
+    session = _PostgresSession()
+
+    with pytest.raises(ValueError, match="positive integer no greater than 10000"):
+        await _postgres_store(session).purge(limit=limit)
+    assert session.calls == []
 
 
 @pytest.mark.asyncio

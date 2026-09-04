@@ -60,18 +60,56 @@ signature_skip_ws(SignatureParser *parser)
 static int
 signature_token_char(unsigned char value)
 {
-    return isalnum(value) || strchr("_-.:%*/@", value) != NULL;
+    return (value >= 'A' && value <= 'Z') ||
+           (value >= 'a' && value <= 'z') ||
+           (value >= '0' && value <= '9') ||
+           strchr("!#$%&'*+-.^_`|~:/", value) != NULL;
+}
+
+static int
+signature_key_char(unsigned char value)
+{
+    return (value >= 'a' && value <= 'z') ||
+           (value >= '0' && value <= '9') || strchr("_-.*", value) != NULL;
+}
+
+static PyObject *
+signature_parse_key(SignatureParser *parser, const char *terminators,
+                    const char *message)
+{
+    Py_ssize_t start = parser->index;
+    unsigned char first;
+    if (parser->index >= parser->length)
+        return signature_error(parser, message);
+    first = (unsigned char)parser->text[parser->index];
+    if (!((first >= 'a' && first <= 'z') || first == '*'))
+        return signature_error(parser, message);
+    parser->index++;
+    while (parser->index < parser->length &&
+           signature_key_char((unsigned char)parser->text[parser->index]))
+        parser->index++;
+    if (parser->index < parser->length &&
+        strchr(terminators, parser->text[parser->index]) == NULL)
+        return signature_error(parser, message);
+    return PyUnicode_DecodeASCII(parser->text + start,
+                                 parser->index - start, "strict");
 }
 
 static PyObject *
 signature_parse_token(SignatureParser *parser)
 {
     Py_ssize_t start = parser->index;
+    unsigned char first;
+    if (parser->index >= parser->length)
+        return signature_error(parser, "structured field: expected a token");
+    first = (unsigned char)parser->text[parser->index];
+    if (!((first >= 'A' && first <= 'Z') ||
+          (first >= 'a' && first <= 'z') || first == '*'))
+        return signature_error(parser, "structured field: expected a token");
+    parser->index++;
     while (parser->index < parser->length &&
            signature_token_char((unsigned char)parser->text[parser->index]))
         parser->index++;
-    if (parser->index == start)
-        return signature_error(parser, "structured field: expected a token");
     return PyUnicode_DecodeUTF8(parser->text + start, parser->index - start, "strict");
 }
 
@@ -131,8 +169,10 @@ signature_decode_base64(SignatureParser *parser, const char *input, Py_ssize_t l
     Py_ssize_t padding = 0, output_length, written = 0;
     PyObject *result;
     unsigned char *output;
-    if (length == 0 || (length & 3) != 0)
+    if ((length & 3) != 0)
         return signature_error(parser, "structured field: bad base64");
+    if (length == 0)
+        return PyBytes_FromStringAndSize(NULL, 0);
     if (input[length - 1] == '=') padding++;
     if (input[length - 2] == '=') padding++;
     output_length = length / 4 * 3 - padding;
@@ -196,15 +236,33 @@ signature_parse_item(SignatureParser *parser)
         return PyBool_FromLong(current == '1');
     }
     if (current == '-' || isdigit(current)) {
-        Py_ssize_t start = parser->index++;
+        Py_ssize_t start = parser->index;
+        Py_ssize_t integer_start, integer_digits, fraction_start, fraction_digits = 0;
         int decimal = 0;
         PyObject *raw, *value;
-        while (parser->index < parser->length) {
-            current = (unsigned char)parser->text[parser->index];
-            if (isdigit(current)) parser->index++;
-            else if (current == '.') { decimal = 1; parser->index++; }
-            else break;
+        if (current == '-') parser->index++;
+        integer_start = parser->index;
+        while (parser->index < parser->length &&
+               isdigit((unsigned char)parser->text[parser->index]))
+            parser->index++;
+        integer_digits = parser->index - integer_start;
+        if (integer_digits == 0)
+            return signature_error(parser, "structured field: bad number");
+        if (parser->index < parser->length && parser->text[parser->index] == '.') {
+            decimal = 1;
+            parser->index++;
+            fraction_start = parser->index;
+            while (parser->index < parser->length &&
+                   isdigit((unsigned char)parser->text[parser->index]))
+                parser->index++;
+            fraction_digits = parser->index - fraction_start;
         }
+        if ((!decimal && integer_digits > 15) ||
+            (decimal && (integer_digits > 12 || fraction_digits < 1 ||
+                         fraction_digits > 3)) ||
+            (parser->index < parser->length &&
+             strchr(";,\t )", parser->text[parser->index]) == NULL))
+            return signature_error(parser, "structured field: bad number");
         raw = PyUnicode_DecodeASCII(parser->text + start,
                                     parser->index - start, "strict");
         if (raw == NULL) return NULL;
@@ -229,7 +287,8 @@ signature_parse_params(SignatureParser *parser)
         PyObject *key, *value;
         parser->index++;
         signature_skip_ws(parser);
-        key = signature_parse_token(parser);
+        key = signature_parse_key(parser, "=;,\t )",
+                                  "structured field: bad parameter key");
         if (key == NULL) { Py_DECREF(params); return NULL; }
         if (parser->index < parser->length && parser->text[parser->index] == '=') {
             parser->index++;
@@ -288,6 +347,7 @@ wreath_signature_parse_dictionary(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject *text_object, *error_type, *output;
     int inner_list;
     Py_ssize_t max_header, max_components;
+    Py_ssize_t member_count = 0;
     SignatureParser parser;
     if (!PyArg_ParseTuple(args, "OpOnn:signature_parse_dictionary", &text_object,
                           &inner_list, &error_type, &max_header, &max_components))
@@ -303,8 +363,16 @@ wreath_signature_parse_dictionary(PyObject *Py_UNUSED(self), PyObject *args)
     if (output == NULL) return NULL;
     signature_skip_ws(&parser);
     while (parser.index < parser.length) {
-        PyObject *key = signature_parse_token(&parser);
+        PyObject *key;
         PyObject *value = NULL, *params = NULL, *entry = NULL;
+        if (member_count >= max_components) {
+            Py_DECREF(output);
+            return signature_error(&parser,
+                                   "structured field: too many members");
+        }
+        member_count++;
+        key = signature_parse_key(&parser, "=;,\t ",
+                                  "structured field: bad dictionary key");
         if (key == NULL) goto error;
         if (parser.index < parser.length && parser.text[parser.index] == '=') {
             parser.index++;
@@ -784,7 +852,8 @@ signature_parse_input_entries(SignatureParser *parser,
     while (parser->index < parser->length) {
         SignaturePlanComponent *components = NULL;
         Py_ssize_t component_count = 0;
-        PyObject *key = signature_parse_token(parser);
+        PyObject *key = signature_parse_key(
+            parser, "=;,\t ", "structured field: bad dictionary key");
         PyObject *params = NULL;
         int existing;
         if (key == NULL) goto error;
@@ -872,7 +941,8 @@ signature_parse_value_entries(SignatureParser *parser,
     Py_ssize_t count = 0, capacity = 0;
     signature_skip_ws(parser);
     while (parser->index < parser->length) {
-        PyObject *key = signature_parse_token(parser);
+        PyObject *key = signature_parse_key(
+            parser, "=;,\t ", "structured field: bad dictionary key");
         PyObject *value = NULL, *params = NULL;
         int existing;
         if (key == NULL) goto error;

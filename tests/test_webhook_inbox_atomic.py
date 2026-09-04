@@ -106,8 +106,34 @@ async def test_claim_and_enqueue_commits_claim_job_and_completion_in_one_transac
     assert "INSERT INTO wreath_webhook_inbox" in session.events[2][1]
     assert session.events[3] == "enqueue"
     assert "SET state='completed'" in session.events[4][1]
-    assert session.events[4][2] == ("discord", "evt-1", 7, 202)
+    assert session.events[4][2] == ("discord", "evt-1", 7, 202, 30 * 24 * 60 * 60)
     assert session.events[-2:] == [("end", None), ("session-close", None)]
+
+
+async def test_claim_and_enqueue_completes_the_authenticated_deduplication_identity() -> None:
+    session = _Session(rows=[{"fencing_token": 7}], values=[1])
+    envelope = WebhookEnvelope(
+        id="unsigned-provider-id",
+        type="chat.command",
+        version="1",
+        timestamp=datetime(2026, 9, 2, tzinfo=UTC),
+        content_type="application/json",
+        body=b'{"type":2}',
+        deduplication_id="authenticated-body-digest",
+    )
+
+    async def enqueue(*, transaction: Any) -> None:
+        assert transaction is session
+
+    assert await _inbox(session).claim_and_enqueue(
+        source="discord", envelope=envelope, enqueue=enqueue
+    )
+    assert session.events[2][2][1] == "authenticated-body-digest"
+    completion = next(
+        event for event in session.events if isinstance(event, tuple) and len(event) == 3
+        and "SET state='completed'" in event[1]
+    )
+    assert completion[2][1] == "authenticated-body-digest"
 
 
 @pytest.mark.parametrize("state", ["completed", "processing", "failed"])
@@ -237,6 +263,8 @@ async def test_claim_and_enqueue_requires_configured_transaction_ownership() -> 
         pytest.param({"enqueue": object()}, TypeError, "enqueue", id="noncallable-enqueue"),
         pytest.param({"result_status": True}, TypeError, "result_status", id="boolean-status"),
         pytest.param({"result_status": "202"}, TypeError, "result_status", id="noninteger-status"),
+        pytest.param({"result_status": 99}, ValueError, "HTTP status", id="low-status"),
+        pytest.param({"result_status": 600}, ValueError, "HTTP status", id="high-status"),
     ],
 )
 async def test_claim_and_enqueue_validates_its_public_inputs(

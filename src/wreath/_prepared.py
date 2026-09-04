@@ -20,6 +20,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
 from ._conditional import STATUS_WITHOUT_BODY as _STATUS_WITHOUT_BODY
+from ._headers import validate_response_headers as _validate_headers
 
 # The `_json` facade, which also installs the temporal hook.
 from ._json import dumps as _json_dumps
@@ -38,18 +39,19 @@ def _headers_for(
     extra: Iterable[tuple[bytes, bytes]] | None,
 ) -> tuple[tuple[bytes, bytes], ...]:
     headers: list[tuple[bytes, bytes]] = list(extra) if extra is not None else []
-    has_type = has_length = False
-    for key, _ in headers:
-        lowered = key.lower()
-        if lowered == _CONTENT_TYPE:
-            has_type = True
-        elif lowered == _CONTENT_LENGTH:
-            has_length = True
-        if has_type and has_length:
-            break
+    has_type, supplied_length = _validate_headers(headers)
     if media_type and not has_type:
         headers.append((_CONTENT_TYPE, media_type))
-    if status not in _STATUS_WITHOUT_BODY and not has_length:
+    if supplied_length is not None:
+        if 100 <= status < 200 or status == 204:
+            raise ValueError(f"status {status} must not carry content-length")
+        expected_length = str(len(body)).encode("ascii")
+        if status != 304 and supplied_length != expected_length:
+            raise ValueError(
+                f"content-length must be {expected_length.decode('ascii')} "
+                f"for this body, got {supplied_length!r}"
+            )
+    elif status not in _STATUS_WITHOUT_BODY:
         headers.append((_CONTENT_LENGTH, str(len(body)).encode("ascii")))
     return tuple(headers)
 
@@ -78,6 +80,10 @@ class PreparedResponse:
     ) -> None:
         if not isinstance(body, (bytes, bytearray)):
             raise TypeError("PreparedResponse body must be bytes")
+        if type(status) is not int:
+            raise TypeError(f"status must be an int, not {type(status).__name__}")
+        if status < 100 or status > 599:
+            raise ValueError(f"status must be between 100 and 599, got {status}")
         body = bytes(body)
         if status in _STATUS_WITHOUT_BODY:
             body = b""

@@ -6,7 +6,7 @@ import struct
 import warnings
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from cryptography.hazmat.primitives import hashes
@@ -1876,6 +1876,42 @@ def test_a_ceremony_with_no_usable_origin_is_refused() -> None:
     with pytest.raises(ValueError, match="non-empty origin"):
         _webauthn_origins((ORIGIN, ""))
     assert _webauthn_origins((ORIGIN,)) == (ORIGIN,)
+
+
+@pytest.mark.parametrize(
+    "origins",
+    [
+        ("null",),
+        ("http://example.test",),
+        ("https://user@example.test",),
+        ("https://example.test/path",),
+        ("https://example.test:0",),
+        (" https://example.test",),
+        ("ftp://example.test",),
+        ("ftp://localhost",),
+        ("https://example..test",),
+        ("https://-example.test",),
+        ("https://example-.test",),
+        ("https://exa_mple.test",),
+        (f"https://{'a' * 64}.test",),
+        (f"https://{'.'.join(['a' * 63] * 4)}",),
+        (7,),
+    ],
+)
+def test_a_ceremony_refuses_malformed_or_insecure_allowed_origins(origins: object) -> None:
+    from wreath._secondfactor import _webauthn_origins
+
+    with pytest.raises(ValueError, match="valid HTTPS origin or loopback HTTP origin"):
+        _webauthn_origins(cast(Any, origins))
+
+
+def test_a_ceremony_accepts_https_and_loopback_http_origins() -> None:
+    from wreath._secondfactor import _webauthn_origins
+
+    assert _webauthn_origins(("https://api-example.test:8443", "http://localhost:8000")) == (
+        "https://api-example.test:8443",
+        "http://localhost:8000",
+    )
 
 
 def test_a_ceremony_with_no_rp_id_is_refused() -> None:

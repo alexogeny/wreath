@@ -132,6 +132,25 @@ async def test_ambiguous_forwarded_fields_leave_original_request_values(
     }
 
 
+def test_comma_separated_forwarded_proto_cannot_select_its_first_value() -> None:
+    policy = ProxyPolicy(trusted=["10.0.0.0/8"])
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/",
+            "headers": [(b"x-forwarded-proto", b"https,http")],
+            "client": ("10.0.0.5", 5000),
+        },
+        None,
+    )
+
+    policy._ingress_sync(request)
+
+    assert request.scheme == "http"
+
+
 @pytest.mark.asyncio
 async def test_native_context_proxy_updates_do_not_materialize_scope() -> None:
     class NativeLikeContext:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal
@@ -60,7 +60,7 @@ class CheckoutRequest:
 class CheckoutSession:
     provider: str
     id: str
-    url: str
+    url: str = field(repr=False)
     expires_at: datetime | None = None
 
 
@@ -85,7 +85,7 @@ class PortalRequest:
 class PortalSession:
     provider: str
     id: str
-    url: str
+    url: str = field(repr=False)
 
 
 class RefundState(StrEnum):
@@ -114,14 +114,14 @@ class PaymentSnapshot:
     merchant_account: str | None = None
 
     def __post_init__(self) -> None:
-        for field, value in (
+        for name, value in (
             ("provider", self.provider),
             ("payment id", self.id),
             ("subject", self.subject),
             ("reference", self.reference),
         ):
             if not isinstance(value, str) or not value:
-                raise ValueError(f"payment {field} must be a non-empty string")
+                raise ValueError(f"payment {name} must be a non-empty string")
         if not isinstance(self.amount, Money):
             raise TypeError("payment amount must be Money")
         if not isinstance(self.state, PaymentState):

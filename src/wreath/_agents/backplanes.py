@@ -25,6 +25,7 @@ __all__ = [
 
 _RETRYABLE_STATUS = frozenset({408, 409, 425, 429})
 _DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+_HEADER_TOKEN = frozenset("!#$%&'*+-.^_`|~")
 
 
 class _Backplane:
@@ -109,10 +110,21 @@ class _Backplane:
         if not isinstance(result, tuple) or len(result) != 3:
             raise BackplaneError(f"{self.name} transport must return (status, headers, body)")
         status, raw_headers, response_body = result
-        if not isinstance(status, int) or not isinstance(raw_headers, Mapping):
+        if (
+            type(status) is not int
+            or not 100 <= status <= 599
+            or not isinstance(raw_headers, Mapping)
+        ):
+            if not isinstance(response_body, bytes):
+                await _close_body(response_body)
             raise BackplaneError(f"{self.name} transport returned an invalid response")
-        normalized = {str(key).lower(): str(value) for key, value in raw_headers.items()}
-        if status >= 400:
+        try:
+            normalized = _response_headers(raw_headers, provider=self.name)
+        except BackplaneError:
+            if not isinstance(response_body, bytes):
+                await _close_body(response_body)
+            raise
+        if not 200 <= status < 300:
             encoded = await _read_body(
                 response_body,
                 maximum=self.max_response_bytes,
@@ -144,6 +156,7 @@ class OpenAIResponsesBackplane(_Backplane):
     ) -> None:
         if not api_key:
             raise ValueError("OpenAI api_key must be non-empty")
+        api_key = _header_value(api_key, label="OpenAI api_key")
         super().__init__(
             base_url=base_url,
             transport=transport,
@@ -208,6 +221,8 @@ class AnthropicMessagesBackplane(_Backplane):
             raise ValueError("Anthropic api_key must be non-empty")
         if not api_version:
             raise ValueError("Anthropic api_version must be non-empty")
+        api_key = _header_value(api_key, label="Anthropic api_key")
+        api_version = _header_value(api_version, label="Anthropic api_version")
         if default_max_output_tokens <= 0:
             raise ValueError("Anthropic default_max_output_tokens must be positive")
         super().__init__(
@@ -278,6 +293,7 @@ class GeminiGenerateContentBackplane(_Backplane):
     ) -> None:
         if not api_key:
             raise ValueError("Gemini api_key must be non-empty")
+        api_key = _header_value(api_key, label="Gemini api_key")
         super().__init__(
             base_url=base_url,
             transport=transport,
@@ -359,6 +375,8 @@ class OpenAICompatibleBackplane(_Backplane):
     ) -> None:
         if api_key is not None and not api_key:
             raise ValueError("OpenAI-compatible api_key must be non-empty when configured")
+        if api_key is not None:
+            api_key = _header_value(api_key, label="OpenAI-compatible api_key")
         super().__init__(
             base_url=base_url,
             transport=transport,
@@ -404,13 +422,22 @@ class OpenAICompatibleBackplane(_Backplane):
 
 
 def _base_url(value: str, *, https_only: bool) -> str:
-    parsed = urlsplit(value)
     schemes = {"https"} if https_only else {"http", "https"}
     expected = "absolute https" if https_only else "absolute http or https"
+    message = (
+        f"model backplane base_url must be an {expected} URL without credentials, "
+        "controls, a query, or a fragment"
+    )
+    if not isinstance(value, str) or any(
+        ord(character) <= 0x20 or 0x7F <= ord(character) <= 0x9F
+        for character in value
+    ):
+        raise ValueError(message)
+    parsed = urlsplit(value)
     try:
         port = parsed.port
     except ValueError as error:
-        raise ValueError(f"model backplane base_url must be an {expected} URL") from error
+        raise ValueError(message) from error
     if (
         parsed.scheme not in schemes
         or not parsed.hostname
@@ -420,8 +447,46 @@ def _base_url(value: str, *, https_only: bool) -> str:
         or parsed.query
         or parsed.fragment
     ):
-        raise ValueError(f"model backplane base_url must be an {expected} URL")
+        raise ValueError(message)
     return value.rstrip("/")
+
+
+def _header_value(value: str, *, label: str) -> str:
+    if not isinstance(value, str) or any(
+        ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F
+        for character in value
+    ):
+        raise ValueError(f"{label} must be text without HTTP header control characters")
+    return value
+
+
+def _response_headers(
+    headers: Mapping[str, str], *, provider: str
+) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for name, value in headers.items():
+        if (
+            not isinstance(name, str)
+            or not name
+            or any(
+                not (
+                    character.isascii()
+                    and (character.isalnum() or character in _HEADER_TOKEN)
+                )
+                for character in name
+            )
+            or not isinstance(value, str)
+            or any(
+                ord(character) < 0x20 and character != "\t"
+                or ord(character) == 0x7F
+                for character in value
+            )
+        ):
+            raise BackplaneError(
+                f"{provider} transport returned an invalid response header"
+            )
+        normalized[name.lower()] = value
+    return normalized
 
 
 async def _read_body(body: TransportBody, *, maximum: int, provider: str) -> bytes:

@@ -37,6 +37,7 @@ import json
 import struct
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from ipaddress import IPv6Address
 from typing import Any
 
 from ._auth._ecverify import on_p256_curve, verify_ed25519, verify_es256
@@ -575,6 +576,40 @@ def _authority(origin: str) -> tuple[str, str, str] | None:
     return scheme, host, port
 
 
+def _valid_origin(origin: object) -> bool:
+    if not isinstance(origin, str):
+        return False
+    parsed = _authority(origin)
+    if parsed is None:
+        return False
+    scheme, host, port = parsed
+    if scheme not in {"http", "https"}:
+        return False
+    if port and (not port.isdigit() or not 1 <= int(port) <= 65535):
+        return False
+    if ":" in host:
+        try:
+            IPv6Address(host)
+        except ValueError:
+            return False
+    else:
+        domain = host.removesuffix(".")
+        labels = domain.split(".")
+        if (
+            len(domain) > 253
+            or any(
+                not label
+                or len(label) > 63
+                or label.startswith("-")
+                or label.endswith("-")
+                or any(not (character.isalnum() or character == "-") for character in label)
+                for label in labels
+            )
+        ):
+            return False
+    return scheme == "https" or is_loopback_host(host)
+
+
 def origin_accepted(origin: str, accepted: Sequence[str]) -> bool:
     """Whether `origin` is one of `accepted`. Exact, but for a loopback port.
 
@@ -587,6 +622,8 @@ def origin_accepted(origin: str, accepted: Sequence[str]) -> bool:
     loopback origin -- and nothing else is widened: a different host, a
     different scheme, or a port that is not digits all fail.
     """
+    if not _valid_origin(origin):
+        return False
     if origin in accepted:
         return True
     parsed = _authority(origin)

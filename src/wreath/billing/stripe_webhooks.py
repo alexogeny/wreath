@@ -67,6 +67,11 @@ def bind_stripe_webhooks(
             f"Stripe webhook API version {webhook.event_version!r} differs from "
             f"backend API version {backend._api_version!r}"
         )
+    if backend._livemode is not webhook.livemode:
+        raise ValueError(
+            f"Stripe webhook livemode {webhook.livemode!r} differs from "
+            f"backend API key livemode {backend._livemode!r}"
+        )
     direct_connect = backend._connect is not None and isinstance(
         backend._connect.charges, DirectCharges
     )

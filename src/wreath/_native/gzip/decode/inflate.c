@@ -1050,11 +1050,8 @@ int wreath_gzip_decoder_decompress(wreath_gzip_decoder_dec *d, const void *in_, 
     if (wreath_gzip_decoder_crc32_arm(d->crc_arm, 0, member_start, produced) != want_crc)
       return GZ_ERR_CRC;
 
-    if (s.in == s.in_end) break;
-    /* RFC 1952 permits a file to be a series of members; anything that is not
-     * another member's header is trailing garbage. */
-    if ((size_t)(s.in_end - s.in) < 18 || s.in[0] != 0x1F || s.in[1] != 0x8B)
-      return GZ_ERR_TRAILING;
+    if (s.in != s.in_end) return GZ_ERR_TRAILING;
+    break;
   }
 
   *out_len = (size_t)(s.out - (uint8_t *)out_);

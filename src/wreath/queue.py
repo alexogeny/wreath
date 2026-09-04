@@ -293,10 +293,10 @@ class RoundRobin(Awaiting):
         lanes: Iterable[str] = (),
     ) -> None:
         super().__init__()
-        if capacity < 1:
-            raise ValueError("capacity must be positive")
-        if max_lanes < 1:
-            raise ValueError("max_lanes must be positive")
+        if type(capacity) is not int or capacity < 1:
+            raise ValueError("capacity must be positive and must be an integer")
+        if type(max_lanes) is not int or max_lanes < 1:
+            raise ValueError("max_lanes must be positive and must be an integer")
         self._capacity = capacity
         self._max_lanes = max_lanes
         self._drop_oldest = drop_oldest

@@ -4,6 +4,7 @@ import asyncio
 import json
 import struct
 import threading
+from typing import Any
 
 import pytest
 
@@ -302,6 +303,25 @@ def test_config_rejects_bad_limits() -> None:
         InspectorConfig(path="/tmp/x.sock", max_payload_bytes=0)
     with pytest.raises(ValueError):
         InspectorConfig(path="/tmp/x.sock", idle_timeout=0)
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "message"),
+    [
+        ("max_payload_bytes", True, "max_payload_bytes must be an integer"),
+        ("max_payload_bytes", 1.5, "max_payload_bytes must be an integer"),
+        ("max_payload_bytes", float("nan"), "max_payload_bytes must be an integer"),
+        ("max_payload_bytes", float("inf"), "max_payload_bytes must be an integer"),
+        ("idle_timeout", True, "expected a finite positive number of seconds"),
+        ("idle_timeout", float("nan"), "expected a finite positive number of seconds"),
+        ("idle_timeout", float("inf"), "expected a finite positive number of seconds"),
+    ],
+)
+def test_config_refuses_resource_limit_type_bypasses(
+    option: str, value: Any, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        InspectorConfig(path="/tmp/x.sock", **{option: value})
 
 
 def test_frame_header_is_sixteen_bytes() -> None:

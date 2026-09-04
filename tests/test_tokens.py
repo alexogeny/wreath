@@ -96,6 +96,12 @@ def test_token_purpose_refuses_each_invalid_declaration(name: object, ttl: objec
         TokenPurpose(cast("str", name), cast("int", ttl))
 
 
+@pytest.mark.parametrize("single_use", [0, 1, "yes"], ids=("zero", "one", "string"))
+def test_token_purpose_refuses_non_boolean_single_use(single_use: object) -> None:
+    with pytest.raises(ValueError, match="single_use must be a boolean"):
+        TokenPurpose("reset", 60, single_use=cast("bool", single_use))
+
+
 @pytest.mark.parametrize("max_entries", [True, "2", 0], ids=("boolean", "string", "zero"))
 def test_memory_ledger_refuses_each_invalid_capacity(max_entries: object) -> None:
     with pytest.raises(ValueError, match="positive integer"):
@@ -271,6 +277,19 @@ def test_verify_refuses_invalid_outer_token_shapes(token: object) -> None:
     assert tokens.verify("invite", cast("str", token), now=100) is None
 
 
+@pytest.mark.parametrize(
+    ("token", "bound"),
+    [("\ud800", ""), ("w1.eA.eA", "\ud800")],
+    ids=("token-surrogate", "bound-surrogate"),
+)
+def test_verify_refuses_unencodable_outer_token_text(token: str, bound: str) -> None:
+    tokens = ActionTokens(
+        {"active": KEY_A}, current="active", purposes=[TokenPurpose("invite", 60)]
+    )
+
+    assert tokens.verify("invite", token, bound=bound, now=100) is None
+
+
 def test_verify_refuses_a_well_formed_token_with_the_wrong_prefix() -> None:
     tokens = ActionTokens(
         {"active": KEY_A}, current="active", purposes=[TokenPurpose("invite", 60)]
@@ -313,7 +332,10 @@ def test_verify_refuses_non_object_and_wrong_field_set_payloads() -> None:
         ({"exp": 160.0}, 120),
         ({"exp": 161}, 120),
         ({"s": 1}, 120),
+        ({"s": ""}, 120),
+        ({"s": "s" * 1025}, 120),
         ({"j": 1}, 120),
+        ({"j": ""}, 120),
     ],
     ids=(
         "version",
@@ -325,7 +347,10 @@ def test_verify_refuses_non_object_and_wrong_field_set_payloads() -> None:
         "expires-type",
         "duration",
         "subject-type",
+        "subject-empty",
+        "subject-long",
         "token-id-type",
+        "token-id-empty",
     ),
 )
 def test_verify_refuses_each_invalid_signed_claim(changes: dict[str, object], now: int) -> None:
@@ -341,6 +366,34 @@ def test_verify_refuses_a_token_issued_in_the_future() -> None:
     )
     token = tokens.issue("invite", "subject", now=100)
     assert tokens.verify("invite", token, now=99) is None
+
+
+def test_verify_refuses_a_token_at_its_expiry_boundary() -> None:
+    tokens = ActionTokens(
+        {"active": KEY_A}, current="active", purposes=[TokenPurpose("invite", 60)]
+    )
+    token = tokens.issue("invite", "subject", now=100)
+
+    assert tokens.verify("invite", token, now=160) is None
+
+
+def test_verify_refuses_an_oversized_signed_bound_even_when_the_caller_matches_it() -> None:
+    tokens = ActionTokens(
+        {"active": KEY_A}, current="active", purposes=[TokenPurpose("invite", 60)]
+    )
+    token = tokens.issue("invite", "subject", now=100)
+    bound = "b" * 1025
+
+    assert tokens.verify("invite", signed_payload(token, b=bound), bound=bound, now=120) is None
+
+
+def test_verify_refuses_a_signed_non_string_bound() -> None:
+    tokens = ActionTokens(
+        {"active": KEY_A}, current="active", purposes=[TokenPurpose("invite", 60)]
+    )
+    token = tokens.issue("invite", "subject", now=100)
+
+    assert tokens.verify("invite", signed_payload(token, b=None), now=120) is None
 
 
 def test_unknown_purpose_is_refused_before_issue_or_verify() -> None:

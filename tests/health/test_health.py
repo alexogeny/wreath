@@ -64,6 +64,22 @@ def test_health_check_timeout_must_be_finite(timeout: float):
         callable_check("db", _hang, timeout=timeout)
 
 
+@pytest.mark.parametrize("timeout", [True, "1"])
+def test_health_check_timeout_must_be_an_exact_number(timeout: object):
+    with pytest.raises(ValueError, match="finite and positive"):
+        callable_check("db", _hang, timeout=timeout)
+
+
+def test_health_check_critical_flag_must_be_an_exact_bool():
+    with pytest.raises(ValueError, match="critical must be a bool"):
+        callable_check("db", _bad, critical=0)
+
+
+def test_health_check_refuses_a_noncallable_probe_at_declaration():
+    with pytest.raises(ValueError, match="probe must be callable"):
+        callable_check("db", None)
+
+
 @pytest.mark.asyncio
 async def test_a_failed_non_critical_check_degrades_without_dropping_traffic():
     serving, detail = await evaluate(

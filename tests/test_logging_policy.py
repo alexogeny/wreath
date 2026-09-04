@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from wreath import _flight_schema as fs
 from wreath import logging as log
-from wreath._logscratch import LogSamplingPolicy, RequestLogBuffer, SiteLimiter
+from wreath._logscratch import LogSamplingPolicy, OffLoopStage, RequestLogBuffer, SiteLimiter
 
 
 class FakeClock:
@@ -18,6 +20,54 @@ class FakeClock:
 
     def advance(self, seconds: float) -> None:
         self.now += seconds
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "correct_form"),
+    [
+        ("enabled", 1, "boolean"),
+        ("first", -1, "non-negative integer"),
+        ("first", True, "non-negative integer"),
+        ("first", 1.5, "non-negative integer"),
+        ("thereafter", 0, "positive integer"),
+        ("thereafter", True, "positive integer"),
+        ("thereafter", 1.5, "positive integer"),
+        ("interval", 0, "finite positive number"),
+        ("interval", True, "finite positive number"),
+        ("interval", float("nan"), "finite positive number"),
+        ("interval", float("inf"), "finite positive number"),
+        ("ceiling", int(fs.Severity.INFO), "Severity"),
+    ],
+)
+def test_sampling_policy_refuses_malformed_controls(
+    field: str, value: object, correct_form: str
+) -> None:
+    with pytest.raises((TypeError, ValueError), match=rf"{field}.*{correct_form}"):
+        LogSamplingPolicy(**cast(Any, {field: value}))
+
+
+@pytest.mark.parametrize("capacity", [True, 1.5, float("nan"), float("inf"), -1, 1 << 21])
+def test_site_limiter_refuses_an_invalid_or_unbounded_capacity(capacity: object) -> None:
+    with pytest.raises(ValueError, match="capacity must be an integer between 0 and 1048576"):
+        SiteLimiter(capacity=cast(Any, capacity))
+
+
+@pytest.mark.parametrize("capacity", [True, 1.5, float("nan"), float("inf"), -1, 1 << 23])
+def test_off_loop_stage_refuses_an_invalid_or_unbounded_capacity(capacity: object) -> None:
+    with pytest.raises(ValueError, match="capacity must be an integer between 0 and 4194304"):
+        OffLoopStage(capacity=cast(Any, capacity))
+
+
+@pytest.mark.parametrize("request_id", [True, -1, 1 << 64])
+def test_request_log_buffer_refuses_a_request_id_that_would_alias(request_id: object) -> None:
+    with pytest.raises(ValueError, match="request_id must be an unsigned 64-bit integer"):
+        RequestLogBuffer(cast(Any, request_id), budget=1)
+
+
+@pytest.mark.parametrize("budget", [True, 1.5, -1, 65537])
+def test_request_log_buffer_refuses_an_invalid_or_unbounded_budget(budget: object) -> None:
+    with pytest.raises(ValueError, match="budget must be an integer between 0 and 65536"):
+        RequestLogBuffer(1, budget=cast(Any, budget))
 
 
 def test_first_n_pass_then_every_mth() -> None:
@@ -119,6 +169,12 @@ def test_an_explicit_promote_publishes_the_buffer() -> None:
     buffer.promote()
     buffer.finish(promoted=False, emit=emitted.append)
     assert len(emitted) == 1
+
+
+def test_buffer_finish_requires_an_exact_promotion_verdict() -> None:
+    buffer = RequestLogBuffer(request_id=1, budget=1)
+    with pytest.raises(ValueError, match="promoted must be a boolean"):
+        buffer.finish(promoted=cast(Any, 1), emit=lambda _cell: None)
 
 
 def test_exhausting_the_buffer_budget_is_counted() -> None:

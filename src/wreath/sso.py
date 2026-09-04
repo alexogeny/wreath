@@ -54,7 +54,8 @@ from base64 import urlsafe_b64encode
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from math import isfinite
-from typing import Any, Literal
+from types import MappingProxyType
+from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 from xml.sax.saxutils import quoteattr
 
@@ -72,6 +73,10 @@ __all__ = [
     "SsoRefusal",
     "UnknownIdentityProvider",
 ]
+
+_MAX_JWKS_KEYS = 128
+_MAX_KID_LENGTH = 256
+_MAX_SIGNING_CERTIFICATES = 16
 
 
 class SsoRefusal(Exception):
@@ -120,11 +125,73 @@ class IdentityProviderConfig:
     require_second_factor: bool = False
 
     def __post_init__(self) -> None:
+        if isinstance(self.certificates, (str, bytes)):
+            raise SsoRefusal(
+                "invalid-signer-configuration",
+                "identity-provider certificates must be an iterable of complete certificate texts",
+            )
+        if isinstance(self.roles, str):
+            raise SsoRefusal(
+                "invalid-role-configuration",
+                "identity-provider roles must be an iterable of complete role names, not text",
+            )
+        object.__setattr__(self, "certificates", tuple(self.certificates))
+        object.__setattr__(self, "roles", tuple(self.roles))
+        if any(
+            not isinstance(certificate, str) or not certificate.strip()
+            for certificate in self.certificates
+        ):
+            raise SsoRefusal(
+                "invalid-signer-configuration",
+                "identity-provider certificates must contain only non-empty certificate text",
+            )
+        if any(not isinstance(role, str) or not role for role in self.roles):
+            raise SsoRefusal(
+                "invalid-role-configuration",
+                "identity-provider roles must contain only non-empty text role names",
+            )
+        if not isinstance(self.require_second_factor, bool):
+            raise SsoRefusal(
+                "invalid-second-factor",
+                "identity-provider require_second_factor must be a boolean",
+            )
         if not self.certificates:
             raise SsoRefusal(
                 "no-signer",
                 f"identity provider for {self.organization!r} has no signing certificate, "
                 "so no assertion from it could ever be verified",
+            )
+        if len(self.certificates) > _MAX_SIGNING_CERTIFICATES:
+            raise SsoRefusal(
+                "too-many-signers",
+                f"identity provider for {self.organization!r} accepts at most "
+                f"{_MAX_SIGNING_CERTIFICATES} signing certificates",
+            )
+        try:
+            parsed_sso_url = urlsplit(self.sso_url)
+            _ = parsed_sso_url.port
+        except ValueError as error:
+            raise SsoRefusal(
+                "insecure-sso-url",
+                f"identity provider SSO URL {self.sso_url!r} must be an absolute HTTPS "
+                "URL without credentials, controls, or a fragment",
+            ) from error
+        if (
+            any(
+                ord(character) < 0x21 or 0x7F <= ord(character) <= 0x9F
+                for character in self.sso_url
+            )
+            or parsed_sso_url.scheme != "https"
+            or parsed_sso_url.hostname is None
+            or parsed_sso_url.username is not None
+            or parsed_sso_url.port == 0
+            or parsed_sso_url.fragment
+            or "\\" in self.sso_url
+        ):
+            raise SsoRefusal(
+                "insecure-sso-url",
+                f"identity provider SSO URL {self.sso_url!r} must be an absolute HTTPS "
+                "URL without credentials, controls, or a fragment",
             )
 
 
@@ -138,9 +205,15 @@ class IdentityProviderDirectory:
     __slots__ = ("_by_organization",)
 
     def __init__(self, providers: Iterable[IdentityProviderConfig] = ()) -> None:
-        self._by_organization: dict[str, IdentityProviderConfig] = {
-            provider.organization: provider for provider in providers
-        }
+        self._by_organization: dict[str, IdentityProviderConfig] = {}
+        for provider in providers:
+            if provider.organization in self._by_organization:
+                raise SsoRefusal(
+                    "duplicate-idp",
+                    f"duplicate identity provider for organisation {provider.organization!r}; "
+                    "each organisation must select exactly one trust anchor",
+                )
+            self._by_organization[provider.organization] = provider
 
     def for_organization(self, organization: str) -> IdentityProviderConfig:
         provider = self._by_organization.get(organization)
@@ -149,6 +222,12 @@ class IdentityProviderDirectory:
         return provider
 
     def add(self, provider: IdentityProviderConfig) -> None:
+        if provider.organization in self._by_organization:
+            raise SsoRefusal(
+                "duplicate-idp",
+                f"duplicate identity provider for organisation {provider.organization!r}; "
+                "each organisation must select exactly one trust anchor",
+            )
         self._by_organization[provider.organization] = provider
 
     def organizations(self) -> tuple[str, ...]:
@@ -168,10 +247,10 @@ class PendingLogin:
     """
 
     request_id: str
-    relay_state: str
+    relay_state: str = field(repr=False)
     organization: str
     issued_at: float
-    session_id: str = ""
+    session_id: str = field(default="", repr=False)
     #: Where to send the browser, with the request already encoded.
     redirect_url: str = ""
 
@@ -194,8 +273,8 @@ class PendingLoginStore:
             or ttl <= 0
         ):
             raise ValueError("pending-login ttl must be a positive finite number")
-        if max_entries < 1:
-            raise ValueError("pending-login max_entries must be at least one")
+        if not isinstance(max_entries, int) or isinstance(max_entries, bool) or max_entries < 1:
+            raise ValueError("pending-login max_entries must be a positive integer of at least one")
         self._by_id = CapabilityMap(
             max_entries=max_entries,
             ttl=ttl,
@@ -322,6 +401,50 @@ class SamlServiceProvider:
     certificates: tuple[str, ...] = ()
     pending: PendingLoginStore = field(default_factory=PendingLoginStore)
 
+    def __post_init__(self) -> None:
+        if isinstance(self.certificates, (str, bytes)):
+            raise SsoRefusal(
+                "invalid-service-provider-certificate",
+                "SAML service-provider certificates must be an iterable of complete texts",
+            )
+        object.__setattr__(self, "certificates", tuple(self.certificates))
+        if any(
+            not isinstance(certificate, str) or not certificate.strip()
+            for certificate in self.certificates
+        ):
+            raise SsoRefusal(
+                "invalid-service-provider-certificate",
+                "SAML service-provider certificates must contain only non-empty text",
+            )
+        if not isinstance(self.entity_id, str) or not self.entity_id:
+            raise SsoRefusal("invalid-service-provider", "SAML entity_id must be non-empty text")
+        try:
+            parsed_acs = urlsplit(self.acs_url)
+            _ = parsed_acs.port
+        except (TypeError, ValueError) as error:
+            raise SsoRefusal(
+                "insecure-acs-url",
+                "SAML assertion consumer URL must be an absolute HTTPS URL without "
+                "credentials, controls, or a fragment",
+            ) from error
+        if (
+            any(
+                ord(character) < 0x21 or 0x7F <= ord(character) <= 0x9F
+                for character in self.acs_url
+            )
+            or parsed_acs.scheme != "https"
+            or parsed_acs.hostname is None
+            or parsed_acs.username is not None
+            or parsed_acs.port == 0
+            or parsed_acs.fragment
+            or "\\" in self.acs_url
+        ):
+            raise SsoRefusal(
+                "insecure-acs-url",
+                "SAML assertion consumer URL must be an absolute HTTPS URL without "
+                "credentials, controls, or a fragment",
+            )
+
     def metadata_xml(self) -> str:
         """The document an administrator pastes into their identity provider.
 
@@ -332,7 +455,7 @@ class SamlServiceProvider:
         """
         certificates = "".join(
             '<md:KeyDescriptor use="signing"><ds:KeyInfo><ds:X509Data>'
-            f"<ds:X509Certificate>{_pem_body(certificate)}</ds:X509Certificate>"
+            f"<ds:X509Certificate>{_escape(_pem_body(certificate))}</ds:X509Certificate>"
             "</ds:X509Data></ds:KeyInfo></md:KeyDescriptor>"
             for certificate in self.certificates
         )
@@ -364,7 +487,7 @@ class SamlServiceProvider:
         a refusal at the start of a login rather than a signature failure at the
         end of one.
         """
-        if not session_id:
+        if not isinstance(session_id, str) or not session_id:
             raise SsoRefusal(
                 "session-binding-required",
                 "SAML login requires a non-empty browser session binding",
@@ -507,10 +630,37 @@ class AttributeMapping:
                 f"the assertion carries no {', '.join(missing)}, and this application "
                 "identifies an account by email",
             )
+        selected: dict[str, str | None] = {}
+        for field_name, attribute_name in (
+            ("email", self.email),
+            ("display_name", self.display_name),
+            ("external_id", self.external_id),
+        ):
+            key = cast(str, attribute_name)
+            if key not in attributes:
+                selected[field_name] = None
+                continue
+            value = attributes[key]
+            if isinstance(value, str):
+                candidate = value
+            elif isinstance(value, (list, tuple)) and len(value) == 1 and isinstance(value[0], str):
+                candidate = value[0]
+            else:
+                raise SsoRefusal(
+                    "attribute-cardinality",
+                    f"the identity attribute {attribute_name!r} must carry exactly one text value",
+                )
+            if not candidate.strip():
+                raise SsoRefusal(
+                    "attribute-cardinality",
+                    f"the identity attribute {attribute_name!r} must carry one "
+                    "non-empty text value",
+                )
+            selected[field_name] = candidate
         return {
-            "email": attributes[self.email],
-            "display_name": attributes.get(self.display_name),
-            "external_id": attributes.get(self.external_id),
+            "email": selected["email"],
+            "display_name": selected["display_name"],
+            "external_id": selected["external_id"],
         }
 
 
@@ -559,10 +709,30 @@ class JitProvisioning:
     ) -> None:
         if revoke_sessions is not None and not callable(revoke_sessions):
             raise TypeError("JIT revoke_sessions must be an async callable")
-        self._roles = tuple(roles)
+        if isinstance(roles, str) or isinstance(vocabulary, str):
+            raise SsoRefusal(
+                "invalid-role-configuration",
+                "JIT roles and vocabulary must be iterables of complete role names, not text",
+            )
+        configured_roles = tuple(roles)
+        configured_vocabulary = tuple(vocabulary)
+        if any(
+            not isinstance(role, str) or not role
+            for role in (*configured_roles, *configured_vocabulary)
+        ):
+            raise SsoRefusal(
+                "invalid-role-configuration",
+                "JIT roles and vocabulary must contain only non-empty text role names",
+            )
+        if not isinstance(require_second_factor, bool):
+            raise SsoRefusal(
+                "invalid-second-factor",
+                "JIT require_second_factor must be a boolean",
+            )
+        self._roles = configured_roles
         self._second_factor = require_second_factor
         self._revoke_sessions = revoke_sessions
-        vocab = set(vocabulary)
+        vocab = set(configured_vocabulary)
         # Checked here rather than at provisioning time: the roles are
         # configuration, and configuration that can only fail on somebody's
         # first login is configuration nobody tested.
@@ -579,6 +749,16 @@ class JitProvisioning:
         self._memberships: dict[str, tuple[str, ...]] = {}
 
     def provision(self, *, organization: str, email: str) -> ProvisionedLogin:
+        if (
+            not isinstance(organization, str)
+            or not organization.strip()
+            or not isinstance(email, str)
+            or not email.strip()
+        ):
+            raise SsoRefusal(
+                "invalid-identity",
+                "JIT provisioning requires a non-empty organisation and email identity",
+            )
         key = (organization, email.strip().lower())
         user_id = self._accounts.get(key)
         created = user_id is None
@@ -613,12 +793,12 @@ class JitProvisioning:
 
 @dataclass(frozen=True, slots=True)
 class _OidcFlow:
-    state: str
-    nonce: str
-    verifier: str
+    state: str = field(repr=False)
+    nonce: str = field(repr=False)
+    verifier: str = field(repr=False)
     challenge: str
     organization: str
-    session_id: str
+    session_id: str = field(repr=False)
     issued_at: float
 
 
@@ -658,13 +838,24 @@ class OidcRelyingParty:
                 "PKCE method 'plain' sends the verifier as the challenge, so it "
                 "protects nothing; only S256 is accepted",
             )
-        parsed_issuer = urlsplit(issuer)
+        try:
+            parsed_issuer = urlsplit(issuer)
+            _ = parsed_issuer.port
+        except ValueError as error:
+            raise SsoRefusal(
+                "insecure-issuer",
+                "OIDC issuer must be an absolute HTTPS URL without credentials, "
+                "a query, or a fragment",
+            ) from error
         if (
-            parsed_issuer.scheme != "https"
+            any(ord(character) < 0x21 or 0x7F <= ord(character) <= 0x9F for character in issuer)
+            or parsed_issuer.scheme != "https"
             or parsed_issuer.hostname is None
             or parsed_issuer.username is not None
+            or parsed_issuer.port == 0
             or parsed_issuer.query
             or parsed_issuer.fragment
+            or "\\" in issuer
         ):
             raise SsoRefusal(
                 "insecure-issuer",
@@ -678,8 +869,8 @@ class OidcRelyingParty:
             or ttl <= 0
         ):
             raise ValueError("OIDC state ttl must be a positive finite number")
-        if max_pending < 1:
-            raise ValueError("OIDC max_pending must be at least one")
+        if not isinstance(max_pending, int) or isinstance(max_pending, bool) or max_pending < 1:
+            raise ValueError("OIDC max_pending must be a positive integer of at least one")
         self._issuer = issuer.rstrip("/")
         self._client_id = client_id
         self._pkce = pkce
@@ -707,13 +898,20 @@ class OidcRelyingParty:
     async def refresh(self, fetch: Any) -> int:
         """Reload discovery and JWKS. Called at lifespan startup, never per request."""
         document = await fetch(f"{self._issuer}/.well-known/openid-configuration")
-        if document.get("issuer", self._issuer) != self._issuer:
+        if not isinstance(document, Mapping):
+            raise SsoRefusal("invalid-discovery", "OIDC discovery must be a JSON object")
+        if document.get("issuer") != self._issuer:
             raise SsoRefusal(
                 "issuer-mismatch", "OIDC discovery issuer does not match the configured issuer"
             )
         from ._auth.oidc import _require_same_origin
 
-        jwks_uri = document["jwks_uri"]
+        jwks_uri = document.get("jwks_uri")
+        if not isinstance(jwks_uri, str) or not jwks_uri:
+            raise SsoRefusal(
+                "invalid-discovery",
+                "OIDC discovery must name a non-empty jwks_uri",
+            )
         try:
             _require_same_origin(self._issuer, jwks_uri)
         except ValueError as error:
@@ -722,7 +920,37 @@ class OidcRelyingParty:
                 "OIDC JWKS endpoint is not on the configured issuer origin",
             ) from error
         keys = await fetch(jwks_uri)
-        self._keys = {key["kid"]: key for key in keys.get("keys", ())}
+        if not isinstance(keys, Mapping):
+            raise SsoRefusal("invalid-jwks", "OIDC JWKS must be a JSON object")
+        raw_keys = keys.get("keys", ())
+        if not isinstance(raw_keys, (list, tuple)) or len(raw_keys) > _MAX_JWKS_KEYS:
+            raise SsoRefusal(
+                "invalid-jwks",
+                f"OIDC JWKS keys must be a list of at most {_MAX_JWKS_KEYS} entries",
+            )
+        loaded: dict[str, Any] = {}
+        for key in raw_keys:
+            if not isinstance(key, Mapping):
+                raise SsoRefusal("invalid-jwks", "each OIDC JWKS key must be a JSON object")
+            kid = key.get("kid")
+            if not isinstance(kid, str) or not kid or len(kid) > _MAX_KID_LENGTH:
+                raise SsoRefusal(
+                    "invalid-jwks",
+                    "each OIDC JWKS key needs a non-empty kid of at most "
+                    f"{_MAX_KID_LENGTH} characters",
+                )
+            if kid in loaded:
+                raise SsoRefusal(
+                    "duplicate-key-id",
+                    f"OIDC JWKS carries duplicate key id {kid!r}; a kid must select "
+                    "exactly one verification key",
+                )
+            copied = dict(key)
+            for name in ("key_ops", "x5c"):
+                if isinstance(copied.get(name), list):
+                    copied[name] = tuple(copied[name])
+            loaded[kid] = MappingProxyType(copied)
+        self._keys = loaded
         return len(self._keys)
 
     def begin_login(
@@ -732,7 +960,7 @@ class OidcRelyingParty:
         session_id: str,
         now: float | None = None,
     ) -> _OidcFlow:
-        if not session_id:
+        if not isinstance(session_id, str) or not session_id:
             raise SsoRefusal(
                 "session-binding-required",
                 "OIDC login requires a non-empty browser session binding",
@@ -794,12 +1022,12 @@ class OidcRelyingParty:
                 "expired-state",
                 f"this OIDC state expired after its {self._ttl:g}s lifetime",
             )
-        if not session_id:
+        if not isinstance(session_id, str) or not session_id:
             raise SsoRefusal(
                 "session-binding-required",
                 "OIDC callback requires a non-empty browser session binding",
             )
-        if flow.session_id != session_id:
+        if not hmac.compare_digest(flow.session_id, session_id):
             raise SsoRefusal(
                 "state-session-mismatch",
                 "this callback's state was issued to a different browser session; an "
@@ -816,7 +1044,14 @@ class OidcRelyingParty:
 
     def check_nonce(self, claims: Mapping[str, Any], *, expected_nonce: str) -> None:
         """The claim that binds an id token to one authorization request."""
-        if claims.get("nonce") != expected_nonce:
+        actual = claims.get("nonce")
+        matches = (
+            isinstance(expected_nonce, str)
+            and bool(expected_nonce)
+            and isinstance(actual, str)
+            and hmac.compare_digest(actual, expected_nonce)
+        )
+        if not matches:
             raise SsoRefusal(
                 "nonce-mismatch",
                 "the id token's nonce does not match the one this login issued, so it "
@@ -825,6 +1060,11 @@ class OidcRelyingParty:
 
     def key_for(self, kid: str) -> Any:
         """The signing key for a `kid`, or refuse. **Never fetches.**"""
+        if not isinstance(kid, str) or not kid or len(kid) > _MAX_KID_LENGTH:
+            raise SsoRefusal(
+                "invalid-key-id",
+                f"an OIDC key id must be non-empty text of at most {_MAX_KID_LENGTH} characters",
+            )
         key = self._keys.get(kid)
         if key is None:
             raise SsoRefusal(

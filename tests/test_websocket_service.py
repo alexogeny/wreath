@@ -81,6 +81,28 @@ async def test_service_refuses_invalid_capacity_policies(options: dict, message:
         WebSocketService(**options)
 
 
+@pytest.mark.parametrize("name", ["max_connections", "queue_capacity"])
+@pytest.mark.parametrize("value", [True, 1.5, "2"])
+async def test_service_capacity_requires_an_exact_positive_integer(
+    name: str, value: object
+) -> None:
+    with pytest.raises(ValueError, match=f"{name} must be a positive integer"):
+        if name == "max_connections":
+            WebSocketService(max_connections=cast(int, value))
+        else:
+            WebSocketService(queue_capacity=cast(int, value))
+
+
+@pytest.mark.parametrize("consume", [0, 1, "yes", None])
+async def test_heartbeat_consume_requires_an_exact_boolean(consume: object) -> None:
+    with pytest.raises(ValueError, match="consume must be a bool"):
+        Heartbeat(
+            frame="ping",
+            acknowledge=lambda _frame: False,
+            consume=cast(bool, consume),
+        )
+
+
 async def test_service_refuses_connections_before_start() -> None:
     service = WebSocketService()
     socket = FakeSocket()
@@ -523,6 +545,33 @@ async def test_protocol_supplied_heartbeat_is_bounded_and_consumes_ack() -> None
     assert socket.sent[0] == "ping"
     assert handled == []
     assert service.snapshot.heartbeat_timeouts == 0
+
+
+async def test_heartbeat_acknowledgement_requires_an_exact_true_verdict() -> None:
+    def ambiguous_verdict(_frame: str | bytes) -> bool:
+        return cast(bool, 1)
+
+    service = await _start_service(
+        heartbeat=Heartbeat(
+            frame="ping",
+            acknowledge=ambiguous_verdict,
+            interval=30,
+            timeout=10,
+        )
+    )
+    socket = FakeSocket()
+    handled: list[str | bytes] = []
+
+    async def handle(frame: str | bytes) -> None:
+        handled.append(frame)
+
+    task = asyncio.create_task(service.serve(cast(WebSocket, socket), handle, key="exact"))
+    await asyncio.wait_for(socket.ready.wait(), timeout=0.5)
+    socket.deliver("application-frame")
+    socket.finish()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert handled == ["application-frame"]
 
 
 async def test_heartbeat_timeout_joins_its_acknowledgement_waits(monkeypatch) -> None:

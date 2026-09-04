@@ -63,6 +63,7 @@ from ._webpush import (
     PushResult,
     PushSubscription,
     VapidKeys,
+    _endpoint_parts,
     declarative_payload,
     encrypt,
     vapid_headers,
@@ -219,6 +220,8 @@ class Notifications:
         enqueue: Callable[[Callable[[], Awaitable[None]]], Awaitable[None]] | None = None,
         rate_limit: int = 200,
     ) -> None:
+        if type(rate_limit) is not int or rate_limit < 0:
+            raise ValueError("rate_limit must be a non-negative integer")
         self._channels = tuple(channels)
         self._preferences = preferences or AllowAll()
         self._enqueue = enqueue
@@ -711,9 +714,8 @@ class PushDelivery:
         """POST one encrypted payload and classify the answer."""
         from .http_client import ClientError, HTTPClient
 
-        scheme, _, rest = endpoint.partition("://")
-        authority, _, path = rest.partition("/")
-        origin = f"{scheme}://{authority}"
+        origin, target = _endpoint_parts(endpoint)
+        authority = origin.removeprefix("https://")
         client = self._clients.get(origin)
         if client is None:
             client = HTTPClient(name=f"webpush:{authority}", base_url=origin, **self._limits)
@@ -722,7 +724,7 @@ class PushDelivery:
             (name.encode("ascii"), value.encode("ascii")) for name, value in headers.items()
         )
         try:
-            response = await client.post(f"/{path}", headers=wire, body=body)
+            response = await client.post(target, headers=wire, body=body)
         except ClientError as exc:
             # Reachability failures are transient by definition, so they are not
             # `expired`: deleting a subscription because a push service was

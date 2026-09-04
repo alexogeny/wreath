@@ -298,6 +298,13 @@ def test_nested_command_options_are_typed_and_preserve_native_payload() -> None:
     assert interaction.native is raw
 
 
+def test_interaction_repr_does_not_expose_response_token() -> None:
+    secret = "discord-response-secret"
+    interaction = discord().DiscordInteraction.parse(command_payload(token=secret))
+
+    assert secret not in repr(interaction)
+
+
 def test_component_and_modal_payloads_have_distinct_typed_surfaces() -> None:
     api = discord()
 

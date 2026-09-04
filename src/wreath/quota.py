@@ -56,7 +56,7 @@ from dataclasses import dataclass
 from time import time as _wall_time
 from typing import Any, Protocol
 
-from ._auth.models import qualified_identity_value
+from ._auth.models import qualified_identity_key
 from .response import ProblemResponse
 from .store import ALIAS, Column, Keyed, PostgresStore, Sql
 from .temporal import Duration
@@ -103,8 +103,26 @@ class Quota:
     def __post_init__(self) -> None:
         if not self.name:
             raise ValueError("a quota needs a name")
-        if not all(math.isfinite(value) for value in (self.limit, self.period, self.cost)):
-            raise ValueError("quota limit, period, and cost must be finite")
+        if (
+            type(self.name) is not str
+            or len(self.name) > 64
+            or not self.name.isascii()
+            or not self.name[0].isalnum()
+            or any(not (character.isalnum() or character in "_.-") for character in self.name)
+        ):
+            raise ValueError(
+                "quota name must be a 1..64 character ASCII policy token using "
+                "letters, digits, '_', '-', or '.'"
+            )
+        values = (self.limit, self.period, self.cost)
+        finite = False
+        if all(type(value) in (int, float) for value in values):
+            try:
+                finite = all(math.isfinite(value) for value in values)
+            except OverflowError:
+                pass
+        if not finite:
+            raise ValueError("quota limit, period, and cost must be finite numbers")
         if self.limit <= 0.0:
             raise ValueError("limit must be positive")
         if self.period <= 0.0:
@@ -189,8 +207,8 @@ class MemoryQuotaStore:
     __slots__ = ("_counts", "_full_period", "_max_entries", "_periods", "_quota")
 
     def __init__(self, *, max_entries: int = 10000) -> None:
-        if max_entries <= 0:
-            raise ValueError("max_entries must be positive")
+        if type(max_entries) is not int or max_entries <= 0:
+            raise ValueError("max_entries must be positive; use a positive integer")
         self._max_entries = max_entries
         self._quota: Quota | None = None
         self._counts: dict[str, float] = {}
@@ -314,14 +332,18 @@ class PostgresQuotaStore:
                 prefix="wreath_quota",
             ),
         )
-        # $1 key, $2 cost, $3 limit. Nothing about the allowance is baked into
-        # the text, so the statement stays one prepared entry whatever the
-        # quota; the period lives in $1, which the meter composes.
+        # The database clock chooses the period inside the atomic spend. A
+        # worker's wall clock is used only for Retry-After; letting it choose
+        # the stored key would let skewed workers spend separate allowances.
+        period_key = (
+            "($1::text || ':' || floor(EXTRACT(EPOCH FROM clock_timestamp()) "
+            "/ $4::float8)::bigint::text)"
+        )
         self._store.define(
             "spend",
             self._store.upsert(
                 values={
-                    "key": "$1",
+                    "key": Sql(period_key),
                     "used": Sql("$2::float8"),
                     "admitted": Sql("true"),
                     "updated": Sql("clock_timestamp()"),
@@ -346,7 +368,13 @@ class PostgresQuotaStore:
         # naming a workload it never asked for, the first time something read a
         # remaining-allowance header. `PostgresRateLimitStore` makes the same
         # choice for the same reason.
-        self._store.define("used", f"SELECT used FROM {self._store.table} WHERE key = $1")
+        used_key = (
+            "($1::text || ':' || floor(EXTRACT(EPOCH FROM clock_timestamp()) "
+            "/ $2::float8)::bigint::text)"
+        )
+        self._store.define(
+            "used", f"SELECT used FROM {self._store.table} WHERE key = {used_key}"
+        )
 
     def configure(self, quota: Quota) -> None:
         """Record the allowance bound into every `spend`. Once, and only once."""
@@ -386,13 +414,21 @@ class PostgresQuotaStore:
         """
         quota = self._quota_or_raise()
         _, reset = quota.window(now)
-        row = await self._store.statement("spend").fetchrow(key, quota.cost, quota.limit)
-        return 0.0 if row[1] else reset
+        base, separator, _ = key.rpartition(":")
+        if not separator:
+            raise ValueError("PostgreSQL quota keys must end with a period index")
+        row = await self._store.statement("spend").fetchrow(
+            base, quota.cost, quota.limit, quota.period
+        )
+        return 0.0 if row[1] is True else reset
 
     async def used(self, key: str, now: float) -> float:
         """Units consumed in the current period, spending nothing."""
-        self._quota_or_raise()
-        row = await self._store.statement("used").fetchrow(key)
+        quota = self._quota_or_raise()
+        base, separator, _ = key.rpartition(":")
+        if not separator:
+            raise ValueError("PostgreSQL quota keys must end with a period index")
+        row = await self._store.statement("used").fetchrow(base, quota.period)
         return 0.0 if row is None else float(row[0])
 
     def purge_pass(self, *, chunk: int = 1000, **options: Any) -> Any:
@@ -464,10 +500,12 @@ class QuotaMeter:
         if identity is None:
             return None
         index, _ = self.quota.window(_wall_time())
-        identity_id = qualified_identity_value(
-            str(getattr(identity, "namespace", "")), str(identity.id)
+        identity_id = qualified_identity_key(
+            str(identity.type),
+            str(getattr(identity, "namespace", "")),
+            str(identity.id),
         )
-        return f"{self.quota.name}:{identity.type}:{identity_id}:{index}"
+        return f"{self.quota.name}:{identity_id}:{index}"
 
     def refusal(self, reset: float) -> ProblemResponse:
         """The 429 for an exhausted allowance.
@@ -507,7 +545,11 @@ class QuotaMeter:
         if key is None:
             return None
         reset = self._try_spend(key, _wall_time())
-        return None if reset <= 0.0 else self.refusal(reset)
+        if reset == 0.0:
+            return None
+        if type(reset) not in (int, float) or reset < 0.0 or not math.isfinite(reset):
+            raise RuntimeError("quota store must return a non-negative finite wait")
+        return self.refusal(reset)
 
     async def spend(self, request: Any) -> ProblemResponse | None:
         """Count this request. None when admitted, else the refusal."""
@@ -515,7 +557,11 @@ class QuotaMeter:
         if key is None:
             return None
         reset = await self._store.spend(key, _wall_time())
-        return None if reset <= 0.0 else self.refusal(reset)
+        if reset == 0.0:
+            return None
+        if type(reset) not in (int, float) or reset < 0.0 or not math.isfinite(reset):
+            raise RuntimeError("quota store must return a non-negative finite wait")
+        return self.refusal(reset)
 
     @property
     def awaits(self) -> bool:
@@ -663,7 +709,17 @@ class Quotas:
         """
         if self._states is None:
             return frozenset()
-        return frozenset(str(state) for state in self._declared_states(identity))
+        declared = self._declared_states(identity)
+        if isinstance(declared, (str, bytes)):
+            raise ValueError("quota states provider must return an iterable of non-empty strings")
+        resolved: set[str] = set()
+        for state in declared:
+            if type(state) is not str or not state:
+                raise ValueError(
+                    "quota states provider must return an iterable of non-empty strings"
+                )
+            resolved.add(state)
+        return frozenset(resolved)
 
     def _declared_states(self, identity: Any) -> Iterable[str]:
         states = self._states

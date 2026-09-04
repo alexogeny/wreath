@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -226,6 +226,12 @@ def test_a_negative_lease_is_refused_by_the_same_guard() -> None:
         Ownership(FakeOwnershipDB(FakeClock()), lease=-1)
 
 
+@pytest.mark.parametrize("lease", [float("nan"), float("inf")])
+def test_a_nonfinite_lease_is_refused(lease: float) -> None:
+    with pytest.raises(ValueError, match="^a lease must be positive$"):
+        Ownership(FakeOwnershipDB(FakeClock()), lease=lease)
+
+
 def test_a_lease_accepts_a_duration() -> None:
     own = Ownership(FakeOwnershipDB(FakeClock()), lease=seconds(45))
     assert own._lease == 45.0
@@ -325,6 +331,20 @@ async def test_a_question_reaches_the_holder_on_another_worker() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_kind_with_the_address_delimiter_is_refused() -> None:
+    db, bus = FakeOwnershipDB(FakeClock()), FakeBus()
+    registry = _registry(db, bus, "a")
+
+    with pytest.raises(
+        ValueError,
+        match="^entity kind 'device:west' must be a non-empty string without ':'$",
+    ):
+        await registry.hold("device:west", "abc")
+
+    assert registry.held == frozenset()
+
+
+@pytest.mark.asyncio
 async def test_a_name_nobody_holds_refuses_without_waiting() -> None:
     # Checked against the ownership table before publishing: an ephemeral
     # publish to nobody is a silent no-op, and waiting the full deadline for
@@ -419,6 +439,12 @@ async def test_too_many_questions_in_flight_refuses() -> None:
         await slow
 
 
+def test_entity_registry_refuses_a_nonfinite_pending_limit() -> None:
+    db, bus = FakeOwnershipDB(FakeClock()), FakeBus()
+    with pytest.raises(ValueError, match="limit must be a positive integer"):
+        EntityRegistry(db, bus, max_pending=cast(int, float("nan")))
+
+
 @pytest.mark.asyncio
 async def test_an_answer_to_somebody_elses_question_is_ignored() -> None:
     # One channel carries the whole registry, so every worker sees every reply.
@@ -469,13 +495,39 @@ async def test_a_malformed_message_is_dropped_rather_than_raising(message: Any) 
     # must not become a flood of database round trips.
     db, bus = FakeOwnershipDB(FakeClock()), FakeBus()
     registry = _registry(db, bus, "a")
-    store: FakeStore = registry._ownership._store  # type: ignore[assignment]
+    store = cast(FakeStore, registry._ownership._store)
 
     @registry.answers("device")
     async def answer(name: str, payload: Any) -> Any:  # pragma: no cover - must not run
         raise AssertionError("a malformed message reached the handler")
 
     await registry._receive(message)
+    assert store.asked == []
+
+
+@pytest.mark.asyncio
+async def test_a_question_cannot_claim_one_address_and_dispatch_another() -> None:
+    db, bus = FakeOwnershipDB(FakeClock()), FakeBus()
+    registry = _registry(db, bus, "a")
+    lease = await registry.hold("device", "abc")
+    assert lease is not None
+
+    @registry.answers("session")
+    async def answer(name: str, payload: Any) -> Any:
+        return None
+
+    store = cast(FakeStore, registry._ownership._store)
+    store.asked.clear()
+
+    await registry._receive(
+        {
+            "correlation": "c",
+            "ask": lease.name,
+            "kind": "session",
+            "name": "victim",
+        }
+    )
+
     assert store.asked == []
 
 
@@ -579,7 +631,7 @@ async def test_renewal_costs_one_statement_however_many_names_are_held() -> None
     for index in range(50):
         await registry.hold("device", str(index))
 
-    store: FakeStore = registry._ownership._store  # type: ignore[assignment]
+    store = cast(FakeStore, registry._ownership._store)
     store.asked.clear()
     await registry._tick()
 
@@ -679,6 +731,35 @@ async def test_a_grace_period_keeps_the_name_for_a_reconnect() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("grace", [float("nan"), float("inf"), -1])
+async def test_a_nonfinite_grace_is_refused_before_taking_a_lease(grace: float) -> None:
+    db, bus = FakeOwnershipDB(FakeClock()), FakeBus()
+    registry = _counting_registry(db, bus, "a")
+
+    with pytest.raises(ValueError, match="^grace must be finite and non-negative$"):
+        async with registry.holding("device", "abc", grace=grace):
+            pass
+
+    assert db.rows == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deadline", [float("nan"), float("inf"), 0, -1])
+async def test_an_invalid_timeout_is_refused_before_an_ownership_lookup(
+    deadline: float,
+) -> None:
+    db, bus = FakeOwnershipDB(FakeClock()), FakeBus()
+    registry = _counting_registry(db, bus, "a")
+    store = cast(FakeStore, registry._ownership._store)
+    store.asked.clear()
+
+    with pytest.raises(ValueError, match="^timeout must be finite and positive$"):
+        await registry.ask("device", "absent", {}, timeout=deadline)
+
+    assert store.asked == []
+
+
+@pytest.mark.asyncio
 async def test_a_grace_period_expires_on_a_later_tick() -> None:
     clock = FakeClock()
     db, bus = FakeOwnershipDB(clock), FakeBus()
@@ -703,7 +784,7 @@ async def test_draining_releases_everything_in_one_statement() -> None:
     for index in range(20):
         await registry.hold("device", str(index))
 
-    store: FakeStore = registry._ownership._store  # type: ignore[assignment]
+    store = cast(FakeStore, registry._ownership._store)
     store.asked.clear()
     await registry.drain(deadline=0.0)
 
@@ -717,7 +798,7 @@ async def test_a_tick_holding_nothing_asks_the_database_nothing() -> None:
     clock = FakeClock()
     db, bus = FakeOwnershipDB(clock), FakeBus()
     registry = _counting_registry(db, bus, "a")
-    store: FakeStore = registry._ownership._store  # type: ignore[assignment]
+    store = cast(FakeStore, registry._ownership._store)
     store.asked.clear()
 
     await registry._tick()
@@ -743,7 +824,7 @@ async def test_a_failed_hold_releases_nothing() -> None:
     first, second = _counting_registry(db, bus, "a"), _counting_registry(db, bus, "b")
 
     await first.hold("device", "abc")
-    store: FakeStore = second._ownership._store  # type: ignore[assignment]
+    store = cast(FakeStore, second._ownership._store)
     store.asked.clear()
     async with second.holding("device", "abc") as lease:
         assert lease is None
@@ -753,7 +834,7 @@ async def test_a_failed_hold_releases_nothing() -> None:
 @pytest.mark.asyncio
 async def test_releasing_nothing_asks_the_database_nothing() -> None:
     own = _ownership(FakeOwnershipDB(FakeClock()), owner="a")
-    store: FakeStore = own._store  # type: ignore[assignment]
+    store = cast(FakeStore, own._store)
     store.asked.clear()
     assert await own.release_many([]) == 0
     assert store.asked == []
@@ -813,7 +894,7 @@ async def test_a_tick_with_no_expired_grace_issues_no_release() -> None:
     registry = _counting_registry(db, bus, "a")
     await registry.hold("device", "abc")
 
-    store: FakeStore = registry._ownership._store  # type: ignore[assignment]
+    store = cast(FakeStore, registry._ownership._store)
     store.asked.clear()
     await registry._tick()
 
@@ -834,3 +915,29 @@ async def test_a_successful_renewal_reports_no_loss() -> None:
 
     assert registry.lost == 0
     assert len(registry.held) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_failed_renewal_is_counted_without_stopping_the_service() -> None:
+    stopping = asyncio.Event()
+
+    class FailingRenewStatement:
+        async def fetch(self, owner: str) -> Any:
+            stopping.set()
+            raise RuntimeError("database unavailable")
+
+    class FailingRenewStore:
+        def statement(self, name: str) -> FailingRenewStatement:
+            assert name == "renew_all"
+            return FailingRenewStatement()
+
+    db, bus = FakeOwnershipDB(FakeClock()), FakeBus()
+    registry = _counting_registry(db, bus, "a")
+    await registry.hold("device", "abc")
+    cast(Any, registry._ownership)._store = FailingRenewStore()
+    registry._renew_every = 0.001
+
+    await registry._renew(stopping)
+
+    assert registry.renewal_errors == 1
+    assert registry.held

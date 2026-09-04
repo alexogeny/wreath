@@ -18,6 +18,7 @@
 typedef struct {
     PyObject_HEAD
     PyObject *buffer;
+    PyObject *http_object_cache;
     Py_ssize_t scan;
     Py_ssize_t max_header_bytes;
 } WreathHttpClientProtocol;
@@ -38,7 +39,8 @@ client_protocol_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     self->buffer = PyByteArray_FromStringAndSize(NULL, 0);
     self->scan = 0;
     self->max_header_bytes = limit;
-    if (self->buffer == NULL) {
+    self->http_object_cache = wreath_http_header_name_cache_new();
+    if (self->buffer == NULL || self->http_object_cache == NULL) {
         Py_DECREF(self);
         return NULL;
     }
@@ -50,6 +52,7 @@ client_protocol_dealloc(PyObject *op)
 {
     WreathHttpClientProtocol *self = (WreathHttpClientProtocol *)op;
     Py_XDECREF(self->buffer);
+    Py_XDECREF(self->http_object_cache);
     Py_TYPE(op)->tp_free(op);
 }
 
@@ -105,7 +108,7 @@ client_protocol_feed(WreathHttpClientProtocol *self, PyObject *chunk)
     }
     head = PyBytes_FromStringAndSize(data, end);
     if (head == NULL) return NULL;
-    parsed = wreath_http_parse_response(NULL, head);
+    parsed = wreath_http_parse_response_cached(head, self->http_object_cache);
     Py_DECREF(head);
     if (parsed == NULL) return NULL;
     memmove(data, data + end, size - end);
@@ -170,6 +173,7 @@ static PyType_Spec client_protocol_spec = {
 #define CS_READ_RESPONSE 4
 #define CS_SEP_MAX 16
 #define CS_OFFER_SIZE 65536
+#define CS_MAX_INFORMATIONAL_RESPONSES 16
 
 #define CS_RESPONSE_HEAD 0
 #define CS_RESPONSE_LENGTH 1
@@ -201,6 +205,7 @@ typedef struct {
     PyObject *drain_waiter;
     PyObject *closed_future;
     PyObject *offer_obj;        /* bytearray for the Python get_buffer path */
+    PyObject *http_object_cache;
     /* At most one pending read. */
     int pending_kind;
     char pending_sep[CS_SEP_MAX];
@@ -238,6 +243,7 @@ typedef struct {
     Py_ssize_t response_trailers;
     int response_minor;
     int response_status;
+    int response_informational;
     int response_reusable;
     int response_layout_fast;
     int response_direct_completion;
@@ -506,6 +512,7 @@ cs_clear_response(WreathClientStream *self)
     self->response_trailers = 0;
     self->response_minor = 0;
     self->response_status = 0;
+    self->response_informational = 0;
     self->response_phase = CS_RESPONSE_HEAD;
     self->response_framed = 0;
     self->response_total_enabled = 0;
@@ -654,7 +661,7 @@ cs_take_response(WreathClientStream *self, int *would_block)
             WreathHttpResponseHead parsed;
             int parsed_status = wreath_http_parse_response_parts(
                 (const uint8_t *)self->data + self->head, end,
-                self->response_method, &parsed);
+                self->response_method, &parsed, self->http_object_cache);
             if (parsed_status < 0) return NULL;
             if (parsed_status == 0) {
                 cs_raise_response(
@@ -675,6 +682,13 @@ cs_take_response(WreathClientStream *self, int *would_block)
             }
             if (parsed.status < 200) {
                 wreath_http_response_head_clear(&parsed);
+                if (++self->response_informational >
+                    CS_MAX_INFORMATIONAL_RESPONSES) {
+                    cs_raise_response(
+                        self->response_protocol_error,
+                        "too many informational responses");
+                    return NULL;
+                }
                 continue;
             }
             self->response_headers = parsed.headers;
@@ -898,6 +912,20 @@ cs_take_response(WreathClientStream *self, int *would_block)
             Py_XDECREF(body);
             return result;
         }
+        const char *trailer = self->data + self->head;
+        const char *colon = memchr(trailer, ':', (size_t)line_end);
+        if (colon != NULL) {
+            Py_ssize_t name_length = colon - trailer;
+            if (wreath_ascii_equal_ci_str(
+                    trailer, name_length, "content-length") ||
+                wreath_ascii_equal_ci_str(
+                    trailer, name_length, "transfer-encoding")) {
+                cs_raise_response(
+                    self->response_protocol_error,
+                    "response trailer contains a framing field");
+                return NULL;
+            }
+        }
         static const char synthetic_head[] = "HTTP/1.1 200 OK\r\n";
         Py_ssize_t synthetic_size =
             (Py_ssize_t)(sizeof(synthetic_head) - 1) + line_end + 4;
@@ -910,7 +938,8 @@ cs_take_response(WreathClientStream *self, int *would_block)
             memcpy(write + sizeof(synthetic_head) - 1 + line_end, "\r\n\r\n", 4);
         }
         PyObject *valid = synthetic != NULL
-            ? wreath_http_parse_response(NULL, synthetic) : NULL;
+            ? wreath_http_parse_response_cached(
+                synthetic, self->http_object_cache) : NULL;
         Py_XDECREF(synthetic);
         if (valid == NULL) return NULL;
         if (valid == Py_None) {
@@ -1270,6 +1299,7 @@ cs_start_response(WreathClientStream *self, PyObject *method,
     self->response_max_header = max_header;
     self->response_max_body = max_body;
     self->response_phase = CS_RESPONSE_HEAD;
+    self->response_informational = 0;
     self->response_timer_phase = -1;
     if (total_timeout != Py_None) {
         double total = PyFloat_AsDouble(total_timeout);
@@ -2218,6 +2248,68 @@ wreath_http_client_request_once(PyObject *self, PyObject *args)
         timeout_error, transport_error, Py_None, Py_None);
 }
 
+static int
+http_client_target_is_ambiguous(PyObject *target)
+{
+    int kind = PyUnicode_KIND(target);
+    void *data = PyUnicode_DATA(target);
+    Py_ssize_t length = PyUnicode_GET_LENGTH(target);
+    Py_ssize_t segment = 1;
+    Py_ssize_t path_end = length;
+    for (Py_ssize_t i = 1; i < length; i++) {
+        Py_UCS4 character = PyUnicode_READ(kind, data, i);
+        if (character == '?') {
+            path_end = i;
+            break;
+        }
+        if (character == '\\') return 1;
+        if (character == '%' && i + 2 < length) {
+            Py_UCS4 group = PyUnicode_READ(kind, data, i + 1);
+            Py_UCS4 escaped = PyUnicode_READ(kind, data, i + 2);
+            if ((group == '2' &&
+                 (escaped == 'e' || escaped == 'E' ||
+                  escaped == 'f' || escaped == 'F')) ||
+                (group == '5' && (escaped == 'c' || escaped == 'C'))) return 1;
+        }
+        if (character == '/') {
+            Py_ssize_t width = i - segment;
+            if ((width == 1 && PyUnicode_READ(kind, data, segment) == '.') ||
+                (width == 2 && PyUnicode_READ(kind, data, segment) == '.' &&
+                 PyUnicode_READ(kind, data, segment + 1) == '.')) return 1;
+            segment = i + 1;
+        }
+    }
+    Py_ssize_t width = path_end - segment;
+    return (width == 1 && PyUnicode_READ(kind, data, segment) == '.') ||
+        (width == 2 && PyUnicode_READ(kind, data, segment) == '.' &&
+         PyUnicode_READ(kind, data, segment + 1) == '.');
+}
+
+static int
+http_client_request_line_exceeds_limit(
+    PyObject *client, PyObject *method, PyObject *target)
+{
+    PyObject *limits = FAST_SLOT(client, fast_client_off.limits);
+    Py_ssize_t limit = PyLong_AsSsize_t(
+        FAST_SLOT(limits, fast_limit_off.max_request_header_bytes));
+    if (limit == -1 && PyErr_Occurred()) return -1;
+    PyObject *base = FAST_SLOT(client, fast_client_off.base_path);
+    Py_ssize_t method_length = PyUnicode_GET_LENGTH(method);
+    Py_ssize_t base_length = PyUnicode_GET_LENGTH(base);
+    Py_ssize_t target_length = PyUnicode_GET_LENGTH(target);
+    return method_length > limit || base_length > limit - method_length ||
+        target_length > limit - method_length - base_length;
+}
+
+static PyObject *
+http_client_raise_request_limit(PyObject *client_error)
+{
+    PyObject *error = PyObject_CallFunction(
+        client_error, "s", "request headers exceed configured limit");
+    if (error != NULL) PyErr_SetRaisedException(error);
+    return NULL;
+}
+
 PyObject *
 wreath_http_client_request_default(PyObject *self, PyObject *args)
 {
@@ -2260,6 +2352,16 @@ wreath_http_client_request_default(PyObject *self, PyObject *args)
     int prepared = headers != Py_GetConstantBorrowed(Py_CONSTANT_EMPTY_TUPLE) ||
         body != Py_GetConstantBorrowed(Py_CONSTANT_EMPTY_BYTES);
     if (prepared) {
+        int oversized = http_client_request_line_exceeds_limit(
+            client, method, target);
+        if (oversized < 0) return NULL;
+        if (oversized) return http_client_raise_request_limit(client_error);
+        if (http_client_target_is_ambiguous(target)) {
+            PyErr_SetString(PyExc_ValueError,
+                            "request target contains an encoded separator, "
+                            "dot segment, or backslash separator");
+            return NULL;
+        }
         method_upper = PyObject_CallMethodNoArgs(method, client_str_upper);
         if (method_upper == NULL) return NULL;
         PyObject *base = FAST_SLOT(client, fast_client_off.base_path);
@@ -2332,6 +2434,23 @@ wreath_http_client_request_default(PyObject *self, PyObject *args)
         Py_DECREF(key);
         return NULL;
     } else if (key != NULL) {
+        int oversized = http_client_request_line_exceeds_limit(
+            client, method, target);
+        if (oversized < 0) {
+            Py_DECREF(key);
+            return NULL;
+        }
+        if (oversized) {
+            Py_DECREF(key);
+            return http_client_raise_request_limit(client_error);
+        }
+        if (http_client_target_is_ambiguous(target)) {
+            Py_DECREF(key);
+            PyErr_SetString(PyExc_ValueError,
+                            "request target contains an encoded separator, "
+                            "dot segment, or backslash separator");
+            return NULL;
+        }
         method_upper = PyObject_CallMethodNoArgs(method, client_str_upper);
         if (method_upper == NULL) {
             Py_DECREF(key);
@@ -2828,8 +2947,10 @@ cs_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     self->response_version_11 = PyUnicode_FromString("1.1");
     self->response_timeout_callback = PyObject_GetAttrString(
         (PyObject *)self, "_response_timeout");
+    self->http_object_cache = wreath_http_header_name_cache_new();
     if (self->response_version_10 == NULL || self->response_version_11 == NULL ||
-        self->response_timeout_callback == NULL) {
+        self->response_timeout_callback == NULL ||
+        self->http_object_cache == NULL) {
         Py_DECREF(self);
         return NULL;
     }
@@ -2852,6 +2973,7 @@ cs_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(self->drain_waiter);
     Py_VISIT(self->closed_future);
     Py_VISIT(self->offer_obj);
+    Py_VISIT(self->http_object_cache);
     Py_VISIT(self->pending_future);
     Py_VISIT(self->response_method);
     Py_VISIT(self->response_type);
@@ -2885,6 +3007,7 @@ cs_clear(PyObject *op)
     Py_CLEAR(self->drain_waiter);
     Py_CLEAR(self->closed_future);
     Py_CLEAR(self->offer_obj);
+    Py_CLEAR(self->http_object_cache);
     Py_CLEAR(self->pending_future);
     cs_clear_response(self);
     Py_CLEAR(self->response_layout_type);

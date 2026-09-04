@@ -30,6 +30,9 @@ class _SelectedMCPTools:
         call_id: str,
         context: Any,
     ) -> dict[str, Any]:
+        from .core import _snapshot_json
+
+        metadata = _snapshot_json(context.metadata, label="agent tool metadata")
         result: ToolExecutionResult = await self._executor.invoke(
             name,
             arguments,
@@ -39,7 +42,7 @@ class _SelectedMCPTools:
             call_id=call_id,
             conversation=context.conversation,
             correlation_id=context.correlation_id,
-            metadata=context.metadata,
+            metadata=metadata,
         )
         normalized: dict[str, Any] = {
             "content": [dict(block) for block in result.content],
@@ -55,6 +58,8 @@ class MCPToolCatalog:
     __slots__ = ("_max_tools", "_mcp")
 
     def __init__(self, mcp: Any, *, max_tools: int = 32) -> None:
+        if type(max_tools) is not int:
+            raise TypeError("max_tools must be an integer")
         if max_tools < 1:
             raise ValueError("max_tools must be at least 1")
         self._mcp = mcp

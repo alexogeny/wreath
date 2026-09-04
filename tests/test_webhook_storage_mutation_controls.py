@@ -67,13 +67,34 @@ def _delivery() -> OutboxDelivery:
 
 
 def test_local_replay_store_refuses_nonpositive_capacity() -> None:
-    with pytest.raises(ValueError, match="bounds must be positive"):
+    with pytest.raises(ValueError, match="max_entries must be a positive integer"):
         LocalReplayStore(max_entries=0, ttl=1)
 
 
+@pytest.mark.parametrize("capacity", [True, 1.5, float("nan"), float("inf")])
+def test_local_replay_store_requires_an_integer_capacity(capacity: object) -> None:
+    with pytest.raises(ValueError, match="max_entries must be a positive integer"):
+        LocalReplayStore(max_entries=capacity, ttl=1)
+
+
 def test_local_replay_store_refuses_nonpositive_ttl() -> None:
-    with pytest.raises(ValueError, match="bounds must be positive"):
+    with pytest.raises(ValueError, match="ttl must be positive and finite"):
         LocalReplayStore(max_entries=1, ttl=0)
+
+
+@pytest.mark.parametrize("ttl", [True, "1"])
+def test_local_replay_store_requires_a_numeric_nonboolean_ttl(ttl: object) -> None:
+    with pytest.raises(ValueError, match="ttl must be positive and finite"):
+        LocalReplayStore(max_entries=1, ttl=ttl)
+
+
+def test_replay_store_security_bounds_are_immutable() -> None:
+    store = LocalReplayStore(max_entries=8, ttl=30)
+
+    with pytest.raises(AttributeError):
+        store.max_entries = 1
+    with pytest.raises(AttributeError):
+        store.ttl = 1
 
 
 @pytest.mark.asyncio
@@ -99,11 +120,39 @@ def test_retention_pass_preserves_an_explicit_duty_cycle() -> None:
     assert declaration.pace is pace
 
 
+def test_outbox_schema_indexes_recovery_and_the_full_retention_walk_key() -> None:
+    sql = PostgresWebhookOutbox().schema_sql()
+
+    assert "(lease_expires_at, created_at) WHERE state IN ('leased','sending')" in sql
+    assert "(retention_until, delivery_id) WHERE retention_until IS NOT NULL" in sql
+
+
+def test_webhook_storage_indexes_are_deployed_as_an_upgrade_step() -> None:
+    inbox = PostgresWebhookInbox().component()
+    outbox = PostgresWebhookOutbox().component()
+
+    assert inbox.target_version == 2
+    assert outbox.target_version == 2
+    assert "retention_walk_idx" in inbox.sql(from_version=1)
+    assert "recovery_idx" in outbox.sql(from_version=1)
+    assert "retention_walk_idx" in outbox.sql(from_version=1)
+    assert "CREATE TABLE" not in inbox.sql(from_version=1)
+    assert "CREATE TABLE" not in outbox.sql(from_version=1)
+
+
+@pytest.mark.parametrize("store", [PostgresWebhookInbox(), PostgresWebhookOutbox()])
+def test_postgres_webhook_security_configuration_is_immutable(store: object) -> None:
+    with pytest.raises(AttributeError):
+        store.table = "attacker_controlled_sql"
+    with pytest.raises(AttributeError):
+        store.retention_seconds = 1
+
+
 @pytest.mark.asyncio
 async def test_inbox_claim_refuses_nonpositive_lease_before_querying() -> None:
     session = _Session()
 
-    with pytest.raises(ValueError, match="lease_seconds must be positive"):
+    with pytest.raises(ValueError, match="lease configuration is invalid"):
         await PostgresWebhookInbox().claim(
             session,
             source="source",
@@ -166,10 +215,20 @@ async def test_inbox_purge_normalizes_an_absent_count_to_zero() -> None:
 async def test_outbox_purge_refuses_nonpositive_limit_before_querying() -> None:
     session = _Session()
 
-    with pytest.raises(ValueError, match="purge limit must be positive"):
+    with pytest.raises(ValueError, match="purge limit must be a positive integer"):
         await PostgresWebhookOutbox().purge(session, limit=0)
 
     assert session.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [True, 1.5, "1"])
+async def test_webhook_purges_require_an_integer_limit(limit: object) -> None:
+    for store in (PostgresWebhookInbox(), PostgresWebhookOutbox()):
+        session = _Session()
+        with pytest.raises(ValueError, match="purge limit must be a positive integer"):
+            await store.purge(session, limit=limit)
+        assert session.calls == []
 
 
 @pytest.mark.asyncio
@@ -183,10 +242,28 @@ async def test_outbox_purge_normalizes_an_absent_count_to_zero() -> None:
 async def test_outbox_claim_refuses_nonpositive_lease_before_querying() -> None:
     session = _Session()
 
-    with pytest.raises(ValueError, match="lease_seconds must be positive"):
+    with pytest.raises(ValueError, match="lease configuration is invalid"):
         await PostgresWebhookOutbox().claim_due(session, lease_owner="worker", lease_seconds=0)
 
     assert session.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("lease_owner", "lease_seconds"),
+    [("", 1), (1, 1), ("worker", True), ("worker", "1")],
+)
+async def test_storage_claims_refuse_malformed_lease_configuration(
+    lease_owner: object, lease_seconds: object
+) -> None:
+    for claim in (PostgresWebhookInbox().claim, PostgresWebhookOutbox().claim_due):
+        session = _Session()
+        options = {"lease_owner": lease_owner, "lease_seconds": lease_seconds}
+        if claim.__self__.__class__ is PostgresWebhookInbox:
+            options.update(source="source", envelope=_envelope())
+        with pytest.raises(ValueError, match="lease configuration is invalid"):
+            await claim(session, **options)
+        assert session.calls == []
 
 
 @pytest.mark.asyncio
@@ -200,11 +277,52 @@ async def test_outbox_renew_refuses_nonpositive_lease_before_querying() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("window", [True, "1"])
+async def test_outbox_transition_windows_require_numeric_nonboolean_values(
+    window: object,
+) -> None:
+    session = _Session()
+    with pytest.raises(ValueError, match="lease_seconds must be positive and finite"):
+        await PostgresWebhookOutbox().renew_lease(session, _delivery(), lease_seconds=window)
+    with pytest.raises(ValueError, match="retry delay must be non-negative and finite"):
+        await PostgresWebhookOutbox().mark_retry(
+            session,
+            _delivery(),
+            delay=window,
+            status=None,
+            failure=None,
+        )
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
 async def test_outbox_renew_refuses_a_stale_fencing_token() -> None:
     with pytest.raises(RuntimeError, match="stale webhook outbox fencing token"):
         await PostgresWebhookOutbox().renew_lease(
             _Session(values=[None]), _delivery(), lease_seconds=1
         )
+
+
+@pytest.mark.asyncio
+async def test_lease_transitions_refuse_ownership_after_expiry() -> None:
+    inbox_session = _Session(values=[1])
+    await PostgresWebhookInbox().complete(
+        inbox_session,
+        source="source",
+        message_id="evt",
+        fencing_token=2,
+        result_status=204,
+    )
+
+    outbox = PostgresWebhookOutbox()
+    transition_session = _Session(values=[1])
+    await outbox.mark_delivered(transition_session, _delivery(), status=204)
+    renewal_session = _Session(values=[1])
+    await outbox.renew_lease(renewal_session, _delivery(), lease_seconds=1)
+
+    assert "lease_expires_at >= clock_timestamp()" in inbox_session.calls[0][0]
+    assert "lease_expires_at >= clock_timestamp()" in transition_session.calls[0][0]
+    assert "lease_expires_at >= clock_timestamp()" in renewal_session.calls[0][0]
 
 
 @pytest.mark.asyncio

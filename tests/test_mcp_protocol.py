@@ -112,6 +112,10 @@ def test_parse_message_requires_json_rpc_2(payload: dict) -> None:
             "a request id must be a string or an integer",
         ),
         (
+            {"jsonrpc": "2.0", "id": True, "method": "ping"},
+            "a request id must be a string or an integer",
+        ),
+        (
             {"jsonrpc": "2.0", "id": 1, "method": 7},
             "a JSON-RPC method must be a string",
         ),
@@ -124,6 +128,97 @@ def test_parse_message_refuses_invalid_request_identity_and_method(
         parse_message(payload)
     assert caught.value.code == INVALID_REQUEST
     assert caught.value.message == message
+
+
+def test_parse_message_refuses_a_response_with_both_result_and_error() -> None:
+    with pytest.raises(JsonRpcError, match="either.*result.*error") as caught:
+        parse_message(
+            {
+                "jsonrpc": "2.0",
+                "id": "wreath-1",
+                "result": {"accepted": True},
+                "error": {"code": -32000, "message": "refused"},
+            }
+        )
+
+    assert caught.value.code == INVALID_REQUEST
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"jsonrpc": "2.0", "id": 1, "method": "ping", "result": {}},
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "ping",
+            "error": {"code": -32000, "message": "refused"},
+        },
+        {"jsonrpc": "2.0", "id": 1, "result": {}, "params": {}},
+        {"jsonrpc": "2.0", "id": 1, "result": {}, "method": None},
+    ),
+)
+def test_parse_message_refuses_mixed_request_and_response_members(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(JsonRpcError, match="request.*response|response.*request") as caught:
+        parse_message(payload)
+
+    assert caught.value.code == INVALID_REQUEST
+
+
+def test_parse_message_classifies_a_valid_error_response() -> None:
+    message = parse_message(
+        {
+            "jsonrpc": "2.0",
+            "id": "wreath-1",
+            "error": {"code": -32000, "message": "refused"},
+        }
+    )
+
+    assert message.is_response
+    assert message.error == {"code": -32000, "message": "refused"}
+
+
+def test_parse_message_classifies_a_valid_result_response() -> None:
+    message = parse_message(
+        {
+            "jsonrpc": "2.0",
+            "id": "wreath-1",
+            "result": {"accepted": True},
+        }
+    )
+
+    assert message.is_response
+    assert message.result == {"accepted": True}
+    assert message.error is None
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        {},
+        {"code": True, "message": "refused"},
+        {"code": "-32000", "message": "refused"},
+        {"code": -32000},
+        {"code": -32000, "message": 7},
+    ],
+)
+def test_parse_message_refuses_a_malformed_error_response(error: dict[str, object]) -> None:
+    with pytest.raises(JsonRpcError, match="JSON-RPC `error`"):
+        parse_message({"jsonrpc": "2.0", "id": 7, "error": error})
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"jsonrpc": "2.0", "id": "wreath-1", "error": None},
+        {"jsonrpc": "2.0", "id": "wreath-1"},
+    ),
+)
+def test_parse_message_refuses_an_incomplete_response(payload: dict[str, object]) -> None:
+    with pytest.raises(JsonRpcError):
+        parse_message(payload)
 
 
 async def test_initialize_negotiates_and_mints_a_session() -> None:

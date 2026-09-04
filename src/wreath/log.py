@@ -62,6 +62,7 @@ the log. Read-side consumers only.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final, NamedTuple
@@ -205,12 +206,16 @@ class Flush:
     capacity: int = 4096
 
     def __post_init__(self) -> None:
-        if self.bytes <= 0:
-            raise ValueError("Flush(bytes=...) must be positive")
-        if self.every <= 0:
-            raise ValueError("Flush(every=...) must be a positive number of seconds")
-        if self.capacity <= 0:
-            raise ValueError("Flush(capacity=...) must be positive")
+        if type(self.bytes) is not int or self.bytes <= 0:
+            raise ValueError("Flush(bytes=...) must be positive; expected a positive integer")
+        if (
+            type(self.every) not in (int, float)
+            or not math.isfinite(self.every)
+            or self.every <= 0
+        ):
+            raise ValueError("Flush(every=...) must be a finite positive number of seconds")
+        if type(self.capacity) is not int or self.capacity <= 0:
+            raise ValueError("Flush(capacity=...) must be positive; expected a positive integer")
 
 
 @dataclass(frozen=True, slots=True)

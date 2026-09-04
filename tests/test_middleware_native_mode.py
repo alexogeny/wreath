@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import time
 from typing import Any
 
 import pytest
@@ -103,6 +104,58 @@ async def test_preflight_is_answered_without_materializing_a_request() -> None:
 
 
 @pytest.mark.asyncio
+async def test_native_preflight_refuses_an_unlisted_requested_header() -> None:
+    app = Wreath(
+        http_policy=HttpPolicy(
+            cors=CorsPolicy(
+                allow_origins=["https://app.test"], allow_headers=["x-token"]
+            )
+        )
+    )
+    app._compile_routes()
+
+    response = await serve(
+        app,
+        b"OPTIONS /x HTTP/1.1\r\n"
+        b"host: allowed.test\r\n"
+        b"origin: https://app.test\r\n"
+        b"access-control-request-method: GET\r\n"
+        b"access-control-request-headers: x-other\r\n\r\n",
+    )
+
+    assert response.startswith(b"HTTP/1.1 403 Forbidden\r\n")
+    assert b"access-control-allow-origin:" not in response
+
+
+@pytest.mark.asyncio
+async def test_native_egress_never_authorizes_duplicate_origins() -> None:
+    app = Wreath(
+        http_policy=HttpPolicy(
+            cors=CorsPolicy(
+                allow_origins=["https://app.test"], allow_credentials=True
+            )
+        )
+    )
+
+    @app.get("/x")
+    async def handler(request: Any) -> Response:
+        return Response(b"ok")
+
+    app._compile_routes()
+    response = await serve(
+        app,
+        b"GET /x HTTP/1.1\r\n"
+        b"host: allowed.test\r\n"
+        b"origin: https://app.test\r\n"
+        b"origin: https://evil.test\r\n\r\n",
+    )
+
+    assert response.startswith(b"HTTP/1.1 200 OK\r\n")
+    assert b"access-control-allow-origin:" not in response
+    assert b"access-control-allow-credentials:" not in response
+
+
+@pytest.mark.asyncio
 async def test_ingress_refusal_is_native_and_never_calls_the_handler() -> None:
     app, materialized = build()
     response = await serve(app, b"GET /x HTTP/1.1\r\nhost: evil.test\r\n\r\n")
@@ -133,6 +186,80 @@ async def test_native_csrf_treats_query_as_safe() -> None:
 
     assert response.startswith(b"HTTP/1.1 200 OK\r\n")
     assert reached is True
+
+
+@pytest.mark.parametrize(
+    ("duplicated", "status"),
+    [
+        (b"host: allowed.test\r\nhost: evil.test\r\n", b"400 Bad Request"),
+        (
+            b"origin: http://allowed.test\r\norigin: http://evil.test\r\n",
+            b"403 Forbidden",
+        ),
+        (
+            b"referer: http://allowed.test/form\r\nreferer: http://evil.test/form\r\n",
+            b"403 Forbidden",
+        ),
+        (
+            b"sec-fetch-site: same-origin\r\nsec-fetch-site: cross-site\r\n",
+            b"403 Forbidden",
+        ),
+        (
+            b"x-csrf-token: {token}\r\nx-csrf-token: invalid\r\n",
+            b"403 Forbidden",
+        ),
+        (
+            b"cookie: wreath_csrf={token}; wreath_csrf=invalid\r\n",
+            b"403 Forbidden",
+        ),
+        (
+            b"cookie: wreath_csrf={token}\r\ncookie: wreath_csrf=invalid\r\n",
+            b"403 Forbidden",
+        ),
+    ],
+    ids=["host", "origin", "referer", "fetch-site", "token", "cookie", "cookie-lines"],
+)
+@pytest.mark.asyncio
+async def test_native_csrf_refuses_duplicate_security_headers(
+    duplicated: bytes,
+    status: bytes,
+) -> None:
+    reached = False
+    policy = CsrfPolicy("s" * 32, trusted_hosts=("allowed.test",))
+    token = policy._new_token(int(time.time()))
+    app = Wreath(http_policy=HttpPolicy(csrf=policy))
+
+    @app.post("/")
+    async def submit(request: Any) -> Response:
+        nonlocal reached
+        reached = True
+        return Response(b"ok")
+
+    app._compile_routes()
+    security_headers = duplicated.replace(b"{token}", token.encode("ascii"))
+    response = await serve(
+        app,
+        b"POST / HTTP/1.1\r\n"
+        + security_headers
+        + (b"host: allowed.test\r\n" if not duplicated.startswith(b"host:") else b"")
+        + (
+            b"cookie: wreath_csrf=" + token.encode("ascii") + b"\r\n"
+            if not duplicated.startswith(b"cookie:")
+            else b""
+        )
+        + (
+            b"origin: http://allowed.test\r\n"
+            if not duplicated.startswith((b"origin:", b"referer:", b"sec-fetch-site:"))
+            else b""
+        )
+        + b"x-csrf-token: "
+        + token.encode("ascii")
+        + (b"\r\n" if not duplicated.startswith(b"x-csrf-token:") else b"")
+        + b"content-length: 0\r\n\r\n",
+    )
+
+    assert response.startswith(b"HTTP/1.1 " + status + b"\r\n")
+    assert reached is False
 
 
 @pytest.mark.asyncio

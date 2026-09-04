@@ -103,6 +103,34 @@ _FENCE = f"{ALIAS}.fence"
 _EXPIRES = f"{ALIAS}.expires"
 
 
+def _duration_seconds(
+    value: Any,
+    label: str,
+    *,
+    allow_zero: bool = False,
+    describe_finite: bool = True,
+) -> float:
+    qualifier = "finite and " if describe_finite else ""
+    message = f"{label} must be {qualifier}{'non-negative' if allow_zero else 'positive'}"
+    try:
+        result = Duration.of(value).total_seconds()
+    except (OverflowError, TypeError, ValueError) as error:
+        raise ValueError(message) from error
+    if result < 0 or (result == 0 and not allow_zero):
+        raise ValueError(message)
+    return result
+
+
+def _entity_key(kind: str, name: str) -> str:
+    if not isinstance(kind, str) or not kind or ":" in kind:
+        raise ValueError(
+            f"entity kind {kind!r} must be a non-empty string without ':'"
+        )
+    if not isinstance(name, str) or not name:
+        raise ValueError("entity name must be a non-empty string")
+    return f"{kind}:{name}"
+
+
 class NotHeld(Exception):
     """A name was addressed and no live holder answered.
 
@@ -154,9 +182,7 @@ class Ownership:
         lease: Any = DEFAULT_LEASE,
         owner: str | None = None,
     ) -> None:
-        self._lease = Duration.of(lease).total_seconds()
-        if self._lease <= 0:
-            raise ValueError("a lease must be positive")
+        self._lease = _duration_seconds(lease, "a lease", describe_finite=False)
         #: This process's identity. Generated rather than derived from a host
         #: name or pid, both of which repeat across containers and restarts.
         self._owner = owner or uuid.uuid4().hex
@@ -350,6 +376,7 @@ class EntityRegistry:
         "_ownership",
         "_pending",
         "_renew_every",
+        "_renewal_errors",
         "_renewals",
         "_unrouted",
         "_woken",
@@ -379,6 +406,7 @@ class EntityRegistry:
         self._held: dict[str, float | None] = {}
         self._on_lost = on_lost
         self._lost = 0
+        self._renewal_errors = 0
         self._renewals = 0
         self._woken: asyncio.Event | None = None
         self._bus = bus
@@ -434,6 +462,8 @@ class EntityRegistry:
         sessions without either handler seeing the other's questions.
         """
 
+        _entity_key(kind, "name")
+
         def register(handler: Answer) -> Answer:
             if kind in self._answers:
                 raise ValueError(f"{kind!r} already has an answer on this registry")
@@ -449,7 +479,7 @@ class EntityRegistry:
         writes a keep-alive loop of its own -- which is the loop every
         application with a lease grows, once per name, at one round trip each.
         """
-        key = f"{kind}:{name}"
+        key = _entity_key(kind, name)
         lease = await self._ownership.hold(key)
         if lease is not None:
             self._held[key] = None
@@ -457,7 +487,7 @@ class EntityRegistry:
 
     async def release(self, kind: str, name: str) -> bool:
         """Give up `kind:name` now, and stop renewing it."""
-        key = f"{kind}:{name}"
+        key = _entity_key(kind, name)
         self._held.pop(key, None)
         return await self._ownership.release(key)
 
@@ -485,15 +515,16 @@ class EntityRegistry:
         bumps for something that never actually moved. The deferral is applied
         by the renewal tick, not by a timer per name.
         """
+        seconds_of_grace = _duration_seconds(grace, "grace", allow_zero=True)
         lease = await self.hold(kind, name)
         try:
             yield lease
         finally:
             if lease is not None:
-                await self._let_go(f"{kind}:{name}", grace)
+                await self._let_go(_entity_key(kind, name), seconds_of_grace)
 
     async def _let_go(self, key: str, grace: Any) -> None:
-        seconds_of_grace = Duration.of(grace).total_seconds()
+        seconds_of_grace = _duration_seconds(grace, "grace", allow_zero=True)
         if seconds_of_grace <= 0:
             self._held.pop(key, None)
             await self._ownership.release(key)
@@ -521,7 +552,8 @@ class EntityRegistry:
         a caller waiting the full timeout for that is a bad diagnosis. Raises
         `Unanswered` when a holder existed and did not reply in time.
         """
-        key = f"{kind}:{name}"
+        seconds_of_timeout = _duration_seconds(timeout, "timeout")
+        key = _entity_key(kind, name)
         if await self._ownership.holder(key) is None:
             self._unrouted += 1
             raise NotHeld(f"no live holder for {key!r}")
@@ -538,7 +570,7 @@ class EntityRegistry:
                 },
             )
             try:
-                async with asyncio.timeout(Duration.of(timeout).total_seconds()):
+                async with asyncio.timeout(seconds_of_timeout):
                     return await waiter
             except TimeoutError as error:
                 raise Unanswered(f"{key!r} did not answer within the deadline") from error
@@ -591,6 +623,11 @@ class EntityRegistry:
         """Completed renewal ticks. Flat means the loop has stopped."""
         return self._renewals
 
+    @property
+    def renewal_errors(self) -> int:
+        """Renewal attempts that failed before completing a tick."""
+        return self._renewal_errors
+
     def counters(self) -> Any:
         """This registry's counters, for `wreath.metrics.collect`.
 
@@ -605,6 +642,7 @@ class EntityRegistry:
             values={
                 "held": len(self._held),
                 "lost": self._lost,
+                "renewal_errors": self._renewal_errors,
                 "renewals": self._renewals,
                 "refusals": self.refusals,
                 "unrouted": self._unrouted,
@@ -650,7 +688,7 @@ class EntityRegistry:
                 # A renewal that failed is survivable: the lease still has two
                 # thirds of its life left, and the next tick will try again. A
                 # raise here would take down the supervisor for a transient.
-                self._lost += 0
+                self._renewal_errors += 1
             if woken is not None and woken.is_set():
                 return
 
@@ -688,6 +726,12 @@ class EntityRegistry:
         kind = payload.get("kind")
         name = payload.get("name")
         if not isinstance(key, str) or not isinstance(kind, str) or not isinstance(name, str):
+            return
+        try:
+            expected_key = _entity_key(kind, name)
+        except ValueError:
+            return
+        if key != expected_key:
             return
         handler = self._answers.get(kind)
         if handler is None:

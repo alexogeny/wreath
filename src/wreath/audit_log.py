@@ -54,9 +54,10 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Final
 
+from ._pgname import validate_identifier, validate_unquoted_identifier
 from .log import KEEP_FOREVER, Column, Cursor, Log, PostgresLog
 from .orm.table import Facet
 
@@ -166,6 +167,15 @@ class Change:
     operation: str
     actor: str
     fields: Mapping[str, Any]
+    key_parts: tuple[Any, ...] | None = None
+    _fields_json: str = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "_fields_json",
+            json.dumps(self.fields, default=_stringify, sort_keys=True),
+        )
 
     @property
     def subject(self) -> str:
@@ -175,7 +185,23 @@ class Change:
         ever happened to this row" a range scan, and it is also the unit an
         erasure request names.
         """
-        return f"{self.table}:{self.key}"
+        return _subject(self.table, self.key_parts or self.key)
+
+
+def _frame(value: str) -> str:
+    return f"{len(value.encode('utf-8'))}:{value}"
+
+
+def _row_key(key: str | tuple[Any, ...]) -> str:
+    parts = key if isinstance(key, tuple) else (key,)
+    return "".join(_frame(str(part)) for part in parts)
+
+
+def _subject(table: str, key: str | tuple[Any, ...]) -> str:
+    if not isinstance(key, tuple) or len(key) == 1:
+        value = key[0] if isinstance(key, tuple) else key
+        return f"{table}:{value}"
+    return f"composite:{_frame(table)}{_row_key(key)}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +262,9 @@ def append_only_statements(table: str, *, schema: str = "wreath") -> tuple[str, 
     Emitted through `wreath.migrations` rather than executed here, because it is
     schema and schema belongs in the migration history with the rest of it.
     """
+    validate_unquoted_identifier(table, "audit table")
+    if schema:
+        validate_identifier(schema, "audit schema")
     qualified = f'"{schema}".{table}' if schema else table
     guard = f"{table}_append_only"
     # The function body is one line on purpose. A dollar-quoted body containing
@@ -369,11 +398,13 @@ class AuditTrail:
         self._recorded += written
         return written
 
-    async def history(self, table: str, key: str, *, after: Cursor | None = None) -> Any:
+    async def history(
+        self, table: str, key: str | tuple[Any, ...], *, after: Cursor | None = None
+    ) -> Any:
         """Everything that ever happened to one row, oldest first."""
-        return await self._log.read(f"{table}:{key}", after=after or Cursor.start())
+        return await self._log.read(_subject(table, key), after=after or Cursor.start())
 
-    async def forget(self, table: str, key: str) -> str:
+    async def forget(self, table: str, key: str | tuple[Any, ...]) -> str:
         """Drop one subject's records outright.
 
         The erasure path, and deliberately the only one: retention is
@@ -391,7 +422,7 @@ class AuditTrail:
             await connection.execute("BEGIN")
             try:
                 await connection.execute(f"SET LOCAL {ERASURE_SETTING} = 'on'")
-                status = await self._log.drop_stream(f"{table}:{key}", connection=connection)
+                status = await self._log.drop_stream(_subject(table, key), connection=connection)
                 await connection.execute("COMMIT")
                 return status
             except BaseException:
@@ -410,7 +441,7 @@ def _row(change: Change) -> dict[str, Any]:
         "actor": change.actor,
         "op": change.operation,
         "row_key": change.key,
-        "fields": json.dumps(change.fields, default=_stringify, sort_keys=True),
+        "fields": change._fields_json,
     }
 
 

@@ -517,7 +517,7 @@ class RecordBatch(list[object]):
 @dataclass(frozen=True, slots=True)
 class _ConnectInfo:
     user: str
-    password: str | None
+    password: str | None = dataclass_field(repr=False)
     database: str
     host: str
     port: int | str
@@ -1843,6 +1843,8 @@ class Connection:
         """
         if method not in ("execute", "fetch", "fetchrow", "fetchval"):
             raise ValueError(f"unsupported map method: {method!r}")
+        if type(max_in_flight) is not int:
+            raise ValueError("max_in_flight must be a positive integer")
         if max_in_flight < 1:
             raise ValueError("max_in_flight must be >= 1")
         sql = getattr(statement, "sql", statement)

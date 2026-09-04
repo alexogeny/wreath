@@ -469,3 +469,45 @@ async def test_precision_resolution_returns_the_first_permitted_rung():
 
     assert await resolve_precision(Request(), authorizer, ladder, "Site::*") == 1_000.0
     assert authorizer.actions == ["exact", "coarse"]
+
+
+@pytest.mark.asyncio
+async def test_precision_resolution_requires_an_exact_boolean_permit():
+    class Request:
+        state = State()
+
+    class Authorizer:
+        async def authorize(self, request, requirement):
+            return type("Decision", (), {"allowed": "false"})()
+
+    result = await resolve_precision(
+        Request(), Authorizer(), PrecisionLadder(("exact", None)), "Site::*"
+    )
+
+    assert result is not None
+    assert not result
+
+
+@pytest.mark.asyncio
+async def test_precision_cache_cannot_alias_distinct_resources_with_the_same_repr():
+    class Request:
+        state = State()
+
+    class Resource:
+        def __repr__(self) -> str:
+            return "shared"
+
+    first = Resource()
+    second = Resource()
+
+    class Authorizer:
+        async def authorize(self, request, requirement):
+            return type("Decision", (), {"allowed": requirement.resource is first})()
+
+    request = Request()
+    ladder = PrecisionLadder(("exact", None))
+
+    assert await resolve_precision(request, Authorizer(), ladder, first) is None
+    denied = await resolve_precision(request, Authorizer(), ladder, second)
+    assert denied is not None
+    assert not denied

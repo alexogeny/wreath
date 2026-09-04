@@ -64,6 +64,7 @@ class Supervisor:
 
     __slots__ = (
         "_services",
+        "_starting",
         "_tasks",
         "_stopping",
         "_started",
@@ -72,9 +73,15 @@ class Supervisor:
     )
 
     def __init__(self, *, drain_timeout: float = 10.0) -> None:
-        if not isfinite(drain_timeout):
-            raise ValueError("service drain_timeout must be finite")
+        if (
+            isinstance(drain_timeout, bool)
+            or not isinstance(drain_timeout, (int, float))
+            or not isfinite(drain_timeout)
+            or drain_timeout <= 0
+        ):
+            raise ValueError("service drain_timeout must be a positive finite number")
         self._services: list[Service] = []
+        self._starting = False
         self._tasks: set[asyncio.Task[Any]] = set()
         self._stopping = asyncio.Event()
         self._started = False
@@ -124,6 +131,8 @@ class Supervisor:
         Returns:
             The task, for a caller that wants to await or cancel it itself.
         """
+        if (not self._starting and not self._started) or self._stopping.is_set():
+            raise RuntimeError("a supervisor owns tasks only while it is running")
         task = asyncio.ensure_future(coro)
         task.set_name(name)
         self._tasks.add(task)
@@ -144,7 +153,10 @@ class Supervisor:
         """
         if self._started:
             return
+        if self._starting:
+            raise RuntimeError("the supervisor is already starting")
         self._stopping.clear()
+        self._starting = True
         started: list[Service] = []
         try:
             for service in self._services:
@@ -158,12 +170,14 @@ class Supervisor:
             # swallowed; the original propagates once cleanup is done.
             # Roll back a partial start the same way we shut down: signal, drain
             # what came up, then cancel everything.
+            self._starting = False
             self._stopping.set()
             deadline = asyncio.get_running_loop().time() + self.drain_timeout
             for service in reversed(started):
                 await self._drain_quietly(service, deadline)
             await self._cancel_all()
             raise
+        self._starting = False
         self._started = True
 
     async def stop(self) -> None:

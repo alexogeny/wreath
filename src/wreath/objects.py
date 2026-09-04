@@ -49,6 +49,7 @@ import errno
 import fnmatch
 import hashlib
 import hmac
+import html
 import json as _json
 import mimetypes
 import os
@@ -60,8 +61,9 @@ from collections.abc import AsyncIterable, AsyncIterator, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
+from urllib.parse import quote
 
-from ._auth.models import qualified_identity_value
+from ._auth.models import qualified_identity_key
 from ._native import _core
 
 if TYPE_CHECKING:
@@ -104,6 +106,7 @@ _CHUNK = 1 << 16
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_MAX_RANGE_OFFSET = (1 << 63) - 1
 
 __all__ = [
     "ObjectError",
@@ -195,7 +198,8 @@ def normalize_key(key: str) -> str:
 
     Refused, each as an `ObjectError`: a key that is not a string, an empty key,
     an absolute key, a key containing a `..` segment, one containing a C0
-    control character or `DEL`, and one that collapses to nothing (`"."`).
+    control character or `DEL`, one that is not valid UTF-8 or exceeds S3's
+    1024-byte key limit, and one that collapses to nothing (`"."`).
     A non-string says so and names the type it got: `None` arriving here is
     almost always a field that was never populated, and reporting it as an
     empty key sends the reader looking for the wrong bug.
@@ -219,6 +223,12 @@ def normalize_key(key: str) -> str:
         raise ObjectError("empty object key")
     if key.startswith("/"):
         raise ObjectError(f"absolute object key not allowed: {key!r}")
+    try:
+        encoded_key = key.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ObjectError("object key must be valid UTF-8 without surrogate code points") from None
+    if len(encoded_key) > 1024:
+        raise ObjectError("object key must contain at most 1024 UTF-8 bytes")
     parts = []
     for part in key.replace("\\", "/").split("/"):
         if part in ("", "."):
@@ -231,6 +241,37 @@ def normalize_key(key: str) -> str:
     if not parts:
         raise ObjectError(f"object key resolves to nothing: {key!r}")
     return "/".join(parts)
+
+
+def _checked_range(value: tuple[int, int] | None) -> tuple[int, int] | None:
+    if value is None:
+        return None
+    if type(value) is not tuple or len(value) != 2:
+        raise ObjectError(
+            "range must be two integers with 0 <= start <= end <= 9223372036854775807"
+        )
+    start, end = value
+    if (
+        type(start) is not int
+        or type(end) is not int
+        or not 0 <= start <= end <= _MAX_RANGE_OFFSET
+    ):
+        raise ObjectError(
+            "range must be two integers with 0 <= start <= end <= 9223372036854775807"
+        )
+    return value
+
+
+def _checked_listing_value(name: str, value: str) -> str:
+    if not isinstance(value, str):
+        raise ObjectError(f"{name} must be a string, not {type(value).__name__}")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ObjectError(f"{name} must be valid UTF-8 without surrogate code points") from None
+    if len(encoded) > 1024:
+        raise ObjectError(f"{name} must contain at most 1024 UTF-8 bytes")
+    return value
 
 
 def _local_key(key: str) -> str:
@@ -634,6 +675,12 @@ def _sign_local(secret: bytes, method: str, key: str, deadline: int) -> str:
     return hmac.new(secret, msg, hashlib.sha256).hexdigest()
 
 
+def _checked_lifetime(expires: int) -> int:
+    if type(expires) is not int or expires <= 0:
+        raise ValueError("expires must be a positive integer")
+    return expires
+
+
 def _verify_local(secret: bytes, key: str, *, method: str, expires: int, signature: str) -> bool:
     """Whether `signature` is authentic for `key` and the deadline has not passed."""
     # `isascii()` before the compare, and it is load-bearing rather than belt
@@ -642,10 +689,16 @@ def _verify_local(secret: bytes, key: str, *, method: str, expires: int, signatu
     # without this a `?signature=é` answers 500 instead of 403 -- unauthenticated
     # input turning a refusal into an error. `_secondfactor.py`'s TOTP guard
     # exists for the same hazard and names the same consequence.
-    if not signature.isascii():
+    if (
+        not isinstance(method, str)
+        or type(expires) is not int
+        or not isinstance(signature, str)
+        or len(signature) != 64
+        or not signature.isascii()
+    ):
         return False
     expected = _sign_local(secret, method, normalize_key(key), expires)
-    return hmac.compare_digest(expected, signature) and _now() <= expires
+    return hmac.compare_digest(expected, signature) and _now() < expires
 
 
 class MemoryObjectStore:
@@ -693,6 +746,7 @@ class MemoryObjectStore:
             key: the object to read.
             range: an inclusive `(first, last)` byte range, clamped by plain slicing.
         """
+        range = _checked_range(range)
         data = await self.read(key)
         if range is not None:
             start, end = range
@@ -768,6 +822,7 @@ class MemoryObjectStore:
         `"reports/q3.csv"`) exactly as an S3 prefix does. `delimiter` is
         accepted for protocol compatibility and ignored.
         """
+        prefix = _checked_listing_value("prefix", prefix)
         for key in sorted(self._objects):
             if key.startswith(prefix):
                 data, ct = self._objects[key]
@@ -782,7 +837,7 @@ class MemoryObjectStore:
         if stored is None:
             return None
         data, _content_type = stored
-        return data, _etag(data)
+        return data, _version_etag(data)
 
     async def _upload_compare_and_swap(
         self,
@@ -794,7 +849,7 @@ class MemoryObjectStore:
     ) -> ObjectStat | None:
         key = normalize_key(key)
         current = self._objects.get(key)
-        current_etag = None if current is None else _etag(current[0])
+        current_etag = None if current is None else _version_etag(current[0])
         if current_etag != expected_etag:
             return None
         stored = bytes(data)
@@ -804,7 +859,7 @@ class MemoryObjectStore:
     async def _upload_delete_versioned(self, key: str, *, expected_etag: str) -> bool:
         key = normalize_key(key)
         current = self._objects.get(key)
-        if current is None or _etag(current[0]) != expected_etag:
+        if current is None or _version_etag(current[0]) != expected_etag:
             return False
         del self._objects[key]
         return True
@@ -828,9 +883,9 @@ class MemoryObjectStore:
             method: the method authorised. Case-insensitive, and part of the signature.
         """
         key = normalize_key(key)
-        deadline = int(_now()) + expires
+        deadline = int(_now()) + _checked_lifetime(expires)
         sig = _sign_local(self._secret, method, key, deadline)
-        return f"memory:///{key}?expires={deadline}&signature={sig}"
+        return f"memory:///{quote(key, safe='/')}?expires={deadline}&signature={sig}"
 
     def verify_local_url(self, key: str, *, method: str, expires: int, signature: str) -> bool:
         """Whether a URL from `url` is authentic and still inside its deadline.
@@ -863,7 +918,11 @@ def _iter_chunks(data: bytes) -> Iterable[bytes]:
 
 
 def _etag(data: bytes) -> str:
-    return hashlib.md5(data).hexdigest()
+    return hashlib.md5(data, usedforsecurity=False).hexdigest()
+
+
+def _version_etag(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 def _tmp_name(name: str) -> str:
@@ -959,6 +1018,7 @@ class LocalObjectStore:
         Raises:
             ObjectError: when the object is absent, escapes the root, or crosses a symlink.
         """
+        range = _checked_range(range)
         key = _local_key(key)
         from ._fsguard import ContainmentError, open_beneath
 
@@ -968,6 +1028,9 @@ class LocalObjectStore:
             raise ObjectError(str(exc)) from exc
         except FileNotFoundError:
             raise ObjectError(f"no such object: {key!r}") from None
+        if not _stat.S_ISREG(st.st_mode):
+            os.close(fd)
+            raise ObjectError(f"object {key!r} is not a regular file")
         try:
             remaining = st.st_size
             if range is not None:
@@ -1134,7 +1197,7 @@ class LocalObjectStore:
             finally:
                 for fd in opened:
                     os.close(fd)
-            return None if raw is None else (raw, _etag(raw))
+            return None if raw is None else (raw, _version_etag(raw))
         except ObjectError:
             return None
         finally:
@@ -1165,7 +1228,7 @@ class LocalObjectStore:
             tmp = _tmp_name(name)
             try:
                 current = self._read_at(parent_fd, name)
-                current_etag = None if current is None else _etag(current)
+                current_etag = None if current is None else _version_etag(current)
                 if current_etag != expected_etag:
                     return None
                 fd = self._open_new(parent_fd, tmp)
@@ -1201,7 +1264,7 @@ class LocalObjectStore:
                 return False
             try:
                 current = self._read_at(parent_fd, name)
-                if current is None or _etag(current) != expected_etag:
+                if current is None or _version_etag(current) != expected_etag:
                     return False
                 os.unlink(name, dir_fd=parent_fd)
                 return True
@@ -1262,6 +1325,9 @@ class LocalObjectStore:
             raise ObjectError(str(exc)) from exc
         except FileNotFoundError:
             raise ObjectError(f"no such object: {key!r}") from None
+        if not _stat.S_ISREG(st.st_mode):
+            os.close(fd)
+            raise ObjectError(f"object {key!r} is not a regular file")
         os.close(fd)
         return ObjectStat(key, st.st_size, _fs_etag(st), st.st_mtime, mimetypes.guess_type(key)[0])
 
@@ -1306,6 +1372,7 @@ class LocalObjectStore:
         listed. A key that happens to collide with the pattern is invisible
         here, though `read` and `stat` still answer for it.
         """
+        prefix = _checked_listing_value("prefix", prefix)
         entries = await asyncio.to_thread(self._walk, prefix)
         for key in entries:
             if key.startswith(prefix):
@@ -1315,23 +1382,25 @@ class LocalObjectStore:
                     continue
 
     def _walk(self, prefix: str) -> _List[str]:
+        descriptor_root = f"/proc/self/fd/{self._root_fd}"
+        walk_root = descriptor_root if os.path.exists(descriptor_root) else self._root
         parent = prefix.rpartition("/")[0]
         if not parent:
             return [
                 key
-                for key in _core.local_walk(self._root, os.scandir, os.path.join)
+                for key in _core.local_walk(walk_root, os.scandir, os.path.join)
                 if key != ".wreath-upload-locks" and not key.startswith(".wreath-upload-locks/")
             ]
         try:
             if normalize_key(parent) != parent:
-                return _core.local_walk(self._root, os.scandir, os.path.join)
+                return _core.local_walk(walk_root, os.scandir, os.path.join)
             parent_fd, opened, _name = self._open_parent([*parent.split("/"), "listing"], False)
         except ObjectError, NotADirectoryError:
             return []
         descriptor_path = f"/proc/self/fd/{parent_fd}"
         try:
             if not os.path.exists(descriptor_path):
-                return _core.local_walk(self._root, os.scandir, os.path.join)
+                return _core.local_walk(walk_root, os.scandir, os.path.join)
             return [
                 f"{parent}/{key}"
                 for key in _core.local_walk(descriptor_path, os.scandir, os.path.join)
@@ -1405,9 +1474,9 @@ class LocalObjectStore:
             method: the method authorised. Case-insensitive, and part of the signature.
         """
         key = _local_key(key)
-        deadline = int(_now()) + expires
+        deadline = int(_now()) + _checked_lifetime(expires)
         sig = _sign_local(self._secret, method, key, deadline)
-        return f"/{key}?expires={deadline}&signature={sig}"
+        return f"/{quote(key, safe='/')}?expires={deadline}&signature={sig}"
 
     def verify_local_url(self, key: str, *, method: str, expires: int, signature: str) -> bool:
         """Whether a URL from `url` is authentic and still inside its deadline.
@@ -1677,6 +1746,33 @@ def _http_date(value: bytes | None) -> float | None:
         return None
 
 
+def _checked_s3_header_value(name: str, value: str | None) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string, not {type(value).__name__}")
+    if len(value) > 4096:
+        raise ValueError(f"{name} must contain at most 4096 characters")
+    if _CONTROL_CHARS.search(value):
+        raise ValueError(f"{name} must not contain control characters")
+
+
+def _checked_s3_authority(host: str) -> str:
+    if not isinstance(host, str):
+        raise TypeError(f"host must be a string, not {type(host).__name__}")
+    if (
+        not host
+        or len(host) > 1024
+        or any(character.isspace() or character in "/\\?#@" for character in host)
+    ):
+        raise ValueError("host must be an HTTP authority without userinfo, paths, or controls")
+    try:
+        host.encode("ascii")
+    except UnicodeEncodeError:
+        raise ValueError("host must be an HTTP authority encoded as ASCII") from None
+    return host
+
+
 class S3ObjectStore:
     """S3, and anything that speaks its REST API: MinIO, R2, Wasabi, Spaces.
 
@@ -1765,6 +1861,20 @@ class S3ObjectStore:
                 "url_secret; it is a LocalObjectStore/MemoryObjectStore setting. Drop it, "
                 "or the URLs this store mints will not be the ones you think you configured."
             )
+        if scheme not in ("http", "https"):
+            raise ValueError("scheme must be 'http' or 'https'")
+        if not isinstance(bucket, str) or not bucket or _CONTROL_CHARS.search(bucket):
+            raise ValueError("bucket must be a non-empty string without control characters")
+        if any(character in "/\\?#" for character in bucket):
+            raise ValueError("bucket must not contain URL path or query delimiters")
+        for name, value in (
+            ("access_key", access_key),
+            ("region", region),
+            ("service", service),
+            ("session_token", session_token),
+        ):
+            _checked_s3_header_value(name, value)
+        authority = _checked_s3_authority(host or f"{bucket}.s3.{region}.amazonaws.com")
         self._client = client
         self._bucket = bucket
         self._region = region
@@ -1774,7 +1884,7 @@ class S3ObjectStore:
         self._service = service
         self._scheme = scheme
         self._path_style = path_style
-        self._host = host or f"{bucket}.s3.{region}.amazonaws.com"
+        self._host = authority
         self._part_size = max(part_size, _MIN_PART)
         self._window = max(window, 1 << 16)
         #: Multipart uploads this store began, failed to finish, and then failed
@@ -1807,6 +1917,8 @@ class S3ObjectStore:
     ) -> Any:
         params = params or []
         extra = {name.lower(): value for name, value in (extra_headers or {}).items()}
+        for name, value in extra.items():
+            _checked_s3_header_value(name, value)
         if payload_hash is None:
             # `bytes()` on a `bytes` is the same object, so a caller that
             # already had one pays nothing; only a signed `bytearray` body is
@@ -1833,6 +1945,7 @@ class S3ObjectStore:
             payload_hash=payload_hash,
             headers=extra or None,
             session_token=self._token,
+            _prevalidated=True,
         )
         # `extra` goes on the wire as well as into the signature: a header S3
         # sees but the signature does not cover (or the reverse) is a 403 whose
@@ -1893,9 +2006,16 @@ class S3ObjectStore:
             key: the object to read.
             range: an inclusive `(first, last)` byte range. Windows are clipped to it.
 
+        A server may answer 200 only to the first unbounded read, when the
+        complete object fits inside one requested window. A 200 for an explicit
+        range, or after a previous window, means it ignored the range and is
+        refused before its body is yielded.
+
         Raises:
-            ObjectError: for any status but 200, 206 or 416.
+            ObjectError: for an invalid range, an oversized response window,
+                or a response status inconsistent with a ranged request.
         """
+        range = _checked_range(range)
         key = normalize_key(key)
         path = self._obj_path(key)
         start = range[0] if range else 0
@@ -1907,10 +2027,19 @@ class S3ObjectStore:
             resp = await self._ranged("GET", path, start, hi)
             if resp.status == 416:  # requested past end-of-object → done
                 break
+            if resp.status == 200 and (range is not None or start != 0):
+                raise ObjectError("S3 ignored the requested byte range")
             self._ok(resp, 200, 206)
             chunk = resp.body
+            requested = hi - start + 1
+            if len(chunk) > requested:
+                raise ObjectError(
+                    f"S3 returned {len(chunk)} bytes for a {requested}-byte range"
+                )
             if chunk:
                 yield chunk
+            if resp.status == 200:
+                break
             if not chunk or (end is None and len(chunk) <= hi - start):
                 break
             start += len(chunk)
@@ -1931,6 +2060,7 @@ class S3ObjectStore:
             payload_hash=_sigv4.EMPTY_SHA256,
             headers={"range": rng},
             session_token=self._token,
+            _prevalidated=True,
         )
         headers = {"host": self._host, "range": rng, **signed}
         wire = tuple(
@@ -2088,6 +2218,11 @@ class S3ObjectStore:
                     if upload_id is None:
                         upload_id = await self._initiate(path, content_type)
                     num += 1
+                    if num > _S3_MAX_PARTS:
+                        raise ObjectError(
+                            f"S3 multipart upload is limited to {_S3_MAX_PARTS} parts; "
+                            "raise the part size"
+                        )
                     # The slice is already a fresh `bytearray`; freezing it a
                     # second time copied a whole part for nothing, and neither
                     # `_put_part` nor the HTTP client under it retains a body.
@@ -2097,6 +2232,11 @@ class S3ObjectStore:
             if upload_id is None:  # small object → one PUT
                 return await self.write(key, buf, content_type=content_type)
             num += 1  # final (possibly < 5 MiB) part
+            if num > _S3_MAX_PARTS:
+                raise ObjectError(
+                    f"S3 multipart upload is limited to {_S3_MAX_PARTS} parts; "
+                    "raise the part size"
+                )
             parts.append((num, await self._put_part(path, upload_id, num, buf)))
             self._ok(await self._complete(path, upload_id, parts), 200)
         except BaseException:
@@ -2122,12 +2262,20 @@ class S3ObjectStore:
         )
         root = _parse_s3_xml(resp.body)
         pending = [root]
+        upload_id: str | None = None
         while pending:
             el = pending.pop()
             if el.local == "UploadId":
-                return el.text or ""
+                value = el.text or ""
+                if not value or upload_id is not None:
+                    raise ObjectError(
+                        "S3 multipart initiate requires exactly one non-empty UploadId"
+                    )
+                upload_id = value
             pending.extend(reversed(el.children))
-        raise ObjectError("S3 multipart: no UploadId in initiate response")
+        if upload_id is None:
+            raise ObjectError("S3 multipart initiate requires exactly one non-empty UploadId")
+        return upload_id
 
     async def _put_part(
         self, path: str, upload_id: str, num: int, data: bytes | bytearray | memoryview
@@ -2146,7 +2294,7 @@ class S3ObjectStore:
 
     async def _complete(self, path: str, upload_id: str, parts: _List[tuple[int, str]]) -> Any:
         body = "".join(
-            f"<Part><PartNumber>{number}</PartNumber><ETag>{etag}</ETag></Part>"
+            f"<Part><PartNumber>{number}</PartNumber><ETag>{html.escape(etag)}</ETag></Part>"
             for number, etag in parts
         )
         xml = (
@@ -2262,8 +2410,12 @@ class S3ObjectStore:
         Raises:
             ObjectError: for any status but 200, or for a key that is refused.
         """
+        prefix = _checked_listing_value("prefix", prefix)
+        if delimiter is not None:
+            delimiter = _checked_listing_value("delimiter", delimiter)
         token: str | None = None
         while True:
+            request_token = token
             params = [("list-type", "2")]
             if prefix:
                 params.append(("prefix", prefix))
@@ -2289,6 +2441,8 @@ class S3ObjectStore:
                     truncated = (el.text or "").strip().lower() == "true"
                 elif name == "NextContinuationToken":
                     token = el.text
+            if truncated and request_token is not None and token == request_token:
+                raise ObjectError("S3 list repeated continuation token without making progress")
             if not truncated or not token:
                 break
 
@@ -2315,8 +2469,9 @@ class S3ObjectStore:
         its own signing time in `X-Amz-Date` and AWS rejects it after
         `expires` seconds, so the client's clock is irrelevant.
 
-        AWS caps a SigV4 presign at seven days and rejects a longer one at use
-        time rather than here.
+        AWS caps a SigV4 presign at seven days. This method refuses zero,
+        negative, non-integer, and longer lifetimes before minting a URL S3
+        would reject later.
 
         Args:
             key: the object the URL grants access to.
@@ -3626,7 +3781,10 @@ class ResumableUploads:
         state = await self._uploads.read(request.path_params.get("upload_id", ""))
         if state is None:
             raise _Refused(404, "no such upload")
-        if state.principal != self._request_principal(request):
+        principal = self._request_principal(request)
+        if state.principal != principal and state.principal != self._legacy_request_principal(
+            request
+        ):
             raise _Refused(404, "no such upload")
         if state.tenant != self._request_tenant(request):
             raise _Refused(404, "no such upload")
@@ -3637,10 +3795,22 @@ class ResumableUploads:
         identity = request.identity
         if identity is None:
             return ""
-        identity_id = qualified_identity_value(
-            str(getattr(identity, "namespace", "")), str(identity.id)
+        return qualified_identity_key(
+            str(identity.type),
+            str(getattr(identity, "namespace", "")),
+            str(identity.id),
         )
-        return f"{identity.type}:{identity_id}"
+
+    @staticmethod
+    def _legacy_request_principal(request: Request) -> str | None:
+        identity = request.identity
+        if identity is None:
+            return ""
+        identity_type = str(identity.type)
+        identity_id = str(identity.id)
+        if getattr(identity, "namespace", "") or ":" in identity_type or ":" in identity_id:
+            return None
+        return f"{identity_type}:{identity_id}"
 
     @staticmethod
     def _request_tenant(request: Request) -> str:

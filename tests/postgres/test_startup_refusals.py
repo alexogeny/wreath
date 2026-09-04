@@ -20,6 +20,15 @@ class _Writer:
         return None
 
 
+def test_parsed_dsn_repr_does_not_expose_password() -> None:
+    password = "database-password-secret"
+    info = postgres._parse_dsn(
+        f"postgresql://wreath:{password}@127.0.0.1/wreath_test"
+    )
+
+    assert password not in repr(info)
+
+
 @pytest.mark.asyncio
 async def test_backend_key_data_must_carry_both_protocol_integers() -> None:
     reader = asyncio.StreamReader()

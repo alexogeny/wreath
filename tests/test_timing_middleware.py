@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import re
 from types import SimpleNamespace
 from typing import Any
@@ -86,6 +87,39 @@ def test_metric_name_cannot_inject_a_header() -> None:
     for bad in ("", "a b", "total;dur=0", "x" * 65, "a\nb", 'q"'):
         with pytest.raises(ValueError, match="metric must be"):
             ServerTimingPolicy(metric=bad)
+
+
+@pytest.mark.parametrize("metric", [None, b"total", 1, True])
+def test_metric_name_must_be_a_string(metric: object) -> None:
+    policy_factory: Any = ServerTimingPolicy
+    with pytest.raises(TypeError, match="metric must be a str"):
+        policy_factory(metric=metric)
+
+
+@pytest.mark.parametrize("emit_header", [None, 0, 1, "yes"])
+def test_emit_header_must_be_a_bool(emit_header: object) -> None:
+    policy_factory: Any = ServerTimingPolicy
+    with pytest.raises(TypeError, match="emit_header must be a bool"):
+        policy_factory(emit_header=emit_header)
+
+
+@pytest.mark.parametrize("finish", [9.0, float("nan"), float("inf")])
+def test_invalid_clock_delta_is_refused_before_header_emission(
+    monkeypatch: pytest.MonkeyPatch,
+    finish: float,
+) -> None:
+    timing = importlib.import_module("wreath.policy.timing")
+    ticks = iter((10.0, finish))
+    monkeypatch.setattr(timing.time, "perf_counter", lambda: next(ticks))
+    policy = ServerTimingPolicy()
+    request = Request({"type": "http", "headers": []}, None)
+    response = Response(b"ok")
+
+    policy._ingress_sync(request)
+    with pytest.raises(RuntimeError, match="performance clock returned"):
+        policy._egress_sync(request, response)
+
+    assert all(name != b"server-timing" for name, _value in response.headers)
 
 
 def test_elapsed_without_the_middleware_is_an_error() -> None:

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from fractions import Fraction
+from typing import Any, cast
 
 import pytest
 
 from wreath import Wreath
-from wreath.mcp import MCP, PROTOCOL_VERSION, MCPLimits
+from wreath.mcp import MCP, PROTOCOL_VERSION, MCPLimits, ToolRateLimit
 from wreath.testing import TestClient, TestResponse
 
 
@@ -638,9 +640,64 @@ def test_a_limit_that_is_not_a_limit_is_refused() -> None:
 
 @pytest.mark.parametrize(
     "field",
+    [
+        "max_tools",
+        "max_sessions",
+        "max_concurrent_calls",
+        "max_resources",
+        "max_prompts",
+        "max_subscriptions",
+        "max_pending_notifications",
+        "max_pending_requests",
+        "max_file_bytes",
+        "max_result_bytes",
+    ],
+)
+@pytest.mark.parametrize("value", [True, 1.5, float("nan"), float("inf")])
+def test_mcp_integer_limits_require_integers(field: str, value: object) -> None:
+    with pytest.raises(TypeError, match=rf"MCPLimits\.{field} must be an integer"):
+        MCPLimits(**{field: cast(Any, value)})
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["session_idle_seconds", "stream_keepalive_seconds", "client_request_seconds"],
+)
+@pytest.mark.parametrize("value", [True, Fraction(1, 2), "1"])
+def test_mcp_lifecycle_timeouts_require_plain_numbers(field: str, value: object) -> None:
+    with pytest.raises(TypeError, match=rf"MCPLimits\.{field} must be an int or float"):
+        MCPLimits(**{field: cast(Any, value)})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("limit", True),
+        ("limit", 1.5),
+        ("limit", float("nan")),
+        ("burst", True),
+        ("burst", 1.5),
+        ("burst", float("inf")),
+        ("window", True),
+        ("window", Fraction(1, 2)),
+    ],
+)
+def test_tool_rate_limits_require_plain_declared_types(field: str, value: object) -> None:
+    arguments: dict[str, Any] = {"limit": 1, "window": 60.0}
+    arguments[field] = value
+    with pytest.raises(TypeError, match=rf"ToolRateLimit\.{field}"):
+        ToolRateLimit(**arguments)
+
+
+def test_tool_rate_limit_accepts_an_integer_burst() -> None:
+    assert ToolRateLimit(5, 60.0, 1).capacity == 1.0
+
+
+@pytest.mark.parametrize(
+    "field",
     ["session_idle_seconds", "stream_keepalive_seconds", "client_request_seconds"],
 )
 @pytest.mark.parametrize("value", [float("nan"), float("inf")])
 def test_mcp_lifecycle_timeouts_must_be_finite(field: str, value: float) -> None:
     with pytest.raises(ValueError, match=field):
-        MCPLimits(**{field: value})
+        MCPLimits(**{field: cast(Any, value)})

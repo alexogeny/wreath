@@ -88,6 +88,12 @@ def test_bare_parameters_distinguish_false_and_refuse_unknown_types():
         _serialize_bare(1.5)
 
 
+@pytest.mark.parametrize("value", ["line\r\nbreak", "control\x01", "non-ascii-é"])
+def test_bare_string_serialization_refuses_non_structured_field_characters(value: str):
+    with pytest.raises(SignatureError, match="Structured Fields string"):
+        _serialize_bare(value)
+
+
 def test_base_accepts_read_only_mapping_parameters() -> None:
     components = (("@method", MappingProxyType({})),)
     params = MappingProxyType({"created": 1})

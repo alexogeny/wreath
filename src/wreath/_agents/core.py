@@ -6,6 +6,7 @@ import math
 import time
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -128,6 +129,15 @@ class ModelRequest:
             raise ValueError("model request messages must be non-empty")
         if self.max_output_tokens is not None and self.max_output_tokens < 1:
             raise ValueError("max_output_tokens must be positive")
+        if not isinstance(self.metadata, Mapping):
+            raise TypeError("model request metadata must be a mapping")
+        if not isinstance(self.metadata, MappingProxyType):
+            metadata = dict(self.metadata)
+            for name in ("required_capabilities", "allowed_regions"):
+                facts = metadata.get(name)
+                if isinstance(facts, list | set | dict):
+                    metadata[name] = tuple(facts)
+            object.__setattr__(self, "metadata", MappingProxyType(metadata))
 
 
 @dataclass(frozen=True, slots=True)

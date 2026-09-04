@@ -353,10 +353,15 @@ def _index_module(
         if permissions:
             lines.append('export * from "./use-permissions";\n')
     if base_url_env:
+        environment_key = (
+            base_url_env
+            if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", base_url_env)
+            else f"[{json.dumps(base_url_env)}]"
+        )
         lines.append(
             f"\nexport const defaultBaseUrl: string =\n"
             f"  (import.meta as unknown as {{ env?: Record<string, string> }}).env?."
-            f'{base_url_env} ?? "";\n'
+            f'{environment_key} ?? "";\n'
         )
     return "".join(lines)
 

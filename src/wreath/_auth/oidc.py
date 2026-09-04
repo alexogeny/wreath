@@ -28,6 +28,11 @@ __all__ = ["OidcProvider"]
 
 _MAX_DISCOVERY_BYTES = 64 * 1024
 _USE_PROVIDER_AUDIENCES = object()
+_MISSING = object()
+_ENDPOINT_ORIGIN_ERROR = (
+    "OIDC endpoint is not on the pinned issuer origin; expected the issuer's "
+    "scheme, host, and port without credentials or a fragment"
+)
 
 
 def _matches_token_class(
@@ -38,9 +43,22 @@ def _matches_token_class(
 ) -> bool:
     if not isinstance(claims, Mapping):
         return False
-    use = claims.get("token_use", claims.get("token_type"))
+    token_use = claims.get("token_use", _MISSING)
+    claim_type = claims.get("token_type", _MISSING)
+    if token_use is not _MISSING and claim_type is not _MISSING:
+        if token_use != claim_type:
+            return False
+        use = token_use
+    elif token_use is not _MISSING:
+        use = token_use
+    else:
+        use = claim_type
+    if use is not _MISSING and not isinstance(use, str):
+        return False
+    if use is _MISSING:
+        use = None
     if login_token:
-        return token_type in (None, "JWT") and use != "access"
+        return token_type in (None, "JWT") and use in (None, "id")
     if token_type == "at+jwt":
         return use in (None, "access")
     return token_type in (None, "JWT") and use == "access"
@@ -48,6 +66,10 @@ def _matches_token_class(
 
 def _default_ports(scheme: str) -> int:
     return 443 if scheme == "https" else 80
+
+
+def _has_url_controls(value: str) -> bool:
+    return any(ord(character) < 0x21 or 0x7F <= ord(character) <= 0x9F for character in value)
 
 
 def _require_same_origin(issuer: str, url: str) -> str:
@@ -65,18 +87,36 @@ def _require_same_origin(issuer: str, url: str) -> str:
     Raises:
         ValueError: `url` is not on the issuer's scheme/host/port.
     """
-    iss = urlsplit(issuer)
-    target = urlsplit(url)
+    if _has_url_controls(url):
+        raise ValueError(_ENDPOINT_ORIGIN_ERROR)
+    try:
+        iss = urlsplit(issuer)
+        target = urlsplit(url)
+        issuer_explicit_port = iss.port
+        target_explicit_port = target.port
+        if issuer_explicit_port == 0 or target_explicit_port == 0:
+            raise ValueError("port zero is not a network endpoint")
+        issuer_port = (
+            issuer_explicit_port
+            if issuer_explicit_port is not None
+            else _default_ports(iss.scheme)
+        )
+        target_port = (
+            target_explicit_port
+            if target_explicit_port is not None
+            else _default_ports(target.scheme)
+        )
+    except ValueError as error:
+        raise ValueError(_ENDPOINT_ORIGIN_ERROR) from error
     same = (
         target.scheme == iss.scheme
         and target.hostname == iss.hostname
         and target.username is None
         and not target.fragment
-        and (target.port or _default_ports(target.scheme))
-        == (iss.port or _default_ports(iss.scheme))
+        and target_port == issuer_port
     )
     if not same:
-        raise ValueError(f"OIDC endpoint {url!r} is not on the pinned issuer origin")
+        raise ValueError(_ENDPOINT_ORIGIN_ERROR)
     return url
 
 
@@ -106,6 +146,20 @@ class OidcProvider:
         "token_endpoint",
     )
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "issuer" and hasattr(self, "issuer"):
+            raise AttributeError("OIDC issuer is the pinned trust origin and cannot be changed")
+        if (
+            name in ("authorization_endpoint", "jwks_uri", "token_endpoint")
+            and value is not None
+        ):
+            issuer = getattr(self, "issuer", None)
+            if not isinstance(value, str):
+                raise ValueError(_ENDPOINT_ORIGIN_ERROR)
+            if issuer is not None:
+                _require_same_origin(issuer, value)
+        object.__setattr__(self, name, value)
+
     def __init__(
         self,
         name: str,
@@ -120,22 +174,37 @@ class OidcProvider:
     ) -> None:
         self.name = name
         self.issuer = issuer.rstrip("/")
-        parsed_issuer = urlsplit(self.issuer)
+        try:
+            parsed_issuer = urlsplit(self.issuer)
+            _ = parsed_issuer.port
+        except ValueError as error:
+            raise ValueError(
+                "OIDC issuer must be an absolute HTTPS URL without credentials"
+            ) from error
         if (
-            parsed_issuer.scheme != "https"
+            _has_url_controls(self.issuer)
+            or parsed_issuer.scheme != "https"
             or parsed_issuer.hostname is None
             or parsed_issuer.username is not None
+            or parsed_issuer.port == 0
             or parsed_issuer.query
             or parsed_issuer.fragment
         ):
             raise ValueError("OIDC issuer must be an absolute HTTPS URL without credentials")
+        try:
+            parsed_issuer.hostname.encode("idna")
+        except UnicodeError as error:
+            raise ValueError(
+                "OIDC issuer must be an absolute HTTPS URL without credentials"
+            ) from error
         client_origin = getattr(http_client, "origin", None)
         if client_origin is not None:
             try:
                 _require_same_origin(self.issuer, f"{client_origin}/")
             except ValueError as error:
                 raise ValueError(
-                    f"OIDC HTTP client origin {client_origin!r} does not match issuer origin"
+                    "OIDC HTTP client origin must match the issuer origin's scheme, "
+                    "host, and port without credentials or a fragment"
                 ) from error
         self._client = http_client
         self._algorithms = freeze_algorithms(algorithms)
@@ -161,27 +230,33 @@ class OidcProvider:
         document = _json.loads(response.body)
         if document.get("issuer") != self.issuer:
             raise ValueError("OIDC discovery 'issuer' does not match the configured issuer")
-        self.jwks_uri = document["jwks_uri"]
-        self.token_endpoint = document.get("token_endpoint")
-        # Pinned here rather than where it is used, unlike `token_endpoint`, and
-        # that is not an inconsistency: this one is published as a public
-        # attribute that any application may build its own redirect from, so the
-        # pin belongs at the point the value *enters* -- the earliest moment the
-        # error is knowable (refuse rather than half-wire), and a startup failure rather
-        # than one 500 per sign-in. It stays an absolute URL because it is a
-        # browser redirect target, not something this process fetches.
+        jwks_uri = document["jwks_uri"]
+        jwks_path = _same_origin_path(self.issuer, jwks_uri)
+        token_endpoint = document.get("token_endpoint")
+        if token_endpoint is not None:
+            _require_same_origin(self.issuer, token_endpoint)
+        # This stays absolute because the browser is sent there; the fetched
+        # token and JWKS endpoints are reduced to paths by their origin-pinned client.
         authorization_endpoint = document.get("authorization_endpoint")
         if authorization_endpoint is not None:
             _require_same_origin(self.issuer, authorization_endpoint)
+        cache = JwksCache(http_client=self._client, jwks_path=jwks_path)
+        await cache.prefetch()
+        self.jwks_uri = jwks_uri
+        self.token_endpoint = token_endpoint
         self.authorization_endpoint = authorization_endpoint
-        jwks_path = _same_origin_path(self.issuer, self.jwks_uri)
-        self._cache = JwksCache(http_client=self._client, jwks_path=jwks_path)
-        await self._cache.prefetch()
+        self._cache = cache
 
     def bearer_verifier(self, *, audience: Any = _USE_PROVIDER_AUDIENCES):
         """Return an async `Verifier` closing over this provider's JWKS cache."""
 
         login_token = audience is not _USE_PROVIDER_AUDIENCES
+        required = self._required
+        if login_token:
+            missing = tuple(
+                claim for claim in ("exp", "iat", "sub") if claim not in required
+            )
+            required = (*required, *missing)
         audiences = (
             self._audiences if audience is _USE_PROVIDER_AUDIENCES else compile_audiences(audience)
         )
@@ -204,15 +279,28 @@ class OidcProvider:
                 issuer=self.issuer,
                 audiences=audiences,
                 leeway=self._leeway,
-                required=self._required,
+                required=required,
                 identity=self._identity,
             )
+            if resolved is None:
+                return None
             if not _matches_token_class(
                 header.get("typ"),
-                getattr(resolved, "claims", None),
+                resolved.claims,
                 login_token=login_token,
             ):
+                return None
+            if login_token and not _matches_authorized_party(resolved.claims, audiences):
                 return None
             return resolved
 
         return verify
+
+
+def _matches_authorized_party(claims: Mapping[str, Any], audiences: frozenset[str]) -> bool:
+    audience = claims.get("aud")
+    multiple = isinstance(audience, (list, tuple)) and len(audience) > 1
+    authorized = claims.get("azp")
+    if authorized is None:
+        return not multiple
+    return isinstance(authorized, str) and authorized in audiences

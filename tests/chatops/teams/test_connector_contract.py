@@ -96,6 +96,25 @@ def test_default_provider_constructs_its_zero_dependency_protocol_adapters() -> 
     assert callable(teams.connector.send)
 
 
+def test_config_repr_does_not_expose_app_secret() -> None:
+    secret = "teams-secret-value"
+    assert secret not in repr(config(app_secret=secret))
+
+
+def test_config_snapshots_mutable_trust_inputs() -> None:
+    tenants = {ENTRA_TENANT}
+    issuers = {ENTRA_TENANT: BOT_CONNECTOR_ISSUER}
+    configured = config(allowed_tenants=tenants, login_issuers=issuers)
+
+    tenants.add("attacker-tenant")
+    issuers[ENTRA_TENANT] = "https://attacker.example"
+
+    assert configured.allowed_tenants == frozenset({ENTRA_TENANT})
+    assert configured.login_issuers == {ENTRA_TENANT: BOT_CONNECTOR_ISSUER}
+    with pytest.raises(TypeError):
+        configured.login_issuers["attacker-tenant"] = "https://attacker.example"
+
+
 def test_activity_parses_the_protocol_identity_and_routing_fields() -> None:
     parsed = TeamsActivity.parse(activity())
 
@@ -348,6 +367,8 @@ async def test_startup_rejects_each_jwks_origin_authority_hazard() -> None:
         "https://login.botframework.com:444/v1/keys",
         "https://user@login.botframework.com/v1/keys",
         "https://:password@login.botframework.com/v1/keys",
+        "https://login.botframe\twork.com/v1/keys",
+        "https://login.botframework.com/v1/\x80keys",
     ):
         fetch = RecordingFetch(
             {
@@ -511,6 +532,7 @@ async def test_startup_ignores_every_non_rsa_or_ambiguous_jwk_entry() -> None:
         ({"exp": 1_700_000_000}, "expired-token"),
         ({"exp": "1750000100"}, "expired-token"),
         ({"nbf": 1_800_000_000}, "token-not-yet-valid"),
+        ({"nbf": "1749999900"}, "token-not-yet-valid"),
     ],
 )
 async def test_verified_signature_is_not_enough_when_registered_claims_disagree(

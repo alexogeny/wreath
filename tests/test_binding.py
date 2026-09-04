@@ -14,6 +14,7 @@ import pytest
 
 from wreath import Wreath
 from wreath.binding import (
+    AppScope,
     Body,
     Cookie,
     Depends,
@@ -1138,6 +1139,25 @@ async def test_route_dependencies_alone_still_produce_a_working_binder() -> None
     assert bound is not handler
     assert await bound(_query_request(b"")) == "answered"
     assert ran == ["audit"]
+
+
+def test_route_resource_binding_propagates_app_scope_to_dependency_compilation() -> None:
+    async def per_request(request: Any) -> str:
+        return "leaky"
+
+    async def singleton(request: Any, inner=Depends(per_request)) -> str:
+        return inner
+
+    async def handler(request: Any) -> Any:
+        return "answered"
+
+    with pytest.raises(TypeError, match="outlive the request"):
+        compile_binder(
+            handler,
+            "/",
+            dependencies=(Depends(singleton, scope="app"),),
+            app_scope=AppScope(),
+        )
 
 
 # All four `raise TypeError` arms below were `unreached`. They are declaration-time

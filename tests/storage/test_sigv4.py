@@ -5,6 +5,8 @@ import importlib.util
 import pathlib
 import sys
 
+import pytest
+
 _SRC = pathlib.Path(__file__).resolve().parents[2] / "src" / "wreath"
 
 
@@ -244,6 +246,207 @@ def test_presign_carries_the_token_the_extra_params_and_the_signed_headers():
     assert "X-Amz-SignedHeaders=host%3Bx-amz-acl" in url
     # ... and it changed the signature, so a verifier sees a different request.
     assert _S3_SIGNATURE not in url
+
+
+@pytest.mark.parametrize("expires", [True, 0, -1, 604_801])
+def test_presign_refuses_an_invalid_aws_expiry_before_signing(expires):
+    with pytest.raises(ValueError, match="expires must be an integer from 1 through 604800"):
+        sigv4.presign(
+            method="GET",
+            host="examplebucket.s3.amazonaws.com",
+            path="/test.txt",
+            region="us-east-1",
+            service="s3",
+            access_key="AKIAIOSFODNN7EXAMPLE",
+            secret_key=_S3_SECRET,
+            amz_date="20130524T000000Z",
+            expires=expires,
+        )
+
+
+@pytest.mark.parametrize(
+    "extra_params",
+    [
+        [("X-Amz-Expires", "999999")],
+        [("x-amz-signature", "attacker-chosen")],
+        [("X-Amz-Credential", "other/scope")],
+    ],
+)
+def test_presign_refuses_extra_parameters_that_shadow_authentication(extra_params):
+    with pytest.raises(ValueError, match="reserved SigV4 query parameter"):
+        sigv4.presign(
+            method="GET",
+            host="examplebucket.s3.amazonaws.com",
+            path="/test.txt",
+            region="us-east-1",
+            service="s3",
+            access_key="AKIAIOSFODNN7EXAMPLE",
+            secret_key=_S3_SECRET,
+            amz_date="20130524T000000Z",
+            expires=60,
+            extra_params=extra_params,
+        )
+
+
+def test_presign_refuses_a_signed_header_that_redefines_the_url_host():
+    with pytest.raises(ValueError, match="signed_headers must not redefine host"):
+        sigv4.presign(
+            method="GET",
+            host="examplebucket.s3.amazonaws.com",
+            path="/test.txt",
+            region="us-east-1",
+            service="s3",
+            access_key="AKIAIOSFODNN7EXAMPLE",
+            secret_key=_S3_SECRET,
+            amz_date="20130524T000000Z",
+            expires=60,
+            signed_headers={"Host": "other.example"},
+        )
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Host": "other.example"},
+        {"X-Amz-Meta-Name": "one", "x-amz-meta-name": "two"},
+        {"X-Amz-Meta-Name": "safe\r\nX-Evil: yes"},
+    ],
+)
+def test_header_signing_refuses_authority_and_case_or_line_ambiguity(headers):
+    with pytest.raises(ValueError, match="header"):
+        sigv4.sign(
+            method="GET",
+            host="examplebucket.s3.amazonaws.com",
+            path="/test.txt",
+            region="us-east-1",
+            service="s3",
+            access_key="AK",
+            secret_key=_S3_SECRET,
+            amz_date="20130524T000000Z",
+            headers=headers,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("access_key", "AK\r\nX-Evil: yes"),
+        ("amz_date", "20130524T000000Z\nX-Evil: yes"),
+        ("session_token", "TOK\rX-Evil: yes"),
+        ("payload_hash", "hash\nX-Evil: yes"),
+    ],
+)
+def test_header_signing_refuses_generated_header_line_injection(field, value):
+    options = {
+        "method": "GET",
+        "host": "examplebucket.s3.amazonaws.com",
+        "path": "/test.txt",
+        "region": "us-east-1",
+        "service": "s3",
+        "access_key": "AK",
+        "secret_key": _S3_SECRET,
+        "amz_date": "20130524T000000Z",
+    }
+    options[field] = value
+    with pytest.raises(ValueError, match=f"{field} must not contain control characters"):
+        sigv4.sign(**options)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("scheme", "javascript"), ("host", "good.example/path"), ("host", "user@good.example")],
+)
+def test_presign_refuses_url_authority_confusion(field, value):
+    options = {
+        "method": "GET",
+        "host": "examplebucket.s3.amazonaws.com",
+        "path": "/test.txt",
+        "region": "us-east-1",
+        "service": "s3",
+        "access_key": "AK",
+        "secret_key": _S3_SECRET,
+        "amz_date": "20130524T000000Z",
+        "expires": 60,
+    }
+    options[field] = value
+    with pytest.raises(ValueError, match="scheme|host"):
+        sigv4.presign(**options)
+
+
+@pytest.mark.parametrize("headers", [{"Bad Header": "x"}, {"": "x"}])
+def test_header_signing_refuses_names_that_are_not_http_tokens(headers):
+    with pytest.raises(ValueError, match="valid HTTP field name"):
+        sigv4.sign(
+            method="GET",
+            host="examplebucket.s3.amazonaws.com",
+            path="/test.txt",
+            region="us-east-1",
+            service="s3",
+            access_key="AK",
+            secret_key=_S3_SECRET,
+            amz_date="20130524T000000Z",
+            headers=headers,
+        )
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Bad Header": "x"},
+        {"X-Amz-Meta-Name": "one", "x-amz-meta-name": "two"},
+        {"X-Amz-Meta-Name": "safe\nX-Evil: yes"},
+        {"X-Amz-Meta-Name": "safe\rX-Evil: yes"},
+    ],
+)
+def test_presign_refuses_invalid_or_ambiguous_signed_headers(headers):
+    with pytest.raises(ValueError, match="signed_headers"):
+        sigv4.presign(
+            method="GET",
+            host="examplebucket.s3.amazonaws.com",
+            path="/test.txt",
+            region="us-east-1",
+            service="s3",
+            access_key="AK",
+            secret_key=_S3_SECRET,
+            amz_date="20130524T000000Z",
+            expires=60,
+            signed_headers=headers,
+        )
+
+
+@pytest.mark.parametrize("host", ["good.example/path", "user@good.example", "bad\rhost"])
+def test_header_signing_refuses_invalid_authorities(host):
+    with pytest.raises(ValueError, match="host must be an HTTP authority"):
+        sigv4.sign(
+            method="GET",
+            host=host,
+            path="/test.txt",
+            region="us-east-1",
+            service="s3",
+            access_key="AK",
+            secret_key=_S3_SECRET,
+            amz_date="20130524T000000Z",
+        )
+
+
+def test_prevalidated_header_signing_skips_revalidation(monkeypatch):
+    def fail_normalize(*args):
+        raise AssertionError("prevalidated headers were validated again")
+
+    monkeypatch.setattr(sigv4, "_normalize_headers", fail_normalize)
+    out = sigv4.sign(
+        method="GET",
+        host="examplebucket.s3.amazonaws.com",
+        path="/test.txt",
+        region="us-east-1",
+        service="s3",
+        access_key="AK",
+        secret_key=_S3_SECRET,
+        amz_date="20130524T000000Z",
+        headers={"content-type": "text/plain"},
+        _prevalidated=True,
+    )
+    assert "content-type" in out["Authorization"]
 
 
 if __name__ == "__main__":

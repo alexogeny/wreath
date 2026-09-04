@@ -72,6 +72,7 @@ import hashlib
 import hmac
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from math import isfinite
 from time import monotonic
 from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
 
@@ -176,6 +177,8 @@ MAX_CLOCK_SKEW: Final = 300.0
 #: assertion valid for longer than the ledger remembers it is replayable the
 #: moment the entry ages out.
 MAX_LIFETIME: Final = 3600.0
+MAX_SIGNING_KEYS: Final = 16
+MAX_ASSERTION_ID_LENGTH: Final = 1024
 
 
 class SamlRefusal(ValueError):
@@ -243,6 +246,10 @@ class IdentityProvider:
                 "an identity provider needs at least one signing certificate; a key "
                 "resolved on the request path is a fetch, which this module does not do"
             )
+        if len(text) > MAX_SIGNING_KEYS:
+            raise ValueError(
+                f"an identity provider accepts at most {MAX_SIGNING_KEYS} signing certificates"
+            )
         object.__setattr__(self, "certificates", text)
         object.__setattr__(self, "keys", tuple(_key_from_text(value) for value in text))
 
@@ -268,6 +275,12 @@ class ServiceProvider:
             raise ValueError("a service provider needs an entity_id for AudienceRestriction")
         if not self.acs_url:
             raise ValueError("a service provider needs an acs_url for SubjectConfirmationData")
+        if (
+            isinstance(self.clock_skew, bool)
+            or not isinstance(self.clock_skew, (int, float))
+            or not isfinite(self.clock_skew)
+        ):
+            raise ValueError("clock_skew must be a finite number")
         if not 0.0 <= self.clock_skew <= MAX_CLOCK_SKEW:
             raise ValueError(
                 f"clock_skew must be between 0 and {MAX_CLOCK_SKEW} seconds, not {self.clock_skew}"
@@ -298,7 +311,7 @@ class ReplayLedgerCapacityError(RuntimeError):
 class MemoryReplayLedger:
     """A bounded, fail-closed assertion ledger for one worker."""
 
-    __slots__ = ("_claims",)
+    __slots__ = ("_claims", "retention")
 
     def __init__(
         self,
@@ -307,6 +320,16 @@ class MemoryReplayLedger:
         max_entries: int = 4096,
         clock: Callable[[], float] = monotonic,
     ) -> None:
+        if (
+            isinstance(ttl, bool)
+            or not isinstance(ttl, (int, float))
+            or not isfinite(ttl)
+            or ttl <= 0
+        ):
+            raise ValueError("SAML replay ledger ttl must be a positive finite number")
+        if not isinstance(max_entries, int) or isinstance(max_entries, bool) or max_entries < 1:
+            raise ValueError("SAML replay ledger max_entries must be a positive integer")
+        self.retention = float(ttl)
         self._claims = CapabilityMap(
             max_entries=max_entries,
             ttl=ttl,
@@ -355,6 +378,16 @@ def ledger_declaration(
         claim=True,
         prefix=prefix,
     )
+
+
+def _ledger_retention(ledger: ReplayLedger) -> float | None:
+    if isinstance(ledger, MemoryReplayLedger):
+        return ledger.retention
+    declaration = getattr(ledger, "declaration", None)
+    ttl = getattr(declaration, "ttl", None)
+    if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or not isfinite(ttl) or ttl <= 0:
+        return None
+    return float(ttl)
 
 
 # The result
@@ -496,6 +529,11 @@ def _key_from_spki(spki: bytes) -> _PublicKey:
                 f"a configured SAML RSA key is {n.bit_length()} bits; at least "
                 f"{MIN_RSA_MODULUS_BITS} are required"
             )
+        if e < 3 or e % 2 == 0 or e >= n:
+            raise ValueError(
+                "a configured SAML RSA public exponent must be odd, at least 3, "
+                "and smaller than the modulus"
+            )
         return _PublicKey("RSA", rsa=RsaPublicKey(n, e))
     if oid == _OID_EC:
         _, curve, _ = _der_read_tlv(algorithm, after_oid)
@@ -533,6 +571,13 @@ def _attribute(element: Element, name: str, *, reason: str, what: str) -> str:
     if not value:
         raise _refuse(reason, f"{what} has no {name} attribute")
     return value
+
+
+def _shown(value: object) -> str:
+    rendered = repr(value)
+    if len(rendered) <= 160:
+        return rendered
+    return f"{rendered[:157]}..."
 
 
 def _descendants(element: Element) -> list[Element]:
@@ -601,7 +646,7 @@ def _transform_chain(reference: Element) -> tuple[bool, tuple[str, ...]]:
         if algorithm not in ALLOWED_TRANSFORMS:
             raise _refuse(
                 "transform-refused",
-                f"the transform {algorithm!r} is not one of the two this profile "
+                f"the transform {_shown(algorithm)} is not one of the two this profile "
                 "allows (enveloped-signature and exclusive canonicalization); an "
                 "unrecognised transform changes what the digest covers and is "
                 "refused rather than skipped",
@@ -612,6 +657,13 @@ def _transform_chain(reference: Element) -> tuple[bool, tuple[str, ...]]:
                     "transform-repeated",
                     "the enveloped-signature transform is declared twice, and applying "
                     "it twice would remove a second Signature the first did not",
+                )
+            if canonicalized:
+                raise _refuse(
+                    "transform-order",
+                    "the enveloped-signature transform is declared after exclusive "
+                    "canonicalization, but transforms apply in document order and "
+                    "enveloped-signature requires an XML node set",
                 )
             enveloped = True
             continue
@@ -712,7 +764,7 @@ def _verify_signature(
     if algorithm != _EXC_C14N:
         raise _refuse(
             "c14n-refused",
-            f"SignedInfo declares the canonicalization {algorithm!r}; this profile "
+            f"SignedInfo declares the canonicalization {_shown(algorithm)}; this profile "
             "computes exclusive canonicalization 1.0 and nothing else",
         )
     signed_info_prefixes = _inclusive_prefixes(method)
@@ -726,7 +778,7 @@ def _verify_signature(
     if signature_algorithm not in _SIGNATURES:
         raise _refuse(
             "signature-algorithm-refused",
-            f"the signature algorithm {signature_algorithm!r} is not accepted; this "
+            f"the signature algorithm {_shown(signature_algorithm)} is not accepted; this "
             "profile verifies RSA-SHA256/384/512 and ECDSA-SHA256, and SHA-1 is "
             "excluded because a collision on it is a forged assertion",
         )
@@ -746,7 +798,7 @@ def _verify_signature(
     if not uri.startswith("#") or len(uri) < 2:
         raise _refuse(
             "reference-uri",
-            f"the Reference URI {uri!r} is not a same-document fragment; an empty or "
+            f"the Reference URI {_shown(uri)} is not a same-document fragment; an empty or "
             "external reference is refused, because the only element this profile "
             "verifies is one the document already resolved by identifier",
         )
@@ -757,12 +809,12 @@ def _verify_signature(
     if resolved is None:
         raise _refuse(
             "reference-unresolved",
-            f"the Reference URI {uri!r} names an identifier no element carries",
+            f"the Reference URI {_shown(uri)} names an identifier no element carries",
         )
     if resolved is not covered:
         raise _refuse(
             "reference-elsewhere",
-            f"the Reference URI {uri!r} resolves to a different element from the one "
+            f"the Reference URI {_shown(uri)} resolves to a different element from the one "
             "being consumed; the signature covers a subtree that is not the one whose "
             "values would be read",
         )
@@ -786,7 +838,7 @@ def _verify_signature(
     if digest_algorithm not in _DIGESTS:
         raise _refuse(
             "digest-algorithm-refused",
-            f"the digest algorithm {digest_algorithm!r} is not accepted; this profile "
+            f"the digest algorithm {_shown(digest_algorithm)} is not accepted; this profile "
             "computes SHA-256, SHA-384 and SHA-512, and SHA-1 is excluded because a "
             "collision on it is a forged assertion",
         )
@@ -853,11 +905,11 @@ def _instant(value: str, *, reason: str, what: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as error:
-        raise _refuse(reason, f"{what} is not an xs:dateTime: {value!r}") from error
+        raise _refuse(reason, f"{what} is not an xs:dateTime: {_shown(value)}") from error
     if parsed.tzinfo is None:
         raise _refuse(
             reason,
-            f"{what} carries no timezone offset ({value!r}); an instant without one "
+            f"{what} carries no timezone offset ({_shown(value)}); an instant without one "
             "is not an instant",
         )
     return parsed.astimezone(UTC)
@@ -927,11 +979,18 @@ def _check_conditions(
     # disjunction, and reading it the other way accepts an assertion addressed
     # to somebody else that merely mentions us.
     for restriction in restrictions:
-        audiences = [child.text.strip() for child in _children(restriction, _ASSERTION, "Audience")]
+        audience_elements = _children(restriction, _ASSERTION, "Audience")
+        if any(audience.children for audience in audience_elements):
+            raise _refuse(
+                "audience-structured",
+                "an <Audience> contains child markup, but this SAML profile accepts "
+                "only an audience identifier as plain text",
+            )
+        audiences = [audience.text.strip() for audience in audience_elements]
         if sp.entity_id not in audiences:
             raise _refuse(
                 "audience-mismatch",
-                f"an AudienceRestriction names {audiences!r}, which does not include "
+                f"an AudienceRestriction names {_shown(audiences)}, which does not include "
                 f"this service provider ({sp.entity_id!r})",
             )
     return not_before, not_after
@@ -942,6 +1001,12 @@ def _check_subject(
 ) -> tuple[str, str]:
     subject = _only(assertion, _ASSERTION, "Subject", reason="subject", what="an <Assertion>")
     name_id = _only(subject, _ASSERTION, "NameID", reason="nameid", what="a <Subject>")
+    if name_id.children:
+        raise _refuse(
+            "nameid-structured",
+            "the assertion's NameID contains child markup, but this SAML profile "
+            "accepts only an identifier as plain text",
+        )
     value = name_id.text.strip()
     if not value:
         raise _refuse("nameid-empty", "the assertion's NameID is empty, so it names nobody")
@@ -979,7 +1044,7 @@ def _check_subject(
     if recipient != sp.acs_url:
         raise _refuse(
             "confirmation-recipient",
-            f"the assertion is addressed to the recipient {recipient!r}, not to this "
+            f"the assertion is addressed to the recipient {_shown(recipient)}, not to this "
             f"service provider's assertion consumer ({sp.acs_url!r})",
         )
 
@@ -1008,7 +1073,7 @@ def _check_subject(
     if in_response_to is None and declared is not None:
         raise _refuse(
             "unsolicited",
-            f"the assertion answers the request {declared!r}, which this service "
+            f"the assertion answers the request {_shown(declared)}, which this service "
             "provider did not say it made; an identity-provider-initiated login must "
             "not claim to answer one",
         )
@@ -1017,12 +1082,13 @@ def _check_subject(
             raise _refuse(
                 "unanswered",
                 f"the assertion answers no request, but this service provider is "
-                f"expecting the answer to {in_response_to!r}",
+                f"expecting the answer to {_shown(in_response_to)}",
             )
         if declared != in_response_to:
             raise _refuse(
                 "in-response-to",
-                f"the assertion answers the request {declared!r}, not the {in_response_to!r} "
+                f"the assertion answers the request {_shown(declared)}, not the "
+                f"{_shown(in_response_to)} "
                 "this service provider issued",
             )
     return value, name_id.attrib.get("Format", "")
@@ -1058,7 +1124,14 @@ def _read_authn(assertion: Element) -> tuple[str, str, datetime]:
             "an AuthnContext must name exactly one AuthnContextClassRef; a policy that "
             "requires a strong factor has nothing to read otherwise",
         )
-    return statement.attrib.get("SessionIndex", ""), class_refs[0].text.strip(), instant
+    class_ref = class_refs[0]
+    value = class_ref.text.strip()
+    if class_ref.children or not value:
+        raise _refuse(
+            "authn-context",
+            "an AuthnContextClassRef must be a non-empty identifier as plain text",
+        )
+    return statement.attrib.get("SessionIndex", ""), value, instant
 
 
 def _read_attributes(assertion: Element) -> dict[str, tuple[str, ...]]:
@@ -1077,7 +1150,7 @@ def _read_attributes(assertion: Element) -> dict[str, tuple[str, ...]]:
         if name in attributes:
             raise _refuse(
                 "attribute-repeated",
-                f"the attribute {name!r} is declared twice; merging the two would pick a "
+                f"the attribute {_shown(name)} is declared twice; merging the two would pick a "
                 "reading, and which values an attribute has is not a matter of order",
             )
         # FriendlyName is deliberately ignored. It is an alias the directory
@@ -1087,7 +1160,7 @@ def _read_attributes(assertion: Element) -> dict[str, tuple[str, ...]]:
         if any(value.children for value in values):
             raise _refuse(
                 "attribute-structured",
-                f"the attribute {name!r} carries a structured AttributeValue; only text "
+                f"the attribute {_shown(name)} carries a structured AttributeValue; only text "
                 "values are read, and flattening markup would invent one of its readings",
             )
         attributes[name] = tuple(value.text for value in values)
@@ -1104,7 +1177,7 @@ def _locate_assertion(root: Element) -> tuple[Element, Element]:
     if root.tag != f"{{{_PROTOCOL}}}Response":
         raise _refuse(
             "root-element",
-            f"the document's root is {root.tag!r}; this module reads a SAML 2.0 "
+            f"the document's root is {_shown(root.tag)}; this module reads a SAML 2.0 "
             "<Response> or a bare <Assertion>",
         )
     status = _only(root, _PROTOCOL, "Status", reason="status", what="a <Response>")
@@ -1113,8 +1186,13 @@ def _locate_assertion(root: Element) -> tuple[Element, Element]:
     if value != _STATUS_SUCCESS:
         raise _refuse(
             "status-not-success",
-            f"the response reports the status {value!r} rather than Success, so it "
+            f"the response reports the status {_shown(value)} rather than Success, so it "
             "carries no assertion to act on",
+        )
+    if root.attrib.get("Version") != "2.0":
+        raise _refuse(
+            "version",
+            "a SAML response must declare Version='2.0'",
         )
     if _children(root, _ASSERTION, "EncryptedAssertion"):
         raise _refuse(
@@ -1177,6 +1255,17 @@ async def verify_response(
         raise _refuse(f"xml-{refusal.reason}", str(refusal)) from refusal
 
     assertion, response = _locate_assertion(document.root)
+    if assertion.attrib.get("Version") != "2.0":
+        raise _refuse(
+            "version",
+            "a SAML assertion must declare Version='2.0'",
+        )
+    assertion_id = _attribute(assertion, "ID", reason="assertion-id", what="an <Assertion>")
+    if len(assertion_id) > MAX_ASSERTION_ID_LENGTH:
+        raise _refuse(
+            "assertion-id-length",
+            f"an assertion ID must be at most {MAX_ASSERTION_ID_LENGTH} characters",
+        )
 
     # The signature is preferred on the assertion, because that is the subtree
     # whose values are read. A response-level signature is accepted only when
@@ -1208,22 +1297,61 @@ async def verify_response(
 
     _verify_signature(document, signature, covered, idp)
 
+    if response is not assertion:
+        destination = response.attrib.get("Destination")
+        if destination is not None and destination != sp.acs_url:
+            raise _refuse(
+                "response-destination",
+                "the SAML response Destination does not match this service provider's "
+                "assertion consumer URL",
+            )
+        response_request = response.attrib.get("InResponseTo")
+        if response_request is not None and response_request != in_response_to:
+            raise _refuse(
+                "response-in-response-to",
+                "the SAML response InResponseTo does not match the authentication "
+                "request this service provider is consuming",
+            )
+
     issuer_element = _only(assertion, _ASSERTION, "Issuer", reason="issuer", what="an <Assertion>")
+    if issuer_element.children:
+        raise _refuse(
+            "issuer-structured",
+            "the assertion's Issuer contains child markup, but this SAML profile "
+            "accepts only an entity identifier as plain text",
+        )
     issuer = issuer_element.text.strip()
     if issuer != idp.entity_id:
         raise _refuse(
             "issuer-mismatch",
-            f"the assertion was issued by {issuer!r}, not by the identity provider this "
+            f"the assertion was issued by {_shown(issuer)}, not by the identity provider this "
             f"service provider is configured for ({idp.entity_id!r})",
         )
 
-    moment = (now or datetime.now(UTC)).astimezone(UTC)
+    if now is None:
+        moment = datetime.now(UTC)
+    elif not isinstance(now, datetime) or now.utcoffset() is None:
+        raise _refuse(
+            "invalid-time",
+            "the SAML verification clock must be a timezone-aware datetime",
+        )
+    else:
+        moment = now.astimezone(UTC)
     not_before, not_after = _check_conditions(assertion, sp, moment)
+    retention = _ledger_retention(ledger)
+    if retention is not None:
+        required_retention = (not_after - moment).total_seconds() + sp.clock_skew
+        if retention < required_retention:
+            raise _refuse(
+                "ledger-retention",
+                f"the assertion can remain valid for {required_retention:.0f}s, but the "
+                f"replay ledger remembers it for only {retention:.0f}s; "
+                "increase the ledger ttl so a spent assertion cannot become usable again",
+            )
     name_id, name_id_format = _check_subject(assertion, sp, moment, in_response_to)
     session_index, authn_context, authn_instant = _read_authn(assertion)
     attributes = _read_attributes(assertion)
 
-    assertion_id = _attribute(assertion, "ID", reason="assertion-id", what="an <Assertion>")
     # Spent last, and only once everything above has passed. A ledger is a
     # bounded resource reachable by anyone who can post to the consumer
     # endpoint, so claiming before the signature verifies would let an
@@ -1235,7 +1363,7 @@ async def verify_response(
     if not claimed:
         raise _refuse(
             "replayed",
-            f"the assertion {assertion_id!r} has already been presented; an assertion "
+            f"the assertion {_shown(assertion_id)} has already been presented; an assertion "
             "identifier is spendable exactly once",
         )
 

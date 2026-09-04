@@ -15,6 +15,30 @@ class _Revocations:
 _REVOCATIONS = _Revocations()
 
 
+def test_request_model_reprs_do_not_expose_credentials() -> None:
+    from wreath.users import CodeInput, LoginInput, RegisterInput, ResetInput, TokenInput
+
+    secret = "request-credential-secret"
+    values = (
+        RegisterInput("user@example.com", secret),
+        LoginInput("user@example.com", secret),
+        TokenInput(secret),
+        ResetInput(secret, secret),
+        CodeInput(secret),
+    )
+
+    assert all(secret not in repr(value) for value in values)
+
+
+def test_user_record_repr_does_not_expose_password_hash() -> None:
+    from wreath.users import UserRecord
+
+    password_hash = "scrypt-password-hash-secret"
+    user = UserRecord("user-1", "user@example.com", password_hash)
+
+    assert password_hash not in repr(user)
+
+
 def _routes(router):
     return {(r.path, m) for r in router.routes for m in r.methods}
 
@@ -164,6 +188,107 @@ def test_login_limiter_accepts_the_smallest_legal_configuration() -> None:
     assert limiter.allow("someone@example.com") is True
 
 
+@pytest.mark.parametrize("parameter", ["login_limiter", "reset_limiter"])
+def test_user_router_refuses_an_invalid_attempt_limiter(parameter: str) -> None:
+    with pytest.raises(TypeError, match=rf"{parameter} must provide async admit_key\(key\)"):
+        user_router(
+            InMemoryUserStore(),
+            sessions=_REVOCATIONS,
+            secret="s" * 32,
+            **{parameter: object()},
+        )
+
+
+async def test_injected_attempt_limiter_is_shared_by_login_and_reset(monkeypatch) -> None:
+    import wreath.users as users
+    from wreath.response import JSONResponse
+    from wreath.users import ForgotInput, LoginInput
+
+    class SharedLimiter:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+            self.counts: dict[str, int] = {}
+
+        async def admit_key(self, key: str):
+            self.calls.append(key)
+            self.counts[key] = self.counts.get(key, 0) + 1
+            if self.counts[key] > 1:
+                return JSONResponse({"error": "limited"}, status=429)
+            return None
+
+    class State:
+        session: dict[str, Any] = {}
+
+    class Request:
+        state = State()
+
+    local_failures: list[str] = []
+
+    class LocalLimiter:
+        def __init__(
+            self, *, max_attempts: int, window: float, max_tracked: int = 4096
+        ) -> None:
+            del max_attempts, window, max_tracked
+
+        def record_failure(self, key: str) -> None:
+            local_failures.append(key)
+
+    authenticated = 0
+    reset_started = 0
+
+    async def authenticate(*_args: Any) -> None:
+        nonlocal authenticated
+        authenticated += 1
+        return None
+
+    async def start_reset(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal reset_started
+        reset_started += 1
+
+    monkeypatch.setattr(users._userkit, "authenticate", authenticate)
+    monkeypatch.setattr(users._userkit, "start_password_reset", start_reset)
+    monkeypatch.setattr(users, "LoginLimiter", LocalLimiter)
+    limiter = SharedLimiter()
+    routers = [
+        user_router(
+            InMemoryUserStore(),
+            sessions=_REVOCATIONS,
+            secret="s" * 32,
+            login_limiter=limiter,
+            reset_limiter=limiter,
+        )
+        for _ in range(2)
+    ]
+    login_endpoints = [
+        next(route.endpoint for route in router.routes if route.path.endswith("/login"))
+        for router in routers
+    ]
+    reset_endpoints = [
+        next(route.endpoint for route in router.routes if route.path.endswith("/forgot-password"))
+        for router in routers
+    ]
+
+    login_responses = [
+        await endpoint(Request(), LoginInput("Ann@Example.com", "wrong"))
+        for endpoint in login_endpoints
+    ]
+    reset_responses = [
+        await endpoint(Request(), ForgotInput("Ann@Example.com")) for endpoint in reset_endpoints
+    ]
+
+    assert [response.status for response in login_responses] == [401, 429]
+    assert [response.status for response in reset_responses] == [200, 200]
+    assert authenticated == 1
+    assert reset_started == 1
+    assert local_failures == []
+    assert limiter.calls == [
+        "login:ann@example.com",
+        "login:ann@example.com",
+        "password-reset:ann@example.com",
+        "password-reset:ann@example.com",
+    ]
+
+
 def test_a_verify_link_and_a_reset_link_are_different_urls() -> None:
     from wreath.users import _default_link
 
@@ -185,6 +310,183 @@ def test_the_base_url_keeps_exactly_one_slash_before_the_prefix() -> None:
     without = _default_link("https://app.example.com", "/users")("verify", "t")
     assert with_slash == without
     assert "//users" not in with_slash.removeprefix("https://")
+
+
+async def test_default_mailer_does_not_print_action_tokens(capsys) -> None:
+    from wreath.users import ForgotInput, RegisterInput, hash_password
+
+    store = InMemoryUserStore()
+    await store.create("ann@example.com", hash_password("hunter2hunter2"))
+    router = user_router(
+        store,
+        sessions=_REVOCATIONS,
+        secret="s" * 32,
+        base_url="https://app.example.com",
+    )
+    endpoint = next(
+        route.endpoint for route in router.routes if route.path.endswith("/forgot-password")
+    )
+    register = next(route.endpoint for route in router.routes if route.path.endswith("/register"))
+
+    await endpoint(object(), ForgotInput("ann@example.com"))
+    await register(object(), RegisterInput("bea@example.com", "hunter2hunter2"))
+
+    output = capsys.readouterr().out
+    assert "ann@example.com" in output
+    assert "bea@example.com" in output
+    assert "reset-password?token=" not in output
+    assert "/verify/" not in output
+
+
+async def test_log_mailer_exposes_a_link_only_after_an_explicit_opt_in() -> None:
+    from wreath.users import LogEmailSender
+
+    output: list[str] = []
+    sender = LogEmailSender(output.append, expose_tokens=True)
+
+    await sender.send_password_reset("ann@example.com", "https://app.test/reset?token=secret")
+
+    assert output == [
+        "[wreath.users] reset ann@example.com: https://app.test/reset?token=secret"
+    ]
+
+
+async def test_direct_password_reset_rejects_an_invalid_token() -> None:
+    from wreath import _userkit
+
+    assert not await _userkit.reset_password(
+        InMemoryUserStore(),
+        secret="s" * 32,
+        token="invalid",
+        new_password="a-much-better-password",
+    )
+
+
+async def test_password_stays_unchanged_when_session_revocation_fails() -> None:
+    from wreath import _userkit
+    from wreath.users import hash_password, reset_password_endpoint
+
+    class FailingRevocations:
+        async def delete_for(self, _subject: str) -> int:
+            raise RuntimeError("session store unavailable")
+
+    store = InMemoryUserStore()
+    original = await store.create("ann@example.com", hash_password("hunter2hunter2"))
+    token = _userkit.sign_token(
+        "s" * 32,
+        _userkit._RESET,
+        original.id,
+        ttl=3600,
+        bound=_userkit.fingerprint(original.hashed_password),
+    )
+
+    with pytest.raises(RuntimeError, match="session store unavailable"):
+        await reset_password_endpoint(
+            store,
+            FailingRevocations(),
+            secret="s" * 32,
+            token=token,
+            new_password="a-much-better-password",
+        )
+
+    current = await store.get_by_id(original.id)
+    assert current is not None
+    assert current.hashed_password == original.hashed_password
+
+
+async def test_password_reset_revokes_on_both_sides_of_the_credential_change() -> None:
+    from wreath import _userkit
+    from wreath.users import hash_password, reset_password_endpoint
+
+    events: list[str] = []
+
+    class OrderingStore(InMemoryUserStore):
+        async def compare_and_set_password(
+            self, user_id: str, expected: str, replacement: str
+        ) -> bool:
+            events.append("credential-change")
+            return await super().compare_and_set_password(user_id, expected, replacement)
+
+    class Revocations:
+        async def delete_for(self, _subject: str) -> int:
+            events.append("revoke")
+            return 0
+
+    store = OrderingStore()
+    original = await store.create("ann@example.com", hash_password("hunter2hunter2"))
+    token = _userkit.sign_token(
+        "s" * 32,
+        _userkit._RESET,
+        original.id,
+        ttl=3600,
+        bound=_userkit.fingerprint(original.hashed_password),
+    )
+
+    assert await reset_password_endpoint(
+        store,
+        Revocations(),
+        secret="s" * 32,
+        token=token,
+        new_password="a-much-better-password",
+    )
+    assert events == ["revoke", "credential-change", "revoke"]
+
+
+async def test_failed_password_compare_and_set_does_not_run_the_second_revocation() -> None:
+    from wreath import _userkit
+    from wreath.users import hash_password, reset_password_endpoint
+
+    class RacingStore(InMemoryUserStore):
+        async def compare_and_set_password(
+            self, user_id: str, expected: str, replacement: str
+        ) -> bool:
+            return False
+
+    revoked: list[str] = []
+
+    class Revocations:
+        async def delete_for(self, subject: str) -> int:
+            revoked.append(subject)
+            return 0
+
+    store = RacingStore()
+    original = await store.create("ann@example.com", hash_password("hunter2hunter2"))
+    token = _userkit.sign_token(
+        "s" * 32,
+        _userkit._RESET,
+        original.id,
+        ttl=3600,
+        bound=_userkit.fingerprint(original.hashed_password),
+    )
+
+    assert not await reset_password_endpoint(
+        store,
+        Revocations(),
+        secret="s" * 32,
+        token=token,
+        new_password="a-much-better-password",
+    )
+    assert revoked == [original.id]
+
+
+async def test_invalid_password_reset_token_does_not_revoke_sessions() -> None:
+    from wreath.users import reset_password_endpoint
+
+    revoked: list[str] = []
+
+    class Revocations:
+        async def delete_for(self, subject: str) -> int:
+            revoked.append(subject)
+            return 0
+
+    assert not await reset_password_endpoint(
+        InMemoryUserStore(),
+        Revocations(),
+        secret="s" * 32,
+        token="invalid",
+        new_password="a-much-better-password",
+    )
+    assert revoked == []
 
 
 async def test_a_bad_verification_token_is_a_400_and_says_it_was_invalid() -> None:

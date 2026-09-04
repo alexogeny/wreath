@@ -35,6 +35,31 @@ def _pure(**kw: object) -> ReferenceRecorder:
     return ReferenceRecorder(fs.Mode.FORENSIC, **kw)
 
 
+def _slab_wire(
+    *,
+    field_class: int = int(FC.REQUEST_HEADER),
+    disposition: int = int(D.RAW),
+    payload: bytes = b"",
+    original_length: int | None = None,
+    flags: int = 0,
+) -> bytes:
+    stored = len(payload)
+    padded = fs._pad4(stored)
+    field = bytearray(fs.CAPTURE_FIELD_HEADER_SIZE + padded)
+    field[0:2] = field_class.to_bytes(2, "little")
+    field[4] = disposition
+    field[6:8] = stored.to_bytes(2, "little")
+    field[8:12] = (stored if original_length is None else original_length).to_bytes(4, "little")
+    field[12 : 12 + stored] = payload
+    raw = bytearray(fs.CAPTURE_SLAB_HEADER_SIZE)
+    raw[8:12] = (len(raw) + len(field)).to_bytes(4, "little")
+    raw[12:14] = (1).to_bytes(2, "little")
+    raw[14] = fs.SCHEMA_VERSION
+    raw[15] = fs.EventKind.CAPTURE
+    raw[17] = flags
+    return bytes(raw + field)
+
+
 def test_siphash_matches_reference_vector() -> None:
     # Canonical SipHash-2-4 test vector (key 00..0f, input bytes(0..14)).
     k0, k1 = 0x0706050403020100, 0x0F0E0D0C0B0A0908
@@ -316,6 +341,104 @@ def test_slab_decode_rejects_short_and_wrong_kind() -> None:
     ).encode()
     with pytest.raises(fs.SchemaError):
         fs.CaptureSlab.decode(phase)
+
+
+def test_slab_decode_rejects_bytes_outside_declared_used_length() -> None:
+    rec = _native(capture_slabs=1, slab_bytes=4096)
+    req = rec.begin(start_ns=0)
+    req.capture(int(FC.REQUEST_HEADER), 1, _flight.CAP_RAW, b"value")
+    req.finish(now_ns=1, status=200)
+    (slab,) = rec.drain_captures()
+
+    with pytest.raises(fs.SchemaError, match="used_bytes must equal"):
+        fs.CaptureSlab.decode(slab + b"trailing")
+
+
+def test_slab_decode_rejects_declared_length_below_header() -> None:
+    raw = bytearray(fs.CAPTURE_SLAB_HEADER_SIZE)
+    raw[8:12] = (fs.CAPTURE_SLAB_HEADER_SIZE - 1).to_bytes(4, "little")
+    raw[14] = fs.SCHEMA_VERSION
+    raw[15] = fs.EventKind.CAPTURE
+
+    with pytest.raises(fs.SchemaError, match="at least 24 bytes"):
+        fs.CaptureSlab.decode(bytes(raw))
+
+
+def test_slab_decode_rejects_unparsed_bytes_inside_used_length() -> None:
+    rec = _native(capture_slabs=1, slab_bytes=4096)
+    req = rec.begin(start_ns=0)
+    req.capture(int(FC.REQUEST_HEADER), 1, _flight.CAP_RAW, b"four")
+    req.finish(now_ns=1, status=200)
+    (slab,) = rec.drain_captures()
+    raw = bytearray(slab + b"junk")
+    raw[8:12] = len(raw).to_bytes(4, "little")
+
+    with pytest.raises(fs.SchemaError, match="field records use"):
+        fs.CaptureSlab.decode(bytes(raw))
+
+
+def test_slab_decode_rejects_truncated_field_padding() -> None:
+    raw = bytearray(_slab_wire(payload=b"x"))
+    raw.pop()
+    raw[8:12] = len(raw).to_bytes(4, "little")
+
+    with pytest.raises(fs.SchemaError, match="field padding"):
+        fs.CaptureSlab.decode(bytes(raw))
+
+
+def test_slab_decode_preserves_outbound_exchange_field_class() -> None:
+    rec = _native(capture_slabs=1, slab_bytes=4096)
+    req = rec.begin(start_ns=0)
+    req.capture(int(FC.OUTBOUND_HTTP_EXCHANGE), 1, _flight.CAP_RAW, b"exchange")
+    req.finish(now_ns=1, status=200)
+    (slab,) = rec.drain_captures()
+
+    assert fs.CaptureSlab.decode(slab).fields[0].field_class is FC.OUTBOUND_HTTP_EXCHANGE
+
+
+def test_slab_decode_refuses_impossible_field_count_before_materializing() -> None:
+    raw = bytearray(fs.CAPTURE_SLAB_HEADER_SIZE)
+    raw[8:12] = len(raw).to_bytes(4, "little")
+    raw[12:14] = (0xFFFF).to_bytes(2, "little")
+    raw[14] = fs.SCHEMA_VERSION
+    raw[15] = fs.EventKind.CAPTURE
+
+    with pytest.raises(fs.SchemaError, match="field_count 65535"):
+        fs.CaptureSlab.decode(bytes(raw))
+
+
+@pytest.mark.parametrize("field_class", [11, 0xFFFF])
+def test_slab_decode_rejects_unknown_field_class(field_class: int) -> None:
+    with pytest.raises(fs.SchemaError, match="unknown capture field class"):
+        fs.CaptureSlab.decode(_slab_wire(field_class=field_class))
+
+
+def test_slab_decode_rejects_unknown_disposition() -> None:
+    with pytest.raises(fs.SchemaError, match="unknown capture disposition"):
+        fs.CaptureSlab.decode(_slab_wire(disposition=255))
+
+
+def test_slab_decode_rejects_unknown_flags() -> None:
+    with pytest.raises(fs.SchemaError, match="unknown capture flags"):
+        fs.CaptureSlab.decode(_slab_wire(flags=1))
+
+
+@pytest.mark.parametrize("disposition", [D.MASKED, D.LENGTH])
+def test_slab_decode_rejects_payload_for_payloadless_disposition(
+    disposition: D,
+) -> None:
+    with pytest.raises(fs.SchemaError, match="must not store a payload"):
+        fs.CaptureSlab.decode(_slab_wire(disposition=int(disposition), payload=b"secret"))
+
+
+def test_slab_decode_rejects_a_malformed_hash_payload() -> None:
+    with pytest.raises(fs.SchemaError, match="HASHED payload must be 8 bytes"):
+        fs.CaptureSlab.decode(_slab_wire(disposition=int(D.HASHED), payload=b"short"))
+
+
+def test_slab_decode_rejects_raw_payload_longer_than_original() -> None:
+    with pytest.raises(fs.SchemaError, match="RAW payload exceeds original_length"):
+        fs.CaptureSlab.decode(_slab_wire(payload=b"long", original_length=3))
 
 
 def test_capture_slab_bytes_and_capacity_reported() -> None:

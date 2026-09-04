@@ -32,6 +32,7 @@ from .._json import loads as _json_loads
 from .._native import _core
 from ..request import Request
 from ..response import Response
+from ._cookies import cookie_name_is_ambiguous
 
 
 def rotate_session(request: Request) -> None:
@@ -55,6 +56,7 @@ MIN_SECRET_BYTES = 32
 #: The serialization of an absent/rejected session, so a request that never
 #: touches it compares equal and writes no cookie.
 _EMPTY_SESSION = _json_dumps({})
+_MAX_CLOCK_SKEW = 60
 
 
 class _AmbiguousSessionAuthority(Exception):
@@ -74,7 +76,11 @@ def _session_binding(request: Request) -> tuple[bytes, bool]:
     else:
         header = getattr(request, "header", None)
         raw_host = (header("host") or "") if callable(header) else ""
-    host = _core.normalize_host(raw_host, False) or raw_host.lower()
+    host = _core.normalize_host(raw_host, False)
+    if host is None:
+        if raw_host:
+            raise _AmbiguousSessionAuthority
+        host = ""
     tenant_bytes = tenant_key.encode("utf-8")
     host_bytes = host.encode("utf-8")
     binding = (
@@ -179,8 +185,14 @@ class SessionPolicy:
             # cookie that *is* the session, so a short one is a forgeable
             # session, and "not empty" was not a meaningful bar.
             raise ValueError(f"session secret must contain at least {MIN_SECRET_BYTES} bytes")
+        if not isinstance(secure, bool):
+            raise TypeError("session secure must be bool")
+        if not isinstance(http_only, bool):
+            raise TypeError("session http_only must be bool")
         if max_age <= 0:
             raise ValueError("session max_age must be positive")
+        if same_site is None:
+            raise ValueError("session same_site must be strict, lax, or none")
         Response().set_cookie(
             cookie,
             "configuration-check",
@@ -283,7 +295,9 @@ class SessionPolicy:
                     break
             else:
                 return None
-            if int(stamp) + self._max_age < int(time.time()):
+            issued_at = int(stamp)
+            now = int(time.time())
+            if issued_at > now + _MAX_CLOCK_SKEW or issued_at + self._max_age < now:
                 return None
             payload = b64url_decode(body)
             data = _json_loads(payload)
@@ -311,6 +325,10 @@ class SessionPolicy:
         loaded = None
         binding = None
         raw = request.cookies.get(self._cookie)
+        if raw is not None and cookie_name_is_ambiguous(
+            getattr(request, "headers", ()), self._cookie
+        ):
+            raw = None
         if raw is not None:
             try:
                 binding, tenant_bound = _session_binding(request)
@@ -349,6 +367,10 @@ class SessionPolicy:
         sid: str | None = None
         session: dict[str, Any] = {}
         raw = request.cookies.get(self._cookie)
+        if raw is not None and cookie_name_is_ambiguous(
+            getattr(request, "headers", ()), self._cookie
+        ):
+            raw = None
         try:
             binding, tenant_bound = _session_binding(request)
         except _AmbiguousSessionAuthority:
@@ -463,7 +485,9 @@ class SessionPolicy:
                     break
             else:
                 return None
-            if int(stamp) + self._max_age < int(time.time()):
+            issued_at = int(stamp)
+            now = int(time.time())
+            if issued_at > now + _MAX_CLOCK_SKEW or issued_at + self._max_age < now:
                 return None
             sid = b64url_decode(body).decode("ascii")
             return (sid, previous) if _status else sid

@@ -569,11 +569,17 @@ typedef struct {
     int upgrade_request;
 } WreathHttpRequestMeta;
 
+PyObject *wreath_http_method_cache_new(void);
+PyObject *wreath_http_header_name_cache_new(void);
+int wreath_http_register_request_parser(PyObject *module);
+int wreath_http_register_response_parser(PyObject *module);
+int wreath_http_register_client_response_parser(PyObject *module);
+
 int wreath_http_parse_request_parts(
     const uint8_t *data, Py_ssize_t len, Py_ssize_t head_end_off,
     PyObject **method, PyObject **target, int *minor_version,
     PyObject **headers, Py_ssize_t *consumed, Py_ssize_t max_headers,
-    WreathHttpRequestMeta *request_meta
+    WreathHttpRequestMeta *request_meta, PyObject *object_cache
 );
 PyObject *wreath_http_parse_request(PyObject *self, PyObject *args);
 
@@ -595,10 +601,12 @@ typedef struct {
 
 int wreath_http_parse_response_parts(
     const uint8_t *data, Py_ssize_t size, PyObject *method,
-    WreathHttpResponseHead *head
+    WreathHttpResponseHead *head, PyObject *object_cache
 );
 void wreath_http_response_head_clear(WreathHttpResponseHead *head);
 PyObject *wreath_http_parse_response(PyObject *self, PyObject *args);
+PyObject *wreath_http_parse_response_cached(
+    PyObject *arg, PyObject *object_cache);
 PyObject *wreath_http_response_framing(PyObject *self, PyObject *args);
 PyObject *wreath_http_response_keeps_alive(PyObject *self, PyObject *args);
 PyObject *wreath_http_parse_chunk_size(PyObject *self, PyObject *arg);
@@ -617,6 +625,7 @@ PyObject *wreath_is_compressible_content_type(PyObject *self, PyObject *arg);
 PyObject *wreath_cache_control_flags(PyObject *self, PyObject *arg);
 PyObject *wreath_origin_matches(PyObject *self, PyObject *args);
 PyObject *wreath_append_missing_headers(PyObject *self, PyObject *args);
+PyObject *wreath_validate_response_headers(PyObject *self, PyObject *headers);
 PyObject *wreath_append_vary(PyObject *self, PyObject *args);
 PyObject *wreath_replace_content_length(PyObject *self, PyObject *args);
 PyObject *wreath_replace_response_header(PyObject *self, PyObject *args);

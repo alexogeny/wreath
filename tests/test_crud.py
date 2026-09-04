@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
@@ -473,6 +474,23 @@ async def test_within_is_refused_where_it_would_mean_nothing() -> None:
         Access.deny().within(300)
     with pytest.raises(ValueError, match="no caller can satisfy"):
         Access.roles("admin").within(0)
+
+
+@pytest.mark.parametrize("seconds", [float("nan"), float("inf"), float("-inf")])
+async def test_within_refuses_non_finite_freshness_windows(seconds: float) -> None:
+    with pytest.raises(ValueError, match="positive finite number"):
+        Access.roles("admin").within(seconds)
+
+
+async def test_within_refuses_a_window_too_large_for_finite_seconds() -> None:
+    with pytest.raises(ValueError, match="positive finite number"):
+        Access.roles("admin").within(10**1000)
+
+
+@pytest.mark.parametrize("seconds", [True, "300", None])
+async def test_within_refuses_non_numeric_freshness_windows(seconds: Any) -> None:
+    with pytest.raises(TypeError, match="positive finite number"):
+        Access.roles("admin").within(seconds)
 
 
 async def test_step_up_on_a_generated_delete_is_enforced_through_the_app() -> None:

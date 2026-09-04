@@ -12,9 +12,11 @@ import pytest
 import wreath.chat.teams as teams_module
 from wreath.chat import ChatOps, ChatReply, ChatTenantMismatch
 from wreath.chat.teams import (
+    ConnectorRequest,
     Teams,
     TeamsActivity,
     TeamsBotConfig,
+    TeamsConnectorError,
     TeamsInstallation,
     TeamsManifest,
     TeamsRefusal,
@@ -28,6 +30,212 @@ from ._support import (
     RecordingConnector,
     activity,
 )
+
+
+def test_connector_request_repr_does_not_expose_authorization() -> None:
+    secret = "teams-bearer-secret"
+    request = ConnectorRequest(
+        "POST",
+        "https://smba.trafficmanager.net/amer/v3/messages",
+        {"authorization": f"Bearer {secret}"},
+        {},
+    )
+
+    assert secret not in repr(request)
+
+
+def test_default_connector_bounds_success_response_bodies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        status = 200
+
+        def read(self, size: int = -1) -> bytes:
+            return b"x" * (size + 1)
+
+        def getheader(self, name: str) -> None:
+            return None
+
+    class Connection:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def request(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def getresponse(self) -> Response:
+            return Response()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(teams_module.http.client, "HTTPSConnection", Connection)
+    request = ConnectorRequest(
+        "POST",
+        "https://smba.trafficmanager.net/v3/messages",
+        {},
+        {},
+    )
+
+    with pytest.raises(TeamsConnectorError) as caught:
+        teams_module._UrlConnector._send(request)
+
+    assert caught.value.status == 502
+
+
+def test_default_connector_bounds_token_response_bodies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        status = 200
+
+        def read(self, size: int = -1) -> bytes:
+            return b"x" * (size + 1)
+
+    class Connection:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def request(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def getresponse(self) -> Response:
+            return Response()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(teams_module.http.client, "HTTPSConnection", Connection)
+
+    with pytest.raises(TeamsConnectorError) as caught:
+        teams_module._fetch_connector_token(provider().config)
+
+    assert caught.value.status == 502
+
+
+def test_default_connector_accepts_bounded_response_bodies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        status = 200
+
+        def __init__(self, body: bytes) -> None:
+            self.body = body
+
+        def read(self, size: int = -1) -> bytes:
+            assert size > len(self.body)
+            return self.body
+
+        def getheader(self, name: str) -> None:
+            return None
+
+    responses = iter(
+        (
+            Response(b"{}"),
+            Response(b'{"access_token":"token","expires_in":3600}'),
+        )
+    )
+
+    class Connection:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def request(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def getresponse(self) -> Response:
+            return next(responses)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(teams_module.http.client, "HTTPSConnection", Connection)
+    request = ConnectorRequest(
+        "POST",
+        "https://smba.trafficmanager.net/v3/messages",
+        {},
+        {},
+    )
+
+    assert teams_module._UrlConnector._send(request) == {}
+    assert teams_module._fetch_connector_token(provider().config) == ("token", 3600.0)
+
+
+@pytest.mark.parametrize("expires_in", [b"Infinity", b"86401"])
+def test_default_connector_refuses_an_unbounded_token_lifetime(
+    monkeypatch: pytest.MonkeyPatch,
+    expires_in: bytes,
+) -> None:
+    class Response:
+        status = 200
+
+        def read(self, size: int = -1) -> bytes:
+            return b'{"access_token":"token","expires_in":' + expires_in + b"}"
+
+    class Connection:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def request(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def getresponse(self) -> Response:
+            return Response()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(teams_module.http.client, "HTTPSConnection", Connection)
+
+    with pytest.raises(TeamsConnectorError) as caught:
+        teams_module._fetch_connector_token(provider().config)
+
+    assert caught.value.status == 502
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "expected"),
+    [("17", 17.0), ("86401", None), ("9" * 400, None)],
+)
+def test_default_connector_bounds_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
+    retry_after: str,
+    expected: float | None,
+) -> None:
+    class Response:
+        status = 429
+
+        def read(self, size: int = -1) -> bytes:
+            raise AssertionError("an error response body must not be read")
+
+        def getheader(self, name: str) -> str:
+            return retry_after
+
+    class Connection:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def request(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def getresponse(self) -> Response:
+            return Response()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(teams_module.http.client, "HTTPSConnection", Connection)
+    request = ConnectorRequest(
+        "POST",
+        "https://smba.trafficmanager.net/v3/messages",
+        {},
+        {},
+    )
+
+    with pytest.raises(TeamsConnectorError) as caught:
+        teams_module._UrlConnector._send(request)
+
+    assert caught.value.retry_after == expected
 
 
 def provider(connector: Any = None) -> Teams:
@@ -289,6 +497,10 @@ async def test_concurrent_connector_token_requests_share_one_refresh(
         "https://127.0.0.1/internal/",
         "https://smba.trafficmanager.net/amer/?query=/",
         "https://smba.trafficmanager.net/amer/#fragment/",
+        "https://smba.\ntrafficmanager.net/amer/",
+        "https://smba.trafficmanager.net/am\ter/",
+        "https://smba.trafficmanager.net/amer/\x7f/",
+        "https://smba.trafficmanager.net/amer/\x85/",
         "https://smba.trafficmanager.net/amer",
     ],
 )

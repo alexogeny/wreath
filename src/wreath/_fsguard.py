@@ -18,10 +18,11 @@ import os
 import stat
 
 #: openat-style access (dir_fd) is required to walk beneath a root descriptor.
-_HAVE_DIR_FD = os.open in os.supports_dir_fd
+_HAVE_DIR_FD = os.open in os.supports_dir_fd and os.lstat in os.supports_dir_fd
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 
 class ContainmentError(Exception):
@@ -32,6 +33,8 @@ def open_root(directory: str | os.PathLike[str]) -> int:
     """Open `directory` as a trusted root descriptor (caller closes it)."""
     if not _HAVE_DIR_FD:
         raise ContainmentError("platform lacks openat/dir_fd support")
+    if not _O_NOFOLLOW:
+        raise ContainmentError("platform lacks O_NOFOLLOW support")
     return os.open(os.fspath(directory), os.O_RDONLY | _O_DIRECTORY | _O_CLOEXEC)
 
 
@@ -61,6 +64,8 @@ def open_beneath(root_fd: int, relative: str) -> tuple[int, os.stat_result]:
     """
     if not _HAVE_DIR_FD:
         raise ContainmentError("platform lacks openat/dir_fd support")
+    if not _O_NOFOLLOW:
+        raise ContainmentError("platform lacks O_NOFOLLOW support")
     parts = _components(relative)
     intermediates: list[int] = []
     current = root_fd
@@ -85,7 +90,11 @@ def _open_at(dir_fd: int, name: str, extra_flags: int) -> int:
     if stat.S_ISLNK(os.lstat(name, dir_fd=dir_fd).st_mode):
         raise ContainmentError(f"refusing to follow symlink component {name!r}")
     try:
-        return os.open(name, os.O_RDONLY | _O_NOFOLLOW | _O_CLOEXEC | extra_flags, dir_fd=dir_fd)
+        return os.open(
+            name,
+            os.O_RDONLY | _O_NOFOLLOW | _O_CLOEXEC | _O_NONBLOCK | extra_flags,
+            dir_fd=dir_fd,
+        )
     except OSError as exc:
         # A component swapped to a symlink after the lstat still fails the open
         # under O_NOFOLLOW (ELOOP, or ENOTDIR with O_DIRECTORY); fail closed.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import struct
 import zlib
+from typing import Any, cast
 
 import pytest
 
@@ -64,6 +65,17 @@ def test_decode_recording_refuses_invalid_headers(data: bytes, message: str) -> 
         reference.decode_recording(data)
 
 
+def test_decode_recording_refuses_unknown_container_flags() -> None:
+    data = reference._HEADER.pack(
+        reference.MAGIC,
+        reference._CONTAINER_VERSION,
+        schema.SCHEMA_VERSION,
+        1 << 15,
+    ) + b"\0" * schema.IMAGE_HASH_BYTES
+    with pytest.raises(schema.SchemaError, match="unsupported container flags"):
+        reference.decode_recording(data)
+
+
 def test_decode_recording_refuses_a_false_metadata_hash() -> None:
     encoded = bytearray(reference.encode_recording(_image()))
     encoded[reference._HEADER.size] ^= 1
@@ -113,6 +125,91 @@ def test_decode_recording_refuses_partial_and_wrong_version_event_cells() -> Non
 def test_reference_recorder_refuses_non_power_of_two_rings(ring_records: int) -> None:
     with pytest.raises(ValueError, match="ring_records must be a power of two"):
         reference.ReferenceRecorder(schema.Mode.PULSE, ring_records=ring_records)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("worker_id", -1),
+        ("ring_records", True),
+        ("active_requests", -1),
+        ("histogram_count", -1),
+        ("phase_slots", -1),
+        ("detailed_slow_us", -1),
+        ("capture_slabs", -1),
+        ("slab_bytes", -1),
+    ],
+)
+def test_reference_recorder_refuses_unsigned_constructor_wraparound(
+    name: str, value: int
+) -> None:
+    with pytest.raises((OverflowError, ValueError), match=name):
+        reference.ReferenceRecorder(schema.Mode.OFF, **cast(Any, {name: value}))
+
+
+def test_reference_recorder_refuses_unknown_mode_and_hash_key_wraparound() -> None:
+    with pytest.raises(ValueError, match="mode"):
+        reference.ReferenceRecorder(4)
+    with pytest.raises((OverflowError, ValueError), match="capture_hash_key"):
+        reference.ReferenceRecorder(schema.Mode.OFF, capture_hash_key=(-1, 0))
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "maximum_name"),
+    [
+        ("ring_records", (1 << 24) + 1, "_MAX_RING_RECORDS"),
+        ("active_requests", (1 << 20) + 1, "_MAX_ACTIVE_REQUESTS"),
+        ("phase_slots", (1 << 20) + 1, "_MAX_PHASE_SLOTS"),
+        ("histogram_count", (1 << 16) + 2, "_MAX_HISTOGRAMS"),
+        ("capture_slabs", (1 << 16) + 1, "_MAX_CAPTURE_SLABS"),
+    ],
+)
+def test_reference_unsigned_resource_ceilings(
+    name: str, value: int, maximum_name: str
+) -> None:
+    with pytest.raises(ValueError, match=name):
+        reference._bounded_unsigned(value, name, getattr(reference, maximum_name))
+
+
+def test_reference_resource_ceiling_contract_matches_runtime_configuration() -> None:
+    assert (
+        reference._MAX_RING_RECORDS,
+        reference._MAX_ACTIVE_REQUESTS,
+        reference._MAX_PHASE_SLOTS,
+        reference._MAX_HISTOGRAMS,
+        reference._MAX_CAPTURE_SLABS,
+    ) == (1 << 24, 1 << 20, 1 << 20, (1 << 16) + 1, 1 << 16)
+
+
+def test_reference_unsigned_parser_refuses_non_integer_values() -> None:
+    with pytest.raises((TypeError, ValueError), match="capacity"):
+        reference._bounded_unsigned(1.5, "capacity", 10)
+
+
+def test_reference_capture_budget_is_bounded_only_when_allocated() -> None:
+    with pytest.raises(ValueError, match="capture_slabs . slab_bytes"):
+        reference._validate_capture_budget(schema.Mode.FORENSIC, 2, (1 << 29) + 1)
+    reference._validate_capture_budget(schema.Mode.DETAILED, 2, (1 << 29) + 1)
+    with pytest.raises(ValueError, match="capture_slabs . slab_bytes"):
+        reference.ReferenceRecorder(
+            schema.Mode.FORENSIC, capture_slabs=2, slab_bytes=(1 << 29) + 1
+        )
+
+
+@pytest.mark.parametrize("key", [[], [1, 2], (1,), (1, 2, 3)])
+def test_reference_capture_hash_key_requires_an_exact_pair(key: object) -> None:
+    with pytest.raises(TypeError, match="capture_hash_key must be a .* tuple"):
+        reference.ReferenceRecorder(
+            schema.Mode.OFF, capture_hash_key=cast(Any, key)
+        )
+
+
+def test_empty_reference_ring_drops_instead_of_growing_without_bound() -> None:
+    recorder = reference.ReferenceRecorder(schema.Mode.PULSE, ring_records=0)
+    recorder.record(start_ns=0, end_ns=1_000, status=200)
+
+    assert recorder.ring_occupancy == 0
+    assert recorder.loss(schema.LossReason.RING_FULL) == 1
 
 
 def test_capture_storage_is_disabled_outside_forensic_mode() -> None:

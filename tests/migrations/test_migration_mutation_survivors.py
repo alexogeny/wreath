@@ -76,6 +76,35 @@ def test_managed_policy_keeps_a_valid_sample_size(sample_size: int) -> None:
 
 
 @pytest.mark.parametrize(
+    ("kind", "sample_size"),
+    [("managed", True), ("managed", -1), ("unknown", 0), ("strict", 1)],
+)
+def test_resolution_policy_refuses_invalid_direct_construction(
+    kind: object, sample_size: object
+) -> None:
+    with pytest.raises(ValueError):
+        migrations.ResolutionPolicy(kind, sample_size)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("catalog_chunk_size", True),
+        ("catalog_chunk_size", -1),
+        ("catalog_chunk_size", "1"),
+        ("concurrency", True),
+        ("max_failures", True),
+    ],
+)
+def test_migration_config_refuses_invalid_integer_fields(field: str, value: object) -> None:
+    with pytest.raises(ValueError, match=field):
+        kwargs = {field: value}
+        migrations.MigrationConfig(
+            "main", migrations.ResolutionPolicy.strict(), **kwargs
+        )
+
+
+@pytest.mark.parametrize(
     ("action", "tenant", "holes_open", "fragments"),
     [
         ("drop", "", 0, ("drops app.widgets.value", "pass 'recode'", "phase scan")),
@@ -293,6 +322,12 @@ def test_catalog_descriptor_refuses_a_short_header_with_the_right_magic() -> Non
 
 
 @pytest.mark.asyncio
+async def test_generate_plan_refuses_a_non_boolean_fleet_identity_flag() -> None:
+    with pytest.raises(ValueError, match="fleet must be a bool"):
+        await migrations.generate_single_plan(None, None, fleet=1)
+
+
+@pytest.mark.asyncio
 async def test_generate_baseline_checks_identity_and_resolves_operator_classes(monkeypatch) -> None:
     with pytest.raises(ValueError, match="exactly 16 bytes"):
         await migrations.generate_single_baseline(_Registry(()), None, migration_id=b"short")
@@ -462,6 +497,68 @@ async def test_apply_fleet_refuses_empty_and_repeated_targets_before_loading_art
         await migrations.apply_fleet(None, b"invalid", [])
     with pytest.raises(ValueError, match="same schema twice: tenant"):
         await migrations.apply_fleet(None, b"invalid", ["tenant", "tenant"])
+
+
+@pytest.mark.asyncio
+async def test_apply_fleet_refuses_non_string_schema_before_loading_artifact() -> None:
+    with pytest.raises(ValueError, match="tenant schema must be a string"):
+        await migrations.apply_fleet(None, b"invalid", [123])
+
+
+@pytest.mark.asyncio
+async def test_apply_fleet_refuses_schema_string_subclasses() -> None:
+    class StringSubclass(str):
+        pass
+
+    with pytest.raises(ValueError, match="tenant schema must be a string"):
+        await migrations.apply_fleet(None, b"invalid", [StringSubclass("tenant")])
+
+
+@pytest.mark.asyncio
+async def test_apply_fleet_refuses_each_schema_before_consuming_the_next() -> None:
+    def hostile_directory():
+        yield "not-valid"
+        raise AssertionError("fleet consumed past the first invalid schema")
+
+    with pytest.raises(ValueError, match="plain SQL identifier"):
+        await migrations.apply_fleet(None, b"invalid", hostile_directory())
+
+
+@pytest.mark.asyncio
+async def test_apply_fleet_does_not_call_a_first_schema_a_duplicate() -> None:
+    with pytest.raises(ValueError, match="invalid WMA1 artifact"):
+        await migrations.apply_fleet(None, b"invalid", ["tenant"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("function", "kwargs", "field"),
+    [
+        (migrations.apply_single_artifact, {"allow_destructive": 1}, "allow_destructive"),
+        (migrations.revert_single_artifact, {"allow_destructive": 1}, "allow_destructive"),
+        (migrations.revert_single_artifact, {"force": 1}, "force"),
+    ],
+)
+async def test_single_artifact_entry_points_refuse_non_boolean_authority_flags(
+    function: Any, kwargs: dict[str, object], field: str
+) -> None:
+    with pytest.raises(ValueError, match=f"{field} must be a bool"):
+        await function(None, None, b"invalid", **kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "field"),
+    [
+        ({"allow_destructive": 1}, "allow_destructive"),
+        ({"stop_on_error": 1}, "stop_on_error"),
+    ],
+)
+async def test_apply_fleet_refuses_non_boolean_control_flags(
+    kwargs: dict[str, object], field: str
+) -> None:
+    with pytest.raises(ValueError, match=f"{field} must be a bool"):
+        await migrations.apply_fleet(None, b"invalid", ["tenant"], **kwargs)
 
 
 @pytest.mark.asyncio

@@ -21,6 +21,9 @@ def test_the_plain_pkce_method_is_refused() -> None:
         "https://user:password@idp.example",
         "https://idp.example?tenant=acme",
         "https://idp.example#issuer",
+        "https://idp.example:invalid",
+        "https://idp.example/iss\tuer",
+        "https://idp.example/issuer\x7f",
     ],
 )
 def test_oidc_relying_party_refuses_an_ambiguous_issuer(issuer: str) -> None:
@@ -70,6 +73,29 @@ def test_a_state_from_another_browser_session_is_refused() -> None:
     with pytest.raises(SsoRefusal, match="different browser session") as raised:
         party.consume_state(flow.state, session_id="attacker")
     assert raised.value.reason == "state-session-mismatch"
+
+
+def test_oidc_session_binding_is_constant_time_and_single_attempt(monkeypatch) -> None:
+    import hmac
+
+    comparisons: list[tuple[str, str]] = []
+    original = hmac.compare_digest
+
+    def compared(left: str, right: str) -> bool:
+        comparisons.append((left, right))
+        return original(left, right)
+
+    monkeypatch.setattr(hmac, "compare_digest", compared)
+    party = _party()
+    flow = party.begin_login(organization="acme", session_id="x" * 32)
+
+    with pytest.raises(SsoRefusal, match="different browser session"):
+        party.consume_state(flow.state, session_id="short")
+    with pytest.raises(SsoRefusal) as replay:
+        party.consume_state(flow.state, session_id="x" * 32)
+
+    assert replay.value.reason == "unknown-state"
+    assert comparisons == [("x" * 32, "short")]
 
 
 def test_an_empty_browser_session_binding_is_refused() -> None:
@@ -157,6 +183,29 @@ def test_an_id_token_with_no_nonce_at_all_is_refused() -> None:
         _party().check_nonce({}, expected_nonce="mine")
 
 
+def test_nonce_check_refuses_an_empty_expected_binding() -> None:
+    with pytest.raises(SsoRefusal, match="nonce"):
+        _party().check_nonce({"nonce": ""}, expected_nonce="")
+
+
+def test_nonce_check_compares_text_in_constant_time(monkeypatch) -> None:
+    import hmac
+
+    comparisons: list[tuple[str, str]] = []
+    original = hmac.compare_digest
+
+    def compared(left: str, right: str) -> bool:
+        comparisons.append((left, right))
+        return original(left, right)
+
+    monkeypatch.setattr(hmac, "compare_digest", compared)
+
+    with pytest.raises(SsoRefusal, match="nonce"):
+        _party().check_nonce({"nonce": "short"}, expected_nonce="x" * 32)
+
+    assert comparisons == [("short", "x" * 32)]
+
+
 def test_the_matching_nonce_is_accepted() -> None:
     _party().check_nonce({"nonce": "mine"}, expected_nonce="mine")
 
@@ -177,7 +226,10 @@ async def test_refresh_loads_keys_from_discovery_and_is_the_only_loader() -> Non
     async def fetch(url: str) -> dict:
         calls.append(url)
         if url.endswith("openid-configuration"):
-            return {"jwks_uri": "https://idp.example/jwks"}
+            return {
+                "issuer": "https://idp.example",
+                "jwks_uri": "https://idp.example/jwks",
+            }
         return {"keys": [{"kid": "k1"}, {"kid": "k2"}]}
 
     party = _party()
@@ -194,7 +246,7 @@ async def test_refresh_refuses_a_jwks_uri_off_the_issuer_origin() -> None:
 
     async def fetch(url: str) -> dict:
         calls.append(url)
-        return {"jwks_uri": "http://127.0.0.1/internal"}
+        return {"issuer": "https://idp.example", "jwks_uri": "http://127.0.0.1/internal"}
 
     with pytest.raises(SsoRefusal, match="issuer origin"):
         await _party().refresh(fetch)
@@ -206,8 +258,39 @@ async def test_refresh_refuses_credentials_in_a_discovered_jwks_uri() -> None:
 
     async def fetch(url: str) -> dict:
         calls.append(url)
-        return {"jwks_uri": "https://user:password@idp.example/jwks"}
+        return {
+            "issuer": "https://idp.example",
+            "jwks_uri": "https://user:password@idp.example/jwks",
+        }
 
     with pytest.raises(SsoRefusal, match="issuer origin"):
         await _party().refresh(fetch)
     assert calls == ["https://idp.example/.well-known/openid-configuration"]
+
+
+async def test_refresh_refuses_parser_controls_in_a_discovered_jwks_uri() -> None:
+    calls: list[str] = []
+
+    async def fetch(url: str) -> dict:
+        calls.append(url)
+        return {
+            "issuer": "https://idp.example",
+            "jwks_uri": "https://idp.example/jw\tks",
+        }
+
+    with pytest.raises(SsoRefusal, match="issuer origin"):
+        await _party().refresh(fetch)
+    assert calls == ["https://idp.example/.well-known/openid-configuration"]
+
+
+async def test_refresh_refuses_duplicate_jwks_key_ids() -> None:
+    async def fetch(url: str) -> dict:
+        if url.endswith("openid-configuration"):
+            return {
+                "issuer": "https://idp.example",
+                "jwks_uri": "https://idp.example/jwks",
+            }
+        return {"keys": [{"kid": "rotating"}, {"kid": "rotating"}]}
+
+    with pytest.raises(SsoRefusal, match="duplicate.*rotating"):
+        await _party().refresh(fetch)

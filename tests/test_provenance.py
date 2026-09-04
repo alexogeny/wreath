@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from typing import Any
 
 import pytest
 
+import wreath.provenance as provenance_module
 from wreath.provenance import (
     ArtifactChanged,
     Attestation,
@@ -77,3 +79,58 @@ def test_verification_quorum_refuses_a_non_integer() -> None:
     quorum: Any = 1.5
     with pytest.raises(InvalidProvenance, match="quorum must be an integer"):
         signed.verify(ARTIFACT, {"alice": ALICE.public}, quorum=quorum)
+
+
+def test_sidecar_refuses_duplicate_object_members() -> None:
+    sidecar = Provenance.for_artifact(ARTIFACT).dump().replace(
+        b'"version":1', b'"version":1,"version":1'
+    )
+
+    with pytest.raises(InvalidProvenance, match="duplicate provenance field 'version'"):
+        Provenance.load(sidecar)
+
+
+def test_sidecar_refuses_unknown_attestation_members() -> None:
+    sidecar = (
+        Provenance.for_artifact(ARTIFACT)
+        .countersign(ARTIFACT, ALICE)
+        .dump()
+        .replace(b'{"key_id"', b'{"unknown":true,"key_id"')
+    )
+
+    with pytest.raises(InvalidProvenance, match="unknown attestation fields"):
+        Provenance.load(sidecar)
+
+
+def test_sidecar_refuses_a_non_array_attestation_collection() -> None:
+    sidecar = Provenance.for_artifact(ARTIFACT).dump().replace(
+        b'"attestations":[]', b'"attestations":{}'
+    )
+
+    with pytest.raises(InvalidProvenance, match="attestations must be an array"):
+        Provenance.load(sidecar)
+
+
+def test_sidecar_applies_the_signatory_bound_before_attestation_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = json.loads(
+        Provenance.for_artifact(ARTIFACT).countersign(ARTIFACT, ALICE).dump()
+    )
+    document["attestations"] *= 65
+
+    def unexpected_construction(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("oversized sidecar reached attestation construction")
+
+    monkeypatch.setattr(provenance_module, "Attestation", unexpected_construction)
+
+    with pytest.raises(InvalidProvenance, match="at most 64 signatories"):
+        Provenance.load(json.dumps(document).encode())
+
+
+def test_sidecar_refuses_non_object_attestations_with_the_shape_error() -> None:
+    document = json.loads(Provenance.for_artifact(ARTIFACT).dump())
+    document["attestations"] = [None]
+
+    with pytest.raises(InvalidProvenance, match="unknown attestation fields"):
+        Provenance.load(json.dumps(document).encode())

@@ -48,6 +48,33 @@ async def test_closing_an_unused_session_returns_nothing(
     assert database.released == 0
 
 
+@pytest.mark.parametrize("value", [True, float("nan"), float("inf"), "1", 0, -1])
+async def test_session_statement_timeout_must_be_a_finite_positive_number(
+    registry: Registry, value: object
+) -> None:
+    with pytest.raises(SessionError, match="statement_timeout must be a finite positive number"):
+        Session(registry, "read", statement_timeout=value)
+
+
+@pytest.mark.parametrize("value", [True, 0, -1, 1.5])
+async def test_session_identity_map_warning_threshold_must_be_a_positive_integer(
+    registry: Registry, value: object
+) -> None:
+    with pytest.raises(SessionError, match="identity_map_warn_at must be a positive integer"):
+        Session(registry, "read", identity_map_warn_at=value)
+
+
+async def test_session_accepts_finite_timeout_and_warning_threshold(
+    registry: Registry,
+) -> None:
+    session = Session(
+        registry, "read", statement_timeout=0.5, identity_map_warn_at=1
+    )
+
+    assert session._statement_timeout == 0.5
+    assert session._identity_warn_at == 1
+
+
 async def test_close_returns_the_connection_exactly_once(
     registry: Registry, database: FakeDatabase
 ) -> None:

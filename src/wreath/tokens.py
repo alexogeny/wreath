@@ -31,6 +31,8 @@ class TokenPurpose:
             raise ValueError("TokenPurpose name must be between 1 and 128 UTF-8 bytes")
         if isinstance(self.ttl, bool) or not isinstance(self.ttl, int) or self.ttl < 1:
             raise ValueError(f"TokenPurpose {self.name!r} ttl must be a positive integer")
+        if not isinstance(self.single_use, bool):
+            raise ValueError(f"TokenPurpose {self.name!r} single_use must be a boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,7 +188,13 @@ class ActionTokens:
     ) -> TokenClaims | None:
         """Return verified claims, or `None` for every invalid token shape."""
         policy = self._purpose(purpose)
-        if not isinstance(token, str) or len(token.encode("utf-8")) > self.max_token_bytes:
+        if not isinstance(token, str):
+            return None
+        try:
+            token_size = len(token.encode("utf-8"))
+        except UnicodeError:
+            return None
+        if token_size > self.max_token_bytes:
             return None
         current = int(self._clock() if now is None else now)
         try:
@@ -216,19 +224,25 @@ class ActionTokens:
             expires = payload["exp"]
             subject = payload["s"]
             token_id = payload["j"]
+            token_bound = payload["b"]
             if (
                 payload["v"] != 1
                 or payload["p"] != purpose
-                or payload["b"] != bound
+                or not isinstance(token_bound, str)
+                or len(token_bound.encode("utf-8")) > 1024
+                or token_bound != bound
                 or isinstance(issued, bool)
                 or not isinstance(issued, int)
                 or isinstance(expires, bool)
                 or not isinstance(expires, int)
                 or expires != issued + policy.ttl
                 or current < issued
-                or current > expires
+                or current >= expires
                 or not isinstance(subject, str)
+                or not subject
+                or len(subject.encode("utf-8")) > 1024
                 or not isinstance(token_id, str)
+                or len(token_id) != 22
             ):
                 return None
         except TypeError, ValueError, UnicodeError:

@@ -8,6 +8,7 @@
  */
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include <math.h>
 
 #include "flight.h"
 
@@ -25,6 +26,66 @@ typedef struct {
 
 static PyTypeObject RecorderType;
 static PyTypeObject RequestType;
+
+#define RECORDER_MAX_RING_RECORDS (1U << 24)
+#define RECORDER_MAX_ACTIVE_REQUESTS (1U << 20)
+#define RECORDER_MAX_PHASE_SLOTS (1U << 20)
+#define RECORDER_MAX_HISTOGRAMS ((1U << 16) + 1U)
+#define RECORDER_MAX_CAPTURE_SLABS (1U << 16)
+#define RECORDER_MAX_CAPTURE_BYTES (1ULL << 30)
+
+static int
+parse_bounded_u32(PyObject *object, const char *name, uint32_t maximum,
+                  uint32_t *result)
+{
+    if (object == Py_True || object == Py_False || !PyIndex_Check(object)) {
+        PyErr_Format(PyExc_TypeError, "%s must be an integer from 0 through %u",
+                     name, maximum);
+        return 0;
+    }
+    PyObject *integer = PyNumber_Index(object);
+    if (integer == NULL) {
+        return 0;
+    }
+    unsigned long long value = PyLong_AsUnsignedLongLong(integer);
+    Py_DECREF(integer);
+    if (value == (unsigned long long)-1 && PyErr_Occurred()) {
+        PyErr_Clear();
+        PyErr_Format(PyExc_ValueError, "%s must be an integer from 0 through %u",
+                     name, maximum);
+        return 0;
+    }
+    if (value > maximum) {
+        PyErr_Format(PyExc_ValueError, "%s must be an integer from 0 through %u",
+                     name, maximum);
+        return 0;
+    }
+    *result = (uint32_t)value;
+    return 1;
+}
+
+static int
+parse_u64(PyObject *object, const char *name, uint64_t *result)
+{
+    if (object == Py_True || object == Py_False || !PyIndex_Check(object)) {
+        PyErr_Format(PyExc_TypeError, "%s must be a non-negative integer", name);
+        return 0;
+    }
+    PyObject *integer = PyNumber_Index(object);
+    if (integer == NULL) {
+        return 0;
+    }
+    unsigned long long value = PyLong_AsUnsignedLongLong(integer);
+    Py_DECREF(integer);
+    if (value == (unsigned long long)-1 && PyErr_Occurred()) {
+        PyErr_Clear();
+        PyErr_Format(PyExc_ValueError, "%s must be a non-negative 64-bit integer",
+                     name);
+        return 0;
+    }
+    *result = (uint64_t)value;
+    return 1;
+}
 
 /* `PyUnicode_FSConverter` that also accepts None, for an optional path.
  *
@@ -220,19 +281,63 @@ recorder_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
                        slab_bytes = 65536;
     int completion_summaries = 1;
     double detailed_sample_rate = 0.0;
-    unsigned long long detailed_slow_us = 0;
+    uint64_t detailed_slow_us = 0;
+    PyObject *mode_obj;
+    PyObject *worker_id_obj = NULL;
+    PyObject *ring_records_obj = NULL;
+    PyObject *active_requests_obj = NULL;
+    PyObject *histogram_count_obj = NULL;
+    PyObject *phase_slots_obj = NULL;
+    PyObject *detailed_slow_us_obj = NULL;
+    PyObject *capture_slabs_obj = NULL;
+    PyObject *slab_bytes_obj = NULL;
     PyObject *hash_key = NULL;
     PyObject *ring_path_obj = NULL;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "I|IIIIpdIKIIOO&:Recorder", kwlist,
-                                     &mode, &worker_id, &ring_records, &active_requests,
-                                     &histogram_count, &completion_summaries,
-                                     &detailed_sample_rate, &phase_slots,
-                                     &detailed_slow_us, &capture_slabs, &slab_bytes,
-                                     &hash_key, path_or_none, &ring_path_obj)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|OOOOpdOOOOOO&:Recorder", kwlist,
+                                     &mode_obj, &worker_id_obj, &ring_records_obj,
+                                     &active_requests_obj, &histogram_count_obj,
+                                     &completion_summaries, &detailed_sample_rate,
+                                     &phase_slots_obj, &detailed_slow_us_obj,
+                                     &capture_slabs_obj, &slab_bytes_obj, &hash_key,
+                                     path_or_none, &ring_path_obj)) {
         return NULL;
     }
-    if (detailed_sample_rate < 0.0 || detailed_sample_rate > 1.0) {
-        PyErr_SetString(PyExc_ValueError, "detailed_sample_rate must be in [0, 1]");
+    if (!parse_bounded_u32(mode_obj, "mode", WREATH_NFR_MODE_FORENSIC, &mode) ||
+        (worker_id_obj != NULL &&
+         !parse_bounded_u32(worker_id_obj, "worker_id", UINT32_MAX, &worker_id)) ||
+        (ring_records_obj != NULL &&
+         !parse_bounded_u32(ring_records_obj, "ring_records",
+                            RECORDER_MAX_RING_RECORDS, &ring_records)) ||
+        (active_requests_obj != NULL &&
+         !parse_bounded_u32(active_requests_obj, "active_requests",
+                            RECORDER_MAX_ACTIVE_REQUESTS, &active_requests)) ||
+        (histogram_count_obj != NULL &&
+         !parse_bounded_u32(histogram_count_obj, "histogram_count",
+                            RECORDER_MAX_HISTOGRAMS, &histogram_count)) ||
+        (phase_slots_obj != NULL &&
+         !parse_bounded_u32(phase_slots_obj, "phase_slots", RECORDER_MAX_PHASE_SLOTS,
+                            &phase_slots)) ||
+        (detailed_slow_us_obj != NULL &&
+         !parse_u64(detailed_slow_us_obj, "detailed_slow_us", &detailed_slow_us)) ||
+        (capture_slabs_obj != NULL &&
+         !parse_bounded_u32(capture_slabs_obj, "capture_slabs",
+                            RECORDER_MAX_CAPTURE_SLABS, &capture_slabs)) ||
+        (slab_bytes_obj != NULL &&
+         !parse_bounded_u32(slab_bytes_obj, "slab_bytes", UINT32_MAX, &slab_bytes))) {
+        Py_XDECREF(ring_path_obj);
+        return NULL;
+    }
+    if (!isfinite(detailed_sample_rate) || detailed_sample_rate < 0.0 ||
+        detailed_sample_rate > 1.0) {
+        PyErr_SetString(PyExc_ValueError,
+                        "detailed_sample_rate must be a finite number in [0, 1]");
+        Py_XDECREF(ring_path_obj);
+        return NULL;
+    }
+    if (capture_slabs != 0 && mode >= WREATH_NFR_MODE_FORENSIC &&
+        (uint64_t)capture_slabs * slab_bytes > RECORDER_MAX_CAPTURE_BYTES) {
+        PyErr_SetString(PyExc_ValueError,
+                        "capture_slabs * slab_bytes must not exceed 1073741824 bytes");
         Py_XDECREF(ring_path_obj);
         return NULL;
     }
@@ -240,10 +345,16 @@ recorder_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
      * default draws a process-local key from the CSPRNG inside the worker. */
     uint64_t hash_key0 = 0, hash_key1 = 0;
     if (hash_key != NULL && hash_key != Py_None) {
-        if (!PyTuple_Check(hash_key) ||
-            !PyArg_ParseTuple(hash_key, "KK", &hash_key0, &hash_key1)) {
+        if (!PyTuple_Check(hash_key) || PyTuple_GET_SIZE(hash_key) != 2) {
             PyErr_SetString(PyExc_TypeError,
                             "capture_hash_key must be a (k0, k1) tuple");
+            Py_XDECREF(ring_path_obj);
+            return NULL;
+        }
+        if (!parse_u64(PyTuple_GET_ITEM(hash_key, 0), "capture_hash_key[0]",
+                       &hash_key0) ||
+            !parse_u64(PyTuple_GET_ITEM(hash_key, 1), "capture_hash_key[1]",
+                       &hash_key1)) {
             Py_XDECREF(ring_path_obj);
             return NULL;
         }
@@ -737,6 +848,10 @@ recorder_drain(RecorderObject *self, PyObject *args)
     }
     if (max_cells <= 0) {
         return PyBytes_FromStringAndSize(NULL, 0);
+    }
+    uint64_t occupancy = wreath_nfr_ring_occupancy(self->worker);
+    if ((uint64_t)max_cells > occupancy) {
+        max_cells = (Py_ssize_t)occupancy;
     }
     PyObject *buffer = PyBytes_FromStringAndSize(NULL, max_cells * WREATH_NFR_CELL_SIZE);
     if (buffer == NULL) {

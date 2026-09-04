@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import pytest
 
@@ -34,8 +35,14 @@ _PORT = 28150 + _SLOT * 40
     ("ejection", "message"),
     [
         (Ejection(failures=0), "ejection.failures must be at least 1"),
+        (Ejection(failures=1.5), "ejection.failures must be an integer"),
+        (Ejection(failures=True), "ejection.failures must be an integer"),
         (Ejection(seconds=0), "ejection.seconds must be positive"),
+        (Ejection(seconds=float("nan")), "ejection.seconds must be finite"),
+        (Ejection(seconds=float("inf")), "ejection.seconds must be finite"),
         (Ejection(cap=0), "ejection.cap must be positive"),
+        (Ejection(cap=float("nan")), "ejection.cap must be finite"),
+        (Ejection(cap=float("inf")), "ejection.cap must be finite"),
         (Ejection(seconds=10, cap=5), "ejection.cap must be at least ejection.seconds"),
     ],
 )
@@ -51,11 +58,23 @@ def test_upstream_pool_refuses_invalid_ejection_policy(
     ("options", "message"),
     [
         ({"attempts": 0}, "attempts must be at least 1"),
+        ({"attempts": True}, "attempts must be an integer"),
+        ({"attempts": 1.5}, "attempts must be an integer"),
+        ({"attempts": float("nan")}, "attempts must be an integer"),
+        ({"attempts": float("inf")}, "attempts must be an integer"),
         ({"max_body": -1}, "max_body must be non-negative"),
+        ({"max_body": True}, "max_body must be an integer"),
+        ({"max_body": 1.5}, "max_body must be an integer"),
+        ({"max_body": float("nan")}, "max_body must be an integer"),
+        ({"max_body": float("inf")}, "max_body must be an integer"),
         ({"buffer_below": -1}, "buffer_below must be non-negative"),
+        ({"buffer_below": True}, "buffer_below must be an integer"),
+        ({"buffer_below": 1.5}, "buffer_below must be an integer"),
+        ({"buffer_below": float("nan")}, "buffer_below must be an integer"),
+        ({"buffer_below": float("inf")}, "buffer_below must be an integer"),
     ],
 )
-def test_reverse_proxy_refuses_invalid_limits(options: dict[str, int], message: str) -> None:
+def test_reverse_proxy_refuses_invalid_limits(options: dict[str, Any], message: str) -> None:
     upstream = Upstream("http://origin.test")
     with pytest.raises(ValueError, match=message):
         ReverseProxy(UpstreamPool([upstream]), {upstream.url: object()}, **options)
